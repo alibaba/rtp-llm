@@ -63,6 +63,16 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "speculative_config_validator",
+    hdrs = ["SpeculativeConfigValidator.h"],
+    deps = [
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:model_config",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 # Main engine base class
 cc_library(
     name = "engine_base",
@@ -88,5 +98,4 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
 )
-
 

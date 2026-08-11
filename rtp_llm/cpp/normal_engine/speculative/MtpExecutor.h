@@ -49,7 +49,8 @@ public:
                          MlaOpsType                                     mla_ops_type            = MlaOpsType::AUTO,
                          int32_t                                        kv_cache_group_num      = 1,
                          const std::vector<int32_t>&                    kv_cache_layer_to_group = {},
-                         bool                                           warm_up                 = false);
+                         bool                                           warm_up                 = false,
+                         std::optional<RoleType>                        role_override           = std::nullopt);
 
     absl::Status process(const std::list<GenerateStreamPtr>& streams) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
@@ -84,7 +85,8 @@ public:
                                                         const RuntimeConfig&   runtime_config,
                                                         const ResourceContext& resource_context);
     static GenerateStreamPtr createMinFakeDecodeStream(int                    max_new_tokens,
-                                                       const ModelConfig&     model_config,
+                                                       const ModelConfig&     target_model_config,
+                                                       const ModelConfig&     proposal_model_config,
                                                        const RuntimeConfig&   runtime_config,
                                                        const ResourceContext& resource_context);
 
@@ -106,6 +108,8 @@ protected:
                         std::list<GenerateStreamPtr>&       prefill_streams,
                         std::list<GenerateStreamPtr>&       decode_streams);
 
+    void releaseModelBuffers();
+
 private:
     std::unique_ptr<ModelBase>               model_;
     std::unique_ptr<Sampler>                 sampler_;
@@ -124,6 +128,9 @@ private:
     size_t                                           hidden_size_;
     size_t                                           propose_step_;
     size_t                                           propose_vocab_size_;
+    size_t                                           target_input_vocab_size_;
+    size_t                                           propose_input_vocab_size_;
+    bool                                             sampled_token_input_vocab_guard_required_ = false;
     std::shared_ptr<ModelBase>                       draft_model_;
     std::shared_ptr<ModelBase>                       sp_prefill_draft_model_;
     std::unique_ptr<speculative::SpeculativeSampler> speculative_sampler_;

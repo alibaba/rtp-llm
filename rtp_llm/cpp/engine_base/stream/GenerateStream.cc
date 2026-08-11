@@ -609,6 +609,14 @@ size_t GenerateStream::iterCount() const {
     return iter_count_;
 }
 
+void GenerateStream::restoreIterCount(size_t iter_count) {
+    RTP_LLM_CHECK_WITH_INFO(iter_count <= iter_count_,
+                            "cannot restore stream iteration count forward from %zu to %zu",
+                            iter_count_,
+                            iter_count);
+    iter_count_ = iter_count;
+}
+
 size_t GenerateStream::spIterCount() const {
     return sp_iter_count_;
 }

@@ -269,6 +269,7 @@ public:
     bool                isSubGenerateDoneWithoutLock(int batch_id) const;
 
     size_t iterCount() const;
+    void   restoreIterCount(size_t iter_count);
     size_t spIterCount() const;
     void   setSpIterCount(int sp_iter_count);
 

@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <vector>
 #include "absl/status/status.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
@@ -62,7 +63,25 @@ private:
     std::shared_ptr<GenerateInput>  makeFakeInput(size_t seq_len);
     void                            mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
 
-    void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);
+    void initExecutor(const EngineInitParams& params);
+    std::unique_ptr<Executor> createExecutor(const EngineInitParams&                params,
+                                             const std::shared_ptr<KVCacheManager>& cache_manager,
+                                             bool                                   warm_up,
+                                             std::optional<RoleType>                role_override);
+    std::shared_ptr<KVCacheManager> createWarmUpCacheManager(const EngineInitParams& params);
+    WarmUpResult runWarmUp(const EngineInitParams&                            params,
+                           const std::vector<std::shared_ptr<GenerateInput>>& generate_inputs,
+                           preRunMode                                          mode);
+    std::vector<std::shared_ptr<GenerateInput>>
+    makeWarmUpInputs(size_t seq_len, size_t batch_size, bool independent_streams);
+    std::vector<GenerateStreamPtr> createPreRunStreams(
+        const std::vector<std::shared_ptr<GenerateInput>>& generate_inputs,
+        preRunMode                                          mode,
+        const ResourceContext&                              resource_context);
+    virtual absl::StatusOr<std::vector<GenerateStreamPtr>> preRunWithResourceContext(
+        const std::vector<std::shared_ptr<GenerateInput>>& generate_inputs,
+        preRunMode                                          mode,
+        const ResourceContext&                              resource_context);
 
     bool isMTPEagle() override;
     bool isEagle() override;

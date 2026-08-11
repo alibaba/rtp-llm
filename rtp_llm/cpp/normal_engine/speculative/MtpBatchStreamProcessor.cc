@@ -51,7 +51,9 @@ absl::StatusOr<GptModelInputs>
 MtpBatchStreamProcessor::gatherDecodeModelInput(const StreamGroups& stream_groups) const {
     auto model_input = NormalBatchStreamProcessor::gatherModelInput(stream_groups);
 
-    RTP_LLM_CHECK(model_input.ok());
+    if (!model_input.ok()) {
+        return model_input.status();
+    }
 
     if (propose_step_ == 1) {
         return model_input;

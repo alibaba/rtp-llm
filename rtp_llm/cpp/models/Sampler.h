@@ -10,7 +10,7 @@ namespace rtp_llm {
 class Sampler {
 public:
     Sampler(const SamplerInitParams& params);
-    ~Sampler() {};
+    virtual ~Sampler() = default;
 
     virtual SamplerOutput forward(const SamplerInputs& inputs);
 

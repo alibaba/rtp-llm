@@ -2,8 +2,10 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
+#include "rtp_llm/cpp/engine_base/SpeculativeConfigValidator.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/normal_engine/speculative/MtpSamplerFailureValidator.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
@@ -16,11 +18,448 @@
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/TimeUtility.h"
+#include <limits>
 #include <memory>
+#include <optional>
+#include <sstream>
 #include <thread>
 #include <random>
 
 namespace rtp_llm {
+
+namespace {
+
+enum class SamplerRowLayout { NORMAL, SCORE };
+
+struct GeneratorStateSnapshot {
+    at::Generator generator;
+    torch::Tensor state;
+};
+
+struct StreamIterationSnapshot {
+    GenerateStreamPtr stream;
+    size_t            iter_count;
+};
+
+std::vector<GenerateStreamPtr> batchStreams(const StreamGroups& stream_groups) {
+    const auto streams = stream_groups.allStreams();
+    return {streams.begin(), streams.end()};
+}
+
+std::vector<StreamIterationSnapshot> captureStreamIterationStates(
+    const std::vector<GenerateStreamPtr>& streams) {
+    std::vector<StreamIterationSnapshot> snapshots;
+    snapshots.reserve(streams.size());
+    for (const auto& stream : streams) {
+        snapshots.push_back({stream, stream->iterCount()});
+    }
+    return snapshots;
+}
+
+void restoreStreamIterationStates(const std::vector<StreamIterationSnapshot>& snapshots) {
+    for (const auto& snapshot : snapshots) {
+        snapshot.stream->restoreIterCount(snapshot.iter_count);
+    }
+}
+
+std::vector<size_t> samplerRowCounts(const std::vector<GenerateStreamPtr>& streams, SamplerRowLayout layout) {
+    std::vector<size_t> row_counts;
+    row_counts.reserve(streams.size());
+    for (const auto& stream : streams) {
+        if (layout == SamplerRowLayout::SCORE) {
+            row_counts.push_back(stream->scoreLen());
+            continue;
+        }
+        const int row_count =
+            stream->needTilingForSampling() ? stream->nextBatchSize() : stream->currentBatchSize();
+        if (row_count <= 0) {
+            throw std::invalid_argument("sampler stream row count must be positive");
+        }
+        row_counts.push_back(static_cast<size_t>(row_count));
+    }
+    return row_counts;
+}
+
+void reportAllStreamsError(const std::vector<GenerateStreamPtr>& streams,
+                           ErrorCode                            error_code,
+                           const std::string&                   message) {
+    for (const auto& stream : streams) {
+        if (!stream->hasError()) {
+            stream->reportError(error_code, message);
+        }
+    }
+}
+
+bool reportSamplerFailures(const SamplerOutput&                  sampler_output,
+                           const std::vector<GenerateStreamPtr>& streams,
+                           SamplerRowLayout                      layout) {
+    if (!sampler_output.success.defined()) {
+        return false;
+    }
+    const auto failed_stream_indices = speculative::findFailedSamplerStreamIndices(
+        sampler_output.success, samplerRowCounts(streams, layout));
+    for (const size_t stream_index : failed_stream_indices) {
+        streams[stream_index]->reportError(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");
+    }
+    return !failed_stream_indices.empty();
+}
+
+bool reportSampledTokenInputVocabFailures(const torch::Tensor&                  token_ids,
+                                          const std::vector<GenerateStreamPtr>& streams,
+                                          SamplerRowLayout                      layout,
+                                          size_t                                target_input_vocab_size,
+                                          size_t                                propose_input_vocab_size,
+                                          bool                                  allow_int64 = false) {
+    if (!token_ids.defined()) {
+        throw std::invalid_argument("sampler token ids are undefined");
+    }
+    const auto token_dtype = token_ids.scalar_type();
+    if ((token_dtype != torch::kInt32 && !(allow_int64 && token_dtype == torch::kInt64)) || token_ids.dim() != 2
+        || !token_ids.is_contiguous() || token_ids.size(1) <= 0) {
+        throw std::invalid_argument(
+            allow_int64 ? "sampler token ids must be a contiguous int32 or int64 tensor with shape [rows, width]" :
+                          "sampler token ids must be a contiguous int32 tensor with shape [rows, width]");
+    }
+    if (!token_ids.is_cpu() && !token_ids.is_cuda()) {
+        throw std::invalid_argument("sampler token ids must be on CPU or CUDA");
+    }
+
+    const auto row_counts   = samplerRowCounts(streams, layout);
+    size_t     expected_rows = 0;
+    for (const size_t row_count : row_counts) {
+        if (row_count > std::numeric_limits<size_t>::max() - expected_rows) {
+            throw std::invalid_argument("sampler token id row count overflow");
+        }
+        expected_rows += row_count;
+    }
+    if (static_cast<size_t>(token_ids.size(0)) != expected_rows) {
+        throw std::invalid_argument("sampler token id row count does not match the executor batch");
+    }
+
+    const auto token_ids_cpu = token_ids.is_cuda() ? token_ids.cpu() : token_ids;
+    const auto token_stride  = static_cast<size_t>(token_ids_cpu.size(1));
+
+    bool   has_failure = false;
+    size_t row_offset  = 0;
+    for (size_t stream_index = 0; stream_index < streams.size(); ++stream_index) {
+        bool stream_failed = false;
+        for (size_t row = 0; row < row_counts[stream_index]; ++row) {
+            const size_t token_index = (row_offset + row) * token_stride + token_stride - 1;
+            const int64_t token      = token_dtype == torch::kInt64 ?
+                                           token_ids_cpu.data_ptr<int64_t>()[token_index] :
+                                           token_ids_cpu.data_ptr<int32_t>()[token_index];
+            stream_failed |= token < 0 || static_cast<uint64_t>(token) >= target_input_vocab_size
+                             || static_cast<uint64_t>(token) >= propose_input_vocab_size;
+        }
+        if (stream_failed) {
+            streams[stream_index]->reportError(ErrorCode::OUT_OF_VOCAB_RANGE,
+                                               "sampled token is outside a model input vocabulary");
+            has_failure = true;
+        }
+        row_offset += row_counts[stream_index];
+    }
+    return has_failure;
+}
+
+bool reportAcceptedTokenInputVocabFailures(
+    const speculative::SpeculativeSamplerOutput& speculative_output,
+    const std::vector<GenerateStreamPtr>&         streams,
+    size_t                                        target_input_vocab_size,
+    size_t                                        propose_input_vocab_size) {
+    if (speculative_output.accept_tokens.size() != streams.size()
+        || speculative_output.accept_len.size() != streams.size()) {
+        throw std::invalid_argument("speculative sampler output size does not match the executor batch");
+    }
+
+    bool has_failure = false;
+    for (size_t stream_index = 0; stream_index < streams.size(); ++stream_index) {
+        const int   accept_len = speculative_output.accept_len[stream_index];
+        const auto& tokens     = speculative_output.accept_tokens[stream_index];
+        const bool  valid_contract = accept_len > 0 && tokens.defined() && tokens.is_cpu()
+                                     && tokens.scalar_type() == torch::kInt32 && tokens.is_contiguous()
+                                     && tokens.dim() == 2 && tokens.size(0) == 1 && tokens.size(1) == accept_len;
+        if (!valid_contract) {
+            throw std::invalid_argument(
+                "accepted token ids must be a contiguous CPU int32 tensor with shape [1, accept_len]");
+        }
+
+        bool        stream_failed = false;
+        const auto* token_ptr     = tokens.data_ptr<int32_t>();
+        for (int token_index = 0; token_index < accept_len; ++token_index) {
+            const int32_t token = token_ptr[token_index];
+            stream_failed |= token < 0 || static_cast<uint64_t>(token) >= target_input_vocab_size
+                             || static_cast<uint64_t>(token) >= propose_input_vocab_size;
+        }
+        if (stream_failed) {
+            streams[stream_index]->reportError(ErrorCode::OUT_OF_VOCAB_RANGE,
+                                               "accepted token is outside a model input vocabulary");
+            has_failure = true;
+        }
+    }
+    return has_failure;
+}
+
+void syncSkipRunAcrossTensorParallelRanks(bool& skip_run, const ParallelismConfig& parallelism_config) {
+    if (parallelism_config.tp_size <= 1) {
+        return;
+    }
+    auto skip_flag = torch::zeros({1}, torch::kInt32).pin_memory();
+    if (parallelism_config.tp_rank == 0) {
+        skip_flag.data_ptr<int32_t>()[0] = skip_run ? 1 : 0;
+    }
+    execBroadcast({{skip_flag}, 0});
+    execSyncCommunication(false);
+    cudaSyncAndCheck();
+    skip_run = skip_flag.data_ptr<int32_t>()[0] != 0;
+}
+
+void reportSamplingException(const std::vector<GenerateStreamPtr>& streams, const std::string& message) {
+    RTP_LLM_LOG_ERROR("MTP sampling failed: %s", message.c_str());
+    reportAllStreamsError(streams, ErrorCode::EXECUTION_EXCEPTION, message);
+}
+
+std::vector<GeneratorStateSnapshot> captureSeededGeneratorStates(const std::vector<GenerateStreamPtr>& streams) {
+    std::vector<GeneratorStateSnapshot> snapshots;
+    for (const auto& stream : streams) {
+        if (stream->generateConfig()->random_seed.has_value()) {
+            auto generator = stream->getGenerator();
+            snapshots.push_back({generator, generator.get_state()});
+        }
+    }
+    return snapshots;
+}
+
+void restoreSeededGeneratorStates(const std::vector<GeneratorStateSnapshot>& snapshots) noexcept {
+    for (const auto& snapshot : snapshots) {
+        try {
+            auto generator = snapshot.generator;
+            generator.set_state(snapshot.state);
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("failed to restore sampler generator state after batch abort: %s", e.what());
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("failed to restore sampler generator state after batch abort");
+        }
+    }
+}
+
+void clearDecodeTensorHolders(const std::list<GenerateStreamPtr>& streams) {
+    for (const auto& stream : streams) {
+        const auto& sp_output_buffer = stream->getSPOutputBuffer();
+        if (sp_output_buffer) {
+            sp_output_buffer->tensors_holder.clear();
+        }
+    }
+}
+
+std::optional<std::string> validatePrefillSpeculativeInput(const GenerateStreamPtr& stream,
+                                                           size_t                   target_input_vocab_size,
+                                                           size_t                   propose_input_vocab_size) {
+    if (!stream) {
+        return "speculative stream is missing";
+    }
+    if (!stream->isContextStream() || stream->currentBatchSize() <= 0) {
+        return "speculative prefill requires a context stream with a positive batch size";
+    }
+
+    const auto text_token_mask = stream->textTokensMask();
+    for (int batch_index = 0; batch_index < stream->currentBatchSize(); ++batch_index) {
+        const auto input_tokens = stream->currentExecuteTokens(batch_index);
+        if (input_tokens.empty()) {
+            return "speculative prefill input must not be empty";
+        }
+        for (size_t token_index = 0; token_index < input_tokens.size(); ++token_index) {
+            const bool is_text_token = token_index >= text_token_mask.size() || text_token_mask[token_index];
+            if (!is_text_token) {
+                return "speculative prefill does not support non-text tokens";
+            }
+            const int token = input_tokens[token_index];
+            if (token < 0 || static_cast<uint64_t>(token) >= static_cast<uint64_t>(target_input_vocab_size)) {
+                return "speculative prefill token is outside the target input vocabulary";
+            }
+            if (token_index > 0
+                && static_cast<uint64_t>(token) >= static_cast<uint64_t>(propose_input_vocab_size)) {
+                return "speculative prefill token is outside the proposal input vocabulary";
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+bool reportInvalidPrefillSpeculativeInputs(const std::vector<GenerateStreamPtr>& streams,
+                                           size_t                                target_input_vocab_size,
+                                           size_t                                propose_input_vocab_size) {
+    bool has_failure = false;
+    for (const auto& stream : streams) {
+        const auto error =
+            validatePrefillSpeculativeInput(stream, target_input_vocab_size, propose_input_vocab_size);
+        if (!error.has_value()) {
+            continue;
+        }
+        if (!stream) {
+            RTP_LLM_LOG_ERROR("invalid speculative prefill input: %s", error->c_str());
+            has_failure = true;
+            continue;
+        }
+        RTP_LLM_LOG_ERROR(
+            "invalid speculative prefill input for stream %ld: %s", stream->streamId(), error->c_str());
+        stream->reportError(ErrorCode::INVALID_PARAMS, "invalid speculative prefill input");
+        has_failure = true;
+    }
+    return has_failure;
+}
+
+std::optional<std::string> validateDecodeSpeculativeInput(const GenerateStreamPtr& stream,
+                                                          size_t                   propose_step,
+                                                          size_t                   propose_vocab_size,
+                                                          size_t                   target_input_vocab_size,
+                                                          size_t                   propose_input_vocab_size,
+                                                          size_t                   propose_hidden_size,
+                                                          c10::ScalarType          propose_hidden_dtype) {
+    if (!stream) {
+        return "speculative stream is missing";
+    }
+    const auto& output = stream->getSPOutputBuffer();
+    if (!output) {
+        return "speculative output buffer is missing";
+    }
+
+    const auto& tokens = output->tokens;
+    if (!tokens.defined() || !tokens.is_cpu() || tokens.scalar_type() != torch::kInt32 || !tokens.is_contiguous()
+        || tokens.dim() != 2 || tokens.size(0) != 1 || tokens.size(1) != 2) {
+        return "speculative tokens must be a contiguous CPU int32 tensor with shape [1, 2]";
+    }
+
+    if (stream->currentBatchSize() != 1 || stream->seqLength() <= 0) {
+        return "speculative decode requires a non-empty single-sequence stream";
+    }
+    const auto* token_values = tokens.data_ptr<int32_t>();
+    for (size_t token_index = 0; token_index < 2; ++token_index) {
+        if (token_values[token_index] < 0
+            || static_cast<uint64_t>(token_values[token_index]) >= static_cast<uint64_t>(propose_vocab_size)) {
+            return "speculative token is outside the proposal vocabulary";
+        }
+        if (static_cast<uint64_t>(token_values[token_index]) >= static_cast<uint64_t>(target_input_vocab_size)
+            || static_cast<uint64_t>(token_values[token_index])
+                   >= static_cast<uint64_t>(propose_input_vocab_size)) {
+            return "speculative token is outside a model input vocabulary";
+        }
+    }
+    const auto latest_tokens = stream->getLatestTokens(1);
+    if (latest_tokens.size() != 1 || token_values[0] != latest_tokens[0]) {
+        return "speculative target token does not match the stream tail";
+    }
+
+    const auto& holders = output->tensors_holder;
+    if (!holders.empty() && holders.size() != 2) {
+        return "speculative tensor holder must contain either zero or two tensors";
+    }
+
+    const bool  is_remote_holder = !holders.empty();
+    const auto& probs            = is_remote_holder ? holders[0] : output->all_probs;
+    const auto& hidden           = is_remote_holder ? holders[1] : output->hidden_states;
+    const auto  has_valid_device = [is_remote_holder](const torch::Tensor& tensor) {
+        return is_remote_holder ? tensor.is_cpu() : tensor.is_cuda();
+    };
+
+    if (!probs.defined() || probs.scalar_type() != torch::kFloat32 || !probs.is_contiguous() || probs.dim() != 2
+        || probs.size(0) != 1 || static_cast<size_t>(probs.size(1)) != propose_vocab_size) {
+        return "speculative probabilities must be contiguous float32 with shape [1, proposal_vocab_size]";
+    }
+    if (!has_valid_device(probs)) {
+        return is_remote_holder ? "speculative probability holder must be a CPU tensor" :
+                                  "local speculative probabilities must be an accelerator tensor";
+    }
+
+    if (propose_step > 1) {
+        if (!hidden.defined() || hidden.scalar_type() != propose_hidden_dtype || !hidden.is_contiguous()
+            || hidden.dim() != 2 || hidden.size(0) != 1
+            || static_cast<size_t>(hidden.size(1)) != propose_hidden_size) {
+            return "speculative hidden states have an invalid dtype or shape";
+        }
+    } else if (is_remote_holder && !hidden.defined()) {
+        return "speculative hidden-state holder is undefined";
+    } else if (hidden.defined() && hidden.numel() > 0
+               && (hidden.scalar_type() != propose_hidden_dtype || !hidden.is_contiguous() || hidden.dim() != 2
+                   || hidden.size(0) != 1 || static_cast<size_t>(hidden.size(1)) != propose_hidden_size)) {
+        return "optional speculative hidden states have an invalid dtype or shape";
+    }
+    if (hidden.defined() && !has_valid_device(hidden)) {
+        return is_remote_holder ? "speculative hidden-state holder must be a CPU tensor" :
+                                  "local speculative hidden states must be an accelerator tensor";
+    }
+    return std::nullopt;
+}
+
+bool reportInvalidDecodeSpeculativeInputs(const std::vector<GenerateStreamPtr>& streams,
+                                          size_t                                propose_step,
+                                          size_t                                propose_vocab_size,
+                                          size_t                                target_input_vocab_size,
+                                          size_t                                propose_input_vocab_size,
+                                          size_t                                propose_hidden_size,
+                                          c10::ScalarType                       propose_hidden_dtype) {
+    bool has_failure = false;
+    for (const auto& stream : streams) {
+        const auto error = validateDecodeSpeculativeInput(
+            stream,
+            propose_step,
+            propose_vocab_size,
+            target_input_vocab_size,
+            propose_input_vocab_size,
+            propose_hidden_size,
+            propose_hidden_dtype);
+        if (!error.has_value()) {
+            continue;
+        }
+        if (!stream) {
+            RTP_LLM_LOG_ERROR("invalid speculative decode input: %s", error->c_str());
+            has_failure = true;
+            continue;
+        }
+        RTP_LLM_LOG_ERROR("invalid speculative decode input for stream %ld: %s",
+                          stream->streamId(),
+                          error->c_str());
+        stream->reportError(ErrorCode::INVALID_PARAMS, "invalid speculative decode input");
+        if (const auto& output = stream->getSPOutputBuffer()) {
+            output->tensors_holder.clear();
+        }
+        has_failure = true;
+    }
+    return has_failure;
+}
+
+void materializeDecodeTensorHolders(const std::vector<GenerateStreamPtr>& streams) {
+    struct PendingTensors {
+        SpeculativeExecutorStreamOutputPtr output;
+        torch::Tensor                      probs;
+        torch::Tensor                      hidden;
+    };
+
+    std::vector<PendingTensors> pending;
+    pending.reserve(streams.size());
+    for (const auto& stream : streams) {
+        const auto& output = stream->getSPOutputBuffer();
+        if (output->tensors_holder.empty()) {
+            continue;
+        }
+        pending.push_back({output,
+                           output->tensors_holder[0].to(torch::kCUDA).clone(),
+                           output->tensors_holder[1].to(torch::kCUDA).clone()});
+    }
+
+    for (auto& tensors : pending) {
+        tensors.output->all_probs     = std::move(tensors.probs);
+        tensors.output->hidden_states = std::move(tensors.hidden);
+    }
+}
+
+void reportInputPreparationFailure(const std::vector<GenerateStreamPtr>& streams,
+                                   ErrorCode                            error_code,
+                                   const std::string&                   detail) {
+    RTP_LLM_LOG_ERROR("MTP input preparation failed: %s", detail.c_str());
+    reportAllStreamsError(streams, error_code, "speculative input preparation failed");
+}
+
+}  // namespace
 
 bool MtpExecutor::isTpRank0() const {
     return tp_rank_ == 0;
@@ -32,6 +471,18 @@ void MtpExecutor::maybePrintModelInput(const GptModelInputs& model_input, const 
         RTP_LLM_LOG_INFO("%s model_input: %s", prefix.c_str(), model_input.debugString(force).c_str());
     } else {
         RTP_LLM_LOG_DEBUG("%s model_input: %s", prefix.c_str(), model_input.debugString(force).c_str());
+    }
+}
+
+void MtpExecutor::releaseModelBuffers() {
+    if (model_) {
+        model_->releaseBuffers();
+    }
+    if (draft_model_) {
+        draft_model_->releaseBuffers();
+    }
+    if (sp_prefill_draft_model_ && sp_prefill_draft_model_.get() != draft_model_.get()) {
+        sp_prefill_draft_model_->releaseBuffers();
     }
 }
 
@@ -57,17 +508,26 @@ static std::shared_ptr<NormalGenerateStream> makeFakeStream(int                 
     return fake_stream;
 }
 
-static SpeculativeExecutorStreamOutputPtr
-makeFakeSPOutputBuffer(DataType data_type, size_t hidden_size, size_t vocab_size, size_t propose_step) {
+static SpeculativeExecutorStreamOutputPtr makeFakeSPOutputBuffer(
+    DataType data_type, size_t hidden_size, size_t vocab_size, size_t propose_step, int32_t initial_token) {
+    RTP_LLM_CHECK_WITH_INFO(vocab_size > 0, "fake speculative output requires a non-empty vocabulary");
+    RTP_LLM_CHECK_WITH_INFO(vocab_size <= static_cast<size_t>(std::numeric_limits<int64_t>::max()),
+                            "vocabulary size does not fit int64_t: %zu",
+                            vocab_size);
+    RTP_LLM_CHECK_WITH_INFO(initial_token >= 0 && static_cast<size_t>(initial_token) < vocab_size,
+                            "fake speculative token %d is outside vocabulary size %zu",
+                            initial_token,
+                            vocab_size);
     auto sp_buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
 
     auto fake_hidden_states = torch::zeros(
         {1, (int64_t)hidden_size}, torch::TensorOptions().dtype(dataTypeToTorchType(data_type)).device(torch::kCUDA));
-    auto fake_probs =
-        torch::zeros({1, (int64_t)vocab_size}, torch::TensorOptions().dtype(torch::kFloat).device(torch::kCUDA));
+    auto fake_probs = torch::full({1, static_cast<int64_t>(vocab_size)},
+                                  1.0 / static_cast<double>(vocab_size),
+                                  torch::TensorOptions().dtype(torch::kFloat).device(torch::kCUDA));
     sp_buffer->propose_step  = propose_step;
     sp_buffer->all_probs     = fake_probs;
-    sp_buffer->tokens        = torch::zeros({1, 2}, torch::kInt32);
+    sp_buffer->tokens        = torch::tensor({initial_token, initial_token}, torch::kInt32).reshape({1, 2});
     sp_buffer->hidden_states = fake_hidden_states;
 
     return sp_buffer;
@@ -81,14 +541,18 @@ GenerateStreamPtr MtpExecutor::createMinFakePrefillStream(int                   
 }
 
 GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    max_new_tokens,
-                                                         const ModelConfig&     model_config,
+                                                         const ModelConfig&     target_model_config,
+                                                         const ModelConfig&     proposal_model_config,
                                                          const RuntimeConfig&   runtime_config,
                                                          const ResourceContext& resource_context) {
-    auto fake_stream =
-        makeFakeStream(max_new_tokens, 1 + max_new_tokens, model_config, runtime_config, resource_context);
+    auto fake_stream = makeFakeStream(
+        max_new_tokens, 1 + max_new_tokens, target_model_config, runtime_config, resource_context);
 
-    auto sp_buffer = makeFakeSPOutputBuffer(
-        model_config.data_type, model_config.hidden_size, model_config.vocab_size, max_new_tokens);
+    auto sp_buffer = makeFakeSPOutputBuffer(proposal_model_config.data_type,
+                                            proposal_model_config.hidden_size,
+                                            proposal_model_config.vocab_size,
+                                            max_new_tokens,
+                                            0);
 
     auto new_tokens = torch::zeros({1, 1}, torch::kInt32);
 
@@ -115,19 +579,25 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                          MlaOpsType                                     mla_ops_type,
                          int32_t                                        kv_cache_group_num,
                          const std::vector<int32_t>&                    kv_cache_layer_to_group,
-                         bool                                           warm_up):
+                         bool                                           warm_up,
+                         std::optional<RoleType>                        role_override):
     Executor(),
     cache_manager_(cache_manager),
     metrics_reporter_(params.metrics_reporter),
     speculative_sampler_(new speculative::SpeculativeSampler(propose_params->gen_num_per_circle)),
     fast_topk_sampler_(new speculative::FastTopKSampler()),
     warm_up_(warm_up),
-    role_type_(params.pd_sep_config.role_type) {
-    data_type_          = params.model_config_.data_type;
-    hidden_size_        = params.model_config_.hidden_size;
-    propose_step_       = propose_params->gen_num_per_circle;
-    vocab_size_         = params.model_config_.vocab_size;
-    propose_vocab_size_ = propose_params->getEngineInitParams().model_config_.vocab_size;
+    role_type_(role_override.value_or(params.pd_sep_config.role_type)) {
+    data_type_               = propose_params->getEngineInitParams().model_config_.data_type;
+    hidden_size_             = propose_params->getEngineInitParams().model_config_.hidden_size;
+    propose_step_            = propose_params->gen_num_per_circle;
+    vocab_size_              = params.model_config_.vocab_size;
+    propose_vocab_size_      = propose_params->getEngineInitParams().model_config_.vocab_size;
+    target_input_vocab_size_ = effectiveInputVocabSize(params.model_config_);
+    propose_input_vocab_size_ =
+        effectiveInputVocabSize(propose_params->getEngineInitParams().model_config_);
+    sampled_token_input_vocab_guard_required_ = target_input_vocab_size_ < vocab_size_
+                                                || propose_input_vocab_size_ < vocab_size_;
 
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
     tp_rank_            = params.parallelism_config.tp_rank;
@@ -202,8 +672,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
 
     // when warmup, cache manager maybe nullptr
     const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
+    auto executor_pd_sep_config = params.pd_sep_config;
+    executor_pd_sep_config.role_type = role_type_;
     batch_stream_processor_.reset(new MtpBatchStreamProcessor(params.model_config_,
-                                                              params.pd_sep_config,
+                                                              executor_pd_sep_config,
                                                               params.profiling_debug_logging_config,
                                                               cache_config,
                                                               params.sp_config,
@@ -316,11 +788,13 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     RtpLLMTokenPSMetricsCollector&  tps_collector      = metrics_collector.tps_collector;
 
     StreamGroups    stream_groups(streams);
+    const auto      iteration_snapshots = captureStreamIterationStates(batchStreams(stream_groups));
     GptModelInputs  model_input;
     GptModelOutputs model_output;
     SamplerOutput   sampler_output;
     GptModelOutputs draft_model_output;
     SamplerOutput   draft_sampler_output;
+    std::vector<GeneratorStateSnapshot> generator_snapshots;
 
     // placeholder for some tensors
     torch::Tensor                      draft_probs;
@@ -328,20 +802,42 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     speculative::FastTopKSamplerOutput fast_topk_sampler_output;
 
     {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(gather_model_input)");
-        int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
-        auto    model_input_status = batch_stream_processor_->gatherModelInput(stream_groups);
-        RETURN_IF_STATUS_OR_ERROR(model_input_status);
-        model_input                              = std::move(model_input_status.value());
-        executor_collector.gather_model_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-    }
-    {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(tp_sync_input)");
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(prepare_and_tp_sync_input)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
+        if (isTpRank0()) {
+            model_input.skip_run = streams.empty() && !enable_ffn_disaggregate_;
+            if (!model_input.skip_run) {
+                const auto streams_in_batch = batchStreams(stream_groups);
+                model_input.skip_run = reportInvalidPrefillSpeculativeInputs(
+                    streams_in_batch, target_input_vocab_size_, propose_input_vocab_size_);
+                if (!model_input.skip_run) {
+                    try {
+                        auto model_input_status = batch_stream_processor_->gatherModelInput(stream_groups);
+                        if (!model_input_status.ok()) {
+                            reportInputPreparationFailure(
+                                streams_in_batch, ErrorCode::INVALID_PARAMS, model_input_status.status().ToString());
+                            model_input.skip_run = true;
+                        } else {
+                            model_input = std::move(model_input_status.value());
+                        }
+                    } catch (const std::exception& e) {
+                        reportInputPreparationFailure(streams_in_batch, ErrorCode::EXECUTION_EXCEPTION, e.what());
+                        model_input.skip_run = true;
+                    } catch (...) {
+                        reportInputPreparationFailure(
+                            streams_in_batch, ErrorCode::EXECUTION_EXCEPTION, "unknown prefill input exception");
+                        model_input.skip_run = true;
+                    }
+                }
+            }
+        }
         tpSyncModelInputs(model_input, parallelism_config_);
         if (model_input.skip_run) {
-            return absl::OkStatus();
+            restoreStreamIterationStates(iteration_snapshots);
+            cudaSyncAndCheck();
+            releaseModelBuffers();
+            return warm_up_ ? absl::InternalError("prefill input preparation failed during warm-up") :
+                              absl::OkStatus();
         }
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
@@ -349,8 +845,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     metrics_collector.not_skip = true;
 
     // release model input before forward
-    model_->releaseBuffers();
-    draft_model_->releaseBuffers();
+    releaseModelBuffers();
 
     // target model prefill
     {
@@ -371,13 +866,45 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // target model sample
     if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_sample)");
-        if (model_input.is_fake_stream) {
+        if (model_input.is_fake_stream && !warm_up_) {
             model_input.last_hidden_states = model_output.all_hidden_states;
         } else {
-            CHECK_AND_RETURN_REF(sampler_input,
-                                 batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
-            sampler_output = std::move(sampler_->forward(sampler_input));
-            batch_stream_processor_->updatePrefillPostDraftModelInput(model_input, model_output, sampler_output);
+            const auto                          streams_in_batch = batchStreams(stream_groups);
+            try {
+                auto sampler_input_status =
+                    batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output);
+                if (!sampler_input_status.ok()) {
+                    reportSamplingException(streams_in_batch, sampler_input_status.status().ToString());
+                    model_input.skip_run = true;
+                } else {
+                    generator_snapshots = captureSeededGeneratorStates(streams_in_batch);
+                    sampler_output = std::move(sampler_->forward(sampler_input_status.value()));
+                    model_input.skip_run =
+                        reportSamplerFailures(sampler_output, streams_in_batch, SamplerRowLayout::NORMAL);
+                    if (!model_input.skip_run && sampled_token_input_vocab_guard_required_) {
+                        model_input.skip_run = reportSampledTokenInputVocabFailures(sampler_output.token_ids,
+                                                                                   streams_in_batch,
+                                                                                   SamplerRowLayout::NORMAL,
+                                                                                   target_input_vocab_size_,
+                                                                                   propose_input_vocab_size_);
+                    }
+                    if (!model_input.skip_run) {
+                        batch_stream_processor_->updatePrefillPostDraftModelInput(
+                            model_input, model_output, sampler_output);
+                    }
+                    if (model_input.skip_run) {
+                        restoreSeededGeneratorStates(generator_snapshots);
+                    }
+                }
+            } catch (const std::exception& e) {
+                restoreSeededGeneratorStates(generator_snapshots);
+                reportSamplingException(streams_in_batch, e.what());
+                model_input.skip_run = true;
+            } catch (...) {
+                restoreSeededGeneratorStates(generator_snapshots);
+                reportSamplingException(streams_in_batch, "unknown target sampling exception");
+                model_input.skip_run = true;
+            }
         }
     }
 
@@ -385,6 +912,12 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
         tpSyncModelInputs(model_input, parallelism_config_);
+        if (model_input.skip_run) {
+            restoreStreamIterationStates(iteration_snapshots);
+            cudaSyncAndCheck();
+            releaseModelBuffers();
+            return warm_up_ ? absl::InternalError("target sampling failed during warm-up") : absl::OkStatus();
+        }
         maybePrintModelInput(model_input, "prefill post draft model");
         const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
         model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
@@ -393,19 +926,48 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         draft_model_output                  = std::move(draft_model_->forward(model_input));
     }
 
-    if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
+    if (!isTpRank0() || streams.empty() || (model_input.is_fake_stream && !warm_up_)) {
         cudaSyncAndCheck();
-        model_->releaseBuffers();
-        draft_model_->releaseBuffers();
+        releaseModelBuffers();
         return absl::OkStatus();
     }
 
     // draft model sample
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_sample)");
-        fast_topk_sampler_output       = fast_topk_sampler_->forward(draft_model_output.logits);
-        draft_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
-        draft_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
+        const auto streams_in_batch = batchStreams(stream_groups);
+        try {
+            fast_topk_sampler_output       = fast_topk_sampler_->forward(draft_model_output.logits);
+            draft_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
+            draft_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
+            if (sampled_token_input_vocab_guard_required_) {
+                model_input.skip_run = reportSampledTokenInputVocabFailures(draft_sampler_output.token_ids,
+                                                                             streams_in_batch,
+                                                                             SamplerRowLayout::NORMAL,
+                                                                             target_input_vocab_size_,
+                                                                             propose_input_vocab_size_,
+                                                                             /*allow_int64=*/true);
+            }
+        } catch (const std::exception& e) {
+            reportSamplingException(streams_in_batch, e.what());
+            model_input.skip_run = true;
+        } catch (...) {
+            reportSamplingException(streams_in_batch, "unknown draft sampling exception");
+            model_input.skip_run = true;
+        }
+        if (model_input.skip_run) {
+            restoreSeededGeneratorStates(generator_snapshots);
+            restoreStreamIterationStates(iteration_snapshots);
+            cudaSyncAndCheck();
+            releaseModelBuffers();
+            return warm_up_ ? absl::InternalError("draft sampling failed during warm-up") : absl::OkStatus();
+        }
+    }
+
+    if (warm_up_) {
+        cudaSyncAndCheck();
+        releaseModelBuffers();
+        return absl::OkStatus();
     }
 
     // collect metrics
@@ -432,8 +994,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                                                      {std::move(draft_model_output), std::move(draft_sampler_output)});
         RTP_LLM_LOG_DEBUG("dispatch done");
 
-        model_->releaseBuffers();
-        draft_model_->releaseBuffers();
+        releaseModelBuffers();
 
         return result;
     }
@@ -508,6 +1069,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     RtpLLMSpeculativeEngineMetricsCollector& sp_engine_collector = metrics_collector.sp_engine_collector;
 
     StreamGroups    stream_groups(streams);
+    const auto      iteration_snapshots = captureStreamIterationStates(batchStreams(stream_groups));
     GptModelInputs  model_input;
     GptModelOutputs model_output;
     SamplerOutput   sampler_output;
@@ -526,41 +1088,65 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     torch::Tensor                      spec_token_ids_t;
     std::vector<torch::Tensor>         draft_probs_list;
     speculative::FastTopKSamplerOutput fast_topk_sampler_output;
+    std::vector<GeneratorStateSnapshot> generator_snapshots;
 
     size_t total_accept_len = 0;
 
-    // clone tensors from grpc
-    {
-        RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(clone_sp_tensors,stream_count=%zu)", streams.size());
-        for (auto& stream : streams) {
-            auto        sp_output_buffer = stream->getSPOutputBuffer();
-            auto const& tensors_holder   = sp_output_buffer->tensors_holder;
-            if (!tensors_holder.empty()) {
-                auto const& propose_probs       = tensors_holder[0];
-                auto const& propose_hidden      = tensors_holder[1];
-                sp_output_buffer->all_probs     = propose_probs.to(torch::kCUDA).clone();
-                sp_output_buffer->hidden_states = propose_hidden.to(torch::kCUDA).clone();
-            }
-        }
-    }
-
     size_t batch_size = streams.size();
     {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(gather_model_input)");
-        int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
-        auto    model_input_status = batch_stream_processor_->gatherDecodeModelInput(stream_groups);
-        RETURN_IF_STATUS_OR_ERROR(model_input_status);
-        model_input = std::move(model_input_status.value());
-        executor_collector.gather_model_input_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-    }
-
-    if (isTpRank0()) {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(tp_sync_input_rank0)");
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_and_tp_sync_input)");
+        int64_t start_time_us                = autil::TimeUtility::currentTimeInMicroSeconds();
+        bool    preserve_valid_input_holders = false;
+        if (isTpRank0()) {
+            model_input.skip_run = streams.empty() && !enable_ffn_disaggregate_;
+            if (!model_input.skip_run) {
+                const auto streams_in_batch = batchStreams(stream_groups);
+                preserve_valid_input_holders = reportInvalidDecodeSpeculativeInputs(
+                    streams_in_batch,
+                    propose_step_,
+                    propose_vocab_size_,
+                    target_input_vocab_size_,
+                    propose_input_vocab_size_,
+                    hidden_size_,
+                    dataTypeToTorchType(data_type_));
+                model_input.skip_run = preserve_valid_input_holders;
+                if (!model_input.skip_run) {
+                    try {
+                        materializeDecodeTensorHolders(streams_in_batch);
+                        auto model_input_status = batch_stream_processor_->gatherDecodeModelInput(stream_groups);
+                        if (!model_input_status.ok()) {
+                            reportInputPreparationFailure(
+                                streams_in_batch, ErrorCode::INVALID_PARAMS, model_input_status.status().ToString());
+                            model_input.skip_run = true;
+                        } else {
+                            model_input = std::move(model_input_status.value());
+                            if (propose_step_ == 1) {
+                                batch_stream_processor_->prepareOneStepSpecDecodeModelInput(stream_groups, model_input);
+                            } else {
+                                batch_stream_processor_->prepareDecodeDraftModelInput(stream_groups, model_input);
+                            }
+                        }
+                    } catch (const std::exception& e) {
+                        reportInputPreparationFailure(streams_in_batch, ErrorCode::EXECUTION_EXCEPTION, e.what());
+                        model_input.skip_run = true;
+                    } catch (...) {
+                        reportInputPreparationFailure(
+                            streams_in_batch, ErrorCode::EXECUTION_EXCEPTION, "unknown decode input exception");
+                        model_input.skip_run = true;
+                    }
+                }
+            }
+        }
+        tpSyncModelInputs(model_input, parallelism_config_);
         if (model_input.skip_run) {
-            tpSyncModelInputs(model_input, parallelism_config_);
-            return absl::OkStatus();
+            restoreStreamIterationStates(iteration_snapshots);
+            cudaSyncAndCheck();
+            if (!preserve_valid_input_holders) {
+                clearDecodeTensorHolders(streams);
+            }
+            releaseModelBuffers();
+            return warm_up_ ? absl::InternalError("decode input preparation failed during warm-up") :
+                              absl::OkStatus();
         }
         executor_collector.tp_sync_input_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
@@ -569,30 +1155,21 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     // TODO(yinzhi): consider beam search & lora
 
-    {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_decode_input_and_tp_sync)");
-        if (isTpRank0()) {
-            if (propose_step_ == 1) {
-                batch_stream_processor_->prepareOneStepSpecDecodeModelInput(stream_groups, model_input);
-            } else {
-                batch_stream_processor_->prepareDecodeDraftModelInput(stream_groups, model_input);
-            }
-        }
-        tpSyncModelInputs(model_input, parallelism_config_);
-        if (model_input.skip_run) {
-            return absl::OkStatus();
-        }
-    }
-
     // release hold buffers before draft model forward
-    draft_model_->releaseBuffers();
-    model_->releaseBuffers();
+    releaseModelBuffers();
 
     if (propose_step_ > 1) {
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
         draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t);
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
+        if (model_input.skip_run) {
+            restoreStreamIterationStates(iteration_snapshots);
+            cudaSyncAndCheck();
+            clearDecodeTensorHolders(streams);
+            releaseModelBuffers();
+            return warm_up_ ? absl::InternalError("draft sampling failed during warm-up") : absl::OkStatus();
+        }
     }
 
     {
@@ -613,7 +1190,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // trick: update draft sampler output after spec decode to avoid kernel launch overhead
     if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(update_draft_sampler_output)");
-        if (!model_input.is_fake_stream) {
+        if (!model_input.is_fake_stream || warm_up_) {
             if (propose_step_ == 1) {
                 batch_stream_processor_->updateOneStepDraftSamplerOutput(
                     stream_groups, draft_sampler_output, draft_token_probs_d_t);
@@ -638,32 +1215,71 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(rejection_sampling)");
+        const auto                          streams_in_batch = batchStreams(stream_groups);
+        try {
+            if (model_input.is_fake_stream && !warm_up_) {
+                speculative_sampler_output.accept_len.assign(batch_size, 1);
+                speculative_sampler_output.accept_tokens.reserve(batch_size);
+                for (size_t i = 0; i < batch_size; ++i) {
+                    speculative_sampler_output.accept_tokens.push_back(torch::zeros({1}, torch::kInt32));
+                }
+                cudaSyncAndCheck();
+            } else {
+                // target model sample
+                auto sampler_input_status =
+                    batch_stream_processor_->gatherSpecSamplerInput(stream_groups, model_input, model_output);
+                if (!sampler_input_status.ok()) {
+                    reportSamplingException(streams_in_batch, sampler_input_status.status().ToString());
+                    model_input.skip_run = true;
+                } else {
+                    generator_snapshots = captureSeededGeneratorStates(streams_in_batch);
+                    sampler_output = std::move(sampler_->forward(sampler_input_status.value()));
+                    model_input.skip_run =
+                        reportSamplerFailures(sampler_output, streams_in_batch, SamplerRowLayout::SCORE);
+                    if (!model_input.skip_run) {
+                        sampler_output.all_probs = sampler_output.all_probs.reshape(
+                            {(int64_t)batch_size, (int64_t)(propose_step_ + 1), (int64_t)vocab_size_});
 
-        if (model_input.is_fake_stream) {
-            auto accept_tokens                       = torch::zeros({1, 1}, torch::kInt32);
-            speculative_sampler_output.accept_len    = {1};
-            speculative_sampler_output.accept_tokens = {std::move(accept_tokens)};
-            cudaSyncAndCheck();
-        } else {
-            // target model sample
-            CHECK_AND_RETURN_REF(
-                sampler_input,
-                batch_stream_processor_->gatherSpecSamplerInput(stream_groups, model_input, model_output));
-            sampler_output           = std::move(sampler_->forward(sampler_input));
-            sampler_output.all_probs = sampler_output.all_probs.reshape(
-                {(int64_t)batch_size, (int64_t)(propose_step_ + 1), (int64_t)vocab_size_});
-
-            // rejection sampling
-            speculative_sampler_output = speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
+                        // rejection sampling
+                        speculative_sampler_output =
+                            speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
+                        if (sampled_token_input_vocab_guard_required_) {
+                            model_input.skip_run = reportAcceptedTokenInputVocabFailures(speculative_sampler_output,
+                                                                                         streams_in_batch,
+                                                                                         target_input_vocab_size_,
+                                                                                         propose_input_vocab_size_);
+                        }
+                    }
+                }
+            }
+            if (!model_input.skip_run) {
+                // NOTE: here will have cuda device sync before update model input
+                batch_stream_processor_->updateDecodePostDraftModelInput(
+                    model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, total_accept_len);
+            } else {
+                restoreSeededGeneratorStates(generator_snapshots);
+            }
+        } catch (const std::exception& e) {
+            restoreSeededGeneratorStates(generator_snapshots);
+            reportSamplingException(streams_in_batch, e.what());
+            model_input.skip_run = true;
+        } catch (...) {
+            restoreSeededGeneratorStates(generator_snapshots);
+            reportSamplingException(streams_in_batch, "unknown speculative sampling exception");
+            model_input.skip_run = true;
         }
-        // NOTE: here will have cuda device sync before update model input
-        batch_stream_processor_->updateDecodePostDraftModelInput(
-            model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, total_accept_len);
     }
 
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(tp_sync_post_rejection)");
         tpSyncModelInputs(model_input, parallelism_config_);
+        if (model_input.skip_run) {
+            restoreStreamIterationStates(iteration_snapshots);
+            cudaSyncAndCheck();
+            clearDecodeTensorHolders(streams);
+            releaseModelBuffers();
+            return warm_up_ ? absl::InternalError("target sampling failed during warm-up") : absl::OkStatus();
+        }
     }
 
     {
@@ -677,27 +1293,53 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_forward)");
-        // Use sp_prefill_draft_model_ if CUDA graph is enabled, otherwise use draft_model_
-        if (sp_prefill_draft_model_) {
-            draft_prefill_model_output = std::move(sp_prefill_draft_model_->forward(model_input));
-        } else {
-            draft_prefill_model_output = std::move(draft_model_->forward(model_input));
-        }
+        auto* draft_prefill_model = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
+        draft_prefill_model_output = std::move(draft_prefill_model->forward(model_input));
     }
 
-    if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
+    if (!isTpRank0() || streams.empty() || (model_input.is_fake_stream && !warm_up_)) {
         cudaSyncAndCheck();
-        draft_model_->releaseBuffers();
-        model_->releaseBuffers();
+        releaseModelBuffers();
         return absl::OkStatus();
     }
 
     // draft model sample
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_sample)");
-        fast_topk_sampler_output               = fast_topk_sampler_->forward(draft_prefill_model_output.logits);
-        draft_prefill_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
-        draft_prefill_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
+        const auto streams_in_batch = batchStreams(stream_groups);
+        try {
+            fast_topk_sampler_output               = fast_topk_sampler_->forward(draft_prefill_model_output.logits);
+            draft_prefill_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
+            draft_prefill_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
+            if (sampled_token_input_vocab_guard_required_) {
+                model_input.skip_run = reportSampledTokenInputVocabFailures(draft_prefill_sampler_output.token_ids,
+                                                                             streams_in_batch,
+                                                                             SamplerRowLayout::NORMAL,
+                                                                             target_input_vocab_size_,
+                                                                             propose_input_vocab_size_,
+                                                                             /*allow_int64=*/true);
+            }
+        } catch (const std::exception& e) {
+            reportSamplingException(streams_in_batch, e.what());
+            model_input.skip_run = true;
+        } catch (...) {
+            reportSamplingException(streams_in_batch, "unknown draft sampling exception");
+            model_input.skip_run = true;
+        }
+        if (model_input.skip_run) {
+            restoreSeededGeneratorStates(generator_snapshots);
+            restoreStreamIterationStates(iteration_snapshots);
+            cudaSyncAndCheck();
+            clearDecodeTensorHolders(streams);
+            releaseModelBuffers();
+            return warm_up_ ? absl::InternalError("draft sampling failed during warm-up") : absl::OkStatus();
+        }
+    }
+
+    if (warm_up_) {
+        cudaSyncAndCheck();
+        releaseModelBuffers();
+        return absl::OkStatus();
     }
 
     // collect metrics
@@ -731,8 +1373,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             stream->getSPOutputBuffer()->tensors_holder.clear();
         }
 
-        draft_model_->releaseBuffers();
-        model_->releaseBuffers();
+        releaseModelBuffers();
 
         return result;
     }
@@ -750,7 +1391,11 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
         } else {
             stream->setScoreLen(propose_step_ + 1);
             if (stream->getSPOutputBuffer() == nullptr && stream->isPerfTest()) {
-                auto sp_output_buffer = makeFakeSPOutputBuffer(data_type_, hidden_size_, vocab_size_, propose_step_);
+                const auto execute_tokens = stream->currentExecuteTokens();
+                RTP_LLM_CHECK_WITH_INFO(!execute_tokens.empty(),
+                                        "fake speculative stream requires at least one token");
+                auto sp_output_buffer = makeFakeSPOutputBuffer(
+                    data_type_, hidden_size_, vocab_size_, propose_step_, execute_tokens.back());
                 stream->setSPOutputBuffer(sp_output_buffer);
             }
             decode_streams.push_back(stream);
@@ -874,6 +1519,27 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         }
 
         draft_token_ids = draft_token_ids.to(torch::kInt32).to(torch::kCUDA);
+        if (sampled_token_input_vocab_guard_required_) {
+            if (isTpRank0()) {
+                try {
+                    model_input.skip_run = reportSampledTokenInputVocabFailures(draft_token_ids,
+                                                                                 batchStreams(stream_groups),
+                                                                                 SamplerRowLayout::NORMAL,
+                                                                                 target_input_vocab_size_,
+                                                                                 propose_input_vocab_size_);
+                } catch (const std::exception& e) {
+                    reportSamplingException(batchStreams(stream_groups), e.what());
+                    model_input.skip_run = true;
+                } catch (...) {
+                    reportSamplingException(batchStreams(stream_groups), "unknown draft sampling exception");
+                    model_input.skip_run = true;
+                }
+            }
+            syncSkipRunAcrossTensorParallelRanks(model_input.skip_run, parallelism_config_);
+            if (model_input.skip_run) {
+                return;
+            }
+        }
         draft_token_ids_list.push_back(draft_token_ids);
         draft_probs_list.push_back(draft_probs_reshape);
 

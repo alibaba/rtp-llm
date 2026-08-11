@@ -36,11 +36,9 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                          || std::any_of(num_beams_out, num_beams_out + inputs.batch_size, [](auto n) { return n > 1; });
     bool variable_num_beams = inputs.batch_size != inputs.batch_size_out;
 
-    // allocate output tensors
-    // Keep success on CUDA to avoid a blocking D2H copy: the GPU sampling kernel writes success
-    // directly, and callers that need CPU access should call .cpu() explicitly.
-    auto all_success =
-        torch::empty({(int64_t)inputs.batch_size}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
+    // Undefined means every sampling group uses a path that cannot report row-level failure.
+    // Materialize the aggregate lazily only when a stochastic kernel returns a success tensor.
+    torch::Tensor all_success;
     auto all_beam_indices =
         has_num_beams ? torch::empty({(int64_t)inputs.batch_size_out}, torch::kInt32) : torch::Tensor();
     // Move token_ids to CUDA once so sampleGreedy writes GPU→GPU (no blocking D2H sync).
@@ -74,7 +72,6 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         const auto batch_size_out   = beam_batch_size * cur_num_beams_out;
         const auto to_batch_idx_out = from_batch_idx_out + batch_size_out;
 
-        auto success           = all_success.narrow(0, from_batch_idx_in, batch_size_in);
         auto logits            = inputs.logits.narrow(0, from_batch_idx_in, batch_size_in);
         auto token_ids_in      = inputs_token_ids_cuda.narrow(0, from_batch_idx_in, batch_size_in);
         auto token_ids_out     = all_token_ids_out.narrow(0, from_batch_idx_out, batch_size_out);
@@ -131,13 +128,14 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  do_sample,
                  generator});
             if (greedy_output.success.defined()) {
-                success.copy_(greedy_output.success);
-                // TODO(zhangjianning.zjn): would be better to eliminate the copy
-                if (variable_num_beams) {
-                    token_ids_out.copy_(token_ids_in);
+                if (!all_success.defined()) {
+                    all_success = torch::ones({(int64_t)inputs.batch_size}, greedy_output.success.options());
                 }
-            } else {
-                success.fill_(true);
+                all_success.narrow(0, from_batch_idx_in, batch_size_in).copy_(greedy_output.success);
+            }
+            // TODO(zhangjianning.zjn): would be better to eliminate the copy
+            if (variable_num_beams) {
+                token_ids_out.copy_(token_ids_in);
             }
         } else {
             RTP_LLM_LOG_DEBUG("current_num_beams_in is %d", cur_num_beams_in);
@@ -190,7 +188,6 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             }
             beam_indices.reshape({(int64_t)beam_batch_size, (int64_t)cur_num_beams_out}).copy_(output.beam_indices);
 
-            success.fill_(true);
         }
 
         // prepare for next sampling

@@ -65,6 +65,7 @@ public:
     torch::Tensor cum_log_probs;
     torch::Tensor all_probs;
     torch::Tensor beam_index;
+    // Undefined when the selected sampling path cannot report row-level failure.
     torch::Tensor success;
 };
 
