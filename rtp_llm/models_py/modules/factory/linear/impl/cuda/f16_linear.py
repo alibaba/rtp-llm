@@ -12,6 +12,8 @@ from rtp_llm.ops import HWKernelConfig
 class CudaF16Linear(LinearBase):
     """CUDA F16 (non-quantized) Linear"""
 
+    supports_deferred_bias = True
+
     @classmethod
     def can_handle(
         cls,
@@ -43,3 +45,17 @@ class CudaF16Linear(LinearBase):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return F.linear(input, self.weight, self.bias)
+
+    def forward_without_bias(self, input: torch.Tensor) -> torch.Tensor:
+        return F.linear(input, self.weight, None)
+
+    def forward_with_bias_gelu(self, input: torch.Tensor) -> torch.Tensor:
+        output = self.forward_without_bias(input)
+        if self.bias is None:
+            return F.gelu(output)
+        if self.bias.dtype != output.dtype:
+            return F.gelu(output + self.bias.to(output.dtype))
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        rtp_llm_ops.fused_bias_gelu(output, self.bias)
+        return output
