@@ -379,7 +379,9 @@ py_library(
     ]),
     deps = [
         "//rtp_llm/distribute:distribute",
-        ":multimodal"
+        ":multimodal",
+        ":pydantic",
+        ":transformers",
     ],
     data = [":alog_config"]
 )
