@@ -462,9 +462,9 @@ class GrpcClientWrapper:
         """Run an irreversible lifecycle transition to completion even if the
         driving request coroutine is cancelled.
 
-        Once the commit phase has started running the GPU-release / GPU-restore
-        hooks there is no consistent rollback: freed device memory (or a level-2
-        disk dump/reload) cannot be un-done, so the only valid terminal states
+        Once an irreversible phase has started running the GPU-release /
+        GPU-restore hooks there is no consistent rollback: freed device memory
+        (or a level-2 reload) cannot be un-done, so the only valid terminal states
         are the two endpoints of the transition -- every rank RUNNING or every
         rank SLEEPING. If the frontend request task is cancelled midway (a
         concurrent /health probe tearing down a shared channel, a worker
@@ -474,9 +474,9 @@ class GrpcClientWrapper:
         memory freed and no owner driving it to a consistent state.
 
         So we absorb the cancellation and keep awaiting until the backend
-        converges, then report the true terminal state to whoever is left. The
-        underlying `_converge_commit` is itself bounded (COMMIT_MAX_ATTEMPTS x
-        per-attempt timeout), so this cannot hang indefinitely.
+        converges, then report the true terminal state to whoever is left. Both
+        prepare RPCs and `_converge_commit` have bounded deadlines, so this cannot
+        hang indefinitely.
         """
         task = asyncio.ensure_future(coro)
         absorbed_cancel = False
@@ -490,13 +490,13 @@ class GrpcClientWrapper:
                     # the cancellation die here (the irreversible work is done).
                     result = task.result()
                     break
-                # Still committing an irreversible transition -- swallow the
+                # Still driving an irreversible transition -- swallow the
                 # cancellation and keep waiting for the backend to converge.
                 absorbed_cancel = True
                 continue
         if absorbed_cancel:
             logging.warning(
-                "lifecycle commit was driven to its terminal state despite "
+                "lifecycle transition was driven to its terminal state despite "
                 "request cancellation; absorbed the cancel to avoid a "
                 "half-committed instance"
             )
@@ -839,6 +839,43 @@ class GrpcClientWrapper:
             logging.info("wake_up action completed ok in %.0fms", duration_ms)
         return result
 
+    async def _wake_up_to_terminal(
+        self, prepare_request: Any, commit_request: Any
+    ) -> Dict[str, Any]:
+        """Run irreversible wake preparation and commit as one protected unit."""
+        prepare_results = await self._broadcast_control_rpc(
+            "WakeUpServing", prepare_request, timeout_s=600
+        )
+        failures = [result for result in prepare_results if "error" in result]
+        if failures:
+            statuses = await self._raw_sleep_statuses()
+            if (
+                len(statuses) == len(self.control_addresses)
+                and all("error" not in status for status in statuses)
+                and all(status.get("state") == "WAKING_UP" for status in statuses)
+            ):
+                logging.warning(
+                    "wake_up prepare RPC reported failure, but every control rank "
+                    "reached WAKING_UP; continuing commit convergence"
+                )
+            else:
+                recovery = self._recovery_required(
+                    "prepare wake_up",
+                    "failed on some control ranks after restoration started",
+                    statuses,
+                )
+                recovery["prepare_details"] = _error_details(prepare_results)
+                return recovery
+
+        return await self._converge_commit(
+            operation="commit wake_up",
+            rpc_name="WakeUpServing",
+            commit_request=commit_request,
+            timeout_s=600,
+            transitional_state="WAKING_UP",
+            final_state="RUNNING",
+        )
+
     async def _wake_up_serving_locked(self, req: Any = None) -> Dict[str, Any]:
         try:
             try:
@@ -869,32 +906,11 @@ class GrpcClientWrapper:
             prepare_request = pb2.WakeUpRequestPB(prepare_only=True)
             commit_request = pb2.WakeUpRequestPB(commit_only=True)
 
-            prepare_results = await self._broadcast_control_rpc(
-                "WakeUpServing", prepare_request, timeout_s=600
-            )
-            failures = [result for result in prepare_results if "error" in result]
-            if failures:
-                return {
-                    "error": "Failed to prepare wake_up on some control ranks",
-                    "grpc_status": failures[0].get("grpc_status", "UNKNOWN"),
-                    "details": _error_details(prepare_results),
-                }
-
-            # commit runs the GPU-restore hooks; for level-2 that includes reloading
-            # the ~weights-sized raw backup from disk (read + H2D copy), which can
-            # take far longer than a level-1 tms resume. Give it the same headroom
-            # as wake prepare so a slow restore does not trip the commit deadline.
-            # Restoring device memory / reloading weights is irreversible, so drive
-            # it to the terminal RUNNING state even if this request is cancelled.
+            # Wake prepare already restores VMM backing and, for level 2, reloads
+            # weights from the checkpoint. Protect prepare and commit together so
+            # cancellation cannot release the lifecycle lease in WAKING_UP.
             return await self._drive_to_terminal(
-                self._converge_commit(
-                    operation="commit wake_up",
-                    rpc_name="WakeUpServing",
-                    commit_request=commit_request,
-                    timeout_s=600,
-                    transitional_state="WAKING_UP",
-                    final_state="RUNNING",
-                )
+                self._wake_up_to_terminal(prepare_request, commit_request)
             )
         except grpc.aio.AioRpcError as e:
             logging.error(f"Wake_up serving failed: {e.details()}")

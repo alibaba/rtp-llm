@@ -895,6 +895,71 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(commit_request.prepare_only)
             self.assertTrue(commit_request.commit_only)
 
+    async def test_wake_up_prepare_cancellation_is_absorbed_and_reaches_running(self):
+        # Wake prepare restores VMM backing and level-2 weights, so it is already
+        # irreversible. Cancellation must not release the lifecycle owner while
+        # ranks are left in WAKING_UP; prepare and commit are one protected unit.
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        wrapper, pb2 = self._build_wrapper(
+            control_addresses=addresses,
+            expected_control_address_count=len(addresses),
+        )
+        rank_statuses: Dict[str, Dict[str, Any]] = {
+            address: {
+                "state": "SLEEPING",
+                "sleep_epoch": 1,
+                "kv_memory_state": "PAUSED",
+                "device_kv_cache_valid": False,
+                "active_request_count": 0,
+                "active_cache_transfer_count": 0,
+                "gpu_resource_state": "RELEASED",
+            }
+            for address in addresses
+        }
+        prepare_entered = asyncio.Event()
+        release_prepare = asyncio.Event()
+
+        for address in addresses:
+
+            async def get_status(*args, address=address, **kwargs):
+                return self._status_pb(pb2, **rank_statuses[address])
+
+            async def wake_rpc(request, *args, address=address, **kwargs):
+                if request.prepare_only:
+                    prepare_entered.set()
+                    await release_prepare.wait()
+                    rank_statuses[address].update(
+                        state="WAKING_UP",
+                        kv_memory_state="ACTIVE",
+                        gpu_resource_state="RESTORING",
+                    )
+                elif request.commit_only:
+                    rank_statuses[address].update(
+                        state="RUNNING",
+                        gpu_resource_state="ACTIVE",
+                    )
+                return pb2.EmptyPB()
+
+            wrapper._dp_stubs[address].GetSleepStatus = AsyncMock(
+                side_effect=get_status
+            )
+            wrapper._dp_stubs[address].WakeUpServing = AsyncMock(side_effect=wake_rpc)
+
+        task = asyncio.ensure_future(wrapper.wake_up_serving())
+        await asyncio.wait_for(prepare_entered.wait(), timeout=5)
+        task.cancel()
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+        release_prepare.set()
+
+        result = await asyncio.wait_for(task, timeout=5)
+        self.assertEqual(result, {"status": "ok"})
+        self.assertFalse(task.cancelled())
+        for address in addresses:
+            self.assertEqual(wrapper._dp_stubs[address].WakeUpServing.await_count, 2)
+        running_status = await wrapper.get_sleep_status()
+        self.assertEqual(running_status["state"], "RUNNING")
+
     async def test_wake_up_from_uniform_sleeping_state_proceeds(self):
         # #1 contract (positive): when every control rank reports the SAME
         # SLEEPING state, wake is a well-defined atomic transition and must
@@ -1326,7 +1391,9 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("error", result)
         self.assertEqual(result["grpc_status"], "FAILED_PRECONDITION")
+        self.assertTrue(result["recovery_required"])
         self.assertIn("prepare wake_up", result["error"])
+        self.assertIn("prepare_details", result)
         for address in addresses:
             self.assertEqual(wrapper._dp_stubs[address].WakeUpServing.await_count, 1)
             prepare_request = wrapper._dp_stubs[address].WakeUpServing.await_args.args[
@@ -1334,6 +1401,51 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
             ]
             self.assertTrue(prepare_request.prepare_only)
             self.assertFalse(prepare_request.commit_only)
+
+    async def test_wake_up_prepare_rpc_failure_commits_if_all_ranks_prepared(self):
+        # A deadline/transport error may race with a backend that completed the
+        # prepare hook. If every rank reports WAKING_UP, it is safe and necessary
+        # to finish the irreversible transition instead of requiring a restart.
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        wrapper, pb2 = self._build_wrapper(control_addresses=addresses)
+        rank_statuses = {address: "SLEEPING" for address in addresses}
+
+        for address in addresses:
+
+            async def get_status(*args, address=address, **kwargs):
+                state = rank_statuses[address]
+                return self._status_pb(
+                    pb2,
+                    state=state,
+                    sleep_epoch=1,
+                    kv_memory_state="ACTIVE" if state != "SLEEPING" else "PAUSED",
+                    gpu_resource_state=(
+                        "ACTIVE" if state == "RUNNING" else "RESTORING"
+                    ),
+                )
+
+            async def wake_rpc(request, *args, address=address, **kwargs):
+                if request.prepare_only:
+                    rank_statuses[address] = "WAKING_UP"
+                    if address == addresses[1]:
+                        raise self._aio_error(
+                            grpc.StatusCode.DEADLINE_EXCEEDED,
+                            "prepare response timed out",
+                        )
+                elif request.commit_only:
+                    rank_statuses[address] = "RUNNING"
+                return pb2.EmptyPB()
+
+            wrapper._dp_stubs[address].GetSleepStatus = AsyncMock(
+                side_effect=get_status
+            )
+            wrapper._dp_stubs[address].WakeUpServing = AsyncMock(side_effect=wake_rpc)
+
+        result = await wrapper.wake_up_serving()
+
+        self.assertEqual(result, {"status": "ok"})
+        for address in addresses:
+            self.assertEqual(wrapper._dp_stubs[address].WakeUpServing.await_count, 2)
 
     async def test_wake_up_serving_commit_failure_returns_error(self):
         addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
