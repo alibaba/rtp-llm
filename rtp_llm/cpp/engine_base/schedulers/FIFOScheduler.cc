@@ -34,16 +34,12 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
     prefill_cp_size_(parallelism_config.prefill_cp_config.is_enabled() ?
                          static_cast<size_t>(std::max<int64_t>(parallelism_config.tp_size, 1)) :
                          1),
-    cp_force_single_prefill_(parallelism_config.prefill_cp_config.is_enabled()
-                             && runtime_config.fifo_scheduler_config.cp_force_single_prefill),
     metrics_reporter_(metrics_reporter) {
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu], "
-                     "prefill_cp_size is [%zu], cp_force_single_prefill is [%d], "
-                     "max_inited_kv_cache_streams is [%zu]",
+                     "prefill_cp_size is [%zu], max_inited_kv_cache_streams is [%zu]",
                      max_generate_batch_size_,
                      max_batch_tokens_size_,
                      prefill_cp_size_,
-                     cp_force_single_prefill_,
                      max_inited_kv_cache_streams_);
 }
 
@@ -179,11 +175,6 @@ bool FIFOScheduler::evaluateRunningBatch(const ScheduleRuntime&   schedule_runti
     }
     // prefill and decode not mixed together
     if (!running_streams_.empty()) {
-        return false;
-    }
-    // Conservative CP prefill mode: cap at one stream per round unless runtime
-    // config explicitly allows CP prefill batching.
-    if (cp_force_single_prefill_ && admitted_running_stream_count > 0) {
         return false;
     }
     if (running_streams_.size() + admitted_running_stream_count + 1 > max_generate_batch_size_) {
