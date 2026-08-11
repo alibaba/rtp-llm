@@ -36,6 +36,13 @@ class Utf8BoundaryTokenizer:
 
 
 class FrontendStreamingUtf8ReplayTest(IsolatedAsyncioTestCase):
+    """Pure-text renderer coverage with deterministic UTF-8 boundary tokens.
+
+    Focused coverage of TokenNormalizer's replacement-character predicate lives
+    in token_normalizer_test.py. This integration suite verifies MTP delta assembly
+    without detector/parser state or an external tokenizer model.
+    """
+
     def setUp(self):
         class TestRenderer(ReasoningToolBaseRenderer):
             def _setup_chat_template(self):
@@ -57,7 +64,6 @@ class FrontendStreamingUtf8ReplayTest(IsolatedAsyncioTestCase):
         )
         self.request = ChatCompletionRequest(
             messages=[ChatMessage(role=RoleEnum.user, content="你好")],
-            tools=[],
         )
 
     async def _render_mtp_chunks(self, mtp_chunks):
@@ -73,12 +79,6 @@ class FrontendStreamingUtf8ReplayTest(IsolatedAsyncioTestCase):
             output.output_ids = torch.tensor([token_ids], dtype=torch.int64)
             output.aux_info = aux_info
             return output
-
-        self.assertTrue(mtp_chunks)
-        self.assertTrue(
-            all(2 <= len(chunk) <= 4 for chunk in mtp_chunks),
-            f"every simulated MTP callback must contain 2-4 tokens: {mtp_chunks}",
-        )
 
         streamed_deltas = []
         for chunk in mtp_chunks:

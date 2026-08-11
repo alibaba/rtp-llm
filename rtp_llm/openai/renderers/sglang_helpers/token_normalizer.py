@@ -43,12 +43,13 @@ _MAX_UTF8_WINDOW = 6
 
 
 def expand_prev_window(tokenizer, output_ids: List[int], last_token_length: int) -> int:
-    """Widen the prev-token window until it decodes without U+FFFD.
+    """Widen the bounded prev-token window while its decode contains U+FFFD.
 
-    _calculate_yielded_length() only peels from the right, so a leftmost
-    orphan UTF-8 tail byte makes it return 0 and the next iteration
-    re-emits already-yielded text.  This helper extends the window left
-    until the decode is clean.
+    A replacement character can be caused by missing context on the left or
+    by an incomplete code point on the right. Retaining more bounded context
+    gives the next normalization pass a stable decoded prefix;
+    _calculate_yielded_length() separately treats only a trailing replacement
+    character as pending output.
 
     Returns the (possibly increased) last_token_length.
     """
@@ -57,7 +58,7 @@ def expand_prev_window(tokenizer, output_ids: List[int], last_token_length: int)
     max_expand = min(len(output_ids), last_token_length + _MAX_UTF8_WINDOW)
     while last_token_length < max_expand:
         window = output_ids[-last_token_length:]
-        if "�" not in tokenizer.decode(window):
+        if "\uFFFD" not in tokenizer.decode(window):
             break
         last_token_length += 1
     return last_token_length
@@ -127,7 +128,7 @@ class TokenNormalizer:
 
     def _calculate_yielded_length(self, prev_token_ids: List[int]) -> int:
         """
-        Calculate the length of text that has already been yielded.
+        Calculate the decoded offset of text handled in the previous pass.
 
         Key insight: If prev_decoded ends with \uFFFD, it means the last token(s)
         produced incomplete output that was NOT yielded. In that case, we need to
@@ -140,11 +141,19 @@ class TokenNormalizer:
         end, because the character(s) before \uFFFD may also be part of the
         incomplete sequence (e.g., a space that's part of a multi-token encoding).
 
+        The caller supplies an ordered suffix of the token stream. If that suffix
+        starts on a UTF-8 continuation byte, its decode can begin with \uFFFD.
+        That placeholder was not emitted, but it still occupies one position in
+        subsequent cumulative decodes and must be included in the slicing offset.
+        Tokenizer APIs cannot distinguish decoding failure from a literal trailing
+        U+FFFD, so a trailing replacement character is conservatively treated as
+        pending incomplete output.
+
         Args:
             prev_token_ids: Previously decoded token IDs
 
         Returns:
-            int: Length of the already-yielded portion
+            int: Decoded offset of text handled in the previous pass
         """
         if not prev_token_ids:
             return 0
@@ -154,8 +163,8 @@ class TokenNormalizer:
         # Only a replacement character at the end represents an incomplete
         # trailing UTF-8 sequence that has not been yielded yet. A replacement
         # character earlier in the string can come from a context window that
-        # starts on a UTF-8 continuation token; text after it is still complete
-        # and has already been yielded.
+        # starts on a UTF-8 continuation token; its position and the complete
+        # text after it belong to the already-handled decoded prefix.
         if not prev_decoded.endswith("\uFFFD"):
             return len(prev_decoded)
 
