@@ -6,9 +6,7 @@ from typing import Any, List, Optional, Protocol, Type, Union, cast, runtime_che
 import torch
 
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.grammar_tokenizer_info import (
-    build_model_grammar_tokenizer_info_json,
-)
+from rtp_llm.config.grammar_tokenizer_info import build_grammar_tokenizer_info_json
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import VitConfig
@@ -337,20 +335,42 @@ class BaseModel(object):
             self.model_config.special_tokens.eos_token_id = int(eos_token_id)
 
     def build_grammar_tokenizer_info(self) -> str:
-        # Non-empty metadata enables the engine's optional structured-output backend.
-        # A tokenizer wrapper without a real tokenizer leaves the backend disabled;
-        # Dash-SC rejects only requests that actually ask for structured output.
-        # Other metadata construction failures remain startup errors because they
-        # indicate an invalid tokenizer/backend compatibility contract.
+        # Grammar tokenizer metadata is a startup-time compatibility contract, not
+        # an optional per-request optimization.  Fail fast below if it cannot be
+        # built: accepting ordinary requests with empty metadata would defer an
+        # unsupported tokenizer or missing stop-token configuration until the
+        # first grammar request reaches the engine.
+        real_tokenizer = self.tokenizer.get_real_tokenizer()
+        if real_tokenizer is None:
+            return ""
+
         try:
-            return build_model_grammar_tokenizer_info_json(
-                self.tokenizer,
-                self.model_config,
+            return build_grammar_tokenizer_info_json(
+                real_tokenizer,
+                model_vocab_size=int(self.model_config.vocab_size or 0),
+                stop_token_ids=self._collect_tokenizer_info_stop_token_ids(),
             )
         except Exception as e:
             message = f"Failed to build grammar tokenizer metadata from tokenizer: {e}"
             logging.warning(message)
             raise RuntimeError(message) from e
+
+    def _collect_tokenizer_info_stop_token_ids(self) -> List[int]:
+        ids: List[int] = []
+
+        def add_id(token_id: int) -> None:
+            if token_id < 0:
+                return
+            if token_id not in ids:
+                ids.append(token_id)
+
+        special_tokens = self.model_config.special_tokens
+        add_id(int(special_tokens.eos_token_id))
+        for token_ids in special_tokens.stop_words_id_list:
+            if len(token_ids) == 1:
+                add_id(int(token_ids[0]))
+        ids.sort()
+        return ids
 
     def is_multimodal(self) -> bool:
         return self.model_config.mm_model_config.is_multimodal
