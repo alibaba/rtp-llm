@@ -69,6 +69,17 @@ py_test(
 )
 
 py_test(
+    name = "glm_reasoning_hotpath_test",
+    srcs = [
+        "glm_reasoning_hotpath_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    timeout = "short",
+)
+
+py_test(
     name = "reasoning_tool_parsing_test",
     srcs = [
         "reasoning_tool_parsing_test.py",
