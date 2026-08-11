@@ -1,7 +1,5 @@
 """Attention factory module - handles different attention implementations."""
 
-import logging
-
 from rtp_llm.device.device_type import DeviceType, get_device_type
 
 # Import the factory after lists are defined to avoid circular imports

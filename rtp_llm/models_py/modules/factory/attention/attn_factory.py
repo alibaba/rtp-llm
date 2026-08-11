@@ -183,18 +183,11 @@ def get_fmha_impl(
         # Check if implementation supports parallelism config
         if not impl.support_parallelism_config(parallelism_config):
             continue
-        try:
-            instance = impl.create(
-                attn_configs, attn_inputs, parallelism_config, fmha_config
-            )
-            if not is_cuda_graph or instance.support_cuda_graph():
-                return instance
-
-        except Exception as e:
-            if VALIDATE_FMHA_CONFIG is not None:
-                raise
-            logging.warning(f"Failed to instantiate {impl_class_name}: {e}")
-            continue
+        instance = impl.create(
+            attn_configs, attn_inputs, parallelism_config, fmha_config
+        )
+        if not is_cuda_graph or instance.support_cuda_graph():
+            return instance
     if (
         attn_configs.rope_config.style == RopeStyle.Mrope
         and not attn_configs.rope_config.mrope_interleaved
