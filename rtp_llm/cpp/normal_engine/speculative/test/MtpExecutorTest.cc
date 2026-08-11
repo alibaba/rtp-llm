@@ -992,14 +992,17 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
     checkOutput(stream, {0, 1, 2, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.21, 0.22});
 }
 
-TEST_F(MtpExecutorTest, testDSparkProbabilisticSamplingUsesFrameworkKernelOutsideGraph) {
+TEST_F(MtpExecutorTest, testProbabilisticDraftSamplingUsesFrameworkKernelOutsideGraph) {
     MtpExecutorTestConfig test_config;
     test_config.vocab_size           = 4;
     test_config.vocab_size_override  = 4;
     test_config.gen_num_per_cycle    = 2;
+    test_config.draft_sample_method  = "probabilistic";
+    auto mtp_components              = createMtpExecutorComponents(test_config);
+    EXPECT_TRUE(mtp_components.executor->probabilistic_draft_);
+
     test_config.sp_type              = SP_TYPE_DSPARK;
     test_config.dspark_mask_token_id = 0;
-    test_config.draft_sample_method  = "probabilistic";
     auto components                  = createMtpExecutorComponents(test_config);
 
     auto stream =

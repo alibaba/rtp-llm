@@ -90,7 +90,7 @@ def init_speculative_decoding_group_args(parser, sp_config):
         type=str,
         choices=("greedy", "probabilistic"),
         default="greedy",
-        help="DSpARK draft proposal sampling method.",
+        help="Draft proposal sampling method.",
     )
 
     speculative_decoding_group.add_argument(

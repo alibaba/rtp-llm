@@ -208,8 +208,8 @@ private:
     size_t                                           propose_step_;
     // Fixed-width block diffusion: one draft forward emits gamma proposals;
     // unlike MTP there is no autoregressive draft loop or hidden-state chain.
-    bool                                             is_dspark_                  = false;
-    bool                                             dspark_probabilistic_draft_ = false;
+    bool                                             is_dspark_            = false;
+    bool                                             probabilistic_draft_  = false;
     size_t                                           draft_vocab_size_;
     std::shared_ptr<ModelBase>                       draft_model_;
     // DSpARK uses two prefill-shaped graph contracts: gamma query rows for
