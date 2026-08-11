@@ -69,6 +69,9 @@ LOOP="${LOOP:-0}"
 # means JavaLoadClient's built-in default (replay), identical to before.
 SEND_MODE="${SEND_MODE:-}"
 SEND_MODE_QPS="${SEND_MODE_QPS:-}"
+# Priority mix injection ("70:10,60:15,50:50,40:15,30:10" priority:percent).
+# Empty keeps every request at priority 0 (legacy scheduling path).
+PRIORITY_MIX="${PRIORITY_MIX:-}"
 PUSHGATEWAY_URL="${PUSHGATEWAY_URL:-}"
 LOAD_CLIENT_WORKERS="${LOAD_CLIENT_WORKERS:-8}"
 LOAD_CLIENT_START_DELAY_SECONDS="${LOAD_CLIENT_START_DELAY_SECONDS:-10}"
@@ -617,6 +620,9 @@ PY
 )"
 echo "Load clients will start at epoch_ms=${CLIENT_START_EPOCH_MS}"
 echo "Send mode: ${SEND_MODE:-replay} (SEND_MODE_QPS=${SEND_MODE_QPS:-0})"
+if [[ -n "${PRIORITY_MIX}" ]]; then
+  echo "Priority mix: ${PRIORITY_MIX}"
+fi
 
 # Launch one load client instance. Args: output_dir, num_shards, shard_index,
 # max_concurrency, skip_server_latency (0/1). JavaLoadClient is env-var
@@ -650,6 +656,7 @@ launch_load_client() {
     "LOOP=${LOOP}" \
     "SEND_MODE=${SEND_MODE}" \
     "SEND_MODE_QPS=${SEND_MODE_QPS}" \
+    "PRIORITY_MIX=${PRIORITY_MIX}" \
     "N_CHANNELS=${FLEXLB_N_CHANNELS}" \
     "EVENT_LOOP_THREADS=${EVENT_LOOP_THREADS:-}" \
     "START_AT_EPOCH_MS=${CLIENT_START_EPOCH_MS}" \
@@ -774,9 +781,23 @@ if shards and shards[0].get("send_mode") == "uniform":
         key: shards[0].get(key)
         for key in ("send_mode", "target_qps", "per_shard_qps", "uniform_interval_ms")
     }
+# Cross-shard per-priority success/fail aggregation (PRIORITY_MIX runs only;
+# fields absent in legacy runs, mirroring the shard-level summaries).
+priority_stats = {}
+for item in shards:
+    for prio, stat in (item.get("priority_stats") or {}).items():
+        agg = priority_stats.setdefault(
+            prio, {"total": 0, "success": 0, "fail": 0, "error_status_counts": {}}
+        )
+        agg["total"] += stat.get("total", 0)
+        agg["success"] += stat.get("success", 0)
+        agg["fail"] += stat.get("fail", 0)
+        for code, count in (stat.get("error_status_counts") or {}).items():
+            agg["error_status_counts"][code] = agg["error_status_counts"].get(code, 0) + count
 summary = {
     "load_client_workers": worker_count,
     **send_mode_fields,
+    **({"priority_stats": priority_stats} if priority_stats else {}),
     "sent_task_count": sent_task_count,
     "actual_rpc_start_count": actual_rpc_start_count,
     "recorded_result_count": recorded_result_count,

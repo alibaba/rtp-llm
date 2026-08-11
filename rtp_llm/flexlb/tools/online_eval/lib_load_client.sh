@@ -124,6 +124,7 @@ JAVA_LOAD_CLIENT_ENV_VARS=(
   DRY_RUN
   SEND_MODE
   SEND_MODE_QPS
+  PRIORITY_MIX
 )
 
 # run_java_load_client VAR=value [VAR=value ...]

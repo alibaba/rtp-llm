@@ -43,7 +43,7 @@ class LoopShardRidDisjointTest {
                 0, 16, 10.0, 1, tempDir.resolve("out").toString(), NUM_SHARDS, shardIndex, 0,
                 120_000L, 500.0, "skip", false, true, 1, 1, 0L, 120, true,
                 "engine_service", "", false,
-                false, 10, 1000, 0, 0, "", false, "", true, "replay", 0.0);
+                false, 10, 1000, 0, 0, "", false, "", true, "replay", 0.0, "");
         return new JavaLoadClient(config);
     }
 

@@ -36,12 +36,15 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
+import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -65,6 +68,9 @@ public final class JavaLoadClient {
     private static final int BLOCK_SIZE = 1024;
 
     private final Config config;
+    // Parsed PRIORITY_MIX (null when unset: every request keeps priority 0,
+    // which proto3 does not serialize — wire-identical to the legacy client).
+    private final PriorityMix priorityMix;
     private final EventLoopGroup eventLoopGroup;
     private final ManagedChannel[] scheduleChannels;
     private final FlexlbServiceGrpc.FlexlbServiceBlockingStub[] scheduleStubs;
@@ -94,6 +100,7 @@ public final class JavaLoadClient {
 
     JavaLoadClient(Config config) {
         this.config = config;
+        this.priorityMix = PriorityMix.parse(config.priorityMix);
         if (config.dryRun) {
             // Test-only mode: no gRPC channels are created.
             this.eventLoopGroup = null;
@@ -441,7 +448,9 @@ public final class JavaLoadClient {
             actualSentCount.incrementAndGet();
 
             inputPb = buildGenerateInput(record);
-            FlexlbScheduleProtocol.FlexlbScheduleRequestPB scheduleReq = buildScheduleRequest(record, inputPb);
+            result.priority = priorityMix == null ? 0 : priorityMix.sample(ThreadLocalRandom.current());
+            FlexlbScheduleProtocol.FlexlbScheduleRequestPB scheduleReq =
+                    buildScheduleRequest(record, inputPb, result.priority);
 
             long scheduleStartNanos = System.nanoTime();
             FlexlbServiceGrpc.FlexlbServiceBlockingStub stub = nextScheduleStub()
@@ -796,7 +805,7 @@ public final class JavaLoadClient {
     }
 
     private FlexlbScheduleProtocol.FlexlbScheduleRequestPB buildScheduleRequest(
-            TraceRecord record, EngineRpcService.GenerateInputPB inputPb) {
+            TraceRecord record, EngineRpcService.GenerateInputPB inputPb, int priority) {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(record.requestId)
                 .setGenerateInput(inputPb.toByteString())
@@ -810,6 +819,8 @@ public final class JavaLoadClient {
                 .setModel(config.model)
                 .setApiKey(config.apiKey)
                 .setCacheKeyBlockSize(BLOCK_SIZE)
+                // 0 (legacy) is proto3-default and never serialized on the wire.
+                .setPriority(priority)
                 .build();
     }
 
@@ -1074,6 +1085,7 @@ public final class JavaLoadClient {
                 node.put("decode", result.decode);
                 node.put("error", result.error);
                 node.put("route_path", result.routePath);
+                node.put("priority", result.priority);
                 node.put("wall_clock_ts", result.wallClockTs);
                 node.put("send_due_epoch_ms", result.sendDueEpochMs);
                 node.put("send_start_epoch_ms", result.sendStartEpochMs);
@@ -1181,6 +1193,12 @@ public final class JavaLoadClient {
         summary.set("decode_balance", loadBalanceSummary(ok.stream().map(r -> r.decode).toList()));
         summary.set("status_counts", countBy(results, r -> r.status));
         summary.set("route_path_counts", countBy(results, r -> r.routePath));
+        if (priorityMix != null) {
+            // Per-priority success/fail accounting — the data base for comparing
+            // success rates across priorities in PRIORITY_MIX runs. Absent in
+            // legacy runs so replay summaries stay byte-identical.
+            summary.set("priority_stats", buildPriorityStats());
+        }
 
         Path summaryPath = Path.of(config.outputDir, "summary.json");
         MAPPER.writerWithDefaultPrettyPrinter().writeValue(summaryPath.toFile(), summary);
@@ -1607,6 +1625,28 @@ public final class JavaLoadClient {
         return node;
     }
 
+    // Groups results by injected priority (descending) and reports per-priority
+    // total/success/fail plus a fail breakdown keyed by result status.
+    private ObjectNode buildPriorityStats() {
+        Map<Integer, List<RequestResult>> byPriority = new TreeMap<>(Comparator.reverseOrder());
+        for (RequestResult result : results) {
+            byPriority.computeIfAbsent(result.priority, key -> new ArrayList<>()).add(result);
+        }
+        ObjectNode stats = MAPPER.createObjectNode();
+        for (Map.Entry<Integer, List<RequestResult>> entry : byPriority.entrySet()) {
+            List<RequestResult> rows = entry.getValue();
+            List<RequestResult> failures = rows.stream()
+                    .filter(r -> !"ok".equals(r.status) && !"scheduled".equals(r.status)).toList();
+            ObjectNode node = MAPPER.createObjectNode();
+            node.put("total", rows.size());
+            node.put("success", rows.size() - failures.size());
+            node.put("fail", failures.size());
+            node.set("error_status_counts", countBy(failures, r -> r.status));
+            stats.set(String.valueOf(entry.getKey()), node);
+        }
+        return stats;
+    }
+
     // ---- Cleanup ----
 
     private void close() {
@@ -1624,6 +1664,66 @@ public final class JavaLoadClient {
     }
 
     // ---- Inner Classes ----
+
+    /**
+     * Parsed PRIORITY_MIX spec: "70:10,60:15,50:50,40:15,30:10"
+     * (priority:percent). Each request samples a priority according to the
+     * weights. An empty/unset spec parses to null and every request keeps
+     * priority 0 — the proto3 default, never serialized, i.e. the legacy path.
+     */
+    static final class PriorityMix {
+        final int[] priorities;
+        private final int[] cumulativeWeights;
+        final int totalWeight;
+
+        private PriorityMix(int[] priorities, int[] cumulativeWeights, int totalWeight) {
+            this.priorities = priorities;
+            this.cumulativeWeights = cumulativeWeights;
+            this.totalWeight = totalWeight;
+        }
+
+        /** Returns null for an empty spec (legacy: priority stays 0). */
+        static PriorityMix parse(String spec) {
+            if (spec == null || spec.isBlank()) {
+                return null;
+            }
+            String[] parts = spec.split(",");
+            int[] priorities = new int[parts.length];
+            int[] cumulative = new int[parts.length];
+            int total = 0;
+            for (int i = 0; i < parts.length; i++) {
+                String[] kv = parts[i].trim().split(":");
+                if (kv.length != 2) {
+                    throw new IllegalArgumentException(
+                            "PRIORITY_MIX entry must be 'priority:percent', got '" + parts[i].trim() + "'");
+                }
+                int priority = Integer.parseInt(kv[0].trim());
+                int weight = Integer.parseInt(kv[1].trim());
+                if (priority <= 0 || weight <= 0) {
+                    throw new IllegalArgumentException(
+                            "PRIORITY_MIX requires priority > 0 and percent > 0, got '" + parts[i].trim() + "'");
+                }
+                priorities[i] = priority;
+                total += weight;
+                cumulative[i] = total;
+            }
+            return new PriorityMix(priorities, cumulative, total);
+        }
+
+        int sample(Random random) {
+            return priorityFor(random.nextInt(totalWeight));
+        }
+
+        /** Maps a roll in [0, totalWeight) onto a priority (visible for tests). */
+        int priorityFor(int roll) {
+            for (int i = 0; i < cumulativeWeights.length; i++) {
+                if (roll < cumulativeWeights[i]) {
+                    return priorities[i];
+                }
+            }
+            return priorities[priorities.length - 1];
+        }
+    }
 
     static final class Config {
         final String traceFile;
@@ -1661,6 +1761,7 @@ public final class JavaLoadClient {
         final boolean dryRun;
         final String sendMode;
         final double sendModeQps;
+        final String priorityMix;
 
         Config(String traceFile, String targetAddr, String grpcTarget,
                int durationS, int maxConcurrency, double replaySpeed,
@@ -1673,7 +1774,7 @@ public final class JavaLoadClient {
                boolean gradient, int gradientStartSpeed, int gradientMaxSpeed,
                int maxInputLen, int maxOutputLen, String pushgatewayUrl,
                boolean enableFallback, String endpointsFile, boolean dryRun,
-               String sendMode, double sendModeQps) {
+               String sendMode, double sendModeQps, String priorityMix) {
             this.traceFile = traceFile;
             this.targetAddr = targetAddr;
             this.grpcTarget = grpcTarget;
@@ -1709,6 +1810,7 @@ public final class JavaLoadClient {
             this.dryRun = dryRun;
             this.sendMode = sendMode;
             this.sendModeQps = sendModeQps;
+            this.priorityMix = priorityMix;
             if (!"replay".equals(sendMode) && !"uniform".equals(sendMode)) {
                 throw new IllegalArgumentException(
                         "SEND_MODE must be 'replay' or 'uniform', got '" + sendMode + "'");
@@ -1773,7 +1875,8 @@ public final class JavaLoadClient {
                     env("ENDPOINTS_FILE", ""),
                     envBool("DRY_RUN", false),
                     env("SEND_MODE", "replay"),
-                    envDouble("SEND_MODE_QPS", 0.0)
+                    envDouble("SEND_MODE_QPS", 0.0),
+                    env("PRIORITY_MIX", "")
             );
         }
 
@@ -1813,6 +1916,7 @@ public final class JavaLoadClient {
             System.out.println("  ENDPOINTS_FILE=" + endpointsFile);
             System.out.println("  SEND_MODE=" + sendMode);
             System.out.println("  SEND_MODE_QPS=" + sendModeQps);
+            System.out.println("  PRIORITY_MIX=" + (priorityMix.isEmpty() ? "<unset: legacy priority 0>" : priorityMix));
             System.out.println("=====================================");
         }
 
@@ -1884,6 +1988,7 @@ public final class JavaLoadClient {
         String decode = "";
         String error = "";
         String routePath = "master";
+        int priority;
         double wallClockTs;
         double sendDueEpochMs;
         double sendStartEpochMs;

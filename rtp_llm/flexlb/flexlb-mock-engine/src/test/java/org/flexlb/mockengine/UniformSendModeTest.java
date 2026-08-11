@@ -56,7 +56,7 @@ class UniformSendModeTest {
                 durationS, 16, 1000.0, 1, outDir, numShards, shardIndex, limit,
                 120_000L, 500.0, "skip", false, loop, 1, 1, 0L, 120, true,
                 "engine_service", "", false,
-                false, 10, 1000, 0, 0, "", false, "", true, sendMode, sendModeQps);
+                false, 10, 1000, 0, 0, "", false, "", true, sendMode, sendModeQps, "");
     }
 
     private List<JsonNode> readPerRequest(Path outDir) throws IOException {
