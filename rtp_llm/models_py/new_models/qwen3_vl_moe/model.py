@@ -3,7 +3,7 @@ from typing import Any
 
 import torch
 
-from rtp_llm.models_py.new_models.model_base import select_block_map_for_layer
+from rtp_llm.models_py.new_models.model_base import select_fmha_impl_for_layer
 from rtp_llm.models_py.new_models.qwen3_moe.language import Qwen3MoeForCausalLM
 from rtp_llm.models_py.new_models.qwen3_vl.multimodal import Qwen3VLMultimodalMixin
 from rtp_llm.models_py.weight_mapper import WeightsMapper
@@ -36,11 +36,13 @@ class Qwen3VLMoeForCausalLM(Qwen3VLMultimodalMixin, Qwen3MoeForCausalLM):
 
         residual = torch.zeros_like(hidden_states)
         for layer_id, layer in enumerate(self.layers):
-            select_block_map_for_layer(inputs.attention_inputs, layer_id)
+            layer_fmha_impl = select_fmha_impl_for_layer(
+                fmha_impl, self.kv_cache, layer_id
+            )
             hidden_states, residual = layer(
                 hidden_states,
                 residual,
-                fmha_impl,
+                layer_fmha_impl,
                 kv_cache=(
                     self.kv_cache.get_layer_cache(layer_id) if self.kv_cache else None
                 ),

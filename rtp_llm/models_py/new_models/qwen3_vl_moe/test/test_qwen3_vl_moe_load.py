@@ -274,8 +274,9 @@ class Qwen3VLMoeNewLoaderTest(unittest.TestCase):
 
         with mock.patch(
             "rtp_llm.models_py.new_models.qwen3_vl_moe.model."
-            "select_block_map_for_layer"
-        ) as select_block:
+            "select_fmha_impl_for_layer",
+            return_value=fmha_impl,
+        ) as select_fmha:
             output = model(inputs, fmha_impl)
 
         expected = model.embed_tokens(torch.tensor([1, 0, 2]))
@@ -287,8 +288,8 @@ class Qwen3VLMoeNewLoaderTest(unittest.TestCase):
         expected = expected + 30.0
         torch.testing.assert_close(output.hidden_states, expected)
         self.assertEqual(
-            [call.args for call in select_block.call_args_list],
-            [(inputs.attention_inputs, 0), (inputs.attention_inputs, 1)],
+            [call.args for call in select_fmha.call_args_list],
+            [(fmha_impl, None, 0), (fmha_impl, None, 1)],
         )
 
     def test_deepstack_flows_through_real_rms_residual_add_norm(self):
@@ -336,7 +337,8 @@ class Qwen3VLMoeNewLoaderTest(unittest.TestCase):
 
         with mock.patch(
             "rtp_llm.models_py.new_models.qwen3_vl_moe.model."
-            "select_block_map_for_layer"
+            "select_fmha_impl_for_layer",
+            return_value=fmha_impl,
         ):
             output = model(inputs, fmha_impl)
 
@@ -384,7 +386,8 @@ class Qwen3VLMoeNewLoaderTest(unittest.TestCase):
 
         with mock.patch(
             "rtp_llm.models_py.new_models.qwen3_vl_moe.model."
-            "select_block_map_for_layer"
+            "select_fmha_impl_for_layer",
+            return_value=fmha_impl,
         ):
             output = model(inputs, fmha_impl)
 
