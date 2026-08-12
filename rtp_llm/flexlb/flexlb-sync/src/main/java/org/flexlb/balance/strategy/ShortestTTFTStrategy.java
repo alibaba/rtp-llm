@@ -588,8 +588,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                         : cacheAffinityDecision.shortestTtftWorkerIpPort()),
                 cacheAffinityDecision == null
                         || cacheAffinityDecision.outstandingUncachedTokensThreshold() <= 0
-                        || outstandingUncachedTokens
-                                < cacheAffinityDecision.outstandingUncachedTokensThreshold(),
+                        || outstandingUncachedTokens + requestUncachedTokens
+                                <= cacheAffinityDecision.outstandingUncachedTokensThreshold(),
                 blockSize,
                 scoredWorker.hitCacheTokens(),
                 requestHitRatePct,

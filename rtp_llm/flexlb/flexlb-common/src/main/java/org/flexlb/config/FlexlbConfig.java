@@ -106,9 +106,10 @@ public class FlexlbConfig {
     private long cacheAffinityFirstMaxExtraWorkTokens = 0;
 
     /**
-     * Existing outstanding uncached-token watermark for CACHE_AFFINITY_FIRST admission.
-     * The incoming request is not included in this check. A value less than or equal to
-     * zero disables the watermark.
+     * Outstanding uncached-token watermark for CACHE_AFFINITY_FIRST admission.
+     * A worker is eligible when its current work plus the incoming request's predicted
+     * uncached tokens does not exceed this value. If every available worker exceeds it, routing
+     * falls back to the shortest-TTFT worker. A value less than or equal to zero disables the watermark.
      */
     private long cacheAffinityFirstOutstandingUncachedTokensThreshold = 0;
 

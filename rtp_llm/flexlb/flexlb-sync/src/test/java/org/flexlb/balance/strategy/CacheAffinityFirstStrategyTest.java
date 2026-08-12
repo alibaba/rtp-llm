@@ -333,41 +333,69 @@ class CacheAffinityFirstStrategyTest {
     }
 
     @Test
-    void usesShortestTtftWhenCacheLeaderReachesOutstandingThreshold() {
+    void skipsCandidateWhenOutstandingExceedsThreshold() {
         WorkerStatus cacheLeader = createWorker("127.0.0.1", 0);
         WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
-        WorkerStatus thirdWorker = createWorker("127.0.0.3", 1000);
-        putPendingTask(cacheLeader, "existing", 1_000_000, 0);
+        putPendingTask(cacheLeader, "existing", 960_000, 0);
         CacheAffinityFirstStrategy strategy = createStrategy(
-                List.of(cacheLeader, shortestTtftWorker, thirdWorker),
+                List.of(cacheLeader, shortestTtftWorker),
                 Map.of(
-                        cacheLeader.getIpPort(), 25,
-                        shortestTtftWorker.getIpPort(), 15,
-                        thirdWorker.getIpPort(), 10));
+                        cacheLeader.getIpPort(), 3,
+                        shortestTtftWorker.getIpPort(), 0));
         FlexlbConfig config = cacheAffinityConfig();
         config.setCacheAffinityFirstMaxExtraWorkTokens(2_000_000);
         config.setCacheAffinityFirstOutstandingUncachedTokensThreshold(1_000_000);
 
-        ServerStatus selected = select(strategy, config, "watermark-fallback");
+        BalanceContext balanceContext = createBalanceContext(config, "outstanding-over-threshold");
+        ServerStatus selected = strategy.select(balanceContext, RoleType.PREFILL, null);
 
         Assertions.assertEquals(shortestTtftWorker.getIp(), selected.getServerIp());
+        Assertions.assertFalse(cacheLeader.getLocalTaskMap().containsKey("outstanding-over-threshold"));
+        Assertions.assertTrue(shortestTtftWorker.getLocalTaskMap().containsKey("outstanding-over-threshold"));
+        var decision = balanceContext.getShortestTtftDecisionByRole().get(RoleType.PREFILL);
+        Assertions.assertFalse(decision.workers().stream()
+                .filter(worker -> worker.ip().equals(cacheLeader.getIp()))
+                .findFirst()
+                .orElseThrow()
+                .outstandingGuardEligible());
     }
 
     @Test
-    void admitsUsingExistingWatermarkThenBlocksLaterRequests() {
-        WorkerStatus worker = createWorker("127.0.0.1", 0);
-        putPendingTask(worker, "existing", 990_000, 0);
-        CacheAffinityFirstStrategy strategy = createStrategy(List.of(worker), Map.of());
+    void fallsBackToShortestTtftWhenAllWorkersExceedOutstandingThreshold() {
+        WorkerStatus cacheLeader = createWorker("127.0.0.1", 0);
+        WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
+        putPendingTask(cacheLeader, "cache-leader-existing", 980_000, 0);
+        putPendingTask(shortestTtftWorker, "shortest-existing", 970_000, 0);
+        CacheAffinityFirstStrategy strategy = createStrategy(
+                List.of(cacheLeader, shortestTtftWorker),
+                Map.of(cacheLeader.getIpPort(), 3, shortestTtftWorker.getIpPort(), 0));
         FlexlbConfig config = cacheAffinityConfig();
+        config.setCacheAffinityFirstMaxExtraWorkTokens(2_000_000);
         config.setCacheAffinityFirstOutstandingUncachedTokensThreshold(1_000_000);
 
-        ServerStatus first = select(strategy, config, "crosses-watermark");
-        ServerStatus second = select(strategy, config, "blocked-after-crossing");
+        ServerStatus selected = select(strategy, config, "all-outstanding-over-threshold");
 
-        Assertions.assertTrue(first.isSuccess());
-        Assertions.assertEquals(1_040_000, worker.getOutstandingUncachedTokens());
-        Assertions.assertFalse(second.isSuccess());
-        Assertions.assertFalse(worker.getLocalTaskMap().containsKey("blocked-after-crossing"));
+        Assertions.assertTrue(selected.isSuccess());
+        Assertions.assertEquals(shortestTtftWorker.getIp(), selected.getServerIp());
+        Assertions.assertTrue(shortestTtftWorker.getLocalTaskMap().containsKey("all-outstanding-over-threshold"));
+    }
+
+    @Test
+    void allowsCandidateWhenOutstandingEqualsThreshold() {
+        WorkerStatus cacheLeader = createWorker("127.0.0.1", 0);
+        WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
+        putPendingTask(cacheLeader, "existing", 956_000, 0);
+        CacheAffinityFirstStrategy strategy = createStrategy(
+                List.of(cacheLeader, shortestTtftWorker),
+                Map.of(cacheLeader.getIpPort(), 3, shortestTtftWorker.getIpPort(), 0));
+        FlexlbConfig config = cacheAffinityConfig();
+        config.setCacheAffinityFirstMaxExtraWorkTokens(2_000_000);
+        config.setCacheAffinityFirstOutstandingUncachedTokensThreshold(1_000_000);
+
+        ServerStatus selected = select(strategy, config, "outstanding-at-threshold");
+
+        Assertions.assertEquals(cacheLeader.getIp(), selected.getServerIp());
+        Assertions.assertEquals(1_000_000, cacheLeader.getOutstandingUncachedTokens());
     }
 
     @Test
@@ -379,8 +407,8 @@ class CacheAffinityFirstStrategyTest {
         CacheAffinityFirstStrategy strategy = createStrategy(
                 List.of(cacheLeader, shortestTtftWorker),
                 Map.of(
-                        cacheLeader.getIpPort(), 25,
-                        shortestTtftWorker.getIpPort(), 15));
+                        cacheLeader.getIpPort(), 3,
+                        shortestTtftWorker.getIpPort(), 0));
         FlexlbConfig config = cacheAffinityConfig();
         config.setCacheAffinityFirstMaxExtraWorkTokens(2_000_000);
         config.setCacheAffinityFirstOutstandingUncachedTokensThreshold(1_000_000);
@@ -430,6 +458,10 @@ class CacheAffinityFirstStrategyTest {
 
     private ServerStatus select(
             CacheAffinityFirstStrategy strategy, FlexlbConfig config, String requestId) {
+        return strategy.select(createBalanceContext(config, requestId), RoleType.PREFILL, null);
+    }
+
+    private BalanceContext createBalanceContext(FlexlbConfig config, String requestId) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(INPUT_TOKENS);
@@ -438,7 +470,7 @@ class CacheAffinityFirstStrategyTest {
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setConfig(config);
         balanceContext.setRequest(request);
-        return strategy.select(balanceContext, RoleType.PREFILL, null);
+        return balanceContext;
     }
 
     private FlexlbConfig cacheAffinityConfig() {
