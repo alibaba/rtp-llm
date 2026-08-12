@@ -17,16 +17,15 @@ TOKENIZER_PATH=/data3/kimi-k3
 PREFILL_ENDPOINT=11.163.39.114:27188
 DECODE_ENDPOINT=11.163.39.115:28188
 KIMI_K3_EXECUTION_MODE=optimized
-KIMI_K3_KV_CACHE_MEM_MB=4096
 SP_TYPE=eagle3
 SP_MODEL_TYPE=kimi_k3_mla_swa_eagle3
 SP_CHECKPOINT_PATH=/mnt/nas1/hf/kimi3_eagle
 GEN_NUM_PER_CIRCLE=3
 KIMI_K3_EAGLE3_AUX_LAYER_IDS=0,44,88
-KIMI_K3_SKIP_BUILD=1
 ```
 
-Use `KIMI_K3_SKIP_BUILD=1` only when the Bazel binary matches the source. Rebuild after relevant source changes.
+Never set `KIMI_K3_SKIP_BUILD=1`. Every launch must run the startup script's
+build and validation path.
 
 ## Prefill launch on 114
 
@@ -52,7 +51,6 @@ nohup env \
   SP_CHECKPOINT_PATH=/mnt/nas1/hf/kimi3_eagle \
   GEN_NUM_PER_CIRCLE=3 \
   KIMI_K3_EAGLE3_AUX_LAYER_IDS=0,44,88 \
-  KIMI_K3_SKIP_BUILD=1 \
   bash example/start_kimi_k3_pd.sh prefill \
   > /data0/xinfei.sxf/k3-prefill-launch.log 2>&1 &
 ```
@@ -78,16 +76,27 @@ nohup env \
   KIMI_K3_EXECUTION_MODE=optimized \
   KIMI_K3_KDA_BACKEND=kernel \
   KIMI_K3_TARGET_VERIFY_KDA_BACKEND=kernel \
-  KIMI_K3_KV_CACHE_MEM_MB=4096 \
+  KIMI_K3_KV_CACHE_MEM_MB=2048 \
+  KIMI_K3_RUN_ROOT=/data1/xinfei.sxf/k3-pd-decode \
+  KIMI_K3_TMPDIR=/data1/xinfei.sxf/k3-pd-decode-tmp \
+  KIMI_K3_FLASHINFER_WORKSPACE_BASE=/data1/xinfei.sxf/k3-pd-flashinfer \
   SP_TYPE=eagle3 \
   SP_MODEL_TYPE=kimi_k3_mla_swa_eagle3 \
   SP_CHECKPOINT_PATH=/mnt/nas1/hf/kimi3_eagle \
   GEN_NUM_PER_CIRCLE=3 \
   KIMI_K3_EAGLE3_AUX_LAYER_IDS=0,44,88 \
-  KIMI_K3_SKIP_BUILD=1 \
+  ENABLE_CUDA_GRAPH=1 \
+  DECODE_CAPTURE_CONFIG=1,2,3,4,5,6,7,8 \
+  RTP_MLA_DECODE_KERNEL=flashinfer \
+  LOAD_METHOD=fastsafetensors \
   bash example/start_kimi_k3_pd.sh decode \
-  > /tmp/kimi-k3-pd/decode-launch.log 2>&1 &
+  > /data1/xinfei.sxf/k3-pd-logs/decode-cudagraph-fastsafetensors.log 2>&1 &
 ```
+
+`fastsafetensors` is the normal launch mode and loaded the main weights in
+about 135-153 seconds during the validated run. Use `LOAD_METHOD=scratch` only
+as a load-time memory diagnostic; it performs CPU conversion for an estimated
+1.28 TB model and is much slower.
 
 ## Readiness and proxy diagnosis
 
@@ -116,16 +125,17 @@ Input collection:
 ```
 
 Each file contains `input_ids` for prompt plus reference response and an
-`input_len` boundary. Send only `dump["input_ids"][:dump["input_len"]]`.
-Run `scripts/run_humaneval.py`; it performs this slicing and emits per-query
-acceptance metrics plus token/output sanity samples.
+`input_len` boundary. Slice `dump["input_ids"][:dump["input_len"]]`, decode it
+with `/data3/kimi-k3`, encode the resulting prompt again, and require exact ID
+equality before sending it. The old `kimi_k3_accuracy_input_ids` request field
+is no longer supported. Run `scripts/run_humaneval.py`; it performs the strict
+round trip and writes complete responses and output IDs to JSON.
 
 Use top-level request fields at `/`, not a `query` wrapper:
 
 ```json
 {
-  "prompt": "<kimi-k3-accuracy-input-ids>",
-  "kimi_k3_accuracy_input_ids": ["token IDs"],
+  "prompt": "<decoded prompt whose re-encoded IDs exactly match>",
   "generate_config": {
     "max_new_tokens": 1000,
     "top_k": 1,
@@ -174,6 +184,30 @@ Latest validated result with Draft `/mnt/nas1/hf/kimi3_eagle`, MAL samples
 
 Weighted rate: `1462/1866 = 78.35%`. All five outputs are sane and end at EOS.
 
+### Validated CUDA Graph result
+
+Validated on commits `3917913e9` (target-verify CUDA Graph) and `96f85a339`
+(target-verify Decode state fix), with `fastsafetensors`, Decode capture sizes
+`1..8`, KV cache 2048 MB, and kernel target verify:
+
+| Query | Output | Accepted/proposed | Rate | Termination |
+|---|---:|---:|---:|---|
+| 0000 | 1000 | 644/1065 | 60.47% | max tokens |
+| 0001 | 1000 | 595/1212 | 49.09% | max tokens |
+| 0002 | 428 | 300/381 | 78.74% | EOS 163585 |
+| 0003 | 1000 | 727/816 | 89.09% | max tokens |
+| 0004 | 1000 | 713/858 | 83.10% | max tokens |
+
+Weighted rate: `2979/4332 = 68.77%`, versus the immediately preceding
+non-CUDA-Graph baseline `72.68%`. All responses matched their HumanEval task;
+maximum consecutive identical-token runs were 1, except query 1 at 2. The
+complete result is
+`/data1/xinfei.sxf/k3-pd-logs/humaneval-modefix-cudagraph.json`.
+
+Confirm the live Decode command includes `--enable_cuda_graph 1` and
+`--decode_capture_config 1,2,3,4,5,6,7,8`; do not infer current graph state
+from older log entries in reused log directories.
+
 ## GPU contention and automatic retry
 
 Before launch, require zero compute processes on all eight GPUs. Check on the
@@ -192,6 +226,12 @@ that exits with code `-9` while another user's jobs appear at the same time is
 GPU scheduler contention, not evidence of a model/configuration failure.
 
 Prefill `kernel` produced misleading rates near 99% while outputting repeated token `0`, `!`, or a fixed phrase. Always inspect output IDs and decoded text.
+
+Before launch, inspect both `git status --short` and `git diff --cached`. A
+staged diagnostic rollback can silently undo the CUDA Graph implementation in
+the current HEAD. Preserve the fused D2D copies, immutable host capture
+descriptors, target-verify Decode MLA selection, and separate draft-prefill
+graph gate introduced by `3917913e9` or its rebased equivalent.
 
 ## Hidden-state comparison
 

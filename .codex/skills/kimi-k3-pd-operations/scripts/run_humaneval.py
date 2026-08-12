@@ -8,6 +8,7 @@ import time
 import urllib.request
 
 import torch
+from transformers import AutoTokenizer
 
 
 def main() -> None:
@@ -19,6 +20,11 @@ def main() -> None:
     )
     parser.add_argument("--count", type=int, default=5)
     parser.add_argument("--max-new-tokens", type=int, default=1000)
+    parser.add_argument("--tokenizer", default="/data3/kimi-k3")
+    parser.add_argument(
+        "--output-json",
+        default="/data1/xinfei.sxf/k3-pd-logs/humaneval-cudagraph.json",
+    )
     args = parser.parse_args()
 
     paths = sorted(glob.glob(args.samples))[: args.count]
@@ -26,15 +32,22 @@ def main() -> None:
         raise RuntimeError(f"expected {args.count} samples, found {len(paths)}")
 
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.tokenizer, trust_remote_code=True
+    )
+    results = []
     total_accepted = 0
     total_proposed = 0
     for path in paths:
         dump = torch.load(path, map_location="cpu", weights_only=False)
         input_len = int(dump["input_len"])
         ids = dump["input_ids"][:input_len].tolist()
+        prompt = tokenizer.decode(ids)
+        roundtrip_ids = tokenizer.encode(prompt)
+        if roundtrip_ids != ids:
+            raise RuntimeError(f"{path}: token round-trip mismatch")
         payload = {
-            "prompt": "<kimi-k3-accuracy-input-ids>",
-            "kimi_k3_accuracy_input_ids": ids,
+            "prompt": prompt,
             "generate_config": {
                 "max_new_tokens": args.max_new_tokens,
                 "top_k": 1,
@@ -64,26 +77,33 @@ def main() -> None:
         proposed = max(0, (iterations - 1) * 3)
         total_accepted += accepted
         total_proposed += proposed
-        print(
-            json.dumps(
-                {
-                    "query": dump["record_id"],
-                    "input_len": input_len,
-                    "elapsed_s": round(time.time() - started, 3),
-                    "output_len": output_len,
-                    "iter_count": iterations,
-                    "accepted": accepted,
-                    "proposed": proposed,
-                    "rate": accepted / proposed if proposed else 0,
-                    "last_token": output_ids[-1] if output_ids else None,
-                    "output_head": output_ids[:20],
-                    "output_tail": output_ids[-20:],
-                    "response_head": result.get("response", "")[:200],
-                },
-                ensure_ascii=False,
-            ),
-            flush=True,
-        )
+        max_run = 0
+        current_run = 0
+        previous = None
+        for token_id in output_ids:
+            current_run = current_run + 1 if token_id == previous else 1
+            max_run = max(max_run, current_run)
+            previous = token_id
+        row = {
+            "query": dump.get("record_id", path),
+            "input_len": input_len,
+            "roundtrip_equal": True,
+            "elapsed_s": round(time.time() - started, 3),
+            "output_len": output_len,
+            "iter_count": iterations,
+            "accepted": accepted,
+            "proposed": proposed,
+            "rate": accepted / proposed if proposed else 0,
+            "last_token": output_ids[-1] if output_ids else None,
+            "max_consecutive_identical_tokens": max_run,
+            "response": result.get("response", ""),
+            "output_ids": output_ids,
+        }
+        results.append(row)
+        with open(args.output_json, "w") as output_file:
+            json.dump(results, output_file, ensure_ascii=False, indent=2)
+        summary = {k: v for k, v in row.items() if k not in ("response", "output_ids")}
+        print(json.dumps(summary, ensure_ascii=False), flush=True)
     print(
         json.dumps(
             {
