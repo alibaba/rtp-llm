@@ -81,9 +81,36 @@ public:
 
     virtual size_t onflightRequestNum();
 
-    void stop() {
+    int64_t completedSteps() const {
+        return engine_ ? engine_->completedSteps() : -1;
+    }
+
+    void armStop(int64_t target_step) {
         if (engine_) {
-            (void)engine_->stop();
+            THROW_IF_STATUS_ERROR(engine_->armStopAtStep(target_step, 5000));
+        }
+    }
+
+    void cancelArmedStop() {
+        if (engine_) {
+            THROW_IF_STATUS_ERROR(engine_->cancelArmedStop(5000));
+        }
+    }
+
+    void requestForceStop() {
+        if (engine_) {
+            engine_->requestForceStop();
+        }
+    }
+
+    void stop(bool coordinated = true, int64_t target_step = -1) {
+        if (engine_) {
+            auto status = coordinated && target_step >= 0 ? engine_->stopAtStep(target_step) :
+                          coordinated                     ? engine_->stop() :
+                                                            engine_->forceStop();
+            if (!status.ok()) {
+                throw std::runtime_error(status.ToString());
+            }
         }
     }
 

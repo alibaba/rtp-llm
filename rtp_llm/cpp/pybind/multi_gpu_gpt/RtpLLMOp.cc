@@ -1,3 +1,4 @@
+#include <chrono>
 #include <cstddef>
 #include <memory>
 #include <tuple>
@@ -21,23 +22,6 @@ using namespace std;
 namespace th = torch;
 
 namespace rtp_llm {
-
-namespace {
-
-int64_t getGrpcStopTimeoutMs() {
-    constexpr int64_t kDefaultStopTimeoutMs = 600 * 1000;
-    const auto        explicit_timeout_ms   = autil::EnvUtil::getEnv("RTP_LLM_STOP_TIMEOUT_MS", int64_t(0));
-    if (explicit_timeout_ms > 0) {
-        return explicit_timeout_ms;
-    }
-    const auto shutdown_timeout_s = autil::EnvUtil::getEnv("SHUTDOWN_TIMEOUT", int64_t(600));
-    if (shutdown_timeout_s <= 0) {
-        return kDefaultStopTimeoutMs;
-    }
-    return shutdown_timeout_s * 1000;
-}
-
-}  // namespace
 
 std::unique_ptr<ProposeModelEngineInitParams>
 prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const EngineInitParams& base_params) {
@@ -397,24 +381,91 @@ void RtpLLMOp::startHttpServer(py::object model_weights_loader,
     }
 }
 
+size_t RtpLLMOp::onflightRequestNum() const {
+    return model_rpc_service_ ? model_rpc_service_->onflightRequestNum() : 0;
+}
+
+int64_t RtpLLMOp::completedSteps() const {
+    std::lock_guard<std::mutex> lock(engine_stop_mutex_);
+    return model_rpc_service_ ? model_rpc_service_->completedSteps() : -1;
+}
+
+void RtpLLMOp::armStop(int64_t target_step) {
+    std::lock_guard<std::mutex> lock(engine_stop_mutex_);
+    if (!is_engine_stopped_ && model_rpc_service_) {
+        // armStopAtStep waits for the engine loop to acknowledge the target.
+        // The loop may need the Python GIL while finishing its current step,
+        // so retaining the caller's GIL here would deadlock the handshake.
+        pybind11::gil_scoped_release release;
+        model_rpc_service_->armStop(target_step);
+    }
+}
+
+void RtpLLMOp::cancelArmedStop() {
+    std::lock_guard<std::mutex> lock(engine_stop_mutex_);
+    if (!is_engine_stopped_ && model_rpc_service_) {
+        // Cancellation also waits for an engine-loop acknowledgement.
+        pybind11::gil_scoped_release release;
+        model_rpc_service_->cancelArmedStop();
+    }
+}
+
+void RtpLLMOp::prepareStop(bool coordinated, int64_t target_step) {
+    {
+        std::unique_lock<std::mutex> lock(engine_stop_mutex_);
+        while (is_engine_stopping_) {
+            if (!coordinated && model_rpc_service_) {
+                // Interrupt the coordinated owner's wait, but never join or
+                // mutate engine resources from two stop callers concurrently.
+                model_rpc_service_->requestForceStop();
+                pybind11::gil_scoped_release release;
+                engine_stop_cv_.wait(lock, [this] { return !is_engine_stopping_; });
+            } else {
+                pybind11::gil_scoped_release release;
+                engine_stop_cv_.wait(lock, [this] { return !is_engine_stopping_; });
+            }
+        }
+        if (is_engine_stopped_ || !model_rpc_service_) {
+            return;
+        }
+        is_engine_stopping_ = true;
+    }
+
+    // Stop and join the engine loop, but retain the service, models, and
+    // communicators until every collective rank has reached this boundary.
+    std::exception_ptr stop_error;
+    try {
+        pybind11::gil_scoped_release release;
+        model_rpc_service_->stop(coordinated, target_step);
+    } catch (...) {
+        stop_error = std::current_exception();
+    }
+    {
+        std::lock_guard<std::mutex> lock(engine_stop_mutex_);
+        is_engine_stopping_ = false;
+        is_engine_stopped_  = stop_error == nullptr;
+    }
+    engine_stop_cv_.notify_all();
+    if (stop_error) {
+        std::rethrow_exception(stop_error);
+    }
+}
+
 void RtpLLMOp::stop() {
-    const int64_t stop_timeout_ms = getGrpcStopTimeoutMs();
-    bool          expected        = false;
+    bool expected = false;
     if (is_server_shutdown_.compare_exchange_strong(expected, true)) {
         if (grpc_server_) {
-            auto begin_wait_us = autil::TimeUtility::currentTimeInMicroSeconds();
-            while (auto onflight_request = model_rpc_service_->onflightRequestNum()) {
-                RTP_LLM_LOG_INFO("rpc service has [%lu] onflight request, waiting 1s, stop_timeout_ms=%ld",
-                                 onflight_request,
-                                 stop_timeout_ms);
-                sleep(1);
-                if (autil::TimeUtility::currentTimeInMicroSeconds() - begin_wait_us > stop_timeout_ms * 1000) {
-                    RTP_LLM_LOG_INFO("rpc service wait timeout, no more waiting");
-                    break;
-                }
-            }
+            // In a DP/EP deployment this count is rank-local. Waiting here lets
+            // idle fake-stream ranks tear down their engine while a real rank is
+            // still executing collectives. BackendManager performs the drain and
+            // a process-shared rank rendezvous before entering this method.
             RTP_LLM_LOG_INFO("Server shutdowning");
-            grpc_server_->Shutdown();
+            // The Python layer has already given active requests the configured
+            // drain window. Do not wait indefinitely here: an on-flight streaming
+            // RPC otherwise prevents rank 0 from reaching model shutdown after
+            // all ranks have rendezvoused. An immediate deadline cancels any
+            // request that survived the drain timeout.
+            grpc_server_->Shutdown(std::chrono::system_clock::now());
         }
         if (grpc_server_thread_.joinable()) {
             grpc_server_thread_.join();
@@ -423,9 +474,9 @@ void RtpLLMOp::stop() {
             grpc_server_.reset();
         }
         if (model_rpc_service_) {
-            pybind11::gil_scoped_release release;
-            model_rpc_service_->stop();
-            pybind11::gil_scoped_acquire acquire;
+            prepareStop(true, -1);
+            std::unique_lock<std::mutex> lock(engine_stop_mutex_);
+            engine_stop_cv_.wait(lock, [this] { return active_force_stops_ == 0; });
             model_rpc_service_.reset();
         }
         if (http_server_) {
@@ -437,7 +488,19 @@ void RtpLLMOp::stop() {
 }
 
 RtpLLMOp::~RtpLLMOp() {
-    stop();
+    // stop() now deliberately propagates engine-stop failures (prepareStop
+    // rethrows the captured exception_ptr so the Python layer can see them).
+    // Letting that escape a destructor is std::terminate, which would both kill
+    // the process during teardown and bury the original error under a
+    // destructor stack. Log and swallow here; the error was already reported to
+    // whoever called stop() explicitly.
+    try {
+        stop();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("RtpLLMOp::stop() failed during destruction: %s", e.what());
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("RtpLLMOp::stop() failed during destruction with an unknown exception");
+    }
 }
 
 void RtpLLMOp::pause() {
@@ -467,6 +530,11 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("world_info"),
              py::arg("tokenizer"),
              py::arg("render"))
+        .def("onflight_request_num", &RtpLLMOp::onflightRequestNum)
+        .def("completed_steps", &RtpLLMOp::completedSteps)
+        .def("arm_stop", &RtpLLMOp::armStop)
+        .def("cancel_armed_stop", &RtpLLMOp::cancelArmedStop)
+        .def("prepare_stop", &RtpLLMOp::prepareStop, py::arg("coordinated") = true, py::arg("target_step") = -1)
         .def("stop", &RtpLLMOp::stop);
 }
 

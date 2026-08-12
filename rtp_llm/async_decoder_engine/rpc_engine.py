@@ -73,3 +73,23 @@ class LanguageCppEngine(BaseEngine):
     @override
     def _stop(self) -> None:
         self.rtp_llm_op_.stop()
+
+    @override
+    def prepare_stop(self, coordinated: bool = True, target_step: int = -1) -> None:
+        self.rtp_llm_op_.prepare_stop(coordinated, target_step)
+
+    @override
+    def completed_steps(self) -> int:
+        return self.rtp_llm_op_.completed_steps()
+
+    @override
+    def arm_stop(self, target_step: int) -> None:
+        self.rtp_llm_op_.arm_stop(target_step)
+
+    @override
+    def cancel_armed_stop(self) -> None:
+        self.rtp_llm_op_.cancel_armed_stop()
+
+    @override
+    def onflight_request_num(self) -> int:
+        return self.rtp_llm_op_.onflight_request_num()

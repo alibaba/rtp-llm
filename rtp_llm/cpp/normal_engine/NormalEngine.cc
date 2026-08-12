@@ -609,6 +609,138 @@ absl::Status NormalEngine::stop() {
     return status;
 }
 
+int64_t NormalEngine::completedSteps() const {
+    return propose_params_ ? static_cast<int64_t>(published_completed_steps_.load(std::memory_order_relaxed)) : -1;
+}
+
+absl::Status NormalEngine::armStopAtStep(int64_t target_step, int64_t timeout_ms) {
+    if (!propose_params_ || target_step < 0) {
+        return absl::InvalidArgumentError("coordinated stop requires MTP and a non-negative target");
+    }
+    // Publish first, then wait for the engine thread to acknowledge the exact
+    // boundary at which it observed the arm. This closes the check-then-publish
+    // race without putting a lock or a device collective on normal steps.
+    armed_stop_observed_step_.store(-1, std::memory_order_release);
+    armed_stop_cancel_requested_.store(false, std::memory_order_release);
+    armed_stop_cancel_observed_.store(false, std::memory_order_release);
+    int64_t expected_target = -1;
+    if (!armed_stop_target_step_.compare_exchange_strong(expected_target, target_step, std::memory_order_acq_rel)) {
+        return expected_target == target_step ?
+                   absl::OkStatus() :
+                   absl::FailedPreconditionError("normal engine has a different stop target");
+    }
+    // Shutdown must be able to make progress after SetPause. The loop's pause
+    // wait already treats resume as a control-plane operation.
+    pause_                   = false;
+    int64_t    observed_step = -1;
+    const auto deadline      = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (running_.load(std::memory_order_acquire)
+           && (observed_step = armed_stop_observed_step_.load(std::memory_order_acquire)) < 0) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return absl::DeadlineExceededError("engine loop did not acknowledge coordinated stop arm");
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (observed_step < 0 || target_step <= observed_step) {
+        return absl::FailedPreconditionError("coordinated stop target has already been reached");
+    }
+    RTP_LLM_LOG_INFO("arm normal engine stop at shared step %ld (observed=%ld)", target_step, observed_step);
+    return absl::OkStatus();
+}
+
+absl::Status NormalEngine::cancelArmedStop(int64_t timeout_ms) {
+    if (armed_stop_target_step_.load(std::memory_order_acquire) < 0) {
+        return absl::OkStatus();
+    }
+    armed_stop_cancel_requested_.store(true, std::memory_order_release);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (running_.load(std::memory_order_acquire) && !armed_stop_cancel_observed_.load(std::memory_order_acquire)) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return absl::DeadlineExceededError("engine loop did not acknowledge coordinated stop cancellation");
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return armed_stop_cancel_observed_.load(std::memory_order_acquire) ?
+               absl::OkStatus() :
+               absl::FailedPreconditionError("engine stopped before acknowledging cancellation");
+}
+
+absl::Status NormalEngine::stopAtStep(int64_t target_step) {
+    if (!propose_params_ || target_step < 0) {
+        return stop();
+    }
+    if (armed_stop_target_step_.load(std::memory_order_acquire) != target_step) {
+        auto arm_status = armStopAtStep(target_step, 5000);
+        if (!arm_status.ok()) {
+            return arm_status;
+        }
+    }
+    stop_target_step_.store(target_step, std::memory_order_release);
+    bool expected_stop = false;
+    if (!stop_started_.compare_exchange_strong(expected_stop, true, std::memory_order_release)) {
+        return stop_target_step_.load(std::memory_order_acquire) == target_step ?
+                   absl::OkStatus() :
+                   absl::FailedPreconditionError("normal engine is already stopping");
+    }
+    pause_ = false;
+    if (loop_thread_) {
+        loop_thread_->join();
+        loop_thread_.reset();
+    }
+    if (scheduler_) {
+        auto scheduler_status = scheduler_->stop();
+        if (!scheduler_status.ok()) {
+            return scheduler_status;
+        }
+    }
+#if USING_CUDA || USING_ROCM
+    try {
+        cudaPreRun(getDeviceId());
+        cudaSyncAndCheck();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("cuda sync during coordinated shutdown failed: %s", e.what());
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("cuda sync during coordinated shutdown failed with unknown exception");
+    }
+#endif
+    return absl::OkStatus();
+}
+
+void NormalEngine::requestForceStop() {
+    running_ = false;
+    // A coordinated stop owns stop_started_; clear its target so any code
+    // still inside step() takes the immediate-stop path.
+    stop_target_step_.store(-1, std::memory_order_release);
+    armed_stop_target_step_.store(-1, std::memory_order_release);
+    armed_stop_observed_step_.store(-1, std::memory_order_release);
+    armed_stop_cancel_requested_.store(false, std::memory_order_release);
+    armed_stop_cancel_observed_.store(false, std::memory_order_release);
+    if (executor_) {
+        executor_->notifyStop();
+    }
+    if (scheduler_) {
+        (void)scheduler_->stop();
+    }
+}
+
+absl::Status NormalEngine::forceStop() {
+    requestForceStop();
+    stop_started_.store(true, std::memory_order_release);
+    if (loop_thread_) {
+        loop_thread_->join();
+        loop_thread_.reset();
+    }
+#if USING_CUDA || USING_ROCM
+    try {
+        cudaPreRun(getDeviceId());
+        cudaSyncAndCheck();
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("cuda sync during forced shutdown failed");
+    }
+#endif
+    return absl::OkStatus();
+}
+
 void NormalEngine::loop() {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
@@ -640,6 +772,52 @@ void NormalEngine::loop() {
             }
             RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
             THROW_IF_STATUS_ERROR(trySaveStepError());
+        }
+        if (stop_started_.load(std::memory_order_relaxed)) {
+            const auto target_step = stop_target_step_.load(std::memory_order_acquire);
+            if (target_step >= 0 && completed_steps_ >= static_cast<uint64_t>(target_step)) {
+                running_ = false;
+                break;
+            }
+        }
+        const auto armed_target = armed_stop_target_step_.load(std::memory_order_acquire);
+        if (armed_target >= 0) {
+            const auto completed_step = completed_steps_;
+            armed_stop_observed_step_.store(static_cast<int64_t>(completed_step), std::memory_order_release);
+            if (armed_stop_cancel_requested_.load(std::memory_order_acquire)) {
+                // Remain at this post-step collective boundary until the
+                // all-rank cancellation rendezvous authorizes force-stop.
+                armed_stop_cancel_observed_.store(true, std::memory_order_release);
+                while (running_ && armed_stop_cancel_requested_.load(std::memory_order_acquire)
+                       && !stop_started_.load(std::memory_order_acquire)) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                continue;
+            }
+            if (completed_step < static_cast<uint64_t>(armed_target)) {
+                continue;
+            }
+            // All collective work for this step is complete. Hold this rank at
+            // the shared boundary until the control plane either commits the
+            // target (stop_started_) or aborts it (armed target becomes -1).
+            while (running_ && armed_stop_target_step_.load(std::memory_order_acquire) == armed_target
+                   && !stop_started_.load(std::memory_order_acquire)
+                   && !armed_stop_cancel_requested_.load(std::memory_order_acquire)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            if (armed_stop_cancel_requested_.load(std::memory_order_acquire)) {
+                armed_stop_cancel_observed_.store(true, std::memory_order_release);
+                while (running_ && armed_stop_cancel_requested_.load(std::memory_order_acquire)
+                       && !stop_started_.load(std::memory_order_acquire)) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                continue;
+            }
+            if (stop_started_.load(std::memory_order_acquire)
+                && stop_target_step_.load(std::memory_order_acquire) == armed_target) {
+                running_ = false;
+                break;
+            }
         }
     }
     RTP_LLM_LOG_INFO("loop end");
@@ -691,11 +869,11 @@ void NormalEngine::maybeRefreshCacheStatusSnapshot(const std::list<GenerateStrea
 
 absl::Status NormalEngine::step() {
     RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
-    if (!running_ || stop_started_) {
+    if (!running_ || (stop_started_ && stop_target_step_.load(std::memory_order_relaxed) < 0)) {
         return absl::OkStatus();
     }
     while (pause_) {
-        if (!running_ || stop_started_) {
+        if (!running_ || (stop_started_ && stop_target_step_.load(std::memory_order_relaxed) < 0)) {
             return absl::OkStatus();
         }
         // wait 50ms if system paused.
@@ -709,7 +887,7 @@ absl::Status NormalEngine::step() {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
             CHECK_AND_ASSIGN(streams, scheduler_->schedule());
         }
-        if (!running_ || stop_started_) {
+        if (!running_ || (stop_started_ && stop_target_step_.load(std::memory_order_relaxed) < 0)) {
             return absl::OkStatus();
         }
         if (parallelism_config.dp_size > 1) {
@@ -733,6 +911,12 @@ absl::Status NormalEngine::step() {
     {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
         status = executor_->process(streams, tps_schedule_time_us);
+        if (propose_params_) {
+            ++completed_steps_;
+            if ((completed_steps_ & 63U) == 0) {
+                published_completed_steps_.store(completed_steps_, std::memory_order_relaxed);
+            }
+        }
         // MTP refreshes immediately after the target model has finished CPU dispatch, while its GPU
         // work is still outstanding. The normal executor keeps the original post-process placement.
         if (status.ok() && !propose_params_) {
@@ -782,7 +966,7 @@ bool NormalEngine::isEagle() {
 }
 
 void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
-    if (!running_ || stop_started_) {
+    if (!running_) {
         return;
     }
     if (isMTPEagle()) {

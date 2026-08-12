@@ -7,6 +7,8 @@
 #include "rtp_llm/cpp/api_server/HttpApiServer.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServiceImpl.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServiceImpl.h"
+#include <condition_variable>
+#include <mutex>
 
 namespace th = torch;
 
@@ -17,13 +19,18 @@ public:
     RtpLLMOp();
     ~RtpLLMOp();
 
-    void init(py::object model,
-              py::object engine_config,
-              py::object vit_config,
-              py::object mm_process_engine,
-              py::object propose_model,
-              py::object token_processor);
-    void stop();
+    void    init(py::object model,
+                 py::object engine_config,
+                 py::object vit_config,
+                 py::object mm_process_engine,
+                 py::object propose_model,
+                 py::object token_processor);
+    size_t  onflightRequestNum() const;
+    int64_t completedSteps() const;
+    void    armStop(int64_t target_step);
+    void    cancelArmedStop();
+    void    prepareStop(bool coordinated = true, int64_t target_step = -1);
+    void    stop();
     void
     startHttpServer(py::object model_weights_loader, py::object world_info, py::object tokenizer, py::object render);
     void pause();
@@ -50,6 +57,11 @@ private:
     std::unique_ptr<grpc::Server>   grpc_server_;
     std::thread                     grpc_server_thread_;
     std::atomic<bool>               is_server_ready_{false};
+    mutable std::mutex              engine_stop_mutex_;
+    std::condition_variable         engine_stop_cv_;
+    bool                            is_engine_stopping_{false};
+    bool                            is_engine_stopped_{false};
+    size_t                          active_force_stops_{0};
     std::atomic<bool>               is_server_shutdown_{false};
     size_t                          model_id_ = 0;
 };

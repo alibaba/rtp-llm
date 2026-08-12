@@ -21,6 +21,10 @@ from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
 
+class BackendStopConsensusError(TimeoutError):
+    """The store failed before collective-stop safety could be established."""
+
+
 @dataclass
 class WorldInfo:
     members: List[WorkerInfo]
@@ -179,6 +183,14 @@ class DistributedServer(object):
     """Registry key prefix for rank address in TCPStore."""
 
     REGISTRY_RANK_ADDRESS_KEY = "registry_rank_address_"
+    BACKEND_SHUTDOWN_KEY = "backend_shutdown_"
+    BACKEND_SHUTDOWN_DECISION_KEY = "backend_shutdown_decision_"
+    BACKEND_SHUTDOWN_REQUEST_KEY = "backend_shutdown_requested"
+    BACKEND_SHUTDOWN_STEP_KEY = "backend_shutdown_step_rank_"
+    BACKEND_SHUTDOWN_TARGET_KEY = "backend_shutdown_target_step"
+    BACKEND_SHUTDOWN_STEP_ACK_KEY = "backend_shutdown_step_armed_rank_"
+    BACKEND_SHUTDOWN_STEP_CANCEL_KEY = "backend_shutdown_step_cancelled_rank_"
+    BACKEND_SHUTDOWN_STEP_DECISION_KEY = "backend_shutdown_step_decision"
 
     def __init__(
         self,
@@ -215,6 +227,13 @@ class DistributedServer(object):
             initialized=False,
         )
 
+        if rank == -1:
+            rank = pc.world_rank
+        if world_size == -1:
+            world_size = pc.world_size
+        self.rank = rank
+        self.world_size = world_size
+
         if pc.world_size == 1:
             logging.info("world_size == 1, do not start distributed_server")
             self.master_server_port = server_config.start_port
@@ -223,14 +242,8 @@ class DistributedServer(object):
             )
             return
 
-        if rank == -1:
-            rank = pc.world_rank
-        if world_size == -1:
-            world_size = pc.world_size
         self._initialized = True
         self.py_env_configs = py_env_configs
-        self.rank = rank
-        self.world_size = world_size
 
         self.master_ip, master_server_port = get_master(
             self.py_env_configs.distribute_config,
@@ -318,6 +331,218 @@ class DistributedServer(object):
         except Exception as e:
             logging.error(f"Unexpected error when getting key '{key}': {e}")
             return ""
+
+    def wait_for_backend_shutdown(self, timeout: float, phase: str) -> None:
+        """Rendezvous every backend rank at one shutdown phase."""
+        if self.world_size <= 1:
+            return
+        rank_key_prefix = self.BACKEND_SHUTDOWN_KEY + phase + "_rank_"
+        decision_key = self.BACKEND_SHUTDOWN_DECISION_KEY + phase
+        self.store.set(rank_key_prefix + str(self.rank), "ready")
+        keys = [rank_key_prefix + str(rank) for rank in range(self.world_size)]
+        deadline = time.monotonic() + timeout
+        while True:
+            if self.store.check([decision_key]):
+                decision = self.store.get(decision_key).decode("utf-8")
+                if decision == "success":
+                    return
+                raise TimeoutError(
+                    f"backend shutdown rendezvous {phase} aborted by a peer rank"
+                )
+            if self.store.check(keys):
+                self.store.compare_set(decision_key, "", "success")
+                continue
+            if time.monotonic() >= deadline:
+                # TCPStore.wait() times out independently on each caller. A
+                # shared abort key gives every surviving rank the equivalent of
+                # multiprocessing.BrokenBarrierError within one polling period.
+                decision = self.store.compare_set(
+                    decision_key, "", f"abort:{self.rank}"
+                ).decode("utf-8")
+                if decision == "success":
+                    return
+                raise TimeoutError(
+                    f"backend shutdown rendezvous {phase} timed out on rank {self.rank}"
+                )
+            time.sleep(0.1)
+
+    def request_backend_shutdown(self) -> None:
+        """Publish a job-wide shutdown request for peer nodes/ranks."""
+        if self.world_size > 1:
+            self.store.set(self.BACKEND_SHUTDOWN_REQUEST_KEY, str(self.rank))
+
+    def choose_backend_stop_step(
+        self, timeout: float, local_step: int, arm_stop, cancel_armed_stop
+    ) -> int:
+        """Atomically commit one future MTP stop step across all ranks."""
+        if self.world_size <= 1:
+            return -1
+        step_keys = [
+            self.BACKEND_SHUTDOWN_STEP_KEY + str(rank)
+            for rank in range(self.world_size)
+        ]
+        armed_keys = [
+            self.BACKEND_SHUTDOWN_STEP_ACK_KEY + str(rank)
+            for rank in range(self.world_size)
+        ]
+        cancelled_keys = [
+            self.BACKEND_SHUTDOWN_STEP_CANCEL_KEY + str(rank)
+            for rank in range(self.world_size)
+        ]
+        deadline = time.monotonic() + timeout
+        step_published = False
+        armed_target = None
+        armed_ack_published = False
+
+        def abort_and_wait(message: str) -> None:
+            nonlocal armed_target
+            decision = self.store.compare_set(
+                self.BACKEND_SHUTDOWN_STEP_DECISION_KEY,
+                "",
+                f"abort:{self.rank}",
+            ).decode("utf-8")
+            if decision == "success":
+                raise BackendStopConsensusError(
+                    "stop-step success became visible after this rank failed to arm"
+                )
+            if armed_target is not None and armed_target >= 0:
+                cancel_armed_stop()
+            armed_target = None
+            self.store.set(
+                self.BACKEND_SHUTDOWN_STEP_CANCEL_KEY + str(self.rank), "ready"
+            )
+            cancel_deadline = time.monotonic() + timeout
+            while not self.store.check(cancelled_keys):
+                if time.monotonic() >= cancel_deadline:
+                    raise BackendStopConsensusError(
+                        f"{message}; cancellation rendezvous timed out"
+                    )
+                time.sleep(0.1)
+            raise TimeoutError(message)
+
+        while True:
+            try:
+                if not step_published:
+                    self.store.set(
+                        self.BACKEND_SHUTDOWN_STEP_KEY + str(self.rank),
+                        str(local_step),
+                    )
+                    step_published = True
+                if self.store.check([self.BACKEND_SHUTDOWN_STEP_DECISION_KEY]):
+                    decision = self.store.get(
+                        self.BACKEND_SHUTDOWN_STEP_DECISION_KEY
+                    ).decode("utf-8")
+                    if decision == "success":
+                        return int(
+                            self.store.get(self.BACKEND_SHUTDOWN_TARGET_KEY).decode(
+                                "utf-8"
+                            )
+                        )
+                    abort_and_wait("backend stop-step selection aborted by a peer rank")
+
+                if self.store.check(step_keys):
+                    # Snapshots lag by at most 63 steps. The arm handshake below
+                    # rejects a target that is no longer future, so the margin
+                    # does not need a per-step atomic on the runtime hot path.
+                    steps = [
+                        int(self.store.get(key).decode("utf-8")) for key in step_keys
+                    ]
+                    candidate = (
+                        -1 if any(step < 0 for step in steps) else max(steps) + 256
+                    )
+                    chosen = self.store.compare_set(
+                        self.BACKEND_SHUTDOWN_TARGET_KEY, "", str(candidate)
+                    ).decode("utf-8")
+                    target_step = int(chosen or candidate)
+                    if armed_target is None:
+                        armed_target = target_step
+                        try:
+                            if target_step >= 0:
+                                arm_stop(target_step)
+                        except Exception:
+                            abort_and_wait("backend stop-step arming failed")
+                    if not armed_ack_published:
+                        self.store.set(
+                            self.BACKEND_SHUTDOWN_STEP_ACK_KEY + str(self.rank),
+                            str(target_step),
+                        )
+                        armed_ack_published = True
+
+                    if self.store.check(armed_keys):
+                        armed_steps = [
+                            int(self.store.get(key).decode("utf-8"))
+                            for key in armed_keys
+                        ]
+                        decision_value = (
+                            "success"
+                            if all(step == target_step for step in armed_steps)
+                            else f"abort:{self.rank}"
+                        )
+                        decision = self.store.compare_set(
+                            self.BACKEND_SHUTDOWN_STEP_DECISION_KEY,
+                            "",
+                            decision_value,
+                        ).decode("utf-8")
+                        if decision == "success":
+                            return target_step
+                        abort_and_wait(
+                            "backend stop-step selection aborted by a peer rank"
+                        )
+
+                    # Once armed, do not publish a unilateral timeout abort: the
+                    # target is already installed and a peer may be about to
+                    # publish the last armed key. Keep resolving the shared
+                    # decision to preserve collective safety.
+                if time.monotonic() >= deadline:
+                    decision = self.store.compare_set(
+                        self.BACKEND_SHUTDOWN_STEP_DECISION_KEY,
+                        "",
+                        f"abort:{self.rank}",
+                    ).decode("utf-8")
+                    if decision == "success":
+                        return int(
+                            self.store.get(self.BACKEND_SHUTDOWN_TARGET_KEY).decode(
+                                "utf-8"
+                            )
+                        )
+                    abort_and_wait("backend stop-step consensus timed out")
+                time.sleep(0.1)
+            except TimeoutError:
+                raise
+            except Exception:
+                if time.monotonic() >= deadline:
+                    try:
+                        decision = self.store.compare_set(
+                            self.BACKEND_SHUTDOWN_STEP_DECISION_KEY,
+                            "",
+                            f"abort:{self.rank}",
+                        ).decode("utf-8")
+                        if decision.startswith("abort:"):
+                            abort_and_wait(
+                                "backend stop-step store unavailable during consensus"
+                            )
+                    except TimeoutError:
+                        raise
+                    except Exception as abort_error:
+                        # Without a readable shared decision/cancel rendezvous,
+                        # forcing this rank down could race an armed peer.
+                        raise BackendStopConsensusError(
+                            "backend stop-step store unavailable after consensus timeout"
+                        ) from abort_error
+                # A local read/CAS error must not make this rank choose force-stop
+                # while a peer may have committed success. Keep resolving the
+                # shared decision; a persistent store partition sacrifices
+                # shutdown liveness rather than collective safety.
+                logging.exception(
+                    "backend stop-step store operation failed; retrying shared decision"
+                )
+                time.sleep(0.1)
+
+    def is_backend_shutdown_requested(self) -> bool:
+        """Return whether any rank has published a job-wide shutdown request."""
+        return self.world_size > 1 and self.store.check(
+            [self.BACKEND_SHUTDOWN_REQUEST_KEY]
+        )
 
     def regist(self) -> None:
         key = self.REGISTRY_RANK_ADDRESS_KEY + str(self.rank)

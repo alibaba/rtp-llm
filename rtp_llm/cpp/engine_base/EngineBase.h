@@ -58,6 +58,32 @@ public:
 
     virtual absl::Status stop() = 0;
 
+    virtual absl::Status forceStop() {
+        return stop();
+    }
+
+    virtual void requestForceStop() {}
+
+    virtual int64_t completedSteps() const {
+        return -1;
+    }
+
+    virtual absl::Status armStopAtStep(int64_t target_step, int64_t timeout_ms) {
+        (void)target_step;
+        (void)timeout_ms;
+        return absl::UnimplementedError("coordinated stop is not supported");
+    }
+
+    virtual absl::Status cancelArmedStop(int64_t timeout_ms) {
+        (void)timeout_ms;
+        return absl::OkStatus();
+    }
+
+    virtual absl::Status stopAtStep(int64_t target_step) {
+        (void)target_step;
+        return stop();
+    }
+
     virtual absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                                      preRunMode                            mode) = 0;
 
