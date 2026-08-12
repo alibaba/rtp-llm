@@ -215,9 +215,9 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     auto       kv_cache_data      = (uint64_t*)kv_cache.kv_cache_buffer.data_ptr();
     auto       kv_cache_owner     = std::make_shared<torch::Tensor>(kv_cache.kv_cache_buffer);
     const bool kv_gpu_mem         = kv_cache.kv_cache_buffer.is_cuda();
-    const bool has_kv_scale = kv_cache.kv_scale_buffer.defined() && kv_cache.kv_scale_buffer.numel() > 0
-                              && param.kv_scale_stride_bytes > 0;
-    uint64_t*  kv_scale_data      = nullptr;
+    const bool has_kv_scale =
+        kv_cache.kv_scale_buffer.defined() && kv_cache.kv_scale_buffer.numel() > 0 && param.kv_scale_stride_bytes > 0;
+    uint64_t*                      kv_scale_data = nullptr;
     std::shared_ptr<torch::Tensor> kv_scale_owner;
     if (has_kv_scale) {
         kv_scale_data  = (uint64_t*)kv_cache.kv_scale_buffer.data_ptr();
@@ -256,10 +256,9 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             / seq_size_per_block;
         int canonical_reuse_block_num =
             param.prefix_lengths_host.data_ptr<int>()[batch_id] / canonical_seq_size_per_block;
-        int canonical_block_num =
-            (param.input_lengths_host.data_ptr<int>()[param.decoder_batch_size + batch_id]
-             + canonical_seq_size_per_block - 1)
-            / canonical_seq_size_per_block;
+        int canonical_block_num = (param.input_lengths_host.data_ptr<int>()[param.decoder_batch_size + batch_id]
+                                   + canonical_seq_size_per_block - 1)
+                                  / canonical_seq_size_per_block;
         auto request_id     = *(param.request_id.data_ptr<int64_t>() + batch_id);
         auto event          = param.pre_created_event ? param.pre_created_event : runtimeCreateEvent();
         auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
@@ -307,20 +306,20 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
 
             constexpr size_t kDsv4SwaFp8EntryBytes  = 584;
             constexpr size_t kDsv4SwaTokenDataBytes = 576;
-            const bool       is_swa_cp_slice        = param.region_name == KVCacheRegionName::SWA_KV && param.cp_size > 1
-                                               && param.kv_block_stride_bytes % kDsv4SwaFp8EntryBytes == 0;
+            const bool       is_swa_cp_slice = param.region_name == KVCacheRegionName::SWA_KV && param.cp_size > 1
+                                         && param.kv_block_stride_bytes % kDsv4SwaFp8EntryBytes == 0;
 
             // Some layouts treat the block as a single opaque KV chunk. Only
             // the legacy MHA path splits k/v. SWA_KV is opaque logically, but
             // its FP8 physical block is striped as DATA then SCALES, so CP
             // slices must store those two regions independently.
             if (is_swa_cp_slice) {
-                constexpr size_t kSwaTokenDataBytes  = kDsv4SwaTokenDataBytes;
-                constexpr size_t kSwaTokenScaleBytes = kDsv4SwaFp8EntryBytes - kSwaTokenDataBytes;
-                const size_t     local_entries       = param.kv_block_stride_bytes / kDsv4SwaFp8EntryBytes;
-                const size_t     data_bytes          = local_entries * kSwaTokenDataBytes;
-                const size_t     scale_bytes         = local_entries * kSwaTokenScaleBytes;
-                void*            scale_addr          = static_cast<void*>(static_cast<int8_t*>(kv_addr) + data_bytes);
+                constexpr size_t      kSwaTokenDataBytes  = kDsv4SwaTokenDataBytes;
+                constexpr size_t      kSwaTokenScaleBytes = kDsv4SwaFp8EntryBytes - kSwaTokenDataBytes;
+                const size_t          local_entries       = param.kv_block_stride_bytes / kDsv4SwaFp8EntryBytes;
+                const size_t          data_bytes          = local_entries * kSwaTokenDataBytes;
+                const size_t          scale_bytes         = local_entries * kSwaTokenScaleBytes;
+                void*                 scale_addr = static_cast<void*>(static_cast<int8_t*>(kv_addr) + data_bytes);
                 std::shared_ptr<void> scale_block_addr(kv_cache_owner, scale_addr);
                 request_blocks->addBlock("kv_" + cache_key, kv_block_addr, data_bytes, kv_gpu_mem, true);
                 request_blocks->addBlock("kv_scale_" + cache_key, scale_block_addr, scale_bytes, kv_gpu_mem, true);

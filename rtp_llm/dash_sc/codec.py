@@ -87,15 +87,50 @@ DASH_ERROR_UNSUPPORTED = DashErrorSpec(
     status_code=422,
     status_name="InvalidParameter",
 )
+# NOTE: finish_reason must be USE_PARAMETER_STATUS for any spec whose
+# status_code differs from what the DashScope api-server would derive via
+# LlmFinishReasonUtils.finishReasonToStatusCode().  The api-server only
+# passes the explicit status_code (from the error_msg JSON) through verbatim
+# when finish_reason == USE_PARAMETER_STATUS (1000); otherwise it re-derives
+# HTTP from the finish_reason code, which maps most non-trivial codes to
+# InternalError.EngineAbort/500.  error_no is kept at the semantic value for
+# downstream metric/labelling; only finish_reason is remapped.
+# Mirrors the STOP_ENGINE_PARAM→USE_PARAMETER_STATUS translation that
+# dashllm's processor.py (L1438-1442) applies at the wire boundary.
 DASH_ERROR_CAPACITY = DashErrorSpec(
     error_no=LLMFinishReason.TASK_LIST_FULL,
-    finish_reason=LLMFinishReason.TASK_LIST_FULL,
-    status_code=503,
-    status_name="ServiceUnavailable",
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
+    status_code=429,
+    status_name="TooManyRequests",
+)
+# Auto-TPM victim preemption (Master 8429 PRIORITY_PREEMPTED): the request was
+# already dispatched and then cancelled as a victim of a strictly
+# higher-priority request.  Distinct from generic capacity backpressure
+# (DASH_ERROR_CAPACITY): error_no carries ABORT(10) for downstream
+# metric/labelling, status_name is Throttling.Aborted, and finish_reason is
+# USE_PARAMETER_STATUS so the api-server passes the explicit 429 through
+# verbatim (same wire convention as the specs above).
+DASH_ERROR_AUTO_TPM_PREEMPTED = DashErrorSpec(
+    error_no=LLMFinishReason.ABORT,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
+    status_code=429,
+    status_name="Throttling.Aborted",
+)
+DASH_ERROR_ADMISSION_OVERLOADED = DashErrorSpec(
+    error_no=LLMFinishReason.TASK_LIST_FULL,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
+    status_code=429,
+    status_name="Throttling.ServiceOverloaded",
+)
+DASH_ERROR_RESOURCE_EXHAUSTED = DashErrorSpec(
+    error_no=LLMFinishReason.TASK_LIST_FULL,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
+    status_code=429,
+    status_name="Throttling.ResourceExhausted",
 )
 DASH_ERROR_TIMEOUT = DashErrorSpec(
     error_no=LLMFinishReason.STOP_TIMEOUT,
-    finish_reason=LLMFinishReason.STOP_TIMEOUT,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
     status_code=504,
     status_name="GatewayTimeout",
 )
@@ -107,7 +142,7 @@ DASH_ERROR_INVALID_OUTPUT = DashErrorSpec(
 )
 DASH_ERROR_ABORT = DashErrorSpec(
     error_no=LLMFinishReason.ABORT,
-    finish_reason=LLMFinishReason.ABORT,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
     status_code=499,
     status_name="ClientClosedRequest",
 )
@@ -953,7 +988,11 @@ def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> Other
         )
 
     request_headers: dict[str, str] = {}
-    for header_name in ("user_id", "x-dashscope-apikeyid"):
+    for header_name in (
+        "user_id",
+        "x-dashscope-apikeyid",
+        "x-dashscope-inner-qos-level",
+    ):
         value = _normalize_non_empty_str(ds_attrs.get(header_name))
         if value is not None:
             request_headers[header_name] = value
@@ -1441,8 +1480,9 @@ def build_dash_error_response(
     infer.parameters["incremental_output"].int64_param = 1
     infer.parameters["error_no"].int64_param = int(error_spec.error_no)
     infer.parameters["error_msg"].string_param = error_msg
-    # DashScope api-server reads status_* as standalone parameters. Keep the
-    # legacy error_no/error_msg fields above for backward compatibility.
+    # DashScope api-server reads status_* as standalone parameters; without
+    # status_name it degrades every error to 500 "missing status name".
+    # error_no/error_msg above are kept for backward compatibility.
     infer.parameters["status_code"].int64_param = int(error_spec.status_code)
     infer.parameters["status_name"].string_param = error_spec.status_name
     infer.parameters["status_message"].string_param = status_message

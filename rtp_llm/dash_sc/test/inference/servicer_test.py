@@ -18,16 +18,24 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import RoleAddr
+from rtp_llm.config.exceptions import (
+    AdmissionRejectReason,
+    ExceptionType,
+    FtRuntimeException,
+)
+from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
+from rtp_llm.dash_sc import grpc_metrics
 from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord
 from rtp_llm.dash_sc.codec import (
     DASH_ERROR_ABORT,
+    DASH_ERROR_ADMISSION_OVERLOADED,
+    DASH_ERROR_AUTO_TPM_PREEMPTED,
     DASH_ERROR_BAD_REQUEST,
     DASH_ERROR_CAPACITY,
     DASH_ERROR_INTERNAL,
     DASH_ERROR_INVALID_OUTPUT,
+    DASH_ERROR_RESOURCE_EXHAUSTED,
     DASH_ERROR_TIMEOUT,
     DASH_ERROR_TOO_LONG,
     DASH_ERROR_UNSUPPORTED,
@@ -39,13 +47,21 @@ from rtp_llm.dash_sc.codec import (
 )
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
+    _dash_error_mapping_for_ft_exception,
     _dash_error_spec_for_ft_exception,
     build_think_runtime,
     iter_real_model_stream_infer,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2
+from rtp_llm.metrics import AccMetrics
 from rtp_llm.ops import RoleType
-from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
+from rtp_llm.server.master_client import MasterClient
+from rtp_llm.utils.base_model_datatypes import (
+    AuxInfo,
+    GenerateInput,
+    GenerateOutput,
+    GenerateOutputs,
+)
 
 
 def _add_input_tensor(
@@ -158,6 +174,78 @@ class DashErrorSpecForFtExceptionTest(unittest.TestCase):
             DASH_ERROR_INTERNAL,
         )
 
+    def test_priority_preempted_has_dedicated_non_capacity_spec(self) -> None:
+        self.assertEqual(
+            _dash_error_spec_for_ft_exception(
+                FtRuntimeException(ExceptionType.PRIORITY_PREEMPTED, "boom")
+            ),
+            DASH_ERROR_AUTO_TPM_PREEMPTED,
+        )
+        self.assertEqual(
+            _dash_error_spec_for_ft_exception(
+                FtRuntimeException(ExceptionType.MASTER_NO_AVAILABLE_WORKER, "boom")
+            ),
+            DASH_ERROR_CAPACITY,
+        )
+
+    def test_typed_admission_reason_matrix(self) -> None:
+        cases = (
+            (
+                ExceptionType.PRIORITY_ADMISSION_REJECTED,
+                AdmissionRejectReason.HIGHER_PRIORITY_AHEAD,
+                DASH_ERROR_ADMISSION_OVERLOADED,
+                "Higher-priority requests are being served. Please retry later.",
+                False,
+            ),
+            (
+                ExceptionType.PRIORITY_ADMISSION_REJECTED,
+                AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+                DASH_ERROR_ADMISSION_OVERLOADED,
+                "Requests with the same priority are ahead in the queue. "
+                "Please retry later.",
+                False,
+            ),
+            (
+                ExceptionType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                DASH_ERROR_RESOURCE_EXHAUSTED,
+                "Resources are temporarily exhausted. Please retry later.",
+                False,
+            ),
+            (
+                ExceptionType.ADMISSION_UNAVAILABLE,
+                AdmissionRejectReason.UNSPECIFIED,
+                DASH_ERROR_ADMISSION_OVERLOADED,
+                "Too many requests.",
+                False,
+            ),
+        )
+        for exception_type, reason, expected_spec, expected_message, invalid in cases:
+            with self.subTest(exception_type=exception_type, reason=reason):
+                mapping = _dash_error_mapping_for_ft_exception(
+                    FtRuntimeException(
+                        exception_type,
+                        "private scheduler diagnostic",
+                        admission_reject_reason=reason,
+                    )
+                )
+                self.assertEqual(expected_spec, mapping.error_spec)
+                self.assertEqual(expected_message, mapping.public_message)
+                self.assertEqual(invalid, mapping.protocol_error)
+
+    def test_illegal_admission_reason_pair_has_safe_fallback(self) -> None:
+        mapping = _dash_error_mapping_for_ft_exception(
+            FtRuntimeException(
+                ExceptionType.RESOURCE_EXHAUSTED,
+                "do not parse this text",
+                admission_reject_reason=AdmissionRejectReason.HIGHER_PRIORITY_AHEAD,
+            )
+        )
+
+        self.assertEqual(DASH_ERROR_ADMISSION_OVERLOADED, mapping.error_spec)
+        self.assertEqual("Too many requests.", mapping.public_message)
+        self.assertTrue(mapping.protocol_error)
+
 
 class _FakeTokenizer:
     eos_token_id = 2
@@ -234,6 +322,14 @@ def _assert_parameter_error_response(
     testcase.assertIn(
         expected_message_part,
         payload["status_message"],
+    )
+    testcase.assertEqual(infer.parameters["status_code"].int64_param, 400)
+    testcase.assertEqual(
+        infer.parameters["status_name"].string_param, "InvalidParameter"
+    )
+    testcase.assertIn(
+        expected_message_part,
+        infer.parameters["status_message"].string_param,
     )
     testcase.assertEqual(_finish_reason(resp), LLMFinishReason.STOP_ENGINE_PARAM)
     testcase.assertEqual(_gen_ids(resp), [])
@@ -446,9 +542,12 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(chunks[0].error_message)
         error_no, payload = _dash_error_payload(chunks[0])
         self.assertEqual(error_no, 5)
-        self.assertEqual(payload["status_code"], 503)
+        self.assertEqual(payload["status_code"], 429)
+        self.assertEqual(payload["status_name"], "TooManyRequests")
         self.assertIn("route failed", payload["status_message"])
-        self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.TASK_LIST_FULL)
+        self.assertEqual(
+            _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
+        )
         self.assertEqual(access_agg.backend_error_code, "8500_ROUTE_ERROR")
         self.assertEqual(
             access_agg.aux_info,
@@ -459,6 +558,251 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 "aux_string": "route-diagnostic",
             },
         )
+
+    async def test_auto_tpm_preempted_maps_to_throttling_aborted(self) -> None:
+        """Master 8429 PRIORITY_PREEMPTED (Auto-TPM victim) must surface as
+        ABORT(10) / 429 / Throttling.Aborted with a sanitised status message,
+        independently of the QoS header."""
+        req = self._minimal_request()
+
+        class _PreemptedVisitor:
+            async def enqueue(self, _gi):
+                raise FtRuntimeException(
+                    ExceptionType.PRIORITY_PREEMPTED,
+                    "AUTO_TPM_PREEMPTED victim request 703 by request 77",
+                )
+
+        for request_headers in (
+            {},
+            {"x-dashscope-inner-qos-level": "40"},
+            {"x-dashscope-inner-qos-level": "50"},
+        ):
+            with self.subTest(request_headers=request_headers):
+                access_agg = GrpcAccessRecord(
+                    method="ModelStreamInfer",
+                    stream_type="bidi_stream",
+                    peer="",
+                    start_ts=0.0,
+                    raw_mode=False,
+                )
+                chunks = await _drain(
+                    iter_real_model_stream_infer(
+                        req,
+                        [1, 2],
+                        SamplingParams(),
+                        OtherParams(request_headers=request_headers),
+                        _PreemptedVisitor(),
+                        rtp_llm_request_id=1,
+                        access_agg=access_agg,
+                    )
+                )
+
+                self.assertEqual(len(chunks), 1)
+                self.assertFalse(chunks[0].error_message)
+                infer = chunks[0].infer_response
+                error_no, payload = _dash_error_payload(chunks[0])
+                self.assertEqual(error_no, LLMFinishReason.ABORT)
+                self.assertEqual(payload["status_code"], 429)
+                self.assertEqual(payload["status_name"], "Throttling.Aborted")
+                self.assertEqual(payload["status_message"], "Too many requests.")
+                # Legacy error_msg JSON and standalone status_* parameters must
+                # stay byte-for-byte equivalent for old and new consumers.
+                self.assertEqual(infer.parameters["status_code"].int64_param, 429)
+                self.assertEqual(
+                    infer.parameters["status_name"].string_param,
+                    "Throttling.Aborted",
+                )
+                self.assertEqual(
+                    infer.parameters["status_message"].string_param,
+                    "Too many requests.",
+                )
+                self.assertEqual(
+                    _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
+                )
+                public_payload = (
+                    infer.parameters["error_msg"].string_param
+                    + infer.parameters["status_message"].string_param
+                )
+                self.assertNotIn("AUTO_TPM_PREEMPTED", public_payload)
+                self.assertNotIn("703", public_payload)
+                self.assertNotIn("77", public_payload)
+                self.assertEqual(
+                    access_agg.backend_error_code,
+                    "8429_PRIORITY_PREEMPTED",
+                )
+
+    async def test_typed_admission_rejections_map_without_priority_heuristics(
+        self,
+    ) -> None:
+        req = self._minimal_request()
+        cases = (
+            (
+                ExceptionType.PRIORITY_ADMISSION_REJECTED,
+                AdmissionRejectReason.HIGHER_PRIORITY_AHEAD,
+                "Throttling.ServiceOverloaded",
+                "Higher-priority requests are being served. Please retry later.",
+            ),
+            (
+                ExceptionType.PRIORITY_ADMISSION_REJECTED,
+                AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+                "Throttling.ServiceOverloaded",
+                "Requests with the same priority are ahead in the queue. "
+                "Please retry later.",
+            ),
+            (
+                ExceptionType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                "Throttling.ResourceExhausted",
+                "Resources are temporarily exhausted. Please retry later.",
+            ),
+            (
+                ExceptionType.ADMISSION_UNAVAILABLE,
+                AdmissionRejectReason.UNSPECIFIED,
+                "Throttling.ServiceOverloaded",
+                "Too many requests.",
+            ),
+        )
+
+        for exception_type, reason, expected_name, expected_message in cases:
+
+            class _RejectedVisitor:
+                async def enqueue(self, _gi):
+                    raise FtRuntimeException(
+                        exception_type,
+                        "private scheduler diagnostic",
+                        admission_reject_reason=reason,
+                    )
+
+            for qos in ("30", "70"):
+                with self.subTest(
+                    exception_type=exception_type, reason=reason, qos=qos
+                ):
+                    chunks = await _drain(
+                        iter_real_model_stream_infer(
+                            req,
+                            [1, 2],
+                            SamplingParams(),
+                            OtherParams(
+                                request_headers={"x-dashscope-inner-qos-level": qos}
+                            ),
+                            _RejectedVisitor(),
+                            rtp_llm_request_id=1,
+                        )
+                    )
+
+                    self.assertEqual(1, len(chunks))
+                    _, payload = _dash_error_payload(chunks[0])
+                    self.assertEqual(429, payload["status_code"])
+                    self.assertEqual(expected_name, payload["status_name"])
+                    self.assertEqual(expected_message, payload["status_message"])
+                    self.assertNotIn(
+                        "private scheduler diagnostic",
+                        chunks[0].infer_response.parameters["error_msg"].string_param,
+                    )
+
+    async def test_generic_capacity_mapping_does_not_depend_on_qos_priority(
+        self,
+    ) -> None:
+        """A QoS value is not a rejection reason.
+
+        Generic capacity failures keep the generic capacity contract for every
+        priority; only explicit PRIORITY_PREEMPTED (8429) maps to
+        Throttling.Aborted.
+        """
+        req = self._minimal_request()
+
+        class _CapacityVisitor:
+            async def enqueue(self, _gi):
+                raise FtRuntimeException(
+                    ExceptionType.TRAFFIC_LIMIT_ERROR,
+                    "traffic limit exceeded",
+                )
+
+        for request_headers in (
+            {},
+            {"x-dashscope-inner-qos-level": "40"},
+            {"x-dashscope-inner-qos-level": "50"},
+        ):
+            with self.subTest(request_headers=request_headers):
+                chunks = await _drain(
+                    iter_real_model_stream_infer(
+                        req,
+                        [1, 2],
+                        SamplingParams(),
+                        OtherParams(request_headers=request_headers),
+                        _CapacityVisitor(),
+                        rtp_llm_request_id=1,
+                    )
+                )
+                self.assertEqual(len(chunks), 1)
+                self.assertFalse(chunks[0].error_message)
+                error_no, payload = _dash_error_payload(chunks[0])
+                self.assertEqual(error_no, 5)
+                self.assertEqual(payload["status_code"], 429)
+                self.assertEqual(payload["status_name"], "TooManyRequests")
+                self.assertIn("traffic limit exceeded", payload["status_message"])
+                self.assertEqual(
+                    _finish_reason(chunks[0]),
+                    LLMFinishReason.USE_PARAMETER_STATUS,
+                )
+
+    async def test_error_text_does_not_override_typed_internal_code(self) -> None:
+        """Diagnostic text is never used as a capacity classification."""
+        req = self._minimal_request()
+
+        class _TaskListFullVisitor:
+            async def enqueue(self, _gi):
+                raise FtRuntimeException(
+                    ExceptionType.UNKNOWN_ERROR,
+                    "Inference engine abort. Finish reason: [TASK_LIST_FULL].",
+                )
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                OtherParams(),
+                _TaskListFullVisitor(),
+                rtp_llm_request_id=1,
+            )
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertFalse(chunks[0].error_message)
+        error_no, payload = _dash_error_payload(chunks[0])
+        self.assertEqual(error_no, 19)
+        self.assertEqual(payload["status_code"], 500)
+        self.assertEqual(payload["status_name"], "InternalError")
+        self.assertIn("TASK_LIST_FULL", payload["status_message"])
+        self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.INNER_ENGINE_ERROR)
+
+    async def test_generic_error_text_does_not_create_capacity_reason(self) -> None:
+        req = self._minimal_request()
+
+        class _TaskListFullGenericVisitor:
+            async def enqueue(self, _gi):
+                raise RuntimeError(
+                    "Inference engine abort. Finish reason: [TASK_LIST_FULL]."
+                )
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                OtherParams(),
+                _TaskListFullGenericVisitor(),
+                rtp_llm_request_id=1,
+            )
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertFalse(chunks[0].error_message)
+        error_no, payload = _dash_error_payload(chunks[0])
+        self.assertEqual(error_no, 19)
+        self.assertEqual(payload["status_code"], 500)
+        self.assertEqual(payload["status_name"], "InternalError")
+        self.assertIn("TASK_LIST_FULL", payload["status_message"])
+        self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.INNER_ENGINE_ERROR)
 
     async def test_stream_exception_yields_error_message(self) -> None:
         req = self._minimal_request()
@@ -1944,6 +2288,89 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             ["emit_access_log", "report_frontend_rpc_done"],
         )
 
+    def _capture_kmonitor_calls(self):
+        # Patch the kmonitor the grpc_metrics leaf functions report through;
+        # the servicer calls them by imported name, so the module-global
+        # kmonitor reference is the single choke point.
+        calls: list[tuple] = []
+        patcher = patch.object(grpc_metrics, "kmonitor")
+        mock_kmon = patcher.start()
+        self.addCleanup(patcher.stop)
+        mock_kmon.report.side_effect = lambda m, v=1, tags=None: calls.append(
+            (m, v, dict(tags or {}))
+        )
+        return calls
+
+    @staticmethod
+    def _tagged_arrivals(calls):
+        return [
+            c for c in calls if c[0] == AccMetrics.QPS_METRIC and "priority" in c[2]
+        ]
+
+    async def test_priority_arrival_reports_true_qos_exactly_once(self) -> None:
+        # Normal RPC with a qos level: the tagged arrival fires once with
+        # the true value (after the first frame parse), and the done-tail
+        # fallback stays a no-op.
+        out = GenerateOutput(
+            output_ids=torch.tensor([9], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=1, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"x-dashscope-inner-qos-level": 7}
+        )
+        calls = self._capture_kmonitor_calls()
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), _FakeGrpcContext()))
+
+        tagged = self._tagged_arrivals(calls)
+        self.assertEqual(len(tagged), 1)
+        self.assertEqual(tagged[0][2]["priority"], "7")
+        # No untagged arrival series (single-report).
+        untagged = [
+            c for c in calls if c[0] == AccMetrics.QPS_METRIC and "priority" not in c[2]
+        ]
+        self.assertEqual(len(untagged), 0)
+        # Success carries the same priority.
+        success = [c for c in calls if c[0] == AccMetrics.SUCCESS_QPS_METRIC]
+        self.assertEqual(len(success), 1)
+        self.assertEqual(success[0][2]["priority"], "7")
+
+    async def test_priority_arrival_falls_back_to_zero_on_parse_error(self) -> None:
+        # Request that fails before the first frame parse completes (missing
+        # input_ids): the done-tail fallback back-fills the "0" bucket, still
+        # exactly one tagged arrival.
+        servicer = DashScInferenceServicer(backend_visitor=None)
+        bad = predict_v2_pb2.ModelInferRequest()
+        bad.id = "x"
+        bad.model_name = "m"
+        calls = self._capture_kmonitor_calls()
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([bad]), _FakeGrpcContext()))
+
+        tagged = self._tagged_arrivals(calls)
+        self.assertEqual(len(tagged), 1)
+        self.assertEqual(tagged[0][2]["priority"], "0")
+
+    async def test_priority_arrival_falls_back_to_zero_on_frameless_rpc(
+        self,
+    ) -> None:
+        # RPC with no request frame at all: no parse ever runs, the done-tail
+        # fallback reports the "0" bucket exactly once.
+        servicer = DashScInferenceServicer(backend_visitor=None)
+        calls = self._capture_kmonitor_calls()
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([]), _FakeGrpcContext()))
+
+        tagged = self._tagged_arrivals(calls)
+        self.assertEqual(len(tagged), 1)
+        self.assertEqual(tagged[0][2]["priority"], "0")
+
     async def test_missing_input_ids_error(self) -> None:
         servicer = DashScInferenceServicer(backend_visitor=None)
         bad = predict_v2_pb2.ModelInferRequest()
@@ -2384,12 +2811,18 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         captured: list[int] = []
 
         class _CaptureVisitor:
+            request_id_factory = None
+
+            def set_request_id_factory(self, factory):
+                self.request_id_factory = factory
+
             async def enqueue(self, gi):
                 captured.append(gi.request_id)
                 return _FakeAsyncStream([])
 
+        visitor = _CaptureVisitor()
         servicer = DashScInferenceServicer(
-            backend_visitor=_CaptureVisitor(),
+            backend_visitor=visitor,
             ip="10.0.0.1",
             port=12345,
             server_id="srv-xyz",
@@ -2401,9 +2834,12 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                 )
             )
             expected = rig.generate_request_id("10.0.0.1", 12345, "srv-xyz", 1)
+            retry_id = visitor.request_id_factory()
+            expected_retry_id = rig.generate_request_id("10.0.0.1", 12345, "srv-xyz", 2)
 
         self.assertEqual(len(captured), 1)
         self.assertEqual(captured[0], expected)
+        self.assertEqual(retry_id, expected_retry_id)
 
     async def test_real_mode_passes_invocation_metadata_to_generate_input(self) -> None:
         visitor = _FakeVisitor(_FakeAsyncStream([]))
@@ -2460,6 +2896,72 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             visitor.last_generate_input.headers,
             {"user_id": "u1", "x-dashscope-apikeyid": "ak1"},
         )
+        # qos_priority must NOT be set when x-dashscope-inner-qos-level
+        # is absent from the request.
+        self.assertIsNone(generate_config.qos_priority)
+
+    async def test_qos_priority_set_from_ds_header_attributes(self) -> None:
+        """dash_sc path must set generate_config.qos_priority from
+        x-dashscope-inner-qos-level, mirroring openai_endpoint.py."""
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        context = MagicMock()
+        context.invocation_metadata.return_value = ()
+        request = self._valid_infer_request()
+        request.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "x-dashscope-inner-qos-level": "77",
+                "x-ds-request-priority": "10",
+                "user_id": "u1",
+                "x-dashscope-apikeyid": "ak1",
+            }
+        )
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([request]), context))
+
+        self.assertIsNotNone(visitor.last_generate_input)
+        generate_config = visitor.last_generate_input.generate_config
+        # Channel 2: qos_priority set by _apply_request_overrides
+        self.assertEqual(generate_config.qos_priority, 77)
+        # traffic_reject_priority still comes from x-ds-request-priority
+        self.assertEqual(generate_config.traffic_reject_priority, 10)
+        # Channel 1: headers also carry the qos level
+        self.assertEqual(
+            visitor.last_generate_input.headers.get("x-dashscope-inner-qos-level"),
+            "77",
+        )
+        # _extract_priority returns 77 via either channel
+        self.assertEqual(
+            MasterClient._extract_priority(visitor.last_generate_input), 77
+        )
+
+    async def test_extract_priority_fallback_to_qos_priority(self) -> None:
+        """When GenerateInput.headers is empty (e.g. after IPC),
+        _extract_priority must fall back to generate_config.qos_priority."""
+        gc = GenerateConfig()
+        gc.qos_priority = 77
+        input_no_headers = GenerateInput(
+            request_id=1,
+            token_ids=torch.tensor([1, 2], dtype=torch.int),
+            mm_inputs=[],
+            generate_config=gc,
+            headers={},
+        )
+        self.assertEqual(MasterClient._extract_priority(input_no_headers), 77)
+
+    async def test_extract_priority_returns_50_when_no_priority(self) -> None:
+        """When neither headers nor qos_priority carry a value,
+        _extract_priority returns the default 50."""
+        gc = GenerateConfig()
+        self.assertIsNone(gc.qos_priority)
+        input_no_priority = GenerateInput(
+            request_id=1,
+            token_ids=torch.tensor([1, 2], dtype=torch.int),
+            mm_inputs=[],
+            generate_config=gc,
+            headers={},
+        )
+        self.assertEqual(MasterClient._extract_priority(input_no_priority), 50)
 
 
 if __name__ == "__main__":

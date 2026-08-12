@@ -119,15 +119,15 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 }
 
 void GenerateStream::resetBeginTime(int64_t begin_time_us) {
-    begin_time_us_ = begin_time_us;
-    wait_time_us_ = 0;
-    scheduler_enqueue_time_us_ = 0;
-    can_run_time_us_ = 0;
+    begin_time_us_               = begin_time_us;
+    wait_time_us_                = 0;
+    scheduler_enqueue_time_us_   = 0;
+    can_run_time_us_             = 0;
     loading_cache_start_time_us_ = 0;
-    loading_cache_done_time_us_ = 0;
-    first_running_time_us_ = 0;
-    loading_cache_latency_us_ = 0;
-    load_done_to_running_us_ = 0;
+    loading_cache_done_time_us_  = 0;
+    first_running_time_us_       = 0;
+    loading_cache_latency_us_    = 0;
+    load_done_to_running_us_     = 0;
 }
 
 bool GenerateStream::hasCacheKeys() const {
@@ -1213,7 +1213,7 @@ void GenerateStream::reportStreamMetrics() {
             collector.first_token_latency_us = complete_token_ids_->firstTokenLatencyUs();
             RTP_LLM_LOG_DEBUG(
                 "stream [%s] report first latency us = %ld", streamLogTag().c_str(), collector.first_token_latency_us);
-            collector.wait_latency_us          = wait_time_us_;
+            collector.wait_latency_us = wait_time_us_;
             if (scheduler_enqueue_time_us_ > 0 && can_run_time_us_ > scheduler_enqueue_time_us_) {
                 collector.enqueue_to_canrun_us = can_run_time_us_ - scheduler_enqueue_time_us_;
             }

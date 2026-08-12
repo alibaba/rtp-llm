@@ -34,6 +34,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheMatchMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheReadMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheWriteMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheSDKMetrics);
+AUTIL_LOG_SETUP(rtp_llm, PrefillPoolMetrics);
 
 #define REPORT_QPS(name)                                                                                               \
     if (collector->name) {                                                                                             \
@@ -266,6 +267,13 @@ bool RtpEmbeddingGlobalMetrics::init(kmonitor::MetricsGroupManager* manager) {
 
 void RtpEmbeddingGlobalMetrics::report(const kmonitor::MetricsTags*        tags,
                                        RtpEmbeddingGlobalMetricsCollector* collector) {
+    // Embedding path has no qos priority semantics; tag all reports with priority="0".
+    kmonitor::MetricsTags priority_tags;
+    if (tags) {
+        priority_tags = *tags;
+    }
+    priority_tags.AddTag("priority", "0");
+    tags = &priority_tags;
     REPORT_MUTABLE_QPS(qps_metric);
     if (collector->error) {
         REPORT_MUTABLE_QPS(error_qps_metric);
@@ -294,11 +302,11 @@ bool RtpLLMSchedulerMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(running_stream_size_metric, "rtp_llm_running_stream_size");
     REGISTER_GAUGE_MUTABLE_METRIC(remote_running_stream_size_metric, "rtp_llm_remote_running_stream_size");
     REGISTER_GAUGE_MUTABLE_METRIC(loading_cache_stream_size_metric, "rtp_llm_loading_cache_stream_size");
-    REGISTER_GAUGE_MUTABLE_METRIC(admitted_context_batch_size_metric,
-                                  "rtp_llm_scheduler_admitted_context_batch_size");
-    REGISTER_GAUGE_MUTABLE_METRIC(admitted_context_token_size_metric,
-                                  "rtp_llm_scheduler_admitted_context_token_size");
+    REGISTER_GAUGE_MUTABLE_METRIC(admitted_context_batch_size_metric, "rtp_llm_scheduler_admitted_context_batch_size");
+    REGISTER_GAUGE_MUTABLE_METRIC(admitted_context_token_size_metric, "rtp_llm_scheduler_admitted_context_token_size");
     REGISTER_GAUGE_MUTABLE_METRIC(waiting_oldest_age_us_metric, "rtp_llm_scheduler_waiting_oldest_age_us");
+    REGISTER_MUTABLE_METRIC_BASE(
+        group_fallback_acc_metric, "rtp_llm_scheduler_group_fallback_acc", kmonitor::COUNTER, kmonitor::NORMAL);
     return true;
 }
 
@@ -310,6 +318,9 @@ void RtpLLMSchedulerMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMSch
     REPORT_MUTABLE_METRIC(admitted_context_batch_size_metric, collector->admitted_context_batch_size);
     REPORT_MUTABLE_METRIC(admitted_context_token_size_metric, collector->admitted_context_token_size);
     REPORT_MUTABLE_METRIC(waiting_oldest_age_us_metric, collector->waiting_oldest_age_us);
+    if (collector->group_fallback_count > 0) {
+        REPORT_MUTABLE_METRIC(group_fallback_acc_metric, collector->group_fallback_count);
+    }
 }
 
 bool RtpLLMEngineMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -1101,6 +1112,27 @@ void RtpLLMDiskCacheMetrics::report(const kmonitor::MetricsTags*           tags,
 #undef REPORT_NON_ZERO_MUTABLE_METRIC
 #undef REPORT_QPS
 #undef REPORT_GAUGE
+
+bool PrefillPoolMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(active_metric, "rtp_llm_prefill_pool_active");
+    REGISTER_GAUGE_MUTABLE_METRIC(queued_metric, "rtp_llm_prefill_pool_queued");
+    REGISTER_GAUGE_MUTABLE_METRIC(completed_metric, "rtp_llm_prefill_pool_completed");
+    REGISTER_GAUGE_MUTABLE_METRIC(rejected_metric, "rtp_llm_prefill_pool_rejected");
+    REGISTER_GAUGE_MUTABLE_METRIC(fallback_metric, "rtp_llm_prefill_pool_fallback");
+    REGISTER_GAUGE_MUTABLE_METRIC(thread_max_metric, "rtp_llm_prefill_pool_thread_max");
+    REGISTER_GAUGE_MUTABLE_METRIC(queue_max_metric, "rtp_llm_prefill_pool_queue_max");
+    return true;
+}
+
+void PrefillPoolMetrics::report(const kmonitor::MetricsTags* tags, PrefillPoolMetricsCollector* collector) {
+    REPORT_MUTABLE_METRIC(active_metric, collector->active);
+    REPORT_MUTABLE_METRIC(queued_metric, collector->queued);
+    REPORT_MUTABLE_METRIC(completed_metric, collector->completed);
+    REPORT_MUTABLE_METRIC(rejected_metric, collector->rejected);
+    REPORT_MUTABLE_METRIC(fallback_metric, collector->fallback);
+    REPORT_MUTABLE_METRIC(thread_max_metric, collector->thread_max);
+    REPORT_MUTABLE_METRIC(queue_max_metric, collector->queue_max);
+}
 
 bool initKmonitorFactory() {
     KmonParam param;

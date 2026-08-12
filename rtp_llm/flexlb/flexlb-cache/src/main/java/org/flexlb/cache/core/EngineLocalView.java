@@ -39,7 +39,7 @@ public class EngineLocalView {
      */
     @Autowired
     private CacheMetricsReporter cacheMetricsReporter;
-    
+
     /**
      * Dynamic sync interval manager
      */

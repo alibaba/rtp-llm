@@ -12,6 +12,7 @@ REQUEST_HEADER_NAMES = (
     "trace_id",
     "eagleeye-traceid",
     "x-b3-traceid",
+    "x-dashscope-inner-qos-level",
 )
 CORRELATION_HEADER_NAMES = (
     "x-dashscope-request-id",
