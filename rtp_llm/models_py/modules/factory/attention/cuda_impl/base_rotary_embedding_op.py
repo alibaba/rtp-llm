@@ -103,8 +103,10 @@ class BaseRotaryEmbeddingOp(ABC):
             rope_theta = (
                 self.rope_config.base if self.rope_config is not None else 10000
             )
+            # MRoPE has no precomputed cache and may rotate only part of a head.
+            rotary_dim = self.rope_config.dim if self.rope_config is not None else None
             flashinfer.apply_rope_pos_ids_inplace(
-                query, key, pos_ids, rope_theta=rope_theta
+                query, key, pos_ids, rotary_dim=rotary_dim, rope_theta=rope_theta
             )
 
     def _prepare_warmup_cache_indices(
