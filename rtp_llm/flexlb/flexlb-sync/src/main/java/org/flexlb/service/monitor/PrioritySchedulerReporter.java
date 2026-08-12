@@ -77,7 +77,10 @@ public class PrioritySchedulerReporter {
         monitor.register(AUTO_TPM_PLAN_AGE_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_DECODE_ENGINE_LOAD, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_INFLIGHT_SETTLE_MISS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        log.info("PrioritySchedulerReporter initialized (21 metrics)");
+        monitor.register(AUTO_TPM_VICTIM_KV_TOKENS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
+        monitor.register(AUTO_TPM_DECODE_RESERVED_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(AUTO_TPM_DECODE_SHADOW_KV_RESERVED, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        log.info("PrioritySchedulerReporter initialized (24 metrics)");
     }
 
     /**
