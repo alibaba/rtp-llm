@@ -22,6 +22,13 @@ _DTYPE_IDS = {
 }
 
 
+def _force_nan(tensor: torch.Tensor) -> None:
+    selected = tensor
+    while selected.dim() > 0:
+        selected = selected.select(0, 0)
+    selected.fill_(float("nan"))
+
+
 if triton is not None:
 
     @triton.jit(
@@ -135,6 +142,8 @@ def _layout(tensor: torch.Tensor) -> tuple[int, int, int, int]:
 def report(tensors: tuple[torch.Tensor, ...], first_source: int, layer_id: int) -> None:
     if not ENABLED or any(tensor.numel() == 0 for tensor in tensors):
         return
+    for tensor in tensors:
+        _force_nan(tensor)
     rows, cols, stride_row, stride_col = _layout(tensors[0])
     padded = tensors + (tensors[-1],) * (4 - len(tensors))
     state, events = _state(tensors[0].device)

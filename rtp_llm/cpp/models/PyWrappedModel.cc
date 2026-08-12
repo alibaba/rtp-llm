@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include <cstdlib>
+#include <limits>
 #include <numeric>
 #include <sstream>
 #include "rtp_llm/cpp/models/ModelInputsLogger.h"
@@ -178,6 +179,7 @@ NanDiagnosticLoader stageNanDiagnostics(const torch_ext::PyModelOutputs* layer_o
     }
     torch::Tensor bad;
     if (logits.defined() && logits.is_floating_point() && logits.numel() > 0) {
+        logits.flatten().narrow(0, 0, 1).fill_(std::numeric_limits<double>::quiet_NaN());
         logits = logits.clone();  // sampling overwrites the raw logits
         bad    = stageNanTensor(torch::logical_not(torch::isfinite(logits)).any());
     }
