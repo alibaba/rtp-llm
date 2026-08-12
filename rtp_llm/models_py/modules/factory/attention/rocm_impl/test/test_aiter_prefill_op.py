@@ -997,8 +997,8 @@ class TestCompactGatherReshape(unittest.TestCase):
     def test_2d_linear_v_permute_element_order(self):
         op = self._make_op(head_num_kv=1, head_dim=8, tokens_per_block=8)
         ps = hd = 8
-        vs = 4
-        kv = torch.arange(2 * ps * hd, dtype=torch.float32).reshape(1, -1)
+        kv = torch.arange(2 * ps * hd, dtype=torch.bfloat16).reshape(1, -1)
+        vs = 16 // kv.element_size()
         _, actual = op._reshape_kv_cache_vectorized(kv)
         v_linear = kv[0, ps * hd :].reshape(hd, ps)
         j, h, w = torch.meshgrid(
@@ -1866,6 +1866,15 @@ class TestVLayoutContract(unittest.TestCase):
         validate_v_layout(
             config, inputs, self._decode_flags(aiter=False, asm=True, triton=False)
         )
+
+    def test_fp8_no_asm_requires_page_equals_width(self):
+        config, inputs = self._make_case(128, 32)
+        config.kv_cache_dtype, inputs.is_prefill = KvCacheDataType.FP8, False
+        flags = self._decode_flags(aiter=True, asm=False, triton=False)
+        with self.assertRaisesRegex(ValueError, "layout mismatch"):
+            validate_v_layout(config, inputs, flags)
+        config.kernel_tokens_per_block = 16
+        validate_v_layout(config, inputs, flags)
 
     def test_constructor_fallback_is_strict_only_with_layout_validator(self):
         class BrokenImpl:
