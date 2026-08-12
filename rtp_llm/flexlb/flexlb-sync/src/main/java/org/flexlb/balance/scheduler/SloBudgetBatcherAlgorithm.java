@@ -60,10 +60,10 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
         //    PR-D §2.3 fail-fast: when Auto-TPM is on and the head's dispatch
         //    deadline has passed, check whether the remaining coarse budget
         //    can still cover the estimated prefill time. If not, the request
-        //    cannot meet its SLO — drive it to BATCH_SLO_EXPIRED via onExpired
-        //    (the AdmissionLease.close() is an idempotent no-op here). If the
-        //    coarse budget still has room, fall through to the deadline_guard
-        //    dispatch below.
+        //    cannot meet its SLO — drive it through onExpired to the typed
+        //    Auto-TPM admission result (8430/8431). The AdmissionLease.close()
+        //    is an idempotent no-op here. If the coarse budget still has room,
+        //    fall through to the deadline_guard dispatch below.
         if (budgetMs < 0) {
             if (!ctx.cfg().isAutoTpmEnabled()) {
                 dropHead(ctx, head, now, budgetMs, "deadline_expired");

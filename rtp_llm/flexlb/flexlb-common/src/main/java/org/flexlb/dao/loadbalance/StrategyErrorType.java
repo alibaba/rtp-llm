@@ -44,11 +44,14 @@ public enum StrategyErrorType {
     // Auto-TPM incoming rejection caused by a proven priority blocker.  The
     // typed AdmissionRejectReason distinguishes higher- and same-priority.
     PRIORITY_ADMISSION_REJECTED(8430, false),
-    // Auto-TPM incoming rejection caused by a proven instantaneous physical
-    // resource shortage.
+    // Auto-TPM incoming rejection when no higher/same-priority queue blocker
+    // explains the failure and the selected path cannot provide admission
+    // capacity within the request budget. This includes hard KV/slot/token
+    // limits and dispatch/engine-admission backpressure; it is not limited to
+    // CUDA allocation failure.
     RESOURCE_EXHAUSTED(8431, false),
-    // Admission is unavailable but the snapshot cannot prove priority or
-    // physical-resource attribution.
+    // Retained for decoding responses from older peers. New Auto-TPM
+    // admission decisions do not produce this untyped fallback.
     ADMISSION_UNAVAILABLE(8432, false);
 
     private final int errorCode;

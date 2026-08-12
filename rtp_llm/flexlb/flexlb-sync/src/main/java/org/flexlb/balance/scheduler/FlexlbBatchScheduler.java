@@ -4,15 +4,18 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.RequestInflight;
+import org.flexlb.balance.scheduler.priority.AdmissionFailure;
+import org.flexlb.balance.scheduler.priority.AdmissionFailureClassifier;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
 import org.flexlb.balance.scheduler.priority.InflightRegistrar;
 import org.flexlb.balance.scheduler.priority.PriorityAdmissionScheduler;
+import org.flexlb.balance.scheduler.priority.QueuedRequestSnapshot;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
+import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -188,7 +191,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
             BatchItem item = new BatchItem(ctx, future, routeResponse, copyOf(prefill), copyOf(decode),
                     prefillEp, decodeEp, System.currentTimeMillis());
-            InflightEntry entry = new InflightEntry(item);
+            InflightEntry entry = new InflightEntry(item, false);
             InflightEntry existing = inflight.putIfAbsent(ctx.getRequestId(), entry);
             if (existing != null || terminalStates.containsKey(ctx.getRequestId())) {
                 if (existing == null) {
@@ -225,8 +228,8 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
      * {@link CompletableFuture#orTimeout(long, TimeUnit)} would let the timer
      * permanently complete the frontend future while a priority Cancel owns
      * the request; a later authoritative CANCELED observation could then no
-     * longer publish PRIORITY_PREEMPTED. Legacy requests have no budget and
-     * continue to rely on the existing TTL cleanup.
+     * longer publish PRIORITY_PREEMPTED. The legacy submit path does not
+     * attach this admission timer and keeps its existing TTL cleanup.
      */
     private void attachAdmissionTimeout(BalanceContext ctx,
                                         CompletableFuture<Response> future) {
@@ -243,19 +246,36 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     /** Deliver one admission deadline through the ordinary-terminal reducer. */
     private void onAdmissionDeadline(long requestId,
                                      CompletableFuture<Response> expectedFuture) {
-        if (expectedFuture.isDone()) {
-            return;
-        }
-        InflightEntry entry = inflight.get(requestId);
-        if (entry == null || entry.item.future() != expectedFuture) {
-            return;
-        }
-        synchronized (entry) {
-            if (inflight.get(requestId) != entry || expectedFuture.isDone()) {
+        // The future monitor is the admission handoff fence shared with the
+        // asynchronous Decode-preemption COMMITTED callback. It makes the
+        // pre-inflight deadline decision atomic with register+offer without
+        // introducing another lifecycle state machine.
+        synchronized (expectedFuture) {
+            if (expectedFuture.isDone()) {
                 return;
             }
-            reduceOrdinaryTerminalLocked(entry,
-                    DeferredTerminal.timeout("admission deadline exceeded"));
+            InflightEntry entry = inflight.get(requestId);
+            if (entry == null) {
+                // Decode preemption is asynchronous: until it commits, the
+                // incoming owns a provisional Decode reservation but has no
+                // inflight entry yet. Closing the public admission gate here
+                // lets the coordinator abort that reservation instead of
+                // admitting a request after its deadline.
+                completeAdmissionError(expectedFuture,
+                        AdmissionFailure.resourceExhausted(),
+                        "admission deadline exceeded before inflight registration");
+                return;
+            }
+            if (entry.item.future() != expectedFuture) {
+                return;
+            }
+            synchronized (entry) {
+                if (inflight.get(requestId) != entry || expectedFuture.isDone()) {
+                    return;
+                }
+                reduceOrdinaryTerminalLocked(entry,
+                        DeferredTerminal.timeout("admission deadline exceeded"));
+            }
         }
     }
 
@@ -268,7 +288,9 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
      */
     @Override
     public boolean registerInflight(BatchItem item) {
-        InflightEntry entry = new InflightEntry(item);
+        // This registrar is the Auto-TPM commit boundary. Legacy submit()
+        // constructs its entry directly with autoTpmAdmission=false.
+        InflightEntry entry = new InflightEntry(item, true);
         InflightEntry existing = inflight.putIfAbsent(item.requestId(), entry);
         if (existing != null || terminalStates.containsKey(item.requestId())) {
             if (existing == null) {
@@ -486,9 +508,10 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 return false;
             }
             entry.preemption.state = PreemptionRegistrationState.CANCEL_UNKNOWN;
-            // A transport-unknown ACK cannot suppress a one-shot natural
-            // terminal forever. The endpoint accounting CAS decides whether
-            // this ordinary outcome or a racing typed CANCELED wins.
+            // UNKNOWN does not prove that the Cancel intent was rejected.
+            // Only an authoritative worker terminal may disambiguate it;
+            // local timeout/failure/lease cleanup must retain accounting for
+            // a later typed CANCELED observation.
             replayAfterNegativeCancelLocked(entry, attemptToken, true);
         }
         return true;
@@ -680,7 +703,9 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             applyOrdinaryTerminalLocked(entry, terminal);
             return;
         }
-        if (registration.pendingTerminal == null) {
+        if (registration.pendingTerminal == null
+                || (!registration.pendingTerminal.authoritativeWorker()
+                    && terminal.authoritativeWorker())) {
             registration.pendingTerminal = terminal;
         }
         if (registration.state == PreemptionRegistrationState.NOT_FOUND_STALE) {
@@ -720,6 +745,12 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         PreemptionRegistration registration = entry.preemption;
         DeferredTerminal pending = registration.pendingTerminal;
         if (pending != null) {
+            // NOT_FOUND proves no Cancel intent was installed, so every
+            // cached terminal can resume. Transport UNKNOWN does not; replay
+            // only a terminal observed authoritatively from worker status.
+            if (transportUnknown && !pending.authoritativeWorker()) {
+                return;
+            }
             DecodeEndpoint endpoint = entry.item.decodeEp();
             boolean ordinaryWon = endpoint == null
                     || endpoint.reconcilePriorityVictimFinished(entry.item.requestId());
@@ -1194,11 +1225,47 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     }
 
     private void timeoutEntry(InflightEntry entry, String detail) {
+        AdmissionFailure admissionFailure = null;
+        PrefillEndpoint prefill = entry.item.prefillEp();
+        if (entry.autoTpmAdmission) {
+            admissionFailure = classifyAdmissionTimeout(entry.item, prefill);
+            if (prefill != null) {
+                prefill.getBatcher().queueManager().tryRemove(
+                        entry.item.requestId(), "ADMISSION_TIMEOUT");
+            }
+        }
         RequestLifecycleSnapshot terminal = entry.lifecycle.timeout(detail);
         rollbackOnce(entry);
         removeFromPrefillBatch(entry);
-        completeError(entry.item.future(), StrategyErrorType.BATCH_SLO_EXPIRED, detail);
+        if (admissionFailure != null) {
+            Logger.info("[auto-tpm] admission timeout classified: request_id={} "
+                            + "priority={} lifecycle={} error_code={} reason={} trigger={}",
+                    entry.item.requestId(), entry.item.priority(), terminal.state(),
+                    admissionFailure.errorType().getErrorCode(), admissionFailure.reason(), detail);
+            completeAdmissionError(entry.item.future(), admissionFailure, detail);
+        } else {
+            completeError(entry.item.future(), StrategyErrorType.BATCH_SLO_EXPIRED, detail);
+        }
         finishEntry(entry, terminal);
+    }
+
+    private static AdmissionFailure classifyAdmissionTimeout(BatchItem item,
+                                                              PrefillEndpoint prefill) {
+        if (prefill == null) {
+            return AdmissionFailure.resourceExhausted();
+        }
+        List<QueuedRequestSnapshot> ahead = new ArrayList<>();
+        for (QueuedRequestSnapshot queued
+                : prefill.getBatcher().queueManager().snapshot().items()) {
+            if (queued.requestId() == item.requestId()) {
+                return AdmissionFailureClassifier.classifyQueuedDeadline(
+                        item.priority(), ahead);
+            }
+            ahead.add(queued);
+        }
+        // The item already left the queue (dispatch/expiry won); there is no
+        // queue-order evidence for HIGHER or SAME.
+        return AdmissionFailure.resourceExhausted();
     }
 
     private static void completeError(CompletableFuture<Response> future,
@@ -1209,6 +1276,18 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         }
         Response errorResp = Response.error(errorType);
         errorResp.setErrorMessage(errorType.buildErrorMessage(message));
+        future.complete(errorResp);
+    }
+
+    private static void completeAdmissionError(CompletableFuture<Response> future,
+                                               AdmissionFailure failure,
+                                               String trigger) {
+        if (future.isDone()) {
+            return;
+        }
+        Response errorResp = Response.error(failure.errorType(), failure.reason());
+        String detail = failure.message() + "; trigger=" + trigger;
+        errorResp.setErrorMessage(failure.errorType().buildErrorMessage(detail));
         future.complete(errorResp);
     }
 
@@ -1336,14 +1415,16 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     private static final class InflightEntry {
         final BatchItem item;
         final RequestLifecycle lifecycle;
+        final boolean autoTpmAdmission;
         final AtomicBoolean rolledBack = new AtomicBoolean(false);
         boolean cleanupOwned;
         PreemptionRegistration preemption;
 
-        InflightEntry(BatchItem item) {
+        InflightEntry(BatchItem item, boolean autoTpmAdmission) {
             this.item = Objects.requireNonNull(item);
             Objects.requireNonNull(item.prefill(), "BatchItem.prefill must not be null");
             this.lifecycle = new RequestLifecycle(item.requestId());
+            this.autoTpmAdmission = autoTpmAdmission;
         }
 
         public long createdAtMs() {
@@ -1421,6 +1502,10 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         static DeferredTerminal worker(WorkerTerminalObservation observation) {
             return new DeferredTerminal(DeferredTerminalKind.WORKER,
                     null, null, false, Objects.requireNonNull(observation));
+        }
+
+        boolean authoritativeWorker() {
+            return kind == DeferredTerminalKind.WORKER;
         }
     }
 }

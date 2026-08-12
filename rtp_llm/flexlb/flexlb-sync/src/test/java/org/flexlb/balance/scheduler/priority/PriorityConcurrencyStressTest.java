@@ -228,7 +228,6 @@ class PriorityConcurrencyStressTest {
                 StrategyErrorType.SCHEDULER_PLAN_CONFLICT.getErrorCode(),
                 StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode(),
                 StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
-                StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(),
                 StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode());
         int successCount = 0;
         int failureCount = 0;
@@ -248,7 +247,7 @@ class PriorityConcurrencyStressTest {
                 failureCount++;
             }
             // 不变式④：8429 只允许来自注入的 engine-owned preempt；
-            // incoming 准入拒绝使用独立的 8430/8431/8432 分类。
+            // incoming 准入拒绝仅使用 8430/8431 分类。
             if (code == StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode()) {
                 assertTrue(injectedPreempts.contains(e.getKey()),
                         "8429 for request " + e.getKey()

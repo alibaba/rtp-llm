@@ -196,14 +196,15 @@ class PriorityAdmissionSchedulerTest {
     }
 
     @Test
-    void request_without_priority_field_and_no_worker_isTypedUnknown() throws Exception {
+    void request_without_priority_field_and_no_worker_isResourceExhausted() throws Exception {
         when(router.route(any(BalanceContext.class))).thenReturn(null);
 
         Response response = scheduler.submit(context(62, 0)).get(1, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(), response.getCode());
-        assertEquals(AdmissionRejectReason.UNSPECIFIED, response.getAdmissionRejectReason());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                response.getAdmissionRejectReason());
         verify(priorityScheduler).schedule(any(), any(), any());
         verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
     }
@@ -211,7 +212,7 @@ class PriorityAdmissionSchedulerTest {
     // ==================== task40: slo deadline exceeded is rejected ====================
 
     @Test
-    void expired_deadline_is_rejected_with_8400_and_reason() throws Exception {
+    void expired_deadline_is_resource_exhausted() throws Exception {
         BalanceContext ctx = context(71);
         ctx.setBudget(ScheduleBudget.forDeadline(50,
                 ctx.getStartTime(), System.currentTimeMillis() - 1_000));
@@ -219,8 +220,10 @@ class PriorityAdmissionSchedulerTest {
         Response response = scheduler.submit(ctx).get(1, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode());
-        assertTrue(response.getErrorMessage().contains("slo deadline exceeded"));
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                response.getAdmissionRejectReason());
+        assertTrue(response.getErrorMessage().contains("admission budget already expired"));
         verify(router, never()).route(any(BalanceContext.class));
         verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
     }
@@ -247,21 +250,23 @@ class PriorityAdmissionSchedulerTest {
         Response response = scheduler.submit(context(21)).get(1, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(), response.getCode());
-        assertEquals(AdmissionRejectReason.UNSPECIFIED, response.getAdmissionRejectReason());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                response.getAdmissionRejectReason());
         verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
     }
 
     @Test
-    void routerCapacityFailureIsTypedUnknownWithoutCausalSnapshot() throws Exception {
+    void routerCapacityFailureIsResourceExhaustedWithoutCausalSnapshot() throws Exception {
         when(router.route(any(BalanceContext.class)))
                 .thenReturn(Response.error(StrategyErrorType.NO_PREFILL_WORKER));
 
         Response response = scheduler.submit(context(22)).get(1, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(), response.getCode());
-        assertEquals(AdmissionRejectReason.UNSPECIFIED, response.getAdmissionRejectReason());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                response.getAdmissionRejectReason());
     }
 
     // ==================== offer failure: decode reservation rollback ====================
@@ -290,8 +295,9 @@ class PriorityAdmissionSchedulerTest {
         Response response = scheduler.submit(context(31)).get(2, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(), response.getCode());
-        assertEquals(AdmissionRejectReason.UNSPECIFIED, response.getAdmissionRejectReason());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                response.getAdmissionRejectReason());
         // One route per attempt (MAX_PLAN_RETRIES = 3)
         verify(router, times(3)).route(any(BalanceContext.class));
         // Rollback: every decode reservation released (shadow load/KV restored)
@@ -353,10 +359,11 @@ class PriorityAdmissionSchedulerTest {
         Response response = scheduler.submit(context(51)).get(2, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
-        // Pure OCC has no reliable capacity fact, so the typed attribution is
-        // deliberately unknown rather than reconstructed from retry text.
-        assertEquals(StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(), response.getCode());
-        assertEquals(AdmissionRejectReason.UNSPECIFIED, response.getAdmissionRejectReason());
+        // Pure OCC has no reliable priority-blocker evidence, so the production
+        // admission contract falls back to typed resource exhaustion.
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                response.getAdmissionRejectReason());
         verify(router, times(3)).route(any(BalanceContext.class));
         // All decode reservations rolled back across the retries
         assertEquals(0, decodeEp.getInflightCount());

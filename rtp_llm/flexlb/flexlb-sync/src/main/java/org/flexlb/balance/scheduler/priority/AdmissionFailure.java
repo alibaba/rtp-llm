@@ -29,12 +29,7 @@ public record AdmissionFailure(StrategyErrorType errorType,
     public static AdmissionFailure resourceExhausted() {
         return new AdmissionFailure(StrategyErrorType.RESOURCE_EXHAUSTED,
                 AdmissionRejectReason.RESOURCE_EXHAUSTED,
-                "resources are temporarily exhausted");
+                "admission capacity is temporarily exhausted");
     }
 
-    public static AdmissionFailure attributionUnknown() {
-        return new AdmissionFailure(StrategyErrorType.ADMISSION_UNAVAILABLE,
-                AdmissionRejectReason.UNSPECIFIED,
-                "admission unavailable; blocker attribution is unknown");
-    }
 }

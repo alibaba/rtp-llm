@@ -1,6 +1,6 @@
 import unittest
 from dataclasses import dataclass, field
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from rtp_llm.config.exceptions import (
     AdmissionRejectReason,
@@ -322,6 +322,25 @@ class _CapacityThenPreemptedModelRpcClient:
         )
 
 
+class _CapacityThenBatchSloExpiredModelRpcClient:
+    def __init__(self):
+        self.attempts = 0
+
+    async def enqueue(self, _input):
+        self.attempts += 1
+        if False:
+            yield None
+        if self.attempts == 1:
+            raise FtRuntimeException(
+                ExceptionType.MASTER_NO_AVAILABLE_WORKER,
+                "no available worker",
+            )
+        raise FtRuntimeException(
+            ExceptionType.BATCH_SLO_EXPIRED,
+            "admission deadline exceeded",
+        )
+
+
 class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
     def _visitor(self, model_rpc_client) -> BackendRPCServerVisitor:
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
@@ -477,6 +496,43 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(client.attempts, 1)
 
+    async def test_batch_slo_expired_is_terminal_and_keeps_request_identity(self):
+        client = _AlwaysFailingModelRpcClient(
+            FtRuntimeException(
+                ExceptionType.BATCH_SLO_EXPIRED,
+                "admission deadline exceeded",
+            )
+        )
+        visitor = self._visitor(client)
+        request_id_factory = Mock(return_value=456)
+        visitor.set_request_id_factory(request_id_factory)
+
+        stream = await visitor.enqueue(_FakeInput(_FakeGenerateConfig(False)))
+        with self.assertRaises(FtRuntimeException) as ctx:
+            [output async for output in stream]
+
+        self.assertEqual(
+            ctx.exception.exception_type,
+            ExceptionType.BATCH_SLO_EXPIRED,
+        )
+        self.assertEqual(client.attempts, 1)
+        request_id_factory.assert_not_called()
+
+    async def test_batch_slo_expired_overrides_earlier_retryable_capacity(self):
+        client = _CapacityThenBatchSloExpiredModelRpcClient()
+        visitor = self._visitor(client)
+        visitor.set_request_id_factory(lambda: 456)
+
+        stream = await visitor.enqueue(_FakeInput(_FakeGenerateConfig(False)))
+        with self.assertRaises(FtRuntimeException) as ctx:
+            [output async for output in stream]
+
+        self.assertEqual(
+            ctx.exception.exception_type,
+            ExceptionType.BATCH_SLO_EXPIRED,
+        )
+        self.assertEqual(client.attempts, 2)
+
     async def test_admission_rejections_are_terminal_and_keep_typed_reason(self):
         cases = (
             (
@@ -508,9 +564,7 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
                 visitor = self._visitor(client)
                 visitor.set_request_id_factory(lambda: 456)
 
-                stream = await visitor.enqueue(
-                    _FakeInput(_FakeGenerateConfig(False))
-                )
+                stream = await visitor.enqueue(_FakeInput(_FakeGenerateConfig(False)))
                 with self.assertRaises(FtRuntimeException) as ctx:
                     [output async for output in stream]
 

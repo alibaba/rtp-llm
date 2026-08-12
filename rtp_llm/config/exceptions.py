@@ -122,6 +122,8 @@ class ExceptionType(IntEnum):
     PRIORITY_PREEMPTED = 8429, ExceptionCategory.CAPACITY
     PRIORITY_ADMISSION_REJECTED = 8430, ExceptionCategory.CAPACITY
     RESOURCE_EXHAUSTED = 8431, ExceptionCategory.CAPACITY
+    # Compatibility-only decoder for older Master responses. New admission
+    # decisions use 8430 with HIGHER/SAME or 8431 with RESOURCE.
     ADMISSION_UNAVAILABLE = 8432, ExceptionCategory.CAPACITY
 
     # route error
@@ -170,7 +172,5 @@ class FtRuntimeException(Exception):
     ):
         self.exception_type = exception_type
         self.message = message
-        self.admission_reject_reason = AdmissionRejectReason(
-            admission_reject_reason
-        )
+        self.admission_reject_reason = AdmissionRejectReason(admission_reject_reason)
         super().__init__(self.message)

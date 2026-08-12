@@ -13,7 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class AdmissionFailureClassifierTest {
 
     @Test
-    void unknownConfirmedPriorityIsNotGuessedAsDefaultFifty() {
+    void unknownConfirmedPriorityFallsBackToResourceExhausted() {
         DecodeRequestSnapshot unknown = request(
                 1, 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 128, false, false);
         DecodeEndpointSnapshot endpoint = endpoint(
@@ -22,8 +22,8 @@ class AdmissionFailureClassifierTest {
         AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
                 incoming(50, 128), List.of(endpoint));
 
-        assertFailure(failure, StrategyErrorType.ADMISSION_UNAVAILABLE,
-                AdmissionRejectReason.UNSPECIFIED);
+        assertFailure(failure, StrategyErrorType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.RESOURCE_EXHAUSTED);
     }
 
     @Test
@@ -65,7 +65,7 @@ class AdmissionFailureClassifierTest {
     }
 
     @Test
-    void unknownPriorityOnReservedSlotForcesUnknownAttribution() {
+    void unknownPriorityOnReservedSlotFallsBackToResourceExhausted() {
         DecodeRequestSnapshot unknownQueued = request(
                 1, 50, DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED,
                 512, false, true);
@@ -76,12 +76,12 @@ class AdmissionFailureClassifierTest {
         AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
                 incoming(50, 128), List.of(endpoint));
 
-        assertFailure(failure, StrategyErrorType.ADMISSION_UNAVAILABLE,
-                AdmissionRejectReason.UNSPECIFIED);
+        assertFailure(failure, StrategyErrorType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.RESOURCE_EXHAUSTED);
     }
 
     @Test
-    void unknownPriorityOnResidualDimensionOverridesKnownPriorityLabels() {
+    void unknownPriorityOnResidualDimensionFallsBackToResourceExhausted() {
         DecodeRequestSnapshot unknown = request(
                 1, 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 0, false, false);
         DecodeRequestSnapshot higher = request(
@@ -93,12 +93,12 @@ class AdmissionFailureClassifierTest {
         AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
                 incoming(50, 128), List.of(endpoint));
 
-        assertFailure(failure, StrategyErrorType.ADMISSION_UNAVAILABLE,
-                AdmissionRejectReason.UNSPECIFIED);
+        assertFailure(failure, StrategyErrorType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.RESOURCE_EXHAUSTED);
     }
 
     @Test
-    void differingEndpointCausesDegradeToUnknown() {
+    void differingEndpointCausesFallBackToResourceExhausted() {
         DecodeEndpointSnapshot higher = endpoint(
                 "decode-higher", 1, 1, 1_000, 2_000, List.of(),
                 List.of(request(1, 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
@@ -111,8 +111,8 @@ class AdmissionFailureClassifierTest {
         AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
                 incoming(50, 128), List.of(higher, same));
 
-        assertFailure(failure, StrategyErrorType.ADMISSION_UNAVAILABLE,
-                AdmissionRejectReason.UNSPECIFIED);
+        assertFailure(failure, StrategyErrorType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.RESOURCE_EXHAUSTED);
     }
 
     @Test
@@ -148,7 +148,7 @@ class AdmissionFailureClassifierTest {
     }
 
     @Test
-    void prefillWithoutSnapshotDeficitIsUnknown() {
+    void prefillWithoutSnapshotDeficitIsResourceExhausted() {
         PrefillQueueSnapshot queue = new PrefillQueueSnapshot(
                 "prefill-1", 1, 4,
                 List.of(new QueuedRequestSnapshot(1, 70, 0, 0,
@@ -157,8 +157,42 @@ class AdmissionFailureClassifierTest {
         AdmissionFailure failure = AdmissionFailureClassifier.classifyPrefill(
                 incoming(50, 128), queue);
 
-        assertFailure(failure, StrategyErrorType.ADMISSION_UNAVAILABLE,
-                AdmissionRejectReason.UNSPECIFIED);
+        assertFailure(failure, StrategyErrorType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.RESOURCE_EXHAUSTED);
+    }
+
+    @Test
+    void queuedDeadlineUsesHigherPriorityPrefix() {
+        AdmissionFailure failure = AdmissionFailureClassifier.classifyQueuedDeadline(
+                50, List.of(
+                        queued(1, 50),
+                        queued(2, 70)));
+
+        assertFailure(failure, StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
+                AdmissionRejectReason.HIGHER_PRIORITY_AHEAD);
+    }
+
+    @Test
+    void queuedDeadlineUsesSamePriorityFifoPrefix() {
+        AdmissionFailure failure = AdmissionFailureClassifier.classifyQueuedDeadline(
+                50, List.of(queued(1, 30), queued(2, 50)));
+
+        assertFailure(failure, StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
+                AdmissionRejectReason.SAME_PRIORITY_AHEAD);
+    }
+
+    @Test
+    void queuedDeadlineWithoutProtectedPrefixIsResourceExhausted() {
+        AdmissionFailure failure = AdmissionFailureClassifier.classifyQueuedDeadline(
+                50, List.of(queued(1, 30)));
+
+        assertFailure(failure, StrategyErrorType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.RESOURCE_EXHAUSTED);
+    }
+
+    private static QueuedRequestSnapshot queued(long requestId, int priority) {
+        return new QueuedRequestSnapshot(requestId, priority, 0, requestId,
+                128, 0, QueuedRequestSnapshot.PREFILL_QUEUED);
     }
 
     private static DecodeEndpointSnapshot endpoint(

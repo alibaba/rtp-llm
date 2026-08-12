@@ -14,7 +14,7 @@ public final class AdmissionFailureClassifier {
     public static AdmissionFailure classifyDecode(PriorityRequestEnvelope incoming,
                                                   List<DecodeEndpointSnapshot> endpoints) {
         if (endpoints == null || endpoints.isEmpty()) {
-            return AdmissionFailure.attributionUnknown();
+            return AdmissionFailure.resourceExhausted();
         }
         // A known hard-capacity miss on every endpoint is the one cluster-wide
         // resource fact that does not depend on victim ownership or policy.
@@ -32,7 +32,7 @@ public final class AdmissionFailureClassifier {
             if (slotDeficit <= 0 && kvDeficit <= 0) {
                 // The route failed while this endpoint snapshot has capacity;
                 // the snapshot cannot prove a causal blocker.
-                return AdmissionFailure.attributionUnknown();
+                return AdmissionFailure.resourceExhausted();
             }
             failures.add(classifyEndpoint(incoming, endpoint, slotDeficit, kvDeficit));
         }
@@ -40,7 +40,7 @@ public final class AdmissionFailureClassifier {
         boolean unanimous = failures.stream().allMatch(endpoint ->
                 endpoint.failure().errorType() == common.errorType()
                         && endpoint.failure().reason() == common.reason());
-        return unanimous ? common : AdmissionFailure.attributionUnknown();
+        return unanimous ? common : AdmissionFailure.resourceExhausted();
     }
 
     public static AdmissionFailure classifyPrefill(PriorityRequestEnvelope incoming,
@@ -67,10 +67,48 @@ public final class AdmissionFailureClassifier {
         }
         int residual = Math.max(0, deficit - lower);
         if (deficit <= 0 || residual <= 0) {
-            return AdmissionFailure.attributionUnknown();
+            return AdmissionFailure.resourceExhausted();
         }
         if (unknown) {
-            return AdmissionFailure.attributionUnknown();
+            return AdmissionFailure.resourceExhausted();
+        }
+        if (higher) {
+            return AdmissionFailure.higherPriorityAhead();
+        }
+        if (same) {
+            return AdmissionFailure.samePriorityAhead();
+        }
+        return AdmissionFailure.resourceExhausted();
+    }
+
+    /**
+     * Classify a priority request that reached its admission deadline after it
+     * had already entered the selected Prefill queue.
+     *
+     * <p>{@code itemsAhead} is the exact queue prefix from the deadline
+     * decision snapshot. A higher-priority request is the primary blocker
+     * whenever one exists. Otherwise an earlier request with the same priority
+     * proves FIFO blocking. If neither exists, the selected route failed to
+     * provide dispatch/engine admission capacity within the budget and is
+     * classified as resource exhaustion. Lower-priority items and items behind
+     * the request cannot explain its wait.
+     */
+    public static AdmissionFailure classifyQueuedDeadline(
+            int incomingPriority,
+            List<QueuedRequestSnapshot> itemsAhead) {
+        boolean higher = false;
+        boolean same = false;
+        if (itemsAhead != null) {
+            for (QueuedRequestSnapshot occupant : itemsAhead) {
+                if (!QueuedRequestSnapshot.PREFILL_QUEUED.equals(occupant.state())) {
+                    continue;
+                }
+                if (occupant.priority() > incomingPriority) {
+                    higher = true;
+                } else if (occupant.priority() == incomingPriority) {
+                    same = true;
+                }
+            }
         }
         if (higher) {
             return AdmissionFailure.higherPriorityAhead();
@@ -142,7 +180,7 @@ public final class AdmissionFailureClassifier {
         boolean unknownBlocksResidual = (residualSlot > 0 && unknownSlot)
                 || (residualKv > 0 && unknownKv);
         if (unknownBlocksResidual) {
-            failure = AdmissionFailure.attributionUnknown();
+            failure = AdmissionFailure.resourceExhausted();
         } else if (higherBlocksResidual) {
             failure = AdmissionFailure.higherPriorityAhead();
         } else if (sameBlocksResidual) {
@@ -151,9 +189,10 @@ public final class AdmissionFailureClassifier {
                 || (kvDeficit > 0 && lowerKv >= kvDeficit)) {
             // Lower-priority occupancy appears sufficient numerically, but
             // this snapshot cannot prove ownership homogeneity, cancel support
-            // or policy gates. Do not mislabel that control limitation as a
-            // physical resource shortage.
-            failure = AdmissionFailure.attributionUnknown();
+            // or policy gates. With no proven higher/same cause, fold the
+            // control limitation into the broadened resource result rather
+            // than claiming a physical allocation failure.
+            failure = AdmissionFailure.resourceExhausted();
         } else {
             failure = AdmissionFailure.resourceExhausted();
         }

@@ -13,6 +13,8 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.ScheduleBudget;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -54,22 +56,24 @@ class AcceptedCancelSchedulerTest {
     private static final long PRIORITY_PREEMPTED = 8429L;
 
     private ConfigService configService;
+    private Router router;
     private FlexlbBatchScheduler scheduler;
     private EndpointRegistry endpointRegistry;
     private DecodeEndpoint decodeEndpoint;
     private WorkerStatus decodeStatus;
     private FakeCancelChannel cancelChannel;
     private DecodePreemptionCoordinator coordinator;
+    private FlexlbConfig config;
 
     @BeforeEach
     void setUp() {
         configService = mock(ConfigService.class);
-        Router router = mock(Router.class);
+        router = mock(Router.class);
         BatchDispatcher dispatcher = mock(BatchDispatcher.class);
         BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
         PrioritySchedulerReporter priorityReporter = mock(PrioritySchedulerReporter.class);
 
-        FlexlbConfig config = new FlexlbConfig();
+        config = new FlexlbConfig();
         config.setFlexlbBatchSizeMax(100);
         config.setFlexlbBatchWindowMs(10_000);
         config.setFlexlbBatchQueueMaxSize(16);
@@ -86,7 +90,15 @@ class AcceptedCancelSchedulerTest {
                 configService, router, endpointRegistry, new PlanCommitter(),
                 new PrioritySloPolicy(PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
                         PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
-                priorityReporter, reporter, cancelChannel, coordinator);
+                priorityReporter, reporter, cancelChannel, coordinator) {
+            @Override
+            protected ServerStatus selectPrefillForDecodeEviction(BalanceContext ctx,
+                                                                  FlexlbConfig config,
+                                                                  String group) {
+                return server(RoleType.PREFILL, "10.0.0.1", 8080, 8081,
+                        ctx.getRequestId());
+            }
+        };
         scheduler = new FlexlbBatchScheduler(configService, router, endpointRegistry,
                 dispatcher, reporter, priorityScheduler, null);
 
@@ -253,13 +265,16 @@ class AcceptedCancelSchedulerTest {
         assertTrue(retainedDuringRpc.get(),
                 "dispatch timeout must defer while the preemption claim owns cleanup");
         assertEquals(DecodePreemptionCoordinator.ResultCode.REPLAN_NOT_FOUND, result.code());
-        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
-                victim.future().get(1, TimeUnit.SECONDS).getCode());
+        Response response = victim.future().get(1, TimeUnit.SECONDS);
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
+                response.getCode());
+        assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                response.getAdmissionRejectReason());
         assertFalse(decodeEndpoint.isConfirmedTracked(1L));
     }
 
     @Test
-    void transportUnknownReplaysDispatchFailureThroughOrdinaryTerminal() throws Exception {
+    void transportUnknownRetainsLocalFailureUntilAuthoritativeWorkerTerminal() throws Exception {
         BatchItem victim = registerConfirmedVictim(1L, 30, TaskPhase.RUNNING);
         cancelChannel.handler = (ignored, requestId) -> {
             scheduler.onFailure(victim, new IllegalStateException("natural enqueue failure"));
@@ -272,9 +287,42 @@ class AcceptedCancelSchedulerTest {
                 execute(2L, 70, 500, 100, () -> true).get(1, TimeUnit.SECONDS);
 
         assertEquals(DecodePreemptionCoordinator.ResultCode.CONTROL_FAILED, result.code());
-        assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(),
+        assertFalse(victim.future().isDone(),
+                "transport UNKNOWN must not treat a local failure as release proof");
+        assertTrue(decodeEndpoint.isConfirmedTracked(1L));
+
+        scheduler.onWorkerStatusUpdate(decodeFinished(1L, 9001));
+
+        assertEquals(StrategyErrorType.WORKER_EXECUTION_FAILED.getErrorCode(),
                 victim.future().get(1, TimeUnit.SECONDS).getCode());
         assertFalse(decodeEndpoint.isConfirmedTracked(1L));
+    }
+
+    @Test
+    void transportUnknownRetainsLocalTimeoutUntilLateTypedCanceled() throws Exception {
+        BatchItem victim = registerConfirmedVictim(3L, 30, TaskPhase.RUNNING);
+        cancelChannel.handler = (ignored, requestId) -> {
+            scheduler.onTimeout(victim,
+                    new java.util.concurrent.TimeoutException("local admission timeout"));
+            return CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.failed());
+        };
+
+        DecodePreemptionCoordinator.ExecutionResult result =
+                execute(4L, 70, 500, 100, () -> true).get(1, TimeUnit.SECONDS);
+
+        assertEquals(DecodePreemptionCoordinator.ResultCode.CONTROL_FAILED, result.code());
+        assertFalse(victim.future().isDone(),
+                "transport UNKNOWN must retain a local timeout for typed Cancel reconciliation");
+        assertTrue(decodeEndpoint.isConfirmedTracked(3L));
+
+        scheduler.onWorkerStatusUpdate(prefillCanceled(3L));
+
+        assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(),
+                victim.future().get(1, TimeUnit.SECONDS).getCode());
+        assertFalse(decodeEndpoint.isConfirmedTracked(3L));
+        scheduler.onWorkerStatusUpdate(prefillCanceled(3L));
+        assertEquals(0, decodeEndpoint.getTotalLoad(),
+                "late duplicate typed status must not release resources twice");
     }
 
     @Test
@@ -429,6 +477,78 @@ class AcceptedCancelSchedulerTest {
                 result.get(1, TimeUnit.SECONDS).code());
         assertFalse(decodeEndpoint.reservedView().containsKey(2L),
                 "an admission timeout must not leave an orphan incoming reservation");
+    }
+
+    @Test
+    void admissionDeadlineClosesAsyncCancelBeforeInflightRegistration() throws Exception {
+        BatchItem victim = registerConfirmedVictim(51L, 30, TaskPhase.RUNNING);
+        CompletableFuture<EngineCancelChannel.CancelOutcome> ack = new CompletableFuture<>();
+        cancelChannel.handler = (ignored, requestId) -> ack;
+        when(router.route(org.mockito.ArgumentMatchers.any(BalanceContext.class)))
+                .thenReturn(Response.error(StrategyErrorType.NO_DECODE_WORKER));
+
+        BalanceContext incoming = context(52L, 70);
+        long now = System.currentTimeMillis();
+        incoming.setBudget(ScheduleBudget.forDeadline(70, now, now + 100));
+        CompletableFuture<Response> responseFuture = scheduler.submit(incoming);
+
+        await(() -> cancelChannel.cancelCount.get() == 1
+                && decodeEndpoint.reservedView().containsKey(52L));
+        Response response = responseFuture.get(2, TimeUnit.SECONDS);
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                response.getAdmissionRejectReason());
+
+        ack.complete(EngineCancelChannel.CancelOutcome.accepted());
+        await(() -> scheduler.getRequestState(51L, 0).state()
+                == RequestLifecycleState.CANCEL_REQUESTED);
+        scheduler.onWorkerStatusUpdate(prefillCanceled(51L));
+
+        await(() -> !decodeEndpoint.reservedView().containsKey(52L));
+        assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(),
+                victim.future().get(1, TimeUnit.SECONDS).getCode());
+        assertTrue(endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher()
+                .queueManager().snapshot().items().stream()
+                .noneMatch(item -> item.requestId() == 52L));
+    }
+
+    @Test
+    void asyncCancelHandoffBeforeAdmissionDeadlineUsesInflightReducer() throws Exception {
+        config.setFlexlbBatchFixedWaitMs(3_600_000);
+        BatchItem victim = registerConfirmedVictim(61L, 30, TaskPhase.RUNNING);
+        CompletableFuture<EngineCancelChannel.CancelOutcome> ack = new CompletableFuture<>();
+        cancelChannel.handler = (ignored, requestId) -> ack;
+        when(router.route(org.mockito.ArgumentMatchers.any(BalanceContext.class)))
+                .thenReturn(Response.error(StrategyErrorType.NO_DECODE_WORKER));
+
+        BalanceContext incoming = context(62L, 70);
+        long now = System.currentTimeMillis();
+        incoming.setBudget(ScheduleBudget.forDeadline(70, now, now + 500));
+        CompletableFuture<Response> responseFuture = scheduler.submit(incoming);
+
+        await(() -> cancelChannel.cancelCount.get() == 1
+                && decodeEndpoint.reservedView().containsKey(62L));
+        ack.complete(EngineCancelChannel.CancelOutcome.accepted());
+        await(() -> scheduler.getRequestState(61L, 0).state()
+                == RequestLifecycleState.CANCEL_REQUESTED);
+        scheduler.onWorkerStatusUpdate(prefillCanceled(61L));
+
+        await(() -> endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher()
+                .queueManager().snapshot().items().stream()
+                .anyMatch(item -> item.requestId() == 62L));
+        assertFalse(responseFuture.isDone(),
+                "a committed handoff remains live until the admission deadline reducer runs");
+
+        Response response = responseFuture.get(2, TimeUnit.SECONDS);
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                response.getAdmissionRejectReason());
+        assertFalse(decodeEndpoint.reservedView().containsKey(62L));
+        assertTrue(endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher()
+                .queueManager().snapshot().items().stream()
+                .noneMatch(item -> item.requestId() == 62L));
+        assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(),
+                victim.future().get(1, TimeUnit.SECONDS).getCode());
     }
 
     @Test

@@ -231,10 +231,11 @@ class DecodeEvictionSchedulerTest {
 
         // Auto-TPM never leaks the router's generic 8403. The lower-priority
         // KV looks sufficient, but the disabled eviction gate means this
-        // snapshot cannot prove physical-vs-control attribution.
+        // snapshot cannot prove a priority blocker, so the admission contract
+        // falls back to resource exhaustion.
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(), response.getCode());
-        assertEquals(org.flexlb.dao.loadbalance.AdmissionRejectReason.UNSPECIFIED,
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
+        assertEquals(org.flexlb.dao.loadbalance.AdmissionRejectReason.RESOURCE_EXHAUSTED,
                 response.getAdmissionRejectReason());
         verify(router, times(2)).route(any(BalanceContext.class));
         verify(priorityReporter, never()).reportEvictionPlan(anyInt(), anyString(), anyString());

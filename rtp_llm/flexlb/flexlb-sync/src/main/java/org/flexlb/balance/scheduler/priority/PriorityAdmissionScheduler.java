@@ -57,8 +57,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  *       {@code PRIORITY_PREEMPTED})</li>
  * </ol>
  * When no placement is feasible or retries are exhausted, Auto-TPM returns a
- * typed admission failure: proven priority blocker (8430), proven physical
- * exhaustion (8431), or unknown attribution (8432).
+ * typed admission failure: proven priority blocker (8430), or admission
+ * capacity unavailable within the request budget (8431).
  *
  * <p><b>Auto-TPM switch matrix</b> (all default off; each row gates one
  * behavior entry point, rows below the first also require the first):
@@ -190,9 +190,10 @@ public class PriorityAdmissionScheduler {
             if (deadlineMs <= nowMs) {
                 Logger.info("[auto-tpm] slo deadline exceeded, reject request_id={} deadline_ms={} now_ms={}",
                         ctx.getRequestId(), deadlineMs, nowMs);
-                completeError(future, StrategyErrorType.NO_AVAILABLE_WORKER,
-                        "slo deadline exceeded: deadline_ms=" + deadlineMs + " now_ms=" + nowMs
-                                + " reason=slo_deadline_exceeded");
+                AdmissionFailure failure = AdmissionFailure.resourceExhausted();
+                completeAdmissionError(future, failure.errorType(), failure.reason(),
+                        "admission budget already expired: deadline_ms=" + deadlineMs
+                                + " now_ms=" + nowMs);
                 return;
             }
         }
@@ -246,7 +247,7 @@ public class PriorityAdmissionScheduler {
                                 attempt--;
                                 continue;
                             }
-                            AdmissionFailure failure = AdmissionFailure.attributionUnknown();
+                            AdmissionFailure failure = AdmissionFailure.resourceExhausted();
                             completeAdmissionError(future, failure.errorType(), failure.reason(),
                                     "auto-tpm eviction replans exhausted, reason=victims_gone");
                             return;
@@ -347,7 +348,7 @@ public class PriorityAdmissionScheduler {
                     }
                     case PARTIAL_FAILURE -> {
                         releaseDecodeReservation(outcome.plan);
-                        AdmissionFailure failure = AdmissionFailure.attributionUnknown();
+                        AdmissionFailure failure = AdmissionFailure.resourceExhausted();
                         completeAdmissionError(future, failure.errorType(), failure.reason(),
                                 "eviction commit partial failure");
                         return;
@@ -371,7 +372,7 @@ public class PriorityAdmissionScheduler {
                                 attempt--;
                                 continue;
                             }
-                            AdmissionFailure failure = AdmissionFailure.attributionUnknown();
+                            AdmissionFailure failure = AdmissionFailure.resourceExhausted();
                             completeAdmissionError(future, failure.errorType(), failure.reason(),
                                     "auto-tpm eviction replans exhausted, reason=victims_gone");
                             return;
@@ -401,7 +402,7 @@ public class PriorityAdmissionScheduler {
                 // P2-1: the reason is the current attempt's own failure cause,
                 // never a stale lastFailureReason from an earlier attempt.
                 AdmissionFailure failure = lastCapacityFailure != null
-                        ? lastCapacityFailure : AdmissionFailure.attributionUnknown();
+                        ? lastCapacityFailure : AdmissionFailure.resourceExhausted();
                 completeAdmissionError(future, failure.errorType(), failure.reason(),
                         failure.message());
                 return;
@@ -409,7 +410,7 @@ public class PriorityAdmissionScheduler {
         }
 
         AdmissionFailure finalFailure = !allConflicts && lastCapacityFailure != null
-                ? lastCapacityFailure : AdmissionFailure.attributionUnknown();
+                ? lastCapacityFailure : AdmissionFailure.resourceExhausted();
         completeAdmissionError(future, finalFailure.errorType(), finalFailure.reason(),
                 lastFailureReason != null
                         ? "auto-tpm plan retries exhausted, reason=" + lastFailureReason
@@ -781,8 +782,8 @@ public class PriorityAdmissionScheduler {
             if (error != null || result == null) {
                 cancelNotFoundReplans.remove(ctx.getRequestId());
                 priorityReporter.reportCancelTimeout(proposal.endpointId(), ctx.getPriority());
-                completeAdmissionError(future, StrategyErrorType.ADMISSION_UNAVAILABLE,
-                        AdmissionRejectReason.UNSPECIFIED,
+                completeAdmissionError(future, StrategyErrorType.RESOURCE_EXHAUSTED,
+                        AdmissionRejectReason.RESOURCE_EXHAUSTED,
                         "priority cancel coordinator failed");
                 return;
             }
@@ -790,31 +791,33 @@ public class PriorityAdmissionScheduler {
                 case COMMITTED -> {
                     cancelNotFoundReplans.remove(ctx.getRequestId());
                     // The client admission deadline can race the async Cancel
-                    // completion callback.  A committed reservation must not
-                    // be queued or dispatched after the public future is
-                    // already terminal.
-                    if (future.isDone()) {
-                        decodeEp.release(ctx.getRequestId());
-                        Logger.info("[auto-tpm] drop committed preemption after admission close: "
-                                        + "request_id={} worker={}",
-                                ctx.getRequestId(), proposal.endpointId());
-                        return;
+                    // completion callback. The same future monitor is held by
+                    // the pre-inflight deadline reducer, making the terminal
+                    // check and register+offer handoff one atomic decision.
+                    synchronized (future) {
+                        if (future.isDone()) {
+                            decodeEp.release(ctx.getRequestId());
+                            Logger.info("[auto-tpm] drop committed preemption after admission close: "
+                                            + "request_id={} worker={}",
+                                    ctx.getRequestId(), proposal.endpointId());
+                            return;
+                        }
+                        for (DecodeRequestSnapshot victim : proposal.victims()) {
+                            String stage = victim.phase() == DecodeTaskPhase.RUNNING
+                                    ? "decode_running" : "decode_cancel";
+                            priorityReporter.reportVictim(victim.priority(), ctx.getPriority(),
+                                    stage, proposal.evictionCase());
+                            priorityReporter.reportPriorityPreempt(stage);
+                            priorityReporter.reportVictimKvTokens(
+                                    victim.priority(), stage, victim.kvTokens());
+                            priorityReporter.reportCancelConfirm(
+                                    proposal.endpointId(), victim.priority());
+                        }
+                        priorityReporter.reportEvictionCommit(ctx.getPriority(),
+                                proposal.evictionCase(), "success");
+                        recordDecodePlanObservability(ctx, proposal);
+                        placeAfterDecodeEviction(ctx, future, config, registrar, decodeEp);
                     }
-                    for (DecodeRequestSnapshot victim : proposal.victims()) {
-                        String stage = victim.phase() == DecodeTaskPhase.RUNNING
-                                ? "decode_running" : "decode_cancel";
-                        priorityReporter.reportVictim(victim.priority(), ctx.getPriority(),
-                                stage, proposal.evictionCase());
-                        priorityReporter.reportPriorityPreempt(stage);
-                        priorityReporter.reportVictimKvTokens(
-                                victim.priority(), stage, victim.kvTokens());
-                        priorityReporter.reportCancelConfirm(
-                                proposal.endpointId(), victim.priority());
-                    }
-                    priorityReporter.reportEvictionCommit(ctx.getPriority(),
-                            proposal.evictionCase(), "success");
-                    recordDecodePlanObservability(ctx, proposal);
-                    placeAfterDecodeEviction(ctx, future, config, registrar, decodeEp);
                 }
                 case REPLAN_NOT_FOUND, CONFLICT -> {
                     int replans = cancelNotFoundReplans
@@ -824,8 +827,8 @@ public class PriorityAdmissionScheduler {
                         schedule(ctx, future, registrar);
                     } else {
                         cancelNotFoundReplans.remove(ctx.getRequestId());
-                        completeAdmissionError(future, StrategyErrorType.ADMISSION_UNAVAILABLE,
-                                AdmissionRejectReason.UNSPECIFIED,
+                        completeAdmissionError(future, StrategyErrorType.RESOURCE_EXHAUSTED,
+                                AdmissionRejectReason.RESOURCE_EXHAUSTED,
                                 result.detail());
                     }
                 }
@@ -833,8 +836,8 @@ public class PriorityAdmissionScheduler {
                     cancelNotFoundReplans.remove(ctx.getRequestId());
                     priorityReporter.reportCancelTimeout(
                             proposal.endpointId(), ctx.getPriority());
-                    completeAdmissionError(future, StrategyErrorType.ADMISSION_UNAVAILABLE,
-                            AdmissionRejectReason.UNSPECIFIED,
+                    completeAdmissionError(future, StrategyErrorType.RESOURCE_EXHAUSTED,
+                            AdmissionRejectReason.RESOURCE_EXHAUSTED,
                             result.detail());
                 }
             }
@@ -857,8 +860,8 @@ public class PriorityAdmissionScheduler {
                 ctx, config, decodeEp.getStatus().getGroup());
         if (prefill == null || !prefill.isSuccess()) {
             decodeEp.release(ctx.getRequestId());
-            completeAdmissionError(future, StrategyErrorType.ADMISSION_UNAVAILABLE,
-                    AdmissionRejectReason.UNSPECIFIED,
+            completeAdmissionError(future, StrategyErrorType.RESOURCE_EXHAUSTED,
+                    AdmissionRejectReason.RESOURCE_EXHAUSTED,
                     "no prefill worker after decode eviction");
             return DecodeEvictionOutcome.FAILED;
         }
@@ -866,8 +869,8 @@ public class PriorityAdmissionScheduler {
                 prefill.getServerIp() + ":" + prefill.getHttpPort());
         if (prefillEp == null) {
             decodeEp.release(ctx.getRequestId());
-            completeAdmissionError(future, StrategyErrorType.ADMISSION_UNAVAILABLE,
-                    AdmissionRejectReason.UNSPECIFIED,
+            completeAdmissionError(future, StrategyErrorType.RESOURCE_EXHAUSTED,
+                    AdmissionRejectReason.RESOURCE_EXHAUSTED,
                     "prefill endpoint not registered after decode eviction");
             return DecodeEvictionOutcome.FAILED;
         }
@@ -919,7 +922,7 @@ public class PriorityAdmissionScheduler {
                 }
                 case PARTIAL_FAILURE -> {
                     releaseDecodeReservation(plan);
-                    AdmissionFailure failure = AdmissionFailure.attributionUnknown();
+                    AdmissionFailure failure = AdmissionFailure.resourceExhausted();
                     completeAdmissionError(future, failure.errorType(), failure.reason(),
                             "eviction commit partial failure");
                     return DecodeEvictionOutcome.FAILED;
@@ -1147,7 +1150,7 @@ public class PriorityAdmissionScheduler {
                               Response failureResponse) {
         if (failureResponse != null) {
             if (isCapacityFailure(failureResponse)) {
-                AdmissionFailure failure = AdmissionFailure.attributionUnknown();
+                AdmissionFailure failure = AdmissionFailure.resourceExhausted();
                 completeAdmissionError(future, failure.errorType(), failure.reason(),
                         failure.message());
             } else {
@@ -1157,7 +1160,7 @@ public class PriorityAdmissionScheduler {
         }
         Logger.info("[auto-tpm] no feasible placement, request_id={} priority={}",
                 ctx.getRequestId(), ctx.getPriority());
-        AdmissionFailure failure = AdmissionFailure.attributionUnknown();
+        AdmissionFailure failure = AdmissionFailure.resourceExhausted();
         completeAdmissionError(future, failure.errorType(), failure.reason(), failure.message());
     }
 
@@ -1227,17 +1230,6 @@ public class PriorityAdmissionScheduler {
                 }
             }
         }
-    }
-
-    private static void completeError(CompletableFuture<Response> future,
-                                      StrategyErrorType errorType,
-                                      String message) {
-        if (future.isDone()) {
-            return;
-        }
-        Response errorResp = Response.error(errorType);
-        errorResp.setErrorMessage(errorType.buildErrorMessage(message));
-        future.complete(errorResp);
     }
 
     private static void completeAdmissionError(CompletableFuture<Response> future,

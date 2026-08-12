@@ -215,12 +215,13 @@ class PriorityEvictionSchedulerTest {
         Response response = scheduler.submit(context(22, 70)).get(2, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(), response.getCode());
-        assertEquals(AdmissionRejectReason.UNSPECIFIED, response.getAdmissionRejectReason());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                response.getAdmissionRejectReason());
         // N3 §3.3 (default lockfree): a capacity failure is not transient —
-        // primary + one fallback offer, then conservative unknown attribution.
-        assertTrue(response.getErrorMessage().contains("blocker attribution is unknown"),
-                "expected conservative attribution detail, got: " + response.getErrorMessage());
+        // primary + one fallback offer, then typed resource exhaustion.
+        assertTrue(response.getErrorMessage().contains("admission capacity is temporarily exhausted"),
+                "expected resource-exhaustion detail, got: " + response.getErrorMessage());
         // 1 victim route + primary + one fallback re-route for the incoming
         verify(router, times(3)).route(any(BalanceContext.class));
         verify(priorityReporter, never()).reportEvictionPlan(anyInt(), anyString(), anyString());

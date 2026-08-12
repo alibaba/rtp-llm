@@ -97,7 +97,7 @@ class LeakCanaryLongRunE2ETest {
                 codeByRid.put(100_000L + i, code);
                 codeTally.merge(code, 1, Integer::sum);
                 assertTrue(code == 200 || code == 8400 || code == 8429
-                                || code == 8430 || code == 8431 || code == 8432
+                                || code == 8430 || code == 8431
                                 || code == 8502 || code == 8510 || code == 8515,
                         "unexpected terminal code " + code + ": " + response.getErrorMessage());
             }

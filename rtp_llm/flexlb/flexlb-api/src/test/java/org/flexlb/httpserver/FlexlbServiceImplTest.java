@@ -5,8 +5,10 @@ import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.balance.scheduler.RequestLifecycleState;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
@@ -103,6 +105,34 @@ class FlexlbServiceImplTest {
         assertEquals(200, resp.getCode());
         verify(serverLatencyRecorder).recordArrival(anyLong());
         verify(serverLatencyRecorder).recordCompletion(any(BalanceContext.class), anyLong());
+    }
+
+    @Test
+    void testSchedule_serializesTypedAdmissionReason() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        Response response = Response.error(
+                StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
+                AdmissionRejectReason.SAME_PRIORITY_AHEAD);
+        when(routeService.route(any(BalanceContext.class)))
+                .thenReturn(CompletableFuture.completedFuture(response));
+
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(54321L)
+                        .build();
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
+                mock(StreamObserver.class);
+
+        service.schedule(request, observer);
+
+        ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
+                ArgumentCaptor.forClass(
+                        FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(observer).onNext(captor.capture());
+        assertEquals(8430, captor.getValue().getCode());
+        assertEquals(
+                FlexlbScheduleProtocol.ScheduleFailureReasonPB.SAME_PRIORITY_AHEAD,
+                captor.getValue().getAdmissionRejectReason());
     }
 
     @Test

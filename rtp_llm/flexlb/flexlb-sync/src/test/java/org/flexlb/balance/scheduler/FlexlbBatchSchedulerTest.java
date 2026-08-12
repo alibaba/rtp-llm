@@ -563,10 +563,10 @@ class FlexlbBatchSchedulerTest {
     // ==================== P0-1: onTimeout terminal handling (PR-D) ====================
 
     @Test
-    void onTimeout_settlesWithBatchSloExpired_andLateSuccessIsNoop() {
-        // The dispatch timeout path (DispatchCallback.onTimeout) completes the
-        // future with BATCH_SLO_EXPIRED, removes the inflight entry, and a late
-        // onSuccess (stale ack) is a harmless no-op — the entry is already gone.
+    void onTimeout_settlesPriorityAdmissionAsResourceExhausted_andLateSuccessIsNoop() {
+        // The dispatch timeout path classifies an Auto-TPM admission as
+        // RESOURCE_EXHAUSTED, removes the inflight entry, and treats a late
+        // onSuccess (stale ack) as a harmless no-op.
         BatchItem item = offerFailureItem(301);
         assertTrue(scheduler.registerInflight(item));
 
@@ -574,17 +574,17 @@ class FlexlbBatchSchedulerTest {
 
         Response response = item.future().getNow(null);
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
 
         // Late ack: entry already removed by finishEntry → entryFor returns null
         scheduler.onSuccess(item, 1L);
         Response unchanged = item.future().getNow(null);
-        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), unchanged.getCode());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), unchanged.getCode());
 
         // Idempotent: a second timeout is also a no-op
         scheduler.onTimeout(item, new TimeoutException("second"));
         Response stillUnchanged = item.future().getNow(null);
-        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), stillUnchanged.getCode());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), stillUnchanged.getCode());
     }
 
     // ==================== P0-3: close/handover race (PR-D) ====================
@@ -606,7 +606,7 @@ class FlexlbBatchSchedulerTest {
         assertTrue(item.future().isDone());
         Response response = item.future().getNow(null);
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
     }
 
     private static byte[] generateInputBytes(long requestId) {

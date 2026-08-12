@@ -226,7 +226,9 @@ class PreemptionPhasesE2ETest {
             // 铁律4：cancel 超时绝不乐观派发 —— incoming 明确失败
             Response highResp = high.get(5, TimeUnit.SECONDS);
             assertFalse(highResp.isSuccess());
-            assertEquals(StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(), highResp.getCode());
+            assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), highResp.getCode());
+            assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                    highResp.getAdmissionRejectReason());
             assertTrue(highResp.getErrorMessage().contains("cancel_completion_unknown"),
                     "timeout must be explicit: " + highResp.getErrorMessage());
             assertFalse(decodeEp.reservedView().containsKey(312L),

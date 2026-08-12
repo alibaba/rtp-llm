@@ -125,12 +125,14 @@ class _DashFtErrorMapping:
 
 def _dash_error_mapping_for_ft_exception(
     exc: FtRuntimeException,
+    qos_level: Optional[int] = None,
 ) -> _DashFtErrorMapping:
-    """Pure mapping from internal code/reason to the public Dash contract.
+    """Map an internal failure to the public Dash contract.
 
-    Priority is deliberately absent from the input.  Scheduler diagnostics in
-    ``str(exc)`` are also excluded: only the typed reason may select a public
-    admission response.
+    Scheduler diagnostics in ``str(exc)`` are deliberately excluded.  For an
+    admission rejection, an explicitly supplied DashScope QoS header selects
+    the public high/low-priority contract; without that header the existing
+    typed-reason mapping remains unchanged.
     """
 
     exception_type = exc.exception_type
@@ -151,33 +153,55 @@ def _dash_error_mapping_for_ft_exception(
         )
 
     if exception_type == ExceptionType.PRIORITY_ADMISSION_REJECTED:
-        if reason == AdmissionRejectReason.HIGHER_PRIORITY_AHEAD:
+        if reason not in (
+            AdmissionRejectReason.HIGHER_PRIORITY_AHEAD,
+            AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+        ):
             return _DashFtErrorMapping(
                 DASH_ERROR_ADMISSION_OVERLOADED,
-                "Higher-priority requests are being served. Please retry later.",
+                "Too many requests.",
+                protocol_error=True,
             )
-        if reason == AdmissionRejectReason.SAME_PRIORITY_AHEAD:
+        if qos_level is not None:
             return _DashFtErrorMapping(
-                DASH_ERROR_ADMISSION_OVERLOADED,
+                (
+                    DASH_ERROR_ADMISSION_OVERLOADED
+                    if qos_level < 50
+                    else DASH_ERROR_RESOURCE_EXHAUSTED
+                ),
+                "Too many requests.",
+            )
+        if reason == AdmissionRejectReason.HIGHER_PRIORITY_AHEAD:
+            message = "Higher-priority requests are being served. Please retry later."
+        else:
+            message = (
                 "Requests with the same priority are ahead in the queue. "
-                "Please retry later.",
+                "Please retry later."
             )
         return _DashFtErrorMapping(
             DASH_ERROR_ADMISSION_OVERLOADED,
-            "Too many requests.",
-            protocol_error=True,
+            message,
         )
 
     if exception_type == ExceptionType.RESOURCE_EXHAUSTED:
-        if reason == AdmissionRejectReason.RESOURCE_EXHAUSTED:
+        if reason != AdmissionRejectReason.RESOURCE_EXHAUSTED:
             return _DashFtErrorMapping(
-                DASH_ERROR_RESOURCE_EXHAUSTED,
-                "Resources are temporarily exhausted. Please retry later.",
+                DASH_ERROR_ADMISSION_OVERLOADED,
+                "Too many requests.",
+                protocol_error=True,
+            )
+        if qos_level is not None:
+            return _DashFtErrorMapping(
+                (
+                    DASH_ERROR_ADMISSION_OVERLOADED
+                    if qos_level < 50
+                    else DASH_ERROR_RESOURCE_EXHAUSTED
+                ),
+                "Too many requests.",
             )
         return _DashFtErrorMapping(
-            DASH_ERROR_ADMISSION_OVERLOADED,
-            "Too many requests.",
-            protocol_error=True,
+            DASH_ERROR_RESOURCE_EXHAUSTED,
+            "Resources are temporarily exhausted. Please retry later.",
         )
 
     if exception_type == ExceptionType.ADMISSION_UNAVAILABLE:
@@ -191,6 +215,30 @@ def _dash_error_mapping_for_ft_exception(
     return _DashFtErrorMapping(
         _DASH_ERROR_SPEC_BY_EXCEPTION_CATEGORY[exception_type.category]
     )
+
+
+def _parse_valid_qos_level(value: Any) -> Optional[int]:
+    qos_level = to_optional_int(value)
+    if qos_level is None or not 1 <= qos_level <= 100:
+        return None
+    return qos_level
+
+
+def _request_qos_level(
+    other: OtherParams,
+    invocation_metadata: Optional[Any],
+) -> Optional[int]:
+    """Return valid metadata QoS, otherwise valid parsed request-header QoS."""
+    metadata_value = _headers_from_invocation_metadata(invocation_metadata).get(
+        "x-dashscope-inner-qos-level"
+    )
+    metadata_qos = _parse_valid_qos_level(metadata_value)
+    if metadata_qos is not None:
+        return metadata_qos
+    request_headers = {
+        str(key).lower(): value for key, value in other.request_headers.items()
+    }
+    return _parse_valid_qos_level(request_headers.get("x-dashscope-inner-qos-level"))
 
 
 _DASH_ERROR_SPEC_BY_EXCEPTION_CATEGORY = {
@@ -1040,7 +1088,10 @@ async def iter_real_model_stream_infer(
                 yield (resp, stats) if yield_access_stats else resp
     except FtRuntimeException as e:
         _capture_access_exception(access_agg, e)
-        error_mapping = _dash_error_mapping_for_ft_exception(e)
+        error_mapping = _dash_error_mapping_for_ft_exception(
+            e,
+            qos_level=_request_qos_level(other, invocation_metadata),
+        )
         error_spec = error_mapping.error_spec
         status_message = error_mapping.public_message or str(e)
         if error_mapping.protocol_error:

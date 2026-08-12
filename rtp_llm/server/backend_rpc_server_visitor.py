@@ -43,12 +43,16 @@ def get_role_names(role_addrs: List[RoleAddr]) -> Set[str]:
 
 PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE"
 DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE = 3
-_TERMINAL_ADMISSION_EXCEPTION_TYPES = frozenset(
+_TERMINAL_ROUTE_EXCEPTION_TYPES = frozenset(
     {
         ExceptionType.PRIORITY_PREEMPTED,
         ExceptionType.PRIORITY_ADMISSION_REJECTED,
         ExceptionType.RESOURCE_EXHAUSTED,
         ExceptionType.ADMISSION_UNAVAILABLE,
+        # A scheduling deadline is already a completed admission outcome.
+        # Retrying it with a new request id silently starts a second admission
+        # attempt with a fresh identity and can hide the original timeout.
+        ExceptionType.BATCH_SLO_EXPIRED,
     }
 )
 
@@ -175,7 +179,7 @@ class BackendRPCServerVisitor:
                 # identity and hide the typed 429 result selected by Master.
                 if any(
                     exception_type == int(terminal_type)
-                    for terminal_type in _TERMINAL_ADMISSION_EXCEPTION_TYPES
+                    for terminal_type in _TERMINAL_ROUTE_EXCEPTION_TYPES
                 ):
                     return False
                 return exception_type >= 8000
@@ -595,15 +599,14 @@ class BackendRPCServerVisitor:
                         # A later terminal admission decision is authoritative;
                         # do not hide it behind an earlier retryable transport
                         # or legacy capacity failure.
-                        is_terminal_admission_decision = (
+                        is_terminal_route_decision = (
                             isinstance(e, FtRuntimeException)
-                            and e.exception_type
-                            in _TERMINAL_ADMISSION_EXCEPTION_TYPES
+                            and e.exception_type in _TERMINAL_ROUTE_EXCEPTION_TYPES
                         )
                         if (
                             first_exc is not None
                             and first_exc is not e
-                            and not is_terminal_admission_decision
+                            and not is_terminal_route_decision
                         ):
                             raise first_exc
                         raise

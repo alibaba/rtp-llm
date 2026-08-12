@@ -304,7 +304,7 @@ class PlanCommitConcurrencyRedesignTest {
     // ==================== B-1: SLO rejection carries a reason tag ====================
 
     @Test
-    void b1_slo_deadline_rejection_carries_reason_tag() throws Exception {
+    void b1_slo_deadline_rejection_is_typed_resource_exhaustion() throws Exception {
         BalanceContext ctx = context(300);
         ctx.setBudget(ScheduleBudget.forDeadline(50,
                 ctx.getStartTime(), System.currentTimeMillis() - 1_000));
@@ -312,12 +312,10 @@ class PlanCommitConcurrencyRedesignTest {
         Response response = scheduler.submit(ctx).get(1, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode());
-        // Keeps the human-readable prefix …
-        assertTrue(response.getErrorMessage().contains("slo deadline exceeded"));
-        // … and adds the machine-readable attribution tag
-        assertTrue(response.getErrorMessage().contains("reason=slo_deadline_exceeded"),
-                "expected reason tag, got: " + response.getErrorMessage());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                response.getAdmissionRejectReason());
+        assertTrue(response.getErrorMessage().contains("admission budget already expired"));
     }
 
     // ==================== D-1: infeasible log carries phase + candidate counters ====================
@@ -416,8 +414,9 @@ class PlanCommitConcurrencyRedesignTest {
         Response response = scheduler.submit(context(502)).get(2, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(), response.getCode());
-        assertEquals(AdmissionRejectReason.UNSPECIFIED, response.getAdmissionRejectReason());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                response.getAdmissionRejectReason());
         // Primary + one fallback re-route — not the full 3-attempt budget
         verify(router, times(2)).route(any(BalanceContext.class));
         // Rollback: every decode reservation released

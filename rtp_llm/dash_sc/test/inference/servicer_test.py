@@ -49,6 +49,7 @@ from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
     _dash_error_mapping_for_ft_exception,
     _dash_error_spec_for_ft_exception,
+    _request_qos_level,
     build_think_runtime,
     iter_real_model_stream_infer,
 )
@@ -574,7 +575,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
 
         for request_headers in (
             {},
-            {"x-dashscope-inner-qos-level": "40"},
+            {"x-dashscope-inner-qos-level": "49"},
             {"x-dashscope-inner-qos-level": "50"},
         ):
             with self.subTest(request_headers=request_headers):
@@ -631,7 +632,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                     "8429_PRIORITY_PREEMPTED",
                 )
 
-    async def test_typed_admission_rejections_map_without_priority_heuristics(
+    async def test_qos_header_maps_admission_rejections_by_priority_tier(
         self,
     ) -> None:
         req = self._minimal_request()
@@ -639,31 +640,18 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             (
                 ExceptionType.PRIORITY_ADMISSION_REJECTED,
                 AdmissionRejectReason.HIGHER_PRIORITY_AHEAD,
-                "Throttling.ServiceOverloaded",
-                "Higher-priority requests are being served. Please retry later.",
             ),
             (
                 ExceptionType.PRIORITY_ADMISSION_REJECTED,
                 AdmissionRejectReason.SAME_PRIORITY_AHEAD,
-                "Throttling.ServiceOverloaded",
-                "Requests with the same priority are ahead in the queue. "
-                "Please retry later.",
             ),
             (
                 ExceptionType.RESOURCE_EXHAUSTED,
                 AdmissionRejectReason.RESOURCE_EXHAUSTED,
-                "Throttling.ResourceExhausted",
-                "Resources are temporarily exhausted. Please retry later.",
-            ),
-            (
-                ExceptionType.ADMISSION_UNAVAILABLE,
-                AdmissionRejectReason.UNSPECIFIED,
-                "Throttling.ServiceOverloaded",
-                "Too many requests.",
             ),
         )
 
-        for exception_type, reason, expected_name, expected_message in cases:
+        for exception_type, reason in cases:
 
             class _RejectedVisitor:
                 async def enqueue(self, _gi):
@@ -673,7 +661,10 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                         admission_reject_reason=reason,
                     )
 
-            for qos in ("30", "70"):
+            for qos, expected_name in (
+                ("49", "Throttling.ServiceOverloaded"),
+                ("50", "Throttling.ResourceExhausted"),
+            ):
                 with self.subTest(
                     exception_type=exception_type, reason=reason, qos=qos
                 ):
@@ -694,11 +685,231 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                     _, payload = _dash_error_payload(chunks[0])
                     self.assertEqual(429, payload["status_code"])
                     self.assertEqual(expected_name, payload["status_name"])
-                    self.assertEqual(expected_message, payload["status_message"])
+                    self.assertEqual("Too many requests.", payload["status_message"])
                     self.assertNotIn(
                         "private scheduler diagnostic",
                         chunks[0].infer_response.parameters["error_msg"].string_param,
                     )
+
+    async def test_admission_rejections_without_qos_header_keep_existing_mapping(
+        self,
+    ) -> None:
+        req = self._minimal_request()
+        cases = (
+            (
+                ExceptionType.PRIORITY_ADMISSION_REJECTED,
+                AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+                "Throttling.ServiceOverloaded",
+                "Requests with the same priority are ahead in the queue. "
+                "Please retry later.",
+            ),
+            (
+                ExceptionType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                "Throttling.ResourceExhausted",
+                "Resources are temporarily exhausted. Please retry later.",
+            ),
+            (
+                ExceptionType.ADMISSION_UNAVAILABLE,
+                AdmissionRejectReason.UNSPECIFIED,
+                "Throttling.ServiceOverloaded",
+                "Too many requests.",
+            ),
+            (
+                ExceptionType.BATCH_SLO_EXPIRED,
+                AdmissionRejectReason.UNSPECIFIED,
+                "TooManyRequests",
+                "private scheduler diagnostic",
+            ),
+        )
+
+        for exception_type, reason, expected_name, expected_message in cases:
+
+            class _RejectedVisitor:
+                async def enqueue(self, _gi):
+                    raise FtRuntimeException(
+                        exception_type,
+                        "private scheduler diagnostic",
+                        admission_reject_reason=reason,
+                    )
+
+            with self.subTest(exception_type=exception_type, reason=reason):
+                chunks = await _drain(
+                    iter_real_model_stream_infer(
+                        req,
+                        [1, 2],
+                        SamplingParams(),
+                        OtherParams(),
+                        _RejectedVisitor(),
+                        rtp_llm_request_id=1,
+                    )
+                )
+
+                self.assertEqual(1, len(chunks))
+                _, payload = _dash_error_payload(chunks[0])
+                self.assertEqual(429, payload["status_code"])
+                self.assertEqual(expected_name, payload["status_name"])
+                self.assertEqual(expected_message, payload["status_message"])
+
+    async def test_admission_qos_mapping_reads_invocation_metadata(self) -> None:
+        req = self._minimal_request()
+
+        class _RejectedVisitor:
+            async def enqueue(self, _gi):
+                raise FtRuntimeException(
+                    ExceptionType.RESOURCE_EXHAUSTED,
+                    "private scheduler diagnostic",
+                    admission_reject_reason=AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                )
+
+        for qos, expected_name in (
+            ("49", "Throttling.ServiceOverloaded"),
+            ("50", "Throttling.ResourceExhausted"),
+        ):
+            with self.subTest(qos=qos):
+                chunks = await _drain(
+                    iter_real_model_stream_infer(
+                        req,
+                        [1, 2],
+                        SamplingParams(),
+                        OtherParams(),
+                        _RejectedVisitor(),
+                        rtp_llm_request_id=1,
+                        invocation_metadata=(("x-dashscope-inner-qos-level", qos),),
+                    )
+                )
+
+                _, payload = _dash_error_payload(chunks[0])
+                self.assertEqual(expected_name, payload["status_name"])
+                self.assertEqual("Too many requests.", payload["status_message"])
+
+    async def test_invalid_qos_header_keeps_existing_admission_mapping(self) -> None:
+        req = self._minimal_request()
+
+        class _RejectedVisitor:
+            async def enqueue(self, _gi):
+                raise FtRuntimeException(
+                    ExceptionType.PRIORITY_ADMISSION_REJECTED,
+                    "private scheduler diagnostic",
+                    admission_reject_reason=AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+                )
+
+        for qos in ("invalid", "0", "-1", "101"):
+            with self.subTest(qos=qos):
+                chunks = await _drain(
+                    iter_real_model_stream_infer(
+                        req,
+                        [1, 2],
+                        SamplingParams(),
+                        OtherParams(
+                            request_headers={"x-dashscope-inner-qos-level": qos}
+                        ),
+                        _RejectedVisitor(),
+                        rtp_llm_request_id=1,
+                    )
+                )
+
+                _, payload = _dash_error_payload(chunks[0])
+                self.assertEqual("Throttling.ServiceOverloaded", payload["status_name"])
+                self.assertEqual(
+                    "Requests with the same priority are ahead in the queue. "
+                    "Please retry later.",
+                    payload["status_message"],
+                )
+
+    def test_invalid_metadata_qos_falls_back_to_valid_request_header(self) -> None:
+        for metadata_qos in ("invalid", "0", "-1", "101"):
+            with self.subTest(metadata_qos=metadata_qos):
+                qos_level = _request_qos_level(
+                    OtherParams(request_headers={"x-dashscope-inner-qos-level": "50"}),
+                    (("x-dashscope-inner-qos-level", metadata_qos),),
+                )
+                self.assertEqual(50, qos_level)
+
+    def test_invalid_metadata_and_request_qos_are_not_explicit_qos(
+        self,
+    ) -> None:
+        for qos in ("invalid", "0", "-1", "101"):
+            with self.subTest(qos=qos):
+                qos_level = _request_qos_level(
+                    OtherParams(request_headers={"x-dashscope-inner-qos-level": qos}),
+                    (("x-dashscope-inner-qos-level", qos),),
+                )
+                self.assertIsNone(qos_level)
+
+    async def test_valid_metadata_qos_overrides_request_header(self) -> None:
+        req = self._minimal_request()
+
+        class _RejectedVisitor:
+            async def enqueue(self, _gi):
+                raise FtRuntimeException(
+                    ExceptionType.RESOURCE_EXHAUSTED,
+                    "private scheduler diagnostic",
+                    admission_reject_reason=AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                )
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                OtherParams(request_headers={"x-dashscope-inner-qos-level": "49"}),
+                _RejectedVisitor(),
+                rtp_llm_request_id=1,
+                invocation_metadata=(("x-dashscope-inner-qos-level", "50"),),
+            )
+        )
+
+        _, payload = _dash_error_payload(chunks[0])
+        self.assertEqual("Throttling.ResourceExhausted", payload["status_name"])
+        self.assertEqual("Too many requests.", payload["status_message"])
+
+    def test_explicit_qos_does_not_hide_invalid_admission_reason_pair(self) -> None:
+        invalid_pairs = (
+            (
+                ExceptionType.PRIORITY_ADMISSION_REJECTED,
+                AdmissionRejectReason.UNSPECIFIED,
+            ),
+            (
+                ExceptionType.PRIORITY_ADMISSION_REJECTED,
+                AdmissionRejectReason.RESOURCE_EXHAUSTED,
+            ),
+            (
+                ExceptionType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.UNSPECIFIED,
+            ),
+            (
+                ExceptionType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.HIGHER_PRIORITY_AHEAD,
+            ),
+            (
+                ExceptionType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+            ),
+        )
+
+        for exception_type, reason in invalid_pairs:
+            for qos_level in (49, 50):
+                with self.subTest(
+                    exception_type=exception_type,
+                    reason=reason,
+                    qos_level=qos_level,
+                ):
+                    mapping = _dash_error_mapping_for_ft_exception(
+                        FtRuntimeException(
+                            exception_type,
+                            "private scheduler diagnostic",
+                            admission_reject_reason=reason,
+                        ),
+                        qos_level=qos_level,
+                    )
+
+                    self.assertEqual(
+                        DASH_ERROR_ADMISSION_OVERLOADED,
+                        mapping.error_spec,
+                    )
+                    self.assertEqual("Too many requests.", mapping.public_message)
+                    self.assertTrue(mapping.protocol_error)
 
     async def test_generic_capacity_mapping_does_not_depend_on_qos_priority(
         self,

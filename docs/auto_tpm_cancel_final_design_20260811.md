@@ -5,7 +5,7 @@
 本方案将过去混在一起的两类结果彻底拆开：
 
 1. **Victim 终态**：一个已经被接纳的请求，被严格更高优先级的 incoming 请求主动取消。它的终态错误码是 `PRIORITY_PREEMPTED (8429)`。
-2. **Incoming 准入拒绝**：新请求从未被接纳。Master 必须明确说明它是被更高优先级任务阻塞、排在同优先级任务之后，还是当前物理资源确实不足。
+2. **Incoming 准入拒绝**：新请求从未被接纳。Master 必须明确说明它是被更高优先级任务阻塞、排在同优先级任务之后，还是所选路径未能在 admission budget 内提供容量。
 
 Cancel RPC 首版采用**弱 ACK**：`ACCEPTED` 只表示原始 Prefill 已经原子安装优先级抢占意图，并触发当前或未来的 P-to-D 取消。它不表示 Engine 已完成取消，也不表示 slot/KV 可以复用。Master 收到 ACK 后只把 victim 转为 `CANCEL_REQUESTED`，继续保留资源账本；只有原始 Prefill 的 WorkerStatus 明确上报 `CANCELED + 8429` 后，Master 才执行一次资源结算并继续接纳 incoming。
 
@@ -15,7 +15,9 @@ Cancel RPC 首版采用**弱 ACK**：`ACCEPTED` 只表示原始 Prefill 已经�
 - 原始 Prefill 是 Prefill/Decode 全阶段的 Cancel 控制 owner。
 - Engine 负责真正执行取消；ACK 后以 `CANCELING -> CANCELED` 暴露进度。
 - 原始 Prefill WorkerStatus 的类型化 `CANCELED` 是完成凭证；普通 `finished` 不是。
-- DashSC 只根据类型化原因映射公开状态，禁止根据 QoS 数值推测拒绝原因。
+- DashSC 保留 Master 的类型化原因用于诊断；对于显式携带
+  `x-dashscope-inner-qos-level` 的 incoming 准入拒绝，按 QoS `<50` / `>=50`
+  选择公开 `status_name`。Victim 8429 始终独立映射。
 
 ## 2. 设计目标与非目标
 
@@ -126,7 +128,7 @@ Cancel 等待期间同时计入 victim 和 incoming 是刻意的保守双计数�
 - incoming provisional reservation 从 begin 到 commit/abort 始终由同一个 token 持有；
 - 旧 callback 必须携带当前 token 才能结算，不能修改后续 attempt。
 
-版本冲突、victim 消失、Cancel 传输失败、commit 冲突属于控制面结果。它们应当触发安全重试或控制面失败，不能在没有重新评估 admission snapshot 的情况下冒充上述业务原因。
+版本冲突、victim 消失、Cancel 传输失败、commit 冲突属于控制面结果。它们先触发安全的内部重试；重试用尽后，如果没有一致快照能证明 higher/same，公开结果统一折叠为 `RESOURCE_EXHAUSTED`，内部 detail 和指标仍保留真实控制面原因。
 
 ### 3.4 Victim 所有权分层
 
@@ -497,11 +499,15 @@ autoTpmCancelCompletionTimeoutMs
 
 同优先级 FIFO 必须使用 routing 和 failure classification 共享的不可变 `admissionSeq`。不能重新使用优先级阈值、墙上时钟或 request ID 猜顺序。
 
-如果 blocker 的 priority 来源未知，Master 不能声称 higher/same 因果，也不能声称已证明物理资源耗尽。此时返回 `8432 ADMISSION_UNAVAILABLE + SCHEDULE_FAILURE_REASON_UNSPECIFIED`，并记录内部 `attribution_unknown` 指标。这是一个合法、可预期的业务组合，不等同于协议损坏。
+如果 blocker 的 priority 来源未知，Master 不能声称 higher/same 因果；对外统一折叠为
+`8431 RESOURCE_EXHAUSTED + RESOURCE_EXHAUSTED`。这里的 resource 表示：没有可证明的
+higher/same 前序阻塞，但所选路径未能在 admission budget 内提供容量，包含 KV/slot/token、
+dispatch/engine ACK 和 backpressure，并不只表示 CUDA OOM。`8432` 只用于读取旧 peer 响应，
+新 Master 不再生成。
 
 ### 8.3 多 endpoint
 
-每个 endpoint 返回类型化 failure。Scheduler 使用与正常路由一致的 comparator 选择“最佳失败 endpoint”，最终公开原因来自该 endpoint。禁止在多个 endpoint 的自由文本中任意挑一个原因。
+每个 endpoint 返回类型化 failure。只有 endpoint 对 higher/same 归因一致时，Scheduler 才公开该优先级原因；结果不一致或证据不足时统一返回 `RESOURCE_EXHAUSTED`。禁止在多个 endpoint 的自由文本中任意挑一个原因。
 
 Planner 内部可保留最小事实对象用于可观测性和正确聚合，但不需要全部放入 wire：
 
@@ -515,7 +521,7 @@ AdmissionFailureFacts {
 }
 ```
 
-只有 `attribution_known=true` 且测量事实能证明对应原因时，才能填写 higher/same/resource 的公开 reason。owner missing、Cancel unsupported、policy victim cap、commit conflict 等仍是控制面/策略失败，不冒充物理资源不足。
+只有测量事实能证明对应优先级原因时，才能填写 higher/same。owner missing、Cancel unsupported、policy victim cap、commit conflict 等真实 subcause 保留在内部事实和指标中；对外三分类没有 higher/same 证据时折叠为 broadened `RESOURCE_EXHAUSTED`，不声称发生了物理 OOM。
 
 ## 9. Schedule 失败协议
 
@@ -554,8 +560,8 @@ Victim 的 8429 不属于 incoming admission reason：
 |---:|---|---|
 | 8429 | `PRIORITY_PREEMPTED` | 已接纳 victim 被取消 |
 | 8430 | `PRIORITY_ADMISSION_REJECTED` | incoming 因优先级阻塞被拒绝，reason 区分 higher/same |
-| 8431 | `RESOURCE_EXHAUSTED` | 瞬时物理资源不足 |
-| 8432 | `ADMISSION_UNAVAILABLE` | Master 能确认当前不可准入，但缺少可靠优先级/物理归因 |
+| 8431 | `RESOURCE_EXHAUSTED` | 无可证明 higher/same blocker，且路径未在 admission budget 内提供容量 |
+| 8432 | `ADMISSION_UNAVAILABLE` | 仅兼容读取旧 peer 响应；新 Master 不生成 |
 
 ### 9.1 类型化 reason 端到端传递
 
@@ -582,21 +588,23 @@ Java AdmissionResult
 
 ## 10. 对外状态映射
 
-Dash mapper 是纯函数：
+Dash mapper 使用内部结果和显式请求 header：
 
 ```text
-(internal code, typed failure reason) -> public status
+(internal code, typed failure reason, explicit qos header) -> public status
 ```
 
-它不接收也不读取 `qos_priority`。
+Master 的 failure reason 不由 QoS 阈值推断；QoS 只决定 incoming admission rejection
+在 Frontend 的公开 `status_name`。
 
 | 内部结果 | HTTP | status_name | status_message | 服务端透明重试 |
 |---|---:|---|---|---|
 | `8429` | 429 | `Throttling.Aborted` | `Too many requests.` | 禁止 |
-| `8430 + HIGHER_PRIORITY_AHEAD` | 429 | `Throttling.ServiceOverloaded` | `Higher-priority requests are being served. Please retry later.` | 终态决策后禁止 |
-| `8430 + SAME_PRIORITY_AHEAD` | 429 | `Throttling.ServiceOverloaded` | `Requests with the same priority are ahead in the queue. Please retry later.` | 终态决策后禁止 |
-| `8431 + RESOURCE_EXHAUSTED` | 429 | `Throttling.ResourceExhausted` | `Resources are temporarily exhausted. Please retry later.` | Master 返回后禁止 |
-| `8432 + UNSPECIFIED` | 429 | `Throttling.ServiceOverloaded` | `Too many requests.` | 禁止，并上报 attribution unknown |
+| `8430/8431` 且显式 QoS `<50` | 429 | `Throttling.ServiceOverloaded` | `Too many requests.` | 禁止 |
+| `8430/8431` 且显式 QoS `>=50` | 429 | `Throttling.ResourceExhausted` | `Too many requests.` | 禁止 |
+| `8430 + HIGHER/SAME` 且无有效 QoS header | 429 | `Throttling.ServiceOverloaded` | 稳定原因消息 | 禁止 |
+| `8431 + RESOURCE_EXHAUSTED` 且无有效 QoS header | 429 | `Throttling.ResourceExhausted` | 稳定资源消息 | 禁止 |
+| 旧 peer `8432 + UNSPECIFIED` | 429 | `Throttling.ServiceOverloaded` | `Too many requests.` | 禁止 |
 | 其他非法 code/reason 组合 | 429 | `Throttling.ServiceOverloaded` | `Too many requests.` | 禁止，并上报 protocol error |
 | 无健康 worker/路由不可用 | 503 | `ServiceUnavailable` | `Service unavailable.` | 沿用有限 route retry |
 | 单请求超过 hard limit | 400/413 | 参数/容量专用名称 | 稳定校验信息 | 禁止 |
@@ -604,7 +612,7 @@ Dash mapper 是纯函数：
 约束：
 
 - 8429 与 header、数值优先级无关，永远映射为 `429 / Throttling.Aborted / Too many requests.`。
-- 禁止出现 `qos_priority <= 40` 或 `qos_priority > 40` 的错误映射条件。
+- 只读取显式 `x-dashscope-inner-qos-level`；边界固定为 `<50` / `>=50`。
 - reason 缺失、未知或与 code 不匹配时，禁止从 `error_message` 猜测，固定回落为 `429 / Throttling.ServiceOverloaded / Too many requests.`，并上报 protocol-error 指标。
 - 公开 message 不暴露 victim request ID 或内部 owner 信息。
 
@@ -615,13 +623,13 @@ Dash mapper 是纯函数：
 | 8429 | `UNSPECIFIED`（victim 终态由 code 自描述） |
 | 8430 | `HIGHER_PRIORITY_AHEAD`、`SAME_PRIORITY_AHEAD` |
 | 8431 | `RESOURCE_EXHAUSTED` |
-| 8432 | `UNSPECIFIED`（合法 attribution unknown） |
+| 8432 | `UNSPECIFIED`（仅兼容旧 peer） |
 | 8400 等既有非 admission 专用错误 | `UNSPECIFIED` |
 
 ### 10.1 Retry owner
 
 - Master 内部的 version conflict、victim gone 等控制冲突，只能由 Master 在返回 Schedule response 前有限重试；
-- 8429、8430、8431、8432 一旦返回 Python，Backend 不得通过生成新 request ID 透明重试；
+- 8429、8430、8431、兼容 8432 和 legacy 8511 一旦返回 Python，Backend 不得通过生成新 request ID 透明重试；
 - 客户端是否根据 429 退避重试属于客户端策略，不属于服务端透明重试；
 - Cancel transport unknown 只能针对同一 Prefill、同一 request ID 做有界幂等重试，不能释放容量、切换 victim 或生成新请求。
 
@@ -641,7 +649,7 @@ Dash mapper 是纯函数：
 
 - 不向 Master 暴露 Decode Cancel RPC；
 - 不建设通用 USER/DEADLINE/ADMIN Cancel 框架；
-- 不用 QoS 阈值推断错误原因；
+- 不用 QoS 阈值推断 Master 错误原因；Frontend 只按显式 header 选择公开名称；
 - 不让 WorkerStatus `finished` 重新进入同步 Cancel 提交链；
 - 不做与本请求链无关的 scheduler、async runner、KV allocator 或通用生命周期重构；
 - 不把自由文本、mock 行为或 `resourceReleased=true` 合成值当作协议事实。
@@ -686,7 +694,7 @@ Dash mapper 是纯函数：
 - Planner 同时包含 `ACCEPTED_NOT_RUNNING` 和 `RUNNING`，且只选严格低优先级请求；
 - higher blocker 得到 `HIGHER_PRIORITY_AHEAD`；
 - 更早的 equal blocker 得到 `SAME_PRIORITY_AHEAD`；
-- 真正瞬时容量不足得到 `RESOURCE_EXHAUSTED`；
+- 无 higher/same 证据且 admission budget 内未提供容量时得到 `RESOURCE_EXHAUSTED`；
 - priority provenance 未知时不能输出 higher/same；
 - victim planner 选择覆盖 slot/KV 资源向量的最小确定性前缀，不多取消一个 victim；
 - `ACCEPTED` 只进入 `CANCEL_REQUESTED`，不结算资源；WorkerStatus 首次 `CANCELED + 8429` 才以 `attemptToken` 幂等删除 victim accounting；全部成功后提升既有 incoming provisional reservation；
@@ -704,8 +712,9 @@ Dash mapper 是纯函数：
 ### 12.3 Python/Dash 测试
 
 - 8429 永不透明重试；
-- QoS absent/40/50 对 8429 输出完全一致；
-- typed higher/same/resource 分别映射公开状态，映射函数不读取 QoS；
+- QoS absent/49/50 对 8429 输出完全一致；
+- 8430/8431 在显式 QoS 49/50 时分别输出 ServiceOverloaded/ResourceExhausted；
+- 无有效 QoS header 时保留 typed higher/same/resource 的既有公开映射；
 - unknown reason 不解析 `error_message`，并上报 protocol-error metric；
 - legacy `error_msg` JSON 与 standalone `status_code/status_name/status_message` 一致；
 - 已输出 token 后，terminal frame 仍保留完整 429 字段。
@@ -769,5 +778,5 @@ Cancel 是新接口，不在协议里增加混部兼容分支。
 - Stage 4 `RUNNING` 是合法的严格低优先级 victim；
 - Victim 终态错误码精确为 8429，且不透明重试；
 - Incoming 拒绝原因由 Master 在一致快照上产生；
-- Dash 映射不存在 QoS priority 阈值判断；
+- Dash 只对 8430/8431 使用显式 QoS `<50` / `>=50`；8429 不受 QoS 影响；
 - C++/Java/Python 合同测试和严格 P/D smoke 全部通过。
