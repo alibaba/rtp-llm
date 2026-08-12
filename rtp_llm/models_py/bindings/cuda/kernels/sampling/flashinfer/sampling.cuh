@@ -37,11 +37,21 @@
 #include "utils.cuh"
 #include "vec_dtypes.cuh"
 
-// Define reduction operators based on CUDA version
-// CUDA 13 (12.9+) deprecated cub::Max/Min in favor of cuda::maximum/minimum
+// CUDA 13 dropped cub::Max/Min. Some vendor CUDA 13 SDKs also do not expose
+// cuda::maximum/minimum, so keep the compatible stateless functor shape here.
 #if CUDA_VERSION >= 12090
-using MaxReduceOp = cuda::maximum<>;
-using MinReduceOp = cuda::minimum<>;
+struct MaxReduceOp {
+    template<typename T>
+    __host__ __device__ __forceinline__ T operator()(const T& a, const T& b) const {
+        return (a < b) ? b : a;
+    }
+};
+struct MinReduceOp {
+    template<typename T>
+    __host__ __device__ __forceinline__ T operator()(const T& a, const T& b) const {
+        return (b < a) ? b : a;
+    }
+};
 #else
 using MaxReduceOp = cub::Max;
 using MinReduceOp = cub::Min;

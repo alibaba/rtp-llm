@@ -156,10 +156,13 @@ cc_library(
         "launch_utils.h",
         "cuda_fp8_utils.h",
         "trt_utils.h",
-    ]),
+    ]) + [
+        "@local_config_cuda//cuda:cuda-include",
+    ],
     copts = cuda_copts(),
     deps = torch_deps() + [
         ":cuda_host_utils",
+        "@local_config_cuda//cuda:cuda_headers",
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "//rtp_llm/models_py/bindings/core:types_hdr",
         "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp8_quant",

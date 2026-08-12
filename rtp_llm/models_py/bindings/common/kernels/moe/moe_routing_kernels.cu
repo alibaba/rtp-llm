@@ -47,7 +47,7 @@ __launch_bounds__(TPB) __global__
     int64_t const bidx              = blockIdx.x;
     int64_t const thread_row_offset = bidx * num_cols;
 
-    cub::Sum sum;
+    rtp_llm_cub_compat::Sum sum;
     float    threadData(-FLT_MAX);
 
     if ((finished != nullptr) && finished[bidx]) {
@@ -59,7 +59,7 @@ __launch_bounds__(TPB) __global__
         threadData        = max(input[idx], threadData);
     }
 
-    float const maxElem = BlockReduce(tmpStorage).Reduce(threadData, cub::Max());
+    float const maxElem = BlockReduce(tmpStorage).Reduce(threadData, rtp_llm_cub_compat::Max());
     if (tidx == 0) {
         float_max = maxElem;
     }

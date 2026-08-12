@@ -896,9 +896,9 @@ def make_copy_dir_rule(repository_ctx, name, src_dir, out_dir, exceptions = None
     outs = [
 %s
     ],
-    cmd = \"""cp -rLf "%s/." "%s/" %s\""",
+    cmd = \"""rm -rf "%s" && mkdir -p "%s" && cp -rLf "%s/." "%s/" %s\""",
     tags = ["no-remote"],
-)""" % (name, "\n".join(outs), src_dir, out_dir, post_cmd)
+)""" % (name, "\n".join(outs), out_dir, out_dir, src_dir, out_dir, post_cmd)
 
 def _flag_enabled(repository_ctx, flag_name):
     return get_host_environ(repository_ctx, flag_name) == "1"
@@ -1413,6 +1413,7 @@ _ENVIRONS = [
     "TMP",
     "TMPDIR",
     "TF_CUDA_PATHS",
+    "RTP_PPU_CUDA_VERSION",
 ]
 
 remote_cuda_configure = repository_rule(
