@@ -39,13 +39,21 @@ def init_load_group_args(parser, load_config, model_args):
         help="默认关闭；设为 true 后在 pure TP 下预切分已支持的 MoE 权重；不支持的来源或布局回退为全量读取",
     )
     load_group.add_argument(
+        "--use_new_loader",
+        env_name="USE_NEW_LOADER",
+        bind_to=(model_args, "use_new_loader"),
+        type=str2bool,
+        default=False,
+        help="启用 NewLoader；置假回滚到 legacy loader",
+    )
+    load_group.add_argument(
         "--keep_mla_checkpoint_weights",
         env_name="KEEP_MLA_CHECKPOINT_WEIGHTS",
         bind_to=(load_config, "keep_mla_checkpoint_weights"),
         type=str2bool,
         default=False,
         help=(
-            "仅对 DeepSeek MLA newloader 生效：保留已转换为运行时布局的 "
+            "需先启用 newloader；仅对 DeepSeek MLA 生效：保留已转换为运行时布局的 "
             "checkpoint 权重。会增加显存占用并减少 KV cache 可用块，仅用于调试"
         ),
     )

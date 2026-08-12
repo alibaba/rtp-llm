@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 from safetensors.torch import save_file
 
+from rtp_llm.models_py.layers.embedding import ParallelLMHead
 from rtp_llm.models_py.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -25,6 +26,31 @@ def _validate(module) -> None:
 
 
 class LinearPartitionTest(unittest.TestCase):
+    def test_parallel_lm_head_gathers_vocab_shards(self):
+        head = ParallelLMHead(
+            vocab_size=4,
+            hidden_size=2,
+            tp_size=2,
+            tp_rank=0,
+            params_dtype=torch.float32,
+        )
+        head.weight.data.copy_(torch.eye(2))
+        hidden = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+        remote_logits = torch.tensor([[10.0, 20.0], [30.0, 40.0]])
+        rank_major = torch.cat([hidden, remote_logits], dim=0)
+
+        with patch(
+            "rtp_llm.models_py.layers.embedding.all_gather",
+            return_value=rank_major,
+        ) as gather:
+            logits = head(hidden)
+
+        gather.assert_called_once()
+        torch.testing.assert_close(
+            logits,
+            torch.tensor([[1.0, 2.0, 10.0, 20.0], [3.0, 4.0, 30.0, 40.0]]),
+        )
+
     def test_column_parallel_rejects_unimplemented_gather_output(self):
         with self.assertRaisesRegex(ValueError, "gather_output is not supported"):
             ColumnParallelLinear(

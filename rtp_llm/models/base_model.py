@@ -499,18 +499,10 @@ class BaseModel(object):
         return is_new_loader_enabled(self.model_config)
 
     def _new_loader_quant_type(self) -> str:
-        quant_config = getattr(self.model_config, "quant_config", None)
+        quant_config = self.model_config.quant_config
         if quant_config is None:
             return "none"
-        method = getattr(quant_config, "get_runtime_method_key", None)
-        if not callable(method):
-            method = getattr(quant_config, "get_method", None)
-        if not callable(method):
-            raise TypeError(
-                "model_config.quant_config must define get_method() or "
-                "get_runtime_method_key()"
-            )
-        runtime_method = method()
+        runtime_method = quant_config.get_runtime_method_key()
         if not isinstance(runtime_method, str) or not runtime_method.strip():
             raise ValueError(
                 f"Quantization config {type(quant_config).__name__} is not "
@@ -535,15 +527,17 @@ class BaseModel(object):
                 "EPLB is not supported by this newloader slice; disable EPLB "
                 "or use the legacy loader"
             )
-        device_resource_config = getattr(self, "device_resource_config", None)
-        if getattr(device_resource_config, "enable_layer_micro_batch", 0) != 0:
+        if self.model_config.ptuning_path:
+            raise ValueError("p-tuning is not supported by this newloader slice")
+        if self.model_config.lora_infos:
+            raise ValueError("LoRA loading is not supported by this newloader slice")
+        if (
+            self.device_resource_config is not None
+            and self.device_resource_config.enable_layer_micro_batch != 0
+        ):
             raise ValueError(
                 "layer micro-batch is not supported by this newloader slice"
             )
-        if getattr(self.model_config, "ptuning_path", None):
-            raise ValueError("p-tuning is not supported by this newloader slice")
-        if getattr(self.model_config, "lora_infos", None):
-            raise ValueError("LoRA loading is not supported by this newloader slice")
 
         parallelism = self.parallelism_config
         attn_tp = (
@@ -555,14 +549,7 @@ class BaseModel(object):
             parallelism.get_ffn_tp_rank(),
         )
         physical_tp = (parallelism.tp_size, parallelism.tp_rank)
-        prefill_cp = getattr(parallelism, "prefill_cp_config", None)
-        cp_enabled = False
-        if prefill_cp is not None:
-            for checker_name in ("is_enabled", "is_prefill_enabled"):
-                checker = getattr(prefill_cp, checker_name, None)
-                if callable(checker) and bool(checker()):
-                    cp_enabled = True
-                    break
+        cp_enabled = parallelism.prefill_cp_config.is_enabled()
         if cp_enabled or attn_tp != physical_tp:
             raise ValueError(
                 "Context parallelism is not supported by this newloader slice"
@@ -572,8 +559,7 @@ class BaseModel(object):
                 "Independent FFN TP/sequence parallelism is not supported by the "
                 "registered newloader path"
             )
-        ffn_disaggregate = getattr(parallelism, "ffn_disaggregate_config", None)
-        if bool(getattr(ffn_disaggregate, "enable_ffn_disaggregate", False)):
+        if parallelism.ffn_disaggregate_config.enable_ffn_disaggregate:
             raise ValueError(
                 "FFN disaggregation is not supported by the registered newloader path"
             )
@@ -596,18 +582,18 @@ class BaseModel(object):
             ffn_tp_rank=ffn_tp[1],
             lm_head_tp_size=physical_tp[0],
             lm_head_tp_rank=physical_tp[1],
-            ep_size=getattr(self.parallelism_config, "ep_size", 1),
-            ep_rank=getattr(self.parallelism_config, "ep_rank", 0),
+            ep_size=self.parallelism_config.ep_size,
+            ep_rank=self.parallelism_config.ep_rank,
             compute_dtype=self.model_config.compute_dtype,
             device=device,
             load_method=load_method,
             quant_config=QuantizationConfig(
                 self._new_loader_quant_type(),
-                source_config=getattr(self.model_config, "quant_config", None),
+                source_config=self.model_config.quant_config,
                 hw_kernel_config=self.hw_kernel_config,
             ),
             parallelism_config=self.parallelism_config,
-            moe_config=getattr(self, "moe_config", None),
+            moe_config=self.moe_config,
             fmha_config=self.fmha_config,
             device_resource_config=self.device_resource_config,
             keep_mla_checkpoint_weights=self.keep_mla_checkpoint_weights,

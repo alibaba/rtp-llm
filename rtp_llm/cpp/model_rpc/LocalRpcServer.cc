@@ -662,10 +662,8 @@ LocalRpcServer::UpdateWeights(grpc::ServerContext* context, const UpdateWeightsR
         }
         return grpc::Status::OK;
     } catch (const py::error_already_set& e) {
-        PyObject *type, *value, *traceback;
-        PyErr_Fetch(&type, &value, &traceback);
-        std::string err_msg = value ? PyUnicode_AsUTF8(value) : "Unknown Python error";
-        return {grpc::StatusCode::INTERNAL, "exception from python: " + err_msg};
+        py::gil_scoped_acquire acquire;
+        return {grpc::StatusCode::INTERNAL, "exception from python: " + std::string(e.what())};
     } catch (const std::exception& e) {
         return {grpc::StatusCode::INTERNAL, "exception from C++: " + std::string(e.what())};
     }

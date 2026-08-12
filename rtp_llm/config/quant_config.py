@@ -509,8 +509,15 @@ class CompressedTensorsQuantConfig(QuantizationConfig):
 
 
 class Fp8PerTensorCompressedQuantConfig(CompressedTensorsQuantConfig):
-    def __init__(self, bits: int = 8, is_quanted: bool = False, **kwargs: Any):
-        super().__init__(bits=bits, is_quanted=is_quanted, **kwargs)
+    def __init__(
+        self,
+        bits: int = 8,
+        group_size: int = 0,
+        is_quanted: bool = False,
+        **kwargs: Any,
+    ):
+        # Per-tensor FP8 has no grouping; ignore checkpoint-level group_size.
+        super().__init__(bits=bits, group_size=0, is_quanted=is_quanted, **kwargs)
         self._dynamic = kwargs.get("dynamic", False)
         self._weight_s_suffix = kwargs.get("weight_scale_suffix", None)
         self._act_s_suffix = kwargs.get("act_scale_suffix", None)
@@ -544,8 +551,15 @@ class Fp8PerTensorCompressedQuantConfig(CompressedTensorsQuantConfig):
 
 
 class Fp8PerChannelCompressedQuantConfig(CompressedTensorsQuantConfig):
-    def __init__(self, bits: int = 8, is_quanted: bool = False, **kwargs: Any):
-        super().__init__(bits=bits, is_quanted=is_quanted, **kwargs)
+    def __init__(
+        self,
+        bits: int = 8,
+        group_size: int = 0,
+        is_quanted: bool = False,
+        **kwargs: Any,
+    ):
+        # Per-channel FP8 has no group-size parameter in the runtime contract.
+        super().__init__(bits=bits, group_size=0, is_quanted=is_quanted, **kwargs)
 
     @classmethod
     def get_method(cls) -> str:
@@ -601,8 +615,15 @@ class QuarkQuantConfig(QuantizationConfig):
 
 
 class Fp8PerChannelQuarkQuantConfig(QuarkQuantConfig):
-    def __init__(self, bits: int = 8, is_quanted: bool = False, **kwargs: Any):
-        super().__init__(bits=bits, is_quanted=is_quanted, **kwargs)
+    def __init__(
+        self,
+        bits: int = 8,
+        group_size: int = 0,
+        is_quanted: bool = False,
+        **kwargs: Any,
+    ):
+        # Per-channel FP8 has no group-size parameter in the runtime contract.
+        super().__init__(bits=bits, group_size=0, is_quanted=is_quanted, **kwargs)
 
     @classmethod
     def get_method(cls) -> str:

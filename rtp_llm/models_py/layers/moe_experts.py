@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.device import get_current_device
-from rtp_llm.models_py.module_base import RtpModule
+from rtp_llm.models_py.module_base import RtpModule, copy_weight_
 from rtp_llm.models_py.modules import FusedMoeFactory
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -264,17 +264,19 @@ class BaseMoEExperts(RtpModule):
                 f"{runtime_method!r} without model_config.quant_config"
             )
 
-        key_getter = getattr(source_config, "get_runtime_method_key", None)
-        source_method = key_getter() if callable(key_getter) else ""
-        if not source_method:
-            key_getter = getattr(source_config, "get_method", None)
-            source_method = key_getter() if callable(key_getter) else ""
+        source_method = source_config.get_runtime_method_key()
         source_family = {
             **self._BASE_QUANT_MAP,
             **self._EXTRA_QUANT_MAP,
             "FP8": "fp8_per_tensor",
             "FP8_DYNAMIC_PER_TENSOR": "fp8_per_tensor",
         }.get(source_method)
+        if source_family is None:
+            raise ValueError(
+                f"MoE layer {self.prefix} does not support model quantization "
+                f"method {source_method!r}; disable NewLoader or register its "
+                "runtime family"
+            )
         if source_family != self._quant_family:
             raise ValueError(
                 f"MoE layer {self.prefix} quantization mismatch: runtime "
@@ -416,7 +418,10 @@ class BaseMoEExperts(RtpModule):
             if self.quant_method.dispatch_weight(
                 self, local_expert_id, proj, param_name, tensor
             ):
-                if proj in self.PROJ_NAMES:
+                if proj == "gate_up_proj":
+                    self._record_projection_loaded(local_expert_id, "gate_proj")
+                    self._record_projection_loaded(local_expert_id, "up_proj")
+                elif proj in self.PROJ_NAMES:
                     self._record_projection_loaded(local_expert_id, proj)
                 continue
 
@@ -771,7 +776,11 @@ class BaseMoEExperts(RtpModule):
                 f"shape {tuple(tensor.shape)} is incompatible with local target "
                 f"{tuple(target.shape)}"
             )
-        target.copy_(sliced)
+        copy_weight_(
+            target,
+            sliced,
+            f"expert {expert_id} {'gate' if gate else 'up'}_proj.weight",
+        )
 
     def _copy_down(self, expert_id: int, tensor: torch.Tensor):
         """TP-slice a down projection and write into w2 buffer."""
@@ -790,7 +799,7 @@ class BaseMoEExperts(RtpModule):
                 f"expert {expert_id} down_proj.weight shape {tuple(tensor.shape)} "
                 f"is incompatible with local target {tuple(target.shape)}"
             )
-        target.copy_(sliced)
+        copy_weight_(target, sliced, f"expert {expert_id} down_proj.weight")
 
     def _required_aux_param_names(self):
         return tuple(self.quant_method.required_aux_parameters())
