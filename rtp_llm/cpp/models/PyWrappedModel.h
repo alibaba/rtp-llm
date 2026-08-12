@@ -345,7 +345,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         // clang-format on
 
         if (is_dspark_draft_ && dspark_graph_phase_ == DSparkCallPhase::PROPOSE) {
-            graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle;
+            graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle
+                                             + static_cast<int>(params.sp_config.sp_dspark_bonus_anchor);
         } else if (is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {
             // for embedding model
             graph_params.num_tokens_per_bs = params.max_seq_len;

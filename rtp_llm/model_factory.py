@@ -513,6 +513,9 @@ class ModelFactory:
             raise ValueError(f"invalid dspark_markov_rank: {markov_rank}")
 
         sp_config.sp_dspark_mask_token_id = noise_token_id
+        sp_config.sp_dspark_bonus_anchor = bool(
+            propose_model_config.dspark_bonus_anchor
+        )
         # Both models carry the capture ids: the target uses them to capture
         # and to size the shared MTP hidden buffer rows; the draft only needs
         # them for the same row-width derivation (it never captures).

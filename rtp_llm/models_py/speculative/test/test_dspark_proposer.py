@@ -9,9 +9,10 @@ from rtp_llm.models_py.speculative.dspark_proposer_mixin import DSparkProposerMi
 class _TinyProposer(DSparkProposerMixin):
     """Smallest possible DSparkProposerMixin subclass."""
 
-    def __init__(self, *, width: int):
+    def __init__(self, *, width: int, query_width=None):
         self.init_dspark_proposer(
             width=width,
+            query_width=query_width,
             noise_token_id=1,
             aux_feature_dim=8,
             hidden_dim=4,
@@ -52,12 +53,17 @@ class ProposerContractTest(unittest.TestCase):
         self.assertEqual(tuple(outputs.hidden_states.shape), (6, 8))
         self.assertEqual(outputs.hidden_states.dtype, torch.bfloat16)
 
+    def test_query_width_may_include_a_bonus_anchor(self) -> None:
+        proposer = _TinyProposer(width=3, query_width=4)
+        outputs = proposer.dspark_empty_outputs(2, torch.device("cpu"))
+        self.assertEqual(tuple(outputs.hidden_states.shape), (8, 4))
+
     def test_hooks_require_subclass_implementation(self) -> None:
         proposer = DSparkProposerMixin()
         with self.assertRaises(NotImplementedError):
             proposer.combine_hidden_states(torch.zeros(1, 8))
-        with self.assertRaises(NotImplementedError):
-            proposer.compute_draft_hidden_states(torch.zeros(1, 3, 4, 8))
+        hidden = torch.zeros(1, 3, 4, 8)
+        self.assertIs(proposer.compute_draft_hidden_states(hidden), hidden)
         with self.assertRaises(NotImplementedError):
             proposer.commit_feature_rows(
                 torch.zeros(1, 8),
