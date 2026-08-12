@@ -870,6 +870,8 @@ def build_model_config(
     model_config.ckpt_path = model_args.ckpt_path
     model_config.tokenizer_path = model_args.tokenizer_path
     model_config.model_type = model_args.model_type
+    model_config.use_new_loader = model_args.use_new_loader
+    logging.info("use_new_loader: %s", model_config.use_new_loader)
     if vit_config:
         model_config.extra_data_path = vit_config.extra_data_path
         model_config.local_extra_data_path = vit_config.local_extra_data_path

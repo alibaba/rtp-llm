@@ -188,9 +188,9 @@ py_library(
         "new_models/qwen3_vl_moe/*.py",
         "quant_methods/*.py",
     ], exclude = [
-        # DeepSeek-VL2 vision pulls timm/torchvision/Pillow and registers its
-        # model when the narrow loader target imports it. Other VL vision
-        # modules are torch-only.
+        # Pack DeepSeek-VL2 vision only in deepseek_vl2_vision_loader below;
+        # config's existing multimodal dependency still makes its third-party
+        # packages transitively available to this target.
         "new_models/deepseek_vl2/vision.py",
     ]),
     deps = [
