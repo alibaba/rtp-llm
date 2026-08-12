@@ -289,6 +289,16 @@ class GLM5MegaMoEFused(GLM5MegaMoE):
         indices: torch.Tensor,  # [T, topk] int64 GLOBAL expert IDs
     ) -> torch.Tensor:
         """Run fused routed MegaMoE plus the FP8 shared expert in one kernel."""
+        return self._forward_impl(x, weights, indices, inputs_prepacked=False)
+
+    def _forward_impl(
+        self,
+        x: torch.Tensor,
+        weights: torch.Tensor | None,
+        indices: torch.Tensor | None,
+        *,
+        inputs_prepacked: bool,
+    ) -> torch.Tensor:
         import deep_gemm
 
         self._check_shared_expert_ready()
@@ -312,7 +322,10 @@ class GLM5MegaMoEFused(GLM5MegaMoE):
                 f"is smaller than input tokens={T}."
             )
 
-        self._input_packer.pack(x, weights, indices, buf, T)
+        if not inputs_prepacked:
+            if weights is None or indices is None:
+                raise ValueError("weights and indices are required before packing")
+            self._input_packer.pack(x, weights, indices, buf, T)
         self._maybe_pre_kernel_barrier(T)
         _sync_cuda_graph_warmup_ranks(
             f"glm5.mega_moe_fused.layer{self.cfg.layer_id}.before_deepgemm",

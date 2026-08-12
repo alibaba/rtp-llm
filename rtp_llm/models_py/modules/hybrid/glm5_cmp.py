@@ -131,12 +131,18 @@ class Glm5Cmp:
         self.input_layernorm = input_layernorm
         self.mlp = mlp
         self.post_attention_layernorm = post_attention_layernorm
-        self._has_moe = self.layer_idx in config.moe_layer_index
+        self._is_moe_layer = self.layer_idx in config.moe_layer_index
         self._router_weight = self._prepare_router_weight(mlp)
         self._events: _StreamEvents | None = None
         self._packed_head_gate_weight: torch.Tensor | None = None
         self._draft_prefill_clone = False
         self._disabled_reason = self._static_disabled_reason()
+        self._moe_prepack_disabled_reason = (
+            self._static_moe_prepack_disabled_reason()
+            if self._disabled_reason is None and self.is_moe_layer
+            else None
+        )
+        self._moe_prepack_abi_validated = False
         self.ops = _load_ops()
         if self._disabled_reason is None:
             self._qkv_projection = get_weight_and_scale_from_linear(
@@ -162,8 +168,8 @@ class Glm5Cmp:
         return bool(getattr(self.self_attn, "has_indexer", False))
 
     @property
-    def has_moe(self) -> bool:
-        return self._has_moe
+    def is_moe_layer(self) -> bool:
+        return self._is_moe_layer
 
     def _static_disabled_reason(self) -> str | None:
         reason = _unsupported_parallelism_reason(self.parallelism_config)
@@ -176,12 +182,16 @@ class Glm5Cmp:
             return "attention is not MLA"
         if int(getattr(attn, "kernel_tokens_per_block", 0)) != 64:
             return "GLM5 CMP requires 64-token KV pages"
-        if self.has_indexer and os.environ.get(
-            "GLM5_INDEXER_TOPK_BACKEND", "dsv4_persistent"
-        ).strip().lower() != "topk_v3":
+        if (
+            self.has_indexer
+            and os.environ.get("GLM5_INDEXER_TOPK_BACKEND", "dsv4_persistent")
+            .strip()
+            .lower()
+            != "topk_v3"
+        ):
             return "GLM5 CMP requires GLM5_INDEXER_TOPK_BACKEND=topk_v3"
 
-        if not self._has_moe:
+        if not self.is_moe_layer:
             if not (
                 bool(getattr(self.mlp, "accepts_fp8_input", False))
                 and bool(
@@ -189,13 +199,15 @@ class Glm5Cmp:
                 )
             ):
                 return "Dense GLM5 CMP requires FP8 input with UE8M0 scales"
-            return None
+        return None
 
+    def _static_moe_prepack_disabled_reason(self) -> str | None:
         # RTP-kernel writes router outputs directly into MegaMoE's stable input
-        # buffers. Keep this first integration limited to the deployed ABI.
+        # buffers. Keep this optional optimization limited to the deployed ABI.
         config = self.config
         if (
-            self._router_weight is None
+            not self.is_moe_layer
+            or self._router_weight is None
             or getattr(self.mlp, "correction_bias", None) is None
             or not callable(
                 getattr(
@@ -204,7 +216,13 @@ class Glm5Cmp:
                     None,
                 )
             )
-            or bool(getattr(self.mlp, "_use_mega_moe_fused_shared", False))
+            or not callable(
+                getattr(
+                    getattr(self.mlp, "fused_moe", None),
+                    "forward_prepacked",
+                    None,
+                )
+            )
             or getattr(self.mlp, "shared_expert", None) is None
             or getattr(self.mlp, "shared_expert_gate", None) is not None
             or int(getattr(self.mlp, "ffn_tp_size", 1)) != 1
@@ -220,6 +238,50 @@ class Glm5Cmp:
         ):
             return "unsupported MegaMoE contract"
         return None
+
+    @staticmethod
+    def _moe_prepack_views_disabled_reason(views: Any, rows: int) -> str | None:
+        if not isinstance(views, (tuple, list)) or len(views) != 4:
+            return "MegaMoE prepacked views must contain four tensors"
+        activation, scale, topk_indices, topk_weights = views
+        if not all(isinstance(tensor, torch.Tensor) for tensor in views):
+            return "MegaMoE prepacked views must be tensors"
+
+        expected = (
+            (activation, torch.float8_e4m3fn, (rows, 6144), "activation"),
+            (scale, torch.int32, (rows, 48), "activation scale"),
+            (topk_indices, torch.int64, (rows, 8), "TopK indices"),
+            (topk_weights, torch.float32, (rows, 8), "TopK weights"),
+        )
+        for tensor, dtype, shape, name in expected:
+            if tensor.dtype != dtype or tuple(tensor.shape) != shape:
+                return f"unsupported MegaMoE {name} dtype or shape"
+            if not tensor.is_contiguous():
+                return f"unsupported MegaMoE {name} layout"
+            if tensor.device != activation.device:
+                return "MegaMoE prepacked views must share a device"
+        return None
+
+    def moe_prepacked_input_views(self, rows: int) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        """Return writable FP8 MegaMoE views, or four empty slots."""
+        if not self.is_moe_layer or self._moe_prepack_disabled_reason is not None:
+            return None, None, None, None
+        try:
+            views = self.mlp.fused_moe.prepacked_input_views(int(rows))
+        except (AttributeError, TypeError, ValueError, RuntimeError):
+            return None, None, None, None
+        if not self._moe_prepack_abi_validated:
+            reason = self._moe_prepack_views_disabled_reason(views, int(rows))
+            if reason is not None:
+                self._moe_prepack_disabled_reason = reason
+                return None, None, None, None
+            self._moe_prepack_abi_validated = True
+        return tuple(views)
 
     @staticmethod
     def _prepare_router_weight(mlp: Any) -> torch.Tensor | None:
@@ -250,12 +312,14 @@ class Glm5Cmp:
         clone.input_layernorm = self.input_layernorm
         clone.mlp = mlp
         clone.post_attention_layernorm = self.post_attention_layernorm
-        clone._has_moe = self._has_moe
+        clone._is_moe_layer = self._is_moe_layer
         clone._router_weight = self._router_weight
         clone._events = None
         clone._packed_head_gate_weight = self._packed_head_gate_weight
         clone._draft_prefill_clone = bool(draft_prefill)
         clone._disabled_reason = self._disabled_reason
+        clone._moe_prepack_disabled_reason = self._moe_prepack_disabled_reason
+        clone._moe_prepack_abi_validated = False
         clone.ops = self.ops
         if self._disabled_reason is None:
             clone._qkv_projection = self._qkv_projection
@@ -579,11 +643,14 @@ class Glm5Cmp:
         mla_output: torch.Tensor,
         residual: torch.Tensor,
         fmha_impl: Any,
+        moe_activation: torch.Tensor | None = None,
+        moe_scale: torch.Tensor | None = None,
+        routed_indices: torch.Tensor | None = None,
+        routed_weights: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, ...]:
         """Project the MLA output and prepare an optional routed MoE input."""
         ops = self.ops
         implementation = self._attention_impl(fmha_impl)
-        rows = int(mla_output.size(0))
         mla_weight = implementation.weights[self.layer_idx][W.mla_vc]
         # Apply the per-head absorbed attention-output x W_VC BMM and quantize
         # the expanded [M, 16384] activation for the output projection.
@@ -600,10 +667,10 @@ class Glm5Cmp:
             output_scale,
         )
 
-        if self.has_moe:
-            moe_activation, moe_scale, routed_indices, routed_weights = (
-                self.mlp.fused_moe.prepacked_input_views(rows)
-            )
+        if self.is_moe_layer and moe_activation is not None:
+            assert moe_scale is not None
+            assert routed_indices is not None
+            assert routed_weights is not None
             # Post-attention residual add + RMSNorm, while writing BF16 Router
             # input and group-32 FP8/UE8M0 activation directly to MegaMoE buffers.
             moe_residual = torch.empty_like(attention_output)
@@ -631,21 +698,6 @@ class Glm5Cmp:
             return moe_norm, moe_residual, routed_indices, routed_weights
         return attention_output, residual
 
-    def add_norm_quant(
-        self,
-        attention_output: torch.Tensor,
-        residual: torch.Tensor,
-    ) -> Any:
-        """Prepare the Dense FFN input with the direct add-norm-quant Op."""
-        # Dense-layer post-attention residual add + RMSNorm, followed by the
-        # group-128 FP8 quantization expected by the existing Dense MLP.
-        return self.ops.add_norm_quant(
-            attention_output,
-            residual,
-            self.post_attention_layernorm.weight.data,
-            epsilon=float(self.post_attention_layernorm.variance_epsilon),
-        )
-
 
 def should_enable_glm5_cmp(
     layers: Any,
@@ -658,21 +710,10 @@ def should_enable_glm5_cmp(
     if layer_num <= 0:
         return False
 
-    # Layer 0 validates the shared attention contract; the first MoE layer
-    # validates the shared MegaMoE contract.
+    # Layer 0 validates the shared attention contract. Each MoE layer checks its
+    # optional prepacked-input ABI independently without disabling attention.
     cmp = layers[0].cmp
     if cmp is None or cmp._disabled_reason is not None:
-        return False
-
-    moe_cmp = next(
-        (
-            layer.cmp
-            for layer in layers[:layer_num]
-            if layer.cmp is not None and layer.cmp._has_moe
-        ),
-        None,
-    )
-    if moe_cmp is None or moe_cmp._disabled_reason is not None:
         return False
 
     # Layer 0 must seed the request-local TopK indices reused by main-only layers.
@@ -682,11 +723,5 @@ def should_enable_glm5_cmp(
         or cmp._unsupported_call_reason(hidden_states, fmha_impl, first_cache)
         is not None
     ):
-        return False
-    try:
-        moe_cmp.mlp.fused_moe.prepacked_input_views(
-            int(hidden_states.size(0))
-        )
-    except (AttributeError, TypeError, ValueError, RuntimeError):
         return False
     return True

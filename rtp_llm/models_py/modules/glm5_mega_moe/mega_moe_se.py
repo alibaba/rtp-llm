@@ -31,6 +31,7 @@ from .quant_layouts_se import (
     SHARED_WEIGHT_RECIPE,
     prepare_shared_fp8_scale_for_mega_moe_se,
 )
+from .shared_fp8_scale import stage_shared_fp8_input_scales
 
 logger = logging.getLogger(__name__)
 
@@ -284,6 +285,16 @@ class GLM5MegaMoESE(GLM5MegaMoE):
         weights: torch.Tensor,
         indices: torch.Tensor,
     ) -> torch.Tensor:
+        return self._forward_impl(x, weights, indices, inputs_prepacked=False)
+
+    def _forward_impl(
+        self,
+        x: torch.Tensor,
+        weights: torch.Tensor | None,
+        indices: torch.Tensor | None,
+        *,
+        inputs_prepacked: bool,
+    ) -> torch.Tensor:
         import deep_gemm
 
         self._check_shared_expert_ready()
@@ -308,14 +319,25 @@ class GLM5MegaMoESE(GLM5MegaMoE):
             self.cfg.n_activated_experts,
             "fp8xfp4",
         )
-        self._input_packer.pack(
-            x,
-            weights,
-            indices,
-            buf,
-            tokens,
-            int(block_m),
-        )
+        block_m = int(block_m)
+        if inputs_prepacked:
+            stage_shared_fp8_input_scales(
+                buf.x_sf,
+                buf.shared_l1_acts_sf,
+                tokens,
+                block_m,
+            )
+        else:
+            if weights is None or indices is None:
+                raise ValueError("weights and indices are required before packing")
+            self._input_packer.pack(
+                x,
+                weights,
+                indices,
+                buf,
+                tokens,
+                block_m,
+            )
         self._maybe_pre_kernel_barrier(tokens)
         _sync_cuda_graph_warmup_ranks(
             f"glm5.mega_moe_se.layer{self.cfg.layer_id}.before_deepgemm",

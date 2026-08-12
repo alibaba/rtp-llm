@@ -176,6 +176,16 @@ class GLM5MegaMoEFP8SE(GLM5MegaMoEFP8):
         weights: torch.Tensor,
         indices: torch.Tensor,
     ) -> torch.Tensor:
+        return self._forward_impl(x, weights, indices, inputs_prepacked=False)
+
+    def _forward_impl(
+        self,
+        x: torch.Tensor,
+        weights: torch.Tensor | None,
+        indices: torch.Tensor | None,
+        *,
+        inputs_prepacked: bool,
+    ) -> torch.Tensor:
         import deep_gemm
 
         self._check_shared_expert_ready()
@@ -192,7 +202,10 @@ class GLM5MegaMoEFP8SE(GLM5MegaMoEFP8):
                 f"is smaller than input tokens={tokens}"
             )
 
-        self._input_packer.pack(x, weights, indices, buf, tokens)
+        if not inputs_prepacked:
+            if weights is None or indices is None:
+                raise ValueError("weights and indices are required before packing")
+            self._input_packer.pack(x, weights, indices, buf, tokens)
         block_m = deep_gemm.get_block_m_for_mega_moe_fp8(
             self.cfg.ep_size,
             self.cfg.n_routed_experts,

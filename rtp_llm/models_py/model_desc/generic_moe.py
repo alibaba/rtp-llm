@@ -298,6 +298,8 @@ class GenericMoeLayer(nn.Module):
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
         experts_output = self.fused_moe.forward_prepacked(hidden_states)
+        if self._use_mega_moe_fused_shared:
+            return experts_output
         return experts_output + self.shared_expert(hidden_states)
 
     def forward(
@@ -576,6 +578,42 @@ class GenericMoeDecoderLayer(nn.Module):
         )
         return clone
 
+    def _fwd_mlp_or_moe(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run residual add, RMSNorm, then the dense MLP or MoE."""
+        # Dense MLP: fuse add + RMSNorm + FP8 quant; up_proj consumes FP8 directly.
+        if self._fuse_post_norm_quant and hidden_states.dim() == 2:
+            fp8_hs, scale = fused_add_rmsnorm_fp8_quant(
+                hidden_states,
+                residual,
+                self.post_attention_layernorm.weight.data,
+                self.post_attention_layernorm.variance_epsilon,
+                group_size=128,
+                scale_ue8m0=self.mlp.up_proj.scale_ue8m0,
+            )
+            hidden_states = self.mlp(hidden_states, x_fp8=fp8_hs, x_scale=scale)
+        # MoE: keep BF16 for routing/routed experts and FP8 for the shared expert.
+        elif self._fuse_post_norm_quant_moe and hidden_states.dim() == 2:
+            bf16_hs, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
+                hidden_states,
+                residual,
+                self.post_attention_layernorm.weight.data,
+                self.post_attention_layernorm.variance_epsilon,
+                group_size=128,
+                scale_ue8m0=self.mlp.shared_expert.up_proj.scale_ue8m0,
+            )
+            hidden_states = self.mlp(bf16_hs, x_fp8=fp8_hs, x_scale=scale)
+        # Fallback: use the standard norm path and let MLP/MoE prepare its inputs.
+        else:
+            hidden_states, residual = self.post_attention_layernorm(
+                hidden_states, residual
+            )
+            hidden_states = self.mlp(hidden_states)
+        return hidden_states, residual
+
     def _forward_cmp(
         self,
         hidden_states: torch.Tensor,
@@ -605,11 +643,23 @@ class GenericMoeDecoderLayer(nn.Module):
             kv_cache,
         )
 
-        # Project attention output and optionally prepare routed MoE input.
-        mla_post = cmp.mla_post_moe_pre(
-            mla_output, output_residual, fmha_impl
+        # Dense or unsupported MoE prepacking returns four None values and
+        # falls back to the regular MLP/MoE path below.
+        moe_activation, moe_scale, routed_indices, routed_weights = (
+            cmp.moe_prepacked_input_views(int(mla_output.size(0)))
         )
-        if cmp.has_moe:
+        # Project attention output and prepare routed MoE input only when its
+        # stable buffers match RTP-kernel's FP8/group-32 input ABI.
+        mla_post = cmp.mla_post_moe_pre(
+            mla_output,
+            output_residual,
+            fmha_impl,
+            moe_activation=moe_activation,
+            moe_scale=moe_scale,
+            routed_indices=routed_indices,
+            routed_weights=routed_weights,
+        )
+        if moe_activation is not None:
             moe_hidden_states, output_residual, routed_indices, routed_weights = (
                 mla_post
             )
@@ -619,16 +669,10 @@ class GenericMoeDecoderLayer(nn.Module):
                 routed_weights,
             )
         else:
-            # Dense layers preserve the existing post-attention norm + MLP.
+            # Dense layers and unsupported MoE strategies use RTP's MLP path.
             hidden_states, output_residual = mla_post
-            output_residual, _, hidden_fp8, hidden_scale = cmp.add_norm_quant(
-                hidden_states,
-                output_residual,
-            )
-            hidden_states = self.mlp(
-                hidden_states,
-                x_fp8=hidden_fp8,
-                x_scale=hidden_scale,
+            hidden_states, output_residual = self._fwd_mlp_or_moe(
+                hidden_states, output_residual
             )
 
         return DecodeLayerOutput(hidden_states, output_residual, topk_indices)
@@ -694,31 +738,7 @@ class GenericMoeDecoderLayer(nn.Module):
                     hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
                 )
 
-        if self._fuse_post_norm_quant and hidden_states.dim() == 2:
-            fp8_hs, scale = fused_add_rmsnorm_fp8_quant(
-                hidden_states,
-                residual,
-                self.post_attention_layernorm.weight.data,
-                self.post_attention_layernorm.variance_epsilon,
-                group_size=128,
-                scale_ue8m0=self.mlp.up_proj.scale_ue8m0,
-            )
-            hidden_states = self.mlp(hidden_states, x_fp8=fp8_hs, x_scale=scale)
-        elif self._fuse_post_norm_quant_moe and hidden_states.dim() == 2:
-            bf16_hs, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
-                hidden_states,
-                residual,
-                self.post_attention_layernorm.weight.data,
-                self.post_attention_layernorm.variance_epsilon,
-                group_size=128,
-                scale_ue8m0=self.mlp.shared_expert.up_proj.scale_ue8m0,
-            )
-            hidden_states = self.mlp(bf16_hs, x_fp8=fp8_hs, x_scale=scale)
-        else:
-            hidden_states, residual = self.post_attention_layernorm(
-                hidden_states, residual
-            )
-            hidden_states = self.mlp(hidden_states)
+        hidden_states, residual = self._fwd_mlp_or_moe(hidden_states, residual)
 
         return DecodeLayerOutput(hidden_states, residual, topk_indices)
 

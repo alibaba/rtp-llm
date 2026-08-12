@@ -8,6 +8,14 @@ py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
 
+py_test(
+    name = "glm5_cmp_test",
+    srcs = ["glm5_cmp_test.py"],
+    deps = py_test_deps + [
+        "//rtp_llm:testlib",
+    ],
+)
+
 # FlashInfer dependencies (包括 apache-tvm-ffi 用于 JIT 编译)
 flashinfer_deps = [
     "//rtp_llm:apache-tvm-ffi",
