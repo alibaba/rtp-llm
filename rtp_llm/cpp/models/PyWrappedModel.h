@@ -307,7 +307,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // | Model Type                | is_prefill_cuda_graph    | sp_config.type | model_id | num_tokens_per_bs       |
         // +---------------------------+--------------------------+----------------+----------+-------------------------+
         // | Embedding Model (prefill) | true                     | SP_TYPE_NONE   | -        | max_seq_len             |
-        // | DSpARK proposal (decode)  | false                    | DSpARK         | 1        | gen_num_per_cycle       |
+        // | DSpARK proposal (decode)  | false                    | DSpARK         | 1        | gen_num_per_cycle + optional anchor |
         // | DSpARK commit (decode)    | false                    | DSpARK         | 1        | gen_num_per_cycle + 1   |
         // | Draft commit (prefill)    | true                     | != SP_TYPE_NONE| 1        | gen_num_per_cycle + 1   |
         // | Normal Model (decode)     | false                    | SP_TYPE_NONE   | -        | 1 (default)             |
@@ -317,7 +317,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // clang-format on
 
         if (dspark_model_role_ == DSparkModelRole::PROPOSE) {
-            graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle;
+            graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle
+                                             + static_cast<int>(params.sp_config.sp_dspark_bonus_anchor);
         } else if (dspark_model_role_ == DSparkModelRole::COMMIT) {
             graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle + 1;
         } else if (is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {

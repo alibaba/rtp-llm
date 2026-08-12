@@ -326,6 +326,8 @@ struct SpeculativeExecutionConfig {
     // DSpARK noise/mask token used to build each fixed-width draft block.
     // Filled from the draft checkpoint by ModelFactory.
     int64_t     sp_dspark_mask_token_id = -1;
+    // Qwen3 DSpark queries one bonus-anchor row before gamma mask rows.
+    bool        sp_dspark_bonus_anchor = false;
     std::string to_string() const;
 
     // Helper functions for enum conversion

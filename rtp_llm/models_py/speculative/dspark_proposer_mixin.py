@@ -104,6 +104,7 @@ class DSparkProposerMixin:
         self,
         *,
         width: int,
+        query_width: Optional[int] = None,
         noise_token_id: int,
         aux_feature_dim: int,
         hidden_dim: int,
@@ -122,6 +123,12 @@ class DSparkProposerMixin:
                 raise ValueError(f"DSpark {name} must be positive, got {value}")
 
         self._dspark_width = int(width)
+        self._dspark_query_width = int(width if query_width is None else query_width)
+        if self._dspark_query_width < self._dspark_width:
+            raise ValueError(
+                "DSpark query width cannot be smaller than proposal width: "
+                f"query={self._dspark_query_width}, proposal={self._dspark_width}"
+            )
         self._dspark_noise_token_id = int(noise_token_id)
         self._dspark_aux_feature_dim = int(aux_feature_dim)
         self._dspark_hidden_dim = int(hidden_dim)
@@ -185,8 +192,8 @@ class DSparkProposerMixin:
         raise NotImplementedError
 
     def compute_draft_hidden_states(self, hidden: torch.Tensor) -> torch.Tensor:
-        """Reduce and normalize backbone output to ``[B*width, dim]``."""
-        raise NotImplementedError
+        """Reduce backbone output to ``[B*width, dim]`` when needed."""
+        return hidden.contiguous()
 
     # ------------------------------------------------------------------
     # Shared per-round flow
@@ -196,7 +203,7 @@ class DSparkProposerMixin:
         self, batch_size: int, device: torch.device
     ) -> PyModelOutputs:
         """Zero-filled normalized hidden states with serving geometry."""
-        width = self._dspark_width
+        width = self._dspark_query_width
         return PyModelOutputs(
             torch.zeros(
                 (batch_size * width, self._dspark_hidden_dim),
@@ -307,7 +314,7 @@ class DSparkProposerMixin:
 
         The query block reads the committed feature KV written by
         :meth:`run_commit_step`; the call carries no feature input."""
-        width = self._dspark_width
+        width = self._dspark_query_width
 
         attention_inputs = primary_attention_inputs(
             inputs.attention_inputs, getattr(self, "kv_cache", None)

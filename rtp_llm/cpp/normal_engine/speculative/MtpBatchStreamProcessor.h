@@ -19,7 +19,8 @@ public:
         propose_step_(sp_config.gen_num_per_cycle),
         vocab_size_(model_config.vocab_size),
         is_dspark_(sp_config.type == SP_TYPE_DSPARK),
-        dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)) {}
+        dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
+        dspark_bonus_anchor_(sp_config.sp_dspark_bonus_anchor) {}
 
     absl::Status dispatchPrefill(const StreamGroups& stream_groups,
                                  const MergedOutput& prefill_output,
@@ -160,11 +161,13 @@ protected:
     torch::Tensor dsparkComboTokens(int64_t batch_size, const torch::Tensor& anchors);
     torch::Tensor dsparkDraftInputLengths(int64_t batch_size);
     torch::Tensor dsparkDraftLmIndexes(int64_t batch_size);
+    int64_t       dsparkQueryWidth() const { return propose_step_ + static_cast<int64_t>(dspark_bonus_anchor_); }
 
     int     propose_step_;
     size_t  vocab_size_           = 0;
     bool    is_dspark_            = false;
     int32_t dspark_mask_token_id_ = -1;
+    bool    dspark_bonus_anchor_   = false;
 
     // Decode-round constants are grow-only device buffers.  Keeping them on
     // device is required by RTP_LLM_STREAM_ASYNC: no accept-length D2H is

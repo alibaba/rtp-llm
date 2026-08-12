@@ -58,6 +58,8 @@ class ModelConfig(CppModelConfig):
         "dspark_noise_token_id",
         "dspark_target_layer_ids",
         "dspark_markov_rank",
+        "dspark_bonus_anchor",
+        "dspark_block_size",
         "capture_aux_hidden_layer_ids",
         "normalize_lm_head_weight",
         "enable_fp32_lm_head",
@@ -530,6 +532,8 @@ class ModelConfig(CppModelConfig):
         self.dspark_noise_token_id: Optional[int] = None
         self.dspark_target_layer_ids: Optional[list[int]] = None
         self.dspark_markov_rank: Optional[int] = None
+        self.dspark_bonus_anchor: bool = False
+        self.dspark_block_size: Optional[int] = None
         # Target-side decoder layer outputs exported to the DSpARK draft.
         self.capture_aux_hidden_layer_ids: Optional[list[int]] = None
         self.normalize_lm_head_weight: bool = False

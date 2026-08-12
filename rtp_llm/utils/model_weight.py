@@ -1485,6 +1485,10 @@ class W:
     v4_dspark_main_proj_s = "v4.dspark.main_proj.scale"
     v4_dspark_markov_w1 = "v4.dspark.markov_w1.weight"
     v4_dspark_markov_w2 = "v4.dspark.markov_w2.weight"
+    dspark_fc_w = "dspark_fc.weight"
+    dspark_hidden_norm_gamma = "dspark_hidden_norm.gamma"
+    dspark_markov_w1 = "dspark_markov_w1.weight"
+    dspark_markov_w2 = "dspark_markov_w2.weight"
 
     gpt_style_tp_strategy: Dict[str, Any] = {
         embedding: sp_neg1,
@@ -1673,6 +1677,10 @@ class W:
         v4_dspark_main_proj_s: sp_id,
         v4_dspark_markov_w1: sp_id,
         v4_dspark_markov_w2: sp_id,
+        dspark_fc_w: sp_id,
+        dspark_hidden_norm_gamma: sp_id,
+        dspark_markov_w1: sp_id,
+        dspark_markov_w2: sp_id,
     }
 
     weights_list = [

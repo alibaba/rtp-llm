@@ -904,7 +904,7 @@ torch::Tensor MtpBatchStreamProcessor::compactAcceptedPositionIds(const torch::T
 }
 
 torch::Tensor MtpBatchStreamProcessor::dsparkComboTokens(int64_t batch_size, const torch::Tensor& anchors) {
-    const int64_t draft_width = propose_step_;
+    const int64_t draft_width = dsparkQueryWidth();
     if (!dspark_combo_cache_.defined() || dspark_combo_cache_.size(0) < batch_size
         || dspark_combo_cache_.size(1) != draft_width) {
         dspark_combo_cache_ = fullInt32OnCuda({batch_size, draft_width}, dspark_mask_token_id_);
@@ -916,7 +916,7 @@ torch::Tensor MtpBatchStreamProcessor::dsparkComboTokens(int64_t batch_size, con
 
 torch::Tensor MtpBatchStreamProcessor::dsparkDraftInputLengths(int64_t batch_size) {
     if (!dspark_input_lengths_cache_.defined() || dspark_input_lengths_cache_.size(0) < batch_size) {
-        dspark_input_lengths_cache_ = fullInt32OnCuda({batch_size}, propose_step_);
+        dspark_input_lengths_cache_ = fullInt32OnCuda({batch_size}, dsparkQueryWidth());
     }
     return dspark_input_lengths_cache_.narrow(0, 0, batch_size);
 }
@@ -924,7 +924,16 @@ torch::Tensor MtpBatchStreamProcessor::dsparkDraftInputLengths(int64_t batch_siz
 torch::Tensor MtpBatchStreamProcessor::dsparkDraftLmIndexes(int64_t batch_size) {
     const int64_t token_count = batch_size * propose_step_;
     if (!dspark_lm_indexes_cache_.defined() || dspark_lm_indexes_cache_.size(0) < token_count) {
-        dspark_lm_indexes_cache_ = torch::arange(token_count, cudaInt32Options());
+        if (dspark_bonus_anchor_) {
+            dspark_lm_indexes_cache_ =
+                torch::arange(batch_size * dsparkQueryWidth(), cudaInt32Options())
+                    .view({batch_size, dsparkQueryWidth()})
+                    .narrow(1, 1, propose_step_)
+                    .contiguous()
+                    .view({-1});
+        } else {
+            dspark_lm_indexes_cache_ = torch::arange(token_count, cudaInt32Options());
+        }
     }
     return dspark_lm_indexes_cache_.narrow(0, 0, token_count);
 }

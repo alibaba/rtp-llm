@@ -306,7 +306,8 @@ std::string SpeculativeExecutionConfig::to_string() const {
         << "force_score_context_attention: " << force_score_context_attention << "\n"
         << "quantization: " << quantization << "\n"
         << "checkpoint_path: " << checkpoint_path << "\n"
-        << "sp_dspark_mask_token_id: " << sp_dspark_mask_token_id;
+        << "sp_dspark_mask_token_id: " << sp_dspark_mask_token_id << ", "
+        << "sp_dspark_bonus_anchor: " << sp_dspark_bonus_anchor;
     return oss.str();
 }
 
