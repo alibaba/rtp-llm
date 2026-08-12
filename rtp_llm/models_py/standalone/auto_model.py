@@ -16,6 +16,7 @@ from rtp_llm.ops.compute_ops import (
     PyAttentionInputs,
     PyModelInputs,
     PyModelOutputs,
+    finish_trace_memory,
     get_typemeta,
     init_exec_ctx,
 )
@@ -87,6 +88,9 @@ class AutoModel:
             enable_comm_overlap=engine_config.device_resource_config.enable_comm_overlap,
             mla_ops_type=int(model_config.mla_ops_type),
         )
+        # Standalone AutoModel does not construct NormalEngine, so it must close
+        # the startup trace lifecycle before regular model forwards begin.
+        finish_trace_memory()
         self.device = "cuda"
 
         # init kv cache and bind it to py model

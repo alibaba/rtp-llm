@@ -199,6 +199,72 @@ def h20_oss_suites():
                 },
                 gpu_type=["H20"],
             ),
+            smoke_test(
+                name="moe_forward_warmup_pd_ep2",
+                # Shares moe_cp_pd's golden on purpose: same model, query, and
+                # expected response, and this case's real assertions are the
+                # warmup/KV-sizing log gates below, not the response text. If
+                # this case ever needs its own query or expectation, split the
+                # file then.
+                task_info="data/model/qwen3_moe/q_r_30b_fp8_py_cp2.json",
+                envs={
+                    # MOE_SKEW_MULT is deliberately non-default (default is 2.0)
+                    # so the case proves the value actually travels
+                    # MoeConfig -> pybind -> MoeWarmupDiagnostics. With ep_size=2,
+                    # skew_fraction = min(1, 1.2 / 2) = 0.6. Recompute
+                    # SMOKE_EXPECTED_SKEW_FRACTION if the value, ep_size, or
+                    # MoeWarmupDiagnostics.skew_fraction change.
+                    "prefill": [
+                        "RUNTIME_MEM_SAFETY_RATIO=0.05",
+                        "MOE_SKEW_MULT=1.2",
+                        "SMOKE_ASSERT_WARMUP_SIZING=1",
+                        "SMOKE_EXPECTED_SKEW_FRACTION=skew_fraction=0.600000",
+                    ],
+                    "decode": [
+                        "RUNTIME_MEM_SAFETY_RATIO=0.05",
+                        "SMOKE_ASSERT_WARMUP_SIZING=1",
+                    ],
+                },
+                smoke_args={
+                    "prefill": "--act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --reuse_cache 1 --seq_size_per_block 64 --tp_size 1 --dp_size 2 --ep_size 2 --world_size 2 --warm_up 1 --max_seq_len 32768 --max_context_batch_size 2 --max_batch_tokens_size 65536 --reserver_runtime_mem_mb 1024 --use_deepep_moe 1 --use_deepep_low_latency 0 --use_all_gather 0 --eplb_mode NONE --redundant_expert 0",
+                    "decode": "--act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --reuse_cache 1 --seq_size_per_block 64 --tp_size 1 --dp_size 2 --ep_size 2 --world_size 2 --warm_up 1 --max_seq_len 32768 --concurrency_limit 256 --reserver_runtime_mem_mb 1024 --enable_cuda_graph 1 --decode_capture_config '1,256' --use_deepep_moe 1 --use_deepep_low_latency 0 --use_all_gather 0 --eplb_mode NONE --redundant_expert 0",
+                },
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="moe_forward_warmup_pd_ep2_default_skew",
+                # Variant of moe_forward_warmup_pd_ep2 (same golden) covering the DEFAULT
+                # MOE_SKEW_MULT (2.0): it is deliberately NOT injected below, so the case
+                # exercises the most aggressive shipped combination -- at ep_size=2,
+                # skew_fraction clamps to min(1, 2/2) = 1.0, i.e. the whole cluster's tokens
+                # land on rank 0 with no cold rows, which is the "cold rows go to zero" edge
+                # noted as a known gap in the release note. The sibling case above pins a
+                # non-default 1.2 to prove the value travels MoeConfig -> pybind ->
+                # MoeWarmupDiagnostics, so between the two there is end-to-end evidence for
+                # both the default and an override.
+                #
+                # The sizing gates ([WARMUP_DONE] measured > 0, [KV_ALLOC] warm_up=1, and the
+                # startup CHECK that device_reserved > runtime_required) are the automated
+                # evidence that this fully-collapsed skew still measures a sane peak and does
+                # not push the runtime reserve into an unsafe range.
+                task_info="data/model/qwen3_moe/q_r_30b_fp8_py_cp2.json",
+                envs={
+                    "prefill": [
+                        "RUNTIME_MEM_SAFETY_RATIO=0.05",
+                        "SMOKE_ASSERT_WARMUP_SIZING=1",
+                        "SMOKE_EXPECTED_SKEW_FRACTION=skew_fraction=1.000000",
+                    ],
+                    "decode": [
+                        "RUNTIME_MEM_SAFETY_RATIO=0.05",
+                        "SMOKE_ASSERT_WARMUP_SIZING=1",
+                    ],
+                },
+                smoke_args={
+                    "prefill": "--act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --reuse_cache 1 --seq_size_per_block 64 --tp_size 1 --dp_size 2 --ep_size 2 --world_size 2 --warm_up 1 --max_seq_len 32768 --max_context_batch_size 2 --reserver_runtime_mem_mb 1024 --use_deepep_moe 1 --use_deepep_low_latency 0 --use_all_gather 0 --eplb_mode NONE --redundant_expert 0",
+                    "decode": "--act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --reuse_cache 1 --seq_size_per_block 64 --tp_size 1 --dp_size 2 --ep_size 2 --world_size 2 --warm_up 1 --max_seq_len 32768 --concurrency_limit 256 --reserver_runtime_mem_mb 1024 --enable_cuda_graph 1 --decode_capture_config '1,256' --use_deepep_moe 1 --use_deepep_low_latency 0 --use_all_gather 0 --eplb_mode NONE --redundant_expert 0",
+                },
+                gpu_type=["H20"],
+            ),
         ],
     )
 

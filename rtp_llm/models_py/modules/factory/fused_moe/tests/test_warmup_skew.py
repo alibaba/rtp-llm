@@ -1,0 +1,705 @@
+"""Device-free regression for the MoE warmup skew math.
+
+The warmup skew logic decides how much reserved hot-expert load is folded into the
+memory-traced warmup forward. It is pure Python arithmetic + CPU-tensor index shuffling;
+no assertion touches a GPU device. The target still schedules on a GPU host
+(exec_properties in BUILD): the import chain routes through compute_ops' arch
+dispatch, which requires torch.cuda.is_available() in the CUDA build.
+All supported executors are slot-based, so these tests pin:
+  * the reserved-fraction formula (skew_fraction),
+  * warmup_skew_topk_ids expert-id legality and rank-0 routing, including the
+    n_hot==0 (no hot tokens) and all-hot boundaries, plus the fact that cold rows
+    are spread over the non-rank-0 experts and only overflow back onto rank 0
+    when row-wise uniqueness leaves them no other ids,
+  * FusedMoeDataRouter.experts_per_ep_rank, the validated partition used by every
+    router that slices experts by ep_size.
+"""
+
+import unittest
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import torch
+
+from rtp_llm.models_py.modules.factory.fused_moe.defs import (
+    warmup_diagnostics as diagnostics_module,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    CombineForwardPayload,
+    ExpertForwardPayload,
+    FusedMoe,
+    FusedMoeDataRouter,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.warmup_diagnostics import (
+    MoeWarmupDiagnostics,
+    diagnostics,
+)
+from rtp_llm.ops import RoleType
+
+
+class _FakeRouter:
+    def __init__(
+        self,
+        ep_size,
+        expert_num_per_rank,
+        ep_rank=0,
+        tp_size=1,
+        dp_size=None,
+        expert_num=None,
+        enable_cuda_graph=False,
+        role_type=RoleType.PREFILL,
+    ):
+        dp_size = dp_size if dp_size is not None else ep_size
+        self.config = SimpleNamespace(
+            ep_size=ep_size,
+            expert_num=(
+                ep_size * expert_num_per_rank if expert_num is None else expert_num
+            ),
+            ep_rank=ep_rank,
+            tp_size=tp_size,
+            dp_size=dp_size,
+            world_size=tp_size * dp_size,
+            enable_cuda_graph=enable_cuda_graph,
+            enable_moe_warmup_skew=(role_type == RoleType.PREFILL),
+            parallelism_config=SimpleNamespace(
+                ffn_disaggregate_config=SimpleNamespace(enable_ffn_disaggregate=False)
+            ),
+        )
+
+    def prepare(self, a1, a1_scale, a2_scale, topk_weights, topk_ids):
+        return ExpertForwardPayload(
+            expert_x=a1,
+            expert_topk_ids=topk_ids,
+            expert_topk_weights=topk_weights,
+        )
+
+    def finalize(
+        self,
+        payload,
+        topk_weights,
+        topk_ids,
+        apply_router_weight_on_input,
+        extra_finalize_args,
+    ):
+        return payload.fused_expert_output
+
+
+class _EpPartitionRouter(FusedMoeDataRouter):
+    """Minimal concrete router standing in for the real ep_size-slicing routers."""
+
+    def __init__(self, expert_num, ep_size, phy_exp_num=None):
+        super().__init__(
+            SimpleNamespace(
+                expert_num=expert_num,
+                ep_size=ep_size,
+                tp_size=1,
+                phy_exp_num=expert_num if phy_exp_num is None else phy_exp_num,
+            ),
+            quant_config=None,
+        )
+
+    def prepare(self, a1, a1_scale, a2_scale, topk_weights, topk_ids):
+        raise NotImplementedError
+
+    def finalize(
+        self,
+        payload,
+        topk_weights,
+        topk_ids,
+        apply_router_weight_on_input,
+        extra_finalize_args,
+    ):
+        raise NotImplementedError
+
+
+class _SlotExecutor:
+    """Slot-based executor: memory scales with local expert slots."""
+
+    def execute(
+        self,
+        payload,
+        activation,
+        expert_map,
+        a2_scale,
+        apply_router_weight_on_input,
+        extra_expert_args,
+    ):
+        return CombineForwardPayload(fused_expert_output=payload.expert_x)
+
+
+def _natural_ids(num_tokens, top_k, expert_num, dtype=torch.int64):
+    """Row-unique ids standing in for the model's own routing decision."""
+    rows = torch.arange(num_tokens).unsqueeze(1)
+    slots = torch.arange(top_k).unsqueeze(0)
+    return ((rows + slots) % expert_num).to(dtype)
+
+
+class DiagnosticsTestCase(unittest.TestCase):
+    def setUp(self):
+        # The target schedules on a GPU host (see BUILD), so compute_ops usually
+        # imports fine -- the binding is faked anyway to keep these tests hermetic:
+        # the real get_trace_memory_state is process-global mutable state, and the
+        # skew tests must control the phase rather than inherit whatever earlier
+        # tests left behind. Return the Active phase explicitly; int(MagicMock())
+        # happening to equal 1 is a coincidence, not a contract.
+        binding_patcher = patch.object(
+            diagnostics,
+            "get_trace_memory_state",
+            MagicMock(return_value=diagnostics_module._TRACE_PHASE_ACTIVE),
+        )
+        binding_patcher.start()
+        self.addCleanup(binding_patcher.stop)
+
+        diagnostics.reload_runtime_settings()
+
+
+class EpRankPartitionTest(unittest.TestCase):
+    """experts_per_ep_rank owns the divisibility contract for ep_size-slicing routers.
+
+    It lives on the router rather than on FusedMoe, and routers slicing along another
+    dimension (BatchedDataRouter uses tp_size, whose two accepted branches disagree on that
+    dimension) deliberately do not inherit it -- see the comment in batched_data_router.py.
+    """
+
+    def test_divisible_layout_returns_even_partition(self):
+        self.assertEqual(
+            _EpPartitionRouter(expert_num=64, ep_size=8).experts_per_ep_rank(), 8
+        )
+        self.assertEqual(
+            _EpPartitionRouter(expert_num=7, ep_size=1).experts_per_ep_rank(), 7
+        )
+
+    def test_non_divisible_layout_is_rejected(self):
+        router = _EpPartitionRouter(expert_num=8, ep_size=3)
+        with self.assertRaisesRegex(ValueError, "divisible"):
+            router.experts_per_ep_rank()
+
+    def test_non_divisible_redundant_layout_is_a_known_gap(self):
+        # Known gap, not endorsed behaviour: redundant layouts are exempted from
+        # the divisibility check solely to keep their pre-existing partitioning
+        # bit-for-bit. Nothing in this path consumes phy2log/phy_exp_num, so the
+        # floor division below still drops tail experts (60 % 8 != 0 -> 7 per
+        # rank, 4 experts unreachable). Reachability: the exemption only silences
+        # THIS guard -- executors that assert divisibility themselves still fail
+        # downstream, so the layout only survives end-to-end with executor
+        # combinations that never assert it (tolerated legacy shape, not a
+        # supported one). If redundant partitioning ever becomes phy2log-aware,
+        # this test should start failing and be rewritten.
+        router = _EpPartitionRouter(expert_num=60, ep_size=8, phy_exp_num=64)
+        self.assertEqual(router.experts_per_ep_rank(), 7)
+
+    def test_redundant_nondivisible_warning_is_deduped_per_lifecycle(self):
+        # Every router on every layer reaches the exemption branch, so the warning has
+        # to fire once per model build -- and reset on the next build. Dedup and the
+        # message live in MoeWarmupDiagnostics (warn_redundant_nondivisible_once), which
+        # is also what makes reload_runtime_settings the reset boundary.
+        diagnostics.reload_runtime_settings()
+        router = _EpPartitionRouter(expert_num=60, ep_size=8, phy_exp_num=64)
+        # This class is not a DiagnosticsTestCase, so restore the shared singleton for
+        # whatever runs next.
+        self.addCleanup(diagnostics.reload_runtime_settings)
+
+        with patch.object(diagnostics_module.logger, "warning") as warning:
+            for _ in range(3):
+                self.assertEqual(router.experts_per_ep_rank(), 7)
+            warning.assert_called_once()
+            self.assertIn("redundant non-divisible layout", warning.call_args[0][0])
+
+        # A fresh model build re-arms it.
+        diagnostics.reload_runtime_settings()
+        with patch.object(diagnostics_module.logger, "warning") as warning:
+            router.experts_per_ep_rank()
+            warning.assert_called_once()
+
+    def test_non_positive_layout_is_rejected(self):
+        for expert_num, ep_size in ((0, 4), (8, 0)):
+            with self.subTest(expert_num=expert_num, ep_size=ep_size):
+                router = _EpPartitionRouter(expert_num, ep_size)
+                with self.assertRaisesRegex(ValueError, "positive"):
+                    router.experts_per_ep_rank()
+
+
+class SkewFractionMathTest(DiagnosticsTestCase):
+    def test_skew_fraction_default(self):
+        # default MOE_SKEW_MULT=2.0: the hot rank carries exactly twice the
+        # 1/ep_size mean share.
+        self.assertAlmostEqual(
+            diagnostics.skew_fraction(ep_size=5, expert_num=8, top_k=2),
+            0.4,
+            places=6,
+        )
+        # no EP / every rank hit anyway -> whole batch is hot
+        self.assertEqual(
+            diagnostics.skew_fraction(ep_size=1, expert_num=8, top_k=2), 1.0
+        )
+        self.assertEqual(
+            diagnostics.skew_fraction(ep_size=2, expert_num=2, top_k=2), 1.0
+        )
+
+    def test_skew_fraction_clamped_to_one(self):
+        diagnostics.reload_runtime_settings(skew_mult=3.0)
+        self.assertEqual(
+            diagnostics.skew_fraction(ep_size=2, expert_num=8, top_k=2), 1.0
+        )
+
+    def test_skew_fraction_structured_config_override(self):
+        diagnostics.reload_runtime_settings(skew_mult=1.6)
+        self.assertAlmostEqual(
+            diagnostics.skew_fraction(ep_size=10, expert_num=8, top_k=2),
+            0.16,
+            places=6,
+        )
+
+    def test_aggregate_multiple_is_exactly_mult_at_every_ep_size(self):
+        """Hot-rank load relative to the mean is exactly skew_mult (below clamp).
+
+        The additive-with-floor formula this replaced grew with ep_size; the
+        pure-mult formula pins the multiple everywhere the 1.0 clamp is loose.
+        """
+        mult = 2.0
+        diagnostics.reload_runtime_settings(skew_mult=mult)
+        for ep_size in (3, 4, 8, 16, 32, 64):
+            with self.subTest(ep_size=ep_size):
+                fraction = diagnostics.skew_fraction(
+                    ep_size=ep_size, expert_num=256, top_k=8
+                )
+                self.assertAlmostEqual(fraction * ep_size, mult, places=6)
+
+    def test_invalid_structured_config_is_rejected(self):
+        # < 1.0 would put the hot rank below the mean share, so it is rejected
+        # outright; exactly 1.0 is legal and means "skew disabled".
+        for skew_mult in (-1.0, float("nan"), float("inf"), 0.5, 0.999999):
+            with self.subTest(skew_mult=skew_mult):
+                with self.assertRaises(ValueError):
+                    diagnostics.reload_runtime_settings(skew_mult)
+
+    def test_skew_mult_one_is_accepted_and_disables_the_rewrite(self):
+        # 1.0 is the documented rollback knob: warmup sizing stays on, the id
+        # rewrite is skipped entirely and the model's natural routing survives.
+        diagnostics.reload_runtime_settings(skew_mult=1.0)
+        self.assertEqual(diagnostics.skew_mult, 1.0)
+        topk_ids = torch.tensor([[0, 3], [5, 2], [7, 1]], dtype=torch.int64)
+        out = diagnostics.warmup_skew_topk_ids(
+            topk_ids, ep_size=4, expert_num=8, executor_name="SlotExecutor"
+        )
+        self.assertIs(out, topk_ids)
+
+
+class WarmupSkewTopkIdsTest(DiagnosticsTestCase):
+    @staticmethod
+    def _apply(topk_ids, ep_size, expert_num):
+        return diagnostics.warmup_skew_topk_ids(
+            topk_ids, ep_size, expert_num, "SlotExecutor"
+        )
+
+    def _assert_valid_ids(self, out, expert_num):
+        self.assertTrue(torch.all(out >= 0))
+        self.assertTrue(torch.all(out < expert_num))
+
+    def _assert_unique_rows(self, out):
+        for row in out:
+            self.assertEqual(torch.unique(row).numel(), row.numel())
+
+    def test_single_ep_returns_unchanged(self):
+        topk_ids = torch.tensor([[0, 1], [2, 3]], dtype=torch.int64)
+        out = self._apply(topk_ids, ep_size=1, expert_num=2)
+        self.assertTrue(torch.equal(out, topk_ids))
+
+    def test_fewer_experts_than_ep_ranks_returns_same_object_without_summary(self):
+        topk_ids = torch.tensor([[0, 1], [2, 3]], dtype=torch.int64)
+
+        with patch.object(diagnostics_module.logger, "info") as info:
+            out = self._apply(topk_ids, ep_size=8, expert_num=4)
+
+        self.assertIs(out, topk_ids)
+        info.assert_not_called()
+
+    def test_empty_batch_returns_unchanged_and_keeps_the_summary(self):
+        # A DP rank can receive zero tokens. The rewrite must not touch the batch
+        # and must not spend the once-per-lifecycle summary on hot_tokens=0.
+        topk_ids = torch.empty((0, 2), dtype=torch.int64)
+
+        with patch.object(diagnostics_module.logger, "info") as info:
+            out = self._apply(topk_ids, ep_size=4, expert_num=8)
+
+        self.assertIs(out, topk_ids)
+        info.assert_not_called()
+
+    def test_hot_rows_go_to_rank0_and_cold_rows_avoid_rank0(self):
+        ep_size, n_local = 4, 2
+        expert_num = ep_size * n_local
+        topk_ids = _natural_ids(8, 2, expert_num)
+
+        out = self._apply(topk_ids, ep_size, expert_num)
+
+        self.assertEqual(tuple(out.shape), (8, 2))
+        self._assert_valid_ids(out, expert_num)
+        self._assert_unique_rows(out)
+        # q = 2.0/4 = 0.5 over 8 tokens -> 4 hot rows routed entirely to rank 0.
+        self.assertTrue(torch.all(out[:4] < n_local))
+        # Cold rows are rewritten off rank 0, so its token share is exactly q.
+        self.assertTrue(torch.all(out[4:] >= n_local))
+
+    def test_non_divisible_logical_layout_matches_the_router_floor_window(self):
+        expert_num, ep_size, top_k = 60, 8, 8
+        topk_ids = _natural_ids(8, top_k, expert_num)
+
+        out = self._apply(topk_ids, ep_size, expert_num)
+
+        self._assert_valid_ids(out, expert_num)
+        self._assert_unique_rows(out)
+        # The hot window is the router's own floor partition, not ceil(60/8)==8.
+        floor_window = expert_num // ep_size  # 7
+        self.assertEqual(floor_window, 7)
+        # top_k(8) > n_local(7), so each hot row places exactly n_local slots on rank 0 and
+        # overflows the remaining one into the cold partition to keep the row unique. The hot
+        # row count is scaled up to compensate (see skew_fraction): q=0.25 -> 2 hot rows.
+        hot_rows = out[:2]
+        cold_rows = out[2:]
+        for row in hot_rows:
+            self.assertEqual(int((row < floor_window).sum()), floor_window)
+            self.assertEqual(int((row >= floor_window).sum()), top_k - floor_window)
+        # Cold rows stay entirely outside rank 0's window.
+        self.assertTrue(torch.all(cold_rows >= floor_window))
+        # Why the alignment matters: rank 0 receives 2 * 7 = 14 of the 64 slots, so the logged
+        # rank0_slot_share is 14/64 = 0.21875 exactly. The old ceil window counted id 7 as
+        # rank 0's and reported 0.25 while a floor-partitioned router dispatched it elsewhere.
+        self.assertEqual(int((hot_rows < floor_window).sum()), 14)
+
+    def test_nonempty_batch_always_has_a_hot_token(self):
+        # ep=4, top_k=1, single token would round down without the lower bound.
+        topk_ids = torch.tensor([[7]], dtype=torch.int64)
+
+        out = self._apply(topk_ids, ep_size=4, expert_num=8)
+
+        self.assertEqual(out.item(), 0)
+
+    def test_skew_summary_logs_once_at_info(self):
+        topk_ids = _natural_ids(2, 1, 8)
+        with (
+            patch.object(diagnostics_module.logger, "info") as info,
+            patch.object(diagnostics_module.logger, "warning") as warning,
+        ):
+            self._apply(topk_ids, ep_size=4, expert_num=8)
+            self._apply(topk_ids, ep_size=4, expert_num=8)
+
+        info.assert_called_once()
+        warning.assert_not_called()
+
+        # Cross-repo contract, executable instead of comment-only: the smoke gate greps the
+        # "[MOE_WARMUP] executor=" prefix and suites_h20_oss.bzl pins an exact
+        # "skew_fraction=%.6f"-formatted substring via SMOKE_EXPECTED_SKEW_FRACTION. Changing
+        # either fragment silently breaks those gates, so pin them here where a CPU-only lane
+        # can catch it.
+        log_format = info.call_args[0][0]
+        self.assertIn("[MOE_WARMUP] executor=%s", log_format)
+        self.assertIn("skew_fraction=%.6f", log_format)
+
+    def test_all_hot_boundary(self):
+        # experts == top_k -> slot share clamps to 1.0 -> every token is hot.
+        ep_size, expert_num = 2, 2
+        topk_ids = torch.full((3, 2), 1, dtype=torch.int64)
+
+        out = self._apply(topk_ids, ep_size, expert_num)
+
+        self._assert_valid_ids(out, expert_num)
+        self._assert_unique_rows(out)
+        self.assertTrue(torch.all(out == torch.tensor([0, 1])))
+
+    def test_default_mult_at_ep2_routes_the_whole_batch_to_rank0(self):
+        # Production shape of the most aggressive default combination: the default
+        # skew_mult (2.0) at ep_size=2 clamps skew_fraction to min(1, 2/2) = 1.0,
+        # so the ENTIRE cluster's tokens land on rank 0 -- there are no cold rows
+        # at all. This case pins the clamped rewrite path on CPU at a realistic
+        # shape (128 experts, top_k=8) rather than the toy sizes above; which
+        # skew_mult each smoke case runs is stated in suites_h20_oss.bzl.
+        ep_size, expert_num, top_k = 2, 128, 8
+        n_local = expert_num // ep_size
+        topk_ids = _natural_ids(16, top_k, expert_num)
+
+        with (
+            patch.object(diagnostics_module.logger, "info") as info,
+            patch.object(diagnostics_module.logger, "warning") as warning,
+        ):
+            out = self._apply(topk_ids, ep_size, expert_num)
+
+        self._assert_valid_ids(out, expert_num)
+        self._assert_unique_rows(out)
+        # cold_tokens == 0: every row is hot and every id is in rank 0's window.
+        self.assertTrue(torch.all(out < n_local))
+        # The logged accounting must agree: hot == total, rank0_slot_share == 1.0.
+        info.assert_called_once()
+        (
+            _fmt,
+            _executor,
+            _ep,
+            _experts,
+            _top_k,
+            _n_local,
+            skew_fraction,
+            hot_tokens,
+            total_tokens,
+            cold_tokens,
+            cold_rank_executor_covered,
+            rank0_share,
+        ) = info.call_args[0]
+        self.assertEqual(skew_fraction, 1.0)
+        self.assertEqual(hot_tokens, total_tokens)
+        self.assertEqual(cold_tokens, 0)
+        self.assertEqual(cold_rank_executor_covered, 0)
+        self.assertEqual(rank0_share, 1.0)
+        warning.assert_called_once()
+        self.assertIn("reason=no_cold_tokens", warning.call_args.args[0])
+
+    def test_top_k_larger_than_local_experts_stays_unique_and_countable(self):
+        ep_size, n_local, top_k = 4, 2, 5
+        expert_num = ep_size * n_local
+        topk_ids = _natural_ids(6, top_k, expert_num)
+
+        with patch.object(diagnostics_module.logger, "warning") as warning:
+            out = self._apply(topk_ids, ep_size, expert_num)
+
+        self._assert_valid_ids(out, expert_num)
+        self._assert_unique_rows(out)
+        # q = 2.0/4 = 0.5, dilution compensation scales the hot row count by
+        # top_k/n_local = 2.5 and caps at the batch -> all 6 rows are hot: two
+        # slots on rank 0, the remaining three overflow onto other ranks.
+        self.assertTrue(torch.all(out[:, :n_local] < n_local))
+        self.assertTrue(torch.all(out[:, n_local:] >= n_local))
+        # Slot executors flatten and count these ids before dispatch.
+        slots = torch.bincount(out.reshape(-1), minlength=expert_num)
+        self.assertEqual(slots.numel(), expert_num)
+        self.assertEqual(int(slots.sum()), out.numel())
+        self.assertEqual(warning.call_count, 2)
+        warning_messages = [call.args[0] for call in warning.call_args_list]
+        self.assertTrue(
+            any("reason=dilution_clamped" in message for message in warning_messages)
+        )
+        self.assertTrue(
+            any("reason=no_cold_tokens" in message for message in warning_messages)
+        )
+
+    def test_dilution_compensation_restores_rank0_slot_share(self):
+        # ep=8, experts=8 -> n_local=1, top_k=2: each hot row lands only half its
+        # slots on rank 0, so the hot row count doubles: q=0.25 -> 4 of 8 rows.
+        ep_size, expert_num, top_k = 8, 8, 2
+        topk_ids = _natural_ids(8, top_k, expert_num)
+
+        out = self._apply(topk_ids, ep_size, expert_num)
+
+        self._assert_valid_ids(out, expert_num)
+        self._assert_unique_rows(out)
+        self.assertTrue(torch.all(out[:4, 0] == 0))
+        self.assertTrue(torch.all(out[4:] >= 1))
+        # The dispatched-slot share on rank 0 is exactly mult/ep = 2/8.
+        rank0_slots = int((out == 0).sum())
+        self.assertEqual(rank0_slots / out.numel(), 0.25)
+
+    def test_cold_rows_overflow_back_onto_rank0_when_they_cannot_avoid_it(self):
+        # ep=3, experts=6 -> n_local=2, 4 non-rank0 experts. top_k=5 needs five
+        # unique ids, so every cold row must place exactly one slot on rank 0.
+        # mult=1.1 keeps the compensated hot fraction below 1.0 (0.9166) so cold
+        # rows still exist: 12 tokens -> 11 hot, 1 cold.
+        diagnostics.reload_runtime_settings(skew_mult=1.1)
+        ep_size, expert_num, top_k = 3, 6, 5
+        n_local = 2
+        topk_ids = _natural_ids(12, top_k, expert_num)
+
+        out = self._apply(topk_ids, ep_size, expert_num)
+
+        self._assert_valid_ids(out, expert_num)
+        self._assert_unique_rows(out)
+        self.assertTrue(torch.all(out[:11, :n_local] < n_local))
+        cold_rank0_slots = (out[11:] < n_local).sum(dim=1)
+        self.assertTrue(torch.all(cold_rank0_slots == top_k - (expert_num - n_local)))
+
+    def test_top_k_out_of_bounds_is_rejected(self):
+        # Above expert_num: rows cannot hold unique ids.
+        with self.assertRaisesRegex(ValueError, r"must be in \[1"):
+            self._apply(torch.zeros((2, 5), dtype=torch.int64), 2, 4)
+        # Zero: would divide by zero in the rank0_slot_share computation.
+        with self.assertRaisesRegex(ValueError, r"must be in \[1"):
+            self._apply(torch.zeros((2, 0), dtype=torch.int64), 2, 4)
+
+    def test_non_2d_topk_ids_is_rejected(self):
+        # shape[0]/shape[1] below the guard would read the wrong dimension for a 3-D input
+        # and raise an opaque IndexError for a 1-D one, so the contract is named explicitly.
+        for shape in ((6,), (2, 3, 4)):
+            with self.subTest(shape=shape):
+                with self.assertRaisesRegex(ValueError, "must be 2-D"):
+                    self._apply(torch.zeros(shape, dtype=torch.int64), 2, 4)
+
+    def test_dtype_preserved(self):
+        for dt in (torch.int32, torch.int64):
+            out = self._apply(_natural_ids(6, 2, 8, dtype=dt), 4, 8)
+            self.assertEqual(out.dtype, dt)
+
+    def test_capture_skips_rewrite_and_warns_once(self):
+        topk_ids = MagicMock()
+        topk_ids.is_cuda = True
+        with (
+            patch("torch.cuda.is_current_stream_capturing", return_value=True),
+            patch.object(diagnostics, "warmup_capture_warned", False),
+            patch.object(diagnostics_module.logger, "warning") as warning,
+        ):
+            self.assertIs(self._apply(topk_ids, 2, 4), topk_ids)
+            self.assertIs(self._apply(topk_ids, 2, 4), topk_ids)
+
+        warning.assert_called_once()
+        self.assertIn("[MOE_WARMUP_DEGRADED]", warning.call_args.args[0])
+        self.assertIn("reason=cuda_graph_capture", warning.call_args.args[0])
+
+
+class PrefillSkewGateTest(DiagnosticsTestCase):
+    def test_prefill_warmup_forward_uses_the_rewritten_ids(self):
+        router = _FakeRouter(2, 2)
+        router.prepare = MagicMock(wraps=router.prepare)
+        moe = FusedMoe(
+            router,
+            _SlotExecutor(),
+            expert_num=4,
+            ep_size=2,
+            enable_moe_warmup_skew=True,
+        )
+        hidden_states = torch.ones((2, 4))
+        topk_weights = torch.ones((2, 1))
+        topk_ids = torch.ones((2, 1), dtype=torch.int64)
+        rewritten_ids = torch.zeros_like(topk_ids)
+
+        with (
+            patch.object(diagnostics, "is_moe_warmup_active", return_value=True),
+            patch.object(
+                diagnostics,
+                "warmup_skew_topk_ids",
+                return_value=rewritten_ids,
+            ) as rewrite,
+        ):
+            output = moe(hidden_states, topk_weights, topk_ids)
+
+        rewrite.assert_called_once_with(topk_ids, 2, 4, "_SlotExecutor")
+        self.assertIs(router.prepare.call_args.args[4], rewritten_ids)
+        self.assertTrue(torch.equal(output, hidden_states))
+
+
+class WarmupRoleGateTest(DiagnosticsTestCase):
+    def test_decode_warmup_keeps_natural_routing(self):
+        router = _FakeRouter(
+            2,
+            2,
+            enable_cuda_graph=True,
+            role_type=RoleType.DECODE,
+        )
+        router.prepare = MagicMock(wraps=router.prepare)
+        moe = FusedMoe(
+            router,
+            _SlotExecutor(),
+            expert_num=4,
+            ep_size=2,
+            enable_moe_warmup_skew=False,
+        )
+        hidden_states = torch.ones((2, 4))
+        topk_weights = torch.ones((2, 1))
+        topk_ids = torch.ones((2, 1), dtype=torch.int64)
+
+        with (
+            patch.object(
+                diagnostics, "is_moe_warmup_active", return_value=True
+            ) as warmup_active,
+            patch.object(diagnostics, "warmup_skew_topk_ids") as rewrite,
+        ):
+            output = moe(hidden_states, topk_weights, topk_ids)
+
+        warmup_active.assert_not_called()
+        rewrite.assert_not_called()
+        self.assertIs(router.prepare.call_args.args[4], topk_ids)
+        self.assertTrue(torch.equal(output, hidden_states))
+
+
+class TraceMemoryBindingTest(DiagnosticsTestCase):
+    def test_structured_config_is_loaded_only_when_explicitly_reloaded(self):
+        local_diagnostics = MoeWarmupDiagnostics()
+        self.assertEqual(local_diagnostics.skew_mult, 2.0)
+
+        local_diagnostics.reload_runtime_settings(skew_mult=2.5)
+        self.assertEqual(local_diagnostics.skew_mult, 2.5)
+
+    def test_reload_resets_model_build_trace_state(self):
+        with (
+            patch.object(diagnostics, "trace_memory_finished", True),
+            patch.object(diagnostics, "warmup_skew_logged", True),
+        ):
+            diagnostics_module.reload_runtime_diagnostics()
+
+            self.assertFalse(diagnostics.trace_memory_finished)
+            self.assertFalse(diagnostics.warmup_skew_logged)
+
+    def test_prefill_ep_warmup_requires_binding(self):
+        router = _FakeRouter(ep_size=2, expert_num_per_rank=1)
+        with patch.object(diagnostics, "get_trace_memory_state", None):
+            with self.assertRaisesRegex(RuntimeError, "get_trace_memory_state"):
+                FusedMoe(
+                    router=router,
+                    fused_experts=_SlotExecutor(),
+                    expert_num=2,
+                    ep_size=2,
+                    enable_moe_warmup_skew=True,
+                )
+
+    def test_decode_does_not_require_trace_binding(self):
+        router = _FakeRouter(
+            ep_size=2,
+            expert_num_per_rank=1,
+            role_type=RoleType.DECODE,
+        )
+        with patch.object(diagnostics, "get_trace_memory_state", None):
+            FusedMoe(
+                router=router,
+                fused_experts=_SlotExecutor(),
+                expert_num=2,
+                ep_size=2,
+                enable_moe_warmup_skew=False,
+            )
+
+    def test_completed_startup_trace_stops_binding_queries(self):
+        """Pending is re-queried, Active stays active, Finished latches for good.
+
+        active_forwards is parameterised because a CUDA-graph capture issues many
+        Active forwards before the native trace finishes; the latch behaviour is
+        the same assertion at any count, so it is a subTest rather than a second
+        test method.
+        """
+        for active_forwards in (2, 32):
+            with self.subTest(active_forwards=active_forwards):
+                binding = MagicMock(side_effect=[0] + [1] * active_forwards + [2])
+                with (
+                    patch.object(diagnostics, "get_trace_memory_state", binding),
+                    patch.object(diagnostics, "trace_memory_finished", False),
+                ):
+                    self.assertFalse(diagnostics.is_moe_warmup_active(2))
+                    for _ in range(active_forwards):
+                        self.assertTrue(diagnostics.is_moe_warmup_active(2))
+                    # Sees Finished, latches, and never queries the binding again.
+                    self.assertFalse(diagnostics.is_moe_warmup_active(2))
+                    self.assertFalse(diagnostics.is_moe_warmup_active(2))
+                    self.assertTrue(diagnostics.trace_memory_finished)
+
+                self.assertEqual(binding.call_count, active_forwards + 2)
+
+    def test_finished_trace_does_not_query_binding(self):
+        binding = MagicMock()
+        with (
+            patch.object(diagnostics, "get_trace_memory_state", binding),
+            patch.object(diagnostics, "trace_memory_finished", True),
+        ):
+            self.assertFalse(diagnostics.is_moe_warmup_active(2))
+        binding.assert_not_called()
+
+    def test_single_ep_never_queries_native_trace_state(self):
+        binding = MagicMock(return_value=1)
+        with patch.object(diagnostics, "get_trace_memory_state", binding):
+            self.assertFalse(diagnostics.is_moe_warmup_active(1))
+        binding.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

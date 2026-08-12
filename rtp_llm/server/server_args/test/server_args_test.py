@@ -1,8 +1,23 @@
 import importlib
+import io
 import json
+import logging
 import os
+import pickle
 import sys
 from unittest import TestCase, main
+from unittest.mock import patch
+
+# The pickle state tuple is produced in C++ (rtp_llm/cpp/pybind/ConfigInit.cc) and
+# consumed there by index, so its length is a cross-layer contract this test file
+# can only observe, not enforce.
+_ARITY_TRIPWIRE_MSG = (
+    "config pickle state arity changed: after adding or removing a field, update "
+    "the accepted t.size() list in that config's __setstate__ in "
+    "rtp_llm/cpp/pybind/ConfigInit.cc, keep the previous arity accepted so older "
+    "states still load, and append new fields at the end so the existing indices "
+    "keep pointing at the same fields"
+)
 
 
 class ServerArgsPyEnvConfigsTest(TestCase):
@@ -87,6 +102,577 @@ class ServerArgsSetTest(TestCase):
         self.assertFalse(py_env_configs.load_config.moe_pure_tp_preshard)
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
+
+    def test_runtime_tuning_args_are_bound_to_configs(self):
+        """CLI values bind to the configs and win over a conflicting environment."""
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        for cli_args in (
+            [
+                "--runtime_mem_safety_ratio",
+                "0.08",
+                "--runtime_mem_no_warmup_floor_mb",
+                "3072",
+                "--moe_skew_mult",
+                "1.75",
+            ],
+            [
+                "--runtime_mem_safety_ratio=0.08",
+                "--runtime_mem_no_warmup_floor_mb=3072",
+                "--moe_skew_mult=1.75",
+            ],
+            [
+                "--runtime_mem_safety=0.08",
+                "--runtime_mem_no_warmup_f=3072",
+                "--moe_skew_m=1.75",
+            ],
+        ):
+            with (
+                self.subTest(cli_args=cli_args),
+                patch.dict(
+                    os.environ,
+                    {
+                        "RUNTIME_MEM_SAFETY_RATIO": "0.5",
+                        "RUNTIME_MEM_NO_WARMUP_FLOOR_MB": "9999",
+                        "MOE_SKEW_MULT": "3.0",
+                    },
+                    clear=True,
+                ),
+            ):
+                py_env_configs = setup_args(cli_args)
+
+            # CLI wins over the environment values above (provided_args precedence).
+            self.assertEqual(
+                py_env_configs.kv_cache_config.runtime_mem_safety_ratio, 0.08
+            )
+            self.assertEqual(
+                py_env_configs.kv_cache_config.runtime_mem_no_warmup_floor_mb, 3072
+            )
+            self.assertEqual(py_env_configs.moe_config.moe_skew_mult, 1.75)
+
+    def test_equals_cli_in_sys_argv_wins_over_environment(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        sys.argv = ["prog", "--moe_skew_mult=1.75"]
+        with patch.dict(os.environ, {"MOE_SKEW_MULT": "3.0"}, clear=True):
+            py_env_configs = setup_args()
+
+        self.assertEqual(py_env_configs.moe_config.moe_skew_mult, 1.75)
+
+    def test_invalid_sensitive_env_value_is_redacted(self):
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+        from rtp_llm.server.server_args.util import bounded_int
+
+        for dest, env_name in (
+            ("api_token", "API_TOKEN"),
+            ("openai_api_key", "OPENAI_API_KEY"),
+        ):
+            with self.subTest(dest=dest):
+                parser = EnvArgumentParser()
+                parser.add_argument(f"--{dest}", env_name=env_name, type=bounded_int)
+                secret = "short-secret-value"
+                with (
+                    patch.dict(os.environ, {env_name: secret}, clear=True),
+                    patch("sys.stderr", new_callable=io.StringIO) as stderr,
+                    self.assertRaises(SystemExit),
+                ):
+                    parser.parse_args([])
+
+                self.assertNotIn(secret, stderr.getvalue())
+                self.assertIn("<redacted:18 chars>", stderr.getvalue())
+
+    def test_ordinary_token_arguments_are_not_treated_as_secrets(self):
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        for dest in ("tokenizer_path", "max_batch_tokens_size"):
+            with self.subTest(dest=dest):
+                self.assertFalse(EnvArgumentParser._is_sensitive_dest(dest))
+                self.assertEqual(
+                    EnvArgumentParser._shown_env_value(dest, "visible-value"),
+                    "visible-value",
+                )
+
+    def test_lone_dash_positional_does_not_crash_cli_precedence_scan(self):
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        parser = EnvArgumentParser()
+        parser.add_argument("input")
+
+        self.assertEqual(parser.parse_args(["-"]).input, "-")
+
+    def test_empty_string_env_value_keeps_legacy_semantics_on_both_paths(self):
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        for env_only in (True, False):
+            with self.subTest(env_only=env_only):
+                parser = EnvArgumentParser()
+                parser.add_argument("--label", env_name="LABEL", default="default")
+                sys.argv = ["prog"]
+                with patch.dict(os.environ, {"LABEL": ""}, clear=True):
+                    parsed = parser.parse_args() if env_only else parser.parse_args([])
+
+                self.assertEqual(parsed.label, "")
+
+    def test_env_arg_generator_does_not_emit_converter_objects(self):
+        from rtp_llm.server.server_args.generate_args_from_env_clean import (
+            generate_args_list,
+        )
+
+        grpc_json = '{"client_config": {}, "server_config": {}}'
+        with patch.dict(
+            os.environ,
+            {
+                "CP_ROTATE_METHOD": "ALL_GATHER",
+                "GRPC_CONFIG_JSON": grpc_json,
+            },
+            clear=True,
+        ):
+            generated = generate_args_list(only_env_vars=True)
+
+        # These converters return enum/pybind objects. The legacy generator does
+        # not emit string-valued options, so it must not stringify those objects
+        # into argv values that the same converter cannot parse on the next pass.
+        self.assertNotIn("--cp_rotate_method", generated)
+        self.assertNotIn("--grpc_config_json", generated)
+
+    def test_forward_warmup_is_on_by_default(self):
+        """The Python service entrypoint preserves the legacy warmup default."""
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        self.assertTrue(setup_args([]).runtime_config.warm_up)
+
+    def test_runtime_memory_env_boundaries_are_bound_to_config(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        for safety_ratio, no_warmup_floor_mb in (
+            ("0", "0"),
+            ("0.999999", "3072"),
+        ):
+            with (
+                self.subTest(
+                    safety_ratio=safety_ratio,
+                    no_warmup_floor_mb=no_warmup_floor_mb,
+                ),
+                patch.dict(
+                    os.environ,
+                    {
+                        "RUNTIME_MEM_SAFETY_RATIO": safety_ratio,
+                        "RUNTIME_MEM_NO_WARMUP_FLOOR_MB": no_warmup_floor_mb,
+                    },
+                    clear=True,
+                ),
+            ):
+                py_env_configs = setup_args([])
+
+                self.assertEqual(
+                    py_env_configs.kv_cache_config.runtime_mem_safety_ratio,
+                    float(safety_ratio),
+                )
+                self.assertEqual(
+                    py_env_configs.kv_cache_config.runtime_mem_no_warmup_floor_mb,
+                    int(no_warmup_floor_mb),
+                )
+
+    def test_strict_env_values_abort_with_usage_error_naming_the_env_var(self):
+        """Strict converters reject bad env values through argparse, not a bare traceback.
+
+        setup_args([]) takes the CLI-mixed branch (args is not None), where env values are
+        converted by hand after argparse has run. The three warmup knobs use bounded_* converters,
+        which raise argparse.ArgumentTypeError; that is routed through parser.error() so the exit
+        code (2) and the usage-error form match the env-only path. The message names the env var,
+        which argparse itself cannot do on the env-only path.
+        """
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        for env_name, bad_value in (
+            ("RUNTIME_MEM_SAFETY_RATIO", "1.0"),  # upper bound is exclusive
+            ("RUNTIME_MEM_SAFETY_RATIO", "-0.1"),
+            ("RUNTIME_MEM_SAFETY_RATIO", "nan"),
+            ("RUNTIME_MEM_SAFETY_RATIO", "abc"),
+            ("RUNTIME_MEM_NO_WARMUP_FLOOR_MB", "-1"),
+            ("MOE_SKEW_MULT", "0.99"),
+            ("MOE_SKEW_MULT", "inf"),
+        ):
+            with self.subTest(env_name=env_name, bad_value=bad_value):
+                with (
+                    patch.dict(os.environ, {env_name: bad_value}, clear=True),
+                    # argparse prints usage to stderr before exiting; keep test output readable.
+                    patch("sys.stderr", new_callable=io.StringIO) as stderr,
+                ):
+                    with self.assertRaises(SystemExit) as caught:
+                        setup_args([])
+
+                self.assertEqual(caught.exception.code, 2)
+                self.assertIn(env_name, stderr.getvalue())
+
+    def test_invalid_reserver_env_still_falls_back_on_the_cli_mixed_path(self):
+        """The one knob that deliberately keeps the opposite contract.
+
+        non_negative_mib_int raises ValueError rather than ArgumentTypeError precisely so an
+        invalid RESERVER_RUNTIME_MEM_MB keeps its pre-warmup-feature behavior on this path: warn
+        and use the default instead of aborting. Pinned so the divergence stays deliberate --
+        making it strict is a behaviour change that needs a release note.
+        """
+        from rtp_llm.server.server_args.server_args import setup_args
+        from rtp_llm.server.server_args.util import DEFAULT_RESERVER_RUNTIME_MEM_MB
+
+        for bad_value in ("-1", "not-an-int"):
+            with self.subTest(bad_value=bad_value):
+                with patch.dict(
+                    os.environ, {"RESERVER_RUNTIME_MEM_MB": bad_value}, clear=True
+                ):
+                    py_env_configs = setup_args([])
+
+                self.assertEqual(
+                    py_env_configs.runtime_config.reserve_runtime_mem_mb,
+                    DEFAULT_RESERVER_RUNTIME_MEM_MB,
+                )
+
+    def test_env_only_path_binds_new_knobs_and_aborts_on_invalid_values(self):
+        """The env-only branch, which setup_args([]) never exercises.
+
+        setup_args([]) passes a non-None args list and therefore takes the CLI-mixed branch. With
+        sys.argv holding only the program name and args=None, every env value is instead synthesised
+        into argv and converted by argparse itself. RESERVER_RUNTIME_MEM_MB is the interesting one:
+        it aborts here even though the same value falls back on the CLI-mixed path, which is the
+        deliberate asymmetry documented on non_negative_mib_int.
+        """
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        sys.argv = ["prog"]
+
+        with patch.dict(
+            os.environ,
+            {
+                "RUNTIME_MEM_SAFETY_RATIO": "0.08",
+                "RUNTIME_MEM_NO_WARMUP_FLOOR_MB": "3072",
+                "MOE_SKEW_MULT": "1.75",
+            },
+            clear=True,
+        ):
+            py_env_configs = setup_args()
+
+        self.assertEqual(py_env_configs.kv_cache_config.runtime_mem_safety_ratio, 0.08)
+        self.assertEqual(
+            py_env_configs.kv_cache_config.runtime_mem_no_warmup_floor_mb, 3072
+        )
+        self.assertEqual(py_env_configs.moe_config.moe_skew_mult, 1.75)
+
+        # Out-of-range values abort on this path as well, via argparse's own conversion.
+        for env_name, bad_value in (
+            ("RUNTIME_MEM_SAFETY_RATIO", "1.0"),
+            ("MOE_SKEW_MULT", "0.99"),
+            # Lenient on the CLI-mixed path, but env-only hands it to argparse, which rejects it.
+            ("RESERVER_RUNTIME_MEM_MB", "-1"),
+        ):
+            with self.subTest(env_name=env_name, bad_value=bad_value):
+                sys.argv = ["prog"]
+                with (
+                    patch.dict(os.environ, {env_name: bad_value}, clear=True),
+                    patch("sys.stderr", new_callable=io.StringIO),
+                ):
+                    with self.assertRaises(SystemExit) as caught:
+                        setup_args()
+                self.assertEqual(caught.exception.code, 2)
+
+    def test_skew_rollback_value_parses_on_both_paths(self):
+        """moe_skew_mult=1.0 is the documented "disable the skew" rollback value.
+
+        It is a legal value rather than a rejected one, so it does not fall out of the range tests.
+        Pinning it here means a rollback knob that stopped parsing would fail in CI instead of at
+        the moment an operator needs it.
+        """
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                setup_args(["--moe_skew_mult", "1.0"]).moe_config.moe_skew_mult, 1.0
+            )
+
+        sys.argv = ["prog"]
+        with patch.dict(os.environ, {"MOE_SKEW_MULT": "1.0"}, clear=True):
+            self.assertEqual(setup_args().moe_config.moe_skew_mult, 1.0)
+
+    def test_kv_cache_config_pickle_preserves_runtime_memory_tuning(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        config = setup_args(
+            [
+                "--runtime_mem_safety_ratio",
+                "0.08",
+                "--runtime_mem_no_warmup_floor_mb",
+                "3072",
+            ]
+        ).kv_cache_config
+        self.assertEqual(len(config.__getstate__()), 56, msg=_ARITY_TRIPWIRE_MSG)
+        restored = pickle.loads(pickle.dumps(config))
+
+        self.assertEqual(restored.runtime_mem_safety_ratio, 0.08)
+        self.assertEqual(restored.runtime_mem_no_warmup_floor_mb, 3072)
+
+    def test_moe_config_pickle_preserves_warmup_skew(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        config = setup_args(["--moe_skew_mult", "1.75"]).moe_config
+        self.assertEqual(len(config.__getstate__()), 13, msg=_ARITY_TRIPWIRE_MSG)
+        restored = pickle.loads(pickle.dumps(config))
+
+        self.assertEqual(restored.moe_skew_mult, 1.75)
+
+    def test_moe_config_pickle_state_covers_every_to_string_field(self):
+        """Field-level tripwire: the arity pins above cannot see the failure mode that
+        actually happened -- a field added to the struct and to_string() but never to
+        the pickle tuple (fp4_moe_op). Cross-checking the to_string() field inventory
+        against __getstate__() makes that mode fail loudly: adding a struct field
+        without extending the ConfigInit.cc make_tuple/__setstate__ indices breaks
+        this equation.
+
+        MoeConfig only: its to_string() lists every struct field, so the inventory is
+        authoritative. KVCacheConfig's to_string() covers 36 of its 56 pickled fields,
+        so the same cross-check would be vacuous there; it keeps the arity pin only.
+        """
+        from rtp_llm.ops import MoeConfig
+
+        config = MoeConfig()
+        to_string_fields = [
+            line.split(":", 1)[0]
+            for line in config.to_string().splitlines()
+            if ":" in line
+        ]
+        # Parse sanity: the inventory must be non-trivial and duplicate-free, or the
+        # arithmetic below stops meaning anything.
+        self.assertGreaterEqual(len(to_string_fields), 14)
+        self.assertEqual(len(to_string_fields), len(set(to_string_fields)))
+
+        # Tracked serialization gap, not endorsed: fp4_moe_op predates this tripwire and was never
+        # added to the pickle tuple. Current workers reparse configuration and do not consume this
+        # pickled field, but a future direct consumer would silently get the struct default. Fixing
+        # it touches the ConfigInit.cc tuple/setter and this whitelist in one commit.
+        known_unpickled = {"fp4_moe_op"}
+        self.assertLessEqual(known_unpickled, set(to_string_fields))
+
+        self.assertEqual(
+            len(config.__getstate__()),
+            len(to_string_fields) - len(known_unpickled),
+            msg=(
+                "MoeConfig pickle state no longer matches its to_string() field "
+                "inventory. A new struct field must be added to MoeConfig::to_string() "
+                "AND to the __getstate__ make_tuple + __setstate__ indices in "
+                "rtp_llm/cpp/pybind/ConfigInit.cc in the same commit. A direct pickle "
+                "consumer otherwise silently receives the field default. Known "
+                "un-pickled field(s): "
+                f"{sorted(known_unpickled)}."
+            ),
+        )
+
+    def test_legacy_state_arities_keep_config_defaults(self):
+        """Exercise the shorter tuples __setstate__ still accepts.
+
+        ConfigInit.cc keeps them so a state pickled before these fields existed
+        still loads, with the appended fields falling back to their config
+        defaults. The round-trip tests above only ever feed the current arity, so
+        without this the compatibility branches are never executed.
+
+        Truncating the live __getstate__() also pins the field *order*, which the
+        arity assertions do not: the C++ side reads the appended fields at fixed
+        indices (t[54]/t[55], t[12]), so moving a field earlier in
+        __getstate__ makes these unpickle into the wrong slots and fail here.
+        """
+        from rtp_llm.ops import KVCacheConfig, MoeConfig
+
+        kv_config = KVCacheConfig()
+        kv_config.runtime_mem_safety_ratio = 0.08
+        kv_config.runtime_mem_no_warmup_floor_mb = 3072
+        moe_config = MoeConfig()
+        moe_config.moe_skew_mult = 1.75
+        # Compare against freshly constructed configs rather than literals: the
+        # C++ struct initializers are the single source of truth for these
+        # defaults (see tests/test_warmup_bindings.py).
+        for config, legacy_arity, defaults, fields in (
+            (
+                kv_config,
+                54,
+                KVCacheConfig(),
+                ("runtime_mem_safety_ratio", "runtime_mem_no_warmup_floor_mb"),
+            ),
+            (
+                moe_config,
+                12,
+                MoeConfig(),
+                ("moe_skew_mult",),
+            ),
+        ):
+            with self.subTest(config=type(config).__name__):
+                state = config.__getstate__()
+                for field in fields:
+                    self.assertNotEqual(
+                        getattr(config, field),
+                        getattr(defaults, field),
+                        msg=f"{field} must differ from its default for this test to prove anything",
+                    )
+
+                # pybind's pickle setter constructs into an uninitialized instance. Calling
+                # __setstate__ on type(config)() does not exercise that path and can leave this
+                # compatibility test passing without running the C++ arity branch.
+                legacy = type(config).__new__(type(config))
+                legacy.__setstate__(tuple(state[:legacy_arity]))
+
+                for field in fields:
+                    self.assertEqual(getattr(legacy, field), getattr(defaults, field))
+
+                # Self-prove that the C++ setter ran: one shorter than the accepted legacy state
+                # must hit ConfigInit.cc's Invalid state guard for both config types.
+                invalid = type(config).__new__(type(config))
+                with self.assertRaisesRegex(RuntimeError, "Invalid state"):
+                    invalid.__setstate__(tuple(state[: legacy_arity - 1]))
+
+    def test_no_warmup_compat_anchor_defaults(self):
+        """Pin the literals behind the "no-warmup sizing is unchanged" promise.
+
+        The pre-feature formula hardcoded max(2048 MiB, 5% * total); the C++
+        defaults (kDefaultRuntimeMemorySafetyRatio / kDefaultRuntimeNoWarmupFloorMb
+        in ConfigModules.h) now carry those numbers. Every other test compares
+        against freshly constructed configs, so nothing else fails if the
+        defaults drift -- these literal assertions are the backward-compat
+        anchor: changing either value resizes the KV cache of every deployment
+        that never runs a traced warmup, and needs that impact assessed first.
+        """
+        from rtp_llm.ops import KVCacheConfig
+
+        config = KVCacheConfig()
+        self.assertEqual(
+            config.runtime_mem_safety_ratio,
+            0.05,
+            msg="no-warmup compat anchor: pre-feature formula reserved 5% of total GPU",
+        )
+        self.assertEqual(
+            config.runtime_mem_no_warmup_floor_mb,
+            2048,
+            msg="no-warmup compat anchor: pre-feature formula floored at 2048 MiB",
+        )
+
+    def test_moe_skew_mult_default_anchor(self):
+        """Pin the declared default behind the PREFILL KV-cache change.
+
+        Not a compat anchor -- the opposite: 2.0 (kDefaultMoeSkewMult in
+        ConfigModules.h) means every PD PREFILL deployment running a traced warmup
+        reserves for a rank 0 carrying twice the mean load, shrinking the whole
+        cluster's KV cache via the min reduction. Every other test compares against
+        a freshly constructed MoeConfig, so this literal assertion is the only thing
+        that fails when the value drifts, which is the point: changing it changes
+        released behaviour and belongs in the release note.
+        """
+        from rtp_llm.ops import MoeConfig
+
+        self.assertEqual(
+            MoeConfig().moe_skew_mult,
+            2.0,
+            msg=(
+                "declared default: PREFILL warmup skews rank 0 to 2x the mean load; "
+                "changing it requires updating the release note and rollout guidance"
+            ),
+        )
+
+    def test_runtime_tuning_summary_logs_defaults_at_info(self):
+        """assertLogs renders the record, so a %-placeholder/argument mismatch in
+        _log_runtime_tuning_summary fails here instead of only at runtime."""
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            self.assertLogs(level="INFO") as logs,
+        ):
+            setup_args([])
+
+        records = [
+            record
+            for record in logs.records
+            if record.getMessage().startswith("Runtime memory tuning:")
+        ]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].levelno, logging.INFO)
+        message = records[0].getMessage()
+        # One contiguous string on purpose: this must stay byte-identical to
+        # PYTHON_LOG_SENTINEL in rtp_llm/test/smoke/multi_inst_case_runner.py, which
+        # greps it as a single substring. Asserting the halves separately would let a
+        # field inserted between them pass here and fail smoke.
+        self.assertIn("Runtime memory tuning: world_rank=", message)
+        self.assertIn("tuned=none", message)
+        # The reserver default lives at the argparse layer (1024), not in the C++
+        # RuntimeConfig (0): rendering 1024 with tuned=none proves the summary
+        # compares against the right default, else this default run would list it
+        # in the tuned field.
+        self.assertIn("reserver_runtime_mem_mb=1024", message)
+
+    def test_runtime_tuning_summary_lists_non_default_values_in_tuned_field(self):
+        """Tuned knobs stay at INFO and surface in the same-line tuned=[...] field.
+
+        Collectors filter on the field, not the level: legal tuning is
+        configuration, not an incident. WARNING is reserved for genuinely
+        actionable conditions.
+        """
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        for args, expected_fragments in (
+            (
+                ["--moe_skew_mult", "1.75"],
+                ("moe_skew_mult=1.75", "(default 2.0)"),
+            ),
+            # The only knob whose default is argparse-level (1024) rather than a
+            # freshly constructed C++ config: it must still land in tuned=[...].
+            (
+                ["--reserver_runtime_mem_mb", "8192"],
+                ("reserver_runtime_mem_mb=8192", "(default 1024)"),
+            ),
+        ):
+            with self.subTest(args=args):
+                with (
+                    patch.dict(os.environ, {}, clear=True),
+                    self.assertLogs(level="INFO") as logs,
+                ):
+                    setup_args(args)
+
+                records = [
+                    record
+                    for record in logs.records
+                    if record.getMessage().startswith("Runtime memory tuning:")
+                ]
+                self.assertEqual(len(records), 1)
+                self.assertEqual(records[0].levelno, logging.INFO)
+                message = records[0].getMessage()
+                self.assertIn("tuned=[", message)
+                self.assertNotIn("tuned=none", message)
+                for fragment in expected_fragments:
+                    self.assertIn(fragment, message)
+
+    def test_production_parser_help_renders_without_error(self):
+        """Tripwire for bare % in any help string.
+
+        argparse expands help text with the % operator, so a literal percent
+        sign written as a bare % (instead of %%) makes format_help() raise
+        ValueError. That only fires when help is rendered, so servers start
+        fine and nothing else catches it -- this test does, for every argument
+        the production parser registers.
+        """
+        from rtp_llm.server.server_args.server_args import (
+            EnvArgumentParser,
+            PyEnvConfigs,
+            init_all_group_args,
+        )
+
+        parser = EnvArgumentParser(description="help rendering tripwire")
+        py_env_configs = PyEnvConfigs()
+        parser.set_root_config(py_env_configs)
+        init_all_group_args(parser, py_env_configs)
+        parser.add_argument(
+            "--percent_help_tripwire",
+            help="test-only literal percent: 5%%",
+        )
+
+        help_text = parser.format_help()
+        # Keep the escape assertion independent of production wording while format_help() above
+        # continues to check every argument registered by the production parser.
+        self.assertIn("test-only literal percent: 5%", help_text)
 
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""

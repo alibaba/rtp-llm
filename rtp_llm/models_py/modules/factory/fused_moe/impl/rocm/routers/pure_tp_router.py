@@ -78,7 +78,7 @@ class PureTpRouterBase(FusedMoeDataRouter):
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
         self.expert_num = config.expert_num
-        self.expert_num_per_rank = self.expert_num // self.ep_size
+        self.expert_num_per_rank = self.experts_per_ep_rank()
         self.expert_start_id = self.ep_rank * self.expert_num_per_rank
         self.do_recompute_topk = do_recompute_topk
 

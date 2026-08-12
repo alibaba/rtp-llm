@@ -71,6 +71,31 @@ def torch_sparse_block_forward(
     return final_hidden_states
 
 
+class BatchedDataRouterCapacityTest(TestCase):
+    def test_concentrated_routing_over_capacity_fails_with_context(self):
+        router = BatchedDataRouter.__new__(BatchedDataRouter)
+        router.max_num_tokens = 2
+        router.num_local_experts = 1
+        router.ep_rank = 0
+        router.quant_config = FusedMoEQuantConfig()
+
+        hidden_states = torch.ones((3, 4))
+        topk_weights = torch.ones((3, 1))
+        topk_ids = torch.zeros((3, 1), dtype=torch.int64)
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"expert_id=0, routed_tokens=3, max_num_tokens=2",
+        ):
+            router.prepare(
+                hidden_states,
+                None,
+                None,
+                topk_weights,
+                topk_ids,
+            )
+
+
 class FusedMoeBatchedTest(TestCase):
     # Test parameters
     DTYPES = [torch.float16, torch.bfloat16]

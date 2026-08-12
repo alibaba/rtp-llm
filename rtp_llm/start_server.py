@@ -451,7 +451,7 @@ def start_frontend_server_impl(
 
 
 def main():
-    py_env_configs: PyEnvConfigs = setup_args()
+    py_env_configs: PyEnvConfigs = setup_args(log_source="server_entry")
     setup_and_configure_server(py_env_configs)
     start_server(py_env_configs)
 

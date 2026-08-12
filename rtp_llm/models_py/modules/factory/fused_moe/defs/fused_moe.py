@@ -26,6 +26,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import (
     ExecutorType,
     RouterType,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.defs.warmup_diagnostics import (
+    diagnostics,
+)
 
 SKIP_TP_ALLREDUCE_ARG: Final[Literal["skip_tp_allreduce"]] = "skip_tp_allreduce"
 
@@ -113,6 +116,44 @@ class FusedMoeDataRouter(ABC):
         """Return the TP size used by this router's Group.TP collective."""
 
         return self.config.tp_size
+
+    def experts_per_ep_rank(self) -> int:
+        """Local logical-expert count for routers that slice experts by ep_size.
+
+        Such routers derive both their local expert window and their rank offset from
+        ``expert_num // ep_size``, so a non-divisible layout silently drops the tail experts
+        and misplaces every rank offset. Non-divisible outcomes:
+          * phy_exp_num == expert_num (non-redundant): hard failure listing viable ep_size
+            values. This is a behaviour change -- it used to floor-divide silently.
+          * phy_exp_num != expert_num (redundant): warn once per model build and floor-divide,
+            keeping the pre-existing partitioning bit-for-bit. Known gap, not endorsed: nothing
+            here consumes phy2log, and executors that assert divisibility themselves still fail
+            downstream, so such a layout only survives end-to-end with executor combinations
+            that never assert it.
+
+        Routers slicing along another dimension (BatchedDataRouter uses tp_size) deliberately
+        do not call this -- see the comment there.
+        """
+        expert_num = int(self.config.expert_num)
+        ep_size = int(self.config.ep_size)
+        if expert_num <= 0 or ep_size <= 0:
+            raise ValueError(
+                f"expert_num={expert_num} and ep_size={ep_size} must be positive"
+            )
+        if expert_num % ep_size != 0:
+            phy_exp_num = int(self.config.phy_exp_num)
+            if phy_exp_num == expert_num:
+                viable = [d for d in range(1, expert_num + 1) if expert_num % d == 0]
+                raise ValueError(
+                    f"{type(self).__name__} partitions logical experts evenly across ranks, "
+                    f"so expert_num={expert_num} must be divisible by ep_size={ep_size}; "
+                    f"viable ep_size values: {viable}. Adjust ep_size to one of those values "
+                    "or correct expert_num so every logical expert has a rank-local window."
+                )
+            diagnostics.warn_redundant_nondivisible_once(
+                expert_num, ep_size, phy_exp_num
+            )
+        return expert_num // ep_size
 
     @classmethod
     def router_type(cls) -> RouterType:
@@ -220,11 +261,27 @@ class FusedMoe(torch.nn.Module):
         router: FusedMoeDataRouter,
         fused_experts: FusedMoeExpertExecutor,
         expert_num: int,
+        ep_size: int = 1,
+        enable_moe_warmup_skew: bool = False,
     ):
         super().__init__()
         self.router = router
         self.fused_experts = fused_experts
         self.expert_num = expert_num
+        self.ep_size = int(ep_size)
+        self.enable_moe_warmup_skew = bool(enable_moe_warmup_skew)
+        # Only ep_size is validated here, and only because this class branches on
+        # it directly. expert_num positivity and its divisibility by ep_size belong
+        # to FusedMoeDataRouter.experts_per_ep_rank(), which owns the router-side
+        # partitioning (executors that slice experts run their own asserts);
+        # restating them here would let the two copies drift.
+        if self.ep_size <= 0:
+            raise ValueError(f"ep_size={self.ep_size} must be positive")
+        if self.enable_moe_warmup_skew and diagnostics.skew_mult > 1.0:
+            # skew_mult == 1.0 means "skew disabled" (warmup_skew_topk_ids skips
+            # the rewrite), so the trace binding is not needed and its absence
+            # must not fail the build -- that would defeat the rollback knob.
+            diagnostics.require_trace_binding(self.ep_size)
 
     @property
     def topk_ids_dtype(self) -> torch.dtype:
@@ -253,6 +310,23 @@ class FusedMoe(torch.nn.Module):
             )
 
         a1 = hidden_states
+
+        if self.enable_moe_warmup_skew and diagnostics.is_moe_warmup_active(
+            self.ep_size
+        ):
+            # EPLB is intentionally not a gate. Static redundant weights
+            # already reduce the free-memory baseline, dynamic EPLB buffers
+            # are allocated inside the traced executor, and replica balancing
+            # can only spread this logical skew. Decode warmup intentionally
+            # keeps the model's natural routing. Only ids are rewritten: the
+            # startup trace owns this synthetic forward exclusively and its
+            # output is discarded, so weights retain their original values.
+            topk_ids = diagnostics.warmup_skew_topk_ids(
+                topk_ids,
+                self.ep_size,
+                self.expert_num,
+                type(self.fused_experts).__name__,
+            )
 
         expert_payload = self.router.prepare(
             a1,

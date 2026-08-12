@@ -7,7 +7,9 @@ from typing import Dict, Optional
 
 import torch
 
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 
 from .defs.fused_moe import FusedMoe
 from .strategy_registry import StrategyRegistry
@@ -53,4 +55,10 @@ class FusedMoeFactory:
         router = strategy.create_router(config)
         executor = strategy.create_executor(config, weights)
 
-        return FusedMoe(router, executor, expert_num=config.expert_num)
+        return FusedMoe(
+            router,
+            executor,
+            expert_num=config.expert_num,
+            ep_size=config.ep_size,
+            enable_moe_warmup_skew=config.enable_moe_warmup_skew,
+        )

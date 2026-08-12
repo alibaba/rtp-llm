@@ -1,4 +1,14 @@
-from rtp_llm.server.server_args.util import str2bool
+from functools import partial
+
+from rtp_llm.server.server_args.util import bounded_float, str2bool
+
+# The role and execution-path gates are separate from the warmup gate itself --
+# MoEConfigAdapter only enables the skew for RoleType::PREFILL, and it lives on
+# the models_py execution path, so a deployment running the C++ model path never
+# constructs it.
+_SKEW_SCOPE_HELP = (
+    "仅在 CUDA PD PREFILL 的 models_py forward warmup 中生效；其他路径保留自然路由。"
+)
 
 
 def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
@@ -6,6 +16,34 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
     # MOE 特性
     ##############################################################################################################
     moe_group = parser.add_argument_group("MOE 专家并行")
+    # MoeConfig (C++ ConfigModules.h) is the single source of truth for this
+    # default: the value below feeds both `default=` and the help text, so a C++
+    # change cannot leave the documented default behind. warmup_diagnostics.py
+    # reads the same MoeConfig default for its singleton's initial value, so
+    # there is no Python-side literal to drift.
+    default_skew_mult = moe_config.moe_skew_mult
+    # The full mechanics (skew_fraction formula, top_k dilution compensation,
+    # [MOE_WARMUP] log fields, and the cross-rank min-reduce contract that makes an
+    # asymmetric skew safe for KV sizing) are documented where they are implemented:
+    # MoeWarmupDiagnostics.skew_fraction / warmup_skew_topk_ids in
+    # defs/warmup_diagnostics.py, with the sizing-layer half in
+    # rtp_llm/cpp/cache/RuntimeMemorySizing.h. Keep the help to purpose, range,
+    # default and applicability.
+    moe_group.add_argument(
+        "--moe_skew_mult",
+        env_name="MOE_SKEW_MULT",
+        bind_to=(moe_config, "moe_skew_mult"),
+        type=partial(bounded_float, min_value=1.0),
+        metavar="FLOAT",
+        default=default_skew_mult,
+        help=(
+            "PD PREFILL warmup 中热点 rank 的 expert slot 负载相对均值的倍数，"
+            f"必须 ≥1.0，默认 {default_skew_mult:g}；调高通常会减小全簇 KV cache。"
+            "设为 1.0 可关闭倾斜并保留 warmup 定容。"
+            + _SKEW_SCOPE_HELP
+            + "所有 PREFILL EP rank 应一致设置。"
+        ),
+    )
     moe_group.add_argument(
         "--use_deepep_moe",
         env_name="USE_DEEPEP_MOE",
@@ -192,5 +230,8 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         type=str,
         choices=["auto", "trtllm", "cutedsl"],
         default="auto",
-        help="指定 FP4 MOE算子。可选值: auto (自动选择), trtllm (使用 TensorRT-LLM), cutedsl (使用 CuTe DSL)。",
+        help=(
+            "指定 FP4 MoE 算子：auto、trtllm 或 cutedsl。当前 worker 会在各进程重新解析该参数；"
+            "MoeConfig 的 pickle 状态暂不携带此字段。"
+        ),
     )

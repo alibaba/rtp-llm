@@ -62,9 +62,71 @@ void cudaProfilerEnd();
 // Status queries
 // ===================================================================
 
+enum class TraceMemoryPhase : int {
+    Pending  = 0,
+    Active   = 1,
+    Finished = 2,
+};
+
+// These integers are a cross-language contract, not an implementation detail: Python compares
+// get_trace_memory_state() against the literals (warmup_diagnostics.py gates the MoE skew on
+// them, test_warmup_bindings.py pins them). Renumbering would error nowhere at runtime -- the
+// Python gate would just stop matching and silently disable the skew (fail-open) -- so make it
+// fail every build instead.
+static_assert(static_cast<int>(TraceMemoryPhase::Pending) == 0
+                  && static_cast<int>(TraceMemoryPhase::Active) == 1
+                  && static_cast<int>(TraceMemoryPhase::Finished) == 2,
+              "TraceMemoryPhase values 0/1/2 are pinned by Python callers of "
+              "get_trace_memory_state(); update warmup_diagnostics.py and "
+              "test_warmup_bindings.py in the same commit if they must change");
+
+// Threading contract: the phase is atomic so any thread may *read* it (Python MoE modules poll
+// getTraceMemoryState() per layer forward), but the transitions must all be issued by a single
+// control thread -- the one driving startup: setTraceMemory(true) -> warmup forward ->
+// setTraceMemory(false)/finishTraceMemory(). The close path is now a single atomic store (it
+// deliberately leaves g_reserved_baseline_bytes / g_cuda_used_baseline_bytes in ExecOps.cc alone,
+// since they are only read while Active). The open path is what still needs serializing: it
+// emptyCache()es, resets the peak counter and snapshots those baselines, and only then publishes
+// Active -- a concurrent opener would interleave those steps. The atomic only keeps the reads
+// well-defined.
+class TraceMemoryState {
+public:
+    bool isActive() const {
+        return state_.load(std::memory_order_acquire) == static_cast<int>(TraceMemoryPhase::Active);
+    }
+
+    int get() const {
+        return state_.load(std::memory_order_acquire);
+    }
+
+    void activate() {
+        state_.store(static_cast<int>(TraceMemoryPhase::Active), std::memory_order_release);
+    }
+
+    void finish() {
+        state_.store(static_cast<int>(TraceMemoryPhase::Finished), std::memory_order_release);
+    }
+
+private:
+    std::atomic<int> state_{static_cast<int>(TraceMemoryPhase::Pending)};
+};
+
 ExecStatus    getGpuExecStatus();
 torch::Device getTorchCudaDevice();
 void          setTraceMemory(bool trace_memory);
+void          finishTraceMemory();
+// True only inside the RAII-guarded warmup forward (between setTraceMemory(true/false)); the guard
+// transitions the startup lifecycle to finished on both success and exception paths.
+// Exposed to Python (compute_ops.is_trace_memory) so the MoE module can force worst-case
+// routing during warmup, making the measured peak already cover the skewed case.
+bool isTraceMemory();
+// 0=pending, 1=active, 2=finished. Finished ends one warmup lifecycle and is never revisited
+// within it, but activate() is unguarded on purpose so a serial rebuild in the same process
+// (in practice: test processes) can trace again after reload_runtime_settings resets the
+// Python-side latch. No entrypoint serves one model while another warms up -- see the
+// reset comment in MoeWarmupDiagnostics.reload_runtime_settings; an entrypoint that did
+// would have to add lifecycle ownership on the Python side first.
+int getTraceMemoryState();
 
 // ===================================================================
 // Copy ops

@@ -7,13 +7,10 @@
 import argparse
 import datetime
 import os
-from ast import arg
 from typing import Any, List, Tuple
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.server.server_args.server_args import EnvArgumentParser
-from rtp_llm.server.server_args.util import str2bool
-from rtp_llm.config.py_config_modules import PyEnvConfigs
 
 
 def get_all_arguments_from_parser(
@@ -51,7 +48,11 @@ def get_all_arguments_from_parser(
 
 def read_env_value(env_name: str, default_value: Any, arg_type: type) -> Any:
     """
-    从环境变量读取值，如果环境变量不存在则返回默认值
+    从环境变量读取值，如果环境变量不存在则返回默认值。
+
+    converter 会被调用以保留校验及既有副作用。只有可安全序列化并由同一
+    converter 再次接受的标量使用转换结果；枚举和 pybind 对象保留原始字符串，
+    交给 format_argument_pair 的既有字符串过滤逻辑处理。
     """
     if default_value is None:
         return None
@@ -61,16 +62,13 @@ def read_env_value(env_name: str, default_value: Any, arg_type: type) -> Any:
         return default_value
 
     try:
-        # 根据类型转换环境变量值
+        # Call the registered converter so partials and custom bounded types keep
+        # the same validation semantics as the service parser.
         if arg_type == bool:
             return env_value.lower() in ("true", "1", "yes", "on")
-        elif arg_type == int:
-            return int(env_value)
-        elif arg_type == float:
-            return float(env_value)
-        else:
-            return str(env_value)
-    except (ValueError, TypeError):
+        converted = arg_type(env_value)
+        return converted if isinstance(converted, (bool, int, float)) else env_value
+    except (ValueError, TypeError, argparse.ArgumentTypeError):
         # 如果转换失败，返回默认值
         return default_value
 
@@ -138,7 +136,7 @@ def generate_args_list(only_env_vars: bool = False) -> List[str]:
                 env_value_str = os.getenv(env_name)
                 if env_value_str is not None:
                     try:
-                        # 根据类型转换环境变量值
+                        # Use the action's converter rather than comparing converter identity.
                         if arg_type == bool:
                             env_value = env_value_str.lower() in (
                                 "true",
@@ -146,21 +144,20 @@ def generate_args_list(only_env_vars: bool = False) -> List[str]:
                                 "yes",
                                 "on",
                             )
-                        elif arg_type == int:
-                            env_value = int(env_value_str)
-                        elif arg_type == float:
-                            env_value = float(env_value_str)
-                        elif arg_type == str2bool:
-                            env_value = str2bool(env_value_str)
                         else:
-                            env_value = str(env_value_str)
+                            converted = arg_type(env_value_str)
+                            env_value = (
+                                converted
+                                if isinstance(converted, (bool, int, float))
+                                else env_value_str
+                            )
 
                         # 跳过空字符串参数
                         if isinstance(env_value, str) and env_value == "":
                             continue
 
                         args_list.extend(format_argument_pair(long_option, env_value))
-                    except (ValueError, TypeError):
+                    except (ValueError, TypeError, argparse.ArgumentTypeError):
                         # 如果转换失败，跳过这个参数
                         continue
         else:

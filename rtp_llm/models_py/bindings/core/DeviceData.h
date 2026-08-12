@@ -30,12 +30,59 @@ struct ExecProperties {
 };
 
 struct MemoryStatus {
-    size_t used_bytes         = 0;
-    size_t free_bytes         = 0;
-    size_t available_bytes    = 0;  // free GPU memory available for allocation
-    size_t allocated_bytes    = 0;  // memory allocated via current device
-    size_t max_consumed_bytes = 0;  // only applicable if RTP_LLM_TRACE_MEMORY is enabled.
+    size_t used_bytes = 0;
+    size_t free_bytes = 0;
+    // Device total as reported by cudaMemGetInfo/hipMemGetInfo. Carried explicitly so
+    // callers that need the total (the safety-ratio base in MemoryEvaluationHelper) do
+    // not have to reconstruct it as used + free, which only works because used is
+    // computed as total - free right here.
+    size_t total_bytes     = 0;
+    size_t available_bytes = 0;  // free GPU memory available for allocation
+    size_t allocated_bytes = 0;  // memory allocated via current device
+    // Torch allocator peak growth over the traced window; only set while tracing. Together with
+    // non_torch_increase_bytes below (sampled at the end of the forward) this is the total growth
+    // the KV budget reserves, against the pool as it was before the warmup allocated anything.
+    size_t max_consumed_bytes = 0;
+    // Torch allocator reserved growth at the moment of sampling (current, not peak); only set while
+    // tracing. Sampled after the warmup teardown + emptyCache() it shows how much the warmup left
+    // behind. Diagnostics only: no sizing formula reads it. Segment granularity makes it an
+    // overestimate of true residency (a partially referenced segment counts entirely).
+    size_t torch_current_increase_bytes = 0;
+    // Non-torch (driver-side) resident delta at the moment of sampling: device used minus torch
+    // reserved, so it covers lazily loaded kernel modules, cuBLAS/cuDNN handle state, comm buffers
+    // and driver-side CUDA graph bookkeeping -- and any other process on this GPU. Sampled at the
+    // end of the forward it is a term in the total growth; sampled after the teardown it is a
+    // diagnostic.
+    size_t non_torch_increase_bytes = 0;
 };
+
+struct MemoryGrowthBreakdown {
+    size_t torch_peak_increase_bytes    = 0;
+    size_t torch_current_increase_bytes = 0;
+    size_t non_torch_increase_bytes     = 0;
+};
+
+inline MemoryGrowthBreakdown calculateMemoryGrowth(size_t reserved_baseline_bytes,
+                                                   size_t reserved_peak_bytes,
+                                                   size_t reserved_current_bytes,
+                                                   size_t cuda_used_baseline_bytes,
+                                                   size_t cuda_used_current_bytes) {
+    const size_t torch_peak_increase =
+        reserved_peak_bytes > reserved_baseline_bytes ? reserved_peak_bytes - reserved_baseline_bytes : 0;
+    const size_t torch_current_increase =
+        reserved_current_bytes > reserved_baseline_bytes ? reserved_current_bytes - reserved_baseline_bytes : 0;
+    const size_t non_torch_current =
+        cuda_used_current_bytes > reserved_current_bytes ? cuda_used_current_bytes - reserved_current_bytes : 0;
+    const size_t non_torch_baseline =
+        cuda_used_baseline_bytes > reserved_baseline_bytes ? cuda_used_baseline_bytes - reserved_baseline_bytes : 0;
+    const size_t non_torch_increase =
+        non_torch_current > non_torch_baseline ? non_torch_current - non_torch_baseline : 0;
+    MemoryGrowthBreakdown breakdown;
+    breakdown.torch_peak_increase_bytes    = torch_peak_increase;
+    breakdown.torch_current_increase_bytes = torch_current_increase;
+    breakdown.non_torch_increase_bytes     = non_torch_increase;
+    return breakdown;
+}
 
 // runtime device status, such as available memory.
 struct ExecStatus {

@@ -27,6 +27,9 @@ EmbeddingEngine::EmbeddingEngine(const EngineInitParams& params, py::object hand
                              params.model_config_.mla_ops_type);
     }
     warmupNoBlockCopy();
+    // EmbeddingEngine has no NormalEngine startup warmup scope. Publish the
+    // terminal state before its executor can issue serving forwards.
+    finishTraceMemory();
     executor_.reset(new EmbeddingExecutor(params, handler));
     scheduler_.reset(
         new EmbeddingScheduler(model_config_, concurrency_config, params.runtime_config, metrics_reporter_));

@@ -61,6 +61,80 @@ cc_library(
 )
 
 cc_test(
+    name = "runtime_memory_sizing_test",
+    srcs = ["RuntimeMemorySizingTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:runtime_memory_sizing",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "warmup_result_assembly_test",
+    srcs = ["WarmUpResultAssemblyTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:warmup_result_assembly",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+# Provides the single ExecOps symbol cache_core references (getGpuExecStatus) so the sizing test
+# below does not need the CUDA op libraries that carry the real implementation.
+#
+# Must never end up in the same target as exec_ops_test_lib / exec_ops_srcs: those carry the real
+# definition and the link would fail on a duplicate symbol.
+cc_library(
+    name = "host_gpu_exec_status_stub",
+    srcs = ["HostGpuExecStatusStub.cc"],
+    hdrs = ["HostGpuExecStatusStub.h"],
+    copts = test_copts,
+    # alwayslink so the definition survives archive resolution regardless of where this dep sits
+    # in a test's deps list. testonly + private visibility guard against production use: a non-test
+    # target depending on a fake device-memory reading fails analysis. testonly works here because
+    # cc_test is cc_test_wrapper (def.bzl), which forwards **kwargs -- including testonly on the
+    # consuming cc_test below -- to the native.cc_binary it generates.
+    alwayslink = 1,
+    testonly = True,
+    visibility = ["//visibility:private"],
+    deps = [
+        "//rtp_llm/models_py/bindings/core:device_data",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+    ] + torch_deps(),
+)
+
+cc_test(
+    name = "memory_evaluation_helper_test",
+    srcs = ["MemoryEvaluationHelperTest.cc"],
+    copts = test_copts,
+    # testonly so this may depend on host_gpu_exec_status_stub (forwarded to the generated
+    # cc_binary via cc_test_wrapper's **kwargs).
+    testonly = True,
+    # Formula cases drive the injected MemoryStatus overload; one case deliberately drives the
+    # production sampling overload through the writable stub above. cache_types can transitively
+    # pull in //:rtp_compute_ops, whose shared library carries the real getGpuExecStatus symbol, so
+    # this target relies on the executable's alwayslinked stub definition taking precedence. The
+    # fixture SetUp's fatal zero-total assertion is the runtime sentinel for that link assumption.
+    # Depending on cache_core rather than the cache umbrella still keeps KVCacheManager and the
+    # connector graph out of this no-GPU target. cache_core links torch transitively, so this is
+    # "needs no GPU", not "torch-free".
+    deps = [
+        ":host_gpu_exec_status_stub",
+        "//rtp_llm/cpp/cache:cache_core",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:model_config",
+        "//rtp_llm/cpp/config:static_config",
+        "//rtp_llm/cpp/testing:test_log_capture",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+)
+
+cc_test(
     name = "cache_topology_test",
     srcs = ["CacheTopologyTest.cc"],
     copts = test_copts,

@@ -7,7 +7,7 @@ from typing import Optional
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import QuantizationConfig
-from rtp_llm.ops import MoeConfig, ParallelismConfig
+from rtp_llm.ops import MoeConfig, ParallelismConfig, RoleType
 
 
 class MoEConfigAdapter:
@@ -46,17 +46,24 @@ class MoEConfigAdapter:
         self.local_rank = parallelism_config.local_rank
 
         self.expert_num = model_config.expert_num
+        self.phy_exp_num = model_config.eplb_config.phy_exp_num(self.expert_num)
         self.moe_k = model_config.moe_k
         self.moe_topk_group = model_config.moe_topk_group
         self.hidden_size = model_config.hidden_size
         self.data_type = model_config.data_type
         self.head_num = model_config.attn_config.head_num
-        self.ll_num_max_token = moe_config.ll_num_max_token
-        self.masked_max_token_num = moe_config.masked_max_token_num
-        self.moe_strategy = moe_config.moe_strategy
-        self.use_mori_ep = moe_config.use_mori_ep
-        self.use_deepep_moe = moe_config.use_deepep_moe
+        self.ll_num_max_token = self.moe_config.ll_num_max_token
+        self.masked_max_token_num = self.moe_config.masked_max_token_num
+        self.moe_strategy = self.moe_config.moe_strategy
+        self.use_mori_ep = self.moe_config.use_mori_ep
+        self.use_deepep_moe = self.moe_config.use_deepep_moe
         self.enable_cuda_graph = enable_cuda_graph
+        # Current policy: only PREFILL gets the skew. DECODE also trusts its measured peak and can
+        # select routing-dependent paths such as DeepEP normal, so the role-only exclusion is a
+        # known sizing gap, not a claim that every DECODE router preallocates worst-case buffers.
+        # Resolving it requires either rejecting routing-dependent DECODE combinations or moving
+        # this gate to an explicit router capability; keep the release-note limitation in sync.
+        self.enable_moe_warmup_skew = parallelism_config.role_type == RoleType.PREFILL
 
     @property
     def activation_type(self):

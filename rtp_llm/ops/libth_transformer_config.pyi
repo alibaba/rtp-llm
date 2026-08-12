@@ -684,6 +684,8 @@ class KVCacheConfig:
     enable_remote_cache: bool
     fp8_kv_cache: int
     kv_cache_mem_mb: int
+    runtime_mem_safety_ratio: float
+    runtime_mem_no_warmup_floor_mb: int
     linear_step: int
     max_block_size_per_item: int
     memory_cache_size_mb: int
@@ -1136,12 +1138,14 @@ class MoeConfig:
     hack_moe_expert: bool
     ll_num_max_token: int
     masked_max_token_num: int
+    moe_skew_mult: float
     moe_strategy: str
     use_all_gather: bool
     use_deepep_internode: bool
     use_deepep_low_latency: bool
     use_deepep_moe: bool
     use_deepep_p2p_low_latency: bool
+    use_mori_ep: bool
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:

@@ -6,6 +6,7 @@ from argparse import Namespace
 from typing import Any, Dict, List, Optional, Sequence, Tuple, TypeVar, Union
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.ops import KVCacheConfig, MoeConfig
 from rtp_llm.server.server_args.batch_decode_scheduler_group_args import (
     init_batch_decode_scheduler_group_args,
 )
@@ -64,6 +65,7 @@ from rtp_llm.server.server_args.server_group_args import init_server_group_args
 from rtp_llm.server.server_args.speculative_decoding_group_args import (
     init_speculative_decoding_group_args,
 )
+from rtp_llm.server.server_args.util import DEFAULT_RESERVER_RUNTIME_MEM_MB
 from rtp_llm.server.server_args.vit_group_args import init_vit_group_args
 
 _T = TypeVar("_T")
@@ -172,13 +174,32 @@ class EnvArgumentGroup:
 
 
 class EnvArgumentParser(argparse.ArgumentParser):
-    _env_mappings: Dict[str, str] = {}
+    _SENSITIVE_DESTS = frozenset(
+        {
+            "api_token",
+            "dashscope_api_key",
+            "openai_api_key",
+            "reco_instance_id_salt",
+            "reco_model_sdk_config",
+        }
+    )
+    _SENSITIVE_DEST_SUFFIXES = (
+        "_api_key",
+        "_api_token",
+        "_credential",
+        "_password",
+        "_passwd",
+        "_secret",
+    )
 
     def __init__(self, *args, env_prefix: str = "", **kwargs):
         self.env_prefix = env_prefix.upper()
         self._groups: Dict[str, EnvArgumentGroup] = {}
         self._config_bindings: List[ConfigBinding] = []  # 配置绑定列表
         self._root_config: Optional[Any] = None  # 根配置对象（PyEnvConfigs）
+        # Per-instance rather than a class attribute: a shared dict accumulates mappings
+        # across every parser ever constructed, which leaks between instances.
+        self._env_mappings: Dict[str, str] = {}
 
         super().__init__(*args, **kwargs)
 
@@ -192,9 +213,7 @@ class EnvArgumentParser(argparse.ArgumentParser):
     def _register_config_binding(
         self,
         action: argparse.Action,
-        bind_to: Union[
-            Tuple[Any, str], str, List[Union[Tuple[Any, str], str]]
-        ],
+        bind_to: Union[Tuple[Any, str], str, List[Union[Tuple[Any, str], str]]],
     ) -> None:
         """注册参数到配置对象的绑定关系"""
         binding = ConfigBinding(action, bind_to)
@@ -248,7 +267,42 @@ class EnvArgumentParser(argparse.ArgumentParser):
         else:
             full_env_name = effective_env_name
 
-        EnvArgumentParser._env_mappings[action.dest] = full_env_name
+        self._env_mappings[action.dest] = full_env_name
+
+    def _provided_cli_dests(self, args: Sequence[str]) -> set[str]:
+        """Return destinations explicitly present on the command line."""
+        provided = set()
+        for arg in args:
+            if not arg.startswith("-"):
+                continue
+            option = arg.split("=", 1)[0]
+            # argparse's private prefix matcher indexes option[1]. A lone "-" is
+            # valid positional input, so it must not be sent through that matcher.
+            if len(option) < 2:
+                continue
+            actions = [
+                action for action in self._actions if option in action.option_strings
+            ]
+            if not actions:
+                # argparse accepts unambiguous long-option prefixes. Parsing has already
+                # succeeded, so a unique tuple here is the action argparse actually used.
+                actions = [match[0] for match in self._get_option_tuples(option)]
+            if len(actions) == 1:
+                provided.add(actions[0].dest)
+        return provided
+
+    @classmethod
+    def _shown_env_value(cls, dest: str, value: str) -> str:
+        if cls._is_sensitive_dest(dest):
+            return f"<redacted:{len(value)} chars>"
+        return value if len(value) <= 64 else f"{value[:64]}...[{len(value)} chars]"
+
+    @classmethod
+    def _is_sensitive_dest(cls, dest: str) -> bool:
+        normalized = dest.lower()
+        return normalized in cls._SENSITIVE_DESTS or normalized.endswith(
+            cls._SENSITIVE_DEST_SUFFIXES
+        )
 
     def parse_args(
         self,
@@ -297,46 +351,8 @@ class EnvArgumentParser(argparse.ArgumentParser):
         # After parsing, if there were command line arguments, fill in missing values from environment variables
         # This allows mixing command line arguments and environment variables
         if has_cmd_args:
-            # Build a set of argument names that were provided via command line
-            provided_args = set()
-            if args is not None:
-                # If args was provided, check which arguments are in the args list
-                i = 0
-                while i < len(args):
-                    arg = args[i]
-                    if arg.startswith("--"):
-                        # Find the action for this option
-                        for action_item in self._actions:
-                            if arg in action_item.option_strings:
-                                provided_args.add(action_item.dest)
-                                # Check if this action requires a value
-                                if action_item.nargs in (None, "?", 1):
-                                    # Skip the value if present
-                                    if i + 1 < len(args) and not args[i + 1].startswith(
-                                        "-"
-                                    ):
-                                        i += 1
-                                break
-                    i += 1
-            else:
-                # If args is None, argparse used sys.argv, so check sys.argv
-                i = 1  # Skip program name
-                while i < len(sys.argv):
-                    arg = sys.argv[i]
-                    if arg.startswith("--"):
-                        # Find the action for this option
-                        for action_item in self._actions:
-                            if arg in action_item.option_strings:
-                                provided_args.add(action_item.dest)
-                                # Check if this action requires a value
-                                if action_item.nargs in (None, "?", 1):
-                                    # Skip the value if present
-                                    if i + 1 < len(sys.argv) and not sys.argv[
-                                        i + 1
-                                    ].startswith("-"):
-                                        i += 1
-                                break
-                    i += 1
+            cli_args = args if args is not None else sys.argv[1:]
+            provided_args = self._provided_cli_dests(cli_args)
 
             # Now fill in missing values from environment variables
             for dest, env_name in self._env_mappings.items():
@@ -357,12 +373,46 @@ class EnvArgumentParser(argparse.ArgumentParser):
                         if action is not None:
                             # Convert the value using the action's type
                             if action.type is not None:
+                                # Bound malformed input and redact values whose destination names
+                                # indicate credentials or opaque SDK configuration.
+                                shown = self._shown_env_value(dest, env_value)
                                 try:
                                     converted_value = action.type(env_value)
                                     setattr(parsed_args, dest, converted_value)
+                                except argparse.ArgumentTypeError as error:
+                                    # Strict converters (bounded_*). Must be listed before the
+                                    # lenient except below: ArgumentTypeError does NOT subclass
+                                    # ValueError. Routing it through self.error() gives the same
+                                    # usage-error form and the same exit code 2 as the env-only
+                                    # path, instead of the bare traceback that escaping parse_args
+                                    # used to produce.
+                                    #
+                                    # What this does NOT unify: the message text. This block sits
+                                    # inside `if has_cmd_args:`, so it is unreachable on the
+                                    # env-only path -- there the value is injected as argv and
+                                    # argparse reports "argument <option>: ...", which cannot name
+                                    # the env var. Naming it on both paths would require
+                                    # re-validating each env value before synthesizing argv.
+                                    error_detail = (
+                                        "value failed validation"
+                                        if self._is_sensitive_dest(dest)
+                                        else str(error)
+                                    )
+                                    self.error(
+                                        f"invalid value for {env_name}={shown!r}: {error_detail}"
+                                    )
                                 except (ValueError, TypeError):
-                                    # If conversion fails, skip this value
-                                    pass
+                                    # Lenient fallback, CLI-mixed path only: converters that raise
+                                    # ValueError/TypeError (plain int/float, non_negative_mib_int)
+                                    # keep the legacy "ignore bad env, use default" behavior. Say so
+                                    # rather than dropping the value silently.
+                                    logging.warning(
+                                        "invalid value for %s=%r; ignoring it and using the default "
+                                        "%r for this run",
+                                        env_name,
+                                        shown,
+                                        action.default,
+                                    )
                             else:
                                 # No type converter, use as string
                                 setattr(parsed_args, dest, env_value)
@@ -382,7 +432,11 @@ class EnvArgumentParser(argparse.ArgumentParser):
                     env_value = ",".join(map(str, value))
                 else:
                     env_value = str(value)
-                logging.debug(f"[EnvMapping] {env_name} = {env_value}")
+                logging.debug(
+                    "[EnvMapping] %s = %s",
+                    env_name,
+                    self._shown_env_value(dest, env_value),
+                )
 
         return parsed_args
 
@@ -409,14 +463,14 @@ class EnvArgumentParser(argparse.ArgumentParser):
             if group_name in self._groups:
                 group = self._groups[group_name]._group
                 for action in group._group_actions:
-                    if action.dest in EnvArgumentParser._env_mappings:
+                    if action.dest in self._env_mappings:
                         logging.info(
-                            f"{action.dest:<20} -> {EnvArgumentParser._env_mappings[action.dest]}"
+                            f"{action.dest:<20} -> {self._env_mappings[action.dest]}"
                         )
             else:
                 logging.info(f"Group '{group_name}' not found.")
         else:
-            for dest, env_name in EnvArgumentParser._env_mappings.items():
+            for dest, env_name in self._env_mappings.items():
                 logging.info(f"{dest:<20} -> {env_name}")
 
         logging.info("-" * 50)
@@ -426,11 +480,11 @@ class EnvArgumentParser(argparse.ArgumentParser):
             group = self._groups[group_name]._group
             mappings = {}
             for action in group._group_actions:
-                if action.dest in EnvArgumentParser._env_mappings:
-                    mappings[action.dest] = EnvArgumentParser._env_mappings[action.dest]
+                if action.dest in self._env_mappings:
+                    mappings[action.dest] = self._env_mappings[action.dest]
             return mappings
         else:
-            return EnvArgumentParser._env_mappings.copy()
+            return self._env_mappings.copy()
 
 
 def init_all_group_args(
@@ -504,13 +558,22 @@ def init_all_group_args(
     init_dash_sc_grpc_group_args(parser, py_env_configs.dash_sc_grpc_config)
 
 
-def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
+def setup_args(
+    args: Optional[Sequence[str]] = None, log_source: str = "unspecified"
+) -> PyEnvConfigs:
     """Parse engine arguments into the canonical ``PyEnvConfigs`` object.
 
     ``args=None`` preserves the server entry point behavior (parse ``sys.argv``).
     Supplying an explicit sequence lets in-process tools, such as the offline
     capacity estimator, reuse the exact same parser and config bindings without
     temporarily replacing global process arguments.
+
+    ``log_source`` labels the runtime tuning summary this call emits. More than one
+    entrypoint parses per deployment (the server entry point, then DeviceBase during
+    device init), each re-reading the environment independently, so the same process
+    can log several summaries whose role_type differs from the one the server ends up
+    running. The label is what keeps a log consumer from reading that as a cross-rank
+    fork.
     """
     parser = EnvArgumentParser(description="RTP LLM")
 
@@ -526,4 +589,89 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
     # 解析参数（会自动应用所有配置绑定）
     parser.parse_args(args)
 
+    _log_runtime_tuning_summary(py_env_configs, log_source)
+
     return py_env_configs
+
+
+def _log_runtime_tuning_summary(py_env_configs: PyEnvConfigs, log_source: str) -> None:
+    """Log the four rank-sensitive tuning knobs with this rank's identity.
+
+    These four are only convention-consistent across ranks: nothing validates that every
+    rank in a role got the same value. Divergence is absorbed rather than rejected --
+    KVCacheManager::allocateAndSync min-reduces block_num across DP_AND_TP, so the most
+    conservative rank silently sets the whole cluster's KV cache. That is safe but lossy,
+    and invisible from any single rank's log.
+
+    So carry world_rank/role_type/source on the line, and render the non-default knobs as a
+    same-line tuned=[...] / tuned=none field so collectors filter by field, not by level.
+    The line is always INFO: a legally tuned knob is configuration, not an incident. There
+    is deliberately no WARNING escalation here -- neither for a dangerous-but-legal value
+    nor for cross-rank divergence, since this function sees exactly one rank's config.
+    Defaults come from freshly constructed configs rather than literals (the C++ structs in
+    ConfigModules.h own them) -- except reserver_runtime_mem_mb, whose default is the
+    argparse layer's DEFAULT_RESERVER_RUNTIME_MEM_MB: the bare C++ RuntimeConfig
+    deliberately defaults it to 0, so a fresh RuntimeConfig() would flag every default
+    deployment as tuned.
+    """
+    kv_cache_config = py_env_configs.kv_cache_config
+    moe_config = py_env_configs.moe_config
+    runtime_config = py_env_configs.runtime_config
+    default_kv_cache_config, default_moe_config = KVCacheConfig(), MoeConfig()
+
+    tuned = [
+        (name, value, default)
+        for name, value, default in (
+            (
+                "runtime_mem_safety_ratio",
+                kv_cache_config.runtime_mem_safety_ratio,
+                default_kv_cache_config.runtime_mem_safety_ratio,
+            ),
+            (
+                "runtime_mem_no_warmup_floor_mb",
+                kv_cache_config.runtime_mem_no_warmup_floor_mb,
+                default_kv_cache_config.runtime_mem_no_warmup_floor_mb,
+            ),
+            (
+                "reserver_runtime_mem_mb",
+                runtime_config.reserve_runtime_mem_mb,
+                DEFAULT_RESERVER_RUNTIME_MEM_MB,
+            ),
+            (
+                "moe_skew_mult",
+                moe_config.moe_skew_mult,
+                default_moe_config.moe_skew_mult,
+            ),
+        )
+        if value != default
+    ]
+
+    tuned_field = (
+        "["
+        + ", ".join(
+            f"{name}={value!r} (default {default!r})" for name, value, default in tuned
+        )
+        + "]"
+        if tuned
+        else "none"
+    )
+    # The "Runtime memory tuning: world_rank=" prefix is the smoke gate's
+    # PYTHON_LOG_SENTINEL (rtp_llm/test/smoke/multi_inst_case_runner.py); changing it
+    # requires updating that constant in the same commit. source= distinguishes the
+    # entrypoints that each parse once per process, so this line legitimately appears more
+    # than once with differing role_type.
+    logging.info(
+        "Runtime memory tuning: world_rank=%s role_type=%s source=%s "
+        "runtime_mem_safety_ratio=%s runtime_mem_no_warmup_floor_mb=%s "
+        "reserver_runtime_mem_mb=%s moe_skew_mult=%s tuned=%s. "
+        "All ranks in a role/group must agree; "
+        "a diverging rank is not rejected, it just min-reduces the cluster's KV cache.",
+        py_env_configs.parallelism_config.world_rank,
+        py_env_configs.role_config.role_type,
+        log_source,
+        kv_cache_config.runtime_mem_safety_ratio,
+        kv_cache_config.runtime_mem_no_warmup_floor_mb,
+        runtime_config.reserve_runtime_mem_mb,
+        moe_config.moe_skew_mult,
+        tuned_field,
+    )

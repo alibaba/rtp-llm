@@ -12,7 +12,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
-from rtp_llm.ops import CPRotateMethod, MoeConfig, ParallelismConfig
+from rtp_llm.ops import CPRotateMethod, MoeConfig, ParallelismConfig, RoleType
 
 
 def create_config_adapter(
@@ -23,6 +23,8 @@ def create_config_adapter(
     use_deepep_low_latency: bool = False,
     data_type: str = "fp16",
     cp_enabled: bool = False,
+    role_type: RoleType = RoleType.PDFUSION,
+    redundant_expert: int = 0,
 ) -> MoEConfigAdapter:
     """Helper function to create MoEConfigAdapter for testing"""
     model_config = ModelConfig()
@@ -31,6 +33,7 @@ def create_config_adapter(
     model_config.moe_k = 2
     model_config.data_type = data_type
     model_config.quant_config = quant_config
+    model_config.eplb_config.redundant_expert = redundant_expert
 
     parallelism_config = ParallelismConfig()
     parallelism_config.ep_size = ep_size
@@ -43,6 +46,7 @@ def create_config_adapter(
     parallelism_config.world_rank = 0
     parallelism_config.local_rank = 0
     parallelism_config.local_world_size = 1
+    parallelism_config.role_type = role_type
     if cp_enabled:
         parallelism_config.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
 
@@ -56,12 +60,44 @@ def create_config_adapter(
     )
 
 
+class TestMoEConfigAdapter(unittest.TestCase):
+    def test_warmup_skew_is_enabled_only_for_pd_prefill(self):
+        expected = {
+            "PDFUSION": False,
+            "PREFILL": True,
+            "DECODE": False,
+            "VIT": False,
+            "FRONTEND": False,
+        }
+        self.assertEqual(set(RoleType.__members__), set(expected))
+        for role_name, role in RoleType.__members__.items():
+            with self.subTest(role=role_name):
+                self.assertEqual(
+                    create_config_adapter(role_type=role).enable_moe_warmup_skew,
+                    expected[role_name],
+                    role_name,
+                )
+
+
 class TestMoeConfigResolver(unittest.TestCase):
     """Test MoeConfigResolver"""
 
     def setUp(self):
         """Prepare for testing"""
         self.resolver = MoeConfigResolver()
+
+    def test_phy_exp_num_reflects_redundant_experts(self):
+        """Pin the real pybind boundary the divisibility exemption keys off.
+
+        FusedMoeDataRouter.experts_per_ep_rank treats phy_exp_num != expert_num as "redundant
+        layout" and downgrades a non-divisible layout from hard failure to a warning, so what
+        that expression actually returns is load-bearing. test_warmup_skew.py only covers the
+        branch through a stub config.
+        """
+        self.assertEqual(create_config_adapter().phy_exp_num, 8)
+        adapter = create_config_adapter(redundant_expert=2)
+        self.assertEqual(adapter.expert_num, 8)
+        self.assertEqual(adapter.phy_exp_num, 10)
 
     def test_get_device_type(self):
         """Test getting device type"""

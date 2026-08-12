@@ -2,6 +2,14 @@ load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "runtime_memory_sizing",
+    srcs = ["RuntimeMemorySizing.cc"],
+    hdrs = ["RuntimeMemorySizing.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cp_slot_mapper",
     srcs = ["CPSlotMapper.cc"],
     hdrs = ["CPSlotMapper.h"],
@@ -105,6 +113,32 @@ cc_library(
 )
 
 cc_library(
+    name = "warm_up_result",
+    hdrs = [
+        "WarmUpResult.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+# Pure assembly of the two warmup memory samples into a WarmUpResult, plus the poolShrinkBytes
+# helper both the sizing and the logging layer share. Its own target so the pure computation is
+# testable on its own; warmup_result_assembly_test therefore needs no GPU. Note "no GPU" is not
+# "torch-free": bindings/core:device_data (for MemoryStatus) transitively links torch. cache_core
+# depends on this target, so the dependency edge runs core -> assembly -> bindings.
+cc_library(
+    name = "warmup_result_assembly",
+    srcs = ["WarmUpResultAssembly.cc"],
+    hdrs = ["WarmUpResultAssembly.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":warm_up_result",
+        "//rtp_llm/models_py/bindings/core:device_data",
+    ],
+)
+
+cc_library(
     name = "cache_types",
     srcs = [
         "Types.cc",
@@ -112,7 +146,6 @@ cc_library(
     hdrs = [
         "CacheConfig.h",
         "Types.h",
-        "WarmUpResult.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -123,6 +156,7 @@ cc_library(
         ":cache_group_type",
         ":cache_layout",
         ":kv_cache_specs",
+        ":warm_up_result",
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
@@ -317,8 +351,12 @@ cc_library(
         ":batch_kv_cache_resource",
         ":cache_types",
         ":kv_cache_allocator",
+        ":runtime_memory_sizing",
+        ":warmup_result_assembly",
         "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
+        # MemoryEvaluationHelper.h includes DeviceData.h for the MemoryStatus overload.
+        "//rtp_llm/models_py/bindings/core:device_data",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/models_py/bindings/core:type_convert",
         "//rtp_llm/cpp/disaggregate/cache_store",
@@ -329,15 +367,11 @@ cc_library(
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        # No platform host-utils dep here on purpose: cache_core sources query device
+        # memory only through getGpuExecStatus() (exec_ops_hdr) and include no CUDA/ROCm
+        # headers. block_pool keeps its cuda_host_utils dep -- BlockPool.cc includes
+        # cuda_runtime.h directly.
     ] + torch_deps() + select({
-        "@//:using_cuda": [
-            "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
-        ],
-        "@//:using_rocm": [
-            "//rtp_llm/models_py/bindings/rocm:rocm_host_utils",
-        ],
-        "//conditions:default": [],
-    }) + select({
         "//:using_remote_kv_cache": [
             ":storage_3fs",
         ],

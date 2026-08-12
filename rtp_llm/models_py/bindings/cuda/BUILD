@@ -21,6 +21,11 @@ cc_library(
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:static_config",
         "@local_config_cuda//cuda:nvml",
+        # cuda_host_utils.cc calls the driver API (cuGetErrorName); without this the
+        # solib carries an undefined symbol and only links when some *other* library
+        # on the consumer's link line happens to pull the driver stub in -- small
+        # test binaries (e.g. memory_diagnostics_test) then fail to link.
+        "@local_config_cuda//cuda:cuda_driver",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

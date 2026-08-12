@@ -111,6 +111,14 @@ class BatchedDataRouter(FusedMoeDataRouter):
         self.max_num_tokens = max_num_tokens
         self.ep_rank = config.ep_rank
         self.tp_size = config.tp_size
+        # Known gap, deliberately unchanged: a non-divisible layout floor-divides here and
+        # drops the tail experts, exactly as it did before the warmup feature. The EP routers
+        # got a hard check (FusedMoeDataRouter.experts_per_ep_rank); this one did not, because
+        # the slicing dimension differs between the two branches check_conditions accepts
+        # (is_tp_equal_ep makes tp_size == ep_size, while is_single_gpu leaves tp_size
+        # unconstrained with ep_size == 1) and does not match how the weight loader places
+        # experts. Reconcile that before adding a check, or a valid single-GPU layout starts
+        # failing at startup.
         self.num_local_experts = config.expert_num // self.tp_size
 
     def prepare(
@@ -150,9 +158,18 @@ class BatchedDataRouter(FusedMoeDataRouter):
 
         for expert_id in range(first_expert, last_expert):
             topks = torch.any(topk_ids == expert_id, dim=1).flatten()
-            rows = torch.count_nonzero(topks.flatten())
+            rows = int(torch.count_nonzero(topks.flatten()).item())
             if rows == 0:
                 continue
+            if rows > self.max_num_tokens:
+                raise RuntimeError(
+                    "BatchedDataRouter expert staging capacity exceeded: "
+                    f"expert_id={expert_id}, routed_tokens={rows}, "
+                    f"max_num_tokens={self.max_num_tokens}. This router allocates "
+                    "per-expert staging from ll_num_max_token / tp_size; increase "
+                    "ll_num_max_token or select a routing strategy that supports "
+                    "concentrated expert traffic."
+                )
             idx = expert_id - first_expert
             tokens_per_expert[idx] = rows
             rhs = a1[topks]
