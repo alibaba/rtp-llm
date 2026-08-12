@@ -13,6 +13,7 @@ Design constraints:
   not via implicit current-span magic across layers.
 """
 
+import ipaddress
 import json
 import logging
 import math
@@ -142,16 +143,16 @@ def _endpoint_log_target(endpoint: str) -> str:
 def _resolve_region_config() -> None:
     """Resolve endpoint/headers/CA from a region config file (internal-only).
 
-    Priority: explicit env vars always win.  When RTP_LLM_OTEL_REGION is set,
-    the region is looked up in a JSON config file and the resolved values are
-    written back to os.environ ONLY for keys the user has NOT already set —
-    region config never overrides an explicit env var.  When region is unset
-    or no config file is found, this function is a pure no-op and the caller
-    proceeds with whatever env vars (if any) are already present.
+    Priority: an explicit endpoint/headers/certificate carrier always wins as
+    a whole.  When RTP_LLM_OTEL_REGION is set and no explicit carrier exists,
+    the region is looked up in a JSON config file and its complete carrier is
+    written back to os.environ.  When region is unset or no config file is
+    found, this function is a pure no-op and the caller proceeds with whatever
+    env vars (if any) are already present.
 
     Config file search order:
       1. RTP_LLM_OTEL_REGION_CONFIG_FILE env var
-      2. /etc/rtp_llm/trace_regions.json (image-built)
+      2. /etc/rtp_llm/trace_regions.json (operator-mounted secret)
       3. <workspace>/internal_source/rtp_llm/telemetry/trace_regions.json (dev)
     """
     region = os.environ.get("RTP_LLM_OTEL_REGION", "")
@@ -185,12 +186,19 @@ def _resolve_region_config() -> None:
         _LOGGER.warning("trace region config %s parse failed: %s", config_path, e)
         return
 
+    if not isinstance(config, dict):
+        raise TypeError("trace region config must be an object")
+
     regions_map = config.get("regions", {})
     fallbacks = config.get("fallbacks", {})
+    if not isinstance(regions_map, dict) or not isinstance(fallbacks, dict):
+        raise TypeError("trace region config regions and fallbacks must be objects")
 
     entry = regions_map.get(region)
     if entry is None:
         for prefix, fallback_region in fallbacks.items():
+            if not isinstance(prefix, str) or not isinstance(fallback_region, str):
+                raise TypeError("trace region config fallback entries must be strings")
             if region.startswith(prefix):
                 entry = regions_map.get(fallback_region)
                 break
@@ -198,43 +206,71 @@ def _resolve_region_config() -> None:
         _LOGGER.warning("RTP_LLM_OTEL_REGION=%s not in config %s", region, config_path)
         return
 
-    # Write back without overriding user-set values
-    if entry.get("endpoint") and not os.environ.get(
-        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
-    ):
-        os.environ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = entry["endpoint"]
-    if entry.get("headers") and not os.environ.get("OTEL_EXPORTER_OTLP_TRACES_HEADERS"):
-        os.environ["OTEL_EXPORTER_OTLP_TRACES_HEADERS"] = entry["headers"]
-    if not os.environ.get("OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE"):
-        ca = entry.get("certificate", "")
-        if ca:
-            os.environ["OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE"] = ca
-        else:
-            for cand in (
-                "/etc/pki/tls/certs/ca-bundle.crt",
-                "/etc/ssl/certs/ca-certificates.crt",
-                "/etc/ssl/certs/ca-bundle.crt",
-                "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
-            ):
-                if os.path.isfile(cand):
-                    os.environ["OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE"] = cand
-                    break
+    if not isinstance(entry, dict):
+        raise TypeError("trace region config region entry must be an object")
+
+    region_values: Dict[str, str] = {}
+    for field in ("endpoint", "headers", "certificate"):
+        value = entry.get(field, "")
+        if not isinstance(value, str):
+            raise TypeError(f"trace region config {field} must be a string")
+        region_values[field] = value
+
+    if not region_values["endpoint"]:
+        _LOGGER.warning(
+            "RTP_LLM_OTEL_REGION=%s has no endpoint in config %s", region, config_path
+        )
+        return
+
+    # Endpoint and credentials are one carrier. Any explicit carrier field
+    # selects explicit configuration, even when that configuration is incomplete.
+    explicit_carrier_envs = (
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+        "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_HEADERS",
+        "OTEL_EXPORTER_OTLP_CERTIFICATE",
+    )
+    if any(os.environ.get(env_name) for env_name in explicit_carrier_envs):
+        return
+
+    resolved_env: Dict[str, str] = {
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": region_values["endpoint"]
+    }
+    if region_values["headers"]:
+        resolved_env["OTEL_EXPORTER_OTLP_TRACES_HEADERS"] = region_values["headers"]
+    if region_values["certificate"]:
+        resolved_env["OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE"] = region_values[
+            "certificate"
+        ]
+
+    # Commit only after the complete entry has been validated.
+    if not resolved_env.get("OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE"):
+        for cand in (
+            "/etc/pki/tls/certs/ca-bundle.crt",
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/ssl/certs/ca-bundle.crt",
+            "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+        ):
+            if os.path.isfile(cand):
+                resolved_env["OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE"] = cand
+                break
+    os.environ.update(resolved_env)
     _LOGGER.info(
         "trace region resolved: region=%s endpoint=%s",
         region,
-        _endpoint_log_target(os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")),
+        _endpoint_log_target(resolve_endpoint()),
     )
 
 
 def resolve_region_env() -> None:
-    """Resolve region-mapped OTLP env vars in the launcher process.
+    """Resolve launcher-inherited telemetry env vars and POD_IP.
 
     Must run in the top-level launcher BEFORE child processes spawn: the C++
     backend reads OTEL_EXPORTER_OTLP_TRACES_* strictly from its inherited
-    environment (TelemetryRuntime::init), so writing them only inside the
-    frontend's init_telemetry() would leave the backend without an endpoint.
-    Idempotent (only fills unset keys) and fail-open; no-op without
-    RTP_LLM_OTEL_REGION.
+    environment (TelemetryRuntime::init), and both runtimes read POD_IP for
+    host.ip. Idempotent (only fills unset keys) and fail-open.
     """
     try:
         _resolve_region_config()
@@ -246,6 +282,30 @@ def resolve_region_env() -> None:
                 os.environ["RTP_LLM_OTEL_SCOPE_VERSION"] = _v
     except Exception as e:  # noqa: BLE001 - fail-open by contract
         _LOGGER.warning("telemetry region env resolution failed: %s", e)
+
+    if os.environ.get("POD_IP"):
+        return
+
+    def valid_ip(value: str) -> bool:
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError:
+            return False
+        return not address.is_loopback and not address.is_unspecified
+
+    resolved_ip = os.environ.get("RequestedIP", "")
+    if not valid_ip(resolved_ip):
+        try:
+            resolved_ip = socket.gethostbyname(socket.gethostname())
+        except OSError as e:
+            _LOGGER.warning("telemetry POD_IP DNS resolution failed: %s", e)
+            return
+    if not valid_ip(resolved_ip):
+        return
+
+    if not os.environ.get("POD_IP"):
+        os.environ.pop("POD_IP", None)
+        os.environ.setdefault("POD_IP", resolved_ip)
 
 
 class _DiagnosticExporter:
@@ -356,7 +416,16 @@ def init_telemetry(role: str, tp_rank: int = 0) -> bool:
                 "telemetry disabled on tp_rank %d (only rank0 produces spans)", tp_rank
             )
             return False
-        _resolve_region_config()  # idempotent: launcher usually resolved already
+        try:
+            # Idempotent: the launcher usually resolved this before spawning.
+            # Keep process-local initialization fail-open when an operator-mounted
+            # internal config has a valid JSON encoding but an invalid shape.
+            _resolve_region_config()
+        except Exception as e:  # noqa: BLE001 - fail-open by contract
+            _LOGGER.warning(
+                "telemetry region config resolution failed; using explicit env only: %s",
+                type(e).__name__,
+            )
         endpoint = resolve_endpoint()
         if not endpoint:
             _state = TelemetryState.DISABLED

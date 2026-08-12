@@ -284,6 +284,7 @@ class FrontendServerTest(TestCase):
         self.assertTrue(self.frontend_server.check_health())
         visitor = self.frontend_server._frontend_worker.backend_rpc_server_visitor
         self.assertEqual(visitor.refresh_calls, [False])
+
     def test_close_uses_production_frontend_server_contract(self):
         asyncio.run(self.frontend_server.close())
 
@@ -373,7 +374,8 @@ class FrontendServerTest(TestCase):
             tracing.init_telemetry_for_test(exporter, role="test", tp_rank=0)
         )
         try:
-            asyncio.run(_run())
+            with self.assertRaises(asyncio.CancelledError):
+                asyncio.run(_run())
         finally:
             tracing.shutdown_telemetry()
 
