@@ -457,6 +457,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["GENERATION_PREFILL_CAPTURE_CONFIG"] = "64,128,256"
         os.environ["OUTPUT_DISPATCHER_WORKER_COUNT"] = "3"
         os.environ["KEEP_MLA_CHECKPOINT_WEIGHTS"] = "1"
+        os.environ["USE_NEW_LOADER"] = "true"
 
         sys.argv = ["prog"]
 
@@ -470,6 +471,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.model_args.model_type, "qwen")
         self.assertEqual(py_env_configs.model_args.ckpt_path, "/path/to/checkpoint")
         self.assertEqual(py_env_configs.model_args.act_type, "BF16")
+        self.assertTrue(py_env_configs.model_args.use_new_loader)
 
         # Verify parallelism_config
         self.assertEqual(py_env_configs.parallelism_config.tp_size, 4)
@@ -619,6 +621,10 @@ class ServerArgsSetTest(TestCase):
             "true",
             "--output_dispatcher_worker_count",
             "4",
+            "--use_new_loader",
+            "true",
+            "--keep_mla_checkpoint_weights",
+            "true",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
         ]
@@ -635,6 +641,7 @@ class ServerArgsSetTest(TestCase):
             py_env_configs.model_args.ckpt_path, "/path/to/llama/checkpoint"
         )
         self.assertEqual(py_env_configs.model_args.act_type, "FP16")
+        self.assertTrue(py_env_configs.model_args.use_new_loader)
 
         # Verify parallelism_config
         self.assertEqual(py_env_configs.parallelism_config.tp_size, 8)
@@ -672,10 +679,10 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.runtime_config.warm_up_with_loss, False)
         self.assertEqual(py_env_configs.runtime_config.model_warm_up, True)
 
-        # Pins the shipped defaults: neither env nor argv sets the flags here.
+        # Pins the loader defaults and explicit CLI override.
         self.assertTrue(py_env_configs.load_config.loader_recycle_handles)
         self.assertFalse(py_env_configs.load_config.moe_pure_tp_preshard)
-        self.assertFalse(py_env_configs.load_config.keep_mla_checkpoint_weights)
+        self.assertTrue(py_env_configs.load_config.keep_mla_checkpoint_weights)
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
 
@@ -1230,6 +1237,8 @@ class ServerArgsSetTest(TestCase):
         os.environ["TP_SIZE"] = "4"
         os.environ["CONCURRENCY_LIMIT"] = "32"
         os.environ["DISABLE_FLASHINFER_HYBRID_PREFILL"] = "1"
+        os.environ["USE_NEW_LOADER"] = "1"
+        os.environ["KEEP_MLA_CHECKPOINT_WEIGHTS"] = "1"
 
         # Set command line arguments (should override env vars)
         sys.argv = [
@@ -1245,6 +1254,10 @@ class ServerArgsSetTest(TestCase):
             "--concurrency_limit",
             "64",
             "--disable_flashinfer_hybrid_prefill",
+            "false",
+            "--use_new_loader",
+            "false",
+            "--keep_mla_checkpoint_weights",
             "false",
         ]
 
@@ -1267,6 +1280,8 @@ class ServerArgsSetTest(TestCase):
         self.assertFalse(
             py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill
         )  # Overridden
+        self.assertFalse(py_env_configs.model_args.use_new_loader)
+        self.assertFalse(py_env_configs.load_config.keep_mla_checkpoint_weights)
 
     def test_mixed_env_and_cmd_args(self):
         """Test mixed environment variables and command line arguments."""
