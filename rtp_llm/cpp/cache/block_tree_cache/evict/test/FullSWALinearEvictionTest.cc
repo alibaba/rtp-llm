@@ -65,7 +65,7 @@ TEST_F(FullSWALinearEvictionTest, FullReclaimCascadesToBothSWAAndLinear) {
     EXPECT_EQ(stats0.device_heap_total_size, 5u);  // 1 Full + 2 SWA + 2 Linear
 
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
 
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);  // [100] survives
 }
@@ -83,7 +83,7 @@ TEST_F(FullSWALinearEvictionTest, SingleNodeAllGroupsCleared) {
     insertPath({100}, 10, 20, 30);
 
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
 
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
 }
@@ -103,15 +103,15 @@ TEST_F(FullSWALinearEvictionTest, SequentialReclaimDrainsAllGroups) {
     EXPECT_EQ(cache_->getStats().tree_node_count, 3u);
 
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 2u);
 
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);
 
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
 }
 
@@ -155,17 +155,17 @@ TEST_F(FullSWALinearEvictionTest, ForkBothBranchesEvictable) {
 
     // Reclaim first leaf
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 2u);
 
     // Reclaim second leaf
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);  // [100] survives
 
     // Reclaim [100] (now Full leaf)
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
 }
 
@@ -203,13 +203,13 @@ TEST_F(FullSWALinearEvictionTest, SWAReclaimCascadesToLinear) {
 
     // Reclaim SWA[100] first (LRU); the empty internal node remains.
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*swa_lin_cache, 1, Tier::DEVICE);
-    swa_lin_cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*swa_lin_cache);
     EXPECT_EQ(swa_lin_cache->getStats().tree_node_count, 2u);
     EXPECT_EQ(swa_lin_cache->getStats().device_heap_total_size, 2u);
 
     // Reclaim SWA[200], then delete the leaf and prune empty [100].
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*swa_lin_cache, 1, Tier::DEVICE);
-    swa_lin_cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*swa_lin_cache);
     EXPECT_EQ(swa_lin_cache->getStats().tree_node_count, 0u);
 }
 
@@ -233,7 +233,7 @@ TEST_F(FullSWALinearEvictionTest, AncestorChainCleanupDeepChain) {
     // Sequential reclaim drains all 4 nodes
     for (int i = 4; i >= 1; --i) {
         BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
-        cache_->waitForPendingTasks();
+        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
         EXPECT_EQ(cache_->getStats().tree_node_count, static_cast<size_t>(i - 1))
             << "After reclaiming node " << (5 - i);
     }

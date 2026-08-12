@@ -67,10 +67,10 @@ bool GroupSet::areBlockToNodeMapsEmpty() const {
                        [](const DeviceBlockToTreeNodeMap& block_to_node_map) { return block_to_node_map.empty(); });
 }
 
-void GroupSet::referenceBlocks(const MultiNodeResource& set, BlockRefType ref_type) const {
-    switch (set.tier) {
+void GroupSet::referenceBlocks(const MultiNodeResource& resource, BlockRefType ref_type) const {
+    switch (resource.tier) {
         case Tier::DEVICE:
-            for (const auto& [_, blocks] : set.node_blocks) {
+            for (const auto& [_, blocks] : resource.node_blocks) {
                 for (size_t p = 0; p < blocks.size(); ++p) {
                     device_pools_[p]->incRef(blocks[p], ref_type);
                 }
@@ -78,14 +78,14 @@ void GroupSet::referenceBlocks(const MultiNodeResource& set, BlockRefType ref_ty
             break;
         case Tier::HOST:
             if (host_pool_) {
-                for (const auto& [_, blocks] : set.node_blocks)
+                for (const auto& [_, blocks] : resource.node_blocks)
                     for (auto b : blocks)
                         host_pool_->incRef(b, ref_type);
             }
             break;
         case Tier::DISK:
             if (disk_pool_) {
-                for (const auto& [_, blocks] : set.node_blocks)
+                for (const auto& [_, blocks] : resource.node_blocks)
                     for (auto b : blocks)
                         disk_pool_->incRef(b, ref_type);
             }
@@ -95,10 +95,10 @@ void GroupSet::referenceBlocks(const MultiNodeResource& set, BlockRefType ref_ty
     }
 }
 
-void GroupSet::unreferenceBlocks(const MultiNodeResource& set, BlockRefType ref_type) const {
-    switch (set.tier) {
+void GroupSet::unreferenceBlocks(const MultiNodeResource& resource, BlockRefType ref_type) const {
+    switch (resource.tier) {
         case Tier::DEVICE:
-            for (const auto& [_, blocks] : set.node_blocks) {
+            for (const auto& [_, blocks] : resource.node_blocks) {
                 for (size_t p = 0; p < blocks.size(); ++p) {
                     device_pools_[p]->decRef(blocks[p], ref_type);
                 }
@@ -106,14 +106,14 @@ void GroupSet::unreferenceBlocks(const MultiNodeResource& set, BlockRefType ref_
             break;
         case Tier::HOST:
             if (host_pool_) {
-                for (const auto& [_, blocks] : set.node_blocks)
+                for (const auto& [_, blocks] : resource.node_blocks)
                     for (auto b : blocks)
                         host_pool_->decRef(b, ref_type);
             }
             break;
         case Tier::DISK:
             if (disk_pool_) {
-                for (const auto& [_, blocks] : set.node_blocks)
+                for (const auto& [_, blocks] : resource.node_blocks)
                     for (auto b : blocks)
                         disk_pool_->decRef(b, ref_type);
             }

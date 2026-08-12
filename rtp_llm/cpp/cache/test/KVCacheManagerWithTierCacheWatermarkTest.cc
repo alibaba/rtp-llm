@@ -105,7 +105,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
     }
 
     pausable_engine->release();
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
     auto maybe_host = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(maybe_host.has_value());
@@ -215,7 +215,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
     load_result.async_context->waitDone();
     ASSERT_TRUE(load_result.async_context->done());
     ASSERT_TRUE(load_result.async_context->success()) << load_result.async_context->errorInfo().ToString();
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
     const auto all_descriptors = pausable_engine->descriptors();
@@ -337,7 +337,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
     }
 
     pausable_engine->release();
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
     auto maybe_host = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(maybe_host.has_value());
@@ -408,7 +408,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
     }
 
     pausable_engine->release();
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
     auto maybe_disk = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(maybe_disk.has_value());
@@ -496,7 +496,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
     load_result.async_context->waitDone();
     ASSERT_TRUE(load_result.async_context->done());
     ASSERT_TRUE(load_result.async_context->success()) << load_result.async_context->errorInfo().ToString();
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
     descriptors = pausable_engine->descriptors();
@@ -916,7 +916,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), pending_tasks);
     engine->release();
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
     auto settled_host = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(settled_host.has_value());
@@ -947,7 +947,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
     ASSERT_NE(load_result.async_context, nullptr);
     load_result.async_context->waitDone();
     ASSERT_TRUE(load_result.async_context->success()) << load_result.async_context->errorInfo().ToString();
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     ASSERT_TRUE(
         requestReusesExpectedPath(*cache, cache_config_, seed.cache_keys, load_resource, /*logical_reuse_blocks=*/1));
     ASSERT_TRUE(requestReusedPayloadMatchesExpectedPath(

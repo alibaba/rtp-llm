@@ -27,7 +27,9 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
     task_pool_(std::move(task_pool)),
     evictor_(
         tree_.get(),
-        [this](const TransferDescriptor& descriptor) { return executeTransfer(descriptor); },
+        config_.device_eviction_policy,
+        config_.host_eviction_policy,
+        config_.disk_eviction_policy,
         transfer_dispatcher_.get(),
         task_pool_.get(),
         metrics_reporter_,
@@ -72,7 +74,6 @@ bool BlockTreeCache::init() {
         RTP_LLM_LOG_ERROR("cache is already initialized");
         return false;
     }
-    evictor_.init(config_.device_eviction_policy, config_.host_eviction_policy, config_.disk_eviction_policy);
     if (!task_pool_->start()) {
         RTP_LLM_LOG_ERROR("failed to start task pool, size=%d", config_.task_pool_size);
         return false;
@@ -264,10 +265,6 @@ bool BlockTreeCache::getDeviceBlockDebugInfo(size_t                group_id,
     result.device_blocks   = resource.device_blocks;
     debug_info             = std::move(result);
     return true;
-}
-
-void BlockTreeCache::waitForPendingTasks() {
-    task_pool_->waitForIdle();
 }
 
 void BlockTreeCache::onBlocksReleased(const std::vector<BlockReleaseReceipt>& receipts) {

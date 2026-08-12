@@ -82,7 +82,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
     auto maybe_host = snapshotPathResources(*cache, seed.cache_keys);
@@ -132,7 +132,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
     auto maybe_disk = snapshotPathResources(*cache, seed.cache_keys);
@@ -220,7 +220,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     load_result.async_context->waitDone();
     ASSERT_TRUE(load_result.async_context->done());
     ASSERT_TRUE(load_result.async_context->success()) << load_result.async_context->errorInfo().ToString();
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
     descriptors = pausable_engine->descriptors();
@@ -323,7 +323,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
-        cache->waitForPendingTasks();
+        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     }
     auto staged = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(staged.has_value());
@@ -356,7 +356,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     ASSERT_NE(touch_result.async_context, nullptr);
     touch_result.async_context->waitDone();
     ASSERT_TRUE(touch_result.async_context->success()) << touch_result.async_context->errorInfo().ToString();
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     ASSERT_TRUE(
         requestReusesExpectedPath(*cache, cache_config_, seed.cache_keys, touch_resource, /*logical_reuse_blocks=*/2));
     ASSERT_TRUE(requestReusedPayloadMatchesExpectedPath(
@@ -388,7 +388,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *return_path_one_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     staged = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(staged.has_value());
@@ -411,7 +411,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     }
     ASSERT_FALSE(full_group_set_ids.empty());
     ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*cache, full_group_set_ids.front(), Tier::HOST));
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     auto mixed = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(mixed.has_value());
     ASSERT_EQ(mixed->size(), 3u);
@@ -605,7 +605,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
         load_result.async_context, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
     load_result.async_context->waitDone();
     ASSERT_TRUE(load_result.async_context->success()) << load_result.async_context->errorInfo().ToString();
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
     const auto descriptors = engine->descriptors();
@@ -691,7 +691,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
-        cache->waitForPendingTasks();
+        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
         EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
         const size_t next = countTreeResourcesAtTier(*cache, Tier::DEVICE);
         EXPECT_LT(next, remaining_device) << "round=" << round;
@@ -716,7 +716,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
-        cache->waitForPendingTasks();
+        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
         EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
         const size_t next = countTreeResourcesAtTier(*cache, Tier::HOST);
         EXPECT_LT(next, remaining_host) << "round=" << round;
@@ -802,7 +802,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
     result.async_context->waitDone();
     ASSERT_TRUE(result.async_context->done());
     ASSERT_TRUE(result.async_context->success()) << result.async_context->errorInfo().ToString();
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
     ASSERT_EQ(engine->submitCount(), disk_snapshot_begin + expected_load_descriptors);
 

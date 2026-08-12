@@ -1362,7 +1362,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionCascadesFromFullToLo
     // Trigger reclamation through the production pressure entry: demanding more
     // free blocks than this CP rank's physical pool currently has forces
     // KVCacheGroup::ensureFreeBlocks() to run the allocator-registered eviction
-    // callback (group-id eviction + waitForPendingTasks) and its free
+    // callback (group-id eviction + task-pool idle wait) and its free
     // recomputation loop, instead of test code calling the cache eviction API directly.
     KVCacheGroupPtr target_group;
     for (const auto& group : allocator->cacheGroups()) {

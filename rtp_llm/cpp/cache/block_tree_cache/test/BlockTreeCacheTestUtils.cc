@@ -400,7 +400,7 @@ bool insertGroupSetResources(BlockTreeCache&                                   c
     }
     const BlockTreeInsertResult insert_result = tree->insertNode(cache_keys, resources, /*collect_path=*/false);
     releaseLowerTierSeedRefs(tree->groupSets(), resources);
-    cache.evictor_.onInsertCommitted(insert_result);
+    cache.evictor_.onInserted(insert_result);
     return !insert_result.inserted_nodes.empty() || !insert_result.adopted_nodes.empty();
 }
 
@@ -545,8 +545,12 @@ int BlockTreeCacheTestPeer::pendingTasksForTest(const BlockTreeCache& cache) {
     return cache.task_pool_->pending_tasks_.load();
 }
 
+void BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(const BlockTreeCache& cache) {
+    cache.task_pool_->waitForIdle();
+}
+
 bool BlockTreeCacheTestPeer::armQueueRejectionForTest(BlockTreeCache& cache) {
-    cache.waitForPendingTasks();
+    waitForTaskPoolIdleForTest(cache);
     if (cache.task_pool_->pending_tasks_.load() != 0) {
         ADD_FAILURE() << "queue-rejection guard requires zero pending cache tasks";
         return false;
@@ -578,8 +582,9 @@ bool BlockTreeCacheTestPeer::restoreQueueAfterRejectionForTest(BlockTreeCache& c
     return false;
 }
 
-ScriptedPerRankBlockTransferEngine::ScriptedPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups):
-    PerRankBlockTransferEngine(groups) {}
+ScriptedPerRankBlockTransferEngine::ScriptedPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups,
+                                                                       bool perform_successful_transfers):
+    PerRankBlockTransferEngine(groups), perform_successful_transfers_(perform_successful_transfers) {}
 
 std::shared_ptr<AsyncContext> ScriptedPerRankBlockTransferEngine::submit(const TransferDescriptor& descriptor) {
     bool success = true;
@@ -591,8 +596,11 @@ std::shared_ptr<AsyncContext> ScriptedPerRankBlockTransferEngine::submit(const T
             results_.pop_front();
         }
     }
-    if (success) {
+    if (success && perform_successful_transfers_) {
         return PerRankBlockTransferEngine::submit(descriptor);
+    }
+    if (success) {
+        return std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
     }
     return std::make_shared<CompletedAsyncContext>(
         ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
@@ -801,7 +809,7 @@ void FullSWAEnvironment::setTierWatermark(Tier tier, double ratio) {
 
 void FullSWAEnvironment::runMaintenance() {
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 }
 
 void FullSWAEnvironment::demoteAll(Tier tier) {
@@ -828,10 +836,10 @@ void FullSWAEnvironment::reclaimAll() {
             if (BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, tier) == 0) {
                 break;
             }
-            cache->waitForPendingTasks();
+            block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
         }
     }
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 }
 
 bool FullSWAEnvironment::allResourcesAtTier(Tier tier) const {

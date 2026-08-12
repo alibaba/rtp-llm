@@ -127,7 +127,7 @@ TEST(BlockTreeStorerTest, StorePublishesTargetTierOnlyWithoutDeviceResidency) {
         const BlockIdxType device_block = request_holder[0][0];
 
         env.cache->insert({100}, deviceSourceResources({request_holder[0]}), target_tier);
-        env.cache->waitForPendingTasks();
+        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
 
         auto find = env.cache->tree()->findNode({100});
         ASSERT_EQ(find.size(), 1u);
@@ -163,7 +163,7 @@ TEST(BlockTreeStorerTest, StoreToDiskStaysDiscoverableWhenDeviceCacheIsEnabled) 
     ASSERT_EQ(request_holder.size(), 1u);
 
     env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::DISK);
-    env.cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
 
     auto find = env.cache->tree()->findNode({100});
     ASSERT_EQ(find.size(), 1u);
@@ -222,7 +222,7 @@ TEST(BlockTreeStorerTest, StoreKeepsDeviceSourceAliveAfterRequestRelease) {
             << "the store hold must keep the source out of the Device eviction heap";
 
         barrier->release();
-        env.cache->waitForPendingTasks();
+        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
 
         EXPECT_EQ(env.storeRefCount(), 0u);
         ASSERT_EQ(env.cache->tree()->findNode({100}).size(), 1u);
@@ -258,7 +258,7 @@ TEST(BlockTreeStorerTest, StoreCopyFailureLeavesTreeAndPoolsUntouched) {
             ASSERT_EQ(request_holder.size(), 1u);
 
             env.cache->insert({100}, deviceSourceResources({request_holder[0]}), target_tier);
-            env.cache->waitForPendingTasks();
+            block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
 
             EXPECT_EQ(engine->submitCount(), 1u);
             EXPECT_TRUE(env.cache->tree()->findNode({100}).empty());
@@ -316,7 +316,7 @@ TEST(BlockTreeStorerTest, StoreRejectionRollsBackEveryTemporaryHolderExactlyOnce
         }
 
         env.cache->insert({100}, deviceSourceResources(sources), Tier::HOST);
-        env.cache->waitForPendingTasks();
+        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
 
         EXPECT_EQ(engine->submitCount(), 0u) << "a rejected store must never copy";
         EXPECT_TRUE(env.cache->tree()->findNode({100}).empty());
@@ -359,7 +359,7 @@ TEST(BlockTreeStorerTest, DuplicateStoreForSameKeyReleasesLoserBlock) {
     barrier->waitUntilEntered(2);
     EXPECT_EQ(engine->submitCount(), 2u);
     barrier->release();
-    env.cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
 
     auto find = env.cache->tree()->findNode({100});
     ASSERT_EQ(find.size(), 1u);
@@ -404,7 +404,7 @@ TEST(BlockTreeStorerTest, StoreShutdownCutoffSettlesQueuedAndInFlightTasksWithou
 
     BlockTreeCacheTestPeer::beginStoreShutdownForTest(*env.cache);
     barrier->release();
-    env.cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
 
     for (size_t index = 0; index < kStoreTasks; ++index) {
         EXPECT_TRUE(env.cache->tree()->findNode({static_cast<CacheKeyType>(100 + index)}).empty())
@@ -435,7 +435,7 @@ TEST(BlockTreeStorerTest, StoreDerivedEvictionIsDrainedByWaitForPendingTasks) {
     ASSERT_EQ(request_holder.size(), 1u);
 
     env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::HOST);
-    env.cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
 
     auto find = env.cache->tree()->findNode({100});
     ASSERT_EQ(find.size(), 1u);

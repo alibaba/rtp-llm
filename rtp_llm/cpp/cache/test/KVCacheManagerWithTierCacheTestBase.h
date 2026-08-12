@@ -1224,11 +1224,11 @@ inline void reclaimAndExpectInitialPools(const std::shared_ptr<KVCacheManager>& 
                                          TierLayout                             layout) {
     auto cache = manager->blockTreeCache();
     ASSERT_NE(cache, nullptr);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
     for (const Tier tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
         BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, /*num_blocks=*/4096, tier);
-        cache->waitForPendingTasks();
+        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     }
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
     const auto stats = cache->getStats();
@@ -1251,7 +1251,7 @@ protected:
 
     void TearDown() override {
         if (manager_ != nullptr && manager_->blockTreeCache() != nullptr) {
-            manager_->blockTreeCache()->waitForPendingTasks();
+            block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*manager_->blockTreeCache());
         }
         manager_.reset();
         transfer_engine_.reset();
@@ -1514,7 +1514,7 @@ protected:
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
-        cache->waitForPendingTasks();
+        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
         EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
         auto maybe_host = snapshotPathResources(*cache, seed.cache_keys);
@@ -1539,7 +1539,7 @@ protected:
             BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
             BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
             BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
-            cache->waitForPendingTasks();
+            block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
         } else if (failure_source == LoadFailureSource::MIXED) {
             // A tier-leaf eviction normally reverse-cascades every group set.
             // Let the primary and most cascades succeed while one cascade copy
@@ -1548,7 +1548,7 @@ protected:
             pausable_engine->enqueueResult(/*success=*/true);
             pausable_engine->enqueueResult(/*success=*/false);
             ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*cache, /*group_set_id=*/0, Tier::HOST));
-            cache->waitForPendingTasks();
+            block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
         }
         EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
@@ -1655,7 +1655,7 @@ protected:
         failed_result.async_context->waitDone();
         ASSERT_TRUE(failed_result.async_context->done());
         EXPECT_FALSE(failed_result.async_context->success());
-        cache->waitForPendingTasks();
+        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
         EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
         const auto   descriptors_after_failure = pausable_engine->descriptors();
@@ -1744,7 +1744,7 @@ protected:
         retry_result.async_context->waitDone();
         ASSERT_TRUE(retry_result.async_context->done());
         ASSERT_TRUE(retry_result.async_context->success()) << retry_result.async_context->errorInfo().ToString();
-        cache->waitForPendingTasks();
+        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
         EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
         ASSERT_NO_FATAL_FAILURE(expectPathIdleAtDevice(*cache, seed.cache_keys));
         ASSERT_TRUE(pathDevicePayloadMatches(manager_, *cache, seed.cache_keys));

@@ -1,7 +1,6 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
-#include <deque>
 #include <initializer_list>
 #include <memory>
 #include <mutex>
@@ -21,6 +20,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 
 namespace rtp_llm {
 namespace {
@@ -28,6 +28,7 @@ namespace {
 using block_tree_cache_test::allocateDeviceBlocksForTest;
 using block_tree_cache_test::MultiNodeBlocks;
 using block_tree_cache_test::releaseLowerTierSeedRefs;
+using ScriptedTransferEngine = block_tree_cache_test::ScriptedPerRankBlockTransferEngine;
 using block_tree_cache_test::unreferenceDeviceBlocksForTest;
 
 std::shared_ptr<FullGroupSet> makeFullGroup(const DeviceBlockPoolPtr& device_pool) {
@@ -194,17 +195,21 @@ GroupSetResource makeResource(Tier tier, BlockIdxType block) {
     return resource;
 }
 
-void initEvictor(BlockTreeEvictor& evictor) {
-    evictor.init(EvictionPolicy::LRU, EvictionPolicy::LRU, EvictionPolicy::FIFO);
-}
-
 class TestEvictorRuntime {
 public:
-    std::unique_ptr<BlockTreeEvictor> make(BlockTree* tree, BlockTreeEvictor::ExecuteTransferFn execute_transfer) {
+    std::unique_ptr<BlockTreeEvictor> make(
+        BlockTree* tree,
+        EvictionPolicy device_policy = EvictionPolicy::LRU,
+        EvictionPolicy host_policy   = EvictionPolicy::LRU,
+        EvictionPolicy disk_policy   = EvictionPolicy::FIFO) {
+        transfer_engine_     = std::make_shared<ScriptedTransferEngine>(tree->groupSets(), false);
+        transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(transfer_engine_);
         return std::make_unique<BlockTreeEvictor>(
             tree,
-            std::move(execute_transfer),
-            nullptr,
+            device_policy,
+            host_policy,
+            disk_policy,
+            transfer_dispatcher_.get(),
             nullptr,
             metrics_reporter_,
             mutex_,
@@ -215,9 +220,19 @@ public:
             [](CacheKeyType, size_t) {});
     }
 
+    std::shared_ptr<ScriptedTransferEngine> transferEngine() const {
+        return transfer_engine_;
+    }
+
+    size_t transferCount() const {
+        return transfer_engine_->submitCount();
+    }
+
 private:
-    BlockTreeCacheMetricsReporter metrics_reporter_;
-    std::mutex                    mutex_;
+    BlockTreeCacheMetricsReporter            metrics_reporter_;
+    std::shared_ptr<ScriptedTransferEngine>  transfer_engine_;
+    std::unique_ptr<BlockTransferDispatcher> transfer_dispatcher_;
+    std::mutex                               mutex_;
 };
 
 class BlockTreeEvictorTestPeer {
@@ -311,18 +326,7 @@ public:
 
         tree_ = std::make_unique<BlockTree>(groups_);
 
-        evictor_ = evictor_runtime_.make(
-            tree_.get(),
-            [this](const TransferDescriptor& descriptor) {
-                transfer_group_set_ids_.push_back(descriptor.group_set_id);
-                if (transfer_results_.empty()) {
-                    return true;
-                }
-                const bool success = transfer_results_.front();
-                transfer_results_.pop_front();
-                return success;
-            });
-        initEvictor(*evictor_);
+        evictor_ = evictor_runtime_.make(tree_.get());
 
         std::vector<GroupSetResource> resources(groups_.size());
         host_blocks_.resize(groups_.size(), NULL_BLOCK_IDX);
@@ -337,7 +341,7 @@ public:
 
         auto result = tree_->insertNode({100}, {resources}, /*collect_path=*/false);
         releaseLowerTierSeedRefs(groups_, {resources});
-        evictor_->onInsertCommitted(result);
+        evictor_->onInserted(result);
         node_ = insertedNode(result);
         return node_ != nullptr;
     }
@@ -356,8 +360,19 @@ public:
     }
 
     void setTransferResults(std::initializer_list<bool> results) {
-        transfer_results_.assign(results.begin(), results.end());
-        transfer_group_set_ids_.clear();
+        auto transfer_engine = evictor_runtime_.transferEngine();
+        transfer_engine->clear();
+        for (bool success : results) {
+            transfer_engine->enqueue(success);
+        }
+    }
+
+    std::vector<size_t> transferGroupSetIds() const {
+        std::vector<size_t> group_set_ids;
+        for (const auto& descriptor : evictor_runtime_.transferEngine()->descriptors()) {
+            group_set_ids.push_back(descriptor.group_set_id);
+        }
+        return group_set_ids;
     }
 
     void releaseResidentBlocks() {
@@ -391,8 +406,6 @@ public:
     TestEvictorRuntime                                   evictor_runtime_;
     std::unique_ptr<BlockTreeEvictor>                    evictor_;
     TreeNode*                                            node_{nullptr};
-    std::deque<bool>                                     transfer_results_;
-    std::vector<size_t>                                  transfer_group_set_ids_;
 };
 
 class BlockTreeEvictorTest: public ::testing::Test {
@@ -411,20 +424,14 @@ protected:
         initializeFullGroup(group_, device_pool_);
         groups_  = {group_};
         tree_    = std::make_unique<BlockTree>(groups_);
-        evictor_ = evictor_runtime_.make(
-            tree_.get(),
-            [this](const TransferDescriptor&) {
-                ++transfer_calls_;
-                return true;
-            });
-        initEvictor(*evictor_);
+        evictor_ = evictor_runtime_.make(tree_.get());
     }
 
     BlockTreeInsertResult insert(const CacheKeysType&                              keys,
                                  const std::vector<std::vector<GroupSetResource>>& resources) {
         auto result = tree_->insertNode(keys, resources, /*collect_path=*/false);
         releaseLowerTierSeedRefs(groups_, resources);
-        evictor_->onInsertCommitted(result);
+        evictor_->onInserted(result);
         return result;
     }
 
@@ -443,7 +450,7 @@ protected:
     void settleLoad(TreeNode* node, size_t group_set_id, bool copy_ok) {
         node->group_set_resources[group_set_id].transfer_state = GroupSetTransferState::IDLE;
         if (copy_ok) {
-            evictor_->onTierEntered(node, group_set_id, Tier::DEVICE);
+            evictor_->onLoaded(node, group_set_id);
         } else {
             evictor_->refreshCandidate(node, group_set_id);
         }
@@ -455,7 +462,6 @@ protected:
     std::unique_ptr<BlockTree>        tree_;
     TestEvictorRuntime                evictor_runtime_;
     std::unique_ptr<BlockTreeEvictor> evictor_;
-    size_t                            transfer_calls_{0};
 };
 
 TEST_F(BlockTreeEvictorTest, PendingReleasesFollowAsyncPlanSourcePools) {
@@ -492,8 +498,7 @@ TEST_F(BlockTreeEvictorTest, PendingReleasesCountEveryDeviceMemberBlock) {
     group_->initialize(0, std::move(topology), {0, 1});
     groups_  = {group_};
     tree_    = std::make_unique<BlockTree>(groups_);
-    evictor_ = evictor_runtime_.make(tree_.get(), BlockTreeEvictor::ExecuteTransferFn{});
-    initEvictor(*evictor_);
+    evictor_ = evictor_runtime_.make(tree_.get());
 
     BlockTreeEvictor::EvictionPlan plan;
     plan.primary_desc.group_set_id  = 0;
@@ -568,7 +573,7 @@ TEST(BlockTreeEvictorCascadeTest, NonLeafCascadeFollowsGroupPriority) {
     auto               groups = makeCascadeGroups();
     BlockTree          tree(groups);
     TestEvictorRuntime runtime;
-    auto               evictor_holder = runtime.make(&tree, BlockTreeEvictor::ExecuteTransferFn{});
+    auto               evictor_holder = runtime.make(&tree);
     BlockTreeEvictor&  evictor        = *evictor_holder;
 
     const std::vector<GroupSetResource> resources = {
@@ -591,7 +596,7 @@ TEST(BlockTreeEvictorCascadeTest, ReverseCascadeIsAlwaysEnabledAtLeaf) {
     auto               groups = makeCascadeGroups();
     BlockTree          tree(groups);
     TestEvictorRuntime runtime;
-    auto               evictor_holder = runtime.make(&tree, BlockTreeEvictor::ExecuteTransferFn{});
+    auto               evictor_holder = runtime.make(&tree);
     BlockTreeEvictor&  evictor        = *evictor_holder;
 
     auto inserted =
@@ -618,10 +623,15 @@ TEST_F(BlockTreeEvictorTest, TierEntryRefreshesLastAccessTime) {
     CandidateMeta& candidate_meta = node->group_set_resources[0].candidate_meta;
     candidate_meta.tier_enter_time_us  = 0;
     candidate_meta.last_access_time_us = 0;
-    evictor_->onTierEntered(node, 0, Tier::DEVICE);
+    evictor_->onLoaded(node, 0);
 
     EXPECT_GT(candidate_meta.tier_enter_time_us, 0);
     EXPECT_EQ(candidate_meta.last_access_time_us, candidate_meta.tier_enter_time_us);
+}
+
+TEST_F(BlockTreeEvictorTest, ChooseVictimRejectsUnsupportedTier) {
+    EXPECT_FALSE(evictor_->chooseVictim(/*group_set_id=*/0, Tier::REMOTE).has_value());
+    EXPECT_FALSE(evictor_->chooseVictim(/*group_set_id=*/0, Tier::NONE).has_value());
 }
 
 TEST_F(BlockTreeEvictorTest, MatchUpdatesIntermediateHistoryWithoutAdmittingIt) {
@@ -699,7 +709,7 @@ TEST_F(BlockTreeEvictorTest, ExistingGroupFillAdmitsChildAndRemovesFullParentCan
     empty_resource.device_blocks      = {NULL_BLOCK_IDX};
     BlockTreeInsertResult empty_child = tree_->insertNode(
         {100, 200}, {{makeResource(Tier::DEVICE, parent_block)}, {empty_resource}}, /*collect_path=*/false);
-    evictor_->onInsertCommitted(empty_child);
+    evictor_->onInserted(empty_child);
     ASSERT_NE(insertedNode(empty_child), nullptr);
     ASSERT_EQ(evictor_->candidateStats().device_candidates, 1u);
 
@@ -780,7 +790,7 @@ TEST_F(BlockTreeEvictorTest, PrepareMoveRejectsNewRequestPinWithoutAllocatingTar
     EXPECT_EQ(host_pool->refCount(source), 2u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 1u);
     EXPECT_EQ(evictor_->candidateStats().host_candidates, 0u);
-    EXPECT_EQ(transfer_calls_, 0u);
+    EXPECT_EQ(evictor_runtime_.transferCount(), 0u);
 
     group_->unreferenceBlocks(pin, BlockRefType::REQUEST);
     evictor_->refreshCandidatesAfterRelease(pin);
@@ -842,7 +852,7 @@ TEST_F(BlockTreeEvictorTest, PrepareMovePreservesLoadOwner) {
     EXPECT_EQ(insertedNode(result)->group_set_resources[0].host_block, source);
     EXPECT_EQ(host_pool->refCount(source), 1u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 1u);
-    EXPECT_EQ(transfer_calls_, 0u);
+    EXPECT_EQ(evictor_runtime_.transferCount(), 0u);
 
     settleLoad(insertedNode(result), 0, false);
     EXPECT_EQ(insertedNode(result)->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
@@ -882,7 +892,7 @@ TEST_F(BlockTreeEvictorTest, PrepareMovePreservesExistingDemotionOwnerAndTarget)
     EXPECT_EQ(disk_pool->referencedBlocksNum(BlockRefType::EVICTION), 1u);
     EXPECT_EQ(disk_pool->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 0u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 0u);
-    EXPECT_EQ(transfer_calls_, 0u);
+    EXPECT_EQ(evictor_runtime_.transferCount(), 0u);
 
     BlockTreeEvictorTestPeer::rollbackDesc(*evictor_, owner);
     EXPECT_EQ(insertedNode(result)->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
@@ -935,7 +945,7 @@ TEST_F(BlockTreeEvictorTest, PrepareMoveRejectsSourceTierChangedByLoad) {
     EXPECT_EQ(disk_pool->freeBlocksNum(), 1u);
     EXPECT_EQ(evictor_->candidateStats().host_candidates, 0u);
     EXPECT_EQ(evictor_->candidateStats().device_candidates, 1u);
-    EXPECT_EQ(transfer_calls_, 0u);
+    EXPECT_EQ(evictor_runtime_.transferCount(), 0u);
 
     group_->unmapDeviceBlocksFromTreeNode(device_resource);
     resource.evictFromTier(Tier::DEVICE);
@@ -965,7 +975,7 @@ TEST_F(BlockTreeEvictorTest, PrepareMoveRejectsFullNodeThatBecameNonLeaf) {
     group_->referenceBlocks(MultiNodeResource{0, Tier::HOST, {{nullptr, {parent_source}}}}, BlockRefType::BLOCK_CACHE);
     auto child_result = tree_->insertNode({100, 101}, child_resources, /*collect_path=*/false);
     releaseLowerTierSeedRefs(groups_, child_resources);
-    evictor_->onInsertCommitted(child_result);
+    evictor_->onInserted(child_result);
     ASSERT_NE(insertedNode(child_result), nullptr);
     ASSERT_FALSE(tree_->isLeafAtTier(insertedNode(parent_result), 0, Tier::HOST));
 
@@ -976,7 +986,7 @@ TEST_F(BlockTreeEvictorTest, PrepareMoveRejectsFullNodeThatBecameNonLeaf) {
     EXPECT_EQ(host_pool->refCount(parent_source), 1u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 1u);
     EXPECT_EQ(evictor_->candidateStats().host_candidates, 1u);
-    EXPECT_EQ(transfer_calls_, 0u);
+    EXPECT_EQ(evictor_runtime_.transferCount(), 0u);
 
     insertedNode(parent_result)->group_set_resources[0].host_block = NULL_BLOCK_IDX;
     insertedNode(child_result)->group_set_resources[0].host_block  = NULL_BLOCK_IDX;
@@ -1119,7 +1129,7 @@ TEST(BlockTreeEvictorCascadeTest, BuildPlanSkipsPinnedSiblingAndReadmitsAfterRel
     EXPECT_EQ(environment.node_->group_set_resources[1].transfer_state, GroupSetTransferState::IDLE);
     EXPECT_EQ(environment.node_->group_set_resources[2].transfer_state, GroupSetTransferState::DEMOTING);
     EXPECT_EQ(environment.disk_pools_[1]->freeBlocksNum(), 2u);
-    EXPECT_TRUE(environment.transfer_group_set_ids_.empty());
+    EXPECT_TRUE(environment.transferGroupSetIds().empty());
 
     environment.evictor_->rollbackPreparedPlan(*plan);
     environment.groups_[1]->unreferenceBlocks(pin, BlockRefType::REQUEST);
@@ -1147,7 +1157,7 @@ TEST(BlockTreeEvictorCascadeTest, BuildPlanSkipsLoadingSiblingAndReadmitsAfterFi
     EXPECT_EQ(environment.node_->group_set_resources[1].host_block, environment.host_blocks_[1]);
     EXPECT_EQ(environment.host_pools_[1]->refCount(environment.host_blocks_[1]), 1u);
     EXPECT_EQ(environment.disk_pools_[1]->freeBlocksNum(), 2u);
-    EXPECT_TRUE(environment.transfer_group_set_ids_.empty());
+    EXPECT_TRUE(environment.transferGroupSetIds().empty());
 
     environment.evictor_->rollbackPreparedPlan(*plan);
     environment.node_->group_set_resources[1].transfer_state = GroupSetTransferState::IDLE;
@@ -1180,7 +1190,7 @@ TEST(BlockTreeEvictorCascadeTest, BuildPlanSkipsDemotingSiblingWithoutAdoptingIt
     EXPECT_TRUE(environment.disk_pools_[1]->isAllocated(owner_target));
     EXPECT_EQ(environment.disk_pools_[1]->refCount(owner_target), 1u);
     EXPECT_EQ(environment.disk_pools_[1]->freeBlocksNum(), 1u);
-    EXPECT_TRUE(environment.transfer_group_set_ids_.empty());
+    EXPECT_TRUE(environment.transferGroupSetIds().empty());
 
     environment.evictor_->rollbackPreparedPlan(*plan);
     EXPECT_EQ(environment.node_->group_set_resources[1].transfer_state, GroupSetTransferState::DEMOTING);
@@ -1213,7 +1223,7 @@ TEST(BlockTreeEvictorCascadeTest, LeafBuildPlanSkipsPinnedFullSiblingAndReadmits
     EXPECT_EQ(environment.node_->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
     EXPECT_EQ(environment.node_->group_set_resources[1].transfer_state, GroupSetTransferState::DEMOTING);
     EXPECT_EQ(environment.disk_pools_[0]->freeBlocksNum(), 2u);
-    EXPECT_TRUE(environment.transfer_group_set_ids_.empty());
+    EXPECT_TRUE(environment.transferGroupSetIds().empty());
 
     environment.evictor_->rollbackPreparedPlan(*plan);
     environment.groups_[0]->unreferenceBlocks(pin, BlockRefType::REQUEST);
@@ -1248,7 +1258,7 @@ TEST(BlockTreeEvictorCascadeTest, CascadeTargetExhaustionRestoresOnlyFailedSibli
     EXPECT_EQ(environment.evictor_->candidateStats().host_candidates, 1u);
     EXPECT_EQ(environment.disk_pools_[0]->freeBlocksNum(), 1u);
     EXPECT_EQ(environment.disk_pools_[2]->freeBlocksNum(), 1u);
-    EXPECT_TRUE(environment.transfer_group_set_ids_.empty());
+    EXPECT_TRUE(environment.transferGroupSetIds().empty());
 
     environment.evictor_->rollbackPreparedPlan(*plan);
     for (size_t group_set_id = 0; group_set_id < environment.groups_.size(); ++group_set_id) {
@@ -1273,10 +1283,10 @@ TEST(BlockTreeEvictorCascadeTest, PrimaryCopyFailureSuppressesCascadesAndRollsBa
     auto plan = environment.buildPlan(0);
     ASSERT_TRUE(plan.has_value());
     ASSERT_EQ(cascadeGroupSetIds(*plan), (std::vector<size_t>{1, 2}));
-    auto results = environment.evictor_->taskRunner().performCopy(*plan);
+    auto results = environment.evictor_->task_runner_->performCopy(*plan);
     EXPECT_FALSE(results.primary_success);
     EXPECT_EQ(results.cascade_success, (std::vector<bool>{false, false}));
-    EXPECT_EQ(environment.transfer_group_set_ids_, (std::vector<size_t>{0}));
+    EXPECT_EQ(environment.transferGroupSetIds(), (std::vector<size_t>{0}));
 
     environment.evictor_->complete(*plan, results);
     for (size_t group_set_id = 0; group_set_id < environment.groups_.size(); ++group_set_id) {
@@ -1305,10 +1315,10 @@ TEST(BlockTreeEvictorCascadeTest, CascadeCopyResultsPublishAndRollbackIndependen
     const BlockIdxType failed_target  = plan->cascade_descs[0].target_blocks[0];
     const BlockIdxType success_target = plan->cascade_descs[1].target_blocks[0];
 
-    auto results = environment.evictor_->taskRunner().performCopy(*plan);
+    auto results = environment.evictor_->task_runner_->performCopy(*plan);
     ASSERT_TRUE(results.primary_success);
     EXPECT_EQ(results.cascade_success, (std::vector<bool>{false, true}));
-    EXPECT_EQ(environment.transfer_group_set_ids_, (std::vector<size_t>{0, 1, 2}));
+    EXPECT_EQ(environment.transferGroupSetIds(), (std::vector<size_t>{0, 1, 2}));
     environment.evictor_->complete(*plan, results);
 
     const auto& primary_resource = environment.node_->group_set_resources[0];
@@ -1352,7 +1362,7 @@ TEST(BlockTreeEvictorCascadeTest, DirectCompleteMissingCascadeResultRollsBack) {
     synthetic_results.primary_success = true;
     synthetic_results.cascade_success = {true};
     environment.evictor_->complete(*plan, synthetic_results);
-    EXPECT_TRUE(environment.transfer_group_set_ids_.empty());
+    EXPECT_TRUE(environment.transferGroupSetIds().empty());
 
     const auto& primary_resource = environment.node_->group_set_resources[0];
     const auto& first_resource   = environment.node_->group_set_resources[1];
@@ -1412,9 +1422,8 @@ TEST(BlockTreeEvictorCascadeTest, RejectsResourcesReservedByAnotherPlan) {
     std::vector<GroupSetPtr> groups = {full, swa, linear};
     BlockTree                tree(groups);
     TestEvictorRuntime       runtime;
-    auto                     evictor_holder = runtime.make(&tree, BlockTreeEvictor::ExecuteTransferFn{});
+    auto                     evictor_holder = runtime.make(&tree);
     BlockTreeEvictor&        evictor        = *evictor_holder;
-    initEvictor(evictor);
 
     MultiNodeBlocks full_blocks   = allocateDeviceBlocksForTest(*full, 1, BlockRefType::BLOCK_CACHE);
     MultiNodeBlocks swa_blocks    = allocateDeviceBlocksForTest(*swa, 1, BlockRefType::BLOCK_CACHE);
@@ -1432,7 +1441,7 @@ TEST(BlockTreeEvictorCascadeTest, RejectsResourcesReservedByAnotherPlan) {
     unreferenceDeviceBlocksForTest(*full, full_blocks, BlockRefType::BLOCK_CACHE);
     unreferenceDeviceBlocksForTest(*swa, swa_blocks, BlockRefType::BLOCK_CACHE);
     unreferenceDeviceBlocksForTest(*linear, linear_blocks, BlockRefType::BLOCK_CACHE);
-    evictor.onInsertCommitted(insert_result);
+    evictor.onInserted(insert_result);
 
     auto swa_victim = evictor.chooseVictim(1, Tier::DEVICE);
     ASSERT_TRUE(swa_victim.has_value());
@@ -1483,9 +1492,8 @@ TEST(BlockTreeEvictorStatsTest, AggregatesCandidatesAcrossGroupsAndTiers) {
     std::vector<GroupSetPtr> groups = {group0, group1};
     BlockTree                tree(groups);
     TestEvictorRuntime       runtime;
-    auto                     evictor_holder = runtime.make(&tree, BlockTreeEvictor::ExecuteTransferFn{});
+    auto                     evictor_holder = runtime.make(&tree);
     BlockTreeEvictor&        evictor        = *evictor_holder;
-    initEvictor(evictor);
 
     MultiNodeBlocks    device_set = allocateDeviceBlocksForTest(*group0, 1, BlockRefType::BLOCK_CACHE);
     const BlockIdxType host_block = group0->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
@@ -1499,12 +1507,12 @@ TEST(BlockTreeEvictorStatsTest, AggregatesCandidatesAcrossGroupsAndTiers) {
     auto first = tree.insertNode({100}, first_resources, /*collect_path=*/false);
     unreferenceDeviceBlocksForTest(*group0, device_set, BlockRefType::BLOCK_CACHE);
     releaseLowerTierSeedRefs(groups, first_resources);
-    evictor.onInsertCommitted(first);
+    evictor.onInserted(first);
     const std::vector<std::vector<GroupSetResource>> second_resources = {
         {makeResource(Tier::HOST, host_block), GroupSetResource{}}};
     auto second = tree.insertNode({200}, second_resources, /*collect_path=*/false);
     releaseLowerTierSeedRefs(groups, second_resources);
-    evictor.onInsertCommitted(second);
+    evictor.onInserted(second);
 
     const CandidateStats stats = evictor.candidateStats();
     EXPECT_EQ(stats.device_candidates, 1u);
@@ -1535,20 +1543,22 @@ TEST(BlockTreeEvictorPolicyTest, MatchDoesNotChangeFifoAdmissionOrder) {
     std::vector<GroupSetPtr> groups = {group};
     BlockTree                tree(groups);
     TestEvictorRuntime       runtime;
-    auto                     evictor_holder = runtime.make(&tree, BlockTreeEvictor::ExecuteTransferFn{});
-    BlockTreeEvictor&        evictor        = *evictor_holder;
-    evictor.init(EvictionPolicy::FIFO, EvictionPolicy::LRU, EvictionPolicy::FIFO);
+    auto evictor_holder = runtime.make(&tree,
+                                       EvictionPolicy::FIFO,
+                                       EvictionPolicy::LRU,
+                                       EvictionPolicy::FIFO);
+    BlockTreeEvictor& evictor = *evictor_holder;
 
     MultiNodeBlocks device_set = allocateDeviceBlocksForTest(*group, 2, BlockRefType::BLOCK_CACHE);
     ASSERT_EQ(device_set.size(), 2u);
     auto first = tree.insertNode({100}, {{makeResource(Tier::DEVICE, device_set[0][0])}}, /*collect_path=*/false);
     group->unreferenceBlocks(MultiNodeResource{0, Tier::DEVICE, {{insertedNode(first), device_set[0]}}},
                              BlockRefType::BLOCK_CACHE);
-    evictor.onInsertCommitted(first);
+    evictor.onInserted(first);
     auto second = tree.insertNode({200}, {{makeResource(Tier::DEVICE, device_set[1][0])}}, /*collect_path=*/false);
     group->unreferenceBlocks(MultiNodeResource{0, Tier::DEVICE, {{insertedNode(second), device_set[1]}}},
                              BlockRefType::BLOCK_CACHE);
-    evictor.onInsertCommitted(second);
+    evictor.onInserted(second);
     const uint64_t first_admission = insertedNode(first)->group_set_resources[0].candidate_meta.admission_seq;
 
     evictor.onMatched({insertedNode(first)});
@@ -1586,14 +1596,16 @@ TEST(BlockTreeEvictorPolicyTest, ExistingGroupFillPrecedesNewSuffixAdmission) {
     std::vector<GroupSetPtr> groups = {group};
     BlockTree                tree(groups);
     TestEvictorRuntime       runtime;
-    auto                     evictor_holder = runtime.make(&tree, BlockTreeEvictor::ExecuteTransferFn{});
-    BlockTreeEvictor&        evictor        = *evictor_holder;
-    evictor.init(EvictionPolicy::FIFO, EvictionPolicy::LRU, EvictionPolicy::FIFO);
+    auto evictor_holder = runtime.make(&tree,
+                                       EvictionPolicy::FIFO,
+                                       EvictionPolicy::LRU,
+                                       EvictionPolicy::FIFO);
+    BlockTreeEvictor& evictor = *evictor_holder;
 
     GroupSetResource empty_resource;
     empty_resource.device_blocks = {NULL_BLOCK_IDX};
     auto existing                = tree.insertNode({100}, {{empty_resource}}, /*collect_path=*/false);
-    evictor.onInsertCommitted(existing);
+    evictor.onInserted(existing);
 
     MultiNodeBlocks device_set = allocateDeviceBlocksForTest(*group, 2, BlockRefType::BLOCK_CACHE);
     ASSERT_EQ(device_set.size(), 2u);
@@ -1604,7 +1616,7 @@ TEST(BlockTreeEvictorPolicyTest, ExistingGroupFillPrecedesNewSuffixAdmission) {
     ASSERT_EQ(mixed.adopted_nodes.size(), 1u);
     ASSERT_EQ(mixed.inserted_nodes.size(), 1u);
     unreferenceDeviceBlocksForTest(*group, device_set, BlockRefType::BLOCK_CACHE);
-    evictor.onInsertCommitted(mixed);
+    evictor.onInserted(mixed);
 
     TreeNode* filled_node = mixed.adopted_nodes.front().first;
     TreeNode* new_node    = mixed.inserted_nodes.front();
@@ -1632,20 +1644,22 @@ TEST(BlockTreeEvictorPolicyTest, MatchUpdatesLfuHitCountAndOrder) {
     std::vector<GroupSetPtr> groups = {group};
     BlockTree                tree(groups);
     TestEvictorRuntime       runtime;
-    auto                     evictor_holder = runtime.make(&tree, BlockTreeEvictor::ExecuteTransferFn{});
-    BlockTreeEvictor&        evictor        = *evictor_holder;
-    evictor.init(EvictionPolicy::LFU, EvictionPolicy::LRU, EvictionPolicy::FIFO);
+    auto evictor_holder = runtime.make(&tree,
+                                       EvictionPolicy::LFU,
+                                       EvictionPolicy::LRU,
+                                       EvictionPolicy::FIFO);
+    BlockTreeEvictor& evictor = *evictor_holder;
 
     MultiNodeBlocks device_set = allocateDeviceBlocksForTest(*group, 2, BlockRefType::BLOCK_CACHE);
     ASSERT_EQ(device_set.size(), 2u);
     auto first = tree.insertNode({100}, {{makeResource(Tier::DEVICE, device_set[0][0])}}, /*collect_path=*/false);
     group->unreferenceBlocks(MultiNodeResource{0, Tier::DEVICE, {{insertedNode(first), device_set[0]}}},
                              BlockRefType::BLOCK_CACHE);
-    evictor.onInsertCommitted(first);
+    evictor.onInserted(first);
     auto second = tree.insertNode({200}, {{makeResource(Tier::DEVICE, device_set[1][0])}}, /*collect_path=*/false);
     group->unreferenceBlocks(MultiNodeResource{0, Tier::DEVICE, {{insertedNode(second), device_set[1]}}},
                              BlockRefType::BLOCK_CACHE);
-    evictor.onInsertCommitted(second);
+    evictor.onInserted(second);
 
     evictor.onMatched({insertedNode(first)});
 

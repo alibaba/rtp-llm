@@ -352,8 +352,8 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
             continue;
         }
 
-        MultiNodeResource source_set{desc.group_set_id, desc.source_tier, {{desc.node, desc.source_blocks}}};
-        tree_->groupSets()[desc.group_set_id]->unreferenceBlocks(source_set, BlockRefType::REQUEST);
+        MultiNodeResource resource{desc.group_set_id, desc.source_tier, {{desc.node, desc.source_blocks}}};
+        tree_->groupSets()[desc.group_set_id]->unreferenceBlocks(resource, BlockRefType::REQUEST);
         if (desc.node->group_set_resources[desc.group_set_id].transfer_detached) {
             evictor_.discardDetachedTransfer(desc);
             tree_data_mutated = true;
@@ -370,10 +370,10 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
                 evictor_.refreshCandidate(desc.node, desc.group_set_id);
             }
             if (!fully_prepared) {
-                evictor_.refreshCandidatesAfterRelease(source_set);
+                evictor_.refreshCandidatesAfterRelease(resource);
             }
         } else {
-            evictor_.refreshCandidatesAfterRelease(source_set);
+            evictor_.refreshCandidatesAfterRelease(resource);
             device_refs_released = true;
         }
     }
@@ -448,7 +448,7 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task& task, bool copy_suc
             } else {
                 state_settled = true;
                 if (enable_device_cache_) {
-                    evictor_.onTierEntered(desc.node, desc.group_set_id, Tier::DEVICE);
+                    evictor_.onLoaded(desc.node, desc.group_set_id);
                 } else {
                     evictor_.refreshCandidate(desc.node, desc.group_set_id);
                 }

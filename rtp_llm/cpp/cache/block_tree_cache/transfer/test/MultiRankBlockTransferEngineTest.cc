@@ -453,7 +453,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadCommitsDeviceResource)
     ASSERT_TRUE(context->commit());
     context->waitDone();
     ASSERT_TRUE(context->success());
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     auto find_result = cache->tree()->findNode({100});
     ASSERT_FALSE(find_result.empty());
@@ -515,7 +515,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadFailureKeepsSourceReso
     ASSERT_TRUE(context->commit());
     context->waitDone();
     ASSERT_FALSE(context->success());
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     auto find_result = cache->tree()->findNode({100});
     ASSERT_FALSE(find_result.empty());
@@ -579,7 +579,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadUsesSingleDirectStage)
     ASSERT_TRUE(context->commit());
     context->waitDone();
     ASSERT_TRUE(context->success());
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     auto find_result = cache->tree()->findNode({100});
     ASSERT_FALSE(find_result.empty());
@@ -641,7 +641,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionSuccessCommitsPlan) {
 
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     auto after = cache->tree()->findNode({100});
     ASSERT_FALSE(after.empty());
@@ -703,7 +703,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDeviceEvictionBypassesHostWith
 
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     auto after = cache->tree()->findNode({100});
     ASSERT_FALSE(after.empty());
@@ -759,7 +759,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastD2DiskFailureRollsBackDeviceSo
 
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     auto after = cache->tree()->findNode({100});
     ASSERT_FALSE(after.empty());
@@ -812,7 +812,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionFailureRollsBackPlan) 
 
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     auto after = cache->tree()->findNode({100});
     ASSERT_FALSE(after.empty());
@@ -853,7 +853,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BuildEvictionTransferRequestIncludesPri
     plan.cascade_descs.push_back(cascade_desc);
 
     std::vector<TransferDescriptor> descriptors;
-    ASSERT_TRUE(cache->evictor_.taskRunner().buildTransferBatch(plan, descriptors));
+    ASSERT_TRUE(cache->evictor_.task_runner_->buildTransferBatch(plan, descriptors));
     MemoryOperationRequestPB request;
     ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(request, descriptors, cache->groupSets()));
     ASSERT_EQ(request.copy_items_size(), 2);

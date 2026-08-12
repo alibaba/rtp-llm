@@ -334,7 +334,7 @@ public:
             cache.checkWatermark();
             cache.config_.watermark_device.ratio = 0.0;
         }
-        cache.waitForPendingTasks();
+        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(cache);
         EXPECT_EQ(cache.task_pool_->pending_tasks_.load(), 0);
     }
 };
@@ -384,7 +384,7 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     scripted_copy->enqueue(/*success=*/false);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     auto after_failure = cache->tree()->findNode({100});
     ASSERT_FALSE(after_failure.empty());
@@ -408,7 +408,7 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     scripted_copy->clear();
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     auto find = cache->tree()->findNode({100});
     ASSERT_FALSE(find.empty());
@@ -718,7 +718,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightDemotionAndDisca
     EXPECT_TRUE(disk_pool->isAllocated(disk_target));
 
     pausable_copy->release();
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     EXPECT_FALSE(host_pool->isAllocated(host_source));
     EXPECT_FALSE(disk_pool->isAllocated(disk_target));
@@ -822,7 +822,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightLoadAndDiscardsI
     EXPECT_TRUE(host_pool->isAllocated(host_source));
 
     pausable_copy->release();
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     context->waitDone();
 
     EXPECT_FALSE(context->success());
@@ -1009,7 +1009,7 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
         }
 
         pausable_copy->release();
-        environment->cache->waitForPendingTasks();
+        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
         EXPECT_TRUE(environment->allResourcesAtTier(Tier::HOST));
         for (const auto& [pool, block] : device_sources) {
             EXPECT_FALSE(pool->isAllocated(block));  // source freed exactly once on commit
@@ -1185,7 +1185,7 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
     environment->scripted_per_rank_transfer_engine->clear();
     environment->scripted_per_rank_transfer_engine->enqueue(/*success=*/false);
     ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment->cache, 1, Tier::DEVICE));
-    environment->cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
     EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
     const auto failed_descriptors = environment->scripted_per_rank_transfer_engine->descriptors();
     ASSERT_EQ(failed_descriptors.size(), 1u);
@@ -1195,7 +1195,7 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
 
     environment->scripted_per_rank_transfer_engine->clear();
     ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment->cache, 1, Tier::DEVICE));
-    environment->cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
     EXPECT_TRUE(environment->allResourcesAtTier(Tier::HOST));
     const auto host_descriptors = environment->scripted_per_rank_transfer_engine->descriptors();
     ASSERT_EQ(host_descriptors.size(), 2u);
@@ -1209,7 +1209,7 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
 
     environment->scripted_per_rank_transfer_engine->clear();
     ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment->cache, 1, Tier::HOST));
-    environment->cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
     EXPECT_TRUE(environment->allResourcesAtTier(Tier::DISK));
     const auto disk_descriptors = environment->scripted_per_rank_transfer_engine->descriptors();
     ASSERT_EQ(disk_descriptors.size(), 2u);
@@ -1273,7 +1273,7 @@ TEST_F(BlockTreeCacheIntegrationTest, EvictionRejectsNonCanonicalTargetBeforeCop
 
     environment->scripted_per_rank_transfer_engine->clear();
     EXPECT_FALSE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment->cache, 1, Tier::DEVICE, Tier::DISK));
-    environment->cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
     EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
 }
@@ -1292,7 +1292,7 @@ TEST_F(BlockTreeCacheIntegrationTest, EvictionExplicitNoneCascadesAtLeafWithoutC
 
     environment->scripted_per_rank_transfer_engine->clear();
     EXPECT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment->cache, 1, Tier::DEVICE, Tier::NONE));
-    environment->cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
     auto result = environment->cache->tree()->findNode(environment->keys);
     EXPECT_TRUE(result.empty());
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
@@ -1436,7 +1436,7 @@ TEST_P(BlockTreeCacheLowerTierTest, FullSWA_MatchLowerTierOnlyReturnsContextWith
         environment->expectPoolFreeCounts({12, 12, 14}, {16, 16}, {16, 14});
     }
     environment->reclaimAll();
-    environment->cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
     for (const auto& [pool, block] : request_targets) {
         releaseDeviceBlocksAndNotify(*environment->cache, pool, {block}, BlockRefType::REQUEST);
     }
@@ -1502,7 +1502,7 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesContextAndReleasesAl
     }
 
     ASSERT_TRUE(context->commit());
-    environment->cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
 
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*environment->cache), 0);
     EXPECT_TRUE(context->done());
@@ -1624,7 +1624,7 @@ TEST_P(BlockTreeCacheLowerTierTest, CancelPausedLoadStillInstallsTransferredTarg
     environment->expectPayloads();
 
     context.reset();
-    environment->cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
     for (const auto& [pool, block] : target_blocks) {
         releaseDeviceBlocksAndNotify(*environment->cache, pool, {block}, BlockRefType::REQUEST);
     }
@@ -1693,7 +1693,7 @@ TEST_P(BlockTreeCacheLowerTierTest, CancelCompletionRaceSettlesExactlyOnce) {
 
     context->waitDone();
     cancel_thread.join();
-    environment->cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
 
     ASSERT_TRUE(context->done());
     EXPECT_EQ(cancellation_won, !context->success());
@@ -1812,7 +1812,7 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesLoadAndRestoresCandi
     }
 
     pausable_per_rank_transfer_engine->release();
-    environment->cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
 
     ASSERT_TRUE(context->done());
     EXPECT_FALSE(context->success());
@@ -1919,7 +1919,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadDirectTransferExceptionRestoresSou
     ASSERT_TRUE(context->commit());
     pausable_per_rank_transfer_engine->waitUntilEntered();
     pausable_per_rank_transfer_engine->release();
-    environment->cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
 
     ASSERT_TRUE(context->done());
     EXPECT_FALSE(context->success());
@@ -2207,7 +2207,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadAsyncCompletionRefreshesBeforeTe
     context->waitDone();
     EXPECT_TRUE(context->success());
     context.reset();
-    environment->cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
     for (const auto& [pool, block] : request_target_blocks) {
         releaseDeviceBlocksAndNotify(*environment->cache, pool, {block}, BlockRefType::REQUEST);
     }

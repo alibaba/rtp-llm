@@ -847,7 +847,7 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkSharesPendingRel
     }
     submitBlockReleases(cache, releases);
 
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     // One FULL+LINEAR plan contributes two physical releases. Both GroupSets
     // share the pending count for their common backing pool.
@@ -868,7 +868,7 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkSharesPendingRel
 
     block_tree_cache_test::BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, /*num_blocks=*/100, Tier::DEVICE);
     block_tree_cache_test::BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, /*num_blocks=*/100, Tier::HOST);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, FailedWatermarkPlanStopsThisPassAndRecomputesOnNextTrigger) {
@@ -894,7 +894,7 @@ TEST_F(BlockTreeCacheFactoryTest, FailedWatermarkPlanStopsThisPassAndRecomputesO
     BlockReleaseBatch releases;
     releaseInsertedRequestBlocks(allocator, blocks, releases);
     submitBlockReleases(cache, releases);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     // The failed accepted async plan is not recursively retried in the same
     // maintenance pass; rollback leaves the physical deficit intact.
@@ -903,12 +903,12 @@ TEST_F(BlockTreeCacheFactoryTest, FailedWatermarkPlanStopsThisPassAndRecomputesO
 
     scripted_copy->clear();
     block_tree_cache_test::BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(scripted_copy->submitCount(), 1u);
     EXPECT_EQ(backing->freeBlocksNum(), 7u);
 
     block_tree_cache_test::BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, /*num_blocks=*/100, Tier::HOST);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, DeviceMinFreeDoesNotTriggerBlockTreeWatermarkEviction) {
@@ -933,7 +933,7 @@ TEST_F(BlockTreeCacheFactoryTest, DeviceMinFreeDoesNotTriggerBlockTreeWatermarkE
     BlockReleaseBatch releases;
     releaseInsertedRequestBlocks(allocator, blocks, releases);
     submitBlockReleases(cache, releases);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     EXPECT_EQ(scripted_copy->submitCount(), 0u);
     EXPECT_EQ(backing->freeBlocksNum(), 6u);

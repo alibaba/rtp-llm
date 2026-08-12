@@ -22,8 +22,7 @@ bool StoreTaskRunner::prepareTask(Task& task, const std::vector<std::vector<Grou
                     "store aborted: %s pool exhausted for group_set[%zu]", tierName(task.target_tier), group_set_id);
                 return false;
             }
-            const MultiNodeResource source_holder{group_set_id, Tier::DEVICE, {{nullptr, source.device_blocks}}};
-            group_set->referenceBlocks(source_holder, BlockRefType::STORE);
+            group_set->referenceBlocks({group_set_id, Tier::DEVICE, {{nullptr, source.device_blocks}}}, BlockRefType::STORE);
             TransferDescriptor descriptor =
                 task.target_tier == Tier::HOST ?
                     TransferDescriptor::deviceToHost(group_set_id, source.device_blocks, target_block) :

@@ -54,7 +54,7 @@ TEST_F(FullLinearEvictionTest, FullReclaimCascadesToLinear) {
     EXPECT_EQ(stats0.device_heap_total_size, 3u);  // 1 Full + 2 Linear
 
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
 
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);  // [100] survives
 }
@@ -84,17 +84,17 @@ TEST_F(FullLinearEvictionTest, LinearOnlySequentialDrain) {
     EXPECT_EQ(lin_cache->getStats().device_heap_total_size, 3u);
 
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*lin_cache, 1, Tier::DEVICE);
-    lin_cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*lin_cache);
     EXPECT_EQ(lin_cache->getStats().tree_node_count, 3u);
     EXPECT_EQ(lin_cache->getStats().device_heap_total_size, 2u);
 
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*lin_cache, 1, Tier::DEVICE);
-    lin_cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*lin_cache);
     EXPECT_EQ(lin_cache->getStats().tree_node_count, 3u);
     EXPECT_EQ(lin_cache->getStats().device_heap_total_size, 1u);
 
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*lin_cache, 1, Tier::DEVICE);
-    lin_cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*lin_cache);
     EXPECT_EQ(lin_cache->getStats().tree_node_count, 0u);
 }
 
@@ -110,7 +110,7 @@ TEST_F(FullLinearEvictionTest, FullReclaimClearsBothGroupsSingleNode) {
     insertPath({100}, 10, 30);
 
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
 
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
 }
@@ -125,11 +125,11 @@ TEST_F(FullLinearEvictionTest, SequentialFullReclaimDrainsChain) {
     insertPath({100, 200}, 10, 30);
 
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);
 
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
 }
 

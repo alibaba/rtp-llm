@@ -158,6 +158,7 @@ public:
                                             std::optional<Tier> target_override = std::nullopt);
     static int  reclaimBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier = Tier::DEVICE);
     static int  pendingTasksForTest(const BlockTreeCache& cache);
+    static void waitForTaskPoolIdleForTest(const BlockTreeCache& cache);
 
 private:
     static bool armQueueRejectionForTest(BlockTreeCache& cache);
@@ -166,11 +167,13 @@ private:
 
 class ScriptedPerRankBlockTransferEngine: public PerRankBlockTransferEngine {
 public:
-    explicit ScriptedPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups);
+    explicit ScriptedPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups,
+                                                bool perform_successful_transfers = true);
 
     std::shared_ptr<AsyncContext> submit(const TransferDescriptor& descriptor) override;
 
-    // Scripts the outcome of upcoming submits; an empty queue delegates to the real engine.
+    // Scripts the outcome of upcoming submits. Successful submits delegate to
+    // the real engine unless perform_successful_transfers is false.
     void enqueue(bool success);
     void clear();
 
@@ -181,6 +184,7 @@ private:
     mutable std::mutex              mutex_;
     std::deque<bool>                results_;
     std::vector<TransferDescriptor> descriptors_;
+    bool                            perform_successful_transfers_{true};
 };
 
 struct FullSWAEnvironmentOptions {

@@ -31,8 +31,7 @@ bool isCanonicalEvictionTarget(Tier source_tier, Tier target_tier) {
 
 }  // namespace
 
-EvictionTaskRunner::EvictionTaskRunner(ExecuteTransferFn               execute_transfer,
-                                       const std::vector<GroupSetPtr>& group_sets,
+EvictionTaskRunner::EvictionTaskRunner(const std::vector<GroupSetPtr>& group_sets,
                                        const BlockTransferDispatcher*  transfer_dispatcher,
                                        BlockTreeTaskPool*              task_pool,
                                        BlockTreeCacheMetricsReporter&  metrics_reporter,
@@ -42,7 +41,6 @@ EvictionTaskRunner::EvictionTaskRunner(ExecuteTransferFn               execute_t
                                        IsTierEnabledFn                 is_tier_enabled,
                                        SettledFn                       settled,
                                        RemoteWriteFn                   remote_write):
-    execute_transfer_(std::move(execute_transfer)),
     group_sets_(group_sets),
     transfer_dispatcher_(transfer_dispatcher),
     task_pool_(task_pool),
@@ -278,14 +276,10 @@ BlockTreeEvictor::CopyResultSet EvictionTaskRunner::runTransfer(const BlockTreeE
 }
 
 bool EvictionTaskRunner::executeTierCopy(const TransferDescriptor& eviction_desc) const {
-    if (!execute_transfer_) {
-        return false;
-    }
-
     if (!eviction_desc.isExecutable()) {
         return false;
     }
-    return execute_transfer_(eviction_desc);
+    return transfer_dispatcher_->executePerRank(eviction_desc);
 }
 
 Tier EvictionTaskRunner::normalizeTargetTier(Tier source_tier) const {

@@ -1,20 +1,29 @@
 #include <gtest/gtest.h>
 
+#include <memory>
 #include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 
 namespace rtp_llm {
 namespace {
 
+using ScriptedTransferEngine = block_tree_cache_test::ScriptedPerRankBlockTransferEngine;
+
 class EvictionTaskRunnerTest: public ::testing::Test {
 protected:
-    EvictionTaskRunner makeRunner(EvictionTaskRunner::ExecuteTransferFn execute_transfer) {
-        return EvictionTaskRunner(std::move(execute_transfer),
-                                  group_sets_,
-                                  nullptr,
+    void SetUp() override {
+        transfer_engine_     = std::make_shared<ScriptedTransferEngine>(group_sets_, false);
+        transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(transfer_engine_);
+    }
+
+    EvictionTaskRunner makeRunner() {
+        return EvictionTaskRunner(group_sets_,
+                                  transfer_dispatcher_.get(),
                                   nullptr,
                                   metrics_reporter_,
                                   mutex_,
@@ -25,9 +34,11 @@ protected:
                                   [](CacheKeyType, size_t) {});
     }
 
-    std::vector<GroupSetPtr>      group_sets_;
-    BlockTreeCacheMetricsReporter metrics_reporter_;
-    std::mutex                    mutex_;
+    std::vector<GroupSetPtr>                 group_sets_;
+    std::shared_ptr<ScriptedTransferEngine>  transfer_engine_;
+    std::unique_ptr<BlockTransferDispatcher> transfer_dispatcher_;
+    BlockTreeCacheMetricsReporter            metrics_reporter_;
+    std::mutex                               mutex_;
 };
 
 BlockTreeEvictor::EvictionPlan makeCopyPlan() {
@@ -49,13 +60,10 @@ BlockTreeEvictor::EvictionPlan makeCopyPlan() {
 }
 
 TEST_F(EvictionTaskRunnerTest, PerformCopyExecutesPrimaryAndCascadesInOrder) {
-    std::vector<TransferDescriptor> descriptors;
-    auto runner = makeRunner([&descriptors](const TransferDescriptor& descriptor) {
-        descriptors.push_back(descriptor);
-        return true;
-    });
+    auto runner = makeRunner();
 
     const auto results = runner.performCopy(makeCopyPlan());
+    const auto descriptors = transfer_engine_->descriptors();
 
     EXPECT_TRUE(results.primary_success);
     EXPECT_EQ(results.cascade_success, (std::vector<bool>{true}));
@@ -67,17 +75,14 @@ TEST_F(EvictionTaskRunnerTest, PerformCopyExecutesPrimaryAndCascadesInOrder) {
 }
 
 TEST_F(EvictionTaskRunnerTest, PrimaryFailureSuppressesCascadeCopy) {
-    size_t execution_count = 0;
-    auto runner = makeRunner([&execution_count](const TransferDescriptor&) {
-        ++execution_count;
-        return false;
-    });
+    transfer_engine_->enqueue(false);
+    auto runner = makeRunner();
 
     const auto results = runner.performCopy(makeCopyPlan());
 
     EXPECT_FALSE(results.primary_success);
     EXPECT_EQ(results.cascade_success, (std::vector<bool>{false}));
-    EXPECT_EQ(execution_count, 1u);
+    EXPECT_EQ(transfer_engine_->submitCount(), 1u);
 }
 
 TEST_F(EvictionTaskRunnerTest, BuildTransferBatchIncludesPrimaryAndCascades) {
@@ -123,11 +128,7 @@ TEST_F(EvictionTaskRunnerTest, DiskInvolvedPlanUsesDiskTimeoutEvenWhenSmaller) {
 }
 
 TEST_F(EvictionTaskRunnerTest, DeviceEvictionBypassesDisabledHost) {
-    std::vector<TransferDescriptor> descriptors;
-    auto runner = makeRunner([&descriptors](const TransferDescriptor& descriptor) {
-        descriptors.push_back(descriptor);
-        return true;
-    });
+    auto runner = makeRunner();
     runner.is_tier_enabled_ = [](Tier tier) { return tier == Tier::DISK; };
 
     BlockTreeEvictor::EvictionPlan plan;
@@ -139,6 +140,7 @@ TEST_F(EvictionTaskRunnerTest, DeviceEvictionBypassesDisabledHost) {
 
     const auto results = runner.performCopy(plan);
     ASSERT_TRUE(results.primary_success);
+    const auto descriptors = transfer_engine_->descriptors();
     ASSERT_EQ(descriptors.size(), 1u);
     EXPECT_EQ(descriptors[0].source_tier, Tier::DEVICE);
     EXPECT_EQ(descriptors[0].target_tier, Tier::DISK);
@@ -147,7 +149,7 @@ TEST_F(EvictionTaskRunnerTest, DeviceEvictionBypassesDisabledHost) {
 }
 
 TEST_F(EvictionTaskRunnerTest, TargetNormalizationUsesNearestEnabledTier) {
-    auto runner = makeRunner([](const TransferDescriptor&) { return true; });
+    auto runner = makeRunner();
 
     runner.is_tier_enabled_ = [](Tier tier) { return tier == Tier::HOST || tier == Tier::DISK; };
     EXPECT_EQ(runner.normalizeTargetTier(Tier::DEVICE), Tier::HOST);

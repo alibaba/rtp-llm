@@ -53,7 +53,7 @@ cc_test(
     name = "eviction_task_runner_test",
     srcs = ["EvictionTaskRunnerTest.cc"],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils"],
 )
 
 cc_test(

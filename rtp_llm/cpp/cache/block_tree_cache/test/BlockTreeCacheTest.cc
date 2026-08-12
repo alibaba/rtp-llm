@@ -529,7 +529,7 @@ TEST_F(BlockTreeCacheTest, ReclaimCascadesToLowerPriorityGroup) {
     int reclaimed = BlockTreeCacheTestPeer::reclaimBlocksForTest(*multi_cache, 1, Tier::DEVICE);
     EXPECT_EQ(reclaimed, 1);
 
-    multi_cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*multi_cache);
 }
 
 TEST_F(BlockTreeCacheTest, MultiGroupConstruction) {
@@ -659,7 +659,7 @@ TEST_F(BlockTreeCacheTest, ConcurrentDoubleMatch_LastReleaseReadmitsExactlyOnce)
     EXPECT_EQ(released_count, 2u);
     EXPECT_EQ(cache_->getStats().device_heap_total_size, 1u);
     EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
 }
 
@@ -823,7 +823,7 @@ TEST_F(BlockTreeCacheTest, ConcurrentMatchInsertSameAndForkedPrefixes) {
         if (BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE) == 0) {
             break;
         }
-        cache_->waitForPendingTasks();
+        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     }
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
     EXPECT_EQ(cache_->getStats().device_heap_total_size, 0u);
@@ -885,7 +885,7 @@ TEST(BlockTreeCacheFinalizationTest, CopyExceptionSettlesPendingReleasesBeforeTa
     EXPECT_EQ(per_rank_transfer_engine->submitCount(), submit_count);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*environment->cache, Tier::DEVICE, 0.0);
     barrier->release();
-    environment->cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
 
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*environment->cache), 0);
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingEvictionReleasesForTest(*environment->cache), 0u);
@@ -972,7 +972,7 @@ TEST_F(BlockTreeCacheTest, FullMatch_PreservesPathAndPoolOrder) {
     cache->releaseMatchedResources(result.matched_device_resources);
 
     EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 2, Tier::DEVICE), 2);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_FALSE(pool0->isAllocated(a_pool0));
     EXPECT_FALSE(pool0->isAllocated(b_pool0));
     EXPECT_FALSE(pool1->isAllocated(a_pool1));
@@ -1034,7 +1034,7 @@ TEST_F(BlockTreeCacheTest, DuplicateInsert_KeepsExistingResourceAndCallerOwnsLos
     EXPECT_TRUE(pool->isAllocated(existing_block));
 
     EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 1);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_FALSE(pool->isAllocated(existing_block));
     EXPECT_EQ(pool->freeBlocksNum(), kUsableBlocks);
 }
@@ -1077,7 +1077,7 @@ TEST_F(BlockTreeCacheTest, DuplicateInsert_FillsExistingEmptyGroupAndAddsOneCach
     EXPECT_EQ(pool->refCount(block), 1u);
 
     EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 1);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_FALSE(pool->isAllocated(block));
     EXPECT_EQ(cache->getStats().tree_node_count, 0u);
 }
@@ -1163,7 +1163,7 @@ TEST_F(BlockTreeCacheTest, InsertMatchReleaseReclaim_RefcountLifecycle) {
     EXPECT_EQ(pool->refCount(block), 1u);
 
     EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 1);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_FALSE(pool->isAllocated(block));
     EXPECT_EQ(pool->freeBlocksNum(), kUsableBlocks);
     EXPECT_EQ(cache->getStats().tree_node_count, 0u);
@@ -1192,7 +1192,7 @@ TEST_F(BlockTreeCacheTest, SequentialReclaimDrainsChainWithoutHostBlocks) {
     for (int i = 0; i < 3; ++i) {
         int reclaimed = BlockTreeCacheTestPeer::reclaimBlocksForTest(*ce_cache, 1, Tier::DEVICE);
         EXPECT_EQ(reclaimed, 1) << "Reclaim " << i << " should succeed";
-        ce_cache->waitForPendingTasks();
+        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*ce_cache);
     }
 
     EXPECT_EQ(ce_cache->getStats().tree_node_count, 0u);
@@ -1214,7 +1214,7 @@ TEST_F(BlockTreeCacheTest, HostDisabledDirectRelease) {
     cache->insert({100}, resources, Tier::DEVICE);
 
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     // No host block allocated (Host disabled → direct release)
     EXPECT_EQ(host_pool->freeBlocksNum(), 4u);
@@ -1262,7 +1262,7 @@ TEST_F(BlockTreeCacheTest, NodeDeletedWhenAllGroupsEmpty) {
 
     // Reclaim device data.
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     // Node should be deleted: group empty
     EXPECT_EQ(cache->getStats().tree_node_count, 0u);
@@ -1413,12 +1413,12 @@ TEST_F(BlockTreeCacheTest, ParentBecomesDeviceLeafAfterChildReclaim) {
 
     // Reclaim C -> B becomes DeviceLeaf -> enters heap.
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
 
     // Reclaim B -> A becomes DeviceLeaf -> enters heap.
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
 }
 
@@ -1556,7 +1556,7 @@ TEST_F(BlockTreeCacheTest, LoadDetectsHostData) {
     cache->insert({100}, resources, Tier::DEVICE);
 
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     std::vector<std::vector<GroupSetResource>> resources2(1, std::vector<GroupSetResource>(1));
     resources2[0][0].device_blocks = {55};
@@ -1855,7 +1855,7 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackCoreHoldersAndRetainsReque
     load_context.reset();
     EXPECT_EQ(host_pool->refCount(source_block), source_ref_before)
         << "committed context must not release source twice";
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     device_pool->decRef(request_targets, BlockRefType::REQUEST);
 }
 
@@ -1961,7 +1961,7 @@ TEST_F(BlockTreeCacheTest, LoadContextAbortSkipsLoad) {
     EXPECT_TRUE(result.matched_device_resources.empty());
     load_context.reset();
     cache->releaseMatchedResources(result.matched_device_resources);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 }
 
 // Committing the context uses the allocator-owned target and submits the copy.
@@ -1991,7 +1991,7 @@ TEST_F(BlockTreeCacheTest, LoadContextCommitTriggersLoad) {
     EXPECT_TRUE(load_context->commit());
 
     cache->releaseMatchedResources(result.matched_device_resources);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     device_pool->decRef(request_targets, BlockRefType::REQUEST);
 }
 
@@ -2172,7 +2172,7 @@ TEST_F(BlockTreeCacheTest, ShutdownDrainsOnlyHoldsRemainingAfterPartialMixedTier
     releaseDeviceBlocksAndNotify(*cache, device_pool, device_holder.front(), BlockRefType::REQUEST);
 
     EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 1);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(per_rank_transfer_engine->submitCount(), 0u);
     EXPECT_EQ(device_pool->freeBlocksNum(), device_free_before);
     EXPECT_FALSE(device_pool->isAllocated(device_block));

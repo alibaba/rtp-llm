@@ -60,7 +60,7 @@ TEST_F(FullSWAEvictionTest, FullReclaimCascadesToSWA) {
 
     int reclaimed = BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
     EXPECT_EQ(reclaimed, 1);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
 
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);  // [100]
 }
@@ -91,19 +91,19 @@ TEST_F(FullSWAEvictionTest, SWAOnlySequentialDrain) {
 
     // Reclaim [100]; it stays as an empty internal node.
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*swa_cache, 1, Tier::DEVICE);
-    swa_cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*swa_cache);
     EXPECT_EQ(swa_cache->getStats().tree_node_count, 3u);
     EXPECT_EQ(swa_cache->getStats().device_heap_total_size, 2u);
 
     // Reclaim [200]; it also stays until its child is removed.
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*swa_cache, 1, Tier::DEVICE);
-    swa_cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*swa_cache);
     EXPECT_EQ(swa_cache->getStats().tree_node_count, 3u);
     EXPECT_EQ(swa_cache->getStats().device_heap_total_size, 1u);
 
     // Reclaim [300] and prune [200] and [100].
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*swa_cache, 1, Tier::DEVICE);
-    swa_cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*swa_cache);
     EXPECT_EQ(swa_cache->getStats().tree_node_count, 0u);
 }
 
@@ -117,11 +117,11 @@ TEST_F(FullSWAEvictionTest, SequentialFullReclaimClearsBothGroups) {
     insertPath({100, 200}, 10, 20);
 
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);
 
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
 }
 
@@ -142,15 +142,15 @@ TEST_F(FullSWAEvictionTest, ForkBothBranchesEvictable) {
     EXPECT_EQ(cache_->getStats().device_heap_total_size, 5u);  // 2 Full + 3 SWA
 
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 2u);
 
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);  // [100] survives
 
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
 }
 

@@ -203,7 +203,7 @@ TEST_F(FullEvictionTest, ReclaimSingleLeafDeletesNodeAndPromotesParent) {
 
     int reclaimed = BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
     EXPECT_EQ(reclaimed, 1);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
 
     auto stats = cache_->getStats();
     EXPECT_EQ(stats.tree_node_count, 2u);         // [100], [200] remain
@@ -220,7 +220,7 @@ TEST_F(FullEvictionTest, ParentBecomesLeafAfterChildEviction) {
     insertPath({100, 200, 300}, 10);
 
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
 
     auto stats = cache_->getStats();
     EXPECT_EQ(stats.tree_node_count, 2u);
@@ -241,17 +241,17 @@ TEST_F(FullEvictionTest, SequentialReclaimDrainsChain) {
 
     // Step 1: reclaim [300]
     EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 2u);
 
     // Step 2: reclaim [200]
     EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);
 
     // Step 3: reclaim [100]
     EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
 
     // No more to reclaim
@@ -277,17 +277,17 @@ TEST_F(FullEvictionTest, ForkBothLeavesEvictable) {
 
     // Reclaim first leaf
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 2u);  // [100] + one leaf
 
     // Reclaim second leaf
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);  // [100] survives (has data)
 
     // Reclaim [100] (now leaf after both children deleted)
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
 }
 
@@ -304,7 +304,7 @@ TEST_F(FullEvictionTest, LRUReclaimsOldestLeafFirst) {
     EXPECT_EQ(cache_->getStats().device_heap_total_size, 2u);
 
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
 
     // [100] was reclaimed (oldest). Only [200] remains.
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);
@@ -324,7 +324,7 @@ TEST_F(FullEvictionTest, MatchRefreshesLruOrder) {
     cache_->releaseMatchedResources(match.matched_device_resources);
 
     EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
 
     EXPECT_EQ(cache_->match({100}).matched_device_blocks, 1u);
     EXPECT_EQ(cache_->match({200}).matched_device_blocks, 0u);
@@ -353,7 +353,7 @@ TEST_F(FullEvictionTest, MatchReleaseDoesNotMutateHeat) {
     // Releasing the hotter node must not refresh it again: the untouched rival
     // remains the next LRU victim.
     EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     auto hot_match  = cache_->match({100});
     auto cold_match = cache_->match({200});
     EXPECT_EQ(hot_match.matched_device_blocks, 1u);
@@ -374,7 +374,7 @@ TEST_F(FullEvictionTest, OverlappingInsertDoesNotOverwriteOrRefreshLru) {
     ASSERT_EQ(before.back()->group_set_resources[0].device_blocks, std::vector<BlockIdxType>({10}));
 
     EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
-    cache_->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
 
     EXPECT_EQ(cache_->match({100}).matched_device_blocks, 0u);
     EXPECT_EQ(cache_->match({200}).matched_device_blocks, 1u);

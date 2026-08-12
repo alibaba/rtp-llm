@@ -17,6 +17,7 @@
 #include "rtp_llm/cpp/cache/SingleConfigCreator.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
@@ -839,7 +840,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LowerTierHitFollowedByOuterIncrFailureNev
         EXPECT_EQ(resource->curBlocksNum(), 0);
         EXPECT_EQ(allocator_->freeBlocksNum(), free_before);
 
-        cache->waitForPendingTasks();
+        cache->task_pool_->waitForIdle();
         const auto snapshot_after = cache->getKeySnapshot(/*limit=*/16);
         EXPECT_EQ(snapshot_after.version, snapshot_before.version);
         EXPECT_EQ(snapshot_after.keys, snapshot_before.keys);

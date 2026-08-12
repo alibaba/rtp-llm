@@ -379,7 +379,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DuplicateInsertIsIdempotent) {
     expectPoolSnapshotsEq(after_first_device, snapshotDevicePools(manager_));
     expectPoolSnapshotsEq(after_first_lower, snapshotLowerPools(*cache, GetParam()));
     manager_->free(FreeInfo{resource, tokens});
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
     (void)seed;
 }
@@ -402,7 +402,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerTierMatchPublishesAsyncContext)
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     auto lower = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(lower.has_value());
     ASSERT_EQ(lower->size(), 1u);
@@ -430,7 +430,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerTierMatchPublishesAsyncContext)
     ASSERT_NE(result.async_context, nullptr);
     result.async_context->waitDone();
     ASSERT_TRUE(result.async_context->success()) << result.async_context->errorInfo().ToString();
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(transfer_engine_->submitCount(), submits_before_load + cache->groupSets().size());
     ASSERT_TRUE(
         requestReusesExpectedPath(*cache, cache_config_, seed.cache_keys, resource, /*logical_reuse_blocks=*/1));
@@ -468,7 +468,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4BatchCommonLowerHitSharesOneLoadedTa
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     auto host_path = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(host_path.has_value());
@@ -553,7 +553,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4BatchCommonLowerHitSharesOneLoadedTa
     result.async_context->waitDone();
     ASSERT_TRUE(result.async_context->done());
     ASSERT_TRUE(result.async_context->success()) << result.async_context->errorInfo().ToString();
-    cache->waitForPendingTasks();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
     EXPECT_EQ(engine->submitCount(), descriptors_before_load + cache->groupSets().size());
 

@@ -50,7 +50,7 @@ void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                  
     if (insert_result.inserted_nodes.empty() && insert_result.adopted_nodes.empty()) {
         return;
     }
-    evictor_.onInsertCommitted(insert_result);
+    evictor_.onInserted(insert_result);
     settled_(true, true);
 }
 
@@ -155,7 +155,7 @@ size_t BlockTreeStorer::settleLocked(const StoreTask& task, bool publish) {
     }
 
     if (insert_result.accepted_resource_count > 0) {
-        evictor_.onInsertCommitted(insert_result);
+        evictor_.onInserted(insert_result);
     }
     if (!task.descriptors.empty()) {
         settled_(insert_result.accepted_resource_count > 0, true);
