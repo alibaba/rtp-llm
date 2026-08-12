@@ -63,7 +63,10 @@ def require_cuda_fp8_quant_helpers(quant_kind: str) -> None:
     required_ops = {
         "per_tensor": ("per_tensor_quant_fp8",),
         "per_token": ("per_token_quant_fp8",),
-        "group": ("per_token_group_quant_fp8",),
+        "group": (
+            "per_token_group_quant_fp8",
+            "per_token_group_quant_fp8_v2",
+        ),
     }
     try:
         op_names = required_ops[quant_kind]
@@ -278,6 +281,8 @@ def scaled_fp8_per_tensor_quant(
 
 def scaled_fp8_per_token_quant(
     input: torch.Tensor,
+    scale: Optional[torch.Tensor] = None,
+    *,
     output: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if input.ndim != 2:
@@ -291,7 +296,19 @@ def scaled_fp8_per_token_quant(
         raise ValueError(
             f"FP8 per-token input width must be divisible by 8, got {input.shape[1]}"
         )
-    scale = torch.zeros(input.size(0), device=input.device, dtype=torch.float32)
+    if scale is None:
+        scale = torch.empty(input.size(0), device=input.device, dtype=torch.float32)
+    else:
+        if scale.shape not in ((input.size(0),), (input.size(0), 1)):
+            raise ValueError(
+                "FP8 per-token scale must have shape "
+                f"({input.size(0)},) or ({input.size(0)}, 1), got {tuple(scale.shape)}"
+            )
+        if scale.device != input.device:
+            raise ValueError(f"FP8 scale must be on {input.device}, got {scale.device}")
+        if scale.dtype != torch.float32 or not scale.is_contiguous():
+            raise TypeError("FP8 per-token scale must be contiguous float32")
+        scale = scale.reshape(-1)
     if output is not None:
         _validate_native_output(output, input, torch.float8_e4m3fn, "FP8 per-token")
     else:
