@@ -162,6 +162,63 @@ class PrefillEndpointTest {
     }
 
     @Test
+    void calibrateKeepsBatchInflightUntilEveryMemberFinishes() {
+        BatchItem item1 = createBatchItem(1L, 500, 200);
+        BatchItem item2 = createBatchItem(2L, 300, 100);
+        endpoint.commitBatch(1L, 100, List.of(item1, item2));
+
+        TaskInfo finishedFirst = taskInfo(1L, 1L, null, 0, 40);
+        TaskInfo runningSecond = taskInfo(2L, 1L, TaskPhase.RUNNING, 0, 0);
+        calibrate(Map.of("1", finishedFirst), Map.of("2", runningSecond));
+
+        assertEquals(1, endpoint.getInflightBatchCount(),
+                "one finished member must not release the whole batch");
+        assertEquals(1, endpoint.realPendingCount());
+
+        TaskInfo finishedSecond = taskInfo(2L, 1L, null, 0, 75);
+        calibrate(Map.of("2", finishedSecond), Map.of());
+
+        assertEquals(0, endpoint.getInflightBatchCount());
+        assertEquals(0, endpoint.realPendingCount());
+    }
+
+    @Test
+    void calibrateMixedTerminalMembersKeepsOnlyRunningSurvivor() {
+        BatchItem item1 = createBatchItem(1L, 500, 200);
+        BatchItem item2 = createBatchItem(2L, 300, 100);
+        BatchItem item3 = createBatchItem(3L, 400, 0);
+        endpoint.commitBatch(1L, 100, List.of(item1, item2, item3));
+
+        TaskInfo success = taskInfo(1L, 1L, null, 0, 40);
+        TaskInfo failure = taskInfo(2L, 1L, null, 500, 50);
+        TaskInfo running = taskInfo(3L, 1L, TaskPhase.RUNNING, 0, 0);
+        calibrate(Map.of("1", success, "2", failure), Map.of("3", running));
+
+        assertEquals(1, endpoint.getInflightBatchCount());
+        assertEquals(1, endpoint.realPendingCount());
+
+        // WorkerStatus may repeat an already observed terminal task.  It must
+        // not decrement the survivor count a second time.
+        calibrate(Map.of("1", success), Map.of("3", running));
+        assertEquals(1, endpoint.getInflightBatchCount());
+        assertEquals(1, endpoint.realPendingCount());
+    }
+
+    @Test
+    void runningObservationRefreshesBatchInactivityTtl() throws InterruptedException {
+        BatchItem item = createBatchItem(1L, 500, 200);
+        endpoint.commitBatch(1L, 100, List.of(item));
+
+        Thread.sleep(150);
+        TaskInfo running = taskInfo(1L, 1L, TaskPhase.RUNNING, 0, 0);
+        calibrate(Map.of(), Map.of("1", running));
+
+        assertEquals(0, endpoint.evictExpiredBatches(100),
+                "an actively observed long-running batch must not be evicted by creation age");
+        assertEquals(1, endpoint.getInflightBatchCount());
+    }
+
+    @Test
     void calibrateHandlesTaskWithNoBatchId() {
         BatchItem item = createBatchItem(1L, 500, 200);
         endpoint.commitBatch(1L, 100, List.of(item));
@@ -416,6 +473,20 @@ class PrefillEndpointTest {
         prefill.setDebugInfo(debugInfo);
 
         return new BatchItem(ctx, null, null, prefill, null, endpoint, null, System.currentTimeMillis());
+    }
+
+    private static TaskInfo taskInfo(long requestId,
+                                     long batchId,
+                                     TaskPhase phase,
+                                     int errorCode,
+                                     long executionTimeMs) {
+        TaskInfo task = new TaskInfo();
+        task.setRequestId(requestId);
+        task.setBatchId(batchId);
+        task.setPhase(phase);
+        task.setErrorCode(errorCode);
+        task.setExecutionTimeMs(executionTimeMs);
+        return task;
     }
 
     private static BatchDecisionHandler noopHandler() {

@@ -246,8 +246,8 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     }
 
     /** Deliver one admission deadline through the ordinary-terminal reducer. */
-    private void onAdmissionDeadline(long requestId,
-                                     CompletableFuture<Response> expectedFuture) {
+    void onAdmissionDeadline(long requestId,
+                             CompletableFuture<Response> expectedFuture) {
         // The future monitor is the admission handoff fence shared with the
         // asynchronous Decode-preemption COMMITTED callback. It makes the
         // pre-inflight deadline decision atomic with register+offer without
@@ -273,6 +273,21 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             }
             synchronized (entry) {
                 if (inflight.get(requestId) != entry || expectedFuture.isDone()) {
+                    return;
+                }
+                RequestLifecycleSnapshot snapshot = entry.lifecycle.snapshot();
+                if (entry.engineDispatchStarted
+                        && snapshot.batchId() > 0
+                        && (snapshot.state() == RequestLifecycleState.DISPATCHING
+                            || snapshot.state() == RequestLifecycleState.ACKNOWLEDGED
+                            || snapshot.state() == RequestLifecycleState.CANCEL_REQUESTED)) {
+                    // Dispatch and the admission timer are linearized by this
+                    // entry monitor.  Once dispatch wins before the deadline,
+                    // the Engine may own the request; a Master-only timeout
+                    // would create a failed frontend request that still runs
+                    // in the Engine.  From this point the EnqueueBatch ACK,
+                    // RPC timeout, worker terminal status, or Cancel protocol
+                    // is authoritative.
                     return;
                 }
                 reduceOrdinaryTerminalLocked(entry,
@@ -1046,14 +1061,10 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 if (entry.lifecycle.isTerminal() || entry.cleanupOwned) {
                     continue;
                 }
-                // Linearize dispatch ownership against Master-local eviction.
-                // If eviction/timeout released the reservation first, this
-                // item is no longer allowed to reach the engine. Legacy
-                // reservations are non-queued but still pass this claim.
-                if (item.decodeEp() != null
-                        && !item.decodeEp().tryMarkEngineMayHaveSeen(item.requestId())) {
-                    continue;
-                }
+                // Preserve the scheduler-visible DISPATCHING state as soon as
+                // a batch is assembled. The separate engineDispatchStarted
+                // fence below distinguishes executor-queued work from an item
+                // that may actually have reached the Engine.
                 entry.lifecycle.startDispatch(batchId);
                 dispatchable.add(item);
             }
@@ -1091,19 +1102,47 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 config.getFlexlbBatchSizeMax(), meta.queueDepth(),
                 prefillEp != null ? prefillEp.ipPort() : "");
 
-        // Record dispatch timestamp for dispatch-to-ACK latency metric
-        for (BatchItem item : dispatchable) {
-            InflightEntry entry = entryFor(item);
-            if (entry != null) {
-                entry.lifecycle.markDispatched();
-                item.ctx().setBatchDispatchedNanos(System.nanoTime());
-            }
-        }
-
         dispatcher.dispatch(dispatchable, prefillEp, batchId, predMs, reason, this);
     }
 
     // ==================== DispatchCallback implementation ====================
+
+    @Override
+    public boolean onDispatchStart(BatchItem item, long batchId) {
+        InflightEntry entry = entryFor(item);
+        if (entry == null) {
+            return false;
+        }
+        synchronized (entry) {
+            if (inflight.get(item.requestId()) != entry
+                    || entry.lifecycle.isTerminal()
+                    || entry.cleanupOwned
+                    || entry.lifecycle.snapshot().batchId() != batchId) {
+                return false;
+            }
+            long deadlineMs = item.deadlineMs();
+            if (entry.autoTpmAdmission
+                    && deadlineMs > 0
+                    && System.currentTimeMillis() >= deadlineMs) {
+                reduceOrdinaryTerminalLocked(entry,
+                        DeferredTerminal.timeout(
+                                "admission deadline exceeded before dispatch"));
+                return false;
+            }
+            // This callback runs immediately before building/sending the
+            // Engine request. It shares the entry monitor with the deadline
+            // reducer, so either timeout settles the QUEUED item or dispatch
+            // acquires Engine ownership—never both.
+            if (item.decodeEp() != null
+                    && !item.decodeEp().tryMarkEngineMayHaveSeen(item.requestId())) {
+                return false;
+            }
+            entry.engineDispatchStarted = true;
+            entry.lifecycle.markDispatched();
+            item.ctx().setBatchDispatchedNanos(System.nanoTime());
+            return true;
+        }
+    }
 
     @Override
     public void onSuccess(BatchItem item, long batchId) {
@@ -1480,6 +1519,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         final AtomicBoolean rolledBack = new AtomicBoolean(false);
         AdmissionLease admissionLease;
         boolean decodeAccepted;
+        boolean engineDispatchStarted;
         boolean cleanupOwned;
         PreemptionRegistration preemption;
 

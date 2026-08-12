@@ -22,6 +22,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.LongPredicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -271,6 +272,33 @@ class DefaultBatchDispatcherTest {
         assertEquals(RoleType.PREFILL, RoleTypeProtoConverter.fromRoleAddr(addr));
     }
 
+    @Test
+    void dispatchStartFenceExcludesRejectedMembersFromWirePayload() throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        BatchItem rejected = createBatchItem(1L, 500, 200, prefillEp);
+        BatchItem admitted = createBatchItem(2L, 500, 200, prefillEp);
+        TestCallback fencedCallback = new TestCallback(id -> id == 2L);
+        List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+                .thenAnswer(inv -> {
+                    EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
+                    sent.add(request);
+                    return CompletableFuture.completedFuture(ackResponse(1L, List.of(2L)));
+                });
+
+        dispatcher.dispatch(List.of(rejected, admitted), prefillEp, 1L, 100,
+                "dispatch_fence", fencedCallback);
+
+        assertTrue(fencedCallback.successLatch.await(5, TimeUnit.SECONDS));
+        List<Long> wireRequestIds = sent.getFirst().getDpSlotsList().stream()
+                .flatMap(slot -> slot.getRequestsList().stream())
+                .map(external -> external.getInput().getRequestId())
+                .toList();
+        assertEquals(List.of(2L), wireRequestIds);
+        assertEquals(1, fencedCallback.successCount.get());
+        assertEquals(0, fencedCallback.failureCount.get());
+    }
+
     private static EngineRpcService.GenerateInputPB sentInput(EngineRpcService.EnqueueBatchRequestPB request) {
         return request.getDpSlotsList().getFirst().getRequestsList().getFirst().getInput();
     }
@@ -332,6 +360,20 @@ class DefaultBatchDispatcherTest {
         final CountDownLatch successLatch = new CountDownLatch(1);
         final CountDownLatch failureLatch = new CountDownLatch(1);
         volatile Throwable lastError;
+        private final LongPredicate dispatchFence;
+
+        TestCallback() {
+            this(ignored -> true);
+        }
+
+        TestCallback(LongPredicate dispatchFence) {
+            this.dispatchFence = dispatchFence;
+        }
+
+        @Override
+        public boolean onDispatchStart(BatchItem item, long batchId) {
+            return dispatchFence.test(item.requestId());
+        }
 
         @Override
         public void onSuccess(BatchItem item, long batchId) {

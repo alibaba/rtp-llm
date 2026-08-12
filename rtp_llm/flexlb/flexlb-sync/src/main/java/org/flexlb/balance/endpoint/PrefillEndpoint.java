@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 public class PrefillEndpoint extends WorkerEndpoint {
@@ -163,13 +164,16 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     finishedSize, runningSize, inflightBatches.size());
         }
 
-        // Phase 1: classify finished requests and clean up non-batch inflight.
+        // Phase 1: collect request-level terminal observations and clean up
+        // non-batch inflight.  A WorkerStatus finished list is incremental and
+        // a multi-request batch commonly has finished and running members at
+        // the same time.  Therefore a finished member must never release the
+        // whole batch.
         // Non-batch requests use requestId as the inflight key (engine reports
         // them with batch_id=-1).  Remove them immediately to keep
         // realWaitTimeMs() accurate; warn if a finished non-batch request was
         // not tracked in inflight (indicates a bug or stale engine report).
-        Set<Long> batchesWithSuccess = new HashSet<>();
-        Map<Long, List<TaskInfo>> failedByBatch = new HashMap<>();
+        Map<Long, List<TaskInfo>> finishedByBatch = new HashMap<>();
 
         if (finishedTaskInfo != null) {
             for (TaskInfo task : finishedTaskInfo.values()) {
@@ -184,92 +188,78 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     }
                     continue;
                 }
-                if (task.getErrorCode() == 0) {
-                    batchesWithSuccess.add(batchId);
-                } else {
-                    failedByBatch.computeIfAbsent(batchId, k -> new ArrayList<>()).add(task);
-                }
+                finishedByBatch.computeIfAbsent(batchId, k -> new ArrayList<>()).add(task);
             }
         }
 
-        // Phase 2: any success request → remove entire batch, report predicted vs actual timing
-        logger.debug("batchesWithSuccess size: {}", batchesWithSuccess.size());
-        for (long batchId : batchesWithSuccess) {
-            BatchInflight batch = inflightBatches.get(batchId);
-            if (batch == null) {
-                logger.debug("batch is null, batchId: {}", batchId);
-                continue;
-            }
-            // Defense-in-depth: verify that at least one success task's requestId
-            // belongs to this local batch. Mismatch indicates a stale engine report
-            // from a stale or foreign status report with the same batchId.
-            Set<Long> localRequestIds = batch.requests().stream()
-                    .map(BatchItem::requestId)
-                    .collect(Collectors.toSet());
-            boolean owned = false;
-            if (finishedTaskInfo != null) {
-                for (TaskInfo task : finishedTaskInfo.values()) {
-                    if (task.getBatchId() == batchId
-                            && task.getErrorCode() == 0
-                            && localRequestIds.contains(task.getRequestId())) {
-                        owned = true;
-                        break;
+        // Phase 2: settle only the locally-owned finished members.  The batch
+        // remains inflight while any survivor is still executing/queued in
+        // the Engine; maxInflightBatches must continue to account for it.
+        for (Map.Entry<Long, List<TaskInfo>> entry : finishedByBatch.entrySet()) {
+            long batchId = entry.getKey();
+            List<TaskInfo> observations = entry.getValue();
+            AtomicReference<BatchInflight> completed = new AtomicReference<>();
+            AtomicInteger removedMembers = new AtomicInteger();
+            inflightBatches.computeIfPresent(batchId, (id, batch) -> {
+                Set<Long> localRequestIds = batch.requests().stream()
+                        .map(BatchItem::requestId)
+                        .collect(Collectors.toSet());
+                Set<Long> originalRequestIds = batch.originalRequests().stream()
+                        .map(BatchItem::requestId)
+                        .collect(Collectors.toSet());
+                Set<Long> finishedIds = new HashSet<>();
+                int foreignCount = 0;
+                for (TaskInfo task : observations) {
+                    if (!localRequestIds.contains(task.getRequestId())) {
+                        // A worker may repeat a terminal observation across
+                        // adjacent snapshots. It belongs to this batch but was
+                        // already settled in an earlier calibration pass.
+                        if (!originalRequestIds.contains(task.getRequestId())) {
+                            foreignCount++;
+                        }
+                        continue;
+                    }
+                    finishedIds.add(task.getRequestId());
+                    batch.touch(statusMs);
+                    batch.observeExecutionTime(task.getExecutionTimeMs());
+                    if (task.getErrorCode() != 0) {
+                        logger.warn("Prefill calibrate: batch failure batchId={} reqId={} error={}",
+                                batchId, task.getRequestId(), task.getErrorMessage());
                     }
                 }
-            }
-            if (!owned) {
-                logger.warn("Prefill calibrate: batchId={} has success but no matching requestId in local batch. "
-                        + "Likely stale or foreign status report. Skipping removal.", batchId);
-                continue;
-            }
-            BatchInflight removed = inflightBatches.remove(batchId);
-            if (removed != null) {
-                inflightRequestCount.addAndGet(-removed.requests().size());
+                if (foreignCount > 0) {
+                    logger.warn("Prefill calibrate: batchId={} has {} finished tasks with foreign requestIds. "
+                            + "Skipping foreign members.", batchId, foreignCount);
+                }
+                if (finishedIds.isEmpty()) {
+                    return batch;
+                }
+                List<BatchItem> survivors = batch.requests().stream()
+                        .filter(item -> !finishedIds.contains(item.requestId()))
+                        .toList();
+                int removed = batch.requests().size() - survivors.size();
+                removedMembers.set(removed);
+                if (survivors.isEmpty()) {
+                    completed.set(batch);
+                    return null;
+                }
+                long newPredMs = (long) predictor.predictBatchMs(survivors);
+                return batch.repack(newPredMs, survivors);
+            });
+            int removed = removedMembers.get();
+            if (removed > 0) {
+                inflightRequestCount.addAndGet(-removed);
                 cachedWaitTimeExpireAtMs = 0;
             }
-            reportBatchCompletion(batchId, batch, finishedTaskInfo);
+            BatchInflight completedBatch = completed.get();
+            if (completedBatch != null) {
+                reportBatchCompletion(batchId, completedBatch);
+            } else if (!inflightBatches.containsKey(batchId)) {
+                logger.debug("batch is null, batchId: {}", batchId);
+            }
         }
 
-        // Phase 3: fail-only batches → repack survivors
-        for (Map.Entry<Long, List<TaskInfo>> entry : failedByBatch.entrySet()) {
-            long batchId = entry.getKey();
-            if (batchesWithSuccess.contains(batchId)) {
-                continue;
-            }
-            BatchInflight batch = inflightBatches.get(batchId);
-            if (batch == null) {
-                continue;
-            }
-            // Defense-in-depth: verify failed tasks belong to this local batch
-            Set<Long> localRequestIds = batch.requests().stream()
-                    .map(BatchItem::requestId)
-                    .collect(Collectors.toSet());
-            List<TaskInfo> foreignTasks = new ArrayList<>();
-            List<TaskInfo> localFailedTasks = new ArrayList<>();
-            for (TaskInfo t : entry.getValue()) {
-                if (localRequestIds.contains(t.getRequestId())) {
-                    localFailedTasks.add(t);
-                } else {
-                    foreignTasks.add(t);
-                }
-            }
-            if (!foreignTasks.isEmpty()) {
-                logger.warn("Prefill calibrate: batchId={} has {} failed tasks with foreign requestIds. "
-                        + "Skipping repack for foreign tasks.", batchId, foreignTasks.size());
-            }
-            if (localFailedTasks.isEmpty()) {
-                continue;
-            }
-            Set<Long> failedIds = new HashSet<>();
-            for (TaskInfo t : localFailedTasks) {
-                logger.warn("Prefill calibrate: batch failure batchId={} reqId={} error={}",
-                        batchId, t.getRequestId(), t.getErrorMessage());
-                failedIds.add(t.getRequestId());
-            }
-            repackBatch(batchId, failedIds);
-        }
-
-        // Phase 4: update progress anchors. A queued batch cannot spend
+        // Phase 3: update progress anchors. A queued batch cannot spend
         // predicted forward time until the worker reports it as RUNNING.
         Map<Long, Boolean> activeBatchRunning = new HashMap<>();
         if (runningTaskInfo != null) {
@@ -294,7 +284,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             }
         }
 
-        // Phase 5: check running requests for anomalies
+        // Phase 4: check running requests for anomalies
         if (runningTaskInfo != null) {
             for (TaskInfo task : runningTaskInfo.values()) {
                 long batchId = task.getBatchId();
@@ -382,30 +372,21 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * engine-reported actual execution time (max across the batch's finished tasks),
      * then log and emit prediction-accuracy metrics.
      */
-    private void reportBatchCompletion(long batchId, BatchInflight batch, Map<String, TaskInfo> finishedTaskInfo) {
-        logger.debug("run reportBatchCompletion, batchId: {}, finishedTaskInfo size: {}",
-                batchId, finishedTaskInfo.size());
-        long actualMs = -1;
-        if (finishedTaskInfo != null) {
-            for (TaskInfo task : finishedTaskInfo.values()) {
-                if (task.getBatchId() == batchId && task.getExecutionTimeMs() > 0) {
-                    actualMs = Math.max(actualMs, task.getExecutionTimeMs());
-                }
-            }
-        }
-        if (actualMs < 0) {
-            logger.debug("actualMs < 0: {}", actualMs);
+    private void reportBatchCompletion(long batchId, BatchInflight batch) {
+        long actualMs = batch.maxExecutionTimeMs();
+        if (actualMs <= 0) {
+            logger.debug("actualMs <= 0: {}", actualMs);
             return;
         }
 
-        long predictedMs = batch.predictTimeMs();
+        long predictedMs = batch.originalPredictTimeMs();
         long gapMs = actualMs - predictedMs;
         org.flexlb.util.Logger.info(
                 "flexlb_batch_complete batch_id={} predicted_ms={} actual_ms={} gap_ms={} batch_size={} engine={}",
-                batchId, predictedMs, actualMs, gapMs, batch.requests().size(), getIp());
+                batchId, predictedMs, actualMs, gapMs, batch.originalRequests().size(), getIp());
 
         // Feed the actual-vs-predicted timing back into the predictor for future learning.
-        predictor.learn(batch.requests(), predictedMs, actualMs);
+        predictor.learn(batch.originalRequests(), predictedMs, actualMs);
 
         reporter.reportBatchPredictedTimeMs(RoleType.PREFILL.name(), getIp(), predictedMs);
         reporter.reportBatchActualTimeMs(RoleType.PREFILL.name(), getIp(), actualMs);

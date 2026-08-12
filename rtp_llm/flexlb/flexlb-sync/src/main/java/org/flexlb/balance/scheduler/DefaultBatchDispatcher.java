@@ -149,18 +149,29 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
 
     private void doDispatchInternal(List<BatchItem> items, PrefillEndpoint prefillEp,
                                     long batchId, long predMs, String reason, DispatchCallback callback) {
+        // Claim actual Engine-dispatch ownership on the dispatcher thread,
+        // not when the batch was merely submitted to this executor. This
+        // lets the admission deadline win while an executor task is queued.
+        List<BatchItem> wireItems = items.stream()
+                .filter(item -> callback.onDispatchStart(item, batchId))
+                .toList();
+        if (wireItems.isEmpty()) {
+            prefillEp.releaseBatch(batchId);
+            return;
+        }
+
         // 1. Build gRPC request
         EngineRpcService.EnqueueBatchRequestPB request;
         try {
-            request = buildBatchRequest(batchId, items);
+            request = buildBatchRequest(batchId, wireItems);
         } catch (Exception e) {
             Logger.error("Failed to build FlexLB batch request batchId: {}", batchId, e);
-            failItems(items, prefillEp, batchId, "Batch request build failed: " + e.getMessage(), callback);
+            failItems(wireItems, prefillEp, batchId, "Batch request build failed: " + e.getMessage(), callback);
             return;
         }
 
         // 2. Log dispatch
-        logDispatch(batchId, items, prefillEp, predMs, reason);
+        logDispatch(batchId, wireItems, prefillEp, predMs, reason);
 
         // 3. Send gRPC (async)
         long deadlineMs = configService.loadBalanceConfig().getFlexlbBatchEnqueueDeadlineMs();
@@ -173,22 +184,22 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
                                     batchId, prefillEp.getIp(), prefillEp.getGrpcPort(), cause.getMessage());
                             if (Status.fromThrowable(cause).getCode() == Status.Code.DEADLINE_EXCEEDED) {
                                 prefillEp.releaseBatch(batchId);
-                                for (BatchItem item : items) {
+                                for (BatchItem item : wireItems) {
                                     callback.onTimeout(item, cause);
                                 }
                             } else {
-                                failItems(items, prefillEp, batchId,
+                                failItems(wireItems, prefillEp, batchId,
                                         "gRPC dispatch failed: " + cause.getMessage(), callback);
                             }
                         } else if (response == null) {
-                            failItems(items, prefillEp, batchId, "EnqueueBatch returned null response", callback);
+                            failItems(wireItems, prefillEp, batchId, "EnqueueBatch returned null response", callback);
                         } else {
-                            handleResponse(batchId, items, response, callback);
+                            handleResponse(batchId, wireItems, response, callback);
                         }
                     } catch (Throwable t) {
                         // Safety net: ensure callbacks are always invoked even for unexpected errors
                         Logger.error("Unexpected error in EnqueueBatch callback batchId={}", batchId, t);
-                        failItems(items, prefillEp, batchId,
+                        failItems(wireItems, prefillEp, batchId,
                                 "Unexpected callback error: " + t.getMessage(), callback);
                     }
                 }, dispatchExecutor);

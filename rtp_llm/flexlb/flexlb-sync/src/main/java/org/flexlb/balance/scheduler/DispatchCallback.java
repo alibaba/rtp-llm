@@ -10,6 +10,16 @@ package org.flexlb.balance.scheduler;
 public interface DispatchCallback {
 
     /**
+     * Linearization fence immediately before an item may enter the Engine
+     * EnqueueBatch request. Returning {@code false} excludes the item from
+     * the wire payload; implementations may settle an expired/cancelled item
+     * while holding their lifecycle lock.
+     */
+    default boolean onDispatchStart(BatchItem item, long batchId) {
+        return true;
+    }
+
+    /**
      * Engine successfully accepted this item.
      * Called once per item that appears in the gRPC success list.
      *

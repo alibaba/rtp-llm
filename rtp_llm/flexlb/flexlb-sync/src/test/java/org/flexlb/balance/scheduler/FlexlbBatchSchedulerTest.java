@@ -4,6 +4,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.ScheduleBudget;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -614,6 +615,55 @@ class FlexlbBatchSchedulerTest {
         Response response = item.future().getNow(null);
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
+    }
+
+    @Test
+    void admissionDeadlineBeforeDispatchNeverReachesEngine() throws Exception {
+        BatchItem item = priorityItemWithDeadline(303, System.currentTimeMillis() - 1);
+        assertTrue(scheduler.registerInflight(item));
+
+        scheduler.onBatchReady(List.of(item), new DispatchMeta("deadline_test", 0));
+
+        Response response = item.future().get(2, TimeUnit.SECONDS);
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
+        verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
+    }
+
+    @Test
+    void dispatchOwnershipBeforeAdmissionDeadlineWaitsForAuthoritativeAck() throws Exception {
+        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> ackFuture = new CompletableFuture<>();
+        CountDownLatch enqueueStarted = new CountDownLatch(1);
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+                .thenAnswer(inv -> {
+                    EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
+                    sentBatches.add(request);
+                    enqueueStarted.countDown();
+                    return ackFuture;
+                });
+
+        BatchItem item = priorityItemWithDeadline(304, System.currentTimeMillis() + 5_000);
+        assertTrue(scheduler.registerInflight(item));
+        scheduler.onBatchReady(List.of(item), new DispatchMeta("deadline_race_test", 0));
+        assertTrue(enqueueStarted.await(2, TimeUnit.SECONDS));
+
+        // Simulate the admission timer firing after dispatch acquired Engine
+        // ownership.  It must not return a frontend error while the same
+        // request is already in flight to the Engine.
+        scheduler.onAdmissionDeadline(item.requestId(), item.future());
+        assertFalse(item.future().isDone());
+
+        ackFuture.complete(ackFor(sentBatches.getFirst()));
+        Response response = item.future().get(2, TimeUnit.SECONDS);
+        assertTrue(response.isSuccess());
+        assertTrue(response.isEnqueuedByMaster());
+    }
+
+    private BatchItem priorityItemWithDeadline(long requestId, long deadlineMs) {
+        BatchItem item = offerFailureItem(requestId);
+        long nowMs = System.currentTimeMillis();
+        item.ctx().setBudget(ScheduleBudget.forDeadline(50, nowMs, deadlineMs));
+        return item;
     }
 
     private static byte[] generateInputBytes(long requestId) {
