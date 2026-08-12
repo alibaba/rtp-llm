@@ -7,6 +7,9 @@ from .common import GateError, is_true, log, short_sha, write_output
 from .github import github_get, github_get_pages
 
 
+TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+
+
 def latest_fresh_reviews(reviews, head_sha, pr_author):
     # type: (List[Dict[str, Any]], str, str) -> List[Dict[str, Any]]
     latest_by_user = {}  # type: Dict[str, Dict[str, Any]]
@@ -16,6 +19,12 @@ def latest_fresh_reviews(reviews, head_sha, pr_author):
         if review.get("commit_id") != head_sha:
             continue
         if user.get("type") == "Bot":
+            continue
+        # Anyone can review a public repo; only repo/org insiders may gate CI.
+        association = (review.get("author_association") or "").upper()
+        if association not in TRUSTED_ASSOCIATIONS:
+            log("Ignoring %s review from %s (association: %s)"
+                % (review.get("state", "?"), login, association or "NONE"))
             continue
         if review.get("state") == "COMMENTED" and login == pr_author:
             continue
@@ -27,63 +36,10 @@ def latest_fresh_reviews(reviews, head_sha, pr_author):
     return list(latest_by_user.values())
 
 
-def _fetch_head_commit_date(repo, head_sha, github_token):
-    # type: (str, str, str) -> str
-    """Return the committer date (ISO 8601) of the given commit."""
-    commit = github_get(
-        repo, "/commits/%s" % head_sha,
-        "fetching commit %s" % short_sha(head_sha), github_token,
-    )
-    if not isinstance(commit, dict):
-        raise GateError("::error::Unexpected commit response for %s" % short_sha(head_sha), 2)
-    return (((commit.get("commit") or {}).get("committer") or {}).get("date")) or ""
-
-
 def parse_lgtm_users(lgtm_user):
     # type: (str) -> set
     """Parse a comma-separated ``--lgtm-user`` value into a set of logins."""
     return {u.strip() for u in (lgtm_user or "").split(",") if u.strip()}
-
-
-def _check_issue_comments_qualified(pr_number, repo, head_sha, github_token, lgtm_user, pr_author=""):
-    # type: (str, str, str, str, str, str) -> bool
-    """Check whether a fresh LGTM issue comment from an *lgtm_user* exists.
-
-    Freshness is defined as ``comment.updated_at >= head_commit.committer.date``
-    because issue comments have no ``commit_id`` field. Comments from the PR
-    author never qualify (no self-LGTM).
-    """
-    head_date = _fetch_head_commit_date(repo, head_sha, github_token)
-    if not head_date:
-        log("Could not determine head commit date, skipping issue comment check")
-        return False
-
-    comments = github_get_pages(
-        repo, "/issues/%s/comments" % pr_number,
-        "fetching issue comments for PR #%s" % pr_number, github_token,
-    )
-
-    lgtm_users = parse_lgtm_users(lgtm_user)
-    lgtm_phrase = "lgtm ready to ci"
-    latest_match = None  # type: Any
-    for comment in comments:
-        if not isinstance(comment, dict):
-            continue
-        user = (comment.get("user") or {}).get("login", "")
-        body = (comment.get("body") or "").lower()
-        updated_at = comment.get("updated_at", "")
-        if user in lgtm_users and user != pr_author and lgtm_phrase in body and updated_at >= head_date:
-            if latest_match is None or updated_at > (latest_match.get("updated_at") or ""):
-                latest_match = comment
-
-    if latest_match:
-        log("PR #%s has fresh LGTM issue comment from %s (updated_at: %s >= commit: %s)"
-            % (pr_number, (latest_match.get("user") or {}).get("login", ""),
-               latest_match.get("updated_at", ""), head_date))
-        return True
-
-    log("PR #%s has no qualifying fresh issue comment" % pr_number)
-    return False
 
 
 def check_review_qualified(pr_number, repo, head_sha, github_token, lgtm_user):
@@ -116,10 +72,7 @@ def check_review_qualified(pr_number, repo, head_sha, github_token, lgtm_user):
             log("PR #%s has latest fresh LGTM from %s" % (pr_number, user))
             return True
 
-    if _check_issue_comments_qualified(pr_number, repo, head_sha, github_token, lgtm_user, pr_author):
-        return True
-
-    log("PR #%s has no qualifying fresh review or issue comment" % pr_number)
+    log("PR #%s has no qualifying fresh review" % pr_number)
     return False
 
 
