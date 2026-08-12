@@ -305,6 +305,7 @@ public:
     std::string debugString() const;
 
     void    resetBeginTime(int64_t begin_time_us);
+    void    recordWaitTime();
     int64_t beginTimeUs() const {
         return begin_time_us_;
     }
@@ -730,7 +731,8 @@ protected:
     int64_t                               vocab_size_;
     std::shared_ptr<CompleteTokenIds>     complete_token_ids_;
     int64_t                               begin_time_us_;
-    int64_t                               wait_time_us_ = 0;
+    int64_t                               wait_time_us_       = 0;
+    bool                                  wait_time_recorded_ = false;
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
     std::shared_ptr<bool>                 is_context_stream_;
     size_t                                iter_count_           = 0;

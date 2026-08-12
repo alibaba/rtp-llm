@@ -494,6 +494,7 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
         }
 
         if (!stream->hasError() && evaluateRunningBatch(admitted_streams, stream)) {
+            stream->recordWaitTime();
             if (!stream->hasEvent(StreamEvents::CanRun)) {
                 stream->reportEvent(StreamEvents::CanRun);
             }
