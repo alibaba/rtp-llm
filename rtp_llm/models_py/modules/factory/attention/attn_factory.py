@@ -35,7 +35,15 @@ def get_mla_impl(
     parallelism_config: Optional[ParallelismConfig] = None,
 ) -> MlaImplBase:
 
-    mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
+    is_target_verify = bool(getattr(attn_inputs, "is_target_verify", False))
+    # Target verify is represented as a multi-token prefill-shaped batch, but
+    # it reads and updates the paged decode cache.  Select a decode MLA
+    # implementation, matching the model's forward_decode dispatch.
+    mla_impls = (
+        PREFILL_MLA_IMPS
+        if attn_inputs.is_prefill and not is_target_verify
+        else DECODE_MLA_IMPS
+    )
     for impl in mla_impls:
         # Check support before creating instance
         if not impl.support(attn_configs, attn_inputs):
@@ -43,10 +51,11 @@ def get_mla_impl(
 
         cos_sin_cache = weight.get_global_weight(W.rope_cos_sin_cache)
         # TODO: support fast path for cp prefill
-        if (
-            True
-            and attn_inputs.is_prefill
-        ):
+        if is_target_verify:
+            # Sparse prefill MLA has no CUDA-graph target-verify implementation;
+            # verify uses the paged dense decode implementation.
+            use_fast_path = True
+        elif attn_inputs.is_prefill:
             input_host = getattr(attn_inputs, "input_lengths_host", None)
             prefix_host = getattr(attn_inputs, "prefix_lengths_host", None)
             if input_host is None or not input_host.numel():

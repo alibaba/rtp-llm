@@ -649,7 +649,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                                   draft_cache_layer_layout.layer_to_groups,
                                                   model_inputs_logger_));
             // Create separate model for speculative prefill with CUDA graph if enabled (from params)
-            const bool enable_cuda_graph = params.hw_kernel_config.enable_cuda_graph;
+            // Target verify and draft prefill use separate graph runners.  Keep
+            // target-verify CUDA Graph enabled independently; the draft model
+            // may not support its prefill-shaped graph (for example K3 Eagle3
+            // with MLA).  Draft-prefill graph remains opt-in until each draft
+            // architecture advertises that capability explicitly.
+            const bool enable_cuda_graph = params.hw_kernel_config.enable_cuda_graph
+                                           && readEnvFlagOnce("ENABLE_SP_PREFILL_CUDA_GRAPH",
+                                                              "speculative decoding",
+                                                              "enable_sp_prefill_cuda_graph");
             RTP_LLM_LOG_INFO(
                 "[speculative decoding] enable_cuda_graph=%d (set ENABLE_CUDA_GRAPH=1 when starting server to enable sp_prefill_draft_model_)",
                 static_cast<int>(enable_cuda_graph));

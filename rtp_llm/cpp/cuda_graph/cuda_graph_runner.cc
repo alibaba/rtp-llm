@@ -355,7 +355,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             } else {
                 size_t copy_size = inputs.combo_position_ids.numel() * sizeof(int);
                 if (py_model_inputs_.combo_position_ids.numel() * sizeof(int) >= copy_size) {
-                    optimizedCopyAsync(inputs.combo_position_ids, py_model_inputs_.combo_position_ids, copy_size);
+                    addD2DCopy(
+                        d2d_copies, inputs.combo_position_ids, py_model_inputs_.combo_position_ids, copy_size);
                 } else {
                     RTP_LLM_LOG_WARNING(
                         "combo_position_ids target tensor size (%zu) is smaller than needed (%zu), skipping copy",
@@ -366,6 +367,10 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         }
     } else {
         // D2D copy
+        addD2DCopy(d2d_copies,
+                   inputs.attention_inputs.padding_offset,
+                   py_model_inputs_.attention_inputs.padding_offset,
+                   state.current_seq_len * sizeof(int));
         if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
             addD2DCopy(d2d_copies,
                        inputs.bert_embedding_inputs.combo_position_ids,
@@ -417,10 +422,6 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                py_model_inputs_.attention_inputs.sequence_lengths,
                                state.current_batch_size * sizeof(int));
         } else {
-            optimizedCopyAsync(inputs.attention_inputs.padding_offset,
-                               py_model_inputs_.attention_inputs.padding_offset,
-                               state.current_seq_len * sizeof(int));
-
             if (py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params) {
                 auto* batch_size_ptr = py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params
                                            ->cuda_graph_prefill_batch_size.data_ptr<int>();
@@ -664,6 +665,11 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
     // input_lengths [batch_size, int32] (decode only)
     inputs.attention_inputs.input_lengths = torch::full({int(max_bs_)}, num_tokens_per_bs_, options_cuda_int32_);
+    // Attention implementation selection runs once while the graph is built and
+    // intentionally uses host metadata to avoid synchronizing CUDA tensors.
+    // These are immutable capture descriptors, not replay inputs.
+    inputs.attention_inputs.input_lengths_host =
+        torch::full({int(max_bs_)}, num_tokens_per_bs_, options_cpu_int32_).pin_memory();
     // sequence_lengths [batch_size, int32] (decode only) — CUDA buffer; kernels read it on-device.
     inputs.attention_inputs.sequence_lengths =
         torch::full({int(max_bs_)}, max_seq_len_ - num_tokens_per_bs - 1, options_cuda_int32_);
@@ -677,8 +683,7 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     // (non-Mrope models pay zero memory and the captured graph never references it).
     if (position_id_len_factor_ > 0) {
         inputs.combo_position_ids =
-            torch::ones({int(max_bs_) * num_tokens_per_bs_ * position_id_len_factor_}, options_cpu_int32_);
-        inputs.combo_position_ids                  = inputs.combo_position_ids.pin_memory();
+            torch::ones({int(max_bs_) * num_tokens_per_bs_ * position_id_len_factor_}, options_cuda_int32_);
         inputs.attention_inputs.combo_position_ids = inputs.combo_position_ids;
     }
 
@@ -718,12 +723,15 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     if (is_target_verify_) {
         inputs.attention_inputs.prefix_lengths =
             torch::full({int(max_bs_)}, max_seq_len_ - num_tokens_per_bs_, options_cuda_int32_);
+        inputs.attention_inputs.prefix_lengths_host =
+            torch::full({int(max_bs_)}, max_seq_len_ - num_tokens_per_bs_, options_cpu_int32_).pin_memory();
     } else if (is_prefill_cuda_graph_mode_) {
         inputs.attention_inputs.prefix_lengths = torch::zeros({int(max_bs_)}, options_cuda_int32_);
+        inputs.attention_inputs.prefix_lengths_host =
+            torch::zeros({int(max_bs_)}, options_cpu_int32_).pin_memory();
     }
     // padding_offset [max_num_token_, int32] (for attention padding)
-    inputs.attention_inputs.padding_offset            = torch::zeros({int(max_seq_len_ * max_bs_)}, options_cpu_int32_);
-    inputs.attention_inputs.padding_offset            = inputs.attention_inputs.padding_offset.pin_memory();
+    inputs.attention_inputs.padding_offset = torch::zeros({int(max_seq_len_ * max_bs_)}, options_cuda_int32_);
     inputs.attention_inputs.dtype                     = model_data_type_;
     inputs.attention_inputs.is_s_padded               = true;
     inputs.attention_inputs.sequence_lengths_plus_1_d = torch::zeros({int(max_bs_)}, options_cuda_int32_);
@@ -988,6 +996,8 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     inputs.input_hiddens                = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, token_slice_len);
     inputs.attention_inputs.input_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, batch_size);
+    inputs.attention_inputs.input_lengths_host =
+        capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths_host.slice(0, 0, batch_size);
     inputs.attention_inputs.padding_offset =
         capture_mem_hold_.py_model_inputs_.attention_inputs.padding_offset.slice(0, 0, seq_len_or_tokens);
 
@@ -996,6 +1006,11 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
         && capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.numel() > 0) {
         inputs.attention_inputs.prefix_lengths =
             capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.slice(0, 0, batch_size);
+    }
+    if (capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths_host.defined()
+        && capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths_host.numel() > 0) {
+        inputs.attention_inputs.prefix_lengths_host =
+            capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths_host.slice(0, 0, batch_size);
     }
     inputs.attention_inputs.sequence_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, batch_size);

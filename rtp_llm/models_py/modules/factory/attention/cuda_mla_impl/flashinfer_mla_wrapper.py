@@ -555,8 +555,14 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
     ) -> bool:
         return (
             attn_configs.use_mla
-            and not attn_inputs.is_prefill
-            and not attn_configs.is_sparse
+            and (
+                not attn_inputs.is_prefill
+                or bool(getattr(attn_inputs, "is_target_verify", False))
+            )
+            and (
+                not attn_configs.is_sparse
+                or bool(getattr(attn_inputs, "is_target_verify", False))
+            )
         )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):

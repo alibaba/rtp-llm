@@ -511,7 +511,7 @@ class KimiK3Eagle3(KimiK3):
         return config
 
     def support_cuda_graph(self) -> bool:
-        return False
+        return True
 
     def _create_python_model(self):
         from rtp_llm.models_py.model_desc.kimi_k3_eagle3 import KimiK3Eagle3Model
