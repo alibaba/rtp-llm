@@ -16,7 +16,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     CombineForwardPayload,
     ExpertForwardPayload,
     ExpertTokensMetadata,
+    FinalizeArgs,
     FusedMoeDataRouter,
+    should_skip_tp_allreduce,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
@@ -42,10 +44,25 @@ class PureTpRouterBase(FusedMoeDataRouter):
     def router_type(cls):
         return RouterType.PURE_TP
 
+    @property
+    def supports_skip_tp_allreduce(self) -> bool:
+        return True
+
+    def _maybe_all_reduce_tp(
+        self, output: torch.Tensor, extra_finalize_args: Optional[FinalizeArgs]
+    ) -> torch.Tensor:
+        if self.tp_size > 1 and not should_skip_tp_allreduce(extra_finalize_args):
+            return all_reduce(output, group=Group.TP)
+        return output
+
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         """Check if PureTpRouter can handle the configuration"""
         resolver = MoeConfigResolver()
+        # Keep the existing CUDA strategy coverage for EP-equivalent layouts.
+        # The unified TP all-reduce optimization is independently restricted to
+        # ep_size == 1 in GenericMoeLayer, so this router selection predicate
+        # must not narrow the pre-existing CUDA policy here.
         checker.check(resolver.is_single_gpu(config) or resolver.is_tp_equal_ep(config))
         checker.check(resolver.use_all_gather(config))
 
@@ -115,12 +132,11 @@ class PureTpRouterBase(FusedMoeDataRouter):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
-        extra_finalize_args: Optional[dict[str, Any]],
+        extra_finalize_args: Optional[FinalizeArgs],
     ) -> torch.Tensor:
-        fused_expert_output = payload.fused_expert_output
-        if self.tp_size > 1:
-            fused_expert_output = all_reduce(fused_expert_output, group=Group.TP)
-        return fused_expert_output
+        return self._maybe_all_reduce_tp(
+            payload.fused_expert_output, extra_finalize_args
+        )
 
 
 class PureTpRouterNoQuant(PureTpRouterBase):
