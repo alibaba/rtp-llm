@@ -609,55 +609,82 @@ class GenerateConfig(BaseModel):
         later request enrichment may only update grammar-independent fields.
         """
 
-        if self.thinking_mode == ThinkingMode.UNSPECIFIED:
-            if enable_thinking is True:
-                self.thinking_mode = ThinkingMode.ENABLED
-            elif enable_thinking is False:
-                self.thinking_mode = ThinkingMode.DISABLED
-            else:
-                self.thinking_mode = thinking_mode_from_value(
-                    generate_env_config.think_mode
+        requested_mode = self.thinking_mode
+        if requested_mode == ThinkingMode.UNSPECIFIED and enable_thinking is None:
+            requested_mode = thinking_mode_from_value(generate_env_config.think_mode)
+
+        if requested_mode == ThinkingMode.ADAPTIVE:
+            self.thinking_mode = ThinkingMode.ADAPTIVE
+            self.in_think_mode = False
+            if tokenizer and not self.begin_think_token_ids:
+                think_start_tag = normalize_think_tag(
+                    generate_env_config.think_start_tag
+                )
+                self.begin_think_token_ids = tokenizer.encode(
+                    think_start_tag, add_special_tokens=False
                 )
 
-        uses_reasoning_grammar = self.thinking_mode in (
-            ThinkingMode.ENABLED,
-            ThinkingMode.ADAPTIVE,
-        )
-        if uses_reasoning_grammar and tokenizer and not self.begin_think_token_ids:
-            think_start_tag = normalize_think_tag(generate_env_config.think_start_tag)
-            self.begin_think_token_ids = tokenizer.encode(
-                think_start_tag, add_special_tokens=False
-            )
+            if not self.end_think_token_ids:
+                end_think_token_id = generate_env_config.think_end_token_id
+                if end_think_token_id != -1:
+                    self.end_think_token_ids = [end_think_token_id]
+                elif tokenizer:
+                    think_end_tag = normalize_think_tag(
+                        generate_env_config.think_end_tag
+                    )
+                    self.end_think_token_ids = tokenizer.encode(
+                        think_end_tag, add_special_tokens=False
+                    )
 
-        if not self.end_think_token_ids:
-            end_think_token_id = generate_env_config.think_end_token_id
-            if end_think_token_id != -1:
-                # Boundary IDs are also consumed as metadata when thinking is disabled.
-                self.end_think_token_ids = [end_think_token_id]
-            elif uses_reasoning_grammar and tokenizer:
-                think_end_tag = normalize_think_tag(generate_env_config.think_end_tag)
-                self.end_think_token_ids = tokenizer.encode(
-                    think_end_tag, add_special_tokens=False
+            from rtp_llm.config.response_format_compiler import ReasoningFormat
+
+            if reasoning_format is None:
+                base_format = ReasoningFormat.from_generate_env_config(
+                    generate_env_config
                 )
-        # ADAPTIVE enforces max_thinking_tokens in the structural grammar. The
-        # C++ logits processor remains responsible for the fixed ENABLED state.
-        self.in_think_mode = self.thinking_mode == ThinkingMode.ENABLED
-
-        from rtp_llm.config.response_format_compiler import ReasoningFormat
-
-        if uses_reasoning_grammar and reasoning_format is None:
-            base_format = ReasoningFormat.from_generate_env_config(generate_env_config)
-            if self.thinking_mode == ThinkingMode.ADAPTIVE:
                 reasoning_format = ReasoningFormat(
                     tag_begin=normalize_think_tag(generate_env_config.think_start_tag),
                     tag_end=base_format.tag_end,
                     suffix=base_format.suffix,
                     no_think_excludes=base_format.no_think_excludes,
                 )
+            return self.finalize_response_format(reasoning_format=reasoning_format)
+
+        if enable_thinking is None:
+            if requested_mode == ThinkingMode.ENABLED:
+                enable_thinking = True
+            elif requested_mode == ThinkingMode.DISABLED:
+                enable_thinking = False
             else:
-                reasoning_format = base_format
+                enable_thinking = (
+                    thinking_mode_from_value(generate_env_config.think_mode)
+                    == ThinkingMode.ENABLED
+                )
+
+        # Preserve the pre-adaptive fixed-mode behavior. In particular, fixed
+        # ENABLED does not require the model to emit a begin tag.
+        end_think_token_id = generate_env_config.think_end_token_id
+        self.end_think_token_ids = (
+            [end_think_token_id] if end_think_token_id != -1 else []
+        )
+        if enable_thinking and tokenizer and end_think_token_id == -1:
+            think_end_tag = normalize_think_tag(generate_env_config.think_end_tag)
+            self.end_think_token_ids = tokenizer.encode(
+                think_end_tag, add_special_tokens=False
+            )
+        self.in_think_mode = bool(enable_thinking)
+        self.thinking_mode = (
+            ThinkingMode.ENABLED if self.in_think_mode else ThinkingMode.DISABLED
+        )
+
+        from rtp_llm.config.response_format_compiler import ReasoningFormat
+
+        if self.in_think_mode and reasoning_format is None:
+            reasoning_format = ReasoningFormat.from_generate_env_config(
+                generate_env_config
+            )
         return self.finalize_response_format(
-            reasoning_format=reasoning_format if uses_reasoning_grammar else None
+            reasoning_format=reasoning_format if self.in_think_mode else None
         )
 
     def add_stop_ids_from_str(self, tokenizer):

@@ -459,11 +459,12 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         self.model_config.vocab_size = 1024
         self.model_config.special_tokens = SpecialTokens()
 
-    def _create_adaptive_qwen_renderer(self):
+    def _create_adaptive_qwen_renderer(self, think_mode="disabled"):
         tokenizer = QwenTestTokenizer(
             f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken"
         )
         generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = think_mode
         generate_env_config.think_start_tag = "<think>"
         generate_env_config.think_end_tag = "</think>"
         renderer = ChatRendererFactory.get_renderer(
@@ -669,6 +670,40 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             thinking_mode=ThinkingMode.ADAPTIVE,
             begin_think_token_ids=start_ids,
             end_think_token_ids=end_ids,
+        )
+
+        stream = renderer.render_response_stream(
+            fake_output_generator_mtp(
+                output_ids,
+                MAX_SEQ_LEN,
+                tokenizer.eos_token_id or 0,
+                10,
+                tokens_per_chunk=3,
+            ),
+            request,
+            config,
+        )
+        chunks = [
+            chunk
+            async for chunk in OpenaiEndpoint._complete_stream_response(stream, None)
+        ]
+        delta = merge_stream_responses(chunks).choices[0].delta
+
+        self.assertFalse(delta.reasoning_content)
+        self.assertEqual(delta.content, "answer")
+
+    async def test_fixed_enabled_respects_renderer_think_processing_hook(self):
+        tokenizer, renderer = self._create_adaptive_qwen_renderer(think_mode="enabled")
+        output_ids = tokenizer.encode("answer", add_special_tokens=False)
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+            enable_thinking=True,
+            stream=True,
+        )
+        config = GenerateConfig(
+            is_streaming=True,
+            thinking_mode=ThinkingMode.ENABLED,
+            end_think_token_ids=tokenizer.encode("</think>", add_special_tokens=False),
         )
 
         stream = renderer.render_response_stream(

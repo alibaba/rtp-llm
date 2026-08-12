@@ -204,12 +204,6 @@ class BasicRenderer(CustomChatRenderer):
             and isinstance(request.extra_configs.chat_template_kwargs, dict)
         ):
             render_args.update(request.extra_configs.chat_template_kwargs)
-        # Preserve each template's historical default when the request omits
-        # thinking controls. Deployment-level THINK_MODE still controls
-        # generation, but is not injected into the chat template.
-        enable_thinking = request.get_explicit_template_enable_thinking()
-        if enable_thinking is not None:
-            render_args["enable_thinking"] = enable_thinking
         rendered = template.render(**render_args)
         logging.debug(
             f"request [{request.model_dump_json(indent=4)}] rendered string: [{rendered}]]"

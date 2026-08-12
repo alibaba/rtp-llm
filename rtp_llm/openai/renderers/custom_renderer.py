@@ -323,6 +323,7 @@ class CustomChatRenderer:
         think_mode, self.think_start_tag, self.think_end_tag = _get_think_config(
             generate_env_config
         )
+        self.think_mode = think_mode
         self.default_thinking_mode = thinking_mode_from_value(think_mode)
         self.generate_env_config = generate_env_config
 
@@ -1115,11 +1116,10 @@ class CustomChatRenderer:
     def resolve_thinking_mode(self, request: ChatCompletionRequest) -> ThinkingMode:
         return request.resolve_thinking_mode(self.default_thinking_mode)
 
-    def get_enable_thinking(self, request: ChatCompletionRequest) -> Optional[bool]:
-        return request.get_enable_thinking(default_mode=self.default_thinking_mode)
-
     def in_think_mode(self, request: ChatCompletionRequest):
-        return self.resolve_thinking_mode(request) == ThinkingMode.ENABLED
+        return request.get_enable_thinking(
+            default=self.default_thinking_mode == ThinkingMode.ENABLED
+        )
 
     def should_process_think(self, request: ChatCompletionRequest):
         # 留出方法给子类重写, 避免重复的think处理
@@ -1145,17 +1145,17 @@ class CustomChatRenderer:
         status_list = await self._create_status_list(nums_output, request)
         index = 0
         resolved_thinking_mode = generate_config.thinking_mode
-        initial_in_think_mode = resolved_thinking_mode == ThinkingMode.ENABLED
-        if resolved_thinking_mode == ThinkingMode.UNSPECIFIED:
-            resolved_thinking_mode = (
-                ThinkingMode.ENABLED
-                if self.in_think_mode(request)
-                else ThinkingMode.DISABLED
-            )
+        if resolved_thinking_mode == ThinkingMode.ADAPTIVE:
+            enable_think_mode = False
+            initial_in_think_mode = False
+        else:
+            # Keep fixed enabled/disabled modes on the legacy renderer hooks.
+            # Some reasoning renderers parse thinking before this base class.
+            enable_think_mode = bool(self.in_think_mode(request))
             initial_in_think_mode = bool(self.should_process_think(request))
         think_status_list = [
             ThinkStatus(
-                enable_think_mode=resolved_thinking_mode == ThinkingMode.ENABLED,
+                enable_think_mode=enable_think_mode,
                 in_think_mode=initial_in_think_mode,
                 think_buffer="",
                 think_tokens=0,

@@ -34,7 +34,11 @@ from rtp_llm.config.exceptions import (
     ExceptionType,
     FtRuntimeException,
 )
-from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode
+from rtp_llm.config.generate_config import (
+    GenerateConfig,
+    ThinkingMode,
+    thinking_mode_from_value,
+)
 from rtp_llm.config.response_format import normalize_think_tag
 from rtp_llm.config.response_format_compiler import (
     ReasoningFormat,
@@ -552,7 +556,7 @@ def _apply_dash_sc_controls_to_generate_config(
     runtime: _ThinkRuntime,
     default_thinking_mode: ThinkingMode,
 ) -> None:
-    """Apply DashSC controls over the protocol-specific default mode."""
+    """Apply DashSC request controls over the deployment THINK_MODE default."""
     request_max_think = sampling.max_new_think_tokens
     if request_max_think is None:
         request_max_think = request_controls.max_new_think_tokens
@@ -561,12 +565,13 @@ def _apply_dash_sc_controls_to_generate_config(
         generate_config.max_thinking_tokens = _INT32_MAX if max_think < 0 else max_think
     if request_max_think == 0 or request_controls.enable_thinking is False:
         thinking_mode = ThinkingMode.DISABLED
-    elif request_controls.enable_thinking is True:
+    elif request_controls.enable_thinking is True or request_max_think is not None:
         thinking_mode = ThinkingMode.ENABLED
     else:
         thinking_mode = default_thinking_mode
     implicit_adaptive = (
         request_controls.enable_thinking is None
+        and request_max_think is None
         and thinking_mode == ThinkingMode.ADAPTIVE
     )
     if (
@@ -582,14 +587,19 @@ def _apply_dash_sc_controls_to_generate_config(
         thinking_mode = ThinkingMode.DISABLED
 
     generate_config.thinking_mode = thinking_mode
-    generate_config.in_think_mode = thinking_mode == ThinkingMode.ENABLED
+    generate_config.in_think_mode = False
     if thinking_mode == ThinkingMode.DISABLED:
         generate_config.max_thinking_tokens = 0
     elif thinking_mode == ThinkingMode.ENABLED and (
         generate_config.end_think_token_ids or runtime.eos_tokens
     ):
+        generate_config.in_think_mode = True
         if not generate_config.end_think_token_ids:
             generate_config.end_think_token_ids = list(runtime.eos_tokens)
+    elif thinking_mode == ThinkingMode.ENABLED:
+        # Preserve the legacy DashSC gate: fixed thinking requires a runtime
+        # end boundary. A request budget alone cannot make that state usable.
+        generate_config.thinking_mode = ThinkingMode.DISABLED
     if request_controls.timeout_ms is not None:
         generate_config.timeout_ms = int(request_controls.timeout_ms)
         generate_config.ttft_timeout_ms = int(request_controls.timeout_ms)
@@ -672,7 +682,7 @@ async def iter_real_model_stream_infer(
         generate_config = sampling.to_generate_config(request_controls=request_controls)
         generate_config.trace_id = trace_str
         default_thinking_mode = (
-            ThinkingMode.ADAPTIVE
+            thinking_mode_from_value(generate_env_config.think_mode)
             if generate_env_config is not None
             else ThinkingMode.DISABLED
         )
@@ -726,6 +736,11 @@ async def iter_real_model_stream_infer(
             final_constraint = generate_config.add_thinking_params(
                 _hf_tokenizer(tokenizer),
                 generate_env_config,
+                enable_thinking=(
+                    None
+                    if configured_thinking_mode == ThinkingMode.ADAPTIVE
+                    else generate_config.in_think_mode
+                ),
                 reasoning_format=reasoning_format,
             )
         if runtime.eos_tokens and not generate_config.end_think_token_ids:

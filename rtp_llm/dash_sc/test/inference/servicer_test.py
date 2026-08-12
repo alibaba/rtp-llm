@@ -641,11 +641,11 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(visitor.enqueue_called, 1)
         gc = visitor.last_generate_input.generate_config
-        self.assertFalse(gc.in_think_mode)
-        self.assertEqual(gc.thinking_mode, ThinkingMode.ADAPTIVE)
+        self.assertTrue(gc.in_think_mode)
+        self.assertEqual(gc.thinking_mode, ThinkingMode.ENABLED)
         self.assertEqual(gc.max_thinking_tokens, 2_147_483_647)
         self.assertEqual(gc.end_think_token_ids, [128822, 271])
-        self.assertEqual(gc.structural_tag["format"]["type"], "or")
+        self.assertEqual(gc.structural_tag["format"]["type"], "sequence")
 
     async def test_budget_zero_disables_thinking(self) -> None:
         """Request-level zero budget must still produce a full think mask config."""
@@ -2212,42 +2212,45 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(generate_config.thinking_mode, ThinkingMode.ADAPTIVE)
         self.assertEqual(generate_config.max_thinking_tokens, 32000)
 
-    async def test_dash_generation_without_explicit_mode_defaults_to_adaptive(
+    async def test_dash_generation_without_explicit_mode_inherits_env(
         self,
     ) -> None:
-        for env_mode in ("disabled", "adaptive", "enabled", "0", "1"):
-            for budget in (None, 10):
-                with self.subTest(env_mode=env_mode, budget=budget):
-                    visitor = _FakeVisitor(_FakeAsyncStream([]))
-                    tok = _dsv4_tokenizer()
-                    env_cfg = _GenerateEnvCfg()
-                    env_cfg.think_mode = env_mode
-                    servicer = DashScInferenceServicer(
-                        backend_visitor=visitor,
-                        tokenizer=tok,
-                        generate_env_config=env_cfg,
-                        think_runtime=build_think_runtime(tok, env_cfg, "qwen"),
-                    )
-                    request = self._valid_infer_request()
-                    if budget is not None:
-                        request.parameters["thinking_budget"].int64_param = budget
+        cases = {
+            "disabled": (ThinkingMode.DISABLED, False, None),
+            "adaptive": (ThinkingMode.ADAPTIVE, False, "or"),
+            "enabled": (ThinkingMode.ENABLED, True, "sequence"),
+            "0": (ThinkingMode.DISABLED, False, None),
+            "1": (ThinkingMode.ENABLED, True, "sequence"),
+        }
+        for env_mode, (expected_mode, expected_in_think, grammar_type) in cases.items():
+            with self.subTest(env_mode=env_mode):
+                visitor = _FakeVisitor(_FakeAsyncStream([]))
+                tok = _dsv4_tokenizer()
+                env_cfg = _GenerateEnvCfg()
+                env_cfg.think_mode = env_mode
+                servicer = DashScInferenceServicer(
+                    backend_visitor=visitor,
+                    tokenizer=tok,
+                    generate_env_config=env_cfg,
+                    think_runtime=build_think_runtime(tok, env_cfg, "qwen"),
+                )
+                request = self._valid_infer_request()
 
-                    await _drain(
-                        servicer.ModelStreamInfer(_areq_iter([request]), MagicMock())
-                    )
+                await _drain(
+                    servicer.ModelStreamInfer(_areq_iter([request]), MagicMock())
+                )
 
-                    generate_config = visitor.last_generate_input.generate_config
+                generate_config = visitor.last_generate_input.generate_config
+                self.assertEqual(generate_config.thinking_mode, expected_mode)
+                self.assertEqual(generate_config.in_think_mode, expected_in_think)
+                if grammar_type is None:
+                    self.assertEqual(generate_config.max_thinking_tokens, 0)
+                    self.assertIsNone(generate_config.structural_tag)
+                else:
+                    self.assertEqual(generate_config.max_thinking_tokens, 32000)
                     self.assertEqual(
-                        generate_config.thinking_mode, ThinkingMode.ADAPTIVE
-                    )
-                    self.assertFalse(generate_config.in_think_mode)
-                    expected_budget = budget if budget is not None else 32000
-                    self.assertEqual(
-                        generate_config.max_thinking_tokens,
-                        expected_budget,
-                    )
-                    self.assertEqual(
-                        generate_config.structural_tag["format"]["type"], "or"
+                        generate_config.structural_tag["format"]["type"],
+                        grammar_type,
                     )
 
     async def test_implicit_adaptive_multi_sequence_falls_back_to_disabled(
@@ -2513,7 +2516,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(elements[0]["end"], "</think>\n\n")
         self.assertEqual(elements[1], tag["format"])
 
-    async def test_dash_generation_budget_aliases_without_enable_thinking_are_adaptive(
+    async def test_dash_generation_budget_aliases_without_enable_thinking_are_enabled(
         self,
     ) -> None:
         for param_name in ("thinking_budget", "max_new_think_tokens"):
@@ -2537,17 +2540,16 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(visitor.enqueue_called, 1)
                 generate_config = visitor.last_generate_input.generate_config
-                self.assertFalse(generate_config.in_think_mode)
-                self.assertEqual(generate_config.thinking_mode, ThinkingMode.ADAPTIVE)
+                self.assertTrue(generate_config.in_think_mode)
+                self.assertEqual(generate_config.thinking_mode, ThinkingMode.ENABLED)
                 self.assertEqual(generate_config.max_thinking_tokens, 10)
-                adaptive = generate_config.structural_tag["format"]
-                self.assertEqual(adaptive["type"], "or")
-                think_branch, no_think_branch = adaptive["elements"]
+                fixed = generate_config.structural_tag["format"]
+                self.assertEqual(fixed["type"], "sequence")
+                think_branch = fixed
                 self.assertEqual(
                     think_branch["elements"][0]["content"]["max_tokens"], 10
                 )
                 self.assertEqual(think_branch["elements"][1]["type"], "json_schema")
-                self.assertEqual(no_think_branch["type"], "json_schema")
 
     async def test_max_completion_tokens_thinking_budget_keeps_backend_limit_repro(
         self,

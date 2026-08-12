@@ -141,10 +141,9 @@ def _resolved_thinking_mode(config: Any) -> "ThinkingMode":
 
     from rtp_llm.config.generate_config import ThinkingMode
 
-    mode = config.thinking_mode
-    if mode == ThinkingMode.UNSPECIFIED:
-        mode = ThinkingMode.ENABLED if config.in_think_mode else ThinkingMode.DISABLED
-    return mode
+    if config.thinking_mode == ThinkingMode.ADAPTIVE:
+        return ThinkingMode.ADAPTIVE
+    return ThinkingMode.ENABLED if config.in_think_mode else ThinkingMode.DISABLED
 
 
 def _uses_reasoning_envelope(config: Any) -> bool:

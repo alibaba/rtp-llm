@@ -292,6 +292,7 @@ class OpenaiGenerateConfigTest(TestCase):
         response_format: Optional[Union[str, Dict[str, Any]]] = None,
         json_format: Optional[bool] = None,
         enable_thinking: Optional[bool] = False,
+        thinking_budget: Optional[int] = None,
         input_ids: Optional[List[int]] = None,
         thinking_mode: Optional[ThinkingMode] = None,
         env_think_mode: Optional[Union[str, int]] = None,
@@ -333,6 +334,7 @@ class OpenaiGenerateConfigTest(TestCase):
             response_format=response_format,
             json_format=json_format,
             enable_thinking=enable_thinking,
+            thinking_budget=thinking_budget,
         )
         if thinking_mode is not None:
             if request.extra_configs is None:
@@ -372,10 +374,10 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertIsNone(config.ebnf)
         self.assertIsNone(config.structural_tag)
 
-    def test_unspecified_openai_thinking_is_disabled_even_with_budget(self):
+    def test_unresolved_openai_thinking_uses_disabled_fallback_even_with_budget(self):
         request = ChatCompletionRequest(messages=[], thinking_budget=32000)
         self.assertEqual(request.resolve_thinking_mode(), ThinkingMode.DISABLED)
-        self.assertFalse(request.get_enable_thinking())
+        self.assertIsNone(request.get_enable_thinking())
 
     def test_unspecified_openai_thinking_uses_disabled_final_constraint(self):
         config = self._generate_config_with_stop_word(
@@ -416,6 +418,26 @@ class OpenaiGenerateConfigTest(TestCase):
                         expected_format_type,
                     )
                     self.assertEqual(config.max_thinking_tokens, 32000)
+
+    def test_openai_positive_budget_inherits_env_mode(self):
+        cases = {
+            "disabled": ThinkingMode.DISABLED,
+            "adaptive": ThinkingMode.ADAPTIVE,
+            "enabled": ThinkingMode.ENABLED,
+        }
+        for env_mode, expected in cases.items():
+            with self.subTest(env_mode=env_mode):
+                config = self._generate_config_with_stop_word(
+                    enable_thinking=None,
+                    thinking_budget=32000,
+                    env_think_mode=env_mode,
+                )
+
+                self.assertEqual(config.thinking_mode, expected)
+                self.assertEqual(
+                    config.max_thinking_tokens,
+                    0 if expected == ThinkingMode.DISABLED else 32000,
+                )
 
     def test_explicit_openai_thinking_overrides_env_mode(self):
         disabled = self._generate_config_with_stop_word(
@@ -473,7 +495,16 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertEqual(
             adaptive_request.resolve_thinking_mode(), ThinkingMode.ADAPTIVE
         )
-        self.assertIsNone(adaptive_request.get_enable_thinking())
+        self.assertTrue(adaptive_request.get_enable_thinking())
+
+    def test_enabled_openai_thinking_keeps_legacy_empty_grammar_begin(self):
+        config = self._generate_config_with_stop_word(enable_thinking=True)
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
+        self.assertTrue(config.in_think_mode)
+        reasoning_tag = config.structural_tag["format"]["elements"][0]
+        self.assertEqual(reasoning_tag["begin"], "")
+        self.assertEqual(config.begin_think_token_ids, [])
 
     def test_invalid_chat_template_thinking_mode_is_rejected(self):
         for value in ("auto", "Adaptive", True, 1, None):

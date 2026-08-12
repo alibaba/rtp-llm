@@ -107,6 +107,24 @@ class DeepseekV32Renderer(ReasoningToolBaseRenderer):
         """
         self.chat_template = None
 
+    @override
+    def in_think_mode(self, request: ChatCompletionRequest) -> bool:
+        """Check whether this request uses the renderer's thinking path."""
+
+        thinking_enabled = super().in_think_mode(request)
+        if request.chat_template_kwargs and request.chat_template_kwargs.get(
+            "enable_thinking"
+        ):
+            thinking_enabled = True
+        if (
+            request.extra_configs
+            and request.extra_configs.chat_template_kwargs
+            and isinstance(request.extra_configs.chat_template_kwargs, dict)
+            and request.extra_configs.chat_template_kwargs.get("enable_thinking")
+        ):
+            thinking_enabled = True
+        return thinking_enabled
+
     def _build_prompt(self, request: ChatCompletionRequest) -> str:
         """
         Build prompt string using the DeepSeek V3.2 encoding script.

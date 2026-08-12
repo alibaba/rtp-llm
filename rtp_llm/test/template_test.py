@@ -387,6 +387,8 @@ class TemplateTest(TestCase):
         )
 
     def test_basic_renderer_preserves_template_thinking_default(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = "enabled"
         renderer = BasicRenderer(
             _ThinkingDefaultTemplateTokenizer(),
             RendererParams(
@@ -395,7 +397,7 @@ class TemplateTest(TestCase):
                 eos_token_id=0,
                 stop_word_ids_list=[],
             ),
-            GenerateEnvConfig(),
+            generate_env_config,
             RenderConfig(),
         )
         messages = [ChatMessage(role=RoleEnum.user, content="hello")]
@@ -409,10 +411,17 @@ class TemplateTest(TestCase):
         enabled_prompt = renderer.render_chat(
             ChatCompletionRequest(messages=messages, enable_thinking=True)
         ).rendered_prompt
+        kwargs_disabled_prompt = renderer.render_chat(
+            ChatCompletionRequest(
+                messages=messages,
+                chat_template_kwargs={"enable_thinking": False},
+            )
+        ).rendered_prompt
 
         self.assertEqual(default_prompt, "template-default")
-        self.assertEqual(disabled_prompt, "disabled")
-        self.assertEqual(enabled_prompt, "enabled")
+        self.assertEqual(disabled_prompt, "template-default")
+        self.assertEqual(enabled_prompt, "template-default")
+        self.assertEqual(kwargs_disabled_prompt, "disabled")
 
     def test_qwen_agent(self):
         tokenizer = QWenTokenizer(
