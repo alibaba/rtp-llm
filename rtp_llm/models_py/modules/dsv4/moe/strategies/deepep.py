@@ -256,7 +256,32 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             local_w = all_w * valid.to(all_w.dtype)
             local_i = local_i.clamp(0, self.cfg.n_local_experts - 1)
             try:
-                partial = self._sm120_grouped(all_x, local_w, local_i)
+                # The FlashInfer SM120 path materialises routed activations for
+                # its input rows.  Bound that model-forward workspace instead
+                # of letting CP all-gathered 16k/32k warmup requests consume the
+                # remaining HBM in one call.  Every EP rank has the same all_x
+                # ordering, so the per-chunk all-reduces are collective-safe.
+                chunk_tokens = 4096
+                local_begin = sum(counts[:rank])
+                local_end = local_begin + counts[rank]
+                output = torch.empty(
+                    (counts[rank], all_x.size(1)),
+                    dtype=torch.float32,
+                    device=all_x.device,
+                )
+                for begin in range(0, all_x.size(0), chunk_tokens):
+                    end = min(begin + chunk_tokens, all_x.size(0))
+                    partial = self._sm120_grouped(
+                        all_x[begin:end], local_w[begin:end], local_i[begin:end]
+                    )
+                    dist.all_reduce(partial, op=dist.ReduceOp.SUM, group=group)
+                    copy_begin = max(begin, local_begin)
+                    copy_end = min(end, local_end)
+                    if copy_begin < copy_end:
+                        output[
+                            copy_begin - local_begin : copy_end - local_begin
+                        ].copy_(partial[copy_begin - begin : copy_end - begin])
+                return output
             except BaseException:
                 # PyWrappedModel crosses a C++ worker-thread boundary whose
                 # terminate path otherwise hides the originating Python error.
