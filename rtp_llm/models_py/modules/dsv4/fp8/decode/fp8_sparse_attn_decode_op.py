@@ -226,14 +226,17 @@ class SparseAttnV4DecodeFp8Op:
             logical_kv = dequantize_slots_to_bf16(pool, flat_indices)
             slot_count = int(flat_indices.numel())
             page_count = max((slot_count + page_size - 1) // page_size, 1)
-            packed = torch.empty(
+            packed = torch.zeros(
                 (page_count, page_size, pool.shape[-1]),
                 dtype=pool.dtype,
                 device=pool.device,
             )
             local_slots = torch.arange(slot_count, dtype=torch.int64, device=pool.device)
             quantize_and_insert_k_cache(logical_kv, packed, local_slots)
-            remapped = local_slots.to(torch.int32).masked_fill(~valid, -1)
+            # FlashInfer masks with the explicit top-k length, but still
+            # vector-loads tail indices. Match vLLM's zero-initialized index
+            # buffers so every speculative load addresses a valid slot.
+            remapped = local_slots.to(torch.int32).masked_fill(~valid, 0)
             return packed, remapped.view_as(indices)
 
         swa_indices = flattened_indices(topk_idxs)
