@@ -713,13 +713,14 @@ class DeepSeekV4Model(GptModelBase):
         if device_str.startswith("cuda") and prewarm_jit_kernels:
             from rtp_llm.models_py.modules.dsv4 import tilelang_kernels as _tl_kernels
 
-            first_attn = self.v4.layers[0].attn
-            _tl_kernels.prewarm(
-                first_attn.n_heads,
-                first_attn.head_dim,
-                first_attn.softmax_scale,
-                device_str,
-            )
+            if torch.cuda.get_device_capability(device_str)[0] != 12:
+                first_attn = self.v4.layers[0].attn
+                _tl_kernels.prewarm(
+                    first_attn.n_heads,
+                    first_attn.head_dim,
+                    first_attn.softmax_scale,
+                    device_str,
+                )
 
             # Pre-warm the v4_indexer_score Triton kernel for the SAME
             # constexpr config the live decode (and CSA prefill) call will
@@ -785,7 +786,13 @@ class DeepSeekV4Model(GptModelBase):
                     device=_torch.device(device_str),
                 )
 
-            if os.environ.get("DSV4_PREWARM_FLASH_MLA_SWA", "1") != "0":
+            # FlashMLA has no SM120 cubin. SM120 prefill uses FlashInfer from
+            # the model-forward sparse helper, so skip this FlashMLA-only warmup.
+            _device_capability = _torch.cuda.get_device_capability(device_str)
+            if (
+                os.environ.get("DSV4_PREWARM_FLASH_MLA_SWA", "1") != "0"
+                and _device_capability[0] < 12
+            ):
                 try:
                     from flash_mla import flash_mla_sparse_fwd as _flash_mla_sparse_fwd
 
@@ -1058,7 +1065,7 @@ class DeepSeekV4Model(GptModelBase):
         overrides with the e_proj/h_proj fusion stage."""
         B = meta.batch_size
         q_len = meta.q_len_per_req
-        h = self.v4.embed(input_ids).view(B, q_len, -1)
+        h = self.v4.embed_full(input_ids).view(B, q_len, -1)
         return h.unsqueeze(2).repeat(1, 1, self.v4.hc_mult, 1)
 
     def _prepare_prefill_hidden(
@@ -1068,7 +1075,7 @@ class DeepSeekV4Model(GptModelBase):
     ) -> torch.Tensor:
         """Build the flat ``[T_total, hc, dim]`` hidden tensor that feeds
         the layer loop on the prefill path.  Default = embed+repeat."""
-        h = self.v4.embed(input_ids)
+        h = self.v4.embed_full(input_ids)
         return h.unsqueeze(-2).repeat(1, self.v4.hc_mult, 1)
 
     def prepare_fmha_impl(

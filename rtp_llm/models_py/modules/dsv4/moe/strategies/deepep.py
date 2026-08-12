@@ -12,12 +12,14 @@ Direct port of the pre-refactor ``_routed_experts_deepep`` +
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Dict, Optional, Tuple
 
 import torch
 
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 from .local_loop import LocalLoopStrategy
+from .grouped_fp4 import GroupedFP4Strategy, _has_fp8_fp4_grouped_kernel
 
 
 # ACCL-EP's intranode dispatch kernel has a compile-time switch over
@@ -40,7 +42,24 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         # local compute on dispatched recv tokens. Registered as a child
         # nn.Module so its ``experts`` ModuleList propagates through
         # ``MoE.to(device)`` / state_dict.
-        self._local = LocalLoopStrategy(cfg)
+        self._sm120_grouped = None
+        if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 12 \
+                and _has_fp8_fp4_grouped_kernel():
+            # The EP loader already gives each rank only its local expert
+            # stack. Present that stack as a single-rank grouped problem;
+            # global-to-local routing is handled after the collective below.
+            local_cfg = replace(
+                cfg,
+                ep_size=1,
+                ep_rank=0,
+                n_routed_experts=cfg.n_local_experts,
+                local_expert_start=0,
+                local_expert_end=cfg.n_local_experts,
+            )
+            self._sm120_grouped = GroupedFP4Strategy(local_cfg)
+            self._local = self._sm120_grouped
+        else:
+            self._local = LocalLoopStrategy(cfg)
 
     @classmethod
     def can_handle(cls, cfg: MoeCfg) -> bool:
@@ -92,6 +111,9 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         → DeepEP combine. Requires ``init_deepep_wrapper`` to have been
         called by the engine (``backend_manager.py``).
         """
+        if x.is_cuda and torch.cuda.get_device_capability(x.device)[0] == 12:
+            return self._forward_sm120_collective(x, weights, indices)
+
         from rtp_llm.models_py.distributed.deepep_wrapper import (
             DeepEPMode,
             DeepEPWrapper,
@@ -181,3 +203,74 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             handle,
         )
         return y_combined.float()
+
+    def _forward_sm120_collective(
+        self,
+        x: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.Tensor,
+    ) -> torch.Tensor:
+        """Correctness EP path for SM120 without an ACCL-EP cubin.
+
+        Gather the small decode batch on every EP rank, compute only this
+        rank's local expert slice, then sum the partial outputs.  This keeps
+        weights EP-sharded and is intentionally used only for SM120 bring-up.
+        """
+        dist = torch.distributed
+        if not dist.is_initialized():
+            raise RuntimeError("SM120 EP fallback requires torch.distributed")
+        group = dist.group.WORLD
+        world = dist.get_world_size(group)
+        rank = dist.get_rank(group)
+        if torch.cuda.is_current_stream_capturing():
+            # Decode graphs are captured for a fixed per-rank batch size.
+            # Avoid CPU scalar materialization and device-to-host reads inside
+            # capture; every DP rank captures the same local batch shape.
+            counts = [x.size(0)] * world
+        else:
+            n = torch.full((1,), x.size(0), dtype=torch.int64, device=x.device)
+            counts_t = [torch.empty_like(n) for _ in range(world)]
+            dist.all_gather(counts_t, n, group=group)
+            counts = [int(v.item()) for v in counts_t]
+        max_n = max(max(counts), 1)
+
+        def gather_padded(t: torch.Tensor, fill: float | int) -> list[torch.Tensor]:
+            padded = torch.full(
+                (max_n, *t.shape[1:]), fill, dtype=t.dtype, device=t.device
+            )
+            if t.size(0):
+                padded[: t.size(0)].copy_(t)
+            gathered = [torch.empty_like(padded) for _ in range(world)]
+            dist.all_gather(gathered, padded, group=group)
+            return gathered
+
+        xs = gather_padded(x, 0.0)
+        ws = gather_padded(weights, 0.0)
+        ids = gather_padded(indices.to(torch.int64), -1)
+        all_x = torch.cat([t[:c] for t, c in zip(xs, counts)], dim=0)
+        all_w = torch.cat([t[:c] for t, c in zip(ws, counts)], dim=0)
+        all_i = torch.cat([t[:c] for t, c in zip(ids, counts)], dim=0)
+        if self._sm120_grouped is not None:
+            local_i = all_i - self.cfg.local_expert_start
+            valid = (local_i >= 0) & (local_i < self.cfg.n_local_experts)
+            local_w = all_w * valid.to(all_w.dtype)
+            local_i = local_i.clamp(0, self.cfg.n_local_experts - 1)
+            try:
+                partial = self._sm120_grouped(all_x, local_w, local_i)
+            except BaseException:
+                # PyWrappedModel crosses a C++ worker-thread boundary whose
+                # terminate path otherwise hides the originating Python error.
+                import traceback
+                traceback.print_exc()
+                raise
+        else:
+            partial = self._local._forward_into_buf(
+                all_x,
+                all_w,
+                all_i,
+                local_start=self.cfg.local_expert_start,
+                local_end=self.cfg.local_expert_end,
+            )
+        dist.all_reduce(partial, op=dist.ReduceOp.SUM, group=group)
+        offset = sum(counts[:rank])
+        return partial[offset : offset + counts[rank]].float()

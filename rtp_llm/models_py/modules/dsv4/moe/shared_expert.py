@@ -31,6 +31,11 @@ def strict_fused_moe_enabled() -> bool:
     return os.environ.get("DSV4_MOE_STRICT_FUSED", "1") != "0"
 
 
+def _requires_sm120_fallback(x: torch.Tensor) -> bool:
+    """Return whether the SM100-only DeepGEMM fast path cannot be used."""
+    return x.is_cuda and torch.cuda.get_device_capability(x.device)[0] == 12
+
+
 def _normalize_cuda_device(device: torch.device) -> torch.device | None:
     if not torch.cuda.is_available() or device.type != "cuda":
         return None
@@ -188,6 +193,9 @@ class FusedSharedExpertFastPath:
     @staticmethod
     def can_run(shared_experts: nn.Module, x: torch.Tensor) -> bool:
         if not (x.is_cuda and x.dtype == torch.bfloat16 and x.dim() == 2):
+            return False
+        if torch.cuda.get_device_capability(x.device)[0] == 12:
+            # DeepGEMM's UE8M0 recipe/layout used below is SM100-only.
             return False
         return all(hasattr(shared_experts, name) for name in ("w13", "w2"))
 
@@ -510,7 +518,11 @@ def _run_shared_expert(
         except Exception:
             if strict_fused_moe_enabled():
                 raise
-    if strict_fused_moe_enabled():
+    # The fused runner above uses DeepGEMM's SM100-only UE8M0 layout.  SM120
+    # intentionally executes the loader-merged W13/W2 modules, whose linear
+    # implementation selects the SM120 backend.  Strict mode must not reject
+    # that architecture-specific path merely because it is not DeepGEMM.
+    if strict_fused_moe_enabled() and not _requires_sm120_fallback(x):
         raise RuntimeError(
             "DSV4_MOE_STRICT_FUSED=1 forbids generic Expert.forward shared path"
         )
@@ -557,6 +569,6 @@ def combine_routed_and_shared(
 
         return fused_moe_epilogue(routed, shared, out_dtype, out=out)
     except Exception:
-        if strict_fused_moe_enabled():
+        if strict_fused_moe_enabled() and not _requires_sm120_fallback(routed):
             raise
         return (routed.float() + shared.float()).to(out_dtype)

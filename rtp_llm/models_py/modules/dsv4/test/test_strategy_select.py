@@ -97,12 +97,25 @@ class StrategySelectTest(unittest.TestCase):
         ):
             self.assertFalse(GroupedFP4Strategy.can_handle(cfg))
 
-    def test_grouped_kernel_probe_requires_sm100(self):
+    def test_grouped_kernel_probe_supports_sm100_and_sm120(self):
         fake_deep_gemm = types.SimpleNamespace(
             m_grouped_fp8_fp4_gemm_nt_contiguous=object(),
             get_mk_alignment_for_contiguous_layout=lambda: (128, 128),
         )
-        with mock.patch.dict(sys.modules, {"deep_gemm": fake_deep_gemm}), mock.patch(
+        fake_flashinfer = types.SimpleNamespace(
+            mxfp8_quantize=object(),
+            block_scale_interleave=object(),
+        )
+        fake_flashinfer_gemm = types.SimpleNamespace(
+            group_gemm_mxfp4_nt_groupwise=object(),
+        )
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "flashinfer": fake_flashinfer,
+                "flashinfer.gemm": fake_flashinfer_gemm,
+            },
+        ), mock.patch(
             "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
             "torch.cuda.is_available",
             return_value=True,
@@ -111,7 +124,7 @@ class StrategySelectTest(unittest.TestCase):
             "torch.cuda.get_device_capability",
             return_value=(12, 0),
         ):
-            self.assertFalse(_has_fp8_fp4_grouped_kernel())
+            self.assertTrue(_has_fp8_fp4_grouped_kernel())
 
         with mock.patch.dict(sys.modules, {"deep_gemm": fake_deep_gemm}), mock.patch(
             "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
@@ -145,11 +158,18 @@ class StrategySelectTest(unittest.TestCase):
             self.assertIs(select_strategy(_cfg(ep_size=4)), MegaMoEStrategy)
 
     def test_ep_gt1_no_mega_raises(self):
-        with mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False):
+        with mock.patch.object(
+            MegaMoEStrategy, "can_handle", return_value=False
+        ), mock.patch.object(DeepEPStrategy, "can_handle", return_value=False):
             with self.assertRaises(RuntimeError) as cm:
                 select_strategy(_cfg(ep_size=4))
-        self.assertIn("requires MegaMoEStrategy", str(cm.exception))
-        self.assertIn("fallback to DeepEP/LocalLoop is disabled", str(cm.exception))
+        self.assertIn("requires either MegaMoE or DeepEP", str(cm.exception))
+
+    def test_ep_gt1_no_mega_falls_back_to_deepep(self):
+        with mock.patch.object(
+            MegaMoEStrategy, "can_handle", return_value=False
+        ), mock.patch.object(DeepEPStrategy, "can_handle", return_value=True):
+            self.assertIs(select_strategy(_cfg(ep_size=4)), DeepEPStrategy)
 
     # --- forced override ---------------------------------------------------
 
@@ -167,12 +187,11 @@ class StrategySelectTest(unittest.TestCase):
         self.assertIn("Forced MoE strategy 'grouped_fp4'", str(cm.exception))
         self.assertIn("cannot handle", str(cm.exception))
 
-    def test_forced_ep_gt1_non_mega_raises_even_if_capable(self):
+    def test_forced_ep_gt1_deepep_returns_it(self):
         with mock.patch.object(DeepEPStrategy, "can_handle", return_value=True):
-            with self.assertRaises(RuntimeError) as cm:
-                select_strategy(_cfg(ep_size=4), forced="deepep")
-        self.assertIn("requires MegaMoEStrategy", str(cm.exception))
-        self.assertIn("bypass Mega", str(cm.exception))
+            self.assertIs(
+                select_strategy(_cfg(ep_size=4), forced="deepep"), DeepEPStrategy
+            )
 
     def test_forced_unknown_raises(self):
         with self.assertRaises(RuntimeError) as cm:
@@ -266,16 +285,16 @@ class StrategySelectTest(unittest.TestCase):
             self.assertIn("Conflicting MoE strategy", str(cm.exception))
 
     def test_legacy_negation_does_not_force_alternative(self):
-        # DSV4_USE_MEGA_MOE=0 should NOT force a different strategy. EP>1
-        # select_strategy() treats disabled Mega as a fatal config error.
+        # DSV4_USE_MEGA_MOE=0 does not force a specific replacement; normal
+        # EP strategy selection may still pick DeepEP when it is available.
         with _env(DSV4_USE_MEGA_MOE="0"):
             self.assertEqual(_resolve_forced(None), (None, False))
 
-    def test_legacy_negation_ep_gt1_raises(self):
-        with _env(DSV4_USE_MEGA_MOE="0"):
-            with self.assertRaises(RuntimeError) as cm:
-                select_strategy(_cfg(ep_size=4))
-        self.assertIn("DSV4_USE_MEGA_MOE=0 disables Mega MoE", str(cm.exception))
+    def test_legacy_negation_ep_gt1_falls_back_to_deepep(self):
+        with _env(DSV4_USE_MEGA_MOE="0"), mock.patch.object(
+            MegaMoEStrategy, "can_handle", return_value=False
+        ), mock.patch.object(DeepEPStrategy, "can_handle", return_value=True):
+            self.assertIs(select_strategy(_cfg(ep_size=4)), DeepEPStrategy)
 
     def test_legacy_force_nonstrict_falls_through_when_incapable(self):
         # Legacy DSV4_USE_MEGA_MOE=1 + ep_size=1 cfg: Mega.can_handle False

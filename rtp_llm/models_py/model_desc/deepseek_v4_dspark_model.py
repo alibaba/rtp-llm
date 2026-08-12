@@ -706,7 +706,9 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         tokens_per_block: int,
         graph_metadata: Any,
     ) -> torch.Tensor:
-        hidden = self.v4.embed(query_ids)
+        # TP shards the vocabulary embedding output along the hidden axis;
+        # mHC operates on the full model dimension on every rank.
+        hidden = self.v4.embed_full(query_ids)
         hidden = hidden.unsqueeze(2).repeat(1, 1, self.v4.hc_mult, 1)
 
         # The hyper-connection choreography lives in Block.forward_decode;

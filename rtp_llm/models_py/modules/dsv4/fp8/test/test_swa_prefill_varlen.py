@@ -337,6 +337,33 @@ class GetWindowTopkIdxsVarlenTest(unittest.TestCase):
 # -------------------------------------------------------------------------
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for triton kernels")
 class BuildSwaPrefillMetaVarlenTest(unittest.TestCase):
+    def test_suffix_pool_mapping_rebases_compact_reuse_block_table(self):
+        seq_lens = torch.tensor([2048], dtype=torch.int32)
+        gather_lens = torch.tensor([127], dtype=torch.int32)
+        compact_bt = torch.tensor([[41, 42, 43]], dtype=torch.int32)
+        actual = _build_suffix_pool_slot_mapping(
+            block_table=compact_bt,
+            seq_lens=seq_lens,
+            gather_lens=gather_lens,
+            entries_per_block=132,
+            tokens_per_block_for_block_table=256,
+            ring_entries=132,
+        )
+        positions = torch.arange(1921, 2048, dtype=torch.long)
+        expected = 41 * 132 + positions.remainder(132)
+        torch.testing.assert_close(actual[0], expected)
+
+        full_bt = torch.arange(34, 42, dtype=torch.int32).view(1, -1)
+        full_actual = _build_suffix_pool_slot_mapping(
+            block_table=full_bt,
+            seq_lens=seq_lens,
+            gather_lens=gather_lens,
+            entries_per_block=132,
+            tokens_per_block_for_block_table=256,
+            ring_entries=132,
+        )
+        torch.testing.assert_close(full_actual[0], expected)
+
 
     def setUp(self) -> None:
         self.device = torch.device("cuda")

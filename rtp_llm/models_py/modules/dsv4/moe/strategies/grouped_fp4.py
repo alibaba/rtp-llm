@@ -62,6 +62,17 @@ def _has_fp8_fp4_grouped_kernel() -> bool:
     flag = os.environ.get("DSV4_USE_GROUPED_FP4", "auto").strip().lower()
     if flag in ("0", "false", "off", "no"):
         return False
+    if not torch.cuda.is_available():
+        return False
+    cap = torch.cuda.get_device_capability()
+    if cap[0] == 12:
+        try:
+            from flashinfer.gemm import group_gemm_mxfp4_nt_groupwise
+            from flashinfer import mxfp8_quantize, block_scale_interleave
+            return all((group_gemm_mxfp4_nt_groupwise, mxfp8_quantize,
+                        block_scale_interleave))
+        except Exception:
+            return False
     try:
         import deep_gemm
     except Exception:
@@ -70,9 +81,6 @@ def _has_fp8_fp4_grouped_kernel() -> bool:
         return False
     if not hasattr(deep_gemm, "get_mk_alignment_for_contiguous_layout"):
         return False
-    if not torch.cuda.is_available():
-        return False
-    cap = torch.cuda.get_device_capability()
     return cap[0] == 10
 
 
@@ -141,6 +149,23 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         del stacked_w1_w, stacked_w1_s, stacked_w2_w, stacked_w2_s
         del stacked_w3_w, stacked_w3_s
 
+        if torch.cuda.get_device_capability(device)[0] == 12:
+            # CUTLASS SM120 block-scaled MMA consumes the native UE8M0 values
+            # in its 128x4 interleaved layout.  Each expert boundary is already
+            # 128-row aligned for V4, so a single flattened conversion is safe.
+            from flashinfer import block_scale_interleave
+            self._s13_sm120 = block_scale_interleave(
+                s13_raw.view(torch.uint8).reshape(E * 2 * inter, D // FP4_BLOCK)
+            ).reshape(E, 2 * inter, D // FP4_BLOCK)
+            self._s2_sm120 = block_scale_interleave(
+                s2_raw.view(torch.uint8).reshape(E * D, inter // FP4_BLOCK)
+            ).reshape(E, D, inter // FP4_BLOCK)
+            self._s13 = self._s2 = None
+            self._s13_dense_t = self._s2_dense_t = None
+            del s13_raw, s2_raw
+            torch.cuda.empty_cache()
+            return
+
         self._s13 = prepare_fp4_weight_scale_for_deepgemm(
             s13_raw, 2 * inter, D, E
         )
@@ -195,6 +220,10 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
 
         if N == 0:
             return torch.zeros(N, D, dtype=torch.float32, device=device)
+        if torch.cuda.get_device_capability(device)[0] == 12:
+            if torch.cuda.is_current_stream_capturing():
+                return self._forward_capture_sm120(x, weights, indices)
+            return self._forward_sm120(x, weights, indices)
         if torch.cuda.is_current_stream_capturing():
             return self._forward_capture_topk(x, weights, indices)
 
@@ -317,6 +346,80 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         gather_out = torch.empty((N, D), dtype=torch.bfloat16, device=device)
         ep_gather(down_out, adjusted_topk_ids, weights, output_index, gather_out)
         return gather_out.float()
+
+    def _forward_sm120(
+        self,
+        x: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.Tensor,
+    ) -> torch.Tensor:
+        """vLLM-aligned FlashInfer fused MXFP4 x MXFP8 MoE path."""
+        from flashinfer import mxfp8_quantize
+        from flashinfer.fused_moe import cutlass_fused_moe
+        from flashinfer.fused_moe.core import ActivationType
+
+        cfg = self.cfg
+        num_experts = cfg.n_routed_experts
+        # FlashInfer represents MXFP4 packed weights as int64 words and the
+        # interleaved UE8M0 scales as int32 words. Activations are dynamically
+        # quantized to MXFP8 inside the fused kernel.
+        fake_input_scale = torch.ones(
+            num_experts, dtype=torch.float32, device=x.device
+        )
+        swiglu_limit = torch.full_like(fake_input_scale, cfg.swiglu_limit)
+        out = torch.empty_like(x)
+        # The CUTLASS runner's workspace scales linearly with the tuning token
+        # bound (about 1.14 GiB at 12k tokens for a local V4 expert shard).
+        # RTX PRO 5000 has little free HBM after weights/KV pools, so keep the
+        # exact fused kernel and bound each invocation instead of allocating a
+        # full-prefill workspace. Tokens are independent across MoE calls.
+        chunk_tokens = max(
+            1,
+            int(os.environ.get("DSV4_SM120_FUSED_MOE_CHUNK_TOKENS", "512")),
+        )
+        tune_tokens = min(max(int(cfg.max_tokens_per_rank), 1), chunk_tokens)
+        fc1_weight = self._w13.view(torch.uint8).view(torch.long)
+        fc2_weight = self._w2.view(torch.uint8).view(torch.long)
+        quant_scales = [
+            self._s13_sm120.view(torch.int32),
+            fake_input_scale,
+            self._s2_sm120.view(torch.int32),
+            fake_input_scale,
+        ]
+        for start in range(0, x.size(0), chunk_tokens):
+            end = min(start + chunk_tokens, x.size(0))
+            # vLLM's modular quantizer supplies these MXFP8 tensors before its
+            # expert kernel. RTP performs the equivalent quantization here.
+            input_fp8, input_sf = mxfp8_quantize(
+                x[start:end].contiguous(), is_sf_swizzled_layout=True
+            )
+            cutlass_fused_moe(
+                input=input_fp8,
+                token_selected_experts=indices[start:end]
+                .to(torch.int32)
+                .contiguous(),
+                token_final_scales=weights[start:end].float().contiguous(),
+                fc1_expert_weights=fc1_weight,
+                fc2_expert_weights=fc2_weight,
+                output_dtype=torch.bfloat16,
+                quant_scales=quant_scales,
+                input_sf=input_sf,
+                swiglu_limit=swiglu_limit,
+                output=out[start:end],
+                use_mxfp8_act_scaling=True,
+                tune_max_num_tokens=tune_tokens,
+                activation_type=ActivationType.Swiglu,
+            )
+        return out.float()
+
+    def _forward_capture_sm120(
+        self,
+        x: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.Tensor,
+    ) -> torch.Tensor:
+        """Graph-safe fixed-shape fused path, warmed before capture."""
+        return self._forward_sm120(x, weights, indices)
 
     def _forward_capture_topk(
         self,
