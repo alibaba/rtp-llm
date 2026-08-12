@@ -1,5 +1,7 @@
 #pragma once
 
+#include <map>
+
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/RpcServerRuntimeMeta.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
@@ -39,6 +41,7 @@ private:
     void              remoteLoadCacheEnd(PrefillGenerateContext& prefill_context);
     void              remoteGenerate(PrefillGenerateContext& prefill_context);
     void              pollRemoteOutput(PrefillGenerateContext& prefill_context);
+    static void       mergeMultimodalLengths(GenerateOutputsPB& response, const std::map<int, int>& multimodal_lengths);
 
 private:
     std::string decode_cluster_name_;

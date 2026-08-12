@@ -184,7 +184,7 @@ ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> 
 }
 
 void PrefillRpcServer::setContextError(PrefillGenerateContext& prefill_context, const ErrorInfo& error_info) {
-    prefill_context.error_info   = error_info;
+    prefill_context.error_info = error_info;
     prefill_context.error_status =
         serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, error_info);
 }
@@ -358,7 +358,7 @@ void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_cont
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache", prefill_context.request_id);
     auto start_time_us = currentTimeUs();
-    auto wait_result = waitStreamBeforeRun(prefill_context.getStream());
+    auto wait_result   = waitStreamBeforeRun(prefill_context.getStream());
     prefill_context.stat_info.remote_load_cache_wait_stream_rt_us += currentTimeUs() - start_time_us;
     if (wait_result.hasError()) {
         setContextError(prefill_context, wait_result);
@@ -491,6 +491,10 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     auto              prefill_local_reuse_len  = prefill_context.getStream()->localReuseLength();
     auto              prefill_remote_reuse_len = prefill_context.getStream()->remoteReuseLength();
     auto              prefill_memory_reuse_len = prefill_context.getStream()->memoryReuseLength();
+    // Decode workers do not receive ViT features in PD mode, so preserve the
+    // prefill-side media usage metadata when forwarding their responses.
+    const auto multimodal_lengths =
+        prefill_context.generate_input ? prefill_context.generate_input->multimodalLengths() : std::map<int, int>{};
 
     auto first_token_rt_us = prefill_context.getStream()->getTimeInfo().first_token_rt_us;
     while (prefill_context.client_stream->Read(&response)) {
@@ -507,6 +511,7 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
         for (size_t i = 0; i < response.flatten_output().aux_info_size(); i++) {
             response.mutable_flatten_output()->mutable_aux_info(i)->set_pd_sep(true);
         }
+        mergeMultimodalLengths(response, multimodal_lengths);
         int64_t cost_time_us = currentTimeUs() - prefill_context.request_begin_time_us;
         for (size_t i = 0; i < response.flatten_output().aux_info_size(); i++) {
             auto decode_total_reuse_len  = response.flatten_output().aux_info(i).total_reuse_len();
@@ -546,6 +551,20 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     }
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, prefill_context.closeGrpcStream().ok(), ErrorCode::REMOTE_GENERATE_FAILED);
+}
+
+void PrefillRpcServer::mergeMultimodalLengths(GenerateOutputsPB&        response,
+                                              const std::map<int, int>& multimodal_lengths) {
+    if (multimodal_lengths.empty()) {
+        return;
+    }
+    for (int i = 0; i < response.flatten_output().aux_info_size(); ++i) {
+        auto* output_lengths = response.mutable_flatten_output()->mutable_aux_info(i)->mutable_multimodal_lengths();
+        output_lengths->clear();
+        for (const auto& [type, length] : multimodal_lengths) {
+            (*output_lengths)[type] = length;
+        }
+    }
 }
 
 grpc::Status PrefillRpcServer::prepareAllocateResource(PrefillGenerateContext& prefill_context) {

@@ -209,6 +209,22 @@ TEST_F(PrefillRpcServerTest, prepareAllocateResourceRetriesDecodeWithoutRepeatin
     EXPECT_TRUE(context->closeGrpcStream().ok());
 }
 
+TEST_F(PrefillRpcServerTest, mergeMultimodalLengthsUsesPrefillMetadata) {
+    GenerateOutputsPB response;
+    auto*             first_aux_info                   = response.mutable_flatten_output()->add_aux_info();
+    auto*             second_aux_info                  = response.mutable_flatten_output()->add_aux_info();
+    (*first_aux_info->mutable_multimodal_lengths())[9] = 1;
+
+    PrefillRpcServer::mergeMultimodalLengths(response, {{0, 2752}, {1, 64}});
+
+    ASSERT_EQ(first_aux_info->multimodal_lengths_size(), 2);
+    EXPECT_EQ(first_aux_info->multimodal_lengths().at(0), 2752);
+    EXPECT_EQ(first_aux_info->multimodal_lengths().at(1), 64);
+    ASSERT_EQ(second_aux_info->multimodal_lengths_size(), 2);
+    EXPECT_EQ(second_aux_info->multimodal_lengths().at(0), 2752);
+    EXPECT_EQ(second_aux_info->multimodal_lengths().at(1), 64);
+}
+
 TEST_F(PrefillRpcServerTest, multimodalProcessMarksDeterministicErrorNonRetryable) {
     GenerateInputPB request;
     request.set_request_id(1);
