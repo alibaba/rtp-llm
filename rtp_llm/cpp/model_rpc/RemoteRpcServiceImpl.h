@@ -79,11 +79,42 @@ public:
         return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
     }
 
-    void stop() override {
+    int64_t completedSteps() const override {
         if (prefill_server_) {
-            prefill_server_->stop();
+            return prefill_server_->completedSteps();
+        }
+        return decode_server_ ? decode_server_->completedSteps() : -1;
+    }
+
+    void armStop(int64_t target_step) override {
+        if (prefill_server_) {
+            prefill_server_->armStop(target_step);
+        } else if (decode_server_) {
+            decode_server_->armStop(target_step);
+        }
+    }
+
+    void cancelArmedStop() override {
+        if (prefill_server_) {
+            prefill_server_->cancelArmedStop();
+        } else if (decode_server_) {
+            decode_server_->cancelArmedStop();
+        }
+    }
+
+    void requestForceStop() override {
+        if (prefill_server_) {
+            prefill_server_->requestForceStop();
+        } else if (decode_server_) {
+            decode_server_->requestForceStop();
+        }
+    }
+
+    void stop(bool coordinated = true, int64_t target_step = -1) override {
+        if (prefill_server_) {
+            prefill_server_->stop(coordinated, target_step);
         } else {
-            decode_server_->stop();
+            decode_server_->stop(coordinated, target_step);
         }
     }
 

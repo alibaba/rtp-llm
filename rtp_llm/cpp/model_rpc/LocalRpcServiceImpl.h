@@ -157,9 +157,31 @@ public:
         return local_server_->onflightRequestNum();
     }
 
-    virtual void stop() {
+    virtual int64_t completedSteps() const {
+        return local_server_ ? local_server_->completedSteps() : -1;
+    }
+
+    virtual void armStop(int64_t target_step) {
         if (local_server_) {
-            local_server_->stop();
+            local_server_->armStop(target_step);
+        }
+    }
+
+    virtual void cancelArmedStop() {
+        if (local_server_) {
+            local_server_->cancelArmedStop();
+        }
+    }
+
+    virtual void requestForceStop() {
+        if (local_server_) {
+            local_server_->requestForceStop();
+        }
+    }
+
+    virtual void stop(bool coordinated = true, int64_t target_step = -1) {
+        if (local_server_) {
+            local_server_->stop(coordinated, target_step);
         }
     }
 

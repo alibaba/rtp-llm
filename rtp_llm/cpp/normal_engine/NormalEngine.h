@@ -31,6 +31,12 @@ public:
     absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
+    absl::Status                      forceStop() override;
+    void                              requestForceStop() override;
+    int64_t                           completedSteps() const override;
+    absl::Status                      armStopAtStep(int64_t target_step, int64_t timeout_ms) override;
+    absl::Status                      cancelArmedStop(int64_t timeout_ms) override;
+    absl::Status                      stopAtStep(int64_t target_step) override;
 
     KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
     absl::Status step();
@@ -70,6 +76,13 @@ private:
     autil::ThreadPtr                              loop_thread_;
     std::atomic<bool>                             running_{false};
     std::atomic<bool>                             stop_started_{false};
+    uint64_t                                      completed_steps_{0};
+    std::atomic<uint64_t>                         published_completed_steps_{0};
+    std::atomic<int64_t>                          armed_stop_target_step_{-1};
+    std::atomic<int64_t>                          armed_stop_observed_step_{-1};
+    std::atomic<bool>                             armed_stop_cancel_requested_{false};
+    std::atomic<bool>                             armed_stop_cancel_observed_{false};
+    std::atomic<int64_t>                          stop_target_step_{-1};
     std::unique_ptr<Executor>                     executor_;
     ModelConfig                                   model_config_;
     ParallelismConfig                             parallelism_config;

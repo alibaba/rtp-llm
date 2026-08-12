@@ -925,11 +925,12 @@ void MtpExecutor::notifyStop() {
 }
 
 bool MtpExecutor::shouldSkipFakeStreamForStop(const GptModelInputs& model_input, const char* phase) const {
-    if (!stop_requested_.load(std::memory_order_acquire) || !model_input.is_fake_stream) {
-        return false;
-    }
-    RTP_LLM_LOG_INFO("[MTP decode] skip fake stream during shutdown before %s", phase);
-    return true;
+    // A fake rank is still a mandatory participant in the DP/EP MegaMoE
+    // collective sequence. Never change the phases of a step that has already
+    // started; NormalEngine stops the next step and joins this one.
+    (void)model_input;
+    (void)phase;
+    return false;
 }
 
 bool MtpExecutor::isTpRank0() const {
@@ -3112,7 +3113,6 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
 
 absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.process(stream_size=%zu,mtp_step=%zu)", streams.size(), propose_step_);
-
     const int64_t process_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     if (schedule_time_us <= 0) {
         schedule_time_us = process_start_time_us;

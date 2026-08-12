@@ -46,3 +46,18 @@ class RtpLLMOp:
 
     def stop(self):
         self.ft_op.stop()  # type: ignore
+
+    def prepare_stop(self, coordinated: bool = True, target_step: int = -1):
+        self.ft_op.prepare_stop(coordinated, target_step)  # type: ignore
+
+    def completed_steps(self) -> int:
+        return int(self.ft_op.completed_steps())  # type: ignore
+
+    def arm_stop(self, target_step: int):
+        self.ft_op.arm_stop(target_step)  # type: ignore
+
+    def cancel_armed_stop(self):
+        self.ft_op.cancel_armed_stop()  # type: ignore
+
+    def onflight_request_num(self) -> int:
+        return int(self.ft_op.onflight_request_num())  # type: ignore
