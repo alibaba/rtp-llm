@@ -130,6 +130,18 @@ def _fp8_prefill_topk_canonicalize() -> bool:
     )
 
 
+def _canonicalize_prefill_topk_out(out: torch.Tensor) -> None:
+    """Sort valid cache offsets while preserving the ``valid..., -1...`` ABI."""
+    sentinel = torch.iinfo(torch.int32).max
+    sortable = torch.where(out >= 0, out, torch.full_like(out, sentinel))
+    sorted_idx = torch.sort(sortable, dim=-1).values
+    out.copy_(
+        torch.where(
+            sorted_idx == sentinel, torch.full_like(sorted_idx, -1), sorted_idx
+        )
+    )
+
+
 def _run_prefill_topk_torch(
     logits: torch.Tensor,
     row_starts: torch.Tensor,
@@ -150,14 +162,7 @@ def _run_prefill_topk_torch(
     lengths = (row_ends - row_starts).unsqueeze(1)
     indices = torch.where(indices < lengths, indices, torch.full_like(indices, -1))
     if _fp8_prefill_topk_canonicalize():
-        sentinel = torch.iinfo(torch.int32).max
-        sortable = torch.where(
-            indices >= 0, indices, torch.full_like(indices, sentinel)
-        )
-        sorted_idx = torch.sort(sortable, dim=-1).values
-        indices = torch.where(
-            sorted_idx == sentinel, torch.full_like(sorted_idx, -1), sorted_idx
-        )
+        _canonicalize_prefill_topk_out(indices)
     out[:, :k_eff].copy_(indices)
 
 
@@ -185,6 +190,8 @@ def _run_prefill_topk(
         rtp_llm_ops.fast_topk_v2_variable(
             logits, out, lengths, row_starts.contiguous(), int(topk)
         )
+        if _fp8_prefill_topk_canonicalize():
+            _canonicalize_prefill_topk_out(out)
         return
 
     rtp_llm_ops.dsv4_top_k_per_row_prefill(
@@ -198,6 +205,8 @@ def _run_prefill_topk(
         int(topk),
         _fp8_prefill_topk_force_radix_sort(),
     )
+    if _fp8_prefill_topk_canonicalize():
+        _canonicalize_prefill_topk_out(out)
 
 
 def _fp8_prefill_score_chunk_rows() -> int:
