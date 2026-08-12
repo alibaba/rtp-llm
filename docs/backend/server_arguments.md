@@ -206,4 +206,4 @@ RTP-LLM deployments are released as versioned, immutable container images, with 
 | `--load_method` | Specify the weight loading method.<br>Options: auto, fastsafetensors, scratch (`LOAD_METHOD`) | auto |
 | `--force_cpu_load_weights` | Load weights on CPU to reduce device memory usage (`FORCE_CPU_LOAD_WEIGHTS`) | False |
 | `--loader_recycle_handles` | ROCm + safetensors only: close consumed main-model shard handles to release mmap memory. Requires layer-numbered tensors and copies safetensors data out before closing; no effect on fastsafetensors, ViT, EPLB, or .bin weights. (`LOADER_RECYCLE_HANDLES`) | True |
-| `--moe_pure_tp_preshard` | Under pure TP (`tp>1, dp=1, ep=1`), pre-shard supported Qwen3-Next / Qwen3.5 MoE and offline FP8 weights before device copy. Unsupported sources or layouts warn and use legacy full reads. Set false to disable. (`MOE_PURE_TP_PRESHARD`) | True |
+| `--moe_pure_tp_preshard` | Disabled by default. Set true to pre-shard supported Qwen3-Next / Qwen3.5 MoE and offline FP8 weights under pure TP (`tp>1, dp=1, ep=1`) before device copy. Unsupported sources or layouts warn and use legacy full reads. (`MOE_PURE_TP_PRESHARD`) | False |

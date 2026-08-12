@@ -35,6 +35,6 @@ def init_load_group_args(parser, load_config, model_args):
         env_name="MOE_PURE_TP_PRESHARD",
         bind_to=(load_config, "moe_pure_tp_preshard"),
         type=str2bool,
-        default=True,
-        help="pure TP 下预切分已支持的 MoE 权重；置假回滚为全量读取",
+        default=False,
+        help="默认关闭；设为 true 后在 pure TP 下预切分已支持的 MoE 权重；不支持的来源或布局回退为全量读取",
     )
