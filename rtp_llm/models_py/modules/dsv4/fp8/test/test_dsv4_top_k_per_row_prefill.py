@@ -29,6 +29,9 @@ from __future__ import annotations
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.fp8.indexer import (
+    _canonicalize_prefill_topk_out,
+)
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 _HAS_OP = hasattr(rtp_llm_ops, "dsv4_top_k_per_row_prefill")
@@ -195,6 +198,21 @@ def test_zero_length_row():
     _assert_equiv(out, logits, rs, re, K=128, tag="zero-len rows")
 
 
+def test_canonicalize_keeps_valid_prefix_and_minus_one_tail():
+    out = torch.tensor(
+        [[7, 2, -1, 4, -1], [-1, -1, -1, -1, -1]],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    _canonicalize_prefill_topk_out(out)
+    expected = torch.tensor(
+        [[2, 4, 7, -1, -1], [-1, -1, -1, -1, -1]],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    assert torch.equal(out, expected)
+
+
 # ---------------------------------------------------------------------------
 # Bench vs torch.topk
 # ---------------------------------------------------------------------------
@@ -271,6 +289,7 @@ if __name__ == "__main__":
     test_force_radix_sort()
     test_fast_topk_v2_short_inputs_topk_512_1024()
     test_zero_length_row()
+    test_canonicalize_keeps_valid_prefix_and_minus_one_tail()
     print("\n== Benchmark ==")
     bench_prefill_sweep()
     print("\nOK")
