@@ -22,6 +22,17 @@ public interface InflightRegistrar {
      */
     boolean registerInflight(BatchItem item);
 
+    /**
+     * Attach the admission lease to the exact inflight item registered by the
+     * successful plan commit.  WorkerStatus is delivered to the registrar,
+     * so the lease must live on the same generation-fenced entry instead of
+     * only in the admission scheduler's local callback closure.
+     *
+     * @return {@code true} when the lease was attached to the live entry;
+     *         {@code false} when the entry already reached a terminal state
+     */
+    boolean attachAdmissionLease(BatchItem item, AdmissionLease lease);
+
     /** Remove a previously registered item (offer failed, plan aborted). */
     void unregisterInflight(BatchItem item);
 

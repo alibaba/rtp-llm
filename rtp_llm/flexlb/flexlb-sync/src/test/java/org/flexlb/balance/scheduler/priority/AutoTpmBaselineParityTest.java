@@ -19,15 +19,18 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -62,6 +65,29 @@ class AutoTpmBaselineParityTest {
 
     private static final String PREFILL_IP_PORT = "10.0.0.1:8080";
     private static final String DECODE_IP_PORT = "10.0.0.2:8081";
+
+    @Test
+    void decodeAcceptedWorkerStatusClosesLeaseAndReopensAdmissionCapacity() throws Exception {
+        Harness h = new Harness(cfg -> {
+            Harness.enableAll(cfg);
+            cfg.setFlexlbBatchSizeMax(1);
+            cfg.setAutoTpmPostSuccessBackpressureLimit(1);
+            cfg.setAutoTpmPostSuccessSoftTimeoutMs(60_000);
+        });
+        try {
+            Response first = h.submit(1, 50).get(2, TimeUnit.SECONDS);
+            assertTrue(first.isSuccess());
+
+            h.reportDecodePhase(1, TaskPhase.KV_ALLOCATED);
+            // Duplicate/later acceptance observations are idempotent.
+            h.reportDecodePhase(1, TaskPhase.RUNNING);
+
+            Response second = h.submit(2, 50).get(2, TimeUnit.SECONDS);
+            assertTrue(second.isSuccess(), second.getErrorMessage());
+        } finally {
+            h.close();
+        }
+    }
 
     // ============ ① 开关全关：legacy 路径 parity ============
 
@@ -252,8 +278,18 @@ class AutoTpmBaselineParityTest {
                     .thenAnswer(inv -> routeAnswer(inv.getArgument(0)));
             when(grpcClient.batchEnqueueAsync(anyString(), anyInt(),
                     any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
-                    .thenAnswer(inv -> CompletableFuture.completedFuture(
-                            EngineRpcService.EnqueueBatchResponsePB.getDefaultInstance()));
+                    .thenAnswer(inv -> {
+                        EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
+                        EngineRpcService.EnqueueBatchResponsePB.Builder response =
+                                EngineRpcService.EnqueueBatchResponsePB.newBuilder()
+                                        .setBatchId(request.getBatchId());
+                        for (EngineRpcService.GenerateInputPB input : batchInputs(request)) {
+                            response.addSuccesses(
+                                    EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
+                                            .setRequestId(input.getRequestId()));
+                        }
+                        return CompletableFuture.completedFuture(response.build());
+                    });
 
             endpointRegistry = new EndpointRegistry(configService, this::getScheduler, reporter);
             BatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
@@ -333,6 +369,19 @@ class AutoTpmBaselineParityTest {
                 ctx.setBudget(ScheduleBudget.forDeadline(priority, now, now + 30_000));
             }
             return scheduler.submit(ctx);
+        }
+
+        void reportDecodePhase(long requestId, TaskPhase phase) {
+            TaskInfo task = new TaskInfo();
+            task.setRequestId(requestId);
+            task.setPhase(phase);
+            task.setInputLength(128);
+            WorkerStatusResponse response = new WorkerStatusResponse();
+            response.setRole(RoleType.DECODE);
+            response.setRunningTaskInfo(Map.of(String.valueOf(requestId), task));
+            endpointRegistry.getDecode(DECODE_IP_PORT)
+                    .onWorkerStatusUpdate(new WorkerStatus(), response);
+            scheduler.onWorkerStatusUpdate(response);
         }
 
         /** admitted = 拿到 decode 占位（future 未失败）。 */
@@ -434,6 +483,17 @@ class AutoTpmBaselineParityTest {
                         .build())
                 .build();
         return input.toByteArray();
+    }
+
+    private static List<EngineRpcService.GenerateInputPB> batchInputs(
+            EngineRpcService.EnqueueBatchRequestPB request) {
+        List<EngineRpcService.GenerateInputPB> inputs = new ArrayList<>();
+        for (EngineRpcService.EnqueueBatchDpSlotPB slot : request.getDpSlotsList()) {
+            for (EngineRpcService.EnqueueBatchExternalInputPB item : slot.getRequestsList()) {
+                inputs.add(item.getInput());
+            }
+        }
+        return inputs;
     }
 
     private static Response successRoute(long requestId) {

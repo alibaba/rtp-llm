@@ -519,6 +519,36 @@ class AdmissionLeasePostSuccessTest {
         verify(registrar, never()).finishYieldedById(anyLong(), anyString());
     }
 
+    /**
+     * WorkerStatus can report Decode acceptance before the EnqueueBatch ACK
+     * hands the lease to the engine.  The early observation must be retained
+     * and close the lease immediately when handover later succeeds.
+     */
+    @Test
+    void decodeAccepted_beforeHandover_closesLeaseWhenHandoverSucceeds() {
+        AtomicInteger activeCount = new AtomicInteger(1);
+        InflightRegistrar registrar = mock(InflightRegistrar.class);
+        DecodeEndpoint decodeEp = mock(DecodeEndpoint.class);
+        PrefillQueueManager prefillQueue = mock(PrefillQueueManager.class);
+        BatchItem item = batchItemWithDecode(3702L, new CompletableFuture<>(), 3702L);
+
+        AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar,
+                SOFT_TIMEOUT_MS, activeCount::decrementAndGet);
+
+        lease.markDecodeAccepted();
+        assertEquals(0, lease.leaseState());
+        assertEquals(1, activeCount.get());
+
+        lease.handoverToEngine();
+
+        assertEquals(2, lease.leaseState());
+        assertEquals(0, activeCount.get());
+        verify(prefillQueue, never()).tryRemove(anyLong(), anyString());
+        verify(decodeEp, never()).release(anyLong());
+        verify(registrar, never()).unregisterInflight(any());
+        verify(registrar, never()).finishYieldedById(anyLong(), anyString());
+    }
+
     // ==================== Test 14 ====================
 
     /**

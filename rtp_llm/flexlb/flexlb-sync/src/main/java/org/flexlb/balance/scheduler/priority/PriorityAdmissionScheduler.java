@@ -1110,6 +1110,16 @@ public class PriorityAdmissionScheduler {
         // callback's decrementAndGet sees the counter already incremented.
         activeLeaseCount.incrementAndGet();
         try {
+            // WorkerStatus acceptance belongs to the registrar's exact
+            // inflight generation.  Attach before binding the future so a
+            // racing ACK/status observation cannot strand the counter.
+            if (!registrar.attachAdmissionLease(plan.item(), lease)) {
+                // A Decode terminal can remove the entry before this method
+                // runs.  Record acceptance conservatively; a failed future
+                // still follows close(), while a successful future closes on
+                // handover without releasing engine-owned resources.
+                lease.markDecodeAccepted();
+            }
             lease.bindTo(plan.item().future());
         } catch (RuntimeException e) {
             activeLeaseCount.decrementAndGet();

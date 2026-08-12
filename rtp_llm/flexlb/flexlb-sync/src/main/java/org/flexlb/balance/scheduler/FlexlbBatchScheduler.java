@@ -5,6 +5,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.RequestInflight;
 import org.flexlb.balance.scheduler.priority.AdmissionFailure;
+import org.flexlb.balance.scheduler.priority.AdmissionLease;
 import org.flexlb.balance.scheduler.priority.AdmissionFailureClassifier;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
 import org.flexlb.balance.scheduler.priority.InflightRegistrar;
@@ -23,6 +24,7 @@ import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.PriorityPreemptionProgress;
+import org.flexlb.enums.TaskPhase;
 import org.flexlb.balance.scheduler.priority.InflightRegistrar.PriorityCanceledObservation;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
@@ -299,6 +301,29 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             return false;
         }
         return true;
+    }
+
+    @Override
+    public boolean attachAdmissionLease(BatchItem item, AdmissionLease lease) {
+        Objects.requireNonNull(lease, "lease");
+        InflightEntry entry = entryFor(item);
+        if (entry == null) {
+            return false;
+        }
+        synchronized (entry) {
+            if (inflight.get(item.requestId()) != entry || entry.cleanupOwned) {
+                return false;
+            }
+            if (entry.admissionLease != null && entry.admissionLease != lease) {
+                throw new IllegalStateException(
+                        "admission lease already attached for request_id=" + item.requestId());
+            }
+            entry.admissionLease = lease;
+            if (entry.decodeAccepted) {
+                lease.markDecodeAccepted();
+            }
+            return true;
+        }
     }
 
     @Override
@@ -624,6 +649,20 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         }
         boolean isPrefill = response.getRole() == RoleType.PREFILL;
 
+        // Decode KV_ALLOCATED/RUNNING is the authoritative acceptance signal
+        // for the post-success lease.  Close the lease immediately instead of
+        // retaining one active slot until its 30s fallback timer.  RECEIVED is
+        // deliberately excluded: the engine has seen the request but has not
+        // yet accepted Decode ownership/KV.
+        if (!isPrefill && response.getRunningTaskInfo() != null) {
+            for (TaskInfo task : response.getRunningTaskInfo().values()) {
+                TaskPhase phase = task.getPhase();
+                if (phase == TaskPhase.KV_ALLOCATED || phase == TaskPhase.RUNNING) {
+                    markDecodeAccepted(task.getRequestId());
+                }
+            }
+        }
+
         // NOT_FOUND_STALE is reopened only by a fresh active observation from
         // the original Prefill control owner.
         if (isPrefill && response.getRunningTaskInfo() != null) {
@@ -639,6 +678,12 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
         for (TaskInfo task : finishedTaskInfo.values()) {
             long requestId = task.getRequestId();
+            if (!isPrefill) {
+                // A Decode terminal observation also proves that Decode had
+                // accepted the request, including peers that do not expose an
+                // intermediate TaskPhase snapshot.
+                markDecodeAccepted(requestId);
+            }
             WorkerTerminalObservation observation = new WorkerTerminalObservation(
                     isPrefill, task.getBatchId(), task.getErrorCode());
 
@@ -669,6 +714,22 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 }
                 reduceOrdinaryTerminalLocked(entry,
                         DeferredTerminal.worker(observation));
+            }
+        }
+    }
+
+    private void markDecodeAccepted(long requestId) {
+        InflightEntry entry = inflight.get(requestId);
+        if (entry == null) {
+            return;
+        }
+        synchronized (entry) {
+            if (inflight.get(requestId) != entry) {
+                return;
+            }
+            entry.decodeAccepted = true;
+            if (entry.admissionLease != null) {
+                entry.admissionLease.markDecodeAccepted();
             }
         }
     }
@@ -1417,6 +1478,8 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         final RequestLifecycle lifecycle;
         final boolean autoTpmAdmission;
         final AtomicBoolean rolledBack = new AtomicBoolean(false);
+        AdmissionLease admissionLease;
+        boolean decodeAccepted;
         boolean cleanupOwned;
         PreemptionRegistration preemption;
 

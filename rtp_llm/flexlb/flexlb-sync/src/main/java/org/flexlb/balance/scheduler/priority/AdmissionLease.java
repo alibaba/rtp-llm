@@ -12,6 +12,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * AutoCloseable admission lease — the single ownership boundary between the
@@ -76,6 +77,7 @@ public final class AdmissionLease implements AutoCloseable {
             });
 
     private final AtomicInteger leaseState = new AtomicInteger(STATE_UNSET);
+    private final AtomicBoolean decodeAccepted = new AtomicBoolean(false);
     private final BatchItem item;
     private final DecodeEndpoint decodeEp;
     private final PrefillQueueManager prefillQueue;
@@ -166,6 +168,12 @@ public final class AdmissionLease implements AutoCloseable {
         }
         Logger.info("[auto-tpm] admission lease handed over to engine: request_id={}",
                 item.requestId());
+        // WorkerStatus can race ahead of the EnqueueBatch ACK.  Preserve that
+        // observation and close the lease as soon as handover linearizes.
+        if (decodeAccepted.get()) {
+            closeDecodeAcceptedLease();
+            return;
+        }
         scheduleSoftTimeout();
     }
 
@@ -231,7 +239,12 @@ public final class AdmissionLease implements AutoCloseable {
      * does NOT release resources — the engine has taken over the decode
      * reservation and will release them naturally.
      */
-    void markDecodeAccepted() {
+    public void markDecodeAccepted() {
+        decodeAccepted.set(true);
+        closeDecodeAcceptedLease();
+    }
+
+    private void closeDecodeAcceptedLease() {
         if (!leaseState.compareAndSet(STATE_HANDED_OVER, STATE_CLOSED)) {
             return;
         }
