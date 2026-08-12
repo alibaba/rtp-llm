@@ -24,7 +24,14 @@ Covered cases:
     desyncs and later segments read the wrong physical pages. This case fails on
     that bug (it advances ``off`` by the shorter causal length) and passes on
     the fix. All the prefix=0 cases above have ``seqused_k == kv_segment_lens``
-    so they cannot catch this regression on their own.
+    so they cannot catch this regression on their own,
+  * **segment packing** (many short segments, as produced by CP zigzag where
+    every request contributes 2 segments far below chunk_size): the query dim
+    is sliced exactly like the batch-concatenated sequence -- every chunk
+    except the last is exactly chunk_size (minimal call count), consecutive
+    segments are packed into one multi-segment varlen call (with per-entry
+    cu_seqlens / seqused_k / page-table rows), and segments straddling a
+    chunk boundary are split into partial entries.
 """
 import unittest
 
@@ -35,6 +42,7 @@ def _sm100_available() -> bool:
     if not torch.cuda.is_available():
         return False
     try:
+        _ensure_cutlass_dsl_on_path()
         import fmha_sm100  # noqa: F401
     except Exception:
         return False
@@ -42,6 +50,24 @@ def _sm100_available() -> bool:
         return torch.cuda.get_device_capability(0)[0] == 10
     except Exception:
         return False
+
+
+def _ensure_cutlass_dsl_on_path() -> None:
+    """Make the cutlass DSL importable (same injection as
+    models_py/modules/factory/linear/factory.py). Under bazel runfiles the
+    ``nvidia_cutlass_dsl.pth`` site hook does not run, so ``cutlass`` (and
+    hence ``fmha_sm100``) is unimportable and every test silently skips."""
+    import os
+    import sys
+
+    try:
+        import nvidia_cutlass_dsl
+    except Exception:
+        return
+    pkg_dir = nvidia_cutlass_dsl.__path__[0]
+    python_packages_dir = os.path.join(pkg_dir, "python_packages")
+    if os.path.isdir(python_packages_dir) and python_packages_dir not in sys.path:
+        sys.path.insert(0, python_packages_dir)
 
 
 def _seg(q_len: int, prefix: int = 0, kv_run: int = None) -> dict:
@@ -229,6 +255,7 @@ class SparsePrefillChunkTest(unittest.TestCase):
         # Importing fmha_sm100 eagerly sets up the cute/ sys.path entries that
         # ``_sparse_attn_chunked`` relies on for its lazy ``from src.sm100...``
         # / ``from interface import ...`` imports.
+        _ensure_cutlass_dsl_on_path()
         import fmha_sm100  # noqa: F401
 
         from rtp_llm.models_py.triton_kernels.sparse_msa.prefill import (
@@ -316,7 +343,10 @@ class SparsePrefillChunkTest(unittest.TestCase):
             sm_scale,
             chunk_size,
         )
-        # Drop the per-forward chunk metadata so the next case rebuilds it.
+        # Record how many kernel calls the meta build produced (segment
+        # packing assertions), then drop the per-forward chunk metadata so
+        # the next case rebuilds it.
+        self._last_chunk_count = len(plan["_chunk_meta"]["chunks"])
         plan.pop("_chunk_meta", None)
         return out
 
@@ -436,6 +466,54 @@ class SparsePrefillChunkTest(unittest.TestCase):
         # pages {0,1,2}), so ~half the rows diverge under the bug -> cos << 0.999.
         segs = [_seg(256, prefix=128, kv_run=640), _seg(256)]
         self._run_case(segs, 128, "cp_zigzag_prefix", seed=29)
+
+    def test_multi_segment_packing(self):
+        # CP-zigzag regression: many short segments (2 per request, each far
+        # below chunk_size) must be PACKED into few multi-segment varlen calls,
+        # not one tiny call per segment. 8 segments x 256q = 2048 total, chunk
+        # 1024 -> exactly ceil(2048/1024)=2 calls of 4 segments each. Segments
+        # carry distinct prefixes and kv_run > seqused_k (zigzag page layout),
+        # so this also validates per-entry page-table rows / seqused_k inside
+        # a packed call.
+        segs = [
+            _seg(256, prefix=128, kv_run=640),
+            _seg(256, prefix=384, kv_run=640),
+            _seg(256),
+            _seg(256, prefix=256),
+            _seg(256, prefix=0, kv_run=512),
+            _seg(256, prefix=512, kv_run=768),
+            _seg(256, prefix=128),
+            _seg(256, prefix=640, kv_run=896),
+        ]
+        self._run_case(segs, 1024, "multi_segment_packing", seed=31)
+        self.assertEqual(self._last_chunk_count, 2, "segments were not packed")
+
+    def test_packing_with_oversized_segment(self):
+        # Mixed geometry with an oversized middle segment (2560 > chunk 1024).
+        # Exact-fill chunking is equivalent to slicing the batch-concatenated
+        # sequence: total_q = 256+256+2560+256+256 = 3584, chunk 1024 ->
+        # ceil(3584/1024) = 4 calls, each of the first 3 exactly 1024q (the
+        # oversized segment straddles chunk boundaries and is split into
+        # partial entries).
+        segs = [
+            _seg(256, prefix=128, kv_run=640),
+            _seg(256),
+            _seg(2560, prefix=256),
+            _seg(256, prefix=384, kv_run=768),
+            _seg(256),
+        ]
+        self._run_case(segs, 1024, "packing_with_oversized_segment", seed=33)
+        self.assertEqual(self._last_chunk_count, 4, "unexpected chunk partition")
+
+    def test_packing_splits_at_chunk_boundary(self):
+        # 3 segments of 300q with chunk 512: exact-fill packs 900 queries into
+        # ceil(900/512)=2 calls. Chunk0 = seg0(300) + seg1[0:212] (exactly
+        # 512q); chunk1 = seg1[212:300] + seg2(300). seg1 is split mid-segment
+        # across a chunk boundary -- this exercises partial entries with a
+        # nonzero causal q0 offset (kv_used = prefix + q1) inside packed calls.
+        segs = [_seg(300, prefix=84), _seg(300), _seg(300, prefix=212)]
+        self._run_case(segs, 512, "packing_splits_at_boundary", seed=35)
+        self.assertEqual(self._last_chunk_count, 2)
 
     def test_usable_sm_positive(self):
         # usable_SM_count > 0 exercises the OTHER workspace path: the builder

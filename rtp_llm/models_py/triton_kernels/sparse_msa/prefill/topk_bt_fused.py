@@ -8,6 +8,7 @@ emits either trtllm block_tables+seq_lens (``EMIT_BLOCK_TABLE``) or the
 ``idx_group_size == 1`` (M3 production: num_idx_heads == num_kv_heads).
 """
 
+import logging
 import os
 import subprocess
 
@@ -31,8 +32,29 @@ _M3_MSA_FUSED_CSR = os.environ.get("M3_MSA_FUSED_CSR", "1") == "1"
 # fixed-size chunks (CSR/schedule rebuilt per chunk, causal alignment preserved
 # via per-chunk seqused_k) so the workspace is bounded by the chunk size.
 # Disabled by default; chunk size defaults to 16K queries.
-_M3_SPARSE_ATTN_CHUNK_ENABLE = os.environ.get("M3_SPARSE_ATTN_CHUNK_ENABLE", "0") == "1"
-_M3_SPARSE_ATTN_CHUNK_SIZE = int(os.environ.get("M3_SPARSE_ATTN_CHUNK_SIZE", "16384"))
+# Read lazily (not at import) so env set after module import still takes effect.
+_DEFAULT_SPARSE_ATTN_CHUNK_SIZE = 16384
+
+
+def _sparse_attn_chunk_enabled() -> bool:
+    return os.environ.get("M3_SPARSE_ATTN_CHUNK_ENABLE", "0") == "1"
+
+
+def _sparse_attn_chunk_size() -> int:
+    raw = os.environ.get(
+        "M3_SPARSE_ATTN_CHUNK_SIZE", str(_DEFAULT_SPARSE_ATTN_CHUNK_SIZE)
+    )
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logging.warning(
+            "[M3 sparse attn] invalid M3_SPARSE_ATTN_CHUNK_SIZE=%r; using default=%d",
+            raw,
+            _DEFAULT_SPARSE_ATTN_CHUNK_SIZE,
+        )
+        value = _DEFAULT_SPARSE_ATTN_CHUNK_SIZE
+    return max(value, 1)
+
 
 # Keep BF16 partial O as the production default. FP8 only changes the K1 -> K2
 # intermediate; Q/K/V storage and the final output dtype remain unchanged.
@@ -60,6 +82,8 @@ _M3_SPARSE_ATTN_PARTIAL_DTYPE = (
 #       + row_coords [total_rows, 2] + tile_counts [G_total, Hkv, total_rows],
 #       csr_words = build_k2q_csr.k2q_csr_workspace_words(...) (a few MiB)
 _M3_CHUNK_WS_CACHE: dict = {}  # torch.device -> flat uint8 workspace
+
+_CHUNKED_SPARSE_ATTN_LOGGED = False
 
 
 def _get_or_create_chunk_ws(nbytes: int, device: torch.device) -> torch.Tensor:
@@ -879,6 +903,154 @@ def flash_prefill_topk_to_block_tables(
     return bt, sl, topk_idx
 
 
+def _pack_segments_into_chunks(qo_lens, chunk_size):
+    """Split the flat query dim into consecutive ``chunk_size`` chunks.
+
+    Functionally equivalent to concatenating all segments along the sequence
+    dim and slicing every ``chunk_size`` queries: every chunk except the last
+    is exactly ``chunk_size`` long (minimal call count). Each chunk is a list
+    of ``(seg_idx, q0, q1)`` segment-local slices; a segment straddling a
+    chunk boundary is split into partial entries. One multi-segment varlen
+    call is issued per chunk, which matters under CP zigzag where every
+    request contributes 2 short segments.
+    """
+    groups, cur, cur_q = [], [], 0
+    for b, q_len in enumerate(qo_lens):
+        q0 = 0
+        while q0 < q_len:
+            take = min(chunk_size - cur_q, q_len - q0)
+            cur.append((b, q0, q0 + take))
+            cur_q += take
+            q0 += take
+            if cur_q == chunk_size:
+                groups.append(cur)
+                cur, cur_q = [], 0
+    if cur:
+        groups.append(cur)
+    return groups
+
+
+def _build_group_page_table(group, seg_pages, kv_indices, dev):
+    """[nb, max_n_pad] page table for one group; pad the row width to a
+    multiple of 4 int32 and 16-byte align the base so EVERY row satisfies the
+    cute kernel's %16 == 0 alignment assert. zeros: padding is never
+    dereferenced but must not hold garbage page ids."""
+    nb = len(group)
+    max_n = max(seg_pages[b][1] for (b, _, _) in group)
+    max_n_pad = ((max_n + 3) // 4) * 4
+    buf = torch.zeros(nb * max_n_pad + 4, dtype=torch.int32, device=dev)
+    shift = ((-buf.data_ptr()) % 16) // 4
+    pt = buf[shift : shift + nb * max_n_pad].view(nb, max_n_pad)
+    for i, (b, _, _) in enumerate(group):
+        o, n = seg_pages[b]
+        pt[i, :n] = kv_indices[o : o + n]
+    return pt
+
+
+def _build_chunk(group, qo_lens, seqused, seg_q_starts, seg_pages, kv_indices,
+                 block_size_k, dev):
+    """Geometry for ONE packed varlen call: per-entry cu_seqlens / seqused_k /
+    page-table rows keep the segments independent, exactly like the
+    non-chunked ``_csr_direct`` path."""
+    q_lens = [q1 - q0 for (_, q0, q1) in group]
+    # effective causal KV length per entry at its chunk end
+    kv_useds = [(seqused[b] - qo_lens[b]) + q1 for (b, _, q1) in group]
+    kv_max = max(kv_useds)
+    cu_q_l, cu_k_l = [0], [0]
+    for ql, ku in zip(q_lens, kv_useds):
+        cu_q_l.append(cu_q_l[-1] + ql)
+        cu_k_l.append(cu_k_l[-1] + ku)
+    b0, q0_first, _ = group[0]
+    g0 = seg_q_starts[b0] + q0_first
+    csz = sum(q_lens)
+    # cu_q / cu_k / seqused are standalone allocs: the kernel asserts 16-byte
+    # data alignment, so views into a shared buffer (base + 4B) would be rejected
+    return dict(
+        g0=g0,
+        g1=g0 + csz,
+        csz=csz,
+        nb=len(group),
+        max_q=max(q_lens),
+        kv_max=kv_max,
+        total_k=cu_k_l[-1],
+        total_rows=sum((ku + block_size_k - 1) // block_size_k for ku in kv_useds),
+        max_kv_blocks=(max(kv_max, block_size_k) + block_size_k - 1) // block_size_k,
+        cu_q=torch.tensor(cu_q_l, dtype=torch.int32, device=dev),
+        cu_k=torch.tensor(cu_k_l, dtype=torch.int32, device=dev),
+        seqused=torch.tensor(kv_useds, dtype=torch.int32, device=dev),
+        pt=_build_group_page_table(group, seg_pages, kv_indices, dev),
+    )
+
+
+def _build_chunk_meta(p, kv_indices, topk, block_size_k, chunk_size,
+                      num_q_heads, head_dim, partial_dtype, dev):
+    """Per-forward host metadata for ``_sparse_attn_chunked``: per-chunk
+    aligned page tables + geometry/cu_seqlens tensors, built by the first
+    sparse layer and reused by the rest (the plan is per-forward, so is
+    kv_indices)."""
+    from interface import sparse_fwd_workspace_bytes
+    from src.sm100.build_k2q_csr import k2q_csr_workspace_words
+    from src.sm100.prepare_k2q_csr import SparseK2qCsrBuilderSm100
+
+    num_kv_heads = int(p["num_kv_heads"])
+    qo_lens = [int(v) for v in p["qo_segment_lens"].tolist()]  # CPU tensor
+    seqused = [int(v) for v in p["seqused_k"].cpu().tolist()]  # one DtoH sync
+    # kv_indices is laid out by the FULL per-segment KV run (kv_segment_lens,
+    # what build_kv_page_indices consumed), NOT by the causal seqused_k. Under
+    # zigzag/load-balanced CP a segment's seqused_k (= qo_offset + q_len) is
+    # smaller than its full KV run, so sizing the page table / advancing the
+    # page cursor by seqused_k desyncs the walk and maps later segments to the
+    # wrong physical pages. Size the page run by kv_segment_lens; keep the
+    # causal prefix (= qo_offset) from seqused_k.
+    kv_runs = [int(v) for v in p["kv_segment_lens"].cpu().tolist()]
+    seg_pages, off = [], 0  # (page_offset, n_pages) per segment
+    for kv_run in kv_runs:
+        n = (kv_run + block_size_k - 1) // block_size_k
+        seg_pages.append((off, n))
+        off += n
+
+    seg_q_starts = [0]
+    for q_len in qo_lens:
+        seg_q_starts.append(seg_q_starts[-1] + q_len)
+
+    chunks = [
+        _build_chunk(group, qo_lens, seqused, seg_q_starts, seg_pages,
+                     kv_indices, block_size_k, dev)
+        for group in _pack_segments_into_chunks(qo_lens, chunk_size)
+    ]
+
+    builder = SparseK2qCsrBuilderSm100()
+    builder._ensure_loaded()
+    # Reusable-workspace sizing (see _M3_CHUNK_WS_CACHE): fwd segment covers
+    # the largest chunk; csr segment covers the largest per-chunk scratch.
+    # emit_schedule=True is a superset of the non-schedule size (adds only
+    # row_coords), so the same buffer serves both usable_SM_count modes.
+    ws_fwd_bytes = sparse_fwd_workspace_bytes(
+        topK=topk,
+        total_q=max(c["csz"] for c in chunks),
+        head_q=num_q_heads,
+        head_dim=head_dim,
+        partial_dtype=partial_dtype,
+    )
+    ws_csr_words = max(
+        k2q_csr_workspace_words(
+            num_kv_heads,
+            c["total_rows"],
+            c["nb"],
+            c["max_kv_blocks"],
+            c["csz"],
+            True,
+        )
+        for c in chunks
+    )
+    return dict(
+        chunks=chunks,
+        builder=builder,
+        ws_fwd_bytes=ws_fwd_bytes,
+        ws_csr_words=ws_csr_words,
+    )
+
+
 @torch.no_grad()
 def _sparse_attn_chunked(
     q,  # [total_q, num_q_heads, head_dim] bf16
@@ -897,103 +1069,46 @@ def _sparse_attn_chunked(
     ``sparse_atten_func`` allocates O_partial [topk, total_q, Hq, dim] (+
     LSE_partial) per call, so its workspace scales with total_q -- prohibitive at
     1M-token prefill. Each query row only depends on its own top-k KV blocks, so
-    chunking over queries is lossless: per chunk [q0, q1) of a request with
+    chunking over queries is lossless: for a chunk [q0, q1) of a segment with
     prefix P we rebuild the CSR + schedule from the topk_idx slice and call
     sparse_atten_func with seqused_k = P + q1. The kernel's bottom-right causal
-    alignment (causal_q_offset = seqlen_k - seqlen_q = P + q0) then gives local
-    query i the kv limit P + q0 + i -- identical to the full call. Workspace is
-    bounded by chunk_size; per-chunk CSR/schedule rebuild + small H2D copies are
-    the accepted trade-off of this opt-in mode. Chunks never span requests.
+    alignment (causal_q_offset = seqused_k - seqlen_q = P + q0) then gives local
+    query i the kv limit P + q0 + i -- identical to the full call.
+
+    Chunk partitioning: see ``_pack_segments_into_chunks`` (exact-fill slicing
+    of the batch-concatenated query dim: every chunk except the last is
+    exactly chunk_size, segments straddling a boundary become partial entries
+    of one multi-segment varlen call). Workspace is bounded by chunk_size;
+    per-chunk CSR/schedule rebuild + small H2D copies are the accepted
+    trade-off of this opt-in mode.
     """
     from interface import sparse_atten_func
-    from src.sm100.prepare_k2q_csr import SparseK2qCsrBuilderSm100
 
     p = sparse_attn_plan
     dev = q.device
     total_q, num_q_heads, head_dim = q.shape
-    num_kv_heads = int(p["num_kv_heads"])
-    qhead_per_kv = num_q_heads // num_kv_heads
+    qhead_per_kv = num_q_heads // int(p["num_kv_heads"])
     usable_sm = int(p.get("usable_SM_count", -1))
     partial_dtype = p.get("partial_dtype", torch.bfloat16)
 
-    # Per-forward host metadata: per-batch aligned page tables + per-chunk
-    # geometry/cu_seqlens tensors, built by the first sparse layer and reused by
-    # the rest (the plan is per-forward, so is kv_indices).
     meta = p.get("_chunk_meta")
     if meta is None:
-        qo_lens = [int(v) for v in p["qo_segment_lens"].tolist()]  # CPU tensor
-        seqused = [int(v) for v in p["seqused_k"].cpu().tolist()]  # one DtoH sync
-        # kv_indices is laid out by the FULL per-segment KV run (kv_segment_lens,
-        # what build_kv_page_indices consumed), NOT by the causal seqused_k. Under
-        # zigzag/load-balanced CP a segment's seqused_k (= qo_offset + q_len) is
-        # smaller than its full KV run, so sizing the page table / advancing `off`
-        # by seqused_k desyncs the walk and maps later segments to the wrong
-        # physical pages. Size the page run by kv_segment_lens; keep the causal
-        # prefix (= qo_offset) from seqused_k.
-        kv_runs = [int(v) for v in p["kv_segment_lens"].cpu().tolist()]
-        chunks, off, gq0 = [], 0, 0
-        for b, q_len in enumerate(qo_lens):
-            kv_len = seqused[b]
-            prefix = kv_len - q_len
-            n = (kv_runs[b] + block_size_k - 1) // block_size_k
-            # 16-byte aligned [1, n] page table (the cute kernel asserts %16 == 0)
-            buf = torch.empty(n + 4, dtype=torch.int32, device=dev)
-            shift = ((-buf.data_ptr()) % 16) // 4
-            pt = buf[shift : shift + n].view(1, n)
-            pt[0] = kv_indices[off : off + n]
-            off += n
-            for q0 in range(0, q_len, chunk_size):
-                q1 = min(q0 + chunk_size, q_len)
-                kv_used = prefix + q1  # effective KV length at the chunk end
-                cu_q = torch.tensor([0, q1 - q0], dtype=torch.int32, device=dev)
-                cu_k = torch.tensor([0, kv_used], dtype=torch.int32, device=dev)
-                # standalone alloc: the kernel asserts 16-byte data alignment,
-                # so a cu_k[1:] view (base + 4B) would be rejected
-                sk = torch.tensor([kv_used], dtype=torch.int32, device=dev)
-                chunks.append(
-                    dict(
-                        g0=gq0 + q0,
-                        g1=gq0 + q1,
-                        csz=q1 - q0,
-                        kv_used=kv_used,
-                        total_rows=(kv_used + block_size_k - 1) // block_size_k,
-                        cu_q=cu_q,
-                        cu_k=cu_k,
-                        seqused=sk,
-                        pt=pt,
-                    )
-                )
-            gq0 += q_len
-        builder = SparseK2qCsrBuilderSm100()
-        builder._ensure_loaded()
-        # Reusable-workspace sizing (see _M3_CHUNK_WS_CACHE): fwd segment covers
-        # the largest chunk; csr segment covers the largest per-chunk scratch.
-        # emit_schedule=True is a superset of the non-schedule size (adds only
-        # row_coords), so the same buffer serves both usable_SM_count modes.
-        from interface import sparse_fwd_workspace_bytes
-        from src.sm100.build_k2q_csr import k2q_csr_workspace_words
-
-        max_csz = max(c["csz"] for c in chunks)
-        ws_fwd_bytes = sparse_fwd_workspace_bytes(
-            topK=topk,
-            total_q=max_csz,
-            head_q=num_q_heads,
-            head_dim=head_dim,
-            partial_dtype=partial_dtype,
-        )
-        ws_csr_words = max(
-            k2q_csr_workspace_words(
-                num_kv_heads, c["total_rows"], 1, c["total_rows"], c["csz"], True
-            )
-            for c in chunks
-        )
-        meta = dict(
-            chunks=chunks,
-            builder=builder,
-            ws_fwd_bytes=ws_fwd_bytes,
-            ws_csr_words=ws_csr_words,
+        meta = _build_chunk_meta(
+            p, kv_indices, topk, block_size_k, chunk_size,
+            num_q_heads, head_dim, partial_dtype, dev,
         )
         p["_chunk_meta"] = meta
+        global _CHUNKED_SPARSE_ATTN_LOGGED
+        if not _CHUNKED_SPARSE_ATTN_LOGGED:
+            _CHUNKED_SPARSE_ATTN_LOGGED = True
+            logging.info(
+                "[M3 sparse attn] chunked step3 enabled: total_q=%d chunk_size=%d "
+                "segments=%d packed_calls=%d",
+                total_q,
+                chunk_size,
+                len(p["qo_segment_lens"]),
+                len(meta["chunks"]),
+            )
 
     fwd_bytes, csr_words = meta["ws_fwd_bytes"], meta["ws_csr_words"]
     ws = _get_or_create_chunk_ws(fwd_bytes + csr_words * 4, dev)
@@ -1002,7 +1117,7 @@ def _sparse_attn_chunked(
 
     out = torch.empty(total_q, num_q_heads, head_dim, dtype=torch.bfloat16, device=dev)
     for c in meta["chunks"]:
-        g0, g1, csz, kv_used = c["g0"], c["g1"], c["csz"], c["kv_used"]
+        g0, g1 = c["g0"], c["g1"]
         # dim-1 slice of the contiguous [nkv, total_q, topk] is non-contiguous
         # across heads -> small copy (nkv * csz * topk int32)
         topk_chunk = topk_idx[:, g0:g1, :].contiguous()
@@ -1012,10 +1127,10 @@ def _sparse_attn_chunked(
             topk_chunk,
             c["cu_q"],
             c["cu_k"],
-            total_k=kv_used,
+            total_k=c["total_k"],
             blk_kv=block_size_k,
-            max_seqlen_k=kv_used,
-            max_seqlen_q=csz,
+            max_seqlen_k=c["kv_max"],
+            max_seqlen_q=c["max_q"],
             total_rows=c["total_rows"],
             qhead_per_kv=qhead_per_kv,
             return_schedule=usable_sm <= 0,
@@ -1035,8 +1150,8 @@ def _sparse_attn_chunked(
             topk,
             cu_seqlens_q=c["cu_q"],
             cu_seqlens_k=c["cu_k"],
-            max_seqlen_q=csz,
-            max_seqlen_k=kv_used,
+            max_seqlen_q=c["max_q"],
+            max_seqlen_k=c["kv_max"],
             blk_kv=block_size_k,
             causal=p["causal"],
             softmax_scale=sm_scale,
@@ -1135,20 +1250,22 @@ def flash_prefill_with_fmha(
     # Opt-in chunked step3 (M3_SPARSE_ATTN_CHUNK_ENABLE): route BOTH step3 paths
     # (direct CSR and adapter -- they converge on the same sparse_atten_func)
     # through the chunked implementation to bound the O_partial workspace.
-    if _M3_SPARSE_ATTN_CHUNK_ENABLE and total_q > _M3_SPARSE_ATTN_CHUNK_SIZE:
-        out_f = _sparse_attn_chunked(
-            q,
-            k_paged_f,
-            v_paged_f,
-            topk_idx,
-            kv_indices,
-            sparse_attn_plan,
-            topk,
-            block_size_k,
-            sm_scale,
-            _M3_SPARSE_ATTN_CHUNK_SIZE,
-        )
-        return out_f.view(total_q, num_q_heads, head_dim)
+    if _sparse_attn_chunk_enabled():
+        chunk_size = _sparse_attn_chunk_size()
+        if total_q > chunk_size:
+            out_f = _sparse_attn_chunked(
+                q,
+                k_paged_f,
+                v_paged_f,
+                topk_idx,
+                kv_indices,
+                sparse_attn_plan,
+                topk,
+                block_size_k,
+                sm_scale,
+                chunk_size,
+            )
+            return out_f.view(total_q, num_q_heads, head_dim)
     # Opt-1+ direct path: when the per-forward CSR buffers are attached, bypass the
     # adapter -- feed topk_idx (already [nkv,Q,topk] = q2k) straight to the native CSR
     # _run into prealloc row_ptr/q_indices, GPU page_table (no .tolist() sync), direct
