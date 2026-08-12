@@ -169,22 +169,18 @@ TEST(BlockPoolConfigHelperTest, RejectsMTPSubConfigWithoutGroups) {
                                "cache groups must not be empty");
 }
 
-TEST(BlockPoolConfigHelperTest, RejectsMTPSubConfigWithMismatchedBlockNum) {
+TEST(BlockPoolConfigHelperTest, MTPLayoutUsesSynchronizedMainBlockNum) {
     auto score_config            = makeSparseMlaConfig(2, 4, 4, 4, 32);
-    auto mismatched              = std::make_shared<CacheConfig>(makeSparseMlaConfig(1, 3, 4, 2, 128));
-    score_config.mtp_sub_configs = {mismatched};
-    expectRuntimeErrorContains([&score_config] { BlockPoolConfigHelper::createConfig(score_config); },
-                               "must match main block_num");
-}
+    auto stale_mtp_config        = std::make_shared<CacheConfig>(makeSparseMlaConfig(1, 3, 4, 2, 128));
+    score_config.mtp_sub_configs = {stale_mtp_config};
 
-TEST(BlockPoolConfigHelperTest, RejectsMTPSubConfigWithoutLayerOwningGroup) {
-    auto no_layers     = std::make_shared<CacheConfig>(makeSparseMlaConfig(1, 4, 4, 2, 128));
-    auto no_layer_spec = makeMlaSpec("default", 4, DataType::TYPE_BF16, 4, 4);
-    expectRuntimeErrorContains(
-        [&no_layers, &no_layer_spec] {
-            no_layers->fromGroupedSpecs({no_layer_spec}, {{}}, {CacheGroupType::FULL}, {"default"});
-        },
-        "has no cache group");
+    const auto pool_config = BlockPoolConfigHelper::createConfig(score_config);
+    ASSERT_EQ(pool_config.memory_layouts.size(), 2u);
+    const auto& mtp_layout = pool_config.memory_layouts[1];
+    EXPECT_EQ(stale_mtp_config->block_num, 3u);
+    EXPECT_EQ(mtp_layout.block_num, 4u);
+    EXPECT_EQ(mtp_layout.kv_block_pool_size_bytes, 1u * 4u * 64u);
+    EXPECT_EQ(mtp_layout.kv_scale_pool_size_bytes, 1u * 4u * 128u);
 }
 
 TEST(BlockPoolConfigHelperTest, MTPWithoutScaleKeepsContiguousOffsets) {

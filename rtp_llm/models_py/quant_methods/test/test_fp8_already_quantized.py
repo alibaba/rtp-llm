@@ -24,6 +24,7 @@ import torch
 from rtp_llm.config.quant_config import Fp8PerTensorCompressedQuantConfig
 from rtp_llm.models_py.kernels.cuda.fp8_quant import (
     create_per_token_group_quant_fp8_output_scale,
+    require_cuda_fp8_quant_helpers,
     scaled_fp8_per_tensor_quant,
     scaled_fp8_per_token_quant,
     sgl_per_token_group_quant_fp8,
@@ -380,6 +381,23 @@ assert not any(name == "rtp_kernel" or name.startswith("rtp_kernel.") for name i
                 RuntimeError, "per_tensor CUDA helper is unavailable"
             ):
                 _select_fp8_runtime_backend(torch.device("cuda:0"), "per_tensor")
+
+    def test_group_preflight_requires_masked_v2_helper(self):
+        def resolve(name):
+            if name == "per_token_group_quant_fp8_v2":
+                raise ImportError(f"{name} is unavailable")
+            return lambda: None
+
+        with mock.patch(
+            "rtp_llm.models_py.kernels.cuda.fp8_quant._resolve_compute_op",
+            side_effect=resolve,
+        ):
+            with self.assertRaisesRegex(ImportError, "per_token_group_quant_fp8_v2"):
+                require_cuda_fp8_quant_helpers("group")
+
+    def test_fp8_compressed_configs_ignore_checkpoint_group_size(self):
+        config = Fp8PerTensorCompressedQuantConfig(group_size=128)
+        self.assertEqual(config.group_size(), 0)
 
     def test_fused_layer_requires_consistent_exclusions(self):
         layer = SimpleNamespace(shard_names=["gate_proj", "up_proj"])

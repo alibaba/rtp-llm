@@ -34,9 +34,11 @@ def _model_config():
         tie_word_embeddings=True,
         compute_dtype=torch.float32,
         generate_env_config=None,
+        ptuning_path="",
         lora_infos={},
         eplb_config=types.SimpleNamespace(enable_eplb=lambda: False),
         quant_config=types.SimpleNamespace(get_runtime_method_key=lambda: "none"),
+        use_new_loader=True,
     )
 
 

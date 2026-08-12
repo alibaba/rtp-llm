@@ -3,7 +3,7 @@ from typing import Dict
 import torch
 import torch.nn as nn
 
-from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
 from rtp_llm.models_py.module_base import RtpModule
 
 
@@ -136,4 +136,17 @@ class ParallelLMHead(RtpModule):
             self._copy_weight(tensor)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.nn.functional.linear(x, self.weight)
+        output = torch.nn.functional.linear(x, self.weight)
+        if self.tp_size == 1:
+            return output
+        token_shape = output.shape[:-1]
+        local_vocab_size = output.shape[-1]
+        flat_output = output.reshape(-1, local_vocab_size)
+        gathered = all_gather(flat_output, group=Group.TP)
+        gathered = (
+            gathered.reshape(self.tp_size, flat_output.shape[0], local_vocab_size)
+            .transpose(0, 1)
+            .contiguous()
+            .reshape(*token_shape, self.vocab_size)
+        )
+        return gathered

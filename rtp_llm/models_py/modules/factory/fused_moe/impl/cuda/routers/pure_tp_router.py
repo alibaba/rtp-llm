@@ -188,7 +188,7 @@ class PureTpRouterFp8PerTensor(PureTpRouterBase):
         self, a1: torch.Tensor
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """FP8 per-token quantization"""
-        return scaled_fp8_per_token_quant(a1, None)
+        return scaled_fp8_per_token_quant(a1)
 
 
 class PureTpRouterFp8PerBlock(PureTpRouterBase):
@@ -250,7 +250,7 @@ class PureTpRouterW4a8Int4PerChannel(PureTpRouterBase):
         self, a1: torch.Tensor
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """W4A8 INT4 per-channel quantization"""
-        return scaled_fp8_per_token_quant(a1, None)
+        return scaled_fp8_per_token_quant(a1)
 
 
 class PureTpRouterFp4PerGroup(PureTpRouterBase):
