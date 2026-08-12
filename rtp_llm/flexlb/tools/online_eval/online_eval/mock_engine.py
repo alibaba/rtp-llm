@@ -27,6 +27,19 @@ SENTINEL = object()
 logger = logging.getLogger("mock_engine")
 
 
+def role_addr_type(pb2, role_addr) -> int:
+    """Decode the dsv4 enum plus the new string representation."""
+    string_value = getattr(role_addr, "role_str", "")
+    string_role = getattr(pb2, f"ROLE_TYPE_{string_value}", None)
+    legacy_role = int(role_addr.role)
+    if string_role is not None and legacy_role != 0 and string_role != legacy_role:
+        raise ValueError(
+            "conflicting RoleAddrPB role fields: "
+            f"role={role_addr.role} role_str={string_value}"
+        )
+    return string_role if string_role is not None else legacy_role
+
+
 def now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -415,7 +428,7 @@ class MockEngineState:
             )
         )
         status = self.pb2.WorkerStatusPB(
-            role=self.role.upper(),
+            role=f"RoleType.{self.role.upper()}",
             role_type=self._role_pb(),
             available_concurrency=max(
                 0, self._max_prefill_concurrency - len(self._running)
@@ -855,7 +868,7 @@ class MockEngineState:
     def _get_remote_decode_addr(self, input_pb) -> Optional[str]:
         """Return the decode engine gRPC address from role_addrs, or None."""
         for role_addr in input_pb.generate_config.role_addrs:
-            if role_addr.role_type == self.pb2.ROLE_TYPE_DECODE:
+            if role_addr_type(self.pb2, role_addr) == self.pb2.ROLE_TYPE_DECODE:
                 return f"{role_addr.ip}:{role_addr.grpc_port}"
         return None
 
@@ -1033,6 +1046,7 @@ class MockEngineState:
             dp_rank=task.dp_rank,
             batch_id=task.batch_id,
             phase=task.phase,
+            is_waiting=task.phase != self.pb2.TASK_PHASE_RUNNING,
             execution_time_ms=task.execution_time_ms,
             priority_preemption_progress=task.priority_preemption_progress,
         )
@@ -1465,7 +1479,7 @@ class MockEngineCluster:
     def resolve_decode(self, input_pb) -> Optional[MockEngineState]:
         request_id = int(input_pb.request_id)
         for role_addr in input_pb.generate_config.role_addrs:
-            if role_addr.role_type == self.pb2.ROLE_TYPE_DECODE:
+            if role_addr_type(self.pb2, role_addr) == self.pb2.ROLE_TYPE_DECODE:
                 addr = f"{role_addr.ip}:{role_addr.grpc_port}"
                 state = self._by_grpc_addr.get(addr)
                 if state is not None:

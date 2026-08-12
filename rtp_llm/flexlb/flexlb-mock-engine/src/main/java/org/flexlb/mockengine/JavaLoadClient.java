@@ -12,7 +12,9 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 
@@ -605,10 +607,10 @@ public final class JavaLoadClient {
 
         EngineRpcService.GenerateConfigPB.Builder fbConfig =
                 buildGenerateInput(record).getGenerateConfig().toBuilder().clearRoleAddrs();
-        fbConfig.addRoleAddrs(toRoleAddrPb("PREFILL",
+        fbConfig.addRoleAddrs(toRoleAddrPb(
                 EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL, prefillAddr));
         if (!decodeAddr.isEmpty()) {
-            fbConfig.addRoleAddrs(toRoleAddrPb("DECODE",
+            fbConfig.addRoleAddrs(toRoleAddrPb(
                     EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE, decodeAddr));
         }
         EngineRpcService.GenerateInputPB fbInput = buildGenerateInput(record).toBuilder()
@@ -656,7 +658,7 @@ public final class JavaLoadClient {
     }
 
     private static EngineRpcService.RoleAddrPB toRoleAddrPb(
-            String role, EngineRpcService.RoleTypePB roleType, String addr) {
+            EngineRpcService.RoleTypePB roleType, String addr) {
         int colon = addr.lastIndexOf(':');
         if (colon <= 0 || colon == addr.length() - 1) {
             throw new IllegalArgumentException(
@@ -669,9 +671,10 @@ public final class JavaLoadClient {
             throw new IllegalArgumentException(
                     "invalid engine address '" + addr + "' (non-numeric port)");
         }
+        RoleType domainRole = RoleTypeProtoConverter.fromProto(roleType);
         return EngineRpcService.RoleAddrPB.newBuilder()
-                .setRole(role)
-                .setRoleType(roleType)
+                .setRole(RoleTypeProtoConverter.toLegacyProto(domainRole))
+                .setRoleStr(domainRole.getCode())
                 .setIp(addr.substring(0, colon))
                 .setHttpPort(0)
                 .setGrpcPort(grpcPort)
@@ -829,8 +832,9 @@ public final class JavaLoadClient {
             };
             modified.getGenerateConfigBuilder().addRoleAddrs(
                     EngineRpcService.RoleAddrPB.newBuilder()
-                            .setRole(status.getRole())
-                            .setRoleType(roleType)
+                            .setRole(RoleTypeProtoConverter.toLegacyProto(
+                                    RoleTypeProtoConverter.fromProto(roleType)))
+                            .setRoleStr(RoleTypeProtoConverter.fromProto(roleType).getCode())
                             .setIp(status.getServerIp())
                             .setHttpPort(status.getHttpPort())
                             .setGrpcPort(status.getGrpcPort())

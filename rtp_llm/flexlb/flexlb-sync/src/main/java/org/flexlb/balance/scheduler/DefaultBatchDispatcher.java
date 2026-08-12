@@ -325,8 +325,8 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
         }
         RoleType role = serverStatus.getRole();
         config.addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()
-                .setRole(role.getCode())
-                .setRoleType(RoleTypeProtoConverter.toProto(role))
+                .setRole(RoleTypeProtoConverter.toLegacyProto(role))
+                .setRoleStr(role.getCode())
                 .setIp(serverStatus.getServerIp())
                 .setHttpPort(serverStatus.getHttpPort())
                 .setGrpcPort(serverStatus.getGrpcPort())

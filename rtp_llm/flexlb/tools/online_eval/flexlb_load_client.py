@@ -717,8 +717,8 @@ class LoadClient:
         del fb_input.generate_config.role_addrs[:]
         p_host, p_port = prefill_addr.rsplit(":", 1)
         fb_input.generate_config.role_addrs.add(
-            role="PREFILL",
-            role_type=self.pb2.ROLE_TYPE_PREFILL,
+            role=self.pb2.RoleAddrPB.PREFILL,
+            role_str="PREFILL",
             ip=p_host,
             http_port=0,
             grpc_port=int(p_port),
@@ -726,8 +726,8 @@ class LoadClient:
         if decode_addr:
             d_host, d_port = decode_addr.rsplit(":", 1)
             fb_input.generate_config.role_addrs.add(
-                role="DECODE",
-                role_type=self.pb2.ROLE_TYPE_DECODE,
+                role=self.pb2.RoleAddrPB.DECODE,
+                role_str="DECODE",
                 ip=d_host,
                 http_port=0,
                 grpc_port=int(d_port),
@@ -825,11 +825,12 @@ class LoadClient:
     def _copy_role_addrs(self, input_pb, response) -> None:
         del input_pb.generate_config.role_addrs[:]
         for status in response.server_status:
+            legacy_role = getattr(
+                self.pb2.RoleAddrPB, status.role, self.pb2.RoleAddrPB.PDFUSION
+            )
             input_pb.generate_config.role_addrs.add(
-                role=status.role,
-                role_type=getattr(
-                    self.pb2, f"ROLE_TYPE_{status.role}", self.pb2.ROLE_TYPE_PDFUSION
-                ),
+                role=legacy_role,
+                role_str=status.role,
                 ip=status.server_ip,
                 http_port=status.http_port,
                 grpc_port=status.grpc_port,

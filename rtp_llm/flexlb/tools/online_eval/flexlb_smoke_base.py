@@ -196,11 +196,12 @@ class FlexLBSmokeBase:
         """Copy ``server_status`` role addrs into ``input_pb.generate_config``."""
         del input_pb.generate_config.role_addrs[:]
         for status in response.server_status:
+            legacy_role = getattr(
+                self.pb2.RoleAddrPB, status.role, self.pb2.RoleAddrPB.PDFUSION
+            )
             input_pb.generate_config.role_addrs.add(
-                role=status.role,
-                role_type=getattr(
-                    self.pb2, f"ROLE_TYPE_{status.role}", self.pb2.ROLE_TYPE_PDFUSION
-                ),
+                role=legacy_role,
+                role_str=status.role,
                 ip=status.server_ip,
                 http_port=status.http_port,
                 grpc_port=status.grpc_port,

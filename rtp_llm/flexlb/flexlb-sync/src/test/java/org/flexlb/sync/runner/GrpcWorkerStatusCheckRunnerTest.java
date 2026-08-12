@@ -101,11 +101,12 @@ class GrpcWorkerStatusCheckRunnerTest {
         workerStatus.setPort(8080);
         workerStatus.getStatusVersion().set(100L);
 
-        // Use TaskPhasePB instead of the removed is_waiting field
+        // New engines dual-write phase and the dsv4 is_waiting field.
         EngineRpcService.TaskInfoPB taskInfo = EngineRpcService.TaskInfoPB.newBuilder()
                 .setRequestId(123L)
                 .setInputLength(100)
                 .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED)
+                .setIsWaiting(true)
                 .build();
         EngineRpcService.WorkerStatusPB workerStatusPB = EngineRpcService.WorkerStatusPB.newBuilder()
                 .setRole(RoleType.PREFILL.getCode())

@@ -11,7 +11,13 @@ def _coerce_role_type(value: Union[int, str, RoleType]) -> RoleType:
     if isinstance(value, RoleType):
         return value
     if isinstance(value, str):
-        return getattr(RoleType, value.upper())
+        role_name = value.rsplit(".", 1)[-1].upper()
+        if role_name.startswith("ROLE_TYPE_"):
+            role_name = role_name[len("ROLE_TYPE_") :]
+        try:
+            return RoleType[role_name]
+        except KeyError as error:
+            raise ValueError(f"Invalid role: {value!r}") from error
     raise ValueError(f"Invalid role: {value}, expected int, str, or RoleType")
 
 

@@ -16,7 +16,6 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     GenerateOutputsPB,
     MultimodalInputPB,
     RoleAddrPB,
-    RoleTypePB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
 from rtp_llm.server.request_headers import (
@@ -44,8 +43,23 @@ def _is_finished_response(outputs_pb: GenerateOutputsPB) -> bool:
     return bool(finished) and all(finished)
 
 
-def trans_role_type(role_type: RoleType) -> int:
-    return role_type.value
+def trans_role_type(role_type: RoleType) -> RoleAddrPB.RoleType:
+    """Map the frontend role to the original RoleAddrPB field-1 enum.
+
+    Keep this explicit instead of depending on the numeric values of two
+    independently generated enums remaining aligned.
+    """
+    if role_type == RoleType.PDFUSION:
+        return RoleAddrPB.RoleType.PDFUSION
+    if role_type == RoleType.PREFILL:
+        return RoleAddrPB.RoleType.PREFILL
+    if role_type == RoleType.DECODE:
+        return RoleAddrPB.RoleType.DECODE
+    if role_type == RoleType.VIT:
+        return RoleAddrPB.RoleType.VIT
+    if role_type == RoleType.FRONTEND:
+        return RoleAddrPB.RoleType.FRONTEND
+    raise ValueError(f"unsupported role type: {role_type!r}")
 
 
 def _trans_jsonable_option(config_pb, config, field_name):
@@ -207,8 +221,11 @@ def trans_input(input_py: GenerateInput):
 
     for role_addr in input_py.generate_config.role_addrs:
         role_addr_pb = RoleAddrPB()
-        role_addr_pb.role = role_addr.role.name
-        role_addr_pb.role_type = trans_role_type(role_addr.role)
+        proto_role = trans_role_type(role_addr.role)
+        # Dual-write the original enum at field 1 and the string extension so
+        # both old and new engines decode role addresses during rolling upgrade.
+        role_addr_pb.role = proto_role
+        role_addr_pb.role_str = role_addr.role.name
         role_addr_pb.ip = role_addr.ip
         role_addr_pb.http_port = role_addr.http_port
         role_addr_pb.grpc_port = role_addr.grpc_port

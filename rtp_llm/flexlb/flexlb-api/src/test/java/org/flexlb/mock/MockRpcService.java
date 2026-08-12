@@ -148,7 +148,8 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
 
         EngineRpcService.WorkerStatusPB.Builder builder = EngineRpcService.WorkerStatusPB.newBuilder()
                 .setAlive(true)
-                .setRole(RoleTypeProtoConverter.fromProto(beh.getRoleType()).getCode())
+                .setRole(RoleTypeProtoConverter.toLegacyWorkerStatusString(
+                        RoleTypeProtoConverter.fromProto(beh.getRoleType())))
                 .setRoleType(beh.getRoleType())
                 .setAvailableConcurrency(beh.getAvailableConcurrency())
                 .setAvailableKvCache(beh.getAvailableKvCache())

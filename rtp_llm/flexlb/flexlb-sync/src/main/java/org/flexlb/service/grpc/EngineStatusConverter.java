@@ -3,13 +3,10 @@ package org.flexlb.service.grpc;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatusResponse;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.enums.PriorityPreemptionProgress;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.util.HashMap;
 import java.util.List;
@@ -21,31 +18,13 @@ import java.util.Set;
  */
 public class EngineStatusConverter {
 
-    private static final Logger logger = LoggerFactory.getLogger(EngineStatusConverter.class);
-
     /**
      * Convert WorkerStatusPB to WorkerStatusResponse
      */
     public static WorkerStatusResponse convertToWorkerStatusResponse(EngineRpcService.WorkerStatusPB workerStatusPB) {
         WorkerStatusResponse response = new WorkerStatusResponse();
 
-        // Determine role using a two-level fallback:
-        // 1) role_type (f20 enum) — preferred, type-safe field.
-        // 2) role (f1 string) — backward-compatible string role, e.g. "PREFILL".
-        // 3) Default to PDFUSION if nothing yields a valid role.
-        RoleType role = RoleTypeProtoConverter.fromProto(workerStatusPB.getRoleType());
-        if (role == null) {
-            String roleCode = workerStatusPB.getRole();
-            if (roleCode != null && !roleCode.isEmpty()) {
-                role = RoleType.fromString(roleCode);
-            }
-        }
-        if (role == null) {
-            logger.warn("Failed to determine role from WorkerStatusPB: role_type={}, role='{}'",
-                    workerStatusPB.getRoleType(), workerStatusPB.getRole());
-            role = RoleType.PDFUSION;
-        }
-        response.setRole(role);
+        response.setRole(RoleTypeProtoConverter.fromWorkerStatus(workerStatusPB));
         // Compatibility only: LocalRpcServer::GetWorkerStatus does not currently
         // populate this field. Preserve it for protocol compatibility/telemetry,
         // but do not use it as a scheduling or batching limit.
@@ -93,7 +72,8 @@ public class EngineStatusConverter {
     /**
      * Convert list of TaskInfoPB to list of TaskInfo
      */
-    private static Map<String, TaskInfo> convertToTaskInfoList(List<EngineRpcService.TaskInfoPB> taskInfoPBList) {
+    private static Map<String, TaskInfo> convertToTaskInfoList(
+            List<EngineRpcService.TaskInfoPB> taskInfoPBList) {
         if (taskInfoPBList == null) {
             return null;
         }
@@ -110,7 +90,7 @@ public class EngineStatusConverter {
             taskInfo.setDpRank(taskInfoPB.getDpRank());
             taskInfo.setBatchId(taskInfoPB.getBatchId());
             taskInfo.setExecutionTimeMs(taskInfoPB.getExecutionTimeMs());
-            taskInfo.setPhase(convertPhase(taskInfoPB.getPhase()));
+            taskInfo.setPhase(resolvePhase(taskInfoPB));
             taskInfo.setPriorityPreemptionProgress(switch (
                     taskInfoPB.getPriorityPreemptionProgress()) {
                 case PRIORITY_PREEMPTION_CANCELING -> PriorityPreemptionProgress.CANCELING;
@@ -127,6 +107,22 @@ public class EngineStatusConverter {
         }
 
         return taskInfoMap;
+    }
+
+    private static TaskPhase resolvePhase(EngineRpcService.TaskInfoPB task) {
+        if (task.getPhase() != EngineRpcService.TaskPhase.TASK_PHASE_PENDING) {
+            TaskPhase phase = convertPhase(task.getPhase());
+            if (task.getIsWaiting() == (phase == TaskPhase.RUNNING)) {
+                throw new IllegalArgumentException("conflicting TaskInfoPB phase/is_waiting for request_id="
+                        + task.getRequestId() + ": phase=" + phase
+                        + ", is_waiting=" + task.getIsWaiting());
+            }
+            return phase;
+        }
+        // dsv4 writers only sent is_waiting. Because old proto3 writers omit
+        // false on the wire, phase=0/is_waiting=false means legacy RUNNING.
+        // New PENDING writers dual-write is_waiting=true.
+        return task.getIsWaiting() ? TaskPhase.PENDING : TaskPhase.RUNNING;
     }
 
     private static TaskPhase convertPhase(EngineRpcService.TaskPhase protoPhase) {

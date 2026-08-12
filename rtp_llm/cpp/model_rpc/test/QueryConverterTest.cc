@@ -78,6 +78,45 @@ TEST_F(QueryConverterTest, testTransInput) {
     ASSERT_EQ(generate_config->stop_words_list[1], stop_words_2);
 }
 
+TEST_F(QueryConverterTest, RoleAddrReadsLegacyTypedAndDualWritePayloads) {
+    GenerateConfigPB config;
+
+    auto* legacy = config.add_role_addrs();
+    legacy->set_role(RoleAddrPB::PREFILL);
+    legacy->set_ip("legacy-prefill");
+
+    auto* string_only = config.add_role_addrs();
+    string_only->set_role_str("DECODE");
+    string_only->set_ip("string-decode");
+
+    auto* dual = config.add_role_addrs();
+    dual->set_role(RoleAddrPB::VIT);
+    dual->set_role_str("VIT");
+    dual->set_ip("dual-vit");
+
+    const auto role_addrs = QueryConverter::getRoleAddrs(&config);
+    ASSERT_EQ(role_addrs.size(), 3);
+    EXPECT_EQ(role_addrs[0].role, RoleType::PREFILL);
+    EXPECT_EQ(role_addrs[1].role, RoleType::DECODE);
+    EXPECT_EQ(role_addrs[2].role, RoleType::VIT);
+}
+
+TEST_F(QueryConverterTest, RoleAddrPreservesPdfusionDefaultAndRejectsConflicts) {
+    GenerateConfigPB legacy_pdfusion;
+    legacy_pdfusion.add_role_addrs()->set_role(RoleAddrPB::PDFUSION);
+    EXPECT_EQ(QueryConverter::getRoleAddrs(&legacy_pdfusion)[0].role, RoleType::PDFUSION);
+
+    GenerateConfigPB conflict;
+    auto*            conflicting = conflict.add_role_addrs();
+    conflicting->set_role(RoleAddrPB::PREFILL);
+    conflicting->set_role_str("DECODE");
+    EXPECT_THROW(QueryConverter::getRoleAddrs(&conflict), std::runtime_error);
+
+    GenerateConfigPB omitted_legacy_default;
+    omitted_legacy_default.add_role_addrs();
+    EXPECT_EQ(QueryConverter::getRoleAddrs(&omitted_legacy_default)[0].role, RoleType::PDFUSION);
+}
+
 TEST_F(QueryConverterTest, testTransOutput) {
     auto output_token_ids = torch::empty({1, 3}, torch::kInt32);
     auto data             = output_token_ids.data_ptr<int>();

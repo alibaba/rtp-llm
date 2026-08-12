@@ -9,6 +9,9 @@ import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
 class WorkerStatusResponseTest {
 
     @Test
@@ -36,6 +39,74 @@ class WorkerStatusResponseTest {
         Assertions.assertEquals(RoleType.PREFILL, response.getRole());
         Assertions.assertEquals(131072L, response.getMaxSeqLen());
         Assertions.assertEquals(262144L, response.getMaxBatchTokensSize());
+    }
+
+    @Test
+    void converterReadsLegacyWorkerRoleAndTaskState() {
+        EngineRpcService.TaskInfoPB oldWaiting = EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestId(1L)
+                .setIsWaiting(true)
+                .build();
+        // An old proto3 writer omits is_waiting=false from the wire. The new
+        // reader must use the running_task_info container as the fallback.
+        EngineRpcService.TaskInfoPB oldRunning = EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestId(2L)
+                .build();
+        EngineRpcService.WorkerStatusPB proto = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole("RoleType.PREFILL")
+                .addRunningTaskInfo(oldWaiting)
+                .addRunningTaskInfo(oldRunning)
+                .build();
+
+        WorkerStatusResponse response = EngineStatusConverter.convertToWorkerStatusResponse(proto);
+
+        assertEquals(RoleType.PREFILL, response.getRole());
+        assertEquals(org.flexlb.enums.TaskPhase.PENDING,
+                response.getRunningTaskInfo().get("1").getPhase());
+        assertEquals(org.flexlb.enums.TaskPhase.RUNNING,
+                response.getRunningTaskInfo().get("2").getPhase());
+    }
+
+    @Test
+    void converterReadsAndValidatesDualWorkerStatus() {
+        EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestId(3L)
+                .setIsWaiting(true)
+                .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED)
+                .build();
+        EngineRpcService.WorkerStatusPB proto = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole("DECODE")
+                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
+                .addRunningTaskInfo(task)
+                .build();
+
+        WorkerStatusResponse response = EngineStatusConverter.convertToWorkerStatusResponse(proto);
+
+        assertEquals(RoleType.DECODE, response.getRole());
+        assertEquals(org.flexlb.enums.TaskPhase.KV_ALLOCATED,
+                response.getRunningTaskInfo().get("3").getPhase());
+    }
+
+    @Test
+    void converterRejectsConflictingDualWorkerStatus() {
+        EngineRpcService.WorkerStatusPB roleConflict = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole("PREFILL")
+                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
+                .build();
+        assertThrows(IllegalArgumentException.class,
+                () -> EngineStatusConverter.convertToWorkerStatusResponse(roleConflict));
+
+        EngineRpcService.TaskInfoPB taskConflict = EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestId(4L)
+                .setIsWaiting(false)
+                .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED)
+                .build();
+        EngineRpcService.WorkerStatusPB status = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole("PREFILL")
+                .addRunningTaskInfo(taskConflict)
+                .build();
+        assertThrows(IllegalArgumentException.class,
+                () -> EngineStatusConverter.convertToWorkerStatusResponse(status));
     }
 
     @Test

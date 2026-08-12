@@ -34,11 +34,18 @@ enum RoleTypePB {
 }
 
 message RoleAddrPB {
-    string role = 1;              // 字符串角色名，如 "PREFILL"，向后兼容
+    enum RoleType {
+        PDFUSION = 0;
+        PREFILL = 1;
+        DECODE = 2;
+        VIT = 3;
+        FRONTEND = 4;
+    }
+    RoleType role = 1;
     string ip = 2;
     int32 http_port = 3;
     int32 grpc_port = 4;
-    RoleTypePB role_type = 5;    // 类型安全的枚举字段
+    string role_str = 5;
 }
 
 message GenerateConfigPB {
@@ -424,8 +431,7 @@ message TaskInfoPB {
     int64 iterate_count = 6;
     int64 end_time_ms = 7;
     int64 dp_rank = 8;
-    reserved 9;
-    reserved "is_waiting";
+    bool is_waiting = 9;
     ErrorDetailsPB error_info = 10;
     int64 batch_id = 11;
     TaskPhase phase = 12;
@@ -463,7 +469,7 @@ message WorkerStatusPB {
     int64 total_kv_cache = 18;
     reserved 19;
     reserved "role_str";
-    RoleTypePB role_type = 20;   // 类型安全的枚举字段
+    RoleTypePB role_type = 20;
     // Static limits used by the running Engine. FlexLB uses these values to
     // avoid constructing a group that the Engine can never admit.
     int64 max_seq_len = 21;

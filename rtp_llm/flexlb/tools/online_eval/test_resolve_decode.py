@@ -63,8 +63,8 @@ def _make_input(
     )
     if decode_ip is not None and decode_grpc_port is not None:
         config.role_addrs.add(
-            role="DECODE",
-            role_type=pb2.ROLE_TYPE_DECODE,
+            role=pb2.RoleAddrPB.DECODE,
+            role_str="DECODE",
             ip=decode_ip,
             http_port=decode_http_port,
             grpc_port=decode_grpc_port,

@@ -9,7 +9,9 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
+import org.flexlb.dao.route.RoleType;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -628,7 +630,7 @@ public final class JavaMockEngineCluster {
             long usedKv = Math.min(totalKvTokens, activeKvTokens.get() + faultConfig.getKvPressureTokens());
             EngineRpcService.WorkerStatusPB.Builder status = EngineRpcService.WorkerStatusPB.newBuilder()
                     .setAlive(!stopped)
-                    .setRole(roleName)
+                    .setRole("RoleType." + roleName)
                     .setRoleType(roleType)
                     .setAvailableConcurrency(roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
                             // Python worker_status: max(0, _max_prefill_concurrency - len(_running))
@@ -648,10 +650,12 @@ public final class JavaMockEngineCluster {
                     .setDpSize(1)
                     .setTpSize(1)
                     .setDpRank(0);
-            status.addAllRunningTaskInfo(runningTasks.values());
+            status.addAllRunningTaskInfo(runningTasks.values().stream()
+                    .map(FastRpcService::withLegacyTaskState)
+                    .toList());
             for (VersionedTask completion : completions) {
                 if (completion.version > requestedVersion && completion.version <= latestVersion) {
-                    status.addFinishedTaskList(completion.task);
+                    status.addFinishedTaskList(withLegacyTaskState(completion.task));
                 }
             }
             observer.onNext(status.build());
@@ -1272,7 +1276,8 @@ public final class JavaMockEngineCluster {
             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue =
                     responseQueues.get(input.getRequestId());
             for (EngineRpcService.RoleAddrPB addr : input.getGenerateConfig().getRoleAddrsList()) {
-                if (addr.getRoleType() != EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
+                if (RoleTypeProtoConverter.fromRoleAddr(addr)
+                        != RoleType.DECODE) {
                     continue;
                 }
                 FastRpcService decode = services.get(addr.getGrpcPort());
@@ -1538,6 +1543,14 @@ public final class JavaMockEngineCluster {
                     .setBatchId(batchId)
                     .setPhase(phase)
                     .setDpRank(dpRank)
+                    .build();
+        }
+
+        private static EngineRpcService.TaskInfoPB withLegacyTaskState(
+                EngineRpcService.TaskInfoPB task) {
+            return task.toBuilder()
+                    .setIsWaiting(task.getPhase()
+                            != EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
                     .build();
         }
 

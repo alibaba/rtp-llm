@@ -245,7 +245,10 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     RTP_LLM_LOG_DEBUG("getWorkerStatusInfo took %ld us", request_after_ws_time_us - request_begin_time_us);
 
     const auto& engine_schedule_info = status_info.engine_schedule_info;
-    response->set_role(roleTypeToString(status_info.role));
+    // Field 1 is consumed as an opaque string by legacy Masters, whose role
+    // codes are "RoleType.PREFILL" etc. Keep that exact spelling while the
+    // typed field 20 is rolled out.
+    response->set_role("RoleType." + roleTypeToString(status_info.role));
     response->set_role_type(static_cast<RoleTypePB>(status_info.role));
 
     for (const auto& task : engine_schedule_info.running_task_info_list) {
@@ -258,6 +261,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         task_info->set_end_time_ms(task.end_time_ms);
         task_info->set_dp_rank(status_info.dp_rank);
         task_info->set_phase(static_cast<::TaskPhase>(task.phase));
+        task_info->set_is_waiting(task.phase != rtp_llm::TaskPhase::RUNNING);
         task_info->set_batch_id(task.batch_id);
         task_info->set_execution_time_ms(task.execution_time_ms);
         task_info->set_priority_preemption_progress(
@@ -278,6 +282,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         task_info->set_end_time_ms(task.end_time_ms);
         task_info->set_dp_rank(status_info.dp_rank);
         task_info->set_phase(static_cast<::TaskPhase>(task.phase));
+        task_info->set_is_waiting(task.phase != rtp_llm::TaskPhase::RUNNING);
         task_info->set_batch_id(task.batch_id);
         task_info->set_execution_time_ms(task.execution_time_ms);
         task_info->set_priority_preemption_progress(

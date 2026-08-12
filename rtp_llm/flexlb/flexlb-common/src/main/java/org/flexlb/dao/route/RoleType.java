@@ -34,7 +34,9 @@ public enum RoleType {
     }
 
     /**
-     * Deserialize from JSON string. Accepts short name ("PREFILL") or proto-prefixed name ("ROLE_TYPE_PREFILL").
+     * Deserialize from JSON or legacy WorkerStatus strings. Accepts short name
+     * ("PREFILL"), proto-prefixed name ("ROLE_TYPE_PREFILL"), and the original
+     * C++ status spelling ("RoleType.PREFILL").
      */
     @JsonCreator
     public static RoleType fromString(String value) {
@@ -50,6 +52,13 @@ public enum RoleType {
         if (value.startsWith("ROLE_TYPE_")) {
             try {
                 return RoleType.valueOf(value.substring(10));
+            } catch (IllegalArgumentException e) {
+                return null;
+            }
+        }
+        if (value.startsWith("RoleType.")) {
+            try {
+                return RoleType.valueOf(value.substring("RoleType.".length()));
             } catch (IllegalArgumentException e) {
                 return null;
             }

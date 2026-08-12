@@ -329,7 +329,8 @@ class ShutdownDrainTest {
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(1)
                         .addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()
-                                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
+                                .setRole(EngineRpcService.RoleAddrPB.RoleType.DECODE)
+                                .setRoleStr("DECODE")
                                 .setGrpcPort(decodePort)
                                 .build())
                         .build());

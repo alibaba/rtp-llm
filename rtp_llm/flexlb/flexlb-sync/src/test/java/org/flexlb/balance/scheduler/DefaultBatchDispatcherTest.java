@@ -10,6 +10,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -246,6 +247,28 @@ class DefaultBatchDispatcherTest {
 
         assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
         assertEquals(0, sentInput(sent.getFirst()).getPriority());
+    }
+
+    @Test
+    void dispatchDualWritesCompatibleRoleAddress() throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+
+        List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+                .thenAnswer(inv -> {
+                    sent.add(inv.getArgument(2));
+                    return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
+                });
+
+        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "role_compat", callback);
+
+        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
+        EngineRpcService.RoleAddrPB addr = sentInput(sent.getFirst())
+                .getGenerateConfig().getRoleAddrs(0);
+        assertEquals(EngineRpcService.RoleAddrPB.RoleType.PREFILL, addr.getRole());
+        assertEquals("PREFILL", addr.getRoleStr());
+        assertEquals(RoleType.PREFILL, RoleTypeProtoConverter.fromRoleAddr(addr));
     }
 
     private static EngineRpcService.GenerateInputPB sentInput(EngineRpcService.EnqueueBatchRequestPB request) {

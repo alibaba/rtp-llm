@@ -278,6 +278,31 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(input_pb.request_info.request_id, "source-request-id")
         self.assertEqual(input_pb.request_info.source_role, "frontend")
 
+    def test_trans_input_dual_writes_role_addrs(self):
+        input_pb = trans_input(
+            GenerateInput(
+                token_ids=torch.tensor([1, 2, 3]),
+                generate_config=GenerateConfig(
+                    role_addrs=[
+                        _prefill_role_addr(),
+                        _decode_role_addr(),
+                    ]
+                ),
+                request_id=123,
+                mm_inputs=[],
+            )
+        )
+
+        self.assertEqual(len(input_pb.generate_config.role_addrs), 2)
+        self.assertEqual(
+            [role_addr.role for role_addr in input_pb.generate_config.role_addrs],
+            [RoleAddrPB.PREFILL, RoleAddrPB.DECODE],
+        )
+        self.assertEqual(
+            [role_addr.role_str for role_addr in input_pb.generate_config.role_addrs],
+            ["PREFILL", "DECODE"],
+        )
+
     def test_trans_input_request_info_fallback(self):
         input_pb = trans_input(
             GenerateInput(

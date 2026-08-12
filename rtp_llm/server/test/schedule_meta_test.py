@@ -69,6 +69,19 @@ class TestScheduleMetaRoleConversion(unittest.TestCase):
             expected_role = getattr(RoleType, role_type_str)
             self.assertEqual(schedule_meta.server_status[0].role, expected_role)
 
+    def test_schedule_meta_accepts_legacy_and_typed_role_spellings(self):
+        for role_value in ("RoleType.PREFILL", "ROLE_TYPE_PREFILL", 1):
+            with self.subTest(role=role_value):
+                status = ServerStatus.model_validate(
+                    {
+                        "role": role_value,
+                        "server_ip": "127.0.0.1",
+                        "http_port": 8000,
+                        "grpc_port": 9000,
+                    }
+                )
+                self.assertEqual(status.role, RoleType.PREFILL)
+
     def test_server_status_with_debug_info(self):
         """Test ServerStatus with optional debug_info field."""
         test_data = {

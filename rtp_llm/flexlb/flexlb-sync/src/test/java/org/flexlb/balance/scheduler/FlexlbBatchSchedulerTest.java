@@ -105,10 +105,10 @@ class FlexlbBatchSchedulerTest {
 
     @Test
     void submit_flushes_grouped_requests_with_force_batch_payload() throws Exception {
-        CompletableFuture<Response> first = scheduler.submit(context(1));
+        CompletableFuture<Response> first = scheduler.submit(contextWithLegacyBatchFields(1));
         assertFalse(first.isDone());
 
-        CompletableFuture<Response> second = scheduler.submit(context(2));
+        CompletableFuture<Response> second = scheduler.submit(contextWithLegacyBatchFields(2));
 
         Response firstResponse = first.get(2, TimeUnit.SECONDS);
         Response secondResponse = second.get(2, TimeUnit.SECONDS);
@@ -128,12 +128,13 @@ class FlexlbBatchSchedulerTest {
         assertEquals(0, inputs.get(1).getGroupSize());
         assertFalse(inputs.get(0).hasGroupId());
         assertFalse(inputs.get(1).hasGroupId());
+        assertEquals(1, legacyForceBatchValue(inputs.get(0).getGenerateConfig()));
         assertEquals(77, inputs.get(0).getGenerateConfig().getGroupTimeout().getValue());
         assertEquals(2, inputs.get(0).getGenerateConfig().getRoleAddrsCount());
-        assertEquals(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
-                inputs.get(0).getGenerateConfig().getRoleAddrs(0).getRoleType());
-        assertEquals(EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
-                inputs.get(0).getGenerateConfig().getRoleAddrs(1).getRoleType());
+        assertEquals("PREFILL",
+                inputs.get(0).getGenerateConfig().getRoleAddrs(0).getRoleStr());
+        assertEquals("DECODE",
+                inputs.get(0).getGenerateConfig().getRoleAddrs(1).getRoleStr());
     }
 
     @Test
@@ -560,6 +561,12 @@ class FlexlbBatchSchedulerTest {
         return ctx;
     }
 
+    private static BalanceContext contextWithLegacyBatchFields(long requestId) {
+        BalanceContext ctx = context(requestId);
+        ctx.setGenerateInputPbBytes(generateInputBytes(requestId, true));
+        return ctx;
+    }
+
     // ==================== P0-1: onTimeout terminal handling (PR-D) ====================
 
     @Test
@@ -610,16 +617,34 @@ class FlexlbBatchSchedulerTest {
     }
 
     private static byte[] generateInputBytes(long requestId) {
+        return generateInputBytes(requestId, false);
+    }
+
+    private static byte[] generateInputBytes(long requestId, boolean includeLegacyBatchFields) {
+        EngineRpcService.GenerateConfigPB.Builder config = EngineRpcService.GenerateConfigPB.newBuilder()
+                .setMaxNewTokens(8);
+        if (includeLegacyBatchFields) {
+            com.google.protobuf.UnknownFieldSet.Field forceBatch =
+                    com.google.protobuf.UnknownFieldSet.Field.newBuilder()
+                            .addLengthDelimited(com.google.protobuf.Int32Value.of(1).toByteString())
+                            .build();
+            config.setUnknownFields(com.google.protobuf.UnknownFieldSet.newBuilder()
+                    .addField(55, forceBatch)
+                    .build());
+            config.setGroupTimeout(com.google.protobuf.Int32Value.of(77));
+        }
         EngineRpcService.GenerateInputPB input = EngineRpcService.GenerateInputPB.newBuilder()
                 .setRequestId(requestId)
                 .addTokenIds(101)
                 .addTokenIds(102)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(8)
-                        .setGroupTimeout(com.google.protobuf.Int32Value.of(77))
-                        .build())
+                .setGenerateConfig(config.build())
                 .build();
         return input.toByteArray();
+    }
+
+    private static int legacyForceBatchValue(EngineRpcService.GenerateConfigPB config) throws Exception {
+        return com.google.protobuf.Int32Value.parseFrom(
+                config.getUnknownFields().getField(55).getLengthDelimitedList().get(0)).getValue();
     }
 
     private static Response successRoute(long requestId) {

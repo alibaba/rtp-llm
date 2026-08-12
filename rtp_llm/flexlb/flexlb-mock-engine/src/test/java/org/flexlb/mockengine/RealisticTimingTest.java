@@ -209,7 +209,8 @@ class RealisticTimingTest {
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(outputLen)
                         .addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()
-                                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
+                                .setRole(EngineRpcService.RoleAddrPB.RoleType.DECODE)
+                                .setRoleStr("DECODE")
                                 .setGrpcPort(decodePort)
                                 .build())
                         .build());
