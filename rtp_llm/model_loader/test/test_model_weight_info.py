@@ -8,11 +8,13 @@ from typing import List
 import torch
 
 from rtp_llm.config.output_vocab_config import OUTPUT_TOKENS_FILENAME
+from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
     ModelWeightInfo,
     select_output_vocab_rows,
 )
+from rtp_llm.model_loader.tensor_source import TensorCollector
 from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.utils.database import CkptDatabase
@@ -150,6 +152,62 @@ class ModelDeployWeightInfoCkptRegexTest(unittest.TestCase):
         patterns = ModelDeployWeightInfo._collect_ckpt_tensor_name_regexes(weight_info)
 
         self.assertEqual(patterns, [])
+
+
+class AttentionOutputStaticQuantReciprocalTest(unittest.TestCase):
+    def test_reciprocal_added_only_to_layers_with_attention_output(self):
+        # layer 0 mimics a hybrid linear-attention layer: no attention output
+        # projection at all. layer 1 mimics a normal MHA layer.
+        weight_info = ModelWeightInfo(
+            weights=[],
+            layer_weights=[
+                [
+                    AtomicWeight(
+                        W.linear_attn_out_w,
+                        [CkptWeightInfo("model.layers.{i}.linear_attn.out_proj.w")],
+                    )
+                ],
+                [
+                    AtomicWeight(
+                        W.attn_o_w,
+                        [CkptWeightInfo("model.layers.{i}.self_attn.o_proj.weight")],
+                    )
+                ],
+            ],
+        )
+        deploy_info = RecordingDeployWeightInfo(make_database([]), weight_info)
+
+        result = deploy_info._add_attention_output_static_quant_reciprocal(weight_info)
+
+        linear_layer, mha_layer = result.layer_weights
+        self.assertEqual([w.name for w in linear_layer], [W.linear_attn_out_w])
+        self.assertEqual(
+            [w.name for w in mha_layer],
+            [W.attn_o_w, W.attention_output_static_quant_reciprocal],
+        )
+
+        # The scale has no ckpt dependency, so it is loaded from an empty
+        # collector and must still yield a float32 one on the target device.
+        reciprocal = mha_layer[-1]
+        self.assertEqual(reciprocal.get_tensor_names(1, None), set())
+        loaded = reciprocal.load(
+            TensorCollector(set(), make_database([])),
+            1,
+            "cpu",
+            LoadConfig.model_construct(
+                tp_size=1,
+                dp_size=1,
+                ep_size=1,
+                merge_lora=False,
+                exported_device=SimpleNamespace(
+                    maybe_rewrite_weight_by_key=lambda _, tensor: tensor
+                ),
+            ),
+        )
+        torch.testing.assert_close(
+            loaded[W.attention_output_static_quant_reciprocal],
+            torch.ones(1, dtype=torch.float32),
+        )
 
 
 class CkptDatabaseFilterTest(unittest.TestCase):

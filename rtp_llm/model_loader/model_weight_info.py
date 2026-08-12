@@ -12,7 +12,7 @@ from rtp_llm.config.quant_config import (
     ModelOptFp4Config,
     QuantizationConfig,
 )
-from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
+from rtp_llm.model_loader.attn_weight import AttnConfig
 from rtp_llm.model_loader.ffn_weight import FfnConfig, FfnWeight
 from rtp_llm.model_loader.load_config import LoadConfig, LoadMethod
 from rtp_llm.model_loader.weight_module import (
@@ -30,6 +30,7 @@ from rtp_llm.utils.model_weight import (
     WeightStyle,
     choose_available,
     identity,
+    ones,
     tolerate_failed,
 )
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
@@ -38,10 +39,6 @@ if TYPE_CHECKING:
     from rtp_llm.config.kv_cache_config import KVCacheConfig
     from rtp_llm.config.model_config import ModelConfig
     from rtp_llm.ops import HWKernelConfig, ParallelismConfig
-
-
-def create_scalar_ones(ts: List[torch.Tensor]):
-    return torch.ones([1], dtype=torch.float32).to(ts[0].device)
 
 
 def select_output_vocab_rows(
@@ -531,21 +528,15 @@ class ModelDeployWeightInfo:
         self, origin_weight_info: ModelWeightInfo
     ):
         for weights in origin_weight_info.layer_weights:
-            attn_q_weight_info: Optional[CkptWeightInfo] = None
-            for weight in weights:
-                if (
-                    isinstance(weight, AtomicWeight)
-                    or isinstance(weight, AttnAtomicWeight)
-                ) and weight.name == W.attn_qkv_w:
-                    attn_q_weight_info = weight.weights[0]
-                    break
-
-            assert attn_q_weight_info is not None
+            # Hybrid models (Qwen3-Next / Qwen3.5) build linear-attention layers
+            # without attn_o_w, and those layers never consume the scale.
+            if not any(weight.name == W.attn_o_w for weight in weights):
+                continue
             weights.append(
                 AtomicWeight(
                     W.attention_output_static_quant_reciprocal,
-                    [attn_q_weight_info],
-                    create_scalar_ones,
+                    [],
+                    ones,
                     torch.float32,
                 )
             )
@@ -747,7 +738,7 @@ class ModelDeployWeightInfo:
         phy2log: Optional[List[List[int]]] = None,
         exported_device: Optional[Any] = None,
         force_cpu_load_weights: bool = False,
-        moe_pure_tp_preshard: bool = True,
+        moe_pure_tp_preshard: bool = False,
     ):
         merge_lora = False
 
