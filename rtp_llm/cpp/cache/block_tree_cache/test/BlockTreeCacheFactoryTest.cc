@@ -742,11 +742,11 @@ TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguo
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x72);
 
     EXPECT_TRUE(
-        cache->executeTransfer(TransferDescriptor::deviceToHost(group_set->groupSetId(), {device_block}, host_block)));
+        cache->executeTransfer({TransferDescriptor::deviceToHost(group_set->groupSetId(), {device_block}, host_block)}));
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/0, device_block).kv_addr, layer_bytes, 0x00);
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x00);
     EXPECT_TRUE(
-        cache->executeTransfer(TransferDescriptor::hostToDevice(group_set->groupSetId(), host_block, {device_block})));
+        cache->executeTransfer({TransferDescriptor::hostToDevice(group_set->groupSetId(), host_block, {device_block})}));
 
     expectDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/0, device_block).kv_addr, layer_bytes, 0x31);
     expectDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x72);
@@ -1042,7 +1042,7 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkSharesPendingRel
 
     // One FULL+LINEAR plan contributes two physical releases. Both GroupSets
     // share the pending count for their common backing pool.
-    EXPECT_EQ(scripted_copy->submitCount(), 2u);
+    EXPECT_EQ(scripted_copy->submittedDescriptorCount(), 2u);
     EXPECT_EQ(backing->freeBlocksNum(), 3u);
     EXPECT_LT(backing->freeBlocksNum(), backing->totalBlocksNum());
     const auto descriptors = scripted_copy->descriptors();
@@ -1089,13 +1089,13 @@ TEST_F(BlockTreeCacheFactoryTest, FailedWatermarkPlanStopsThisPassAndRecomputesO
 
     // The failed accepted async plan is not recursively retried in the same
     // maintenance pass; rollback leaves the physical deficit intact.
-    EXPECT_EQ(scripted_copy->submitCount(), 1u);
+    EXPECT_EQ(scripted_copy->submittedDescriptorCount(), 1u);
     EXPECT_EQ(backing->freeBlocksNum(), 6u);
 
     scripted_copy->clear();
     block_tree_cache_test::BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    EXPECT_EQ(scripted_copy->submitCount(), 1u);
+    EXPECT_EQ(scripted_copy->submittedDescriptorCount(), 1u);
     EXPECT_EQ(backing->freeBlocksNum(), 7u);
 
     block_tree_cache_test::BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, /*num_blocks=*/100, Tier::HOST);
@@ -1126,7 +1126,7 @@ TEST_F(BlockTreeCacheFactoryTest, DeviceMinFreeDoesNotTriggerBlockTreeWatermarkE
     submitBlockReleases(cache, releases);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
-    EXPECT_EQ(scripted_copy->submitCount(), 0u);
+    EXPECT_EQ(scripted_copy->submittedDescriptorCount(), 0u);
     EXPECT_EQ(backing->freeBlocksNum(), 6u);
 }
 
@@ -1426,6 +1426,7 @@ TEST_F(BlockTreeCacheFactoryTest, CreatesDiskCacheWithoutHostCache) {
     EXPECT_FALSE(cache->isHostCacheEnabled());
     EXPECT_TRUE(cache->isDiskCacheEnabled());
     EXPECT_EQ(cache->config().device_disk_staging_block_count, 4u);
+    EXPECT_EQ(cache->config().max_descriptors_per_transfer_batch, 64u);
     ASSERT_FALSE(cache->groupSets().empty());
     for (const auto& group_set : cache->groupSets()) {
         ASSERT_NE(group_set, nullptr);
@@ -1457,7 +1458,7 @@ TEST_F(BlockTreeCacheFactoryTest, DiskStagingBlockCountPropagatesAndValidates) {
         EXPECT_EQ(cache->config().device_disk_staging_block_count, 2u);
     }
 
-    for (const int64_t bad_block_count : {int64_t{0}, int64_t{-1}}) {
+    for (const int64_t bad_block_count : {int64_t{0}, int64_t{-1}, int64_t{3}}) {
         auto                                     allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
         block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_staging_bad_blocks");
         auto                                     kv_cache_config = makeDiskKvCacheConfig(disk_dir.path);
@@ -1472,6 +1473,24 @@ TEST_F(BlockTreeCacheFactoryTest, DiskStagingBlockCountPropagatesAndValidates) {
         kv_cache_config.disk_cache_staging_block_count = 0;
         auto cache = createBlockTreeCache(config, kv_cache_config, allocator);
         ASSERT_NE(cache, nullptr);
+    }
+}
+
+TEST_F(BlockTreeCacheFactoryTest, TransferBatchLimitPropagatesAndValidates) {
+    const auto config = makeSingleConfig();
+    {
+        auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        KVCacheConfig kv_cache_config;
+        kv_cache_config.memory_cache_max_descriptors_per_transfer_batch = 17;
+        auto cache = createBlockTreeCache(config, kv_cache_config, allocator);
+        ASSERT_NE(cache, nullptr);
+        EXPECT_EQ(cache->config().max_descriptors_per_transfer_batch, 17u);
+    }
+    for (const int64_t invalid_limit : {int64_t{0}, int64_t{-1}}) {
+        auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        KVCacheConfig kv_cache_config;
+        kv_cache_config.memory_cache_max_descriptors_per_transfer_batch = invalid_limit;
+        expectFactoryRejects(config, allocator, kv_cache_config);
     }
 }
 
@@ -1626,9 +1645,9 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
         ASSERT_NE(disk_block, NULL_BLOCK_IDX);
 
         EXPECT_TRUE(factory_cache->executeTransfer(
-            TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks[0], host_block)));
+            {TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks[0], host_block)}));
         EXPECT_TRUE(factory_cache->executeTransfer(
-            TransferDescriptor::hostToDisk(group->groupSetId(), host_block, disk_block)));
+            {TransferDescriptor::hostToDisk(group->groupSetId(), host_block, disk_block)}));
 
         block_tree_cache_test::unreferenceDeviceBlocksForTest(*group, device_blocks, BlockRefType::REQUEST);
         group->releaseSingleBlock(Tier::HOST, host_block, BlockRefType::REQUEST);

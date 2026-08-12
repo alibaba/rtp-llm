@@ -256,7 +256,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         *cache, cache_config_, *cp_mapper, seed.cache_keys, load_resource, /*logical_reuse_blocks=*/1));
 
     manager_->free(FreeInfo{load_resource, load_token_ids});
-    const size_t submits_before_second_hit = pausable_engine->submitCount();
+    const size_t submits_before_second_hit = pausable_engine->submittedDescriptorCount();
     auto         hit_resource              = makeResource(cache_config_);
     auto         hit_token_ids =
         makeTokenIds(/*offset=*/0, 2 * seq_size_per_block + 1, 2 * seq_size_per_block + 1, seq_size_per_block);
@@ -269,7 +269,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     EXPECT_EQ(hit_result.host_reuse_len, 0);
     EXPECT_EQ(hit_result.disk_reuse_len, 0);
     EXPECT_EQ(hit_result.async_context, nullptr);
-    EXPECT_EQ(pausable_engine->submitCount(), submits_before_second_hit);
+    EXPECT_EQ(pausable_engine->submittedDescriptorCount(), submits_before_second_hit);
     ASSERT_TRUE(pathDevicePayloadMatches(manager_, *cache, seed.cache_keys));
     ASSERT_TRUE(requestReusesExpectedCpCanonicalPath(
         *cache, cache_config_, *cp_mapper, seed.cache_keys, hit_resource, /*logical_reuse_blocks=*/1));
@@ -443,7 +443,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     engine->enqueueResult(/*success=*/true);
     engine->enqueueResult(/*success=*/false);
 
-    const size_t descriptors_before_failure = engine->submitCount();
+    const size_t descriptors_before_failure = engine->submittedDescriptorCount();
     ASSERT_TRUE(engine->armPause());
     ScopedTransferRelease failure_release(engine);
 
@@ -540,7 +540,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     ASSERT_TRUE(scheduler->schedule().ok());
     EXPECT_TRUE(prefill_stream->streamCacheResource().isResourceReleased());
 
-    const size_t descriptors_before_load = engine->submitCount();
+    const size_t descriptors_before_load = engine->submittedDescriptorCount();
     ASSERT_TRUE(engine->armPause());
     ScopedTransferRelease load_release(engine);
     auto                  load_resource = makeResource(cache_config_);
@@ -700,7 +700,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
               static_cast<size_t>(logical_blocks) * cache->groupSets().size());
 
     const size_t device_to_host_descriptors = static_cast<size_t>(logical_blocks) * cache->groupSets().size();
-    ASSERT_EQ(engine->submitCount(), device_to_host_descriptors);
+    ASSERT_EQ(engine->submittedDescriptorCount(), device_to_host_descriptors);
     auto descriptors = engine->descriptors();
     for (size_t index = 0; index < device_to_host_descriptors; ++index) {
         EXPECT_EQ(descriptors[index].source_tier, Tier::DEVICE);
@@ -727,7 +727,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
     const size_t host_to_disk_begin = device_to_host_descriptors;
     const size_t disk_snapshot_begin =
         host_to_disk_begin + static_cast<size_t>(logical_blocks) * cache->groupSets().size();
-    ASSERT_EQ(engine->submitCount(), disk_snapshot_begin);
+    ASSERT_EQ(engine->submittedDescriptorCount(), disk_snapshot_begin);
     descriptors = engine->descriptors();
     for (size_t index = host_to_disk_begin; index < disk_snapshot_begin; ++index) {
         EXPECT_EQ(descriptors[index].source_tier, Tier::HOST);
@@ -802,7 +802,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
     ASSERT_TRUE(result.async_context->success()) << result.async_context->errorInfo().ToString();
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
-    ASSERT_EQ(engine->submitCount(), disk_snapshot_begin + expected_load_descriptors);
+    ASSERT_EQ(engine->submittedDescriptorCount(), disk_snapshot_begin + expected_load_descriptors);
 
     descriptors = engine->descriptors();
     for (size_t index = disk_snapshot_begin; index < descriptors.size(); ++index) {

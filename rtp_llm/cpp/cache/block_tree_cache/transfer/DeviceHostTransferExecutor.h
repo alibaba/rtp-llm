@@ -16,11 +16,15 @@ public:
     explicit DeviceHostTransferExecutor(DeviceHostCopyOptions options = {});
     ~DeviceHostTransferExecutor() = default;
 
-    TransferStatus execute(HostBufferView host, const TransferDescriptor& desc, const GroupSet& group_set);
+    TransferStatus execute(const std::vector<HostBufferView>&       hosts,
+                           const std::vector<TransferDescriptor>& descriptors,
+                           const std::vector<const GroupSet*>&    group_sets);
 
 private:
     std::pair<TransferStatus, std::vector<DeviceHostCopyPlan>>
-    generatePlan(const TransferDescriptor& desc, const GroupSet& group_set, HostBufferView host) const;
+    generatePlan(const std::vector<HostBufferView>&       hosts,
+                 const std::vector<TransferDescriptor>& descriptors,
+                 const std::vector<const GroupSet*>&    group_sets) const;
 
     DeviceHostCopyOptions                                options_;
     std::vector<std::unique_ptr<DeviceHostCopyStrategy>> strategies_;

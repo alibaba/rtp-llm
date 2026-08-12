@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
@@ -1027,6 +1028,20 @@ static void appendValidGroupedTransfer(const std::shared_ptr<KVCacheManager>& ma
         *request.mutable_mem_request(), {descriptor}, manager->blockTreeCache()->groupSets()));
 }
 
+class RecordingBatchTransferEngine final: public PerRankBlockTransferEngine {
+public:
+    RecordingBatchTransferEngine(): PerRankBlockTransferEngine(std::vector<GroupSetPtr>{}) {}
+
+    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
+        ++submitted_batch_count;
+        submitted_descriptor_count += descriptors.size();
+        return std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
+    }
+
+    size_t submitted_batch_count{0};
+    size_t submitted_descriptor_count{0};
+};
+
 TEST_F(KVCacheManagerTest, ExecuteFunctionRoutesAllGroupedMemoryItemsOnlyToTieredBlockTree) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
@@ -1041,6 +1056,30 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionRoutesAllGroupedMemoryItemsOnlyToTiere
     EXPECT_TRUE(manager->executeFunction(request, response));
     ASSERT_TRUE(response.has_mem_response());
     EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::OK);
+}
+
+TEST_F(KVCacheManagerTest, ExecuteFunctionSubmitsAllMemoryItemsAsOneBatch) {
+    auto cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_host_cache = true;
+    kv_cache_config.host_cache_size_mb = 1;
+    auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
+    ASSERT_TRUE(manager->init());
+    auto engine = std::make_shared<RecordingBatchTransferEngine>();
+    manager->block_tree_cache_->transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine);
+    FunctionRequestPB request;
+    const std::vector<TransferDescriptor> descriptors = {
+        TransferDescriptor::deviceToHost(0, {1}, 1),
+        TransferDescriptor::deviceToHost(0, {2}, 2),
+    };
+    ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(
+        *request.mutable_mem_request(), descriptors, manager->blockTreeCache()->groupSets()));
+    FunctionResponsePB response;
+
+    EXPECT_TRUE(manager->executeFunction(request, response));
+    EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::OK);
+    EXPECT_EQ(engine->submitted_batch_count, 1u);
+    EXPECT_EQ(engine->submitted_descriptor_count, 2u);
 }
 
 TEST_F(KVCacheManagerTest, ExecuteFunctionReportsFailedCodeForMixedPartialAndOutOfRangeGroupedItems) {

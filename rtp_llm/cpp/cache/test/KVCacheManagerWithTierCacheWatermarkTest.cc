@@ -256,7 +256,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
         requestReusesExpectedPath(*cache, cache_config_, seed.cache_keys, load_resource, /*logical_reuse_blocks=*/3));
 
     manager_->free(FreeInfo{load_resource, load_token_ids});
-    const size_t submits_before_second_hit = pausable_engine->submitCount();
+    const size_t submits_before_second_hit = pausable_engine->submittedDescriptorCount();
     auto         hit_resource              = makeResource(cache_config_);
     auto hit_token_ids = makeTokenIds(/*offset=*/0, 4 * seq_size_per_block, 4 * seq_size_per_block, seq_size_per_block);
     MallocInfo hit_info{hit_resource, hit_token_ids};
@@ -268,7 +268,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
     EXPECT_EQ(hit_result.host_reuse_len, 0);
     EXPECT_EQ(hit_result.disk_reuse_len, 0);
     EXPECT_EQ(hit_result.async_context, nullptr);
-    EXPECT_EQ(pausable_engine->submitCount(), submits_before_second_hit);
+    EXPECT_EQ(pausable_engine->submittedDescriptorCount(), submits_before_second_hit);
     ASSERT_TRUE(pathDevicePayloadMatches(manager_, *cache, seed.cache_keys));
     ASSERT_TRUE(
         requestReusesExpectedPath(*cache, cache_config_, seed.cache_keys, hit_resource, /*logical_reuse_blocks=*/3));
@@ -532,7 +532,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
         requestReusesExpectedPath(*cache, cache_config_, seed.cache_keys, load_resource, /*logical_reuse_blocks=*/1));
 
     manager_->free(FreeInfo{load_resource, load_token_ids});
-    const size_t submits_before_second_hit = pausable_engine->submitCount();
+    const size_t submits_before_second_hit = pausable_engine->submittedDescriptorCount();
     auto         hit_resource              = makeResource(cache_config_);
     auto hit_token_ids = makeTokenIds(/*offset=*/0, 2 * seq_size_per_block, 2 * seq_size_per_block, seq_size_per_block);
     MallocInfo hit_info{hit_resource, hit_token_ids};
@@ -544,7 +544,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
     EXPECT_EQ(hit_result.host_reuse_len, 0);
     EXPECT_EQ(hit_result.disk_reuse_len, 0);
     EXPECT_EQ(hit_result.async_context, nullptr);
-    EXPECT_EQ(pausable_engine->submitCount(), submits_before_second_hit);
+    EXPECT_EQ(pausable_engine->submittedDescriptorCount(), submits_before_second_hit);
     ASSERT_TRUE(pathDevicePayloadMatches(manager_, *cache, seed.cache_keys));
     ASSERT_TRUE(
         requestReusesExpectedPath(*cache, cache_config_, seed.cache_keys, hit_resource, /*logical_reuse_blocks=*/1));
@@ -587,14 +587,14 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
     for (size_t index = 0; index < cache->groupSets().size() * 4; ++index) {
         recording_engine->enqueueResult(/*success=*/false);
     }
-    const size_t failed_submit_count = recording_engine->submitCount();
+    const size_t failed_submit_count = recording_engine->submittedDescriptorCount();
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
     ASSERT_TRUE(
         waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
         << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-        << " submits=" << recording_engine->submitCount();
+        << " submits=" << recording_engine->submittedDescriptorCount();
 
     const auto after_device_failure = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(after_device_failure.has_value());
@@ -615,7 +615,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         ASSERT_NE(group_set->diskPool(), nullptr);
         EXPECT_EQ(group_set->diskPool()->usedBlocksNum(), 0u);
     }
-    EXPECT_GT(recording_engine->submitCount(), failed_submit_count);
+    EXPECT_GT(recording_engine->submittedDescriptorCount(), failed_submit_count);
     expectPoolSnapshotsEq(initial_lower, snapshotLowerPools(*cache, GetParam()));
     ASSERT_TRUE(pathDevicePayloadMatches(manager_, *cache, seed.cache_keys));
 
@@ -627,14 +627,14 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
     MallocInfo hit_info{hit_resource, hit_tokens};
     hit_info.reuse_cache            = true;
     hit_info.enable_cache_lookup    = true;
-    const size_t submits_before_hit = recording_engine->submitCount();
+    const size_t submits_before_hit = recording_engine->submittedDescriptorCount();
     const auto   hit_result         = manager_->malloc(hit_info);
     ASSERT_TRUE(hit_result.success);
     EXPECT_EQ(hit_result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
     EXPECT_EQ(hit_result.host_reuse_len, 0);
     EXPECT_EQ(hit_result.disk_reuse_len, 0);
     EXPECT_EQ(hit_result.async_context, nullptr);
-    EXPECT_EQ(recording_engine->submitCount(), submits_before_hit);
+    EXPECT_EQ(recording_engine->submittedDescriptorCount(), submits_before_hit);
     ASSERT_TRUE(
         requestReusesExpectedPath(*cache, cache_config_, seed.cache_keys, hit_resource, /*logical_reuse_blocks=*/1));
     ASSERT_TRUE(requestReusedPayloadMatchesExpectedPath(
@@ -648,7 +648,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
     ASSERT_TRUE(
         waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
         << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-        << " submits=" << recording_engine->submitCount();
+        << " submits=" << recording_engine->submittedDescriptorCount();
 
     auto maybe_host = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(maybe_host.has_value());
@@ -674,7 +674,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         ASSERT_TRUE(host_ratio.has_value());
 
         const auto lower_before_host_failure   = snapshotLowerPools(*cache, GetParam());
-        const auto submits_before_host_failure = recording_engine->submitCount();
+        const auto submits_before_host_failure = recording_engine->submittedDescriptorCount();
         for (size_t index = 0; index < cache->groupSets().size() * 4; ++index) {
             recording_engine->enqueueResult(/*success=*/false);
         }
@@ -684,7 +684,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         ASSERT_TRUE(waitForPendingTasksDoneFor(
             *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
             << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-            << " submits=" << recording_engine->submitCount();
+            << " submits=" << recording_engine->submittedDescriptorCount();
 
         const auto descriptors_after_host_failure = recording_engine->descriptors();
         ASSERT_GT(descriptors_after_host_failure.size(), submits_before_host_failure);
@@ -719,7 +719,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         // demotion retry. A successful load consumes that HOST copy, so the
         // same cached path is demoted back to HOST below before retrying H2Dk.
         recording_engine->clearScriptedResults();
-        const size_t submits_before_host_hit = recording_engine->submitCount();
+        const size_t submits_before_host_hit = recording_engine->submittedDescriptorCount();
         auto         host_hit_resource       = makeResource(cache_config_);
         auto         host_hit_tokens         = makeTokenIds(
             /*offset=*/0,
@@ -743,7 +743,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         ASSERT_TRUE(waitForPendingTasksDoneFor(
             *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
             << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-            << " submits=" << recording_engine->submitCount();
+            << " submits=" << recording_engine->submittedDescriptorCount();
 
         const auto descriptors_after_host_hit = recording_engine->descriptors();
         ASSERT_EQ(descriptors_after_host_hit.size(), submits_before_host_hit + cache->groupSets().size());
@@ -772,7 +772,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         ASSERT_TRUE(waitForPendingTasksDoneFor(
             *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
             << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-            << " submits=" << recording_engine->submitCount();
+            << " submits=" << recording_engine->submittedDescriptorCount();
         auto rebuilt_host = snapshotPathResources(*cache, seed.cache_keys);
         ASSERT_TRUE(rebuilt_host.has_value());
         ASSERT_EQ(rebuilt_host->size(), 1u);
@@ -791,7 +791,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         ASSERT_TRUE(waitForPendingTasksDoneFor(
             *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
             << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-            << " submits=" << recording_engine->submitCount();
+            << " submits=" << recording_engine->submittedDescriptorCount();
 
         auto after_host_retry = snapshotPathResources(*cache, seed.cache_keys);
         ASSERT_TRUE(after_host_retry.has_value());
@@ -827,7 +827,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
     ASSERT_TRUE(
         waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
         << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-        << " submits=" << recording_engine->submitCount();
+        << " submits=" << recording_engine->submittedDescriptorCount();
     ASSERT_TRUE(pathDevicePayloadMatches(manager_, *cache, seed.cache_keys));
     ASSERT_TRUE(
         requestReusesExpectedPath(*cache, cache_config_, seed.cache_keys, load_resource, /*logical_reuse_blocks=*/1));

@@ -879,10 +879,10 @@ TEST(BlockTreeCacheFinalizationTest, CopyExceptionSettlesPendingReleasesBeforeTa
 
     EXPECT_GT(BlockTreeCacheTestPeer::pendingEvictionReleasesForTest(*environment->cache), 0u);
     const int    pending_tasks = BlockTreeCacheTestPeer::pendingTasksForTest(*environment->cache);
-    const size_t submit_count  = per_rank_transfer_engine->submitCount();
+    const size_t submit_count  = per_rank_transfer_engine->submittedBatchCount();
     BlockTreeCacheTestPeer::runMaintenanceForTest(*environment->cache);
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*environment->cache), pending_tasks);
-    EXPECT_EQ(per_rank_transfer_engine->submitCount(), submit_count);
+    EXPECT_EQ(per_rank_transfer_engine->submittedBatchCount(), submit_count);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*environment->cache, Tier::DEVICE, 0.0);
     barrier->release();
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
@@ -1757,7 +1757,7 @@ TEST_F(BlockTreeCacheTest, LoadPreparedPrefixFailureRollsBackAllSourceAndTargetH
     ASSERT_TRUE(second_device_pool->isAllocated(second_target));
 
     EXPECT_FALSE(load_context->commit());
-    EXPECT_EQ(per_rank_transfer_engine->submitCount(), 0u);
+    EXPECT_EQ(per_rank_transfer_engine->submittedBatchCount(), 0u);
 
     // The first descriptor's acquired target holder and both of its source planning
     // holds are gone; the unprepared trailing descriptor's source hold is also gone.
@@ -1840,7 +1840,7 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackCoreHoldersAndRetainsReque
     EXPECT_TRUE(load_context->done());
     EXPECT_FALSE(load_context->success());
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
-    EXPECT_EQ(per_rank_transfer_engine->submitCount(), 0u);
+    EXPECT_EQ(per_rank_transfer_engine->submittedBatchCount(), 0u);
     EXPECT_EQ(host_pool->refCount(source_block), source_ref_before);
     EXPECT_EQ(device_pool->refCount(request_target), 1u);
 
@@ -1926,7 +1926,7 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackMixedDeviceAndHostDescript
     EXPECT_FALSE(load_context->commit());
     EXPECT_TRUE(load_context->done());
     EXPECT_FALSE(load_context->success());
-    EXPECT_EQ(per_rank_transfer_engine->submitCount(), 0u);
+    EXPECT_EQ(per_rank_transfer_engine->submittedBatchCount(), 0u);
     EXPECT_EQ(resident_device_pool->refCount(resident_block), 1u);
     EXPECT_EQ(host_pool->refCount(host_block), 1u);
     EXPECT_EQ(target_device_pool->refCount(request_target), 1u);
@@ -2173,7 +2173,7 @@ TEST_F(BlockTreeCacheTest, ShutdownDrainsOnlyHoldsRemainingAfterPartialMixedTier
 
     EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 1);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    EXPECT_EQ(per_rank_transfer_engine->submitCount(), 0u);
+    EXPECT_EQ(per_rank_transfer_engine->submittedBatchCount(), 0u);
     EXPECT_EQ(device_pool->freeBlocksNum(), device_free_before);
     EXPECT_FALSE(device_pool->isAllocated(device_block));
     EXPECT_EQ(host_pool->freeBlocksNum(), host_free_before - 1);
@@ -2181,7 +2181,7 @@ TEST_F(BlockTreeCacheTest, ShutdownDrainsOnlyHoldsRemainingAfterPartialMixedTier
 
     cache.reset();
 
-    EXPECT_EQ(per_rank_transfer_engine->submitCount(), 0u);
+    EXPECT_EQ(per_rank_transfer_engine->submittedBatchCount(), 0u);
     EXPECT_EQ(device_pool->freeBlocksNum(), device_free_before);
     EXPECT_EQ(host_pool->freeBlocksNum(), host_free_before);
     EXPECT_EQ(disk_pool->freeBlocksNum(), disk_free_before);

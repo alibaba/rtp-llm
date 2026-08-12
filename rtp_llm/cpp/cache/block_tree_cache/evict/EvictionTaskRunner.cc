@@ -190,52 +190,21 @@ void EvictionTaskRunner::runTask(BlockTreeEvictor& evictor, const BlockTreeEvict
 
 BlockTreeEvictor::CopyResultSet EvictionTaskRunner::performCopy(const BlockTreeEvictor::EvictionPlan& plan) const {
     BlockTreeEvictor::CopyResultSet results;
-    results.primary_success = true;
+    std::vector<TransferDescriptor> descriptors;
+    bool                            transfer_success = buildTransferBatch(plan, descriptors);
+    const auto batches = transfer_success ? partitionTransferBatch(descriptors)
+                                          : std::vector<std::vector<TransferDescriptor>>{};
 
-    if (plan.primary_desc.target_tier != Tier::NONE) {
-        results.primary_success = executeTierCopy(plan.primary_desc);
-        if (!results.primary_success) {
-            RTP_LLM_LOG_WARNING("primary copy FAILED "
-                                "group_set[%zu] node_key=%ld %s->%s",
-                                plan.primary_desc.group_set_id,
-                                plan.primary_desc.node ? plan.primary_desc.node->cache_key : 0,
-                                tierName(plan.primary_desc.source_tier),
-                                tierName(plan.primary_desc.target_tier));
-            results.cascade_success.assign(plan.cascade_descs.size(), false);
-            return results;
-        }
-        RTP_LLM_LOG_DEBUG("primary copy OK "
-                          "group_set[%zu] node_key=%ld %s->%s",
-                          plan.primary_desc.group_set_id,
-                          plan.primary_desc.node ? plan.primary_desc.node->cache_key : 0,
-                          tierName(plan.primary_desc.source_tier),
-                          tierName(plan.primary_desc.target_tier));
+    std::vector<std::shared_ptr<AsyncContext>> contexts;
+    contexts.reserve(batches.size());
+    for (const auto& batch : batches) {
+        contexts.push_back(transfer_dispatcher_->executePerRank(batch));
     }
-
-    results.cascade_success.reserve(plan.cascade_descs.size());
-    for (const auto& cascade_desc : plan.cascade_descs) {
-        bool copy_ok = true;
-        if (cascade_desc.target_tier != Tier::NONE) {
-            copy_ok = executeTierCopy(cascade_desc);
-        }
-        results.cascade_success.push_back(copy_ok);
-
-        if (!copy_ok) {
-            RTP_LLM_LOG_WARNING("cascade copy FAILED "
-                                "group_set[%zu] node_key=%ld %s->%s",
-                                cascade_desc.group_set_id,
-                                cascade_desc.node ? cascade_desc.node->cache_key : 0,
-                                tierName(cascade_desc.source_tier),
-                                tierName(cascade_desc.target_tier));
-        } else if (cascade_desc.target_tier != Tier::NONE) {
-            RTP_LLM_LOG_DEBUG("cascade copy OK "
-                              "group_set[%zu] node_key=%ld %s->%s",
-                              cascade_desc.group_set_id,
-                              cascade_desc.node ? cascade_desc.node->cache_key : 0,
-                              tierName(cascade_desc.source_tier),
-                              tierName(cascade_desc.target_tier));
-        }
-    }
+    FusedAsyncContext context(contexts);
+    context.waitDone();
+    transfer_success = transfer_success && context.success();
+    results.primary_success = transfer_success;
+    results.cascade_success.assign(plan.cascade_descs.size(), transfer_success);
     return results;
 }
 
@@ -247,19 +216,46 @@ BlockTreeEvictor::CopyResultSet EvictionTaskRunner::runTransfer(const BlockTreeE
     BlockTreeEvictor::CopyResultSet results;
     std::vector<TransferDescriptor> descriptors;
     const bool                      batch_ready      = buildTransferBatch(plan, descriptors);
-    const bool                      transfer_success = batch_ready
-                                  && transfer_dispatcher_->executeMultiRank(
-                                      descriptors, transferTimeoutMs(plan, memory_timeout_ms_, disk_timeout_ms_));
+    bool transfer_success = false;
+    if (batch_ready) {
+        const auto batches = partitionTransferBatch(descriptors);
+        std::vector<std::shared_ptr<AsyncContext>> contexts;
+        contexts.reserve(batches.size());
+        for (const auto& batch : batches) {
+            contexts.push_back(transfer_dispatcher_->executeMultiRank(
+                batch, transferTimeoutMs(plan, memory_timeout_ms_, disk_timeout_ms_)));
+        }
+        FusedAsyncContext context(contexts);
+        context.waitDone();
+        transfer_success = context.success();
+    }
     results.primary_success = transfer_success;
     results.cascade_success.assign(plan.cascade_descs.size(), transfer_success);
     return results;
 }
 
-bool EvictionTaskRunner::executeTierCopy(const TransferDescriptor& eviction_desc) const {
-    if (!eviction_desc.isExecutable()) {
-        return false;
+std::vector<std::vector<TransferDescriptor>>
+EvictionTaskRunner::partitionTransferBatch(const std::vector<TransferDescriptor>& descriptors) const {
+    const auto disk_pool = [this](const TransferDescriptor& descriptor) {
+        if (descriptor.source_tier != Tier::DISK && descriptor.target_tier != Tier::DISK) {
+            return static_cast<BlockTreeDiskBlockPool*>(nullptr);
+        }
+        return group_sets_[descriptor.group_set_id]->diskPool().get();
+    };
+    std::vector<std::vector<TransferDescriptor>> batches;
+    for (const auto& descriptor : descriptors) {
+        auto batch = std::find_if(batches.begin(), batches.end(), [&](const auto& current) {
+            return current.front().source_tier == descriptor.source_tier
+                && current.front().target_tier == descriptor.target_tier
+                && disk_pool(current.front()) == disk_pool(descriptor);
+        });
+        if (batch == batches.end()) {
+            batches.push_back({descriptor});
+        } else {
+            batch->push_back(descriptor);
+        }
     }
-    return transfer_dispatcher_->executePerRank(eviction_desc);
+    return batches;
 }
 
 Tier EvictionTaskRunner::normalizeTargetTier(Tier source_tier) const {

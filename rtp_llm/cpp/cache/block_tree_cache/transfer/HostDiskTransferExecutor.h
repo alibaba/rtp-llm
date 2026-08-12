@@ -10,7 +10,9 @@ enum class BlockIOStatus;
 // Consumes a validated HostBufferView; disk I/O always uses the padded stride.
 class HostDiskTransferExecutor {
 public:
-    TransferStatus execute(HostBufferView host, const TransferDescriptor& desc, const GroupSet& group_set) const;
+    TransferStatus execute(const std::vector<HostBufferView>&       hosts,
+                           const std::vector<TransferDescriptor>& descriptors,
+                           const std::vector<const GroupSet*>&    group_sets) const;
 
 private:
     static TransferStatus blockIOStatusToTransferStatus(BlockIOStatus status);

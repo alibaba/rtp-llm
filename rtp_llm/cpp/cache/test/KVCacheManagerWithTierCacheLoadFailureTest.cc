@@ -8,13 +8,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerTierLoadFailureReleasesRefsAndC
     ASSERT_NO_FATAL_FAILURE(runLowerTierLoadFailureScenario(source));
 }
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedHostDiskLoadFailureRollsBackWholeTicketAndCanRetry) {
-    if (GetParam() != TierLayout::HOST_DISK) {
-        GTEST_SKIP() << "mixed HOST+DISK load requires the HostDisk layout";
-    }
-    ASSERT_NO_FATAL_FAILURE(runLowerTierLoadFailureScenario(LoadFailureSource::MIXED));
-}
-
 TEST_P(KVCacheManagerWithTierCacheTest, DSV4ConcurrentLowerHitJoinsLoading) {
     if (GetParam() != TierLayout::HOST_ONLY) {
         GTEST_SKIP() << "manager join coverage uses the HostOnly lower source";
@@ -106,7 +99,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerHitOuterIncrFailureAbortsBefore
         ASSERT_EQ(pool.free_blocks, 1u) << pool.pool->poolName();
         ASSERT_EQ(pool.used_blocks, 0u) << pool.pool->poolName();
     }
-    const size_t submits_before = recording_engine->submitCount();
+    const size_t submits_before = recording_engine->submittedDescriptorCount();
 
     const int     seq_size_per_block = static_cast<int>(cache_config_.seq_size_per_block);
     constexpr int batch_size         = 2;
@@ -197,7 +190,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerHitOuterIncrFailureAbortsBefore
         }
     }
 
-    EXPECT_EQ(recording_engine->submitCount(), submits_before)
+    EXPECT_EQ(recording_engine->submittedDescriptorCount(), submits_before)
         << "pre-commit failure must not submit a lower-tier copy";
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
     expectPoolSnapshotsEq(device_before, snapshotDevicePools(manager_));

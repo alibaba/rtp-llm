@@ -102,9 +102,9 @@ public:
                                          TransferCopyAction               action,
                                          std::shared_ptr<CallbackBarrier> barrier = nullptr);
 
-    std::shared_ptr<AsyncContext> submit(const TransferDescriptor& descriptor) override;
+    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override;
 
-    size_t submitCount() const;
+    size_t submittedBatchCount() const;
 
 private:
     const TransferCopyAction         action_;
@@ -170,7 +170,7 @@ public:
     explicit ScriptedPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups,
                                                 bool perform_successful_transfers = true);
 
-    std::shared_ptr<AsyncContext> submit(const TransferDescriptor& descriptor) override;
+    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override;
 
     // Scripts the outcome of upcoming submits. Successful submits delegate to
     // the real engine unless perform_successful_transfers is false.
@@ -178,12 +178,14 @@ public:
     void clear();
 
     std::vector<TransferDescriptor> descriptors() const;
-    size_t                          submitCount() const;
+    size_t                          submittedBatchCount() const;
+    size_t                          submittedDescriptorCount() const;
 
 private:
     mutable std::mutex              mutex_;
     std::deque<bool>                results_;
     std::vector<TransferDescriptor> descriptors_;
+    size_t                          submitted_batch_count_{0};
     bool                            perform_successful_transfers_{true};
 };
 

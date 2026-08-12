@@ -18,7 +18,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DevicePrefixHitKeepsLowerTiersUntouc
     ASSERT_NO_FATAL_FAILURE(expectPathIdleAtDevice(*cache, seed.cache_keys));
     const auto lower_after_seed = snapshotLowerPools(*cache, GetParam());
     expectPoolSnapshotsEq(initial_lower, lower_after_seed);
-    ASSERT_EQ(transfer_engine_->submitCount(), 0u);
+    ASSERT_EQ(transfer_engine_->submittedDescriptorCount(), 0u);
 
     auto       resource  = makeResource(cache_config_);
     auto       token_ids = makeTokenIds(/*offset=*/0,
@@ -53,7 +53,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DevicePrefixHitKeepsLowerTiersUntouc
 
     ASSERT_NO_FATAL_FAILURE(expectPathIdleAtDevice(*cache, seed.cache_keys));
     expectPoolSnapshotsEq(lower_after_seed, snapshotLowerPools(*cache, GetParam()));
-    EXPECT_EQ(transfer_engine_->submitCount(), 0u);
+    EXPECT_EQ(transfer_engine_->submittedDescriptorCount(), 0u);
 
     manager_->free(FreeInfo{resource, token_ids});
     ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
@@ -84,7 +84,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4AllocatorPressureUsesDirectDropNotDe
     ASSERT_GT(device_resources_before, 0u);
     const auto lower_before_pressure = snapshotLowerPools(*cache, GetParam());
     expectPoolSnapshotsEq(initial_lower, lower_before_pressure);
-    ASSERT_EQ(transfer_engine_->submitCount(), 0u);
+    ASSERT_EQ(transfer_engine_->submittedDescriptorCount(), 0u);
 
     const int  seq_len                = 3 * static_cast<int>(cache_config_.seq_size_per_block);
     const auto device_before_pressure = snapshotDevicePools(manager_);
@@ -117,7 +117,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4AllocatorPressureUsesDirectDropNotDe
     EXPECT_LT(device_resources_after, device_resources_before);
     ASSERT_NO_FATAL_FAILURE(expectAllTreeResourcesIdleAtDevice(*cache));
     expectPoolSnapshotsEq(lower_before_pressure, snapshotLowerPools(*cache, GetParam()));
-    EXPECT_EQ(transfer_engine_->submitCount(), 0u);
+    EXPECT_EQ(transfer_engine_->submittedDescriptorCount(), 0u);
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
     const auto device_after_pressure = snapshotDevicePools(manager_);
@@ -215,7 +215,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4ReuseCacheFalsePressureDoesNotDistur
     MallocInfo first_info{first_resource, first_token_ids};
     first_info.reuse_cache                = true;
     first_info.enable_cache_lookup        = true;
-    const size_t first_load_submits_begin = pausable_engine->submitCount();
+    const size_t first_load_submits_begin = pausable_engine->submittedDescriptorCount();
     const auto   first_result             = manager_->malloc(first_info);
     ASSERT_TRUE(first_result.success);
     EXPECT_EQ(first_result.reuse_len, 0);
@@ -250,7 +250,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4ReuseCacheFalsePressureDoesNotDistur
     ASSERT_GE(device_before_second[0].free_blocks, 1u) << "the second request must first allocate in group0 SWA";
     ASSERT_EQ(cache_config_.typeForGroup(/*group_id=*/1), CacheGroupType::FULL);
     ASSERT_EQ(device_before_second[1].free_blocks, 0u) << "the second request must fail after reaching group1 FULL";
-    const size_t submits_before_second = pausable_engine->submitCount();
+    const size_t submits_before_second = pausable_engine->submittedDescriptorCount();
 
     auto second_resource  = makeResource(cache_config_);
     auto second_token_ids = makeTokenIds(/*offset=*/10000, seq_size_per_block, seq_size_per_block, seq_size_per_block);
@@ -269,7 +269,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4ReuseCacheFalsePressureDoesNotDistur
 
     expectPoolSnapshotsEq(device_before_second, snapshotDevicePools(manager_));
     expectPoolSnapshotsEq(lower_before_second, snapshotLowerPools(*cache, GetParam()));
-    EXPECT_EQ(pausable_engine->submitCount(), submits_before_second);
+    EXPECT_EQ(pausable_engine->submittedDescriptorCount(), submits_before_second);
     EXPECT_FALSE(first_result.async_context->done());
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), pending_before_second)
         << "reuse_cache=false pressure must not enqueue or settle the first load";
@@ -281,14 +281,14 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4ReuseCacheFalsePressureDoesNotDistur
     ASSERT_TRUE(waitForAsyncContextDoneFor(first_result.async_context,
                                            std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
         << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-        << " submits=" << pausable_engine->submitCount();
+        << " submits=" << pausable_engine->submittedDescriptorCount();
     first_result.async_context->waitDone();
     ASSERT_TRUE(first_result.async_context->done());
     ASSERT_TRUE(first_result.async_context->success()) << first_result.async_context->errorInfo().ToString();
     ASSERT_TRUE(
         waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
         << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-        << " submits=" << pausable_engine->submitCount();
+        << " submits=" << pausable_engine->submittedDescriptorCount();
     const auto descriptors_after_first_load = pausable_engine->descriptors();
     ASSERT_GT(descriptors_after_first_load.size(), first_load_submits_begin);
     for (size_t index = first_load_submits_begin; index < descriptors_after_first_load.size(); ++index) {
@@ -413,8 +413,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerTierMatchPublishesAsyncContext)
         EXPECT_EQ(cache->groupSets()[group_set_id]->hostPool()->refCount(state.host_block), 1u);
     }
 
-    const size_t submits_before_load = transfer_engine_->submitCount();
-    auto         resource            = makeResource(cache_config_);
+    const size_t batches_before_load     = transfer_engine_->submittedBatchCount();
+    const size_t descriptors_before_load = transfer_engine_->submittedDescriptorCount();
+    auto         resource                = makeResource(cache_config_);
     auto         tokens              = makeTokenIds(0,
                                2 * cache_config_.seq_size_per_block,
                                2 * cache_config_.seq_size_per_block,
@@ -431,7 +432,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerTierMatchPublishesAsyncContext)
     result.async_context->waitDone();
     ASSERT_TRUE(result.async_context->success()) << result.async_context->errorInfo().ToString();
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    EXPECT_EQ(transfer_engine_->submitCount(), submits_before_load + cache->groupSets().size());
+    EXPECT_EQ(transfer_engine_->submittedBatchCount(), batches_before_load + 1);
+    EXPECT_EQ(transfer_engine_->submittedDescriptorCount(), descriptors_before_load + cache->groupSets().size());
     ASSERT_TRUE(
         requestReusesExpectedPath(*cache, cache_config_, seed.cache_keys, resource, /*logical_reuse_blocks=*/1));
     ASSERT_TRUE(requestReusedPayloadMatchesExpectedPath(
@@ -483,7 +485,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4BatchCommonLowerHitSharesOneLoadedTa
         EXPECT_EQ(group_set->hostPool()->refCount(state.host_block), 1u);
     }
 
-    const size_t descriptors_before_load = engine->submitCount();
+    const size_t descriptors_before_load = engine->submittedDescriptorCount();
     ASSERT_TRUE(engine->armPause());
     ScopedTransferRelease release(engine);
 
@@ -555,10 +557,10 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4BatchCommonLowerHitSharesOneLoadedTa
     ASSERT_TRUE(result.async_context->success()) << result.async_context->errorInfo().ToString();
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
-    EXPECT_EQ(engine->submitCount(), descriptors_before_load + cache->groupSets().size());
+    EXPECT_EQ(engine->submittedDescriptorCount(), descriptors_before_load + cache->groupSets().size());
 
     const auto descriptors = engine->descriptors();
-    ASSERT_EQ(descriptors.size(), engine->submitCount());
+    ASSERT_EQ(descriptors.size(), engine->submittedDescriptorCount());
     for (size_t index = descriptors_before_load; index < descriptors.size(); ++index) {
         const auto& descriptor = descriptors[index];
         ASSERT_LT(descriptor.group_set_id, cache->groupSets().size());

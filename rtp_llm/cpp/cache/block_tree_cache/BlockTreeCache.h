@@ -69,8 +69,9 @@ struct BlockTreeCacheConfig {
     int host_cache_sync_timeout_ms{10000};
     int disk_cache_sync_timeout_ms{30000};
 
-    // Usable transient Device<->Disk staging blocks per rank.
+    // Total Device<->Disk staging blocks per rank, split evenly across two pools.
     size_t device_disk_staging_block_count{4};
+    size_t max_descriptors_per_transfer_batch{64};
 
     // ---- Query helpers ----
     bool isTierEnabled(Tier tier) const {
@@ -141,7 +142,7 @@ public:
     BlockIndicesType matchedBlocksForGroup(size_t                                group_id,
                                            const std::vector<MultiNodeResource>& matched_resources) const;
 
-    bool executeTransfer(const TransferDescriptor& descriptor);
+    bool executeTransfer(const std::vector<TransferDescriptor>& descriptors);
 
     void setMetricsReporter(const std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter) {
         metrics_reporter_.setMetricsReporter(metrics_reporter);

@@ -3,6 +3,7 @@
 #include <memory>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
 namespace rtp_llm {
@@ -15,8 +16,9 @@ public:
     BlockTransferDispatcher(std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine,
                             std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine = nullptr);
 
-    bool executePerRank(const TransferDescriptor& descriptor) const;
-    bool executeMultiRank(const std::vector<TransferDescriptor>& descriptors, int timeout_ms) const;
+    std::shared_ptr<AsyncContext> executePerRank(const std::vector<TransferDescriptor>& descriptors) const;
+    std::shared_ptr<AsyncContext> executeMultiRank(const std::vector<TransferDescriptor>& descriptors,
+                                                   int                                    timeout_ms) const;
     bool hasMultiRankEngine() const;
 
 private:

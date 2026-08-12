@@ -36,8 +36,9 @@ public:
 
 private:
     void runTask(BlockTreeEvictor& evictor, const BlockTreeEvictor::EvictionPlan& plan);
-    bool executeTierCopy(const TransferDescriptor& eviction_desc) const;
     Tier normalizeTargetTier(Tier source_tier) const;
+    std::vector<std::vector<TransferDescriptor>>
+    partitionTransferBatch(const std::vector<TransferDescriptor>& descriptors) const;
     static int
     transferTimeoutMs(const BlockTreeEvictor::EvictionPlan& plan, int memory_timeout_ms, int disk_timeout_ms);
 

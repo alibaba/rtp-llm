@@ -20,6 +20,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -34,15 +35,19 @@ public:
     explicit PausableHybridPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups):
         PerRankBlockTransferEngine(groups) {}
 
-    std::shared_ptr<AsyncContext> submit(const TransferDescriptor& descriptor) override {
+    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
         {
-            std::unique_lock<std::mutex> lock(mutex_);
+            std::lock_guard<std::mutex> lock(mutex_);
             ++submit_count_;
+            if (released_) {
+                return PerRankBlockTransferEngine::submit(descriptors);
+            }
+            auto context = std::make_shared<TransferBatchAsyncContext>();
             entered_ = true;
+            pending_.push_back({descriptors, context});
             cv_.notify_all();
-            cv_.wait(lock, [this] { return released_; });
+            return context;
         }
-        return PerRankBlockTransferEngine::submit(descriptor);
     }
 
     bool waitUntilEnteredFor(std::chrono::milliseconds timeout) {
@@ -51,9 +56,18 @@ public:
     }
 
     void release() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        released_ = true;
-        cv_.notify_all();
+        std::vector<PendingSubmit> pending;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            released_ = true;
+            pending.swap(pending_);
+            cv_.notify_all();
+        }
+        for (auto& submit : pending) {
+            auto context = PerRankBlockTransferEngine::submit(submit.descriptors);
+            context->waitDone();
+            submit.context->complete(context->errorInfo());
+        }
     }
 
     size_t submitCount() const {
@@ -62,11 +76,17 @@ public:
     }
 
 private:
-    mutable std::mutex      mutex_;
-    std::condition_variable cv_;
-    bool                    entered_{false};
-    bool                    released_{false};
-    size_t                  submit_count_{0};
+    struct PendingSubmit {
+        std::vector<TransferDescriptor>            descriptors;
+        std::shared_ptr<TransferBatchAsyncContext> context;
+    };
+
+    mutable std::mutex         mutex_;
+    std::condition_variable    cv_;
+    bool                       entered_{false};
+    bool                       released_{false};
+    size_t                     submit_count_{0};
+    std::vector<PendingSubmit> pending_;
 };
 
 class ScopedHybridTransferRelease {
@@ -688,11 +708,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, TieredJoinedLoadMapsTargetsAcrossFullAndL
     EXPECT_EQ(first_context->matchedBlocks(Tier::HOST), cached_keys.size());
     ASSERT_TRUE(transfer_engine->waitUntilEnteredFor(std::chrono::seconds(5)));
 
-    const size_t expected_submit_count =
-        std::count_if(first_context->loadDescs().begin(),
-                      first_context->loadDescs().end(),
-                      [](const TransferDescriptor& desc) { return desc.source_tier == Tier::HOST; });
-    ASSERT_GT(expected_submit_count, 0u);
+    const size_t expected_submit_count = 1;
 
     auto       second_resource = makeBatchResource(/*batch_size=*/1, config, request_keys);
     auto       second_tokens   = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/9, /*seq_size_per_block=*/4);

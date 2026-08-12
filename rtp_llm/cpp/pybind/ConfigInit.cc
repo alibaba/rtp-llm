@@ -404,6 +404,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("disk_cache_buffered_io", &KVCacheConfig::disk_cache_buffered_io)
         .def_readwrite("disk_cache_sync_timeout_ms", &KVCacheConfig::disk_cache_sync_timeout_ms)
         .def_readwrite("disk_cache_staging_block_count", &KVCacheConfig::disk_cache_staging_block_count)
+        .def_readwrite("memory_cache_max_descriptors_per_transfer_batch",
+                       &KVCacheConfig::memory_cache_max_descriptors_per_transfer_batch)
         .def_readwrite("linear_step", &KVCacheConfig::linear_step)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("ssm_state_dtype", &KVCacheConfig::ssm_state_dtype)
@@ -492,10 +494,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.reco_get_broadcast_timeout,
                                       self.reco_put_broadcast_timeout,
                                       self.reco_client_config,
-                                      self.device_cache_min_free_blocks);
+                                      self.device_cache_min_free_blocks,
+                                      self.memory_cache_max_descriptors_per_transfer_batch);
             },
             [](py::tuple t) {
-                if (t.size() != 50) {
+                if (t.size() != 50 && t.size() != 51) {
                     throw std::runtime_error("Invalid KVCacheConfig state");
                 }
                 KVCacheConfig c;
@@ -549,6 +552,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.reco_put_broadcast_timeout           = t[47].cast<int>();
                 c.reco_client_config                   = t[48].cast<std::string>();
                 c.device_cache_min_free_blocks         = t[49].cast<int64_t>();
+                if (t.size() == 51) {
+                    c.memory_cache_max_descriptors_per_transfer_batch = t[50].cast<int64_t>();
+                }
                 return c;
             }));
 

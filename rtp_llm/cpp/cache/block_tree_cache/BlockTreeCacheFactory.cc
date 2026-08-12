@@ -506,16 +506,28 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
 
     if (disk_enabled) {
         const int64_t staging_block_count = kv_cache_config.disk_cache_staging_block_count;
-        if (staging_block_count <= 0
+        if (staging_block_count < 2 || staging_block_count % 2 != 0
             || static_cast<uint64_t>(staging_block_count) > std::numeric_limits<size_t>::max()) {
-            RTP_LLM_LOG_ERROR("disk_cache_staging_block_count must be > 0, got %ld", staging_block_count);
+            RTP_LLM_LOG_ERROR("disk_cache_staging_block_count must be even and >= 2, got %ld", staging_block_count);
             return nullptr;
         }
         config.device_disk_staging_block_count = static_cast<size_t>(staging_block_count);
     }
 
+    const int64_t max_batch_descriptors = kv_cache_config.memory_cache_max_descriptors_per_transfer_batch;
+    if (max_batch_descriptors <= 0
+        || static_cast<uint64_t>(max_batch_descriptors) > std::numeric_limits<size_t>::max()) {
+        RTP_LLM_LOG_ERROR("memory_cache_max_descriptors_per_transfer_batch must be > 0, got %ld",
+                          max_batch_descriptors);
+        return nullptr;
+    }
+    config.max_descriptors_per_transfer_batch = static_cast<size_t>(max_batch_descriptors);
+
     auto per_rank_engine = std::make_shared<PerRankBlockTransferEngine>(
-        group_sets, DeviceHostCopyOptions{}, config.device_disk_staging_block_count);
+        group_sets,
+        DeviceHostCopyOptions{},
+        config.device_disk_staging_block_count,
+        config.max_descriptors_per_transfer_batch);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
         multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(group_sets, std::move(broadcast_manager));

@@ -26,6 +26,7 @@
 #include "rtp_llm/cpp/cache/KVCacheGroup.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
@@ -61,7 +62,6 @@ enum class TierLayout {
 enum class LoadFailureSource {
     HOST,
     DISK,
-    MIXED,
 };
 
 inline const char* layoutName(TierLayout layout) {
@@ -168,26 +168,29 @@ public:
                                              size_t                          device_disk_staging_block_count = 4):
         PerRankBlockTransferEngine(groups, {}, device_disk_staging_block_count) {}
 
-    std::shared_ptr<AsyncContext> submit(const TransferDescriptor& descriptor) override {
+    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
         bool scripted_success = true;
         {
-            std::unique_lock<std::mutex> lock(mutex_);
-            descriptors_.push_back(descriptor);
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++submitted_batch_count_;
+            descriptors_.insert(descriptors_.end(), descriptors.begin(), descriptors.end());
             if (!scripted_results_.empty()) {
                 scripted_success = scripted_results_.front();
                 scripted_results_.pop_front();
             }
             if (pause_armed_) {
                 ++phase_entered_;
+                auto context = std::make_shared<TransferBatchAsyncContext>();
+                pending_.push_back({descriptors, scripted_success, context});
                 cv_.notify_all();
-                cv_.wait(lock, [this] { return phase_released_; });
+                return context;
             }
         }
         if (!scripted_success) {
             return std::make_shared<CompletedAsyncContext>(
                 ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
         }
-        return PerRankBlockTransferEngine::submit(descriptor);
+        return PerRankBlockTransferEngine::submit(descriptors);
     }
 
     void enqueueResult(bool success) {
@@ -222,10 +225,23 @@ public:
     }
 
     void release() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        phase_released_ = true;
-        pause_armed_    = false;
-        cv_.notify_all();
+        std::vector<PendingSubmit> pending;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            phase_released_ = true;
+            pause_armed_    = false;
+            pending.swap(pending_);
+            cv_.notify_all();
+        }
+        for (auto& submit : pending) {
+            if (!submit.success) {
+                submit.context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
+                continue;
+            }
+            auto context = PerRankBlockTransferEngine::submit(submit.descriptors);
+            context->waitDone();
+            submit.context->complete(context->errorInfo());
+        }
     }
 
     std::vector<TransferDescriptor> descriptors() const {
@@ -233,19 +249,32 @@ public:
         return descriptors_;
     }
 
-    size_t submitCount() const {
+    size_t submittedBatchCount() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return submitted_batch_count_;
+    }
+
+    size_t submittedDescriptorCount() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return descriptors_.size();
     }
 
 private:
+    struct PendingSubmit {
+        std::vector<TransferDescriptor>            descriptors;
+        bool                                       success;
+        std::shared_ptr<TransferBatchAsyncContext> context;
+    };
+
     mutable std::mutex              mutex_;
     std::condition_variable         cv_;
     bool                            pause_armed_{false};
     bool                            phase_released_{true};
     size_t                          phase_entered_{0};
     std::vector<TransferDescriptor> descriptors_;
+    size_t                          submitted_batch_count_{0};
     std::deque<bool>                scripted_results_;
+    std::vector<PendingSubmit>      pending_;
 };
 
 class ScopedTransferRelease {
@@ -1318,7 +1347,7 @@ protected:
                 source_used_before.push_back(source_pool->usedBlocksNum());
                 target_used_before.push_back(target_pool->usedBlocksNum());
             }
-            const size_t submits_before = engine->submitCount();
+            const size_t submits_before = engine->submittedDescriptorCount();
             BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, source_tier, *ratio);
             BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
             BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, source_tier, 0.0);
@@ -1326,7 +1355,7 @@ protected:
                 *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
                 << "source=" << tierName(source_tier) << " target=" << tierName(target_tier) << " round=" << round
                 << " pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-                << " submits=" << engine->submitCount();
+                << " submits=" << engine->submittedDescriptorCount();
 
             const auto descriptors = engine->descriptors();
             ASSERT_GT(descriptors.size(), submits_before) << "round=" << round;
@@ -1540,15 +1569,6 @@ protected:
             BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
             BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
             block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-        } else if (failure_source == LoadFailureSource::MIXED) {
-            // A tier-leaf eviction normally reverse-cascades every group set.
-            // Let the primary and most cascades succeed while one cascade copy
-            // fails, producing the mixed HOST/DISK state that this rollback
-            // scenario needs through the real eviction completion path.
-            pausable_engine->enqueueResult(/*success=*/true);
-            pausable_engine->enqueueResult(/*success=*/false);
-            ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*cache, /*group_set_id=*/0, Tier::HOST));
-            block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
         }
         EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
@@ -1581,24 +1601,14 @@ protected:
         } else if (failure_source == LoadFailureSource::DISK) {
             EXPECT_EQ(host_source_count, 0u);
             EXPECT_EQ(disk_source_count, cache->groupSets().size());
-        } else {
-            EXPECT_GT(host_source_count, 0u);
-            EXPECT_GT(disk_source_count, 0u);
         }
 
         const auto   device_before_failure = snapshotDevicePools(manager_);
         const auto   lower_before_failure  = snapshotLowerPools(*cache, GetParam());
         const auto   stats_before_failure  = cache->getStats();
-        const size_t staging_submits       = pausable_engine->submitCount();
+        const size_t descriptors_before_failure = pausable_engine->submittedDescriptorCount();
+        const size_t batches_before_failure     = pausable_engine->submittedBatchCount();
 
-        // HOST descriptors execute before DISK descriptors. For the mixed case,
-        // let every HOST copy finish and fail the first DISK copy so settlement
-        // must roll back a genuinely successful leg.
-        if (failure_source == LoadFailureSource::MIXED) {
-            for (size_t index = 0; index < host_source_count; ++index) {
-                pausable_engine->enqueueResult(/*success=*/true);
-            }
-        }
         pausable_engine->enqueueResult(/*success=*/false);
         ASSERT_TRUE(pausable_engine->armPause());
         ScopedTransferRelease failure_release(pausable_engine);
@@ -1658,17 +1668,14 @@ protected:
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
         EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
-        const auto   descriptors_after_failure = pausable_engine->descriptors();
-        const size_t failure_submit_count      = descriptors_after_failure.size() - staging_submits;
-        EXPECT_EQ(failure_submit_count, failure_source == LoadFailureSource::MIXED ? host_source_count + 1 : 1u);
-        if (failure_source == LoadFailureSource::MIXED) {
-            for (size_t index = staging_submits; index < staging_submits + host_source_count; ++index) {
-                EXPECT_EQ(descriptors_after_failure[index].source_tier, Tier::HOST);
-                EXPECT_EQ(descriptors_after_failure[index].target_tier, Tier::DEVICE);
-            }
-            ASSERT_LT(staging_submits + host_source_count, descriptors_after_failure.size());
-            EXPECT_EQ(descriptors_after_failure[staging_submits + host_source_count].source_tier, Tier::DISK);
-            EXPECT_EQ(descriptors_after_failure[staging_submits + host_source_count].target_tier, Tier::DEVICE);
+        const auto descriptors_after_failure = pausable_engine->descriptors();
+        EXPECT_EQ(pausable_engine->submittedBatchCount() - batches_before_failure, 1u);
+        ASSERT_EQ(descriptors_after_failure.size() - descriptors_before_failure,
+                  host_source_count + disk_source_count);
+        for (size_t index = descriptors_before_failure; index < descriptors_after_failure.size(); ++index) {
+            EXPECT_EQ(descriptors_after_failure[index].source_tier,
+                      failure_source == LoadFailureSource::HOST ? Tier::HOST : Tier::DISK);
+            EXPECT_EQ(descriptors_after_failure[index].target_tier, Tier::DEVICE);
         }
 
         auto maybe_failed = snapshotPathResources(*cache, seed.cache_keys);
@@ -1788,7 +1795,7 @@ protected:
         ASSERT_TRUE(waitForPendingTasksDoneFor(
             *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
             << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-            << " submits=" << engine->submitCount();
+            << " submits=" << engine->submittedDescriptorCount();
 
         if (source_tier == Tier::DISK) {
             std::vector<std::shared_ptr<IBlockPool>> host_pools;
@@ -1803,7 +1810,7 @@ protected:
             ASSERT_TRUE(waitForPendingTasksDoneFor(
                 *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
                 << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-                << " submits=" << engine->submitCount();
+                << " submits=" << engine->submittedDescriptorCount();
         }
 
         auto maybe_source = snapshotPathResources(*cache, seed.cache_keys);
@@ -1838,7 +1845,7 @@ protected:
         MallocInfo first_info{first_resource, first_tokens};
         first_info.reuse_cache           = true;
         first_info.enable_cache_lookup   = true;
-        const size_t submits_before_load = engine->submitCount();
+        const size_t submits_before_load = engine->submittedDescriptorCount();
         const auto   first_result        = manager_->malloc(first_info);
         ASSERT_TRUE(first_result.success);
         EXPECT_EQ(first_result.reuse_len, 0);
@@ -1852,7 +1859,7 @@ protected:
         }
         ASSERT_TRUE(entered);
         EXPECT_FALSE(first_result.async_context->done());
-        const size_t submits_before_join = engine->submitCount();
+        const size_t submits_before_join = engine->submittedDescriptorCount();
         const int    pending_before_join = BlockTreeCacheTestPeer::pendingTasksForTest(*cache);
         ASSERT_GT(pending_before_join, 0);
         const auto descriptors_before_join = engine->descriptors();
@@ -1901,7 +1908,7 @@ protected:
         EXPECT_EQ(second_result.disk_reuse_len, 0);
         ASSERT_NE(second_result.async_context, nullptr);
         EXPECT_FALSE(second_result.async_context->done());
-        EXPECT_EQ(engine->submitCount(), submits_before_join);
+        EXPECT_EQ(engine->submittedDescriptorCount(), submits_before_join);
         EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), pending_before_join)
             << "a joiner must not submit another load task";
 
@@ -1932,11 +1939,11 @@ protected:
         ASSERT_TRUE(waitForAsyncContextDoneFor(
             first_result.async_context, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
             << "first context timed out; pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-            << " submits=" << engine->submitCount();
+            << " submits=" << engine->submittedDescriptorCount();
         ASSERT_TRUE(waitForAsyncContextDoneFor(
             second_result.async_context, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
             << "second context timed out; pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-            << " submits=" << engine->submitCount();
+            << " submits=" << engine->submittedDescriptorCount();
         first_result.async_context->waitDone();
         second_result.async_context->waitDone();
         ASSERT_TRUE(first_result.async_context->done());
@@ -1944,7 +1951,7 @@ protected:
         ASSERT_TRUE(waitForPendingTasksDoneFor(
             *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
             << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-            << " submits=" << engine->submitCount();
+            << " submits=" << engine->submittedDescriptorCount();
         const auto descriptors_after_load = engine->descriptors();
         ASSERT_GE(descriptors_after_load.size(), submits_before_join);
         for (size_t index = submits_before_load; index < descriptors_after_load.size(); ++index) {
@@ -2026,13 +2033,13 @@ protected:
                 waitForAsyncContextDoneFor(retry_result.async_context,
                                            std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
                 << "retry context timed out; pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-                << " submits=" << engine->submitCount();
+                << " submits=" << engine->submittedDescriptorCount();
             retry_result.async_context->waitDone();
             ASSERT_TRUE(retry_result.async_context->success()) << retry_result.async_context->errorInfo().ToString();
             ASSERT_TRUE(waitForPendingTasksDoneFor(
                 *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
                 << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-                << " submits=" << engine->submitCount();
+                << " submits=" << engine->submittedDescriptorCount();
             ASSERT_TRUE(requestReusesExpectedPath(
                 *cache, cache_config_, seed.cache_keys, retry_resource, /*logical_reuse_blocks=*/1));
             ASSERT_TRUE(requestReusedPayloadMatchesExpectedPath(

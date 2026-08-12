@@ -199,6 +199,14 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         default=4,
         help="单个 rank Device<->Disk 直传的 Host staging block 数，决定直传并发容量。",
     )
+    kv_cache_group.add_argument(
+        "--memory_cache_max_descriptors_per_transfer_batch",
+        env_name="MEMORY_CACHE_MAX_DESCRIPTORS_PER_TRANSFER_BATCH",
+        bind_to=(kv_cache_config, "memory_cache_max_descriptors_per_transfer_batch"),
+        type=int,
+        default=64,
+        help="单次直接传输底层批调用包含的最大 descriptor 数。",
+    )
 
     # Remote connector configuration arguments
     kv_cache_group.add_argument(

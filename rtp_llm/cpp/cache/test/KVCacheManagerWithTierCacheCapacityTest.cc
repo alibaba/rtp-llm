@@ -37,13 +37,13 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullLowerPoolSkipsDemotionAndRetries
         EXPECT_EQ(host_holds[group_set_id].size(), group_set->hostPool()->totalBlocksNum());
     }
 
-    const size_t submits_before_full_host = transfer_engine_->submitCount();
+    const size_t submits_before_full_host = transfer_engine_->submittedDescriptorCount();
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
-    EXPECT_EQ(transfer_engine_->submitCount(), submits_before_full_host);
+    EXPECT_EQ(transfer_engine_->submittedDescriptorCount(), submits_before_full_host);
     ASSERT_NO_FATAL_FAILURE(expectPathIdleAtDevice(*cache, seed.cache_keys));
     ASSERT_TRUE(pathDevicePayloadMatches(manager_, *cache, seed.cache_keys));
     for (const auto& group_set : cache->groupSets()) {
@@ -89,13 +89,13 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullLowerPoolSkipsDemotionAndRetries
 
         const auto host_ratio = oneUsedBlockWatermarkRatio(host_pools);
         ASSERT_TRUE(host_ratio.has_value());
-        const size_t submits_before_full_disk = transfer_engine_->submitCount();
+        const size_t submits_before_full_disk = transfer_engine_->submittedDescriptorCount();
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
         EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
-        EXPECT_EQ(transfer_engine_->submitCount(), submits_before_full_disk);
+        EXPECT_EQ(transfer_engine_->submittedDescriptorCount(), submits_before_full_disk);
         auto retained_host_path = snapshotPathResources(*cache, seed.cache_keys);
         ASSERT_TRUE(retained_host_path.has_value());
         for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
@@ -200,15 +200,15 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullHostPoolSelfDrainsThenDeviceDemo
 
     const auto device_ratio = oneUsedBlockWatermarkRatio(device_pools);
     ASSERT_TRUE(device_ratio.has_value());
-    const size_t submits_before_full_host = transfer_engine_->submitCount();
+    const size_t submits_before_full_host = transfer_engine_->submittedDescriptorCount();
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
     ASSERT_TRUE(
         waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
         << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-        << " submits=" << transfer_engine_->submitCount();
-    EXPECT_EQ(transfer_engine_->submitCount(), submits_before_full_host);
+        << " submits=" << transfer_engine_->submittedDescriptorCount();
+    EXPECT_EQ(transfer_engine_->submittedDescriptorCount(), submits_before_full_host);
     auto retained_device = snapshotPathResources(*cache, retry_seed.cache_keys);
     ASSERT_TRUE(retained_device.has_value());
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
@@ -229,15 +229,15 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullHostPoolSelfDrainsThenDeviceDemo
 
     const auto host_ratio = blockExcessWatermarkRatio(host_pools, /*excess_blocks=*/1);
     ASSERT_TRUE(host_ratio.has_value());
-    const size_t submits_before_host_delete = transfer_engine_->submitCount();
+    const size_t submits_before_host_delete = transfer_engine_->submittedDescriptorCount();
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
     ASSERT_TRUE(
         waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
         << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-        << " submits=" << transfer_engine_->submitCount();
-    EXPECT_EQ(transfer_engine_->submitCount(), submits_before_host_delete)
+        << " submits=" << transfer_engine_->submittedDescriptorCount();
+    EXPECT_EQ(transfer_engine_->submittedDescriptorCount(), submits_before_host_delete)
         << "HostOnly HOST eviction deletes cache-owned victims without a copy";
     std::vector<size_t> freed_host_blocks(cache->groupSets().size(), 0);
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
@@ -256,14 +256,14 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullHostPoolSelfDrainsThenDeviceDemo
         EXPECT_EQ(host_pools[group_set_id]->referencedBlocksNum(BlockRefType::EVICTION), 0u);
     }
 
-    const size_t submits_before_retry = transfer_engine_->submitCount();
+    const size_t submits_before_retry = transfer_engine_->submittedDescriptorCount();
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
     ASSERT_TRUE(
         waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
         << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-        << " submits=" << transfer_engine_->submitCount();
+        << " submits=" << transfer_engine_->submittedDescriptorCount();
     const auto descriptors_after_retry = transfer_engine_->descriptors();
     ASSERT_GT(descriptors_after_retry.size(), submits_before_retry);
     for (size_t index = submits_before_retry; index < descriptors_after_retry.size(); ++index) {
@@ -366,15 +366,15 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullDiskPoolEvictsThenHostDemotionRe
 
     const auto host_ratio = oneUsedBlockWatermarkRatio(host_pools);
     ASSERT_TRUE(host_ratio.has_value());
-    const size_t submits_before_full_disk = transfer_engine_->submitCount();
+    const size_t submits_before_full_disk = transfer_engine_->submittedDescriptorCount();
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
     ASSERT_TRUE(
         waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
         << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-        << " submits=" << transfer_engine_->submitCount();
-    EXPECT_EQ(transfer_engine_->submitCount(), submits_before_full_disk);
+        << " submits=" << transfer_engine_->submittedDescriptorCount();
+    EXPECT_EQ(transfer_engine_->submittedDescriptorCount(), submits_before_full_disk);
     auto retained_host = snapshotPathResources(*cache, retry_seed.cache_keys);
     ASSERT_TRUE(retained_host.has_value());
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
@@ -393,15 +393,15 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullDiskPoolEvictsThenHostDemotionRe
 
     const auto disk_ratio = blockExcessWatermarkRatio(disk_pools, /*excess_blocks=*/1);
     ASSERT_TRUE(disk_ratio.has_value());
-    const size_t submits_before_disk_delete = transfer_engine_->submitCount();
+    const size_t submits_before_disk_delete = transfer_engine_->submittedDescriptorCount();
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DISK, *disk_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DISK, 0.0);
     ASSERT_TRUE(
         waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
         << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-        << " submits=" << transfer_engine_->submitCount();
-    EXPECT_EQ(transfer_engine_->submitCount(), submits_before_disk_delete)
+        << " submits=" << transfer_engine_->submittedDescriptorCount();
+    EXPECT_EQ(transfer_engine_->submittedDescriptorCount(), submits_before_disk_delete)
         << "DISK eviction deletes cache-owned victims without a copy";
     std::vector<size_t> freed_disk_blocks(cache->groupSets().size(), 0);
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
@@ -420,14 +420,14 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullDiskPoolEvictsThenHostDemotionRe
         EXPECT_EQ(disk_pools[group_set_id]->referencedBlocksNum(BlockRefType::EVICTION), 0u);
     }
 
-    const size_t submits_before_retry = transfer_engine_->submitCount();
+    const size_t submits_before_retry = transfer_engine_->submittedDescriptorCount();
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
     ASSERT_TRUE(
         waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
         << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-        << " submits=" << transfer_engine_->submitCount();
+        << " submits=" << transfer_engine_->submittedDescriptorCount();
     const auto descriptors_after_retry = transfer_engine_->descriptors();
     ASSERT_GT(descriptors_after_retry.size(), submits_before_retry);
     for (size_t index = submits_before_retry; index < descriptors_after_retry.size(); ++index) {

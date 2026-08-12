@@ -40,32 +40,43 @@ TransferStatus HostDiskTransferExecutor::blockIOStatusToTransferStatus(BlockIOSt
     return TransferStatus::DISK_IO_ERROR;
 }
 
-TransferStatus HostDiskTransferExecutor::execute(HostBufferView            host,
-                                                 const TransferDescriptor& desc,
-                                                 const GroupSet&           group_set) const {
-    const bool              write_to_disk = desc.target_tier == Tier::DISK;
-    const BlockIdxType      disk_block    = desc.singleBlockAt(Tier::DISK);
-    BlockTreeDiskBlockPool& disk_pool     = *group_set.diskPool();
-    const size_t            payload       = group_set.payloadBytes();
-    const size_t            disk_stride   = disk_pool.strideBytes();
-    if (!isValidHostBufferView(host, payload, disk_stride)) {
-        RTP_LLM_LOG_WARNING("invalid host buffer for %s, disk=%d payload=%zu stride=%zu capacity=%zu",
-                            write_to_disk ? "host->disk" : "disk->host",
-                            disk_block,
-                            payload,
-                            disk_stride,
-                            host.capacity_bytes);
-        return TransferStatus::DISK_IO_ERROR;
+TransferStatus HostDiskTransferExecutor::execute(const std::vector<HostBufferView>&       hosts,
+                                                 const std::vector<TransferDescriptor>& descriptors,
+                                                 const std::vector<const GroupSet*>&    group_sets) const {
+    const bool              write_to_disk = descriptors.front().target_tier == Tier::DISK;
+    BlockTreeDiskBlockPool* disk_pool     = group_sets.front()->diskPool().get();
+    const size_t            disk_stride   = disk_pool->strideBytes();
+    BlockIdList             disk_blocks;
+    std::vector<void*>      read_buffers;
+    std::vector<const void*> write_buffers;
+    disk_blocks.reserve(descriptors.size());
+    read_buffers.reserve(descriptors.size());
+    write_buffers.reserve(descriptors.size());
+
+    for (size_t index = 0; index < descriptors.size(); ++index) {
+        const auto& descriptor = descriptors[index];
+        const auto& host       = hosts[index];
+        const auto* group_set  = group_sets[index];
+        const size_t payload   = group_set->payloadBytes();
+        if (!isValidHostBufferView(host, payload, disk_stride)) {
+            RTP_LLM_LOG_WARNING("invalid host-disk batch item index=%zu group=%zu", index, descriptor.group_set_id);
+            return TransferStatus::DISK_IO_ERROR;
+        }
+        if (write_to_disk && disk_stride > payload) {
+            std::memset(static_cast<uint8_t*>(host.base) + payload, 0, disk_stride - payload);
+        }
+        disk_blocks.push_back(descriptor.singleBlockAt(Tier::DISK));
+        read_buffers.push_back(host.base);
+        write_buffers.push_back(host.base);
     }
-    if (write_to_disk && disk_stride > payload) {
-        std::memset(static_cast<uint8_t*>(host.base) + payload, 0, disk_stride - payload);
-    }
-    const BlockIOStatus status =
-        write_to_disk ? disk_pool.write(disk_block, host.base, disk_stride) :
-                        disk_pool.read(disk_block, host.base, disk_stride);
+
+    const BlockIOStatus status = write_to_disk ? disk_pool->write(disk_blocks, write_buffers, disk_stride) :
+                                                disk_pool->read(disk_blocks, read_buffers, disk_stride);
     if (status != BlockIOStatus::OK) {
-        RTP_LLM_LOG_WARNING(
-            "%s failed, disk=%d, status=%s", write_to_disk ? "write" : "read", disk_block, blockIOStatusName(status));
+        RTP_LLM_LOG_WARNING("batch %s failed, item_count=%zu, status=%s",
+                            write_to_disk ? "write" : "read",
+                            descriptors.size(),
+                            blockIOStatusName(status));
         return blockIOStatusToTransferStatus(status);
     }
     return TransferStatus::OK;

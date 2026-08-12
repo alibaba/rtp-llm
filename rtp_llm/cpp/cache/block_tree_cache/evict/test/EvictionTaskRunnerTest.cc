@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -14,10 +15,55 @@ namespace {
 
 using ScriptedTransferEngine = block_tree_cache_test::ScriptedPerRankBlockTransferEngine;
 
+GroupSetPtr makeRunnerTestGroupSet(size_t                       group_set_id,
+                                   const std::string&           pool_name,
+                                   BlockTreeDiskBlockPoolPtr    disk_pool) {
+    using namespace block_transfer_engine_test;
+    auto topology    = makeTestTopology({makeTestGroupBase()});
+    auto device_pool = makeTestDevicePool({{16, 0}}, 4, pool_name + "_device");
+    auto host_pool   = makeHostPool(16, 4, false);
+    return makeTestGroupSet(group_set_id,
+                            std::move(topology),
+                            {0},
+                            {std::move(device_pool)},
+                            std::move(host_pool),
+                            std::move(disk_pool));
+}
+
+BlockTreeDiskBlockPoolPtr makeRunnerTestDiskPool(const std::string& pool_name) {
+    using namespace block_transfer_engine_test;
+    return makeDiskPool(16,
+                        4,
+                        "/tmp",
+                        std::make_unique<StatusDiskBlockIO>(DiskBlockIOStatus::OK),
+                        pool_name);
+}
+
+class BatchCountingTransferEngine: public ScriptedTransferEngine {
+public:
+    using ScriptedTransferEngine::ScriptedTransferEngine;
+
+    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
+        ++batch_count_;
+        return ScriptedTransferEngine::submit(descriptors);
+    }
+
+    size_t batchCount() const {
+        return batch_count_;
+    }
+
+private:
+    size_t batch_count_{0};
+};
+
 class EvictionTaskRunnerTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        transfer_engine_     = std::make_shared<ScriptedTransferEngine>(group_sets_, false);
+        auto disk_pool = makeRunnerTestDiskPool("eviction_runner_shared_disk");
+        group_sets_ = {makeRunnerTestGroupSet(0, "eviction_runner_0", disk_pool),
+                       makeRunnerTestGroupSet(1, "eviction_runner_1", disk_pool),
+                       makeRunnerTestGroupSet(2, "eviction_runner_2", disk_pool)};
+        transfer_engine_     = std::make_shared<BatchCountingTransferEngine>(group_sets_, false);
         transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(transfer_engine_);
     }
 
@@ -34,7 +80,7 @@ protected:
     }
 
     std::vector<GroupSetPtr>                 group_sets_;
-    std::shared_ptr<ScriptedTransferEngine>  transfer_engine_;
+    std::shared_ptr<BatchCountingTransferEngine> transfer_engine_;
     std::unique_ptr<BlockTransferDispatcher> transfer_dispatcher_;
     BlockTreeCacheMetricsReporter            metrics_reporter_;
     std::mutex                               mutex_;
@@ -58,22 +104,63 @@ BlockTreeEvictor::EvictionPlan makeCopyPlan() {
     return plan;
 }
 
-TEST_F(EvictionTaskRunnerTest, PerformCopyExecutesPrimaryAndCascadesInOrder) {
+TEST_F(EvictionTaskRunnerTest, PerformCopySubmitsPlanAsDirectionBatches) {
     auto runner = makeRunner();
+    auto plan   = makeCopyPlan();
+    plan.cascade_descs.push_back(TransferDescriptor::hostToDisk(2, 6, 7));
 
-    const auto results = runner.performCopy(makeCopyPlan());
+    const auto results = runner.performCopy(plan);
     const auto descriptors = transfer_engine_->descriptors();
 
     EXPECT_TRUE(results.primary_success);
-    EXPECT_EQ(results.cascade_success, (std::vector<bool>{true}));
-    ASSERT_EQ(descriptors.size(), 2u);
+    EXPECT_EQ(results.cascade_success, (std::vector<bool>{true, true}));
+    EXPECT_EQ(transfer_engine_->batchCount(), 2u);
+    ASSERT_EQ(descriptors.size(), 3u);
     EXPECT_EQ(descriptors[0].source_tier, Tier::DEVICE);
     EXPECT_EQ(descriptors[0].target_tier, Tier::HOST);
     EXPECT_EQ(descriptors[1].source_tier, Tier::HOST);
     EXPECT_EQ(descriptors[1].target_tier, Tier::DISK);
+    EXPECT_EQ(descriptors[2].source_tier, Tier::HOST);
+    EXPECT_EQ(descriptors[2].target_tier, Tier::DISK);
 }
 
-TEST_F(EvictionTaskRunnerTest, PrimaryFailureSuppressesCascadeCopy) {
+TEST_F(EvictionTaskRunnerTest, HostDiskBatchesAreSplitByDiskPool) {
+    group_sets_ = {makeRunnerTestGroupSet(0, "eviction_runner_0", makeRunnerTestDiskPool("eviction_runner_0_disk")),
+                   makeRunnerTestGroupSet(1, "eviction_runner_1", makeRunnerTestDiskPool("eviction_runner_1_disk"))};
+    auto runner = makeRunner();
+    BlockTreeEvictor::EvictionPlan plan;
+    plan.primary_desc = TransferDescriptor::hostToDisk(0, 1, 2);
+    plan.cascade_descs = {TransferDescriptor::hostToDisk(0, 3, 4),
+                          TransferDescriptor::hostToDisk(1, 5, 6)};
+
+    const auto results = runner.performCopy(plan);
+
+    EXPECT_TRUE(results.primary_success);
+    EXPECT_EQ(results.cascade_success, (std::vector<bool>{true, true}));
+    EXPECT_EQ(transfer_engine_->batchCount(), 2u);
+    EXPECT_EQ(transfer_engine_->descriptors().size(), 3u);
+}
+
+TEST_F(EvictionTaskRunnerTest, TransferBatchPartitionGroupsByDirectionAndDiskPool) {
+    group_sets_ = {makeRunnerTestGroupSet(0, "eviction_runner_0", makeRunnerTestDiskPool("eviction_runner_0_disk")),
+                   makeRunnerTestGroupSet(1, "eviction_runner_1", makeRunnerTestDiskPool("eviction_runner_1_disk"))};
+    auto runner = makeRunner();
+    std::vector<TransferDescriptor> descriptors = {
+        TransferDescriptor::deviceToHost(0, {1}, 2),
+        TransferDescriptor::hostToDisk(0, 3, 4),
+        TransferDescriptor::hostToDisk(0, 5, 6),
+        TransferDescriptor::hostToDisk(1, 7, 8),
+    };
+
+    const auto batches = runner.partitionTransferBatch(descriptors);
+
+    ASSERT_EQ(batches.size(), 3u);
+    EXPECT_EQ(batches[0].size(), 1u);
+    EXPECT_EQ(batches[1].size(), 2u);
+    EXPECT_EQ(batches[2].size(), 1u);
+}
+
+TEST_F(EvictionTaskRunnerTest, DirectionBatchFailureFailsTheWholePlan) {
     transfer_engine_->enqueue(false);
     auto runner = makeRunner();
 
@@ -81,7 +168,7 @@ TEST_F(EvictionTaskRunnerTest, PrimaryFailureSuppressesCascadeCopy) {
 
     EXPECT_FALSE(results.primary_success);
     EXPECT_EQ(results.cascade_success, (std::vector<bool>{false}));
-    EXPECT_EQ(transfer_engine_->submitCount(), 1u);
+    EXPECT_EQ(transfer_engine_->batchCount(), 2u);
 }
 
 TEST_F(EvictionTaskRunnerTest, BuildTransferBatchIncludesPrimaryAndCascades) {

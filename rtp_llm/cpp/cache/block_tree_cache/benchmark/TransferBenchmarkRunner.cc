@@ -600,7 +600,8 @@ TransferBenchmarkRunner::runTransferBatch(const std::shared_ptr<PerRankBlockTran
                                                    worker,
                                                    operation.working_set_index,
                                                    host_is_working_set);
-                auto context                                            = engine->submit(descriptor);
+                auto context                                            = engine->submit({descriptor});
+                context->waitDone();
                 if (context->success()) {
                     ++stats.succeeded;
                 } else {
