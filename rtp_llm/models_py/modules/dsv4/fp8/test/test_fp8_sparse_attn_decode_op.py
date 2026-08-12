@@ -46,9 +46,15 @@ class TestSparseAttnV4DecodeFp8Op(unittest.TestCase):
         )
         sinks = torch.zeros(heads, dtype=torch.float32, device=device)
 
-        for page_size, extra_width in ((2, 4),):
-            with self.subTest(page_size=page_size, extra_width=extra_width):
-                extra_count = max(1024, extra_width)
+        for page_size, logical_extra_width in ((2, 4),):
+            with self.subTest(
+                page_size=page_size, logical_extra_width=logical_extra_width
+            ):
+                # The SM120 prefill implementation reads extra indices in a
+                # fixed BI=64 tile. HCA has only a few logical entries, but its
+                # transient metadata row must still provide the full tile.
+                kernel_extra_width = 64
+                extra_count = max(1024, logical_extra_width)
                 extra_cache = torch.empty(
                     ((extra_count + page_size - 1) // page_size, page_size, 584),
                     dtype=torch.uint8,
@@ -62,16 +68,24 @@ class TestSparseAttnV4DecodeFp8Op(unittest.TestCase):
                     torch.arange(extra_count, dtype=torch.int64, device=device),
                 )
                 extra_indices = torch.arange(
-                    extra_count - extra_width,
+                    extra_count - logical_extra_width,
                     extra_count,
                     dtype=torch.int32,
                     device=device,
                 ).view(1, 1, -1).expand(rows, -1, -1).contiguous()
+                padded_extra_indices = torch.full(
+                    (rows, 1, kernel_extra_width),
+                    -1,
+                    dtype=torch.int32,
+                    device=device,
+                )
+                padded_extra_indices[:, :, :logical_extra_width] = extra_indices
+                extra_indices = padded_extra_indices
                 extra_lens = torch.arange(
                     rows, dtype=torch.int32, device=device
-                ).clamp_max(extra_width)
+                ).clamp_max(logical_extra_width)
                 extra_indices.masked_fill_(
-                    torch.arange(extra_width, device=device).view(1, 1, -1)
+                    torch.arange(kernel_extra_width, device=device).view(1, 1, -1)
                     >= extra_lens.view(-1, 1, 1),
                     -1,
                 )

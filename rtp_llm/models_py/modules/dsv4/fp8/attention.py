@@ -5481,12 +5481,12 @@ class AttentionFP8(nn.Module):
         chunk_rows = min(_FLASH_MLA_SPARSE_Q_CHUNK, s_q)
         if use_sm120 and sm120_extra_indices is not None:
             # The SM120 dual-cache prefill kernel consumes extra indices in
-            # fixed BI=8 tiles even though topk_extra is a runtime value. RTP's
-            # compressed metadata can be narrower (notably HCA's 1--4
-            # entries), so give the transient model-forward view a padded tail
+            # fixed BI=64 tiles even though topk_extra is a runtime value. RTP's
+            # compressed metadata can be narrower (notably HCA), so give the
+            # transient model-forward view a padded tail
             # while preserving the per-row logical lengths.
             extra_width = int(sm120_extra_indices.shape[-1])
-            aligned_extra_width = (extra_width + 7) // 8 * 8
+            aligned_extra_width = (extra_width + 63) // 64 * 64
             if aligned_extra_width != extra_width:
                 padded_extra_indices = torch.full(
                     (s_q, aligned_extra_width),
