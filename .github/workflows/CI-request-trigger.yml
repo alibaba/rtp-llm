@@ -3,7 +3,7 @@
 # │                                                                 │
 # │ pull_request (opened/synchronize/reopened) — this workflow      │
 # │   → native "build" check run created on PR HEAD SHA             │
-# │   → resolve-context: check for fresh LGTM review               │
+# │   → resolve-context: check for fresh LGTM review/comment       │
 # │   → no fresh LGTM                                              │
 # │       → resolve-context exit 1                                  │
 # │       → build check = failure (blocks merge)                    │
@@ -15,7 +15,7 @@
 # │       → CI pass → build check = success → PR mergeable          │
 # │       → CI fail → build check = failure                         │
 # │                                                                 │
-# │ LGTM review                                                    │
+# │ LGTM review/comment                                            │
 # │   → CI-event-dispatcher.yml handles this event                  │
 # │   → finds this workflow's pull_request run for PR HEAD SHA      │
 # │   → reruns it (POST .../actions/runs/{id}/rerun)                │
@@ -53,6 +53,7 @@ permissions:
   pull-requests: read
   contents: read
   statuses: write
+  actions: read
 
 concurrency:
   group: >-
@@ -110,6 +111,7 @@ jobs:
             --event-head-sha "${{ github.event.pull_request.head.sha }}" \
             --event-pr-number "${{ github.event.pull_request.number }}" \
             --event-clone-url "${{ github.event.pull_request.head.repo.clone_url }}" \
+            --run-id "${{ github.run_id }}" \
             --output-file "$GITHUB_OUTPUT"
 
       - name: Set pending commit status

@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 from ci_gate.common import GateError, is_true
 from ci_gate.ci_service import collect_status_tokens, parse_ci_status
 from ci_gate.review import (
+    _check_issue_comments_qualified,
     check_review_qualified,
     latest_fresh_reviews,
     resolve_context,
@@ -267,13 +268,75 @@ class TestCheckReviewQualified(unittest.TestCase):
 
     @patch("ci_gate.review.github_get_pages")
     @patch("ci_gate.review.github_get")
-    def test_only_reviews_are_consulted(self, mock_get, mock_pages):
-        """Issue comments cannot gate CI, so only /reviews is fetched."""
+    def test_no_run_id_skips_comment_path(self, mock_get, mock_pages):
+        """Without a run id there is no trustworthy anchor, so comments are skipped."""
         mock_get.return_value = self._mock_pr()
         mock_pages.return_value = []
         self.assertFalse(check_review_qualified("1", "repo", "sha1", "token", "LLLLKKKK"))
         paths = [call.args[1] for call in mock_pages.call_args_list]
         self.assertEqual(paths, ["/pulls/1/reviews"])
+
+
+# ---------------------------------------------------------------------------
+# review._check_issue_comments_qualified (mocked)
+# ---------------------------------------------------------------------------
+class TestCheckIssueCommentsQualified(unittest.TestCase):
+    PUSHED_AT = "2025-04-20T10:00:00Z"
+    RUN_RESPONSE = {"created_at": PUSHED_AT}
+
+    def _comment(self, login="LLLLKKKK", body="lgtm ready to ci", updated_at="2025-04-20T12:00:00Z"):
+        return {"user": {"login": login}, "body": body, "updated_at": updated_at}
+
+    def _check(self, comments, lgtm_user="LLLLKKKK", pr_author="", run_id="42",
+               run_response=None):
+        with patch("ci_gate.review.github_get",
+                   return_value=self.RUN_RESPONSE if run_response is None else run_response), \
+             patch("ci_gate.review.github_get_pages", return_value=comments):
+            return _check_issue_comments_qualified(
+                "1", "repo", "token", lgtm_user, pr_author, run_id)
+
+    def test_comment_after_push_qualifies(self):
+        self.assertTrue(self._check([self._comment()]))
+
+    def test_comment_before_push_rejected(self):
+        self.assertFalse(self._check([self._comment(updated_at="2025-04-20T09:00:00Z")]))
+
+    def test_backdated_commit_cannot_revive_stale_comment(self):
+        """The anchor is the run creation time, so commit dates cannot shift it."""
+        stale = self._comment(updated_at="2025-04-20T09:59:59Z")
+        self.assertFalse(self._check([stale]))
+
+    def test_wrong_author_rejected(self):
+        self.assertFalse(self._check([self._comment(login="other-user")]))
+
+    def test_missing_phrase_rejected(self):
+        self.assertFalse(self._check([self._comment(body="looks good")]))
+
+    def test_no_comments(self):
+        self.assertFalse(self._check([]))
+
+    def test_case_insensitive_phrase(self):
+        self.assertTrue(self._check([self._comment(body="LGTM Ready To CI")]))
+
+    def test_picks_latest_matching_comment(self):
+        comments = [
+            self._comment(updated_at="2025-04-20T11:00:00Z"),
+            self._comment(updated_at="2025-04-20T14:00:00Z"),
+        ]
+        self.assertTrue(self._check(comments))
+
+    def test_multi_lgtm_users_second_user_qualifies(self):
+        self.assertTrue(self._check([self._comment(login="netaddi")], lgtm_user="LLLLKKKK,netaddi"))
+
+    def test_pr_author_self_lgtm_rejected(self):
+        self.assertFalse(self._check(
+            [self._comment(login="netaddi")], lgtm_user="LLLLKKKK,netaddi", pr_author="netaddi"))
+
+    def test_missing_run_id_rejected(self):
+        self.assertFalse(self._check([self._comment()], run_id=""))
+
+    def test_run_without_created_at_rejected(self):
+        self.assertFalse(self._check([self._comment()], run_response={}))
 
 
 
@@ -296,6 +359,7 @@ class TestResolveContextIssueComment(unittest.TestCase):
             "event_pr_number": "42",
             "event_clone_url": "",
             "lgtm_user": "LLLLKKKK",
+            "run_id": "",
             "output_file": "",
         }
         defaults.update(overrides)
@@ -318,7 +382,7 @@ class TestResolveContextIssueComment(unittest.TestCase):
         self.assertIn("head_sha=abc111", contents)
         self.assertIn("clone_url=https://github.com/org/repo.git", contents)
         self.assertIn("qualified=true", contents)
-        mock_qualified.assert_called_once_with("42", "org/repo", "abc111", "tok", "LLLLKKKK")
+        mock_qualified.assert_called_once_with("42", "org/repo", "abc111", "tok", "LLLLKKKK", "")
 
     @patch("ci_gate.review.check_review_qualified")
     @patch("ci_gate.review.github_get")
@@ -356,6 +420,7 @@ class TestResolveContext(unittest.TestCase):
             "event_pr_number": "42",
             "event_clone_url": "https://github.com/org/repo.git",
             "lgtm_user": "LLLLKKKK",
+            "run_id": "",
             "output_file": "/dev/null",
         }
         defaults.update(overrides)
@@ -389,6 +454,34 @@ class TestResolveContext(unittest.TestCase):
         ]
         result = resolve_context(self._base_args())
         self.assertEqual(result, 0)
+
+    @patch("ci_gate.review.check_review_qualified")
+    @patch("ci_gate.review.github_get")
+    def test_run_id_forwarded_for_pull_request(self, mock_get, mock_qualified):
+        """pull_request runs are created at push time, so their id anchors comments."""
+        mock_get.return_value = {
+            "user": {"login": "author"},
+            "head": {"sha": "aaa111", "repo": {"clone_url": "url"}},
+            "state": "open",
+        }
+        mock_qualified.return_value = True
+        resolve_context(self._base_args(run_id="999"))
+        self.assertEqual(mock_qualified.call_args.args[-1], "999")
+
+    @patch("ci_gate.review.check_review_qualified")
+    @patch("ci_gate.review.github_get")
+    def test_run_id_dropped_for_workflow_dispatch(self, mock_get, mock_qualified):
+        """A dispatch run starts now, so it must not anchor LGTM comments."""
+        mock_get.return_value = {
+            "user": {"login": "author"},
+            "head": {"sha": "aaa111", "repo": {"clone_url": "url"}},
+            "state": "open",
+        }
+        mock_qualified.return_value = True
+        resolve_context(self._base_args(
+            event_name="workflow_dispatch", input_pr_number="42",
+            input_head_sha="aaa111", run_id="999"))
+        self.assertEqual(mock_qualified.call_args.args[-1], "")
 
     @patch("ci_gate.review.github_get")
     def test_head_changed_returns_1(self, mock_get):

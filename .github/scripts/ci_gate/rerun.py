@@ -16,7 +16,7 @@ NO_RUN_COMMENT = (
     "or if the original run was deleted.\n\n"
     "**To fix:** push any commit (even empty: "
     "`git commit --allow-empty -m \"trigger CI\" && git push`) "
-    "to create a native build run, then re-approve or submit a review comment saying `lgtm ready to ci`."
+    "to create a native build run, then re-approve or post `lgtm ready to ci`."
 )
 
 EXPIRED_RUN_COMMENT = (
@@ -24,7 +24,7 @@ EXPIRED_RUN_COMMENT = (
     "but it is too old to rerun (>30 days).\n\n"
     "**To fix:** push any commit (even empty: "
     "`git commit --allow-empty -m \"trigger CI\" && git push`) "
-    "to create a fresh native build run, then re-approve or submit a review comment saying `lgtm ready to ci`."
+    "to create a fresh native build run, then re-approve or post `lgtm ready to ci`."
 )
 
 
