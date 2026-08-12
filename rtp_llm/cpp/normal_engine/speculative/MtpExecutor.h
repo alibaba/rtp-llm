@@ -124,6 +124,9 @@ protected:
                                       const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
                                       GptModelOutputs                              draft_prefill_model_output,
                                       SamplerOutput                                draft_prefill_sampler_output,
+                                      const torch::Tensor&                         linear_block_ids,
+                                      const torch::Tensor&                         linear_group_types,
+                                      const torch::Tensor&                         linear_valid_block_counts,
                                       std::shared_ptr<torch::Event>                rejection_event,
                                       std::shared_ptr<torch::Event>                draft_event);
 
@@ -165,12 +168,18 @@ protected:
     // correctness while bookkeeping overlaps the next step.
     bool useDropBroadSync() const;
 
+    // CUDA-only LINEAR block-table repair used by fully async MTP.
+    bool useAsyncLinearBlockSwap() const;
+
     // Attach next-step device state, then fork a worker that waits on caller-
     // recorded rejection/draft events and runs D2H/specUpdate/KV release off
     // the main thread.
     absl::Status dispatchDecodeAsync(const StreamGroups&                          stream_groups,
                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                      MergedOutput                                 draft_prefill_output,
+                                     const torch::Tensor&                         linear_block_ids,
+                                     const torch::Tensor&                         linear_group_types,
+                                     const torch::Tensor&                         linear_valid_block_counts,
                                      std::shared_ptr<torch::Event>                rejection_event,
                                      std::shared_ptr<torch::Event>                draft_event);
 
