@@ -1,8 +1,4 @@
-# Tests for ROCm prefill/decode attention helpers.
-#
-# - test_attn_utils: geometry helpers, plain torch on CPU, no GPU needed.
-# - test_aiter_prefill_op: numerical regression for AiterPrefillAttnOp; runs
-#   on the ROCm CI runner because it calls aiter.flash_attn_varlen_func.
+# ROCm attention tests run on the MI308X runner.
 
 py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
@@ -50,7 +46,7 @@ py_test(
         "//rtp_llm:config",
         "//rtp_llm:testlib",
     ],
-    timeout = "eternal",
-    tags = ["manual", "rocm"],
+    timeout = "long",
+    tags = ["rocm"],
     exec_properties = {"gpu": "MI308X-ROCM7"},
 )
