@@ -25,8 +25,6 @@ static const std::string multi_tokens_predict_final_ln_gamma = "multi_tokens_pre
 static const std::string multi_tokens_predict_final_ln_beta  = "multi_tokens_predict_final_layernorm.beta";
 static const std::string multi_tokens_predict_d2t_map        = "multi_tokens_predict_d2t_map";
 static const std::string multi_tokens_predict_t2d_map        = "multi_tokens_predict_t2d_map";
-static const std::string v4_dspark_markov_w1                 = "v4.dspark.markov_w1.weight";
-static const std::string v4_dspark_markov_w2                 = "v4.dspark.markov_w2.weight";
 static const std::string dspark_markov_w1                    = "dspark_markov_w1.weight";
 static const std::string dspark_markov_w2                    = "dspark_markov_w2.weight";
 
