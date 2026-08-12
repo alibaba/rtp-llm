@@ -2351,7 +2351,8 @@ class TestFusedRopeKVCacheMropeContract(unittest.TestCase):
             )
             with self.subTest(op_class=op_class.__name__):
                 with self.assertRaisesRegex(
-                    RuntimeError, "token_num=4, index_factor=3"
+                    RuntimeError,
+                    "expected 12 for 4 tokens and index_factor 3",
                 ):
                     op.forward(multi_token_qkv, layer_cache, params)
 
