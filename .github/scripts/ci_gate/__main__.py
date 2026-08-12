@@ -28,6 +28,8 @@ def main(argv):
     check_review.add_argument("--github-token", required=True)
     check_review.add_argument("--lgtm-user", default="LLLLKKKK,netaddi",
                               help="comma-separated logins allowed to LGTM")
+    check_review.add_argument("--run-id", default="",
+                              help="workflow run whose creation time anchors LGTM comments")
 
     resolve = subparsers.add_parser("resolve-context")
     resolve.add_argument("--github-token", required=True)
@@ -42,6 +44,8 @@ def main(argv):
     resolve.add_argument("--output-file", default="")
     resolve.add_argument("--lgtm-user", default="LLLLKKKK,netaddi",
                          help="comma-separated logins allowed to LGTM")
+    resolve.add_argument("--run-id", default="",
+                         help="workflow run whose creation time anchors LGTM comments")
 
     check_merge_parser = subparsers.add_parser("check-merge")
     check_merge_parser.add_argument("pr_number")
@@ -118,7 +122,8 @@ def main(argv):
     try:
         if args.command == "check-review":
             return 0 if check_review_qualified(
-                args.pr_number, args.repository, args.head_sha, args.github_token, args.lgtm_user
+                args.pr_number, args.repository, args.head_sha, args.github_token,
+                args.lgtm_user, args.run_id
             ) else 1
         if args.command == "resolve-context":
             return resolve_context(args)
