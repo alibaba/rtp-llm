@@ -7,6 +7,9 @@ from .common import GateError, is_true, log, short_sha, write_output
 from .github import github_get, github_get_pages
 
 
+TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+
+
 def latest_fresh_reviews(reviews, head_sha, pr_author):
     # type: (List[Dict[str, Any]], str, str) -> List[Dict[str, Any]]
     latest_by_user = {}  # type: Dict[str, Dict[str, Any]]
@@ -16,6 +19,12 @@ def latest_fresh_reviews(reviews, head_sha, pr_author):
         if review.get("commit_id") != head_sha:
             continue
         if user.get("type") == "Bot":
+            continue
+        # Anyone can review a public repo; only repo/org insiders may gate CI.
+        association = (review.get("author_association") or "").upper()
+        if association not in TRUSTED_ASSOCIATIONS:
+            log("Ignoring %s review from %s (association: %s)"
+                % (review.get("state", "?"), login, association or "NONE"))
             continue
         if review.get("state") == "COMMENTED" and login == pr_author:
             continue
@@ -27,35 +36,46 @@ def latest_fresh_reviews(reviews, head_sha, pr_author):
     return list(latest_by_user.values())
 
 
-def _fetch_head_commit_date(repo, head_sha, github_token):
-    # type: (str, str, str) -> str
-    """Return the committer date (ISO 8601) of the given commit."""
-    commit = github_get(
-        repo, "/commits/%s" % head_sha,
-        "fetching commit %s" % short_sha(head_sha), github_token,
-    )
-    if not isinstance(commit, dict):
-        raise GateError("::error::Unexpected commit response for %s" % short_sha(head_sha), 2)
-    return (((commit.get("commit") or {}).get("committer") or {}).get("date")) or ""
-
-
 def parse_lgtm_users(lgtm_user):
     # type: (str) -> set
     """Parse a comma-separated ``--lgtm-user`` value into a set of logins."""
     return {u.strip() for u in (lgtm_user or "").split(",") if u.strip()}
 
 
-def _check_issue_comments_qualified(pr_number, repo, head_sha, github_token, lgtm_user, pr_author=""):
-    # type: (str, str, str, str, str, str) -> bool
-    """Check whether a fresh LGTM issue comment from an *lgtm_user* exists.
+def _fetch_head_push_time(repo, run_id, github_token):
+    # type: (str, str, str) -> str
+    """Return when GitHub created *run_id*, i.e. when this HEAD was pushed.
 
-    Freshness is defined as ``comment.updated_at >= head_commit.committer.date``
-    because issue comments have no ``commit_id`` field. Comments from the PR
+    Used as the freshness anchor for LGTM issue comments. A commit's
+    ``committer.date`` cannot be used: it is chosen by whoever pushes, so
+    backdating a commit would make an older LGTM look fresh again. A workflow
+    run's ``created_at`` is assigned by GitHub, is unchanged by reruns, and a
+    new run is created whenever a SHA is (re-)pushed as the PR head.
+    """
+    run = github_get(
+        repo, "/actions/runs/%s" % run_id,
+        "fetching workflow run %s" % run_id, github_token,
+    )
+    if not isinstance(run, dict):
+        raise GateError("::error::Unexpected workflow run response for %s" % run_id, 2)
+    return run.get("created_at") or ""
+
+
+def _check_issue_comments_qualified(pr_number, repo, github_token, lgtm_user, pr_author, run_id):
+    # type: (str, str, str, str, str, str) -> bool
+    """Check for an LGTM issue comment posted after the current HEAD was pushed.
+
+    Issue comments carry no ``commit_id``, so freshness is anchored on the
+    server-assigned creation time of this workflow run. Comments from the PR
     author never qualify (no self-LGTM).
     """
-    head_date = _fetch_head_commit_date(repo, head_sha, github_token)
-    if not head_date:
-        log("Could not determine head commit date, skipping issue comment check")
+    if not run_id:
+        log("No workflow run id available, skipping issue comment check")
+        return False
+
+    pushed_at = _fetch_head_push_time(repo, run_id, github_token)
+    if not pushed_at:
+        log("Could not determine head push time, skipping issue comment check")
         return False
 
     comments = github_get_pages(
@@ -72,22 +92,22 @@ def _check_issue_comments_qualified(pr_number, repo, head_sha, github_token, lgt
         user = (comment.get("user") or {}).get("login", "")
         body = (comment.get("body") or "").lower()
         updated_at = comment.get("updated_at", "")
-        if user in lgtm_users and user != pr_author and lgtm_phrase in body and updated_at >= head_date:
+        if user in lgtm_users and user != pr_author and lgtm_phrase in body and updated_at >= pushed_at:
             if latest_match is None or updated_at > (latest_match.get("updated_at") or ""):
                 latest_match = comment
 
     if latest_match:
-        log("PR #%s has fresh LGTM issue comment from %s (updated_at: %s >= commit: %s)"
+        log("PR #%s has fresh LGTM issue comment from %s (updated_at: %s >= pushed: %s)"
             % (pr_number, (latest_match.get("user") or {}).get("login", ""),
-               latest_match.get("updated_at", ""), head_date))
+               latest_match.get("updated_at", ""), pushed_at))
         return True
 
     log("PR #%s has no qualifying fresh issue comment" % pr_number)
     return False
 
 
-def check_review_qualified(pr_number, repo, head_sha, github_token, lgtm_user):
-    # type: (str, str, str, str, str) -> bool
+def check_review_qualified(pr_number, repo, head_sha, github_token, lgtm_user, run_id=""):
+    # type: (str, str, str, str, str, str) -> bool
     pr_data = github_get(repo, "/pulls/%s" % pr_number, "fetching PR #%s" % pr_number, github_token)
     if not isinstance(pr_data, dict):
         raise GateError("::error::Unexpected PR response for #%s" % pr_number, 2)
@@ -116,7 +136,7 @@ def check_review_qualified(pr_number, repo, head_sha, github_token, lgtm_user):
             log("PR #%s has latest fresh LGTM from %s" % (pr_number, user))
             return True
 
-    if _check_issue_comments_qualified(pr_number, repo, head_sha, github_token, lgtm_user, pr_author):
+    if _check_issue_comments_qualified(pr_number, repo, github_token, lgtm_user, pr_author, run_id):
         return True
 
     log("PR #%s has no qualifying fresh review or issue comment" % pr_number)
@@ -186,7 +206,11 @@ def resolve_context(args):
         write_output("qualified", "true", args.output_file)
         return 0
 
-    qualified = check_review_qualified(pr_number, repo, head_sha, args.github_token, args.lgtm_user)
+    # The LGTM-comment anchor is this run's creation time, which only matches
+    # the head push for the pull_request event; a dispatch run starts "now".
+    comment_anchor_run = "" if event_name == "workflow_dispatch" else args.run_id
+    qualified = check_review_qualified(
+        pr_number, repo, head_sha, args.github_token, args.lgtm_user, comment_anchor_run)
     write_output("qualified", "true" if qualified else "false", args.output_file)
     if not qualified:
         log("::error::No qualifying review — build check will report failure")
