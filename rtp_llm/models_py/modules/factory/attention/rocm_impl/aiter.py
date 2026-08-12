@@ -66,18 +66,18 @@ def validate_v_layout(
     attn_configs: AttentionConfigs,
     attn_inputs: PyAttentionInputs,
     fmha_config: Optional[FMHAConfig],
-) -> None:
+) -> bool:
     if not attn_configs.need_rope_kv_cache or not _is_mrope_interleaved_supported(
         attn_configs
     ):
-        return
+        return False
     page = attn_configs.kernel_tokens_per_block
     head = attn_configs.size_per_head
     width = _kv_vector_width(attn_configs)
     if head % width or page <= 0 or page % width:
         raise ValueError(f"invalid V geometry: {head=}, {page=}, {width=}")
     if attn_inputs.is_prefill or fmha_config is None:
-        return
+        return True
     prefill_vec = prefill_writes_vectorized_v(attn_configs, fmha_config)
     decode_vec = (
         prefill_vec
@@ -85,12 +85,16 @@ def validate_v_layout(
         else (fmha_config.use_asm_pa and head in ASM_DECODE_HEAD_SIZES)
     )
     if prefill_vec != decode_vec and page != width:
+        remedy = "enable --use_triton_pa 1"
+        if attn_configs.kv_cache_dtype == KvCacheDataType.BASE:
+            remedy += " or set --use_asm_pa 0"
         raise ValueError(
             f"ROCm KV-cache V layout mismatch: {fmha_config.use_asm_pa=}, "
             f"{fmha_config.use_triton_pa=}, "
             f"{head=}, {page=}, {width=}, {prefill_vec=}, {decode_vec=}; "
-            "enable Triton PA or select matching prefill/decode implementations"
+            f"{remedy} to select matching prefill/decode implementations"
         )
+    return True
 
 
 # Pure Python implementation of FMHAParams

@@ -1836,7 +1836,7 @@ class TestVLayoutContract(unittest.TestCase):
         inputs.is_prefill = True
         return config, inputs
 
-    def _decode_flags(self, aiter: bool, asm: bool, triton: bool) -> FMHAConfig:
+    def _decode_flags(self, aiter: bool, asm: bool, triton: bool):
         flags = FMHAConfig()
         flags.use_aiter_pa, flags.use_asm_pa, flags.use_triton_pa = aiter, asm, triton
         return flags
@@ -1866,6 +1866,29 @@ class TestVLayoutContract(unittest.TestCase):
         validate_v_layout(
             config, inputs, self._decode_flags(aiter=False, asm=True, triton=False)
         )
+
+    def test_constructor_fallback_is_strict_only_with_layout_validator(self):
+        class BrokenImpl:
+            accepts_fmha_config = False
+            support = support_parallelism_config = staticmethod(lambda *_: True)
+
+            def __init__(self, *_):
+                raise RuntimeError("constructor failed")
+
+        class WorkingImpl(BrokenImpl):
+            def __init__(self, *_):
+                pass
+
+        _, inputs = self._make_case(128, 16)
+        inputs.is_prefill = False
+        with patch.object(attn_factory, "DECODE_MHA_IMPS", [BrokenImpl, WorkingImpl]):
+            with patch.object(attn_factory, "VALIDATE_FMHA_CONFIG", None):
+                with self.assertLogs(level="WARNING"):
+                    impl = attn_factory.get_fmha_impl(AttentionConfigs(), None, inputs)
+                self.assertIsInstance(impl, WorkingImpl)
+            with patch.object(attn_factory, "VALIDATE_FMHA_CONFIG", lambda *_: True):
+                with self.assertRaisesRegex(RuntimeError, "constructor failed"):
+                    attn_factory.get_fmha_impl(AttentionConfigs(), None, inputs)
 
 
 if __name__ == "__main__":

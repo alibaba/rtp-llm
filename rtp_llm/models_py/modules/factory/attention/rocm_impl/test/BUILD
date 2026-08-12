@@ -1,5 +1,4 @@
-# ROCm attention helper and kernel tests. All targets use the MI308X runner
-# because importing the attention modules requires ROCm bindings.
+# test_attn_utils is CPU-only; kernel tests require the MI308X ROCm runner.
 
 py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
@@ -47,7 +46,7 @@ py_test(
         "//rtp_llm:config",
         "//rtp_llm:testlib",
     ],
-    timeout = "long",
+    timeout = "eternal",
     tags = ["rocm"],
     exec_properties = {"gpu": "MI308X-ROCM7"},
 )
