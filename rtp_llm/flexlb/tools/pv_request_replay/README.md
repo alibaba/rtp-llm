@@ -77,6 +77,10 @@ output/
 
 The request window is applied to the routing record's `requestTimeMs`. Collection continues beyond the requested end by a configurable completion grace so that delayed `cache_hit_comparison` and `prefill_worker_status` records can still join to requests inside the window.
 
+The replay recognizes both `PREFILL` and fused `PDFUSION` routing records. When a
+PV record contains both roles, `PREFILL` retains priority; `DECODE` is never used
+as a substitute for a prefill decision.
+
 Every command returns a non-zero exit status when collection or request joins are partial, even if non-strict mode produced inspectable artifacts. Use `--strict` to stop before HTML generation when log coverage is incomplete or any routed request lacks cache/WorkerStatus first-token telemetry.
 
 ## Semantics and limitations

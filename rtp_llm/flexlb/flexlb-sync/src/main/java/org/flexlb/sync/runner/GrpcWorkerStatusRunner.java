@@ -253,7 +253,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
     }
 
     private void reportFinishedPrefillTasks(Map<String, TaskInfo> finishedTaskInfo) {
-        if (roleType != RoleType.PREFILL || finishedTaskInfo == null || finishedTaskInfo.isEmpty()) {
+        if ((roleType != RoleType.PREFILL && roleType != RoleType.PDFUSION)
+                || finishedTaskInfo == null || finishedTaskInfo.isEmpty()) {
             return;
         }
         for (TaskInfo task : finishedTaskInfo.values()) {

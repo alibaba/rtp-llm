@@ -36,6 +36,10 @@ LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 PV_MARKER = "pvLogger - "
 LOG_TIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})")
 SOURCE_SUFFIXES = {".csv", ".log", ".txt", ".snapshot"}
+# PDFUSION is the prefill-equivalent role in fused deployments.  It must be
+# treated alongside PREFILL for route/cache/decision reconstruction, but DECODE
+# remains deliberately excluded.
+PREFILL_EQUIVALENT_ROLES = ("PREFILL", "PDFUSION")
 
 PERCENTILE_COLORS = {
     "P0-P50": "C6EFCE",      # light green
@@ -254,44 +258,57 @@ def iter_pv_contents(source: PvSource):
             yield str(instance), raw.get("content", "")
 
 
-def get_prefill_server_status(route: dict[str, Any] | None) -> dict[str, Any]:
+def _role_items(route: dict[str, Any], field: str) -> list[dict[str, Any]]:
+    if field == "server_status":
+        response = route.get("response")
+        values = response.get(field, []) if isinstance(response, dict) else []
+    else:
+        values = route.get(field, [])
+    return [item for item in values if isinstance(item, dict)] if isinstance(values, list) else []
+
+
+def get_prefill_equivalent_role(route: dict[str, Any] | None) -> str | None:
+    """Resolve a supported route role, preserving PREFILL priority when both exist."""
+
+    if not route:
+        return None
+    selection_reasons = route.get("selectionReasons", {})
+    for role in PREFILL_EQUIVALENT_ROLES:
+        if isinstance(selection_reasons, dict) and role in selection_reasons:
+            return role
+        for field in ("server_status", "cacheMatchSelections", "shortestTtftDecisions"):
+            if any(item.get("role") == role for item in _role_items(route, field)):
+                return role
+    return None
+
+
+def _prefill_equivalent_item(
+    route: dict[str, Any] | None, field: str, role: str | None = None
+) -> dict[str, Any]:
     if not route:
         return {}
-    statuses = route.get("response", {}).get("server_status", [])
-    for item in statuses:
-        if isinstance(item, dict) and item.get("role") == "PREFILL":
-            return item
-    if len(statuses) == 1 and isinstance(statuses[0], dict) and not statuses[0].get("role"):
-        return statuses[0]
+    items = _role_items(route, field)
+    for preferred_role in ((role,) if role else PREFILL_EQUIVALENT_ROLES):
+        for item in items:
+            if item.get("role") == preferred_role:
+                return item
+    if len(items) == 1 and not items[0].get("role"):
+        return items[0]
     return {}
+
+
+def get_prefill_server_status(route: dict[str, Any] | None) -> dict[str, Any]:
+    return _prefill_equivalent_item(route, "server_status")
 
 
 def get_route_cache_selection(route: dict[str, Any] | None) -> dict[str, Any]:
-    if not route:
-        return {}
-    selections = route.get("cacheMatchSelections", [])
-    for item in selections:
-        if isinstance(item, dict) and item.get("role") == "PREFILL":
-            return item
-    if len(selections) == 1 and isinstance(selections[0], dict) and not selections[0].get("role"):
-        return selections[0]
-    return {}
+    return _prefill_equivalent_item(route, "cacheMatchSelections")
 
 
 def get_prefill_decision(route: dict[str, Any] | None) -> dict[str, Any]:
-    """Return the PREFILL decision snapshot recorded with a routing PV."""
+    """Return the PREFILL/PDFUSION decision snapshot from a routing PV."""
 
-    if not route:
-        return {}
-    decisions = route.get("shortestTtftDecisions", [])
-    if not isinstance(decisions, list):
-        return {}
-    for decision in decisions:
-        if isinstance(decision, dict) and decision.get("role") == "PREFILL":
-            return decision
-    if len(decisions) == 1 and isinstance(decisions[0], dict) and not decisions[0].get("role"):
-        return decisions[0]
-    return {}
+    return _prefill_equivalent_item(route, "shortestTtftDecisions")
 
 
 def yes_no_unknown(value: Any) -> str:
@@ -586,8 +603,15 @@ def build_rows(sources: Sequence[PvSource], start: datetime | str | None = None,
                 {},
             )
         selected_snapshot = selected_snapshot or {}
-        selection_reason = ((route or {}).get("selectionReasons", {}).get("PREFILL")
-                            or "N/A")
+        selection_reasons = (route or {}).get("selectionReasons", {})
+        selection_reason = next(
+            (
+                selection_reasons.get(role)
+                for role in PREFILL_EQUIVALENT_ROLES
+                if isinstance(selection_reasons, dict) and selection_reasons.get(role)
+            ),
+            "N/A",
+        )
         selection_counts[selection_reason] += 1
         scheduler_wait = non_negative(status.get("schedulerWaitMs") if status else None)
         remote_wait = non_negative(status.get("remoteKvWaitMs") if status else None)

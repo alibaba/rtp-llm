@@ -34,23 +34,25 @@ def pv_line(log_time: str, record: dict) -> str:
     )
 
 
-def route_record(request_id: str, request_time_ms: int, worker: str) -> dict:
+def route_record(
+    request_id: str, request_time_ms: int, worker: str, role: str = "PREFILL"
+) -> dict:
     return {
         "requestId": request_id,
         "requestTimeMs": request_time_ms,
         "totalUs": 1234,
         "success": True,
         "inputIdsCount": 1000,
-        "selectionReasons": {"PREFILL": "SHORTEST_TTFT"},
+        "selectionReasons": {role: "SHORTEST_TTFT"},
         "response": {
             "code": 200,
             "server_status": [
-                {"role": "PREFILL", "server_ip": worker, "code": 200}
+                {"role": role, "server_ip": worker, "code": 200}
             ],
         },
         "shortestTtftDecisions": [
             {
-                "role": "PREFILL",
+                "role": role,
                 "decisionTimeMs": request_time_ms,
                 "routingAttempt": 1,
                 "workers": [
@@ -244,6 +246,90 @@ class BuildWorkbookTest(unittest.TestCase):
         self.assertEqual(workbook_module.get_prefill_server_status(ambiguous_legacy), {})
         self.assertEqual(workbook_module.get_route_cache_selection(ambiguous_legacy), {})
         self.assertEqual(workbook_module.get_prefill_decision(ambiguous_legacy), {})
+
+    def test_pdfusion_is_replayed_as_a_prefill_equivalent_role(self) -> None:
+        request_time_ms = epoch_ms(1, 45)
+        route = route_record("fusion-request", request_time_ms, "10.0.0.7", "PDFUSION")
+        route["cacheMatchSelections"] = [
+            {"role": "PDFUSION", "selectedIp": "10.0.0.7", "hitCacheTokens": 800}
+        ]
+
+        self.assertEqual(
+            workbook_module.get_prefill_equivalent_role(route), "PDFUSION"
+        )
+        self.assertEqual(
+            workbook_module.get_prefill_server_status(route)["server_ip"], "10.0.0.7"
+        )
+        self.assertEqual(
+            workbook_module.get_route_cache_selection(route)["selectedIp"], "10.0.0.7"
+        )
+        self.assertEqual(
+            workbook_module.get_prefill_decision(route)["role"], "PDFUSION"
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            source = Path(temporary_directory) / "pv.log"
+            source.write_text(
+                "".join(
+                    [
+                        pv_line("2026-08-11 01:45:00.010", route),
+                        pv_line("2026-08-11 01:45:00.020", cache_record("fusion-request", 800)),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            rows, _, selection_counts = workbook_module.build_rows(
+                [workbook_module.PvSource(source, "fusion-flexlb")]
+            )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["selection_reason"], "SHORTEST_TTFT")
+        self.assertEqual(rows[0]["prefill_host"], "10.0.0.7")
+        self.assertEqual(len(rows[0]["_decision_workers"]), 1)
+        self.assertEqual(selection_counts["SHORTEST_TTFT"], 1)
+
+    def test_prefill_keeps_priority_when_prefill_and_pdfusion_are_both_present(self) -> None:
+        request_time_ms = epoch_ms(1, 45)
+        route = route_record("mixed-request", request_time_ms, "10.0.0.8")
+        fusion_worker = "10.0.0.9"
+        route["response"]["server_status"].insert(
+            0, {"role": "PDFUSION", "server_ip": fusion_worker, "code": 200}
+        )
+        route["cacheMatchSelections"] = [
+            {"role": "PDFUSION", "selectedIp": fusion_worker, "hitCacheTokens": 100},
+            {"role": "PREFILL", "selectedIp": "10.0.0.8", "hitCacheTokens": 800},
+        ]
+        route["shortestTtftDecisions"].insert(
+            0,
+            {
+                "role": "PDFUSION",
+                "workers": [{"ip": fusion_worker, "selected": True}],
+            },
+        )
+        route["selectionReasons"]["PDFUSION"] = "FUSION_REASON"
+
+        self.assertEqual(workbook_module.get_prefill_equivalent_role(route), "PREFILL")
+        self.assertEqual(
+            workbook_module.get_prefill_server_status(route)["server_ip"], "10.0.0.8"
+        )
+        self.assertEqual(
+            workbook_module.get_route_cache_selection(route)["selectedIp"], "10.0.0.8"
+        )
+        self.assertEqual(
+            workbook_module.get_prefill_decision(route)["role"], "PREFILL"
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            source = Path(temporary_directory) / "pv.log"
+            source.write_text(
+                pv_line("2026-08-11 01:45:00.010", route), encoding="utf-8"
+            )
+            rows, _, selection_counts = workbook_module.build_rows(
+                [workbook_module.PvSource(source, "mixed-flexlb")]
+            )
+
+        self.assertEqual(rows[0]["selection_reason"], "SHORTEST_TTFT")
+        self.assertEqual(selection_counts["SHORTEST_TTFT"], 1)
 
     def test_optional_boolean_keeps_unknown_distinct_from_false(self) -> None:
         self.assertEqual(workbook_module.yes_no_unknown(None), "")
