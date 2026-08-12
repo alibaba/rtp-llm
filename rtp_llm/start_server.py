@@ -21,7 +21,7 @@ from rtp_llm.config.server_config_setup import setup_and_configure_server
 from rtp_llm.ops import RoleType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
-from rtp_llm.utils.process_manager import ProcessManager
+from rtp_llm.utils.process_manager import ProcessManager, parent_shutdown_timeout
 
 setup_logging()
 
@@ -350,7 +350,12 @@ def start_server(py_env_configs: PyEnvConfigs):
 
     # Create process manager with config values
     process_manager = ProcessManager(
-        shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
+        # The backend process owns another ProcessManager for local ranks. Its
+        # deadline must expire first; otherwise equal deadlines let this outer
+        # owner SIGKILL a backend that has just finished reaping its ranks.
+        shutdown_timeout=parent_shutdown_timeout(
+            py_env_configs.server_config.shutdown_timeout
+        ),
         monitor_interval=py_env_configs.server_config.monitor_interval,
     )
     # Backward compat: VIT_SEPARATION=ROLE without ROLE_TYPE=VIT

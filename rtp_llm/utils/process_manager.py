@@ -7,6 +7,16 @@ from multiprocessing import Process
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set
 
 
+NESTED_PROCESS_MANAGER_EXIT_GRACE_SECONDS = 10
+
+
+def parent_shutdown_timeout(child_shutdown_timeout: int) -> int:
+    """Give a parent manager time to reap a child manager after child shutdown."""
+    if child_shutdown_timeout == -1:
+        return -1
+    return child_shutdown_timeout + NESTED_PROCESS_MANAGER_EXIT_GRACE_SECONDS
+
+
 class ProcessManager:
     """Process manager for managing and monitoring processes"""
 

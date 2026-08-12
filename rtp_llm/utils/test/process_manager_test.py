@@ -7,7 +7,7 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-from rtp_llm.utils.process_manager import ProcessManager
+from rtp_llm.utils.process_manager import ProcessManager, parent_shutdown_timeout
 
 
 def dummy_worker(duration=1, should_crash=False):
@@ -74,6 +74,12 @@ class TestProcessManager(unittest.TestCase):
         self.assertFalse(self.manager.shutdown_requested)
         self.assertFalse(self.manager.terminated)
         self.assertEqual(self.manager.first_dead_time, 0)
+
+    def test_parent_shutdown_timeout_exceeds_nested_child_deadline(self):
+        self.assertEqual(parent_shutdown_timeout(50), 60)
+
+    def test_parent_shutdown_timeout_preserves_unbounded_wait(self):
+        self.assertEqual(parent_shutdown_timeout(-1), -1)
 
     def test_add_single_process(self):
         """Test adding a single process"""
