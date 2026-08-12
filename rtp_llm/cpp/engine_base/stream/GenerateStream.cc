@@ -944,6 +944,11 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                           nxt_cached_len + 1);
     }
 
+    // Publish completion while still holding mutex_. A concurrent block-table
+    // snapshot therefore sees either the pre-swap table with a pending epoch,
+    // or the post-swap table with the completed epoch, never a mixed state.
+    mtp_linear_swap_completed_epoch_ = std::max(mtp_linear_swap_completed_epoch_, update_info.mtp_async_epoch);
+
     // update normal output buffer
     updateOutput({new_tokens,
                   num_new_tokens,
@@ -963,6 +968,32 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
         updateLogitProcessorStatus(new_tokens, committed_num_new_tokens, torch::Tensor(), true);
     }
     validateStatefulLogitsProcessorState();
+}
+
+GenerateStream::KVCacheBlockSnapshot GenerateStream::snapshotKVCacheBlocks() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+
+    KVCacheBlockSnapshot snapshot;
+    const auto&          kv_cache = stream_cache_resource_->kvCache();
+    const int            batch    = kv_cache.batchSize();
+    const int            groups   = batch > 0 ? kv_cache.groupNums() : 0;
+
+    snapshot.batch_size = batch;
+    snapshot.kernel_blocks.resize(batch);
+    for (int batch_id = 0; batch_id < batch; ++batch_id) {
+        snapshot.kernel_blocks[batch_id].reserve(groups);
+        for (int group_id = 0; group_id < groups; ++group_id) {
+            snapshot.kernel_blocks[batch_id].push_back(kv_cache.kernelBlocks(batch_id, group_id));
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> state_lock(*mtp_async_state_mutex_);
+        snapshot.linear_patch = mtp_linear_patch_state_;
+    }
+    snapshot.needs_mtp_linear_patch =
+        snapshot.linear_patch.epoch != 0 && mtp_linear_swap_completed_epoch_ < snapshot.linear_patch.epoch;
+    return snapshot;
 }
 
 void GenerateStream::update(const StreamUpdateInfo& update_info) {
