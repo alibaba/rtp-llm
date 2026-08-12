@@ -55,6 +55,11 @@ struct StreamSpecUpdateInfo {
 
     bool update_remote_generate = true;
     bool force_update_info      = false;
+
+    // Epoch of the device state that produced this update. The async MTP
+    // worker carries it explicitly because a newer state may be published
+    // before the single-slot worker starts this task.
+    uint64_t mtp_async_epoch = 0;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -516,6 +521,9 @@ public:
         uint64_t      epoch = 0;
         torch::Tensor accept_len_gpu;
         torch::Tensor accept_tokens_gpu;
+        // Sequence length before applying accept_len_gpu. The async LINEAR
+        // patch builder uses it to reproduce specUpdate's permutation.
+        torch::Tensor prev_seq_len_gpu;
         torch::Tensor next_seq_len_gpu;
         // Exact pinned-host mirror of next_seq_len_gpu. Async publishers record
         // the event after the D2H copy; consumers synchronize it before CPU use.
@@ -537,17 +545,62 @@ public:
         int next_real_seq_len = -1;
     };
 
-    uint64_t setMtpAsyncDeviceState(MtpAsyncDeviceState state) {
-        state.epoch      = ++mtp_async_epoch_counter_;
+    // Device-resident final-value patch for one deferred LINEAR host swap.
+    // Values are captured from the authoritative block table in round N and
+    // assigned to a fresh host snapshot in round N+1. before_values lets the
+    // apply kernel preserve allocator edits instead of blindly restoring IDs.
+    struct MtpLinearBlockPatchState {
+        uint64_t              epoch = 0;
+        torch::Tensor         positions_gpu;      // [1, 4]
+        torch::Tensor         source_slots_gpu;   // [1, 4]
+        torch::Tensor         before_values_gpu;  // [1, group, 4]
+        torch::Tensor         after_values_gpu;   // [1, group, 4]
+        torch::Tensor         valid_gpu;          // [1, group]
+        std::shared_ptr<void> ready_event;
+    };
+
+    struct KVCacheBlockSnapshot {
+        // [batch][group][block]. LINEAR groups have one kernel id per logical
+        // block even when FULL groups use multiple kernel blocks per KV block.
+        std::vector<std::vector<BlockIndicesType>> kernel_blocks;
+        int                                        batch_size = 0;
+        MtpLinearBlockPatchState                   linear_patch;
+        bool                                       needs_mtp_linear_patch = false;
+    };
+
+    // Atomically snapshots the host block table and whether the published MTP
+    // epoch has already been applied by worker-side specUpdate().
+    KVCacheBlockSnapshot snapshotKVCacheBlocks();
+
+    uint64_t setMtpAsyncDeviceState(MtpAsyncDeviceState      state,
+                                    bool                     has_pending_linear_swap,
+                                    MtpLinearBlockPatchState linear_patch) {
+        std::unique_lock<std::mutex> stream_lock;
+        if (has_pending_linear_swap) {
+            stream_lock = std::unique_lock<std::mutex>(*mutex_);
+        }
+        std::lock_guard<std::mutex> state_lock(*mtp_async_state_mutex_);
+        state.epoch = ++mtp_async_epoch_counter_;
+        if (has_pending_linear_swap) {
+            // Keep the patch separate from the general MTP state. Ingress or
+            // gRPC publication must not erase a host swap that is still pending.
+            linear_patch.epoch      = state.epoch;
+            mtp_linear_patch_state_ = std::move(linear_patch);
+        }
         mtp_async_state_ = std::move(state);
         return mtp_async_state_.epoch;
     }
-    const MtpAsyncDeviceState& getMtpAsyncDeviceState() const {
+    uint64_t setMtpAsyncDeviceState(MtpAsyncDeviceState state, bool has_pending_linear_swap = false) {
+        return setMtpAsyncDeviceState(std::move(state), has_pending_linear_swap, MtpLinearBlockPatchState());
+    }
+    MtpAsyncDeviceState getMtpAsyncDeviceState() const {
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         return mtp_async_state_;
     }
     bool clearMtpAsyncDeviceState(uint64_t epoch) {
         // Legacy/testing escape hatch. Active MTP decode paths should keep
         // device tensors alive and overwrite them on the next publish.
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         if (mtp_async_state_.epoch != epoch) {
             return false;
         }
@@ -561,33 +614,47 @@ public:
                                   torch::Tensor next_seq_len_gpu,
                                   torch::Tensor propose_tokens_gpu = torch::Tensor()) {
         MtpAsyncDeviceState state;
-        state.accept_len_gpu     = std::move(accept_len_gpu);
-        state.accept_tokens_gpu  = std::move(accept_tokens_gpu);
+        state.accept_len_gpu    = std::move(accept_len_gpu);
+        state.accept_tokens_gpu = std::move(accept_tokens_gpu);
+        if (next_seq_len_gpu.defined() && state.accept_len_gpu.defined()) {
+            state.prev_seq_len_gpu = next_seq_len_gpu - state.accept_len_gpu;
+        }
         state.next_seq_len_gpu   = std::move(next_seq_len_gpu);
         state.propose_tokens_gpu = std::move(propose_tokens_gpu);
         setMtpAsyncDeviceState(std::move(state));
     }
-    const torch::Tensor& getAcceptLenGpu() const {
+    torch::Tensor getAcceptLenGpu() const {
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         return mtp_async_state_.accept_len_gpu;
     }
-    const torch::Tensor& getAcceptTokensGpu() const {
+    torch::Tensor getAcceptTokensGpu() const {
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         return mtp_async_state_.accept_tokens_gpu;
     }
-    const torch::Tensor& getNextSeqLenGpu() const {
+    torch::Tensor getNextSeqLenGpu() const {
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         return mtp_async_state_.next_seq_len_gpu;
     }
-    const torch::Tensor& getProposeTokensGpu() const {
+    torch::Tensor getPrevSeqLenGpu() const {
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
+        return mtp_async_state_.prev_seq_len_gpu;
+    }
+    torch::Tensor getProposeTokensGpu() const {
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         return mtp_async_state_.propose_tokens_gpu;
     }
-    const torch::Tensor& getLastHiddenStatesGpu() const {
+    torch::Tensor getLastHiddenStatesGpu() const {
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         return mtp_async_state_.last_hidden_states_gpu;
     }
-    const torch::Tensor& getDraftAllProbsGpu() const {
+    torch::Tensor getDraftAllProbsGpu() const {
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         return mtp_async_state_.draft_all_probs_gpu;
     }
     void clearSpecDecodeDeviceState() {
         // Unconditional legacy/testing escape hatch. Active MTP decode paths
         // should publish/overwrite MtpAsyncDeviceState instead of clearing it.
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         mtp_async_state_ = MtpAsyncDeviceState{};
     }
 
@@ -814,8 +881,13 @@ protected:
     // Stream-async device-resident state for the next decode step's prepare.
     // These structs stay default-constructed (epoch=0, undefined tensors) until
     // their corresponding async/sync publisher installs a usable state.
-    MtpAsyncDeviceState                mtp_async_state_;
-    uint64_t                           mtp_async_epoch_counter_ = 0;
+    MtpAsyncDeviceState         mtp_async_state_;
+    MtpLinearBlockPatchState    mtp_linear_patch_state_;
+    uint64_t                    mtp_async_epoch_counter_ = 0;
+    std::shared_ptr<std::mutex> mtp_async_state_mutex_   = std::make_shared<std::mutex>();
+    // Protected by mutex_. Updated in the same critical section as the host
+    // LINEAR block swap, so a block snapshot cannot observe a mismatched epoch.
+    uint64_t                           mtp_linear_swap_completed_epoch_ = 0;
     NormalAsyncDeviceState             normal_async_state_;
     uint64_t                           normal_async_epoch_counter_       = 0;
     std::shared_ptr<std::atomic<bool>> grpc_normal_device_state_pending_ = std::make_shared<std::atomic<bool>>(false);

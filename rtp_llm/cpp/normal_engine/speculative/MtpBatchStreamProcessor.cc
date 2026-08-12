@@ -358,12 +358,23 @@ absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups&  strea
 
 absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&                          stream_groups,
                                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
-                                                     const MergedOutput& draft_prefill_output) const {
+                                                     const MergedOutput&                          draft_prefill_output,
+                                                     const std::vector<uint64_t>& mtp_async_epochs) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     std::vector<StreamSpecUpdateInfo> spec_update_infos;
 
     prepareDecodeSpecUpdateInfo(stream_groups, spec_decode_output, draft_prefill_output, spec_update_infos);
+
+    if (!mtp_async_epochs.empty()) {
+        RTP_LLM_CHECK_WITH_INFO(mtp_async_epochs.size() == spec_update_infos.size(),
+                                "MTP async epoch count %zu does not match update count %zu",
+                                mtp_async_epochs.size(),
+                                spec_update_infos.size());
+        for (size_t i = 0; i < spec_update_infos.size(); ++i) {
+            spec_update_infos[i].mtp_async_epoch = mtp_async_epochs[i];
+        }
+    }
 
     // to avoid cuda sync, we need to set propose token in extra loop
     updateProposeTokens(stream_groups, draft_prefill_output, spec_update_infos);
@@ -375,8 +386,10 @@ absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&        
 }
 
 absl::StatusOr<GptModelInputs> MtpBatchStreamProcessor::gatherDecodeModelInput(const StreamGroups& stream_groups,
-                                                                               TensorHolder&       host_holder) const {
-    auto model_input = NormalBatchStreamProcessor::gatherModelInput(stream_groups, host_holder);
+                                                                               TensorHolder&       host_holder,
+                                                                               bool skip_linear_cache_groups) const {
+    auto model_input =
+        NormalBatchStreamProcessor::gatherModelInput(stream_groups, host_holder, skip_linear_cache_groups);
 
     RTP_LLM_CHECK(model_input.ok());
 
@@ -976,8 +989,8 @@ void MtpBatchStreamProcessor::gatherHiddenStates(const StreamGroups& stream_grou
     // Prefer main-thread device-state hidden_states to avoid racing worker
     // writes to sp_output_buffer when DROP_BROAD_SYNC=1. Fallback covers older
     // or first-step streams without published device state.
-    auto pick_hidden_states = [](const GenerateStreamPtr& stream) -> const torch::Tensor& {
-        const auto& dev = stream->getLastHiddenStatesGpu();
+    auto pick_hidden_states = [](const GenerateStreamPtr& stream) -> torch::Tensor {
+        auto dev = stream->getLastHiddenStatesGpu();
         if (dev.defined()) {
             return dev;
         }
@@ -986,7 +999,7 @@ void MtpBatchStreamProcessor::gatherHiddenStates(const StreamGroups& stream_grou
 
     size_t all_hidden_tokens_num = 0;
     for (auto& stream : all_streams) {
-        const auto& hidden_states = pick_hidden_states(stream);
+        auto hidden_states = pick_hidden_states(stream);
         RTP_LLM_CHECK(hidden_states.defined());
         RTP_LLM_CHECK(hidden_states.dim() == 2);
         if (dtype == c10::ScalarType::Undefined) {
@@ -1016,7 +1029,7 @@ void MtpBatchStreamProcessor::gatherHiddenStates(const StreamGroups& stream_grou
 
         bool all_sources_fused_copy_ready = true;
         for (auto& stream : all_streams) {
-            const auto& hidden_states = pick_hidden_states(stream);
+            auto hidden_states = pick_hidden_states(stream);
             if (!hidden_states.is_cuda() || !hidden_states.is_contiguous()) {
                 all_sources_fused_copy_ready = false;
                 break;
@@ -1038,8 +1051,8 @@ void MtpBatchStreamProcessor::gatherHiddenStates(const StreamGroups& stream_grou
             // metadata staging creates H2D work on this hot path. fusedCopy
             // passes copy metadata as kernel params and can be chunked.
             for (auto& stream : all_streams) {
-                const auto& hidden_states    = pick_hidden_states(stream);
-                size_t      hidden_copy_size = hidden_states.nbytes();
+                auto   hidden_states    = pick_hidden_states(stream);
+                size_t hidden_copy_size = hidden_states.nbytes();
                 if (params.num_copies == MAX_FUSED_D2D_COPIES) {
                     flush_fused_copy();
                 }
@@ -1050,8 +1063,8 @@ void MtpBatchStreamProcessor::gatherHiddenStates(const StreamGroups& stream_grou
         } else {
             size_t index = 0;
             for (auto& stream : all_streams) {
-                const auto& hidden_states = pick_hidden_states(stream);
-                auto        hidden_num    = hidden_states.size(0);
+                auto hidden_states = pick_hidden_states(stream);
+                auto hidden_num    = hidden_states.size(0);
                 all_hidden_states.narrow(0, index, hidden_num).copy_(hidden_states);
                 index += hidden_num;
             }

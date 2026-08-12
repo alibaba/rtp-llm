@@ -210,6 +210,7 @@ cc_library(
     srcs = ["mtp_target_verify_prepare.cu"],
     hdrs = ["mtp_target_verify_prepare.h"],
     deps = [
+        "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/utils:core_utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
