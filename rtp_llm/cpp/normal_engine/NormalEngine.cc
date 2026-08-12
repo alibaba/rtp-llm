@@ -45,6 +45,18 @@ void releaseHostMemoryCache() {
 #endif
 }
 
+bool shouldUseCudaMallocKVCacheBacking(const PDSepConfig& pd_sep_config, const CacheStoreConfig& cache_store_config) {
+    // RDMA user-MR registration requires one contiguous cudaMalloc allocation.
+    // PyTorch expandable segments may be CUDA-accessible but cannot be registered
+    // as one continuous MR by ibv_reg_mr.
+    const bool pd_role = pd_sep_config.role_type == RoleType::PREFILL || pd_sep_config.role_type == RoleType::DECODE;
+    const bool has_cache_store_server = pd_sep_config.cache_store_listen_port > 0
+                                        || pd_sep_config.cache_store_rdma_listen_port > 0
+                                        || pd_sep_config.remote_rpc_server_port > 0;
+    return pd_role && pd_sep_config.cache_store_rdma_mode
+           && (cache_store_config.cache_store_rdma_mode || has_cache_store_server);
+}
+
 }  // anonymous namespace
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
@@ -57,6 +69,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     pd_sep_config(params.pd_sep_config),
     profiling_debug_logging_config(params.profiling_debug_logging_config),
     kv_cache_config(params.kv_cache_config),
+    cache_store_config(params.cache_store_config),
     ffn_disaggregate_config(params.ffn_disaggregate_config),
     model_specific_config(params.model_specific_config),
     sp_config(params.sp_config),
@@ -330,6 +343,7 @@ void NormalEngine::normalizeSystemPromptCacheConfig() {
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
     normalizeSystemPromptCacheConfig();
+    const bool use_cuda_malloc_block_pool = shouldUseCudaMallocKVCacheBacking(pd_sep_config, cache_store_config);
     if (kv_cache_config.device_cache_min_free_blocks <= 0) {
         int64_t max_prefill_tokens =
             runtime_config.fifo_scheduler_config.max_context_batch_size * model_config_.max_seq_len;
@@ -356,9 +370,17 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                          isMTPEagle(),
                                                          isEagle());
 
-        resource_context_.cache_manager = make_shared<KVCacheManager>(
-            config, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config, sp_config);
-        resource_context_.role_type = pd_sep_config.role_type;
+        resource_context_.cache_manager = make_shared<KVCacheManager>(config,
+                                                                      false,
+                                                                      metrics_reporter_,
+                                                                      kv_cache_config,
+                                                                      parallelism_config,
+                                                                      runtime_config,
+                                                                      sp_config,
+                                                                      pd_sep_config,
+                                                                      cache_store_config,
+                                                                      use_cuda_malloc_block_pool);
+        resource_context_.role_type     = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -373,9 +395,17 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                          result.block_num,
                          result.block_size_bytes / 1024);
         RTP_LLM_LOG_INFO("create cache manager with linear step %d", result.linear_step);
-        resource_context_.cache_manager = make_shared<KVCacheManager>(
-            result, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);
-        resource_context_.role_type = pd_sep_config.role_type;
+        resource_context_.cache_manager = make_shared<KVCacheManager>(result,
+                                                                      false,
+                                                                      metrics_reporter_,
+                                                                      kv_cache_config,
+                                                                      parallelism_config,
+                                                                      runtime_config,
+                                                                      SpeculativeExecutionConfig{},
+                                                                      pd_sep_config,
+                                                                      cache_store_config,
+                                                                      use_cuda_malloc_block_pool);
+        resource_context_.role_type     = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
