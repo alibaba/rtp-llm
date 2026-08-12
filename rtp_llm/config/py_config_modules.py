@@ -177,7 +177,7 @@ class LoadConfig:
         self.load_method: str = "auto"
         self.force_cpu_load_weights: bool = False
         self.loader_recycle_handles: bool = True
-        self.moe_pure_tp_preshard: bool = True
+        self.moe_pure_tp_preshard: bool = False
 
     def to_string(self):
         return (

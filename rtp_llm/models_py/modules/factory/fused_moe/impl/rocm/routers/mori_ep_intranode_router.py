@@ -11,6 +11,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     CombineForwardPayload,
     ExpertForwardPayload,
     ExpertTokensMetadata,
+    FinalizeArgs,
     FusedMoeDataRouter,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
@@ -73,7 +74,9 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
 
         local_start = self.ep_rank * self.expert_num_per_rank
         local_end = local_start + self.expert_num_per_rank
-        return remap_to_local_ids(dispatch_ids, dispatch_weights, local_start, local_end)
+        return remap_to_local_ids(
+            dispatch_ids, dispatch_weights, local_start, local_end
+        )
 
     def prepare(
         self,
@@ -214,7 +217,7 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
-        extra_finalize_args: Optional[Dict[str, Any]],
+        extra_finalize_args: Optional[FinalizeArgs],
     ) -> torch.Tensor:
         logging.info(
             f"[MoriEpIntranodeRouter] finalize called, ep_rank={self.ep_rank}, chunked={self._is_chunked}"
@@ -228,7 +231,7 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
     def _finalize_single(
         self,
         fused_out: torch.Tensor,
-        extra_finalize_args: Optional[Dict[str, Any]],
+        extra_finalize_args: Optional[FinalizeArgs],
     ) -> torch.Tensor:
         # Use the cached global dispatch_ids for combine, not the local_ids
         # that were set as expert_topk_ids for the fused_moe kernel.
@@ -253,7 +256,7 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
     def _finalize_chunked(
         self,
         fused_out: torch.Tensor,
-        extra_finalize_args: Optional[Dict[str, Any]],
+        extra_finalize_args: Optional[FinalizeArgs],
     ) -> torch.Tensor:
         results = []
         offset = 0
