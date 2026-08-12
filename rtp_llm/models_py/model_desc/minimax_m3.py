@@ -303,48 +303,38 @@ def _target_verify_impl_class():
     from rtp_llm.models_py.modules.factory.attention import common
     from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
         PyFlashinferDecodeAttnOp,
-        PyFlashinferDecodeImpl,
     )
     from rtp_llm.ops.compute_ops import (
         FusedRopeKVCachePrefillOpQNoTransposeOut,
         get_scalar_type,
     )
 
-    class MiniMaxM3TargetVerifyAttnOp(PyFlashinferDecodeAttnOp):
+    def resolve_target_verify_backend(attn_configs) -> tuple[str, str]:
+        requested_backend = _requested_target_verify_backend()
+        runs_on_blackwell = (
+            torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 10
+        )
+        fa4_target_verify_supported = (
+            fa4_available
+            and runs_on_blackwell
+            and attn_configs.kv_cache_dtype == KvCacheDataType.FP8
+        )
+        if requested_backend == "fa4" and not fa4_target_verify_supported:
+            raise RuntimeError(
+                "MiniMax-M3 target verify FA4 requires Blackwell, "
+                "flash-attn-4, and FP8 KV cache"
+            ) from fa4_import_error
+        if requested_backend == "fa4" or (
+            requested_backend == "auto" and fa4_target_verify_supported
+        ):
+            return "fa4", requested_backend
+        return "flashinfer", requested_backend
+
+    class MiniMaxM3TargetVerifyFlashInferAttnOp(PyFlashinferDecodeAttnOp):
         def __init__(self, attn_configs):
             super().__init__(attn_configs)
+            self._backend = "flashinfer"
             self._verify_tokens = None
-            requested_backend = _requested_target_verify_backend()
-            runs_on_blackwell = (
-                torch.cuda.is_available()
-                and torch.cuda.get_device_capability()[0] >= 10
-            )
-            fa4_target_verify_supported = (
-                fa4_available
-                and runs_on_blackwell
-                and self.kv_cache_dtype == KvCacheDataType.FP8
-            )
-            if requested_backend == "fa4" and not fa4_target_verify_supported:
-                raise RuntimeError(
-                    "MiniMax-M3 target verify FA4 requires Blackwell, "
-                    "flash-attn-4, and FP8 KV cache"
-                ) from fa4_import_error
-            if requested_backend == "fa4" or (
-                requested_backend == "auto" and fa4_target_verify_supported
-            ):
-                self._backend = "fa4"
-            else:
-                self._backend = "flashinfer"
-            self._fa4_metadata_by_request_capacity = {}
-            self._active_fa4_metadata = None
-            self._fa4_max_kv_sequence_length = attn_configs.max_seq_len
-            logging.info(
-                "MiniMax-M3 target verify attention backend: %s "
-                "(requested=%s, kv_cache_dtype=%s)",
-                self._backend,
-                requested_backend,
-                self.kv_cache_dtype,
-            )
 
         def _resolve_verify_tokens(
             self, attn_inputs, is_cuda_graph_replay: bool
@@ -393,65 +383,13 @@ def _target_verify_impl_class():
                 q_data_type=_target_verify_query_dtype(
                     self.kv_cache_dtype,
                     get_scalar_type(attn_inputs.dtype),
-                    self._backend,
+                    "flashinfer",
                 ),
                 kv_data_type=self._kv_dtype(attn_inputs),
                 o_data_type=get_scalar_type(attn_inputs.dtype),
             )
 
-        def _prepare_fa4_paged_attention_metadata(
-            self, attn_inputs, is_cuda_graph_replay: bool = False
-        ) -> None:
-            verify_tokens = self._resolve_verify_tokens(
-                attn_inputs, is_cuda_graph_replay
-            )
-            prefix_lengths = attn_inputs.prefix_lengths
-            input_lengths = attn_inputs.input_lengths
-            if prefix_lengths is None or input_lengths is None:
-                raise RuntimeError("MiniMax-M3 target verify metadata is incomplete")
-            physical_block_table = _require_target_verify_physical_block_table(
-                attn_inputs
-            )
-            request_capacity = int(prefix_lengths.numel())
-            metadata = self._fa4_metadata_by_request_capacity.get(request_capacity)
-            if metadata is None:
-                metadata = _TargetVerifyFA4Metadata(
-                    cu_seqlens_q=torch.arange(
-                        0,
-                        (request_capacity + 1) * verify_tokens,
-                        verify_tokens,
-                        dtype=torch.int32,
-                        device=prefix_lengths.device,
-                    ),
-                    kv_sequence_lengths=torch.empty_like(
-                        prefix_lengths, dtype=torch.int32
-                    ),
-                    physical_block_table=physical_block_table,
-                )
-                self._fa4_metadata_by_request_capacity[request_capacity] = metadata
-            elif (
-                metadata.physical_block_table.data_ptr()
-                != physical_block_table.data_ptr()
-            ):
-                raise RuntimeError(
-                    "MiniMax-M3 target verify FA4 block-table storage changed "
-                    f"for request capacity {request_capacity}"
-                )
-
-            _fill_target_verify_compact_lengths(
-                prefix_lengths,
-                input_lengths,
-                verify_tokens,
-                metadata.kv_sequence_lengths,
-                is_cuda_graph_replay,
-            )
-            self._active_fa4_metadata = metadata
-
         def prepare(self, attn_inputs):
-            if self._backend == "fa4":
-                self._prepare_fa4_paged_attention_metadata(attn_inputs)
-                return self.fmha_params
-
             sequence_lengths_plus_1, block_table = self._build_flashinfer_token_rows(
                 attn_inputs
             )
@@ -469,12 +407,6 @@ def _target_verify_impl_class():
             return self.fmha_params
 
         def prepare_for_cuda_graph_replay(self, attn_inputs):
-            if self._backend == "fa4":
-                self._prepare_fa4_paged_attention_metadata(
-                    attn_inputs, is_cuda_graph_replay=True
-                )
-                return
-
             fill_decode = getattr(
                 self.fmha_params, "fill_decode_cuda_graph_params", None
             )
@@ -491,21 +423,108 @@ def _target_verify_impl_class():
                 block_table,
                 self.seq_size_per_block,
             )
-            # Capture uses MAX_SEQ_LEN, but FlashInfer's split schedule is not
-            # a reusable upper bound: chunk mappings, merge indptr, and the
-            # valid-CTA mask describe the exact planned KV lengths. Refresh it
-            # after updating the stable paged-KV metadata for this replay.
+            # FlashInfer's split schedule describes the exact live KV lengths,
+            # so refreshing only the stable paged-KV buffers leaves a stale plan.
             self._plan_decode_wrapper(attn_inputs)
+
+        def forward(self, query, kv_cache, params):
+            query_dtype = _target_verify_query_dtype(
+                self.kv_cache_dtype, query.dtype, "flashinfer"
+            )
+            if query.dtype != query_dtype:
+                query = query.to(query_dtype)
+            return super().forward(query, kv_cache, params)
+
+    class MiniMaxM3TargetVerifyFA4AttnOp:
+        """MiniMax-M3 target verify backed only by FlashAttention-4."""
+
+        def __init__(self, attn_configs):
+            # Keep FA4 independent from PyFlashinferDecodeAttnOp. Each CUDA
+            # graph bucket must not own an unused 512-MiB workspace and wrapper.
+            self._backend = "fa4"
+            self.local_head_num = attn_configs.head_num
+            self.local_kv_head_num = attn_configs.kv_head_num
+            self.head_dim_qk = attn_configs.size_per_head
+            self.seq_size_per_block = attn_configs.kernel_tokens_per_block
+            self.kv_cache_dtype = attn_configs.kv_cache_dtype
+            self._verify_tokens = None
+            self._metadata_by_request_capacity = {}
+            self._active_metadata = None
+            self._max_kv_sequence_length = attn_configs.max_seq_len
+
+        def _resolve_verify_tokens(
+            self, attn_inputs, is_cuda_graph_replay: bool
+        ) -> int:
+            if self._verify_tokens is None:
+                self._verify_tokens = _target_verify_width(attn_inputs)
+            elif is_cuda_graph_replay:
+                _validate_target_verify_replay_shape(attn_inputs, self._verify_tokens)
+            return self._verify_tokens
+
+        def _prepare_paged_attention_metadata(
+            self, attn_inputs, is_cuda_graph_replay: bool = False
+        ) -> None:
+            verify_tokens = self._resolve_verify_tokens(
+                attn_inputs, is_cuda_graph_replay
+            )
+            prefix_lengths = attn_inputs.prefix_lengths
+            input_lengths = attn_inputs.input_lengths
+            if prefix_lengths is None or input_lengths is None:
+                raise RuntimeError("MiniMax-M3 target verify metadata is incomplete")
+            physical_block_table = _require_target_verify_physical_block_table(
+                attn_inputs
+            )
+            request_capacity = int(prefix_lengths.numel())
+            metadata = self._metadata_by_request_capacity.get(request_capacity)
+            if metadata is None:
+                metadata = _TargetVerifyFA4Metadata(
+                    cu_seqlens_q=torch.arange(
+                        0,
+                        (request_capacity + 1) * verify_tokens,
+                        verify_tokens,
+                        dtype=torch.int32,
+                        device=prefix_lengths.device,
+                    ),
+                    kv_sequence_lengths=torch.empty_like(
+                        prefix_lengths, dtype=torch.int32
+                    ),
+                    physical_block_table=physical_block_table,
+                )
+                self._metadata_by_request_capacity[request_capacity] = metadata
+            elif (
+                metadata.physical_block_table.data_ptr()
+                != physical_block_table.data_ptr()
+            ):
+                raise RuntimeError(
+                    "MiniMax-M3 target verify FA4 block-table storage changed "
+                    f"for request capacity {request_capacity}"
+                )
+
+            _fill_target_verify_compact_lengths(
+                prefix_lengths,
+                input_lengths,
+                verify_tokens,
+                metadata.kv_sequence_lengths,
+                is_cuda_graph_replay,
+            )
+            self._active_metadata = metadata
+
+        def prepare(self, attn_inputs):
+            self._prepare_paged_attention_metadata(attn_inputs)
+            return None
+
+        def prepare_for_cuda_graph_replay(self, attn_inputs):
+            self._prepare_paged_attention_metadata(
+                attn_inputs, is_cuda_graph_replay=True
+            )
 
         def forward(self, query, kv_cache, params):
             query = query.reshape(query.shape[0], self.local_head_num, self.head_dim_qk)
             query_dtype = _target_verify_query_dtype(
-                self.kv_cache_dtype, query.dtype, self._backend
+                self.kv_cache_dtype, query.dtype, "fa4"
             )
             if query.dtype != query_dtype:
                 query = query.to(query_dtype)
-            if self._backend == "flashinfer":
-                return super().forward(query, kv_cache, params)
 
             assert kv_cache is not None, "kv_cache is required"
             paged_kv_cache = kv_cache.kv_cache_base
@@ -518,7 +537,7 @@ def _target_verify_impl_class():
                 )
             if paged_kv_cache is None:
                 raise RuntimeError("MiniMax-M3 target verify requires paged KV cache")
-            metadata = self._active_fa4_metadata
+            metadata = self._active_metadata
             if metadata is None:
                 raise RuntimeError(
                     "MiniMax-M3 FA4 target verify metadata was not prepared"
@@ -531,7 +550,7 @@ def _target_verify_impl_class():
                 value_cache,
                 cu_seqlens_q=metadata.cu_seqlens_q,
                 max_seqlen_q=self._verify_tokens,
-                max_seqlen_k=self._fa4_max_kv_sequence_length,
+                max_seqlen_k=self._max_kv_sequence_length,
                 seqused_k=metadata.kv_sequence_lengths,
                 page_table=metadata.physical_block_table,
                 causal=True,
@@ -544,17 +563,40 @@ def _target_verify_impl_class():
                 else attention_output
             )
 
-    class MiniMaxM3TargetVerifyImpl(PyFlashinferDecodeImpl):
+    class MiniMaxM3TargetVerifyImpl(FMHAImplBase):
         def _create_fmha_impl(self, attn_configs):
-            return MiniMaxM3TargetVerifyAttnOp(attn_configs)
+            backend, requested_backend = resolve_target_verify_backend(attn_configs)
+            logging.info(
+                "MiniMax-M3 target verify attention backend: %s "
+                "(requested=%s, kv_cache_dtype=%s)",
+                backend,
+                requested_backend,
+                attn_configs.kv_cache_dtype,
+            )
+            if backend == "fa4":
+                return MiniMaxM3TargetVerifyFA4AttnOp(attn_configs)
+            return MiniMaxM3TargetVerifyFlashInferAttnOp(attn_configs)
 
         def __init__(self, attn_configs, attn_inputs, parallelism_config=None):
-            super().__init__(attn_configs, attn_inputs, parallelism_config)
+            self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
+            self.attn_configs = attn_configs
+            self.attn_inputs = attn_inputs
+            self.fmha_impl = self._create_fmha_impl(attn_configs)
+            self.fmha_params = self.fmha_impl.prepare(attn_inputs)
+            self.rope_kvcache_impl = None
+            self.rope_params = None
             if self.need_rope_kv_cache:
                 self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQNoTransposeOut(
                     attn_configs
                 )
                 self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+            self.write_cache_store_impl = common.create_write_cache_store_impl(
+                attn_inputs
+            )
+
+        @classmethod
+        def support(cls, attn_configs, attn_inputs) -> bool:
+            return not attn_configs.use_mla
 
         def _refresh_rope_kv_offset(self, attn_inputs):
             if not self.need_rope_kv_cache or self.rope_kvcache_impl is None:
@@ -571,6 +613,15 @@ def _target_verify_impl_class():
         def prepare_cuda_graph(self, attn_inputs):
             self.fmha_impl.prepare_for_cuda_graph_replay(attn_inputs)
             self._refresh_rope_kv_offset(attn_inputs)
+
+        def forward(self, qkv, kv_cache, layer_idx: int = 0):
+            if self.need_rope_kv_cache and self.rope_kvcache_impl is not None:
+                assert kv_cache is not None, "target verify requires a paged kv_cache"
+                qkv = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+            common.apply_write_cache_store(
+                self.write_cache_store_impl, self.attn_inputs, kv_cache
+            )
+            return self.fmha_impl.forward(qkv, kv_cache, self.fmha_params)
 
     return MiniMaxM3TargetVerifyImpl
 

@@ -1,3 +1,4 @@
+import gc
 import logging
 import math
 import os
@@ -11,9 +12,12 @@ from attention_ref import compute_flashinfer_decode_reference
 from base_attention_test import BaseAttentionTest, compare_tensors
 
 from rtp_llm.models_py.model_desc.minimax_m3 import _target_verify_impl_class
+from rtp_llm.models_py.modules.factory.attention.cuda_impl import py_flashinfer_mha
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferDecodeAttnOp,
+    PyFlashinferDecodeImpl,
 )
+from rtp_llm.ops import KvCacheDataType
 from rtp_llm.ops.compute_ops import PyAttentionInputs, fill_mla_params, get_typemeta
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -471,6 +475,96 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
             ),
             metadata_ptrs,
         )
+
+    def test_target_verify_fa4_is_independent_of_flashinfer(self):
+        config = self._create_config(
+            head_num=32,
+            head_num_kv=8,
+            size_per_head=128,
+            seq_size_per_block=128,
+            data_type="bf16",
+        )
+        config.attn_configs.kv_cache_dtype = KvCacheDataType.FP8
+
+        with (
+            patch.dict(
+                os.environ,
+                {"RTP_LLM_M3_TARGET_VERIFY_BACKEND": "fa4"},
+            ),
+            patch.object(torch.cuda, "get_device_capability", return_value=(10, 0)),
+            patch.object(
+                py_flashinfer_mha,
+                "get_py_flashinfer_workspace_buffer",
+                side_effect=AssertionError(
+                    "FA4 must not allocate FlashInfer workspace"
+                ),
+            ) as get_workspace,
+            patch.object(
+                py_flashinfer_mha,
+                "BatchDecodeWithPagedKVCacheWrapper",
+                side_effect=AssertionError("FA4 must not construct decode wrapper"),
+            ) as wrapper_class,
+        ):
+            impl_class = _target_verify_impl_class()
+            impl = object.__new__(impl_class)
+            attn_op = impl._create_fmha_impl(config.attn_configs)
+
+        self.assertEqual(attn_op._backend, "fa4")
+        self.assertNotIsInstance(attn_op, PyFlashinferDecodeAttnOp)
+        self.assertFalse(issubclass(impl_class, PyFlashinferDecodeImpl))
+        self.assertFalse(hasattr(attn_op, "g_workspace_buffer"))
+        self.assertFalse(hasattr(attn_op, "decode_wrapper"))
+        get_workspace.assert_not_called()
+        wrapper_class.assert_not_called()
+
+    def test_target_verify_flashinfer_keeps_flashinfer_resources(self):
+        config = self._create_config(
+            head_num=32,
+            head_num_kv=8,
+            size_per_head=128,
+            seq_size_per_block=128,
+            data_type="bf16",
+        )
+        workspace = torch.empty(1, dtype=torch.uint8, device=self.device)
+        wrapper = object()
+
+        with (
+            patch.dict(
+                os.environ,
+                {"RTP_LLM_M3_TARGET_VERIFY_BACKEND": "flashinfer"},
+            ),
+            patch.object(
+                py_flashinfer_mha,
+                "get_py_flashinfer_workspace_buffer",
+                return_value=workspace,
+            ) as get_workspace,
+            patch.object(
+                py_flashinfer_mha,
+                "BatchDecodeWithPagedKVCacheWrapper",
+                return_value=wrapper,
+            ) as wrapper_class,
+            patch.object(
+                py_flashinfer_mha,
+                "release_py_flashinfer_workspace_buffer",
+            ) as release_workspace,
+        ):
+            impl_class = _target_verify_impl_class()
+            impl = object.__new__(impl_class)
+            attn_op = impl._create_fmha_impl(config.attn_configs)
+
+            self.assertEqual(attn_op._backend, "flashinfer")
+            self.assertIsInstance(attn_op, PyFlashinferDecodeAttnOp)
+            self.assertIs(attn_op.g_workspace_buffer, workspace)
+            self.assertIs(attn_op.decode_wrapper, wrapper)
+            get_workspace.assert_called_once_with()
+            wrapper_class.assert_called_once_with(
+                workspace,
+                "HND",
+                use_tensor_cores=attn_op.use_tensor_core,
+            )
+            del attn_op
+            gc.collect()
+            release_workspace.assert_called_once_with(workspace)
 
     def test_edge_case_sequence_lengths(self):
         """Test edge cases with sequence lengths"""
