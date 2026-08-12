@@ -42,7 +42,10 @@
                 "usage": {
                     "prompt_tokens": 2773,
                     "total_tokens": 2873,
-                    "completion_tokens": 100
+                    "completion_tokens": 100,
+                    "prompt_tokens_details": {
+                        "image_tokens": 2752
+                    }
                 }
             }
         }
