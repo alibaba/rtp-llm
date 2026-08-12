@@ -10,7 +10,9 @@
 # │   → CI pass → build check = success → PR mergeable              │
 # │                                                                 │
 # │ LGTM review/comment (this workflow)                             │
-# │   → filter: only approved review or LLLLKKKK "lgtm ready to ci"│
+# │   → filter: approved review, or LGTM user "lgtm ready to ci"   │
+# │   → only insiders (OWNER/MEMBER/COLLABORATOR) gate CI          │
+# │   → LGTM issue comments must name the HEAD SHA                 │
 # │   → resolve PR number and HEAD SHA from event                   │
 # │   → find existing CI-request-trigger.yml pull_request run       │
 # │     for this HEAD SHA                                           │

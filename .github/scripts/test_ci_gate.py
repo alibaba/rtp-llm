@@ -12,7 +12,6 @@ from ci_gate.common import GateError, is_true
 from ci_gate.ci_service import collect_status_tokens, parse_ci_status
 from ci_gate.review import (
     _check_issue_comments_qualified,
-    _fetch_head_commit_date,
     check_review_qualified,
     latest_fresh_reviews,
     resolve_context,
@@ -272,89 +271,67 @@ class TestCheckReviewQualified(unittest.TestCase):
 # review._check_issue_comments_qualified (mocked)
 # ---------------------------------------------------------------------------
 class TestCheckIssueCommentsQualified(unittest.TestCase):
-    COMMIT_DATE = "2025-04-20T10:00:00Z"
-    COMMIT_RESPONSE = {
-        "commit": {"committer": {"date": COMMIT_DATE}},
-    }
+    HEAD_SHA = "abc1234def5678"
+    SHORT_SHA = "abc1234"
 
-    def _comment(self, login="LLLLKKKK", body="lgtm ready to ci", updated_at="2025-04-20T12:00:00Z"):
+    def _comment(self, login="LLLLKKKK", body=None, updated_at="2025-04-20T12:00:00Z"):
+        if body is None:
+            body = "lgtm ready to ci %s" % self.SHORT_SHA
         return {"user": {"login": login}, "body": body, "updated_at": updated_at}
 
-    @patch("ci_gate.review.github_get_pages")
-    @patch("ci_gate.review.github_get")
-    def test_fresh_lgtm_qualifies(self, mock_get, mock_pages):
-        mock_get.return_value = self.COMMIT_RESPONSE
-        mock_pages.return_value = [self._comment()]
-        result = _check_issue_comments_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
-        self.assertTrue(result)
+    def _check(self, comments, lgtm_user="LLLLKKKK", pr_author="", head_sha=None):
+        if head_sha is None:
+            head_sha = self.HEAD_SHA
+        with patch("ci_gate.review.github_get_pages", return_value=comments):
+            return _check_issue_comments_qualified(
+                "1", "repo", head_sha, "token", lgtm_user, pr_author)
 
-    @patch("ci_gate.review.github_get_pages")
-    @patch("ci_gate.review.github_get")
-    def test_stale_comment_rejected(self, mock_get, mock_pages):
-        mock_get.return_value = self.COMMIT_RESPONSE
-        mock_pages.return_value = [self._comment(updated_at="2025-04-19T09:00:00Z")]
-        result = _check_issue_comments_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
-        self.assertFalse(result)
+    def test_lgtm_naming_head_sha_qualifies(self):
+        self.assertTrue(self._check([self._comment()]))
 
-    @patch("ci_gate.review.github_get_pages")
-    @patch("ci_gate.review.github_get")
-    def test_wrong_author_rejected(self, mock_get, mock_pages):
-        mock_get.return_value = self.COMMIT_RESPONSE
-        mock_pages.return_value = [self._comment(login="other-user")]
-        result = _check_issue_comments_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
-        self.assertFalse(result)
+    def test_comment_without_sha_rejected(self):
+        self.assertFalse(self._check([self._comment(body="lgtm ready to ci")]))
 
-    @patch("ci_gate.review.github_get_pages")
-    @patch("ci_gate.review.github_get")
-    def test_missing_phrase_rejected(self, mock_get, mock_pages):
-        mock_get.return_value = self.COMMIT_RESPONSE
-        mock_pages.return_value = [self._comment(body="looks good")]
-        result = _check_issue_comments_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
-        self.assertFalse(result)
+    def test_comment_naming_other_sha_rejected(self):
+        self.assertFalse(self._check([self._comment(body="lgtm ready to ci deadbee")]))
 
-    @patch("ci_gate.review.github_get_pages")
-    @patch("ci_gate.review.github_get")
-    def test_no_comments(self, mock_get, mock_pages):
-        mock_get.return_value = self.COMMIT_RESPONSE
-        mock_pages.return_value = []
-        result = _check_issue_comments_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
-        self.assertFalse(result)
+    def test_backdated_commit_cannot_revive_stale_comment(self):
+        """A stale LGTM must not qualify for a new head, however the commit is dated."""
+        stale = self._comment(body="lgtm ready to ci 0000old", updated_at="2030-01-01T00:00:00Z")
+        self.assertFalse(self._check([stale]))
 
-    @patch("ci_gate.review.github_get_pages")
-    @patch("ci_gate.review.github_get")
-    def test_case_insensitive_phrase(self, mock_get, mock_pages):
-        mock_get.return_value = self.COMMIT_RESPONSE
-        mock_pages.return_value = [self._comment(body="LGTM Ready To CI")]
-        result = _check_issue_comments_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
-        self.assertTrue(result)
+    def test_full_sha_in_comment_qualifies(self):
+        self.assertTrue(self._check([self._comment(body="lgtm ready to ci %s" % self.HEAD_SHA)]))
 
-    @patch("ci_gate.review.github_get_pages")
-    @patch("ci_gate.review.github_get")
-    def test_picks_latest_matching_comment(self, mock_get, mock_pages):
-        mock_get.return_value = self.COMMIT_RESPONSE
-        mock_pages.return_value = [
+    def test_wrong_author_rejected(self):
+        self.assertFalse(self._check([self._comment(login="other-user")]))
+
+    def test_missing_phrase_rejected(self):
+        self.assertFalse(self._check([self._comment(body="looks good %s" % self.SHORT_SHA)]))
+
+    def test_no_comments(self):
+        self.assertFalse(self._check([]))
+
+    def test_case_insensitive_phrase_and_sha(self):
+        body = "LGTM Ready To CI %s" % self.SHORT_SHA.upper()
+        self.assertTrue(self._check([self._comment(body=body)]))
+
+    def test_picks_latest_matching_comment(self):
+        comments = [
             self._comment(updated_at="2025-04-20T11:00:00Z"),
             self._comment(updated_at="2025-04-20T14:00:00Z"),
         ]
-        result = _check_issue_comments_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
-        self.assertTrue(result)
+        self.assertTrue(self._check(comments))
 
-    @patch("ci_gate.review.github_get_pages")
-    @patch("ci_gate.review.github_get")
-    def test_multi_lgtm_users_second_user_qualifies(self, mock_get, mock_pages):
-        mock_get.return_value = self.COMMIT_RESPONSE
-        mock_pages.return_value = [self._comment(login="netaddi")]
-        result = _check_issue_comments_qualified("1", "repo", "sha1", "token", "LLLLKKKK,netaddi")
-        self.assertTrue(result)
+    def test_multi_lgtm_users_second_user_qualifies(self):
+        self.assertTrue(self._check([self._comment(login="netaddi")], lgtm_user="LLLLKKKK,netaddi"))
 
-    @patch("ci_gate.review.github_get_pages")
-    @patch("ci_gate.review.github_get")
-    def test_pr_author_self_lgtm_rejected(self, mock_get, mock_pages):
-        mock_get.return_value = self.COMMIT_RESPONSE
-        mock_pages.return_value = [self._comment(login="netaddi")]
-        result = _check_issue_comments_qualified(
-            "1", "repo", "sha1", "token", "LLLLKKKK,netaddi", pr_author="netaddi")
-        self.assertFalse(result)
+    def test_pr_author_self_lgtm_rejected(self):
+        self.assertFalse(self._check(
+            [self._comment(login="netaddi")], lgtm_user="LLLLKKKK,netaddi", pr_author="netaddi"))
+
+    def test_missing_head_sha_rejected(self):
+        self.assertFalse(self._check([self._comment()], head_sha=""))
 
 
 # ---------------------------------------------------------------------------

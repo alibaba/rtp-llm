@@ -36,18 +36,6 @@ def latest_fresh_reviews(reviews, head_sha, pr_author):
     return list(latest_by_user.values())
 
 
-def _fetch_head_commit_date(repo, head_sha, github_token):
-    # type: (str, str, str) -> str
-    """Return the committer date (ISO 8601) of the given commit."""
-    commit = github_get(
-        repo, "/commits/%s" % head_sha,
-        "fetching commit %s" % short_sha(head_sha), github_token,
-    )
-    if not isinstance(commit, dict):
-        raise GateError("::error::Unexpected commit response for %s" % short_sha(head_sha), 2)
-    return (((commit.get("commit") or {}).get("committer") or {}).get("date")) or ""
-
-
 def parse_lgtm_users(lgtm_user):
     # type: (str) -> set
     """Parse a comma-separated ``--lgtm-user`` value into a set of logins."""
@@ -56,17 +44,14 @@ def parse_lgtm_users(lgtm_user):
 
 def _check_issue_comments_qualified(pr_number, repo, head_sha, github_token, lgtm_user, pr_author=""):
     # type: (str, str, str, str, str, str) -> bool
-    """Check whether a fresh LGTM issue comment from an *lgtm_user* exists.
+    """Check for an LGTM issue comment that explicitly names *head_sha*.
 
-    Freshness is defined as ``comment.updated_at >= head_commit.committer.date``
-    because issue comments have no ``commit_id`` field. Comments from the PR
+    Issue comments carry no ``commit_id``, so the commit must be named in the
+    body. Anchoring freshness on the commit date instead would be forgeable:
+    ``committer.date`` is supplied by whoever pushes, so backdating a commit
+    would make an older LGTM comment look fresh again. Comments from the PR
     author never qualify (no self-LGTM).
     """
-    head_date = _fetch_head_commit_date(repo, head_sha, github_token)
-    if not head_date:
-        log("Could not determine head commit date, skipping issue comment check")
-        return False
-
     comments = github_get_pages(
         repo, "/issues/%s/comments" % pr_number,
         "fetching issue comments for PR #%s" % pr_number, github_token,
@@ -74,6 +59,11 @@ def _check_issue_comments_qualified(pr_number, repo, head_sha, github_token, lgt
 
     lgtm_users = parse_lgtm_users(lgtm_user)
     lgtm_phrase = "lgtm ready to ci"
+    sha_token = (head_sha or "")[:7].lower()
+    if not sha_token:
+        log("No head SHA available, skipping issue comment check")
+        return False
+
     latest_match = None  # type: Any
     for comment in comments:
         if not isinstance(comment, dict):
@@ -81,14 +71,13 @@ def _check_issue_comments_qualified(pr_number, repo, head_sha, github_token, lgt
         user = (comment.get("user") or {}).get("login", "")
         body = (comment.get("body") or "").lower()
         updated_at = comment.get("updated_at", "")
-        if user in lgtm_users and user != pr_author and lgtm_phrase in body and updated_at >= head_date:
+        if user in lgtm_users and user != pr_author and lgtm_phrase in body and sha_token in body:
             if latest_match is None or updated_at > (latest_match.get("updated_at") or ""):
                 latest_match = comment
 
     if latest_match:
-        log("PR #%s has fresh LGTM issue comment from %s (updated_at: %s >= commit: %s)"
-            % (pr_number, (latest_match.get("user") or {}).get("login", ""),
-               latest_match.get("updated_at", ""), head_date))
+        log("PR #%s has LGTM issue comment from %s naming %s"
+            % (pr_number, (latest_match.get("user") or {}).get("login", ""), short_sha(head_sha)))
         return True
 
     log("PR #%s has no qualifying fresh issue comment" % pr_number)
