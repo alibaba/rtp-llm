@@ -21,20 +21,24 @@ on the rest of the fleet.
 import math
 import unittest
 from typing import List, Optional, Sequence
+from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
 
-# Both imports may fail outside the ROCm runtime; we want a clean skip rather
-# than a collection-time error so the rest of the test suite is unaffected.
+_IS_ROCM_BUILD = torch.version.hip is not None
+
 try:
     import aiter  # noqa: F401
 
     _AITER_AVAILABLE = True
 except ImportError:
+    if _IS_ROCM_BUILD:
+        raise
     _AITER_AVAILABLE = False
 
 try:
+    from rtp_llm.models_py.modules.factory.attention import attn_factory
     from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
         AiterPrefillAttnOp,
         AiterPrefillAttnOpPaged,
@@ -42,9 +46,11 @@ try:
         AiterPrefillImplNonAsm,
         AiterPrefillImplPaged,
         FMHAParams,
+        validate_v_layout,
     )
     from rtp_llm.ops import (
         AttentionConfigs,
+        FMHAConfig,
         KvCacheDataType,
         PyAttentionInputs,
         RopeConfig,
@@ -61,6 +67,8 @@ try:
 
     _OPS_IMPORTABLE = True
 except ImportError:
+    if _IS_ROCM_BUILD:
+        raise
     _OPS_IMPORTABLE = False
 
 
@@ -974,12 +982,36 @@ class TestCompactGatherReshape(unittest.TestCase):
         )
         self.assertEqual(k_compact.shape[0], bt.numel() + 1)
 
+    def test_2d_oversized_stride_truncates_to_prefix(self):
+        op = self._make_op()
+        hk, ps, hd = 4, 16, 128
+        exact = self._make_kv_cache_2d(8, hk, ps, hd)
+        padded = torch.cat(
+            [exact, torch.full((exact.shape[0], 32), 999.0, dtype=exact.dtype)], dim=1
+        )
+        k_exact, v_exact = op._reshape_kv_cache_vectorized(exact)
+        k_pad, v_pad = op._reshape_kv_cache_vectorized(padded)
+        torch.testing.assert_close(k_pad, k_exact)
+        torch.testing.assert_close(v_pad, v_exact)
+
+    def test_2d_linear_v_permute_element_order(self):
+        op = self._make_op(head_num_kv=1, head_dim=8, tokens_per_block=8)
+        ps = hd = 8
+        kv = torch.arange(2 * ps * hd, dtype=torch.bfloat16).reshape(1, -1)
+        vs = 16 // kv.element_size()
+        _, actual = op._reshape_kv_cache_vectorized(kv)
+        v_linear = kv[0, ps * hd :].reshape(hd, ps)
+        j, h, w = torch.meshgrid(
+            torch.arange(ps // vs), torch.arange(hd), torch.arange(vs), indexing="ij"
+        )
+        expected = v_linear[h, j * vs + w].reshape(1, 1, ps // vs, hd, vs)
+        torch.testing.assert_close(actual, expected)
+
     # ---- FP8 fallback: compact should NOT be used -------------------------
 
     def test_fp8_uses_full_reshape(self):
         """When kv_cache is FP8, _forward_paged should use the full reshape path."""
         from types import SimpleNamespace
-        from unittest.mock import patch
 
         op = self._make_op(kv_cache_dtype=KvCacheDataType.FP8)
         fp8_dtype = torch.float8_e4m3fn
@@ -1792,6 +1824,80 @@ class TestAiterPrefillImplMropePositionIds(unittest.TestCase):
 
     def test_nonasm_mrope_matches_reference(self):
         self._check_mrope_matches_reference(AiterPrefillImplNonAsm)
+
+
+@unittest.skipUnless(_is_rocm() and _OPS_IMPORTABLE, "Requires ROCm attention wrappers")
+class TestVLayoutContract(unittest.TestCase):
+    def _make_case(self, head_dim: int, page: int):
+        config = _make_attn_configs(8, 2, head_dim, page)
+        config.need_rope_kv_cache = True
+        config.dtype = torch.bfloat16
+        inputs = PyAttentionInputs()
+        inputs.is_prefill = True
+        return config, inputs
+
+    def _decode_flags(self, aiter: bool, asm: bool, triton: bool):
+        flags = FMHAConfig()
+        flags.use_aiter_pa, flags.use_asm_pa, flags.use_triton_pa = aiter, asm, triton
+        return flags
+
+    def test_invalid_geometry(self):
+        for head, page, dtype, error in (
+            (100, 32, KvCacheDataType.BASE, "V geometry"),
+            (128, 8, KvCacheDataType.FP8, "width=16"),
+            (128, 12, KvCacheDataType.BASE, "V geometry"),
+        ):
+            with self.subTest(head=head, page=page, dtype=dtype):
+                config, inputs = self._make_case(head, page)
+                config.kv_cache_dtype = dtype
+                with self.assertRaisesRegex(ValueError, error):
+                    validate_v_layout(config, inputs, FMHAConfig())
+
+    def test_factory_rejects_layout_mismatch(self):
+        config, inputs = self._make_case(256, 16)
+        inputs.is_prefill = False
+        flags = self._decode_flags(aiter=True, asm=True, triton=False)
+        with self.assertRaisesRegex(ValueError, "layout mismatch"):
+            attn_factory.get_fmha_impl(config, None, inputs, fmha_config=flags)
+
+    def test_layout_mismatch_accepted_when_page_equals_width(self):
+        config, inputs = self._make_case(256, 8)
+        inputs.is_prefill = False
+        validate_v_layout(
+            config, inputs, self._decode_flags(aiter=False, asm=True, triton=False)
+        )
+
+    def test_fp8_no_asm_requires_page_equals_width(self):
+        config, inputs = self._make_case(128, 32)
+        config.kv_cache_dtype, inputs.is_prefill = KvCacheDataType.FP8, False
+        flags = self._decode_flags(aiter=True, asm=False, triton=False)
+        with self.assertRaisesRegex(ValueError, "layout mismatch"):
+            validate_v_layout(config, inputs, flags)
+        config.kernel_tokens_per_block = 16
+        validate_v_layout(config, inputs, flags)
+
+    def test_constructor_fallback_is_strict_only_with_layout_validator(self):
+        class BrokenImpl:
+            accepts_fmha_config = False
+            support = support_parallelism_config = staticmethod(lambda *_: True)
+
+            def __init__(self, *_):
+                raise RuntimeError("constructor failed")
+
+        class WorkingImpl(BrokenImpl):
+            def __init__(self, *_):
+                pass
+
+        _, inputs = self._make_case(128, 16)
+        inputs.is_prefill = False
+        with patch.object(attn_factory, "DECODE_MHA_IMPS", [BrokenImpl, WorkingImpl]):
+            with patch.object(attn_factory, "VALIDATE_FMHA_CONFIG", None):
+                with self.assertLogs(level="WARNING"):
+                    impl = attn_factory.get_fmha_impl(AttentionConfigs(), None, inputs)
+                self.assertIsInstance(impl, WorkingImpl)
+            with patch.object(attn_factory, "VALIDATE_FMHA_CONFIG", lambda *_: True):
+                with self.assertRaisesRegex(RuntimeError, "constructor failed"):
+                    attn_factory.get_fmha_impl(AttentionConfigs(), None, inputs)
 
 
 if __name__ == "__main__":

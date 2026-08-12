@@ -5,19 +5,37 @@ feeds each kernel the physical KV layout it expects, while preserving the same
 semantic K/V values.
 """
 
+from __future__ import annotations
+
 import math
 import unittest
 
 import torch
 
-from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
-    AiterDecodeAttnOpNonAsm,
-    AiterDecodeAttnOpTriton,
-    AiterDecodeImplNonAsm,
-    AiterDecodeImplTriton,
-)
-from rtp_llm.ops import AttentionConfigs, KvCacheDataType
-from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, get_typemeta
+_IS_ROCM_BUILD = torch.version.hip is not None
+try:
+    from rtp_llm.models_py.modules.factory.attention import attn_factory
+    from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
+        AiterDecodeAttnOpNonAsm,
+        AiterDecodeAttnOpTriton,
+        AiterDecodeImplNonAsm,
+        AiterDecodeImplTriton,
+    )
+    from rtp_llm.ops import AttentionConfigs, FMHAConfig, KvCacheDataType
+    from rtp_llm.ops.compute_ops import (
+        FusedRopeKVCacheDecodeOpAsm,
+        FusedRopeKVCacheDecodeOpNonAsm,
+        LayerKVCache,
+        PyAttentionInputs,
+        get_typemeta,
+    )
+
+except ImportError:
+    if _IS_ROCM_BUILD:
+        raise
+    _ROCM_IMPORTS_AVAILABLE = False
+else:
+    _ROCM_IMPORTS_AVAILABLE = True
 
 HEAD_NUM = 24
 KV_HEAD_NUM = 4
@@ -50,28 +68,28 @@ def make_inputs(device: torch.device) -> PyAttentionInputs:
     inputs.input_lengths = torch.tensor([1], dtype=torch.int32)
     block_table = torch.arange(NUM_BLOCKS, dtype=torch.int32, device=device).view(1, -1)
     inputs.kv_cache_kernel_block_id_device = block_table
+    inputs.kv_cache_kernel_block_id = block_table.cpu()
     inputs.kv_cache_block_id_device = block_table
     inputs.dtype = get_typemeta(torch.empty((), dtype=torch.bfloat16))
-    inputs.cache_store_inputs = None
     return inputs
 
 
-def make_impl(impl_class, op_class, config, inputs):
+def make_impl(impl_class, op, inputs):
     # Bypass RoPE/cache insertion and test decode FMHA kernels directly.
     impl = impl_class.__new__(impl_class)
     impl.need_rope_kv_cache = False
-    impl.fmha_impl = op_class(config)
+    impl.fmha_impl = op
     impl.attn_inputs = inputs
     impl.fmha_params = impl.fmha_impl.prepare(inputs)
     impl.write_cache_store_impl = None
     return impl
 
 
-def run_impl(impl_class, op_class, config, inputs, query, kv_cache):
+def run_impl(impl_class, op, inputs, query, kv_cache):
     cache = LayerKVCache()
     cache.kv_cache_base = kv_cache.clone()
     cache.kv_scale_base = torch.empty(0, device=query.device)
-    impl = make_impl(impl_class, op_class, config, inputs)
+    impl = make_impl(impl_class, op, inputs)
     return impl.forward(query.clone(), cache, layer_idx=3)
 
 
@@ -87,8 +105,10 @@ def physical_key_for_decode(semantic_key: torch.Tensor) -> torch.Tensor:
 
 def physical_value_for_nonasm(semantic_value: torch.Tensor) -> torch.Tensor:
     # Non-ASM paged_attention_rocm reads BASE V as linear [hd, ps].
-    return semantic_value.permute(0, 1, 3, 2).contiguous().view(
-        NUM_BLOCKS, KV_HEAD_NUM, BLOCK_SIZE, HEAD_DIM
+    return (
+        semantic_value.permute(0, 1, 3, 2)
+        .contiguous()
+        .view(NUM_BLOCKS, KV_HEAD_NUM, BLOCK_SIZE, HEAD_DIM)
     )
 
 
@@ -106,54 +126,16 @@ def physical_value_for_triton(semantic_value: torch.Tensor) -> torch.Tensor:
     )
 
 
+@unittest.skipUnless(torch.cuda.is_available() and _IS_ROCM_BUILD, "Requires ROCm GPU")
+@unittest.skipUnless(_ROCM_IMPORTS_AVAILABLE, "Requires ROCm attention modules")
 class AiterDecodeLayoutParityTest(unittest.TestCase):
-    def test_layout_mismatch_reproduces_large_error(self):
-        if not torch.cuda.is_available() or torch.version.hip is None:
-            self.skipTest("requires a ROCm GPU")
-
-        generator = torch.Generator().manual_seed(0)
-        query = torch.randn(
-            (1, HEAD_NUM, HEAD_DIM), generator=generator, dtype=torch.bfloat16
-        ).cuda()
-
-        # A single shared physical V layout is not comparable across kernels.
-        shared_cache = torch.randn(
-            (NUM_BLOCKS, 2, KV_HEAD_NUM, BLOCK_SIZE, HEAD_DIM),
-            generator=generator,
-            dtype=torch.bfloat16,
-        ).cuda()
-
-        config = make_config()
-        inputs = make_inputs(query.device)
-        triton_output = run_impl(
-            AiterDecodeImplTriton,
-            AiterDecodeAttnOpTriton,
-            config,
-            inputs,
-            query,
-            shared_cache,
-        )
-        nonasm_output = run_impl(
-            AiterDecodeImplNonAsm,
-            AiterDecodeAttnOpNonAsm,
-            config,
-            inputs,
-            query,
-            shared_cache,
-        )
-
-        diff = (triton_output.float() - nonasm_output.float()).flatten()
-        relative_l2 = diff.norm() / nonasm_output.float().flatten().norm()
-        self.assertGreater(
-            relative_l2.item(),
-            0.5,
-            f"unexpectedly small mismatch: relative_l2={relative_l2.item():.6f}",
-        )
+    @staticmethod
+    def _relative_l2(actual: torch.Tensor, reference: torch.Tensor) -> float:
+        reference = reference.float().flatten()
+        diff = actual.float().flatten() - reference
+        return (diff.norm() / reference.norm()).item()
 
     def test_triton_matches_nonasm_with_layout_aware_cache(self):
-        if not torch.cuda.is_available() or torch.version.hip is None:
-            self.skipTest("requires a ROCm GPU")
-
         generator = torch.Generator().manual_seed(0)
         query = torch.randn(
             (1, HEAD_NUM, HEAD_DIM), generator=generator, dtype=torch.bfloat16
@@ -172,36 +154,72 @@ class AiterDecodeLayoutParityTest(unittest.TestCase):
         ).cuda()
 
         key_phys = physical_key_for_decode(semantic_key)
-        nonasm_cache = pack_cache(key_phys, physical_value_for_nonasm(semantic_value))
-        triton_cache = pack_cache(key_phys, physical_value_for_triton(semantic_value))
+        nonasm_cache = pack_cache(
+            key_phys, physical_value_for_nonasm(semantic_value)
+        ).flatten(1)
+        triton_cache = pack_cache(
+            key_phys, physical_value_for_triton(semantic_value)
+        ).flatten(1)
 
         config = make_config()
         inputs = make_inputs(query.device)
-        triton_output = run_impl(
-            AiterDecodeImplTriton,
-            AiterDecodeAttnOpTriton,
-            config,
-            inputs,
-            query,
-            triton_cache,
-        )
         nonasm_output = run_impl(
             AiterDecodeImplNonAsm,
-            AiterDecodeAttnOpNonAsm,
-            config,
+            AiterDecodeAttnOpNonAsm(config),
             inputs,
             query,
             nonasm_cache,
         )
 
-        diff = (triton_output.float() - nonasm_output.float()).flatten()
-        relative_l2 = diff.norm() / nonasm_output.float().flatten().norm()
-        self.assertLess(
-            relative_l2.item(),
-            0.01,
-            "layout-aware comparison still mismatches: "
-            f"relative_l2={relative_l2.item():.6f}",
+        def run_triton(cache, linear_v):
+            return run_impl(
+                AiterDecodeImplTriton,
+                AiterDecodeAttnOpTriton(config, linear_v=linear_v),
+                inputs,
+                query,
+                cache,
+            )
+
+        # Check both Triton V-reader contracts against the same Non-ASM reference.
+        for cache, linear_v in ((triton_cache, False), (nonasm_cache, True)):
+            with self.subTest(linear_v=linear_v):
+                relative_l2 = self._relative_l2(
+                    run_triton(cache, linear_v), nonasm_output
+                )
+                self.assertLess(
+                    relative_l2,
+                    0.01,
+                    "layout-aware comparison still mismatches: "
+                    f"linear_v={linear_v}, relative_l2={relative_l2:.6f}",
+                )
+
+        # Pairing the vectorized reader with the linear cache must diverge,
+        # otherwise the two assertions above would hold for any reader.
+        mismatched_l2 = self._relative_l2(
+            run_triton(nonasm_cache, False), nonasm_output
         )
+        self.assertGreater(mismatched_l2, 0.1, f"{mismatched_l2=:.6f}")
+
+    def test_factory_pairs_reader_and_writer(self):
+        inputs = make_inputs(torch.device("cuda"))
+        for kv_dtype, use_asm_pa, expected_linear_v, expected_writer in (
+            (KvCacheDataType.BASE, False, True, FusedRopeKVCacheDecodeOpNonAsm),
+            (KvCacheDataType.BASE, True, False, FusedRopeKVCacheDecodeOpAsm),
+            (KvCacheDataType.FP8, False, False, FusedRopeKVCacheDecodeOpAsm),
+        ):
+            with self.subTest(kv_dtype=kv_dtype, use_asm_pa=use_asm_pa):
+                config = make_config()
+                config.kv_cache_dtype = kv_dtype
+                fmha_config = FMHAConfig()
+                fmha_config.use_aiter_pa = True
+                fmha_config.use_asm_pa = use_asm_pa
+                fmha_config.use_triton_pa = True
+                impl = attn_factory.get_fmha_impl(
+                    config, None, inputs, fmha_config=fmha_config
+                )
+                self.assertIsInstance(impl, AiterDecodeImplTriton)
+                self.assertEqual(impl.fmha_impl.linear_v, expected_linear_v)
+                self.assertIs(type(impl.rope_kvcache_impl), expected_writer)
 
 
 if __name__ == "__main__":
