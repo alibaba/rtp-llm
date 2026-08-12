@@ -523,16 +523,19 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testAsyncPrepareStartsAtEnqueue) {
 
     auto scheduler = createScheduler(/*max_batch_size=*/1);
     auto stream    = createStream({1, 2, 3}, true, true);
+    stream->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds() - 1000000);
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
     ASSERT_TRUE(
         waitUntil([&]() { return stream->curBlocksNum() > 0 && stream->hasEvent(StreamEvents::LoadInitiated); }));
     EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(stream->getTimeInfo().wait_time_us, 0);
 
     load_done.store(true);
     ASSERT_TRUE(waitUntil([&]() { return stream->hasEvent(StreamEvents::CachePrepared); }));
     auto running = scheduler->schedule();
     ASSERT_TRUE(running.ok());
     ASSERT_EQ(running->size(), 1);
+    EXPECT_GE(stream->getTimeInfo().wait_time_us, 1000000);
 }
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testAsyncPreparePreservesPrefillBatch) {

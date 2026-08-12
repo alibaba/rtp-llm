@@ -138,6 +138,15 @@ void GenerateStream::resetBeginTime(int64_t begin_time_us) {
     begin_time_us_ = begin_time_us;
 }
 
+void GenerateStream::recordWaitTime() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (wait_time_recorded_) {
+        return;
+    }
+    wait_time_us_       = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+    wait_time_recorded_ = true;
+}
+
 bool GenerateStream::hasCacheKeys() const {
     return stream_cache_resource_->hasCacheKeys();
 }
@@ -149,10 +158,7 @@ const CacheKeysType& GenerateStream::cacheKeys(int32_t batch_id) const {
 absl::Status GenerateStream::initKVBlock() {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
-    if (generate_status_->status == StreamState::WAITING) {
-        wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
-    }
-    auto ret = stream_cache_resource_->initKVBlock(reserve_step_);
+    auto                        ret = stream_cache_resource_->initKVBlock(reserve_step_);
     if (!ret.ok()) {
         RTP_LLM_LOG_WARNING("GenerateStream::initKVBlock: initKVBlock failed, stream_id: %lld", streamId());
     }
