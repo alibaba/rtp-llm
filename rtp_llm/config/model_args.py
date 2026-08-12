@@ -30,6 +30,7 @@ class ModelArgs:
         "phy2log_path",
         "enable_fp32_lm_head",
         "enable_output_vocab_pruning",
+        "use_new_loader",
     ]
 
     def __init__(self):
@@ -61,3 +62,4 @@ class ModelArgs:
         # LM head precision
         self.enable_fp32_lm_head: Optional[bool] = None
         self.enable_output_vocab_pruning: bool = False
+        self.use_new_loader: bool = False

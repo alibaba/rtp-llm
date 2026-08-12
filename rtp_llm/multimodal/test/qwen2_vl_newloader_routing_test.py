@@ -24,16 +24,12 @@ from rtp_llm.utils.new_loader import is_new_loader_enabled
 class Qwen2VLNewLoaderRoutingTest(unittest.TestCase):
     def test_newloader_switch_matches_language_loader_semantics(self):
         model_config = types.SimpleNamespace(use_new_loader=False)
-        with mock.patch.dict("os.environ", {}, clear=True):
-            self.assertFalse(is_new_loader_enabled(model_config))
-            model_config.use_new_loader = True
-            self.assertTrue(is_new_loader_enabled(model_config))
-        model_config.use_new_loader = False
-        with mock.patch.dict("os.environ", {"USE_NEW_LOADER": "1"}, clear=True):
-            self.assertTrue(is_new_loader_enabled(model_config))
+        self.assertFalse(is_new_loader_enabled(model_config))
+        model_config.use_new_loader = True
+        self.assertTrue(is_new_loader_enabled(model_config))
         del model_config.use_new_loader
-        with mock.patch.dict("os.environ", {}, clear=True):
-            self.assertFalse(is_new_loader_enabled(model_config))
+        with self.assertRaises(AttributeError):
+            is_new_loader_enabled(model_config)
         model_config.use_new_loader = "1"
         with self.assertRaisesRegex(TypeError, "use_new_loader must be a bool"):
             is_new_loader_enabled(model_config)
