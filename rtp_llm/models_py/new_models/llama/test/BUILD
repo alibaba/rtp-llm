@@ -12,7 +12,13 @@ py_test(
 llama_gpu_test_deps = [
     "//rtp_llm:torch",
     "//rtp_llm/models_py:new_weight_loader",
-]
+] + select({
+    "@//:using_rocm": [
+        "//rtp_llm:aiter",
+        "//rtp_llm:triton",
+    ],
+    "//conditions:default": [],
+})
 
 py_test(
     name = "test_llama_gpu",
