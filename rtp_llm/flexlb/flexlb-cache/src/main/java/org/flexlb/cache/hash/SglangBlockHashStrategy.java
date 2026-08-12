@@ -27,18 +27,18 @@ public final class SglangBlockHashStrategy implements BlockHashStrategy {
             return Collections.emptyList();
         }
 
-        int pageSize = (int) Math.min(blockSize, logicalLength);
-        int pageCount = (logicalLength - 1) / pageSize + 1;
-        List<Long> blockCacheKeys = new ArrayList<>(pageCount);
+        int pageSize = (int) blockSize;
+        int blockCount = logicalLength / pageSize;
+        List<Long> blockCacheKeys = new ArrayList<>(blockCount);
         MessageDigest digest = SHA_256.get();
         byte[] parentHash = null;
 
-        for (int tokenOffset = 0; tokenOffset < logicalLength; tokenOffset += pageSize) {
+        for (int tokenOffset = 0; tokenOffset + pageSize <= logicalLength; tokenOffset += pageSize) {
             digest.reset();
             if (parentHash != null) {
                 digest.update(parentHash);
             }
-            int tokenEnd = Math.min(tokenOffset + pageSize, logicalLength);
+            int tokenEnd = tokenOffset + pageSize;
             for (int tokenIndex = tokenOffset; tokenIndex < tokenEnd; tokenIndex++) {
                 updateLittleEndianInt(digest, inputIds[tokenIndex]);
                 if (lookaheadTokens == 1) {

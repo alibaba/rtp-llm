@@ -60,7 +60,7 @@ class LocalStandbyHashServiceTest {
                             .get(5, TimeUnit.SECONDS);
 
             assertEquals(
-                    List.of(-3488128144981237669L, -3787494577174227566L),
+                    List.of(-3488128144981237669L),
                     result.blockCacheKeys());
             assertEquals(
                     List.of(-3488128144981237669L),
@@ -86,7 +86,7 @@ class LocalStandbyHashServiceTest {
                             .get(5, TimeUnit.SECONDS);
 
             assertEquals(
-                    List.of(-638950109823820341L, 3604587133525381017L),
+                    List.of(-638950109823820341L),
                     result.blockCacheKeys());
             assertEquals(
                     List.of(-638950109823820341L),

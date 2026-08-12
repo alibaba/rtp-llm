@@ -82,7 +82,7 @@ class BlockHashExecutorTest {
     }
 
     @Test
-    void calculatesSglangHashChainIncludingPartialPage() {
+    void calculatesSglangHashChainForCompletePages() {
         BlockHashExecutor sglangExecutor =
                 new BlockHashExecutor(monitor, new SglangBlockHashStrategy(), 1, 2, 60, 1);
 
@@ -92,7 +92,7 @@ class BlockHashExecutorTest {
 
             assertNotNull(result);
             assertEquals(
-                    List.of(-3488128144981237669L, -3787494577174227566L),
+                    List.of(-3488128144981237669L),
                     result.blockCacheKeys());
         } finally {
             sglangExecutor.shutdown();
@@ -110,7 +110,7 @@ class BlockHashExecutorTest {
 
             assertNotNull(result);
             assertEquals(
-                    List.of(-638950109823820341L, 3604587133525381017L),
+                    List.of(-638950109823820341L),
                     result.blockCacheKeys());
             assertEquals(
                     List.of(-638950109823820341L),

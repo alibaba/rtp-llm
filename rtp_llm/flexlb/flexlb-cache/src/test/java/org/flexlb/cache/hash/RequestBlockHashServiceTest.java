@@ -208,7 +208,7 @@ class RequestBlockHashServiceTest {
             service.prepareBlockCacheKeys(contextFor(request)).block();
 
             assertEquals(
-                    List.of(-638950109823820341L, 3604587133525381017L),
+                    List.of(-638950109823820341L),
                     request.getBlockCacheKeys());
             assertSame(
                     request.getBlockCacheKeys(), request.getLocalStandbyBlockCacheKeys());
