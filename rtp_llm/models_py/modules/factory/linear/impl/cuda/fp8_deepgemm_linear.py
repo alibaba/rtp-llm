@@ -270,6 +270,13 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             raise ValueError(error_msg)
         M, _ = self._validate_input(input_fp8)
         output = self._prepare_output(input_fp8, M, out)
+        if (
+            input_fp8.is_cuda
+            and torch.cuda.get_device_capability(input_fp8.device)[0] == 12
+        ):
+            return self._forward_quantized_sm120(
+                input_fp8, input_scales, output
+            )
         fp8_gemm_nt(
             (input_fp8, input_scales),
             (self.weight, self.weight_scales),
@@ -277,6 +284,91 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             c=None,
             disable_ue8m0_cast=not self.scale_ue8m0,
         )
+        if self.bias is not None:
+            output.add_(self.bias.to(output.dtype))
+        return output
+
+    @staticmethod
+    def _ue8m0_packed_to_fp32(
+        scale: torch.Tensor, valid_groups: Optional[int] = None
+    ) -> torch.Tensor:
+        """Decode packed UE8M0 bytes without materializing GEMM operands."""
+        if scale.dtype == torch.int32:
+            # DeepGEMM's quantizer may expose the packed scale matrix with a
+            # column-major stride.  A dtype view requires byte-contiguous last
+            # dimension, so materialize the logical matrix into a canonical
+            # row-major int32 buffer before unpacking its four UE8M0 bytes.
+            packed = torch.empty(
+                scale.shape,
+                dtype=torch.int32,
+                device=scale.device,
+                memory_format=torch.contiguous_format,
+            )
+            packed.copy_(scale)
+            scale = packed.view(torch.uint8).reshape(*scale.shape[:-1], -1)
+            if valid_groups is not None:
+                # UE8M0 packs four scale bytes per int32 and rounds K to a
+                # 512-element container. Drop padding bytes when K is not a
+                # multiple of 512 (e.g. shared-expert unit-test K=256).
+                scale = scale[..., :valid_groups]
+            return (scale.to(torch.int32) - 127).float().exp2()
+        return scale.float().contiguous()
+
+    def _forward_quantized_sm120(
+        self,
+        input_fp8: torch.Tensor,
+        input_scales: torch.Tensor,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """SM120 FlashInfer/CUTLASS block-scaled FP8 GEMM."""
+        from flashinfer.gemm import gemm_fp8_nt_groupwise
+
+        M = input_fp8.size(0)
+        if M == 0:
+            return output
+        padded_m = (M + 3) & ~3
+        if padded_m == M:
+            a = input_fp8.contiguous()
+            a_scale = self._ue8m0_packed_to_fp32(
+                input_scales, (self.K + 127) // 128
+            )
+            gemm_out = output
+        else:
+            a = torch.zeros(
+                (padded_m, self.K),
+                dtype=input_fp8.dtype,
+                device=input_fp8.device,
+            )
+            a[:M].copy_(input_fp8)
+            a_scale = torch.ones(
+                (padded_m, self.K // 128),
+                dtype=torch.float32,
+                device=input_fp8.device,
+            )
+            a_scale[:M].copy_(
+                self._ue8m0_packed_to_fp32(
+                    input_scales, (self.K + 127) // 128
+                )
+            )
+            gemm_out = None
+
+        weight_scale = self._ue8m0_packed_to_fp32(
+            self.weight_scales, (self.K + 127) // 128
+        )
+        if weight_scale.size(0) == self.N:
+            weight_scale = weight_scale[::128]
+        result = gemm_fp8_nt_groupwise(
+            a,
+            self.weight,
+            a_scale,
+            weight_scale.contiguous(),
+            scale_granularity_mnk=(1, 128, 128),
+            scale_major_mode="K",
+            out=gemm_out,
+            out_dtype=torch.bfloat16,
+        )
+        if padded_m != M:
+            output.copy_(result[:M])
         if self.bias is not None:
             output.add_(self.bias.to(output.dtype))
         return output

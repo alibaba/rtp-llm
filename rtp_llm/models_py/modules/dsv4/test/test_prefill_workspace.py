@@ -18,7 +18,19 @@ disjointness. ``align_bytes=1`` is passed throughout to avoid the production
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import (
+    PrefillWorkspace,
+    resolve_prefill_workspace_rows,
+)
+
+
+def test_dynamic_rows_are_opt_in_and_grow_cp_region_together():
+    assert resolve_prefill_workspace_rows(
+        8192, 32768, 24006, 4, allow_dynamic_growth=False
+    ) == (8192, 32768)
+    assert resolve_prefill_workspace_rows(
+        8192, 32768, 24006, 4, allow_dynamic_growth=True
+    ) == (24006, 96024)
 
 
 def _assert_raises(fn, exc_type, msg_substr: str):
@@ -301,6 +313,8 @@ def test_cp_gather_restore_overflow():
 
 
 if __name__ == "__main__":
+    test_dynamic_rows_are_opt_in_and_grow_cp_region_together()
+    print("PASS test_dynamic_rows_are_opt_in_and_grow_cp_region_together")
     test_prefill_q_eager_alloc_shape_and_dtype()
     print("PASS test_prefill_q_eager_alloc_shape_and_dtype")
     test_prefill_q_full_capacity_and_overflow()

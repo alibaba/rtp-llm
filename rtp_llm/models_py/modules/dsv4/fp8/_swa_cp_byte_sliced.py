@@ -58,6 +58,7 @@ def build_cp_byte_sliced_slot_compaction(
 
     block_ids = valid_slots // full_entries_per_block
     block_offsets = valid_slots % full_entries_per_block
+
     unique_blocks, inverse = torch.unique(block_ids, sorted=True, return_inverse=True)
     compact_flat = torch.full_like(slots, -1)
     compact_flat[valid] = (

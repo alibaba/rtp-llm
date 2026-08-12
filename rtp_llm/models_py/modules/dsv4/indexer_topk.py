@@ -230,7 +230,7 @@ class PersistentIndexerTopKBackend(IndexerTopKBackend):
 
         from rtp_llm.ops.compute_ops import rtp_llm_ops
 
-        persistent_topk = getattr(rtp_llm_ops, "persistent_topk")
+        persistent_topk = getattr(rtp_llm_ops, "dsv4_persistent_topk")
         out = torch.empty(
             (flat.shape[0], int(topk)), dtype=torch.int32, device=flat.device
         )
@@ -285,6 +285,22 @@ class AutoIndexerTopKBackend(IndexerTopKBackend):
     ) -> torch.Tensor:
         if int(topk) <= 0 or score.shape[-1] == 0:
             return self._torch.select(score, topk, lengths=lengths, offset=offset)
+        # The legacy fast_topk_v2 binary cannot be loaded on Blackwell SM120,
+        # while the vLLM-derived persistent kernel is compiled for and runs on
+        # SM120.  It also implements the per-row lengths/-1 padding contract,
+        # so prefer it before the historical full-row-only policy below.
+        if (
+            score.is_cuda
+            and score.dtype == torch.float32
+            and torch.cuda.get_device_capability(score.device)[0] >= 12
+            and int(topk) in _PERSISTENT_TOPK_VALUES
+        ):
+            try:
+                return self._persistent.select(
+                    score, topk, lengths=lengths, offset=offset
+                )
+            except (ImportError, AttributeError):
+                pass
         # The fused TopK kernels are only used for full-row selection. Decode
         # can request topk=512 while only a short compressed prefix is valid;
         # keep that masked case on the exact torch path.

@@ -136,23 +136,35 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
         self._W2_s = stacked_routed["w2_s"]
         self._W3_w = stacked_routed["w3_w"]
         self._W3_s = stacked_routed["w3_s"]
-        self._W1_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
-            self._W1_s, cfg.moe_inter_dim, cfg.dim, self._W1_s.shape[0]
-        )
-        self._W2_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
-            self._W2_s, cfg.dim, cfg.moe_inter_dim, self._W2_s.shape[0]
-        )
-        self._W3_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
-            self._W3_s, cfg.moe_inter_dim, cfg.dim, self._W3_s.shape[0]
-        )
+        is_sm120 = self._W1_w.is_cuda and torch.cuda.get_device_capability(
+            self._W1_w.device
+        )[0] == 12
+        if is_sm120:
+            self._W1_s_gemm = self._W2_s_gemm = self._W3_s_gemm = None
+        else:
+            self._W1_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
+                self._W1_s, cfg.moe_inter_dim, cfg.dim, self._W1_s.shape[0]
+            )
+            self._W2_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
+                self._W2_s, cfg.dim, cfg.moe_inter_dim, self._W2_s.shape[0]
+            )
+            self._W3_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
+                self._W3_s, cfg.moe_inter_dim, cfg.dim, self._W3_s.shape[0]
+            )
         # Per-expert DeepGEMM scales are MN-major: a direct
         # self._W*_s_gemm[i] view has stride (1, mn).  torch.index_select on
         # the grouped tensor returns a row-major copy, which fails
         # DeepGEMM's layout check during CUDA graph top-k dispatch.  Select
         # from the transposed view and transpose the selected copy back.
-        self._W1_s_gemm_t = self._W1_s_gemm.transpose(-1, -2)
-        self._W2_s_gemm_t = self._W2_s_gemm.transpose(-1, -2)
-        self._W3_s_gemm_t = self._W3_s_gemm.transpose(-1, -2)
+        self._W1_s_gemm_t = (
+            None if self._W1_s_gemm is None else self._W1_s_gemm.transpose(-1, -2)
+        )
+        self._W2_s_gemm_t = (
+            None if self._W2_s_gemm is None else self._W2_s_gemm.transpose(-1, -2)
+        )
+        self._W3_s_gemm_t = (
+            None if self._W3_s_gemm is None else self._W3_s_gemm.transpose(-1, -2)
+        )
 
         def _expert_at(global_idx: int) -> Optional[Expert]:
             if not (cfg.local_expert_start <= global_idx < cfg.local_expert_end):
@@ -161,13 +173,13 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             ew = {
                 "w1_w": stacked_routed["w1_w"][local_idx],
                 "w1_s": stacked_routed["w1_s"][local_idx],
-                "w1_s_gemm": self._W1_s_gemm[local_idx],
+                "w1_s_gemm": None if self._W1_s_gemm is None else self._W1_s_gemm[local_idx],
                 "w2_w": stacked_routed["w2_w"][local_idx],
                 "w2_s": stacked_routed["w2_s"][local_idx],
-                "w2_s_gemm": self._W2_s_gemm[local_idx],
+                "w2_s_gemm": None if self._W2_s_gemm is None else self._W2_s_gemm[local_idx],
                 "w3_w": stacked_routed["w3_w"][local_idx],
                 "w3_s": stacked_routed["w3_s"][local_idx],
-                "w3_s_gemm": self._W3_s_gemm[local_idx],
+                "w3_s_gemm": None if self._W3_s_gemm is None else self._W3_s_gemm[local_idx],
             }
             return Expert(
                 cfg.dim,
