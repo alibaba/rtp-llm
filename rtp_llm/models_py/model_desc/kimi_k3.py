@@ -1009,7 +1009,22 @@ class KimiK3LinearCacheAdapter:
 
     @staticmethod
     def _block_map(attention_inputs: PyAttentionInputs) -> list[list[int]]:
-        if _host_metadata_enabled():
+        device_block_map = attention_inputs.kv_cache_kernel_block_id_device
+        uses_device_block_map = not bool(
+            getattr(attention_inputs, "is_prefill", False)
+        ) or bool(getattr(attention_inputs, "is_target_verify", False))
+        if (
+            uses_device_block_map
+            and device_block_map is not None
+            and device_block_map.numel()
+        ):
+            # Async MTP repairs LINEAR mappings on the compute stream. Batched
+            # decode and target-verify kernels consume this tensor directly;
+            # fallbacks must use the same source because the racing host row is
+            # skipped. Target verify carries prefill-shaped metadata, so it
+            # cannot be identified from is_prefill alone.
+            block_map = device_block_map
+        elif _host_metadata_enabled():
             # Linear KDA uses one state per physical block. The selected
             # physical host table is therefore the exact map it needs.
             block_map = attention_inputs.kv_cache_block_id_host
@@ -1722,9 +1737,7 @@ class KimiK3KDA(nn.Module):
         attention_inputs: Optional[PyAttentionInputs],
         *,
         mode: KDAExecutionMode,
-    ) -> Optional[
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]
-    ]:
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]]:
         """Return device-resident paged KDA state for indexed recurrence.
 
         Regular decode uses one token per sequence.  Target verification uses
@@ -1838,9 +1851,9 @@ class KimiK3KDA(nn.Module):
             seq_size_per_block=page_size,
             sequence_lengths=sequence_lengths_plus_one,
         )
-        return output.reshape(
-            1, token_count, self.local_heads, self.head_dim
-        ).to(dtype=q.dtype)
+        return output.reshape(1, token_count, self.local_heads, self.head_dim).to(
+            dtype=q.dtype
+        )
 
     def _kda_core(
         self,
@@ -1871,7 +1884,9 @@ class KimiK3KDA(nn.Module):
         non-zero initial-state prefill/decode seams.
         """
 
-        kda_backend = self._kda_backend if backend_override is None else backend_override
+        kda_backend = (
+            self._kda_backend if backend_override is None else backend_override
+        )
         if kda_backend not in (
             "kernel",
             "reference",
@@ -1904,9 +1919,7 @@ class KimiK3KDA(nn.Module):
             )
 
         copy_free_backend_prefill = (
-            _perf_fusions_enabled()
-            and kda_backend == "cula"
-            and mode == "prefill"
+            _perf_fusions_enabled() and kda_backend == "cula" and mode == "prefill"
         )
         if copy_free_backend_prefill:
             state_in = recurrent_state
@@ -2256,9 +2269,7 @@ class KimiK3KDA(nn.Module):
         """Run chunk form page-by-page and persist every reusable boundary."""
 
         trace_enabled = _accuracy_trace_enabled()
-        is_target_verify = bool(
-            getattr(attention_inputs, "is_target_verify", False)
-        )
+        is_target_verify = bool(getattr(attention_inputs, "is_target_verify", False))
         target_verify_backend = (
             os.environ.get("KIMI_K3_TARGET_VERIFY_KDA_BACKEND")
             if is_target_verify
@@ -2344,9 +2355,7 @@ class KimiK3KDA(nn.Module):
                 if is_target_verify:
                     segment_end = cursor + 1
                 else:
-                    tokens_to_page_end = page_size - (
-                        absolute_position % page_size
-                    )
+                    tokens_to_page_end = page_size - (absolute_position % page_size)
                     segment_end = min(end, cursor + tokens_to_page_end)
                 segment_length = segment_end - cursor
                 device_index = (
@@ -2432,10 +2441,7 @@ class KimiK3KDA(nn.Module):
                 beta_for_core = raw_beta[cursor:segment_end].reshape(
                     1, segment_length, self.local_heads
                 )
-                if not (
-                    _perf_fusions_enabled()
-                    and effective_backend == "cula"
-                ):
+                if not (_perf_fusions_enabled() and effective_backend == "cula"):
                     beta_for_core = beta_for_core.float()
                 with _perf_profile(
                     f"{page_prefix}.{effective_backend}_recurrence_and_output"
@@ -2671,9 +2677,7 @@ class KimiK3KDA(nn.Module):
         # kernels update those physical pages directly, just like
         # qwen3-next; do not enter the gather/one-token/scatter prefill path.
         stored_page_states = (
-            mode == "prefill"
-            and kv_cache is not None
-            and paged_decode_cache is None
+            mode == "prefill" and kv_cache is not None and paged_decode_cache is None
         )
         if stored_page_states:
             assert state is not None and attention_inputs is not None
@@ -2979,8 +2983,7 @@ class KimiK3KDA(nn.Module):
                     output = (
                         output_float
                         * torch.rsqrt(
-                            output_float.square().mean(dim=-1, keepdim=True)
-                            + self.eps
+                            output_float.square().mean(dim=-1, keepdim=True) + self.eps
                         )
                         * self.weights[W.linear_attn_norm_w].float()
                         * torch.sigmoid(output_gate.float())
@@ -3000,9 +3003,7 @@ class KimiK3KDA(nn.Module):
                 f"{self.trace_prefix}.o_projection_then_token_reduce_scatter",
                 output,
             ):
-                projection_input = output.reshape(
-                    token_count, self.projection_size
-                )
+                projection_input = output.reshape(token_count, self.projection_size)
                 if bool(getattr(attention_inputs, "is_target_verify", False)):
                     # Match qwen3-next's verify projection boundary.  The
                     # generic K3 row-parallel helper requests an FP32-output
@@ -3033,8 +3034,7 @@ class KimiK3KDA(nn.Module):
                             and self.attn_tp_size > 1
                             and hidden_states.is_cuda
                             and (
-                                mode == "decode"
-                                or token_count % self.attn_tp_size != 0
+                                mode == "decode" or token_count % self.attn_tp_size != 0
                             )
                         ),
                         use_input_dtype_reduce_scatter=(mode == "prefill"),
@@ -5176,9 +5176,7 @@ class KimiK3Model(GptModelBase):
     def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
         if self._mtp_hidden_buffer is None:
             return None
-        rows = (
-            self._mtp_hidden_valid_tokens if int(num_tokens) < 0 else int(num_tokens)
-        )
+        rows = self._mtp_hidden_valid_tokens if int(num_tokens) < 0 else int(num_tokens)
         if rows < 0 or rows > self._mtp_hidden_buffer.size(0):
             raise ValueError(
                 f"Kimi K3 EAGLE hidden rows {rows} exceed buffered "
@@ -5344,9 +5342,7 @@ class KimiK3Model(GptModelBase):
         # 不走 SP 就在启动时 die,Prefill 侧生产配置同样一直是 SP。
         tp_rank = int(self.parallelism_config.get_attn_tp_rank())
         sp_requested = tp_size > 1
-        is_target_verify = bool(
-            getattr(attention_inputs, "is_target_verify", False)
-        )
+        is_target_verify = bool(getattr(attention_inputs, "is_target_verify", False))
         # The engine represents the multi-token target verification pass with
         # Prefill-shaped metadata, but the verify kernels replay every draft
         # position on every TP rank.  It must therefore stay replicated and
@@ -5365,9 +5361,7 @@ class KimiK3Model(GptModelBase):
         # Decode.  Applying Decode token-SP here shards only the residual side
         # and produces incompatible full-token/sharded-token shapes.
         decode_sp = (
-            sp_requested
-            and not attention_inputs.is_prefill
-            and not is_target_verify
+            sp_requested and not attention_inputs.is_prefill and not is_target_verify
         )
         sp_active = prefill_sp or decode_sp
         if not attention_inputs.is_prefill and not getattr(

@@ -40,11 +40,25 @@ struct NormalModelInputGathererConfig {
     bool                        enable_model_inputs_log{};
 };
 
+struct MtpLinearKvCacheGatherResult {
+    torch::Tensor block_ids;
+    torch::Tensor group_types;
+    torch::Tensor valid_block_counts;
+    torch::Tensor patch_positions;
+    torch::Tensor patch_source_slots;
+    torch::Tensor patch_before_values;
+    torch::Tensor patch_after_values;
+    torch::Tensor patch_valid;
+    torch::Tensor pending_patches;
+    bool          device_patch_ready = true;
+};
+
 class NormalModelInputGatherer {
 public:
     explicit NormalModelInputGatherer(const NormalModelInputGathererConfig& config);
 
-    absl::StatusOr<GptModelInputs> gather(const StreamGroups& stream_groups, TensorHolder& host_holder) const;
+    absl::StatusOr<GptModelInputs>
+    gather(const StreamGroups& stream_groups, TensorHolder& host_holder, bool skip_linear_cache_groups = false) const;
 
     // Build only the CUDA kv_cache_kernel_block_id tensor in 3-D layout.
     // Read-only over streams: no step(), no sibling kv_cache_block_id, no
@@ -52,13 +66,22 @@ public:
     absl::StatusOr<torch::Tensor> gatherKvCacheKernelBlockId(const StreamGroups& stream_groups,
                                                              TensorHolder&       host_holder) const;
 
+    // Takes each stream's block table and MTP completion epoch under the same
+    // stream lock. A pending row carries the final-value patch produced in the
+    // previous round, so the device table can be repaired without another swap.
+    absl::StatusOr<MtpLinearKvCacheGatherResult> gatherMtpLinearKvCacheKernelBlockId(const StreamGroups& stream_groups,
+                                                                                     TensorHolder& host_holder) const;
+
 private:
     GptModelInputs allocateModelInputBuffers(const StreamGroups& stream_groups) const;
     void           initializeKvCacheMetadata(GptModelInputs& model_input) const;
-    absl::Status   processDecodeStreams(GptModelInputs& model_input, const StreamGroups& stream_groups) const;
+    absl::Status   processDecodeStreams(GptModelInputs&     model_input,
+                                        const StreamGroups& stream_groups,
+                                        bool                skip_linear_cache_groups) const;
     absl::Status   processContextStreams(GptModelInputs&     model_input,
                                          const StreamGroups& stream_groups,
-                                         TensorHolder&       host_holder) const;
+                                         TensorHolder&       host_holder,
+                                         bool                skip_linear_cache_groups) const;
 
     NormalModelInputGathererConfig config_;
 };

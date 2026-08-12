@@ -29,10 +29,12 @@ public:
 
     absl::Status dispatchDecode(const StreamGroups&                          stream_groups,
                                 const speculative::SpeculativeSamplerOutput& spec_decode_output,
-                                const MergedOutput&                          draft_prefill_output) const;
+                                const MergedOutput&                          draft_prefill_output,
+                                const std::vector<uint64_t>&                 mtp_async_epochs = {}) const;
 
     absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups,
-                                                          TensorHolder&       host_holder) const;
+                                                          TensorHolder&       host_holder,
+                                                          bool                skip_linear_cache_groups = false) const;
 
     absl::StatusOr<SamplerInputs>
     gatherSpecSamplerInput(const StreamGroups&                         stream_groups,

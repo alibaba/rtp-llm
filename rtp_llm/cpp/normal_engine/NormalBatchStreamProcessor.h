@@ -26,7 +26,8 @@ public:
 
     virtual absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
     virtual absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups,
-                                                            TensorHolder&       host_holder) const;
+                                                            TensorHolder&       host_holder,
+                                                            bool                skip_linear_cache_groups = false) const;
     virtual absl::StatusOr<SamplerInputs>  gatherSamplerInput(const StreamGroups&    stream_groups,
                                                               const GptModelInputs&  model_inputs,
                                                               const GptModelOutputs& model_output) const;
@@ -36,6 +37,9 @@ public:
     // Empty input returns an undefined tensor.
     virtual absl::StatusOr<torch::Tensor> gatherKvCacheKernelBlockId(const StreamGroups& stream_groups,
                                                                      TensorHolder&       host_holder) const;
+
+    absl::StatusOr<MtpLinearKvCacheGatherResult> gatherMtpLinearKvCacheKernelBlockId(const StreamGroups& stream_groups,
+                                                                                     TensorHolder& host_holder) const;
 
 protected:
     SamplerInputs allocateSamplerInputs(const StreamGroups& stream_groups,
