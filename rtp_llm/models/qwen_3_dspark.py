@@ -34,7 +34,6 @@ class Qwen3DSpark(QwenV3):
         config.dspark_noise_token_id = int(dspark["mask_token_id"])
         config.dspark_target_layer_ids = list(dspark["aux_hidden_state_layer_ids"])
         config.dspark_markov_rank = int(dspark.get("markov_rank", 0) or 0)
-        config.dspark_block_size = int(dspark["block_size"])
         if config.dspark_markov_rank <= 0:
             raise ValueError("Qwen3 DSpark requires markov_rank > 0")
         config.dspark_sample_from_anchor = bool(

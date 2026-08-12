@@ -16,8 +16,6 @@ class DSparkRuntimeConfigTest(unittest.TestCase):
             num_layers=43,
             capture_aux_hidden_layer_ids=None,
         )
-        # Deliberately has no dspark_block_size: proposal width must come only
-        # from sp_config.gen_num_per_cycle.
         draft_config = SimpleNamespace(
             dspark_noise_token_id=128799,
             dspark_target_layer_ids=[40, 41, 42],

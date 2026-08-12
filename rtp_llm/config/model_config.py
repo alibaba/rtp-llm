@@ -59,7 +59,6 @@ class ModelConfig(CppModelConfig):
         "dspark_target_layer_ids",
         "dspark_markov_rank",
         "dspark_sample_from_anchor",
-        "dspark_block_size",
         "capture_aux_hidden_layer_ids",
         "normalize_lm_head_weight",
         "enable_fp32_lm_head",
@@ -533,7 +532,6 @@ class ModelConfig(CppModelConfig):
         self.dspark_target_layer_ids: Optional[list[int]] = None
         self.dspark_markov_rank: Optional[int] = None
         self.dspark_sample_from_anchor: bool = True
-        self.dspark_block_size: Optional[int] = None
         # Target-side decoder layer outputs exported to the DSpARK draft.
         self.capture_aux_hidden_layer_ids: Optional[list[int]] = None
         self.normalize_lm_head_weight: bool = False
