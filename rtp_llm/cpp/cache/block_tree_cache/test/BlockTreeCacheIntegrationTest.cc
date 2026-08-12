@@ -1538,6 +1538,104 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesContextAndReleasesAl
     EXPECT_NO_THROW(environment->cache.reset());
 }
 
+TEST_P(BlockTreeCacheLowerTierTest, SettlementStateMismatchRollsBackWholeBatch) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+
+    FullSWAEnvironmentOptions options;
+    options.path_length                             = 1;
+    options.usable_device_blocks                    = 4;
+    options.usable_host_blocks                      = 4;
+    options.usable_disk_blocks                      = 4;
+    std::unique_ptr<FullSWAEnvironment> environment = FullSWAEnvironment::create(options);
+    ASSERT_NE(environment, nullptr);
+
+    std::shared_ptr<PausablePerRankBlockTransferEngine> pausable_transfer_engine =
+        std::make_shared<PausablePerRankBlockTransferEngine>(
+            environment->groups, /*succeed=*/true, /*pause_enabled=*/false);
+    BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache, pausable_transfer_engine);
+    environment->insertRequestPath();
+    environment->releaseRequestRefs();
+    demoteTo(*environment, GetParam());
+    environment->expectPayloads();
+
+    BlockTreeMatchResult              result  = environment->cache->match(environment->keys);
+    std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
+    ASSERT_NE(context, nullptr);
+    ASSERT_EQ(context->loadDescs().size(), 2u);
+
+    struct SourceBlockRef {
+        IBlockPool*  pool;
+        BlockIdxType block;
+    };
+    struct TargetBlockRef {
+        GroupSetPtr        group_set;
+        DeviceBlockPoolPtr pool;
+        size_t             member_group_id;
+        BlockIdxType       block;
+    };
+    std::vector<SourceBlockRef> source_refs;
+    std::vector<TargetBlockRef> target_refs;
+    for (size_t desc_index = 0; desc_index < context->loadDescs().size(); ++desc_index) {
+        const TransferDescriptor& desc        = context->loadDescs()[desc_index];
+        IBlockPool*               source_pool = GetParam() == Tier::HOST ?
+                                                    static_cast<IBlockPool*>(environment->host_pools[desc.group_set_id].get()) :
+                                                    static_cast<IBlockPool*>(environment->disk_pools[desc.group_set_id].get());
+        ASSERT_EQ(desc.source_blocks.size(), 1u);
+        EXPECT_EQ(source_pool->refCount(desc.source_blocks.front()), 2u);
+        source_refs.push_back(SourceBlockRef{source_pool, desc.source_blocks.front()});
+
+        const GroupSetPtr&        group_set = environment->groups[desc.group_set_id];
+        std::vector<BlockIdxType> target_blocks;
+        for (size_t member_group_id = 0; member_group_id < group_set->devicePools().size(); ++member_group_id) {
+            const DeviceBlockPoolPtr& pool   = group_set->devicePools()[member_group_id];
+            const BlockIdList         blocks = pool->malloc(1).value();
+            ASSERT_EQ(blocks.size(), 1u);
+            pool->incRef(blocks, BlockRefType::REQUEST);
+            target_blocks.push_back(blocks.front());
+            target_refs.push_back(TargetBlockRef{group_set, pool, member_group_id, blocks.front()});
+        }
+        context->setTargetBlocks(desc_index, std::move(target_blocks));
+    }
+
+    pausable_transfer_engine->enablePause();
+    ASSERT_TRUE(context->commit());
+    ASSERT_TRUE(pausable_transfer_engine->waitUntilEnteredFor(kRaceWaitTimeout));
+    for (const TargetBlockRef& target : target_refs) {
+        EXPECT_EQ(target.pool->refCount(target.block), 2u);
+    }
+
+    const TransferDescriptor& invalid_desc                                           = context->loadDescs().back();
+    invalid_desc.node->group_set_resources[invalid_desc.group_set_id].transfer_state = GroupSetTransferState::IDLE;
+    pausable_transfer_engine->release();
+    context->waitDone();
+
+    EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    for (const TransferDescriptor& desc : context->loadDescs()) {
+        const GroupSetResource& resource = desc.node->group_set_resources[desc.group_set_id];
+        EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+        EXPECT_TRUE(resource.hasTier(GetParam()));
+        EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
+    }
+    for (const SourceBlockRef& source : source_refs) {
+        EXPECT_EQ(source.pool->refCount(source.block), 1u);
+    }
+    for (const TargetBlockRef& target : target_refs) {
+        EXPECT_EQ(target.pool->refCount(target.block), 1u);
+        EXPECT_EQ(target.group_set->findTreeNodeByDeviceBlock(target.member_group_id, target.block), nullptr);
+    }
+    environment->expectPayloads();
+
+    context.reset();
+    for (const TargetBlockRef& target : target_refs) {
+        releaseDeviceBlocksAndNotify(*environment->cache, target.pool, {target.block}, BlockRefType::REQUEST);
+    }
+    environment->reclaimAll();
+    environment->expectFullyReclaimed();
+}
+
 TEST_P(BlockTreeCacheLowerTierTest, CancelPausedLoadStillInstallsTransferredTargets) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";

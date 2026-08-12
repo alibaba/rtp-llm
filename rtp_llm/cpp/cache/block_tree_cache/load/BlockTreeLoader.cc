@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/load/BlockTreeLoader.h"
 
 #include <algorithm>
+#include <cassert>
 #include <exception>
 #include <utility>
 
@@ -430,10 +431,18 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task& task, bool copy_suc
     bool tree_data_mutated    = false;
     const bool device_refs_released = releaseDeviceLoadSourcesLocked(*task.context);
 
-    for (const TransferDescriptor& desc : task.load_descs) {
-        if (settlement_success && desc.node->group_set_resources[desc.group_set_id].transfer_detached) {
-            RTP_LLM_LOG_WARNING("load transfer detached before completion, group_set=%zu", desc.group_set_id);
-            settlement_success = false;
+    if (copy_success) {
+        for (const TransferDescriptor& desc : task.load_descs) {
+            const GroupSetResource& resource = desc.node->group_set_resources[desc.group_set_id];
+            if (resource.transfer_detached) {
+                RTP_LLM_LOG_WARNING("load transfer detached before completion, group_set=%zu", desc.group_set_id);
+                settlement_success = false;
+                continue;
+            }
+            if (resource.transfer_state != GroupSetTransferState::LOADING) {
+                RTP_LLM_LOG_ERROR("load state mismatch during settlement, group_set_id=%zu", desc.group_set_id);
+                settlement_success = false;
+            }
         }
     }
 
@@ -464,17 +473,15 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task& task, bool copy_suc
                 task.target_installed[desc_index] = true;
                 tree_data_mutated                 = true;
             }
-            if (!changeTransferState(
-                    desc.node, desc.group_set_id, GroupSetTransferState::LOADING, GroupSetTransferState::IDLE)) {
-                RTP_LLM_LOG_ERROR("load state mismatch during settlement, group_set_id=%zu", desc.group_set_id);
-                settlement_success = false;
+            const bool state_changed = changeTransferState(
+                desc.node, desc.group_set_id, GroupSetTransferState::LOADING, GroupSetTransferState::IDLE);
+            assert(state_changed);
+            (void)state_changed;
+            state_settled = true;
+            if (enable_device_cache_) {
+                evictor_.onLoaded(desc.node, desc.group_set_id);
             } else {
-                state_settled = true;
-                if (enable_device_cache_) {
-                    evictor_.onLoaded(desc.node, desc.group_set_id);
-                } else {
-                    evictor_.refreshCandidate(desc.node, desc.group_set_id);
-                }
+                evictor_.refreshCandidate(desc.node, desc.group_set_id);
             }
             continue;
         }
