@@ -10,6 +10,7 @@ class DSparkRuntimeConfigTest(unittest.TestCase):
         sp_config = SimpleNamespace(
             gen_num_per_cycle=gamma,
             sp_dspark_mask_token_id=-1,
+            sp_dspark_sample_from_anchor=False,
         )
         target_config = SimpleNamespace(
             num_layers=43,
@@ -33,6 +34,7 @@ class DSparkRuntimeConfigTest(unittest.TestCase):
         )
 
         self.assertEqual(sp_config.sp_dspark_mask_token_id, 128799)
+        self.assertTrue(sp_config.sp_dspark_sample_from_anchor)
         self.assertEqual(target_config.capture_aux_hidden_layer_ids, [40, 41, 42])
 
     def test_gen_num_per_cycle_must_be_positive(self):

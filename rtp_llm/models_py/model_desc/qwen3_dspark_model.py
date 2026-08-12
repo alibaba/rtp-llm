@@ -48,7 +48,7 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
             device_resource_config=device_resource_config,
         )
         proposal_width = int(config.gen_num_per_cycle)
-        query_width = proposal_width + 1
+        query_width = proposal_width + int(not config.dspark_sample_from_anchor)
         if query_width > int(config.dspark_block_size):
             raise ValueError(
                 f"Qwen3 DSpark query width {query_width} exceeds "

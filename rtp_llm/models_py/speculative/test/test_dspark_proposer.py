@@ -53,7 +53,7 @@ class ProposerContractTest(unittest.TestCase):
         self.assertEqual(tuple(outputs.hidden_states.shape), (6, 8))
         self.assertEqual(outputs.hidden_states.dtype, torch.bfloat16)
 
-    def test_query_width_may_include_a_bonus_anchor(self) -> None:
+    def test_query_width_may_exclude_anchor_from_predictions(self) -> None:
         proposer = _TinyProposer(width=3, query_width=4)
         outputs = proposer.dspark_empty_outputs(2, torch.device("cpu"))
         self.assertEqual(tuple(outputs.hidden_states.shape), (8, 4))
