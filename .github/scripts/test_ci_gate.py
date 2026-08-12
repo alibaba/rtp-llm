@@ -152,13 +152,15 @@ class TestParseCiStatus(unittest.TestCase):
 # review.latest_fresh_reviews
 # ---------------------------------------------------------------------------
 class TestLatestFreshReviews(unittest.TestCase):
-    def _review(self, login, state, commit_id="abc123", user_type="User", review_id=1, body=""):
+    def _review(self, login, state, commit_id="abc123", user_type="User", review_id=1, body="",
+                association="MEMBER"):
         return {
             "id": review_id,
             "user": {"login": login, "type": user_type},
             "state": state,
             "commit_id": commit_id,
             "body": body,
+            "author_association": association,
         }
 
     def test_filters_wrong_commit(self):
@@ -170,6 +172,25 @@ class TestLatestFreshReviews(unittest.TestCase):
         reviews = [self._review("bot", "APPROVED", user_type="Bot")]
         result = latest_fresh_reviews(reviews, "abc123", "author")
         self.assertEqual(result, [])
+
+    def test_filters_untrusted_association(self):
+        reviews = [
+            self._review("stranger", "APPROVED", association="NONE"),
+            self._review("drive-by", "CHANGES_REQUESTED", association="FIRST_TIME_CONTRIBUTOR", review_id=2),
+            self._review("forker", "APPROVED", association="CONTRIBUTOR", review_id=3),
+            self._review("no-assoc", "APPROVED", association="", review_id=4),
+        ]
+        result = latest_fresh_reviews(reviews, "abc123", "author")
+        self.assertEqual(result, [])
+
+    def test_keeps_trusted_associations(self):
+        reviews = [
+            self._review("owner", "APPROVED", association="OWNER", review_id=1),
+            self._review("member", "APPROVED", association="MEMBER", review_id=2),
+            self._review("collab", "APPROVED", association="COLLABORATOR", review_id=3),
+        ]
+        result = latest_fresh_reviews(reviews, "abc123", "author")
+        self.assertEqual(len(result), 3)
 
     def test_filters_author_comment(self):
         reviews = [self._review("author", "COMMENTED")]
@@ -210,7 +231,7 @@ class TestCheckReviewQualified(unittest.TestCase):
         mock_get.return_value = self._mock_pr()
         mock_pages.return_value = [
             {"id": 1, "user": {"login": "reviewer", "type": "User"},
-             "state": "APPROVED", "commit_id": "sha1", "body": ""}
+             "state": "APPROVED", "commit_id": "sha1", "body": "", "author_association": "MEMBER"}
         ]
         result = check_review_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
         self.assertTrue(result)
@@ -221,7 +242,7 @@ class TestCheckReviewQualified(unittest.TestCase):
         mock_get.return_value = self._mock_pr()
         mock_pages.return_value = [
             {"id": 1, "user": {"login": "reviewer", "type": "User"},
-             "state": "CHANGES_REQUESTED", "commit_id": "sha1", "body": ""}
+             "state": "CHANGES_REQUESTED", "commit_id": "sha1", "body": "", "author_association": "MEMBER"}
         ]
         result = check_review_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
         self.assertFalse(result)
@@ -233,7 +254,7 @@ class TestCheckReviewQualified(unittest.TestCase):
         mock_pages.return_value = [
             {"id": 1, "user": {"login": "LLLLKKKK", "type": "User"},
              "state": "COMMENTED", "commit_id": "sha1",
-             "body": "lgtm ready to ci please"}
+             "body": "lgtm ready to ci please", "author_association": "MEMBER"}
         ]
         result = check_review_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
         self.assertTrue(result)
@@ -360,7 +381,7 @@ class TestCheckReviewQualifiedWithIssueComments(unittest.TestCase):
         mock_get.return_value = {"user": {"login": "author"}}
         mock_pages.return_value = [
             {"id": 1, "user": {"login": "rev", "type": "User"},
-             "state": "APPROVED", "commit_id": "sha1", "body": ""}
+             "state": "APPROVED", "commit_id": "sha1", "body": "", "author_association": "MEMBER"}
         ]
         result = check_review_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
         self.assertTrue(result)
@@ -373,7 +394,7 @@ class TestCheckReviewQualifiedWithIssueComments(unittest.TestCase):
         mock_get.return_value = {"user": {"login": "author"}}
         mock_pages.return_value = [
             {"id": 1, "user": {"login": "rev", "type": "User"},
-             "state": "CHANGES_REQUESTED", "commit_id": "sha1", "body": ""}
+             "state": "CHANGES_REQUESTED", "commit_id": "sha1", "body": "", "author_association": "MEMBER"}
         ]
         result = check_review_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
         self.assertFalse(result)
@@ -488,7 +509,7 @@ class TestResolveContext(unittest.TestCase):
         }
         mock_pages.return_value = [
             {"id": 1, "user": {"login": "rev", "type": "User"},
-             "state": "APPROVED", "commit_id": "aaa111", "body": ""}
+             "state": "APPROVED", "commit_id": "aaa111", "body": "", "author_association": "MEMBER"}
         ]
         result = resolve_context(self._base_args())
         self.assertEqual(result, 0)

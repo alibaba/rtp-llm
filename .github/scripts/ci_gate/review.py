@@ -7,6 +7,9 @@ from .common import GateError, is_true, log, short_sha, write_output
 from .github import github_get, github_get_pages
 
 
+TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+
+
 def latest_fresh_reviews(reviews, head_sha, pr_author):
     # type: (List[Dict[str, Any]], str, str) -> List[Dict[str, Any]]
     latest_by_user = {}  # type: Dict[str, Dict[str, Any]]
@@ -16,6 +19,12 @@ def latest_fresh_reviews(reviews, head_sha, pr_author):
         if review.get("commit_id") != head_sha:
             continue
         if user.get("type") == "Bot":
+            continue
+        # Anyone can review a public repo; only repo/org insiders may gate CI.
+        association = (review.get("author_association") or "").upper()
+        if association not in TRUSTED_ASSOCIATIONS:
+            log("Ignoring %s review from %s (association: %s)"
+                % (review.get("state", "?"), login, association or "NONE"))
             continue
         if review.get("state") == "COMMENTED" and login == pr_author:
             continue
