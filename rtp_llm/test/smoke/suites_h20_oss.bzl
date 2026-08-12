@@ -204,6 +204,7 @@ def h20_oss_suites():
 
 
     # H20 Dense (Qwen2.5/Qwen3 dense)
+    flashinfer_decode_base_args = "--disable_flashinfer_native 0 --act_type BF16 --reserver_runtime_mem_mb 8192 --tp_size 1 --warm_up 0 --seq_size_per_block 64 --enable_xqa 0 --enable_flashinfer_trtllm_gen 0 --enable_flashinfer_trt_fmha_v2 0 --enable_paged_flashinfer_trt_fmha_v2 0"
     native.test_suite(
         name = "smoke_h20_dense",
         tests = [
@@ -223,6 +224,32 @@ def h20_oss_suites():
                 name="dense_fp8_prequant_tp2",
                 task_info="data/model/qwen3/q_r_block_fp8.json",
                 smoke_args="--disable_flashinfer_native 1 --act_type BF16 --reserver_runtime_mem_mb 8192 --tp_size 2 --warm_up 0",
+                gpu_type=["H20"],
+            ),
+            # This self-contained golden is derived from
+            # data/model/qwen3/q_r_block_fp8.json. Keep messages, tools, and
+            # prompt_tokens synchronized when either golden is regenerated.
+            # It is intentionally shared by graph/eager to isolate graph behavior.
+            # Its 497-token prompt plus 17 generated tokens is the minimum window
+            # that crosses the 512-token boundary (page 8 -> 9 with block size 64).
+            # Graph capture size 2 and the serial smoke request exercise one real
+            # request plus one padding slot. Both cases intentionally remain in
+            # the light suite: eager runs at batch 1, while graph runs at fixed
+            # batch 2, so only eager-pass/graph-fail points to graph replay. UT
+            # covers multi-active metadata transitions and reference outputs;
+            # actual graph capture/replay coverage here is single-active. This
+            # smoke validates end-to-end output under graph configuration but
+            # does not expose a standalone replay counter.
+            smoke_test(
+                name="dense_fp8_prequant_flashinfer_no_cudagraph",
+                task_info="data/model/qwen3/q_r_block_fp8_flashinfer_decode.json",
+                smoke_args=flashinfer_decode_base_args + " --enable_cuda_graph 0",
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="dense_fp8_prequant_flashinfer_cudagraph",
+                task_info="data/model/qwen3/q_r_block_fp8_flashinfer_decode.json",
+                smoke_args=flashinfer_decode_base_args + " --enable_cuda_graph 1 --decode_capture_config '2'",
                 gpu_type=["H20"],
             ),
             smoke_test(
