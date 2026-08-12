@@ -480,6 +480,65 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         )
         return tokenizer, renderer
 
+    def _create_base_thinking_endpoint(self, think_mode):
+        tokenizer = QwenTestTokenizer(
+            f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken"
+        )
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = think_mode
+        generate_env_config.think_start_tag = "<think>"
+        generate_env_config.think_end_tag = "</think>"
+        renderer = custom_renderer.CustomChatRenderer(
+            tokenizer,
+            RendererParams(
+                model_type="thinking_test",
+                max_seq_len=MAX_SEQ_LEN,
+                eos_token_id=tokenizer.eos_token_id or 0,
+                stop_word_ids_list=[],
+            ),
+            generate_env_config=generate_env_config,
+            render_config=RenderConfig(),
+        )
+        endpoint = object.__new__(OpenaiEndpoint)
+        endpoint.tokenizer = tokenizer
+        endpoint.chat_renderer = renderer
+        endpoint.generate_env_config = generate_env_config
+        endpoint.stop_words_id_list = []
+        endpoint.stop_words_str_list = []
+        return tokenizer, renderer, endpoint
+
+    async def _render_fixed_thinking_override(
+        self, default_mode, request_mode, output_text
+    ):
+        tokenizer, renderer, endpoint = self._create_base_thinking_endpoint(
+            default_mode
+        )
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+            chat_template_kwargs={"thinking_mode": request_mode},
+            stream=True,
+        )
+        config = endpoint._extract_generation_config(
+            request, input_ids=[], renderer=renderer
+        )
+        output_ids = tokenizer.encode(output_text, add_special_tokens=False)
+        stream = renderer.render_response_stream(
+            fake_output_generator_mtp(
+                output_ids,
+                MAX_SEQ_LEN,
+                tokenizer.eos_token_id or 0,
+                10,
+                tokens_per_chunk=3,
+            ),
+            request,
+            config,
+        )
+        chunks = [
+            chunk
+            async for chunk in OpenaiEndpoint._complete_stream_response(stream, None)
+        ]
+        return config, merge_stream_responses(chunks).choices[0].delta
+
     async def test_adaptive_thinking_splits_reasoning_and_content(self):
         tokenizer, renderer = self._create_adaptive_qwen_renderer()
         start_ids = tokenizer.encode("<think>", add_special_tokens=False)
@@ -723,6 +782,24 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         ]
         delta = merge_stream_responses(chunks).choices[0].delta
 
+        self.assertFalse(delta.reasoning_content)
+        self.assertEqual(delta.content, "answer")
+
+    async def test_request_enabled_overrides_disabled_env_for_response_split(self):
+        config, delta = await self._render_fixed_thinking_override(
+            "disabled", "enabled", "reasoning</think>answer"
+        )
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
+        self.assertEqual(delta.reasoning_content, "reasoning")
+        self.assertEqual(delta.content, "answer")
+
+    async def test_request_disabled_overrides_enabled_env_for_response_split(self):
+        config, delta = await self._render_fixed_thinking_override(
+            "enabled", "disabled", "answer"
+        )
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.DISABLED)
         self.assertFalse(delta.reasoning_content)
         self.assertEqual(delta.content, "answer")
 

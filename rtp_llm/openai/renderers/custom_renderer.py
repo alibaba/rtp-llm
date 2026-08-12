@@ -1117,9 +1117,9 @@ class CustomChatRenderer:
         return request.resolve_thinking_mode(self.default_thinking_mode)
 
     def in_think_mode(self, request: ChatCompletionRequest):
-        return request.get_enable_thinking(
-            default=self.default_thinking_mode == ThinkingMode.ENABLED
-        )
+        # Keep renderer-side parsing aligned with the three-state mode already
+        # resolved for GenerateConfig. ADAPTIVE decides from the first token.
+        return self.resolve_thinking_mode(request) == ThinkingMode.ENABLED
 
     def should_process_think(self, request: ChatCompletionRequest):
         # 留出方法给子类重写, 避免重复的think处理
