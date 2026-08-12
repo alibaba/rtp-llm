@@ -611,7 +611,15 @@ class KimiK3Model(GptModelBase):
             self.num_attn_res_blocks,
             hidden_states.shape[1],
         )
-        mode: KDAExecutionMode = "prefill" if attention_inputs.is_prefill else "decode"
+        # MTP target verification is represented as a packed multi-token
+        # attention batch, so generic attention metadata may classify it as
+        # prefill-shaped. KDA must nevertheless replay it through the paged
+        # Decode path and update the Decode-owned recurrent state.
+        mode: KDAExecutionMode = (
+            "prefill"
+            if attention_inputs.is_prefill and not is_target_verify
+            else "decode"
+        )
         attn_meta = KimiK3DecoderMetadata(
             cu_seqlens=cu_seqlens,
             mode=mode,
