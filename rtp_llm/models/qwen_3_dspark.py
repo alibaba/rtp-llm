@@ -37,7 +37,9 @@ class Qwen3DSpark(QwenV3):
         config.dspark_block_size = int(dspark["block_size"])
         if config.dspark_markov_rank <= 0:
             raise ValueError("Qwen3 DSpark requires markov_rank > 0")
-        config.dspark_bonus_anchor = True
+        config.dspark_sample_from_anchor = bool(
+            dspark.get("sample_from_anchor", False)
+        )
         return config
 
     @staticmethod

@@ -27,7 +27,7 @@ class Qwen3DSparkRegistrationTest(unittest.TestCase):
             config = Qwen3DSpark._create_config(path)
 
         self.assertFalse(config.attn_config.is_causal)
-        self.assertTrue(config.dspark_bonus_anchor)
+        self.assertFalse(config.dspark_sample_from_anchor)
         self.assertEqual(config.dspark_noise_token_id, 1000)
         self.assertEqual(config.dspark_target_layer_ids, [0, 1])
         self.assertEqual(config.dspark_markov_rank, 32)

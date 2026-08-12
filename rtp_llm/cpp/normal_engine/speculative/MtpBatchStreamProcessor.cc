@@ -845,7 +845,7 @@ torch::Tensor MtpBatchStreamProcessor::dsparkDraftInputLengths(int64_t batch_siz
 torch::Tensor MtpBatchStreamProcessor::dsparkDraftLmIndexes(int64_t batch_size) {
     const int64_t token_count = batch_size * propose_step_;
     if (!dspark_lm_indexes_cache_.defined() || dspark_lm_indexes_cache_.size(0) < token_count) {
-        if (dspark_bonus_anchor_) {
+        if (!dspark_sample_from_anchor_) {
             dspark_lm_indexes_cache_ =
                 torch::arange(batch_size * dsparkQueryWidth(), cudaInt32Options())
                     .view({batch_size, dsparkQueryWidth()})

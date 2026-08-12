@@ -1005,8 +1005,9 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkRuntimeGammaThreePrefillInputShape
     EXPECT_EQ((std::vector<int32_t>{0, 1, 2, 3, 4, 5}), toVec<int32_t>(model_input.lm_output_indexes));
     EXPECT_EQ(model_input.dspark_call_phase, DSparkCallPhase::PROPOSE);
 
-    // Qwen DSpark adds one bonus anchor row but still proposes gamma tokens.
-    sp_config.sp_dspark_bonus_anchor = true;
+    // Fill-in DSpark keeps the anchor as conditioning only, so it queries one
+    // extra row while still proposing gamma tokens.
+    sp_config.sp_dspark_sample_from_anchor = false;
     MtpBatchStreamProcessor qwen_processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
     qwen_processor.buildDSparkProposeInput(model_input, anchors, committed_ends, host_holder);

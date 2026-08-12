@@ -839,7 +839,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("quantization", &SpeculativeExecutionConfig::quantization)
         .def_readwrite("checkpoint_path", &SpeculativeExecutionConfig::checkpoint_path)
         .def_readwrite("sp_dspark_mask_token_id", &SpeculativeExecutionConfig::sp_dspark_mask_token_id)
-        .def_readwrite("sp_dspark_bonus_anchor", &SpeculativeExecutionConfig::sp_dspark_bonus_anchor)
+        .def_readwrite("sp_dspark_sample_from_anchor", &SpeculativeExecutionConfig::sp_dspark_sample_from_anchor)
         .def("to_string", [](const SpeculativeExecutionConfig& self) { return self.to_string(); })
         .def(py::pickle(
             [](const SpeculativeExecutionConfig& self) {
@@ -854,7 +854,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.quantization,
                                       self.checkpoint_path,
                                       self.sp_dspark_mask_token_id,
-                                      self.sp_dspark_bonus_anchor);
+                                      self.sp_dspark_sample_from_anchor);
             },
             [](py::tuple t) {
                 if (t.size() != 10 && t.size() != 11 && t.size() != 12)
@@ -876,7 +876,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     }
                     if (t.size() == 12) {
                         c.sp_dspark_mask_token_id = t[10].cast<int64_t>();
-                        c.sp_dspark_bonus_anchor  = t[11].cast<bool>();
+                        c.sp_dspark_sample_from_anchor = t[11].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("SpeculativeExecutionConfig unpickle error: ") + e.what());
