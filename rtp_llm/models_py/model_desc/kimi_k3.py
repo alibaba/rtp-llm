@@ -74,10 +74,7 @@ if TYPE_CHECKING:
     from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
 
 from rtp_llm.models_py.modules.kimi_k3.kda import KimiK3KDA
-from rtp_llm.models_py.modules.kimi_k3.mla import (
-    KimiK3MLA,
-    prepare_mla_fmha_for_group,
-)
+from rtp_llm.models_py.modules.kimi_k3.mla import KimiK3MLA
 from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
 from rtp_llm.models_py.modules.kimi_k3.residual import KimiK3AttentionResidual
 from rtp_llm.models_py.modules.kimi_k3.sequence import sequence_offsets
@@ -96,8 +93,7 @@ def _prefill_chunk_tokens() -> int:
         ) from exc
     if value < 0:
         raise ValueError(
-            "KIMI_K3_PREFILL_CHUNK_TOKENS must be non-negative, "
-            f"got {value}"
+            "KIMI_K3_PREFILL_CHUNK_TOKENS must be non-negative, " f"got {value}"
         )
     return value
 
@@ -226,22 +222,6 @@ class KimiK3DecoderLayer(nn.Module):
     @property
     def is_kda(self) -> bool:
         return self.layer_type == HybridAttentionType.LINEAR
-
-    def prepare_mla_fmha_for_group(
-        self,
-        fmha_impl: Any,
-        attention_inputs: PyAttentionInputs,
-        group_id: int,
-        prepared_group_id: Optional[int],
-    ) -> Optional[int]:
-        if self.is_kda or fmha_impl is None:
-            return prepared_group_id
-        return prepare_mla_fmha_for_group(
-            fmha_impl,
-            attention_inputs,
-            group_id,
-            prepared_group_id,
-        )
 
     def prepare_kda_cache_store(self, kv_cache: LayerKVCache) -> None:
         if not self.is_kda:
@@ -548,9 +528,7 @@ class KimiK3Model(GptModelBase):
     def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
         if self._mtp_hidden_buffer is None:
             return None
-        rows = (
-            self._mtp_hidden_valid_tokens if int(num_tokens) < 0 else int(num_tokens)
-        )
+        rows = self._mtp_hidden_valid_tokens if int(num_tokens) < 0 else int(num_tokens)
         if rows < 0 or rows > self._mtp_hidden_buffer.size(0):
             raise ValueError(
                 f"Kimi K3 EAGLE hidden rows {rows} exceed buffered "
@@ -601,9 +579,8 @@ class KimiK3Model(GptModelBase):
         multimodal_features = multimodal_inputs.multimodal_features
         mm_features_locs = multimodal_inputs.mm_features_locs_host
         if multimodal_features:
-            if (
-                mm_features_locs is None
-                or mm_features_locs.numel() != len(multimodal_features)
+            if mm_features_locs is None or mm_features_locs.numel() != len(
+                multimodal_features
             ):
                 raise ValueError(
                     "Kimi K3 multimodal feature locations must match the feature count"
@@ -724,21 +701,11 @@ class KimiK3Model(GptModelBase):
         if length <= 0:
             raise ValueError(f"invalid whole-model Prefill chunk [{start}, {end})")
         chunk = copy.copy(attention_inputs)
-        chunk.cu_seqlens = torch.tensor(
-            [0, length], dtype=torch.int32, device=device
-        )
-        chunk.cu_kv_seqlens = torch.tensor(
-            [0, end], dtype=torch.int32, device=device
-        )
-        chunk.input_lengths = torch.tensor(
-            [length], dtype=torch.int32, device=device
-        )
-        chunk.prefix_lengths = torch.tensor(
-            [start], dtype=torch.int32, device=device
-        )
-        chunk.sequence_lengths = torch.tensor(
-            [end], dtype=torch.int32, device=device
-        )
+        chunk.cu_seqlens = torch.tensor([0, length], dtype=torch.int32, device=device)
+        chunk.cu_kv_seqlens = torch.tensor([0, end], dtype=torch.int32, device=device)
+        chunk.input_lengths = torch.tensor([length], dtype=torch.int32, device=device)
+        chunk.prefix_lengths = torch.tensor([start], dtype=torch.int32, device=device)
+        chunk.sequence_lengths = torch.tensor([end], dtype=torch.int32, device=device)
         chunk.sequence_lengths_plus_1_d = torch.arange(
             start + 1, end + 1, dtype=torch.int32, device=device
         )
@@ -821,9 +788,7 @@ class KimiK3Model(GptModelBase):
         # 不走 SP 就在启动时 die,Prefill 侧生产配置同样一直是 SP。
         tp_rank = int(self.parallelism_config.get_attn_tp_rank())
         sp_requested = tp_size > 1
-        is_target_verify = bool(
-            getattr(attention_inputs, "is_target_verify", False)
-        )
+        is_target_verify = bool(getattr(attention_inputs, "is_target_verify", False))
         # The engine represents the multi-token target verification pass with
         # Prefill-shaped metadata, but the verify kernels replay every draft
         # position on every TP rank.  It must therefore stay replicated and
@@ -842,9 +807,7 @@ class KimiK3Model(GptModelBase):
         # Decode.  Applying Decode token-SP here shards only the residual side
         # and produces incompatible full-token/sharded-token shapes.
         decode_sp = (
-            sp_requested
-            and not attention_inputs.is_prefill
-            and not is_target_verify
+            sp_requested and not attention_inputs.is_prefill and not is_target_verify
         )
         sp_active = prefill_sp or decode_sp
         if not attention_inputs.is_prefill and not getattr(
@@ -903,7 +866,6 @@ class KimiK3Model(GptModelBase):
         write_cache_store_impl = create_write_cache_store_impl(
             attention_inputs, self.kv_cache
         )
-        prepared_mla_group_id: Optional[int] = None
         if self._layer_group_ids is None:
             layer_map_host = getattr(
                 attention_inputs, "kv_cache_layer_to_group_host", None
@@ -944,23 +906,12 @@ class KimiK3Model(GptModelBase):
                 and layer_idx < len(self._layer_group_ids)
                 else None
             )
-            selected_group_id = select_block_map_for_layer(
-                attention_inputs, layer_idx, static_group_id
-            )
-            if selected_group_id is None:
-                selected_group_id = 0
+            select_block_map_for_layer(attention_inputs, layer_idx, static_group_id)
             layer_cache = (
                 self.kv_cache.get_layer_cache(layer_idx)
                 if self.kv_cache is not None
                 else None
             )
-            if not layer.is_kda and fmha_impl is not None:
-                prepared_mla_group_id = layer.prepare_mla_fmha_for_group(
-                    fmha_impl,
-                    attention_inputs,
-                    selected_group_id,
-                    prepared_mla_group_id,
-                )
             layer_output = layer(
                 hidden_states,
                 block_residual,
@@ -1024,6 +975,7 @@ class KimiK3Model(GptModelBase):
             if fmha_params is not None
             else PyModelOutputs(hidden_states)
         )
+
 
 __all__ = [
     "KimiK3DecoderLayer",
