@@ -10,6 +10,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.QueueSnapshotResponse;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.MasterInfoResponse;
 import org.flexlb.dao.pv.PvLogData;
@@ -21,10 +22,12 @@ import org.flexlb.service.RouteService;
 import org.flexlb.service.address.FlexlbInstanceAddressService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.service.optimizer.OptimizerClient;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -34,6 +37,7 @@ import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 
 import java.net.URI;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
@@ -54,6 +58,8 @@ public class HttpLoadBalanceServer {
     private final RequestBlockHashService requestBlockHashService;
     private final CacheAwareService cacheAwareService;
     private final FlexlbInstanceAddressService instanceAddressService;
+    private final OptimizerClient optimizerClient;
+    private final ExecutorService doFinallyExecutor;
 
     public HttpLoadBalanceServer(GeneralHttpNettyService generalHttpNettyService,
                                  RouteService routeService,
@@ -63,7 +69,9 @@ public class HttpLoadBalanceServer {
                                  ActiveRequestCounter activeRequestCounter,
                                  RequestBlockHashService requestBlockHashService,
                                  CacheAwareService cacheAwareService,
-                                 FlexlbInstanceAddressService instanceAddressService) {
+                                 FlexlbInstanceAddressService instanceAddressService,
+                                 OptimizerClient optimizerClient,
+                                 @Qualifier("doFinallyExecutor") ExecutorService doFinallyExecutor) {
         this.generalHttpNettyService = generalHttpNettyService;
         this.routeService = routeService;
         this.lbStatusConsistencyService = lbStatusConsistencyService;
@@ -73,6 +81,8 @@ public class HttpLoadBalanceServer {
         this.requestBlockHashService = requestBlockHashService;
         this.cacheAwareService = cacheAwareService;
         this.instanceAddressService = instanceAddressService;
+        this.optimizerClient = optimizerClient;
+        this.doFinallyExecutor = doFinallyExecutor;
     }
 
     @Bean
@@ -119,7 +129,7 @@ public class HttpLoadBalanceServer {
                             ActiveRequestCounter.RequestToken::close);
                 })
                 .onErrorResume(e -> handleRequestError(ctx, e))
-                .doFinally(signal -> finalizeRequestContext(ctx));
+                .doFinally(signal -> doFinallyAsync(ctx));
     }
 
     private Mono<ServerResponse> processScheduledRequest(BalanceContext ctx, Request req) {
@@ -263,6 +273,7 @@ public class HttpLoadBalanceServer {
      */
     private Mono<ServerResponse> handleRoutingResult(BalanceContext ctx, Response response) {
 
+        ctx.setResponse(response);
         response.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
 
         if (response.isSuccess()) {
@@ -272,6 +283,22 @@ public class HttpLoadBalanceServer {
             ctx.setSuccess(false);
             ctx.setErrorMessage("error_code:" + response.getErrorMessage());
             return buildErrorResponse(response);
+        }
+    }
+
+    private void fireTraceQuery(BalanceContext ctx) {
+        try {
+            Request req = ctx.getRequest();
+            Response response = ctx.getResponse();
+            if (ctx.isSuccess() && req != null && response != null && response.isSuccess()) {
+                ServerStatus selectedWorker = response.getServerStatus() == null
+                        || response.getServerStatus().isEmpty()
+                        ? null
+                        : response.getServerStatus().getFirst();
+                optimizerClient.traceQuery(req, selectedWorker);
+            }
+        } catch (Exception e) {
+            Logger.warn("Failed to dispatch OnlineOptimizer trace query", e);
         }
     }
 
@@ -346,6 +373,23 @@ public class HttpLoadBalanceServer {
         engineHealthReporter.reportBalancingService(ctx);
         logPvRecord(ctx);
         updateRequestCacheMetadata(ctx);
+    }
+
+    /**
+     * Request finalization writes logs, reports metrics, and updates cache metadata, so it is
+     * kept off the Reactor event loop during normal operation.
+     */
+    private void doFinallyAsync(BalanceContext ctx) {
+        doFinallyExecutor.execute(() -> doFinally(ctx));
+    }
+
+    private void doFinally(BalanceContext ctx) {
+        try {
+            finalizeRequestContext(ctx);
+        } catch (Exception e) {
+            Logger.error("Failed to finalize request context", e);
+        }
+        fireTraceQuery(ctx);
     }
 
     private void updateRequestCacheMetadata(BalanceContext ctx) {

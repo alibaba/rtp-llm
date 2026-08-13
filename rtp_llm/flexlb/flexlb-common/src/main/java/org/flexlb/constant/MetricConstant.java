@@ -521,4 +521,12 @@ public class MetricConstant {
      * Forward to master result QPS (status: success/failure)
      */
     public static final String FORWARD_TO_MASTER_RESULT = "app.forward.to.master.result";
+
+    /* ------------------------ Online Optimizer Monitoring -------------------------- */
+
+    public static final String ONLINE_OPTIMIZER_TRACE_QUERY_SKIPPED_QPS =
+            "app.optimizer.trace.query.skipped.qps";
+
+    public static final String ONLINE_OPTIMIZER_TRACE_QUERY_FAILED_QPS =
+            "app.optimizer.trace.query.failed.qps";
 }

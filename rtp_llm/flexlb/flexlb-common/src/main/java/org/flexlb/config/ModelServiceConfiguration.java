@@ -6,6 +6,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.KvcmConfig;
 import org.flexlb.dao.route.LocalStandbyConfig;
+import org.flexlb.dao.route.OnlineOptimizerConfig;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.RoutingServiceDiscovery;
 import org.flexlb.util.JsonUtils;
@@ -56,6 +57,7 @@ public class ModelServiceConfiguration {
         }
 
         validateKvcm(serviceRoute.getKvcm(), serviceDiscovery);
+        validateOnlineOptimizer(serviceRoute.getOnlineOptimizer(), serviceDiscovery);
     }
 
     private void validateKvcm(KvcmConfig kvcm, RoutingServiceDiscovery serviceDiscovery) {
@@ -96,5 +98,32 @@ public class ModelServiceConfiguration {
             throw new IllegalArgumentException(
                     "MODEL_SERVICE_CONFIG kvcm.local_standby contains invalid values");
         }
+    }
+
+    private void validateOnlineOptimizer(
+            OnlineOptimizerConfig optimizer,
+            RoutingServiceDiscovery serviceDiscovery) {
+        if (optimizer == null || !optimizer.isEnabled()) {
+            return;
+        }
+        if (StringUtils.isBlank(optimizer.getPath())) {
+            throw new IllegalArgumentException(
+                    "MODEL_SERVICE_CONFIG online_optimizer.path must not be blank");
+        }
+        if (!optimizer.getPath().startsWith("/")) {
+            throw new IllegalArgumentException(
+                    "MODEL_SERVICE_CONFIG online_optimizer.path must start with '/'");
+        }
+        if (optimizer.getPath().indexOf('?') >= 0 || optimizer.getPath().indexOf('#') >= 0) {
+            throw new IllegalArgumentException(
+                    "MODEL_SERVICE_CONFIG online_optimizer.path must not contain query or fragment");
+        }
+        if (optimizer.getDiscovery() != null
+                && optimizer.getDiscovery().getPollIntervalMs() <= 0) {
+            throw new IllegalArgumentException(
+                    "MODEL_SERVICE_CONFIG online_optimizer.discovery.poll_interval_ms "
+                            + "must be greater than zero");
+        }
+        serviceDiscovery.validate(optimizer.toEndpoint());
     }
 }

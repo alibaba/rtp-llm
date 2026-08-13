@@ -24,8 +24,15 @@ public class ServiceRoute {
     @JsonProperty("kvcm")
     private KvcmConfig kvcm;
 
+    @JsonProperty("online_optimizer")
+    private OnlineOptimizerConfig onlineOptimizer;
+
     public boolean isKvcmEnabled() {
         return kvcm != null && kvcm.isEnabled();
+    }
+
+    public boolean isOnlineOptimizerEnabled() {
+        return onlineOptimizer != null && onlineOptimizer.isEnabled();
     }
 
     @JsonProperty("role_endpoints")

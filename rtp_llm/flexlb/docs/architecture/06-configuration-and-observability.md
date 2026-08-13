@@ -52,6 +52,11 @@ Spring 属性/env，缺省**启动失败**。反序列化为 `ServiceRoute`：
   `ttl_ms=300000`、`minimum_ttl_ms=100000`、`ttl_reduction_start_ratio=0.8`、
   `maximum_entries=2000000`、`capacity_multiplier=10.0`、`async_queue_capacity=100000`、
   `hash_thread_count=4`、`hash_queue_capacity=100000`。
+- `OnlineOptimizerConfig`（可选）：`enabled`、`address`、`path=/api/optimizer`、
+  `discovery`。启用后仅在成功调度结束时，由专用 `doFinally` 线程池异步发送
+  `/traceQuery`；`instance_id` 根据 selected worker 的 role、group 和 block size 解析
+  KVCM namespace。请求收尾从 Reactor event-loop 卸载；线程池不设置任务队列，瞬时
+  饱和时由提交线程执行，executor shutdown 后允许丢弃晚到任务。
 
 ### FLEXLB_SYNC_CONSISTENCY_CONFIG（可选）
 
@@ -121,9 +126,12 @@ zookeeperConfig{zkHost, zkTimeoutMs}}`；另需 env `HIPPO_ROLE`。见
     `app.request.body.bytes`（HTTP `Content-Length`，未声明长度的请求不报该值）；
   - `app.worker.permit.capacity`（1s）、`graceful.lifecycle.event`、
     `app.forward.to.master.result`、`app.engine.zk.master.*`。
+  - `app.optimizer.trace.query.skipped.qps` / `app.optimizer.trace.query.failed.qps`：
+    trace query 的跳过与失败 QPS，tag `reason`；成功发起不单独上报。
 - 上报器：`EngineHealthReporter`（~40 个指标，2s 周期性 worker 计数/线程池）、
   `RoutingQueueReporter`、`ResourceMonitorReporter`、`GracefulLifecycleReporter`、
-  `CacheMetricsReporter`（flexlb-cache）、`GrpcReporter`/`KvcmMetricsReporter`（flexlb-grpc）。
+  `CacheMetricsReporter`（flexlb-cache）、`GrpcReporter`/`KvcmMetricsReporter`（flexlb-grpc）、
+  `OptimizerClient`。
 - Tracing：OpenTelemetry 仅配置 W3C TraceContext 传播；OTLP endpoint 经
   `OTEL_EXPORTER_OTLP_ENDPOINT`，skip pattern 经 `OTEL_TRACE_SKIP_PATTERN`。
 

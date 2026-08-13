@@ -13,6 +13,13 @@ import java.util.List;
 public interface ServiceDiscovery {
 
     /**
+     * Validate an endpoint and initialize provider-specific resources.
+     *
+     * @param endpoint Endpoint and its discovery configuration
+     */
+    void validate(Endpoint endpoint);
+
+    /**
      * Synchronously get the host list for an endpoint.
      *
      * @param endpoint Endpoint and its discovery configuration

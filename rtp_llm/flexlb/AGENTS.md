@@ -124,3 +124,6 @@ Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`
    // Request queue (using configured capacity parameter to control queue size, avoiding race conditions)
    private final BlockingDeque<BalanceContext> queue;
    ```
+6. Before considering any code change complete, run the full-repository
+   `./mvnw spotless:check -Pspotless-check` from `rtp_llm/flexlb` and ensure the entire
+   Maven reactor passes. A module-only Spotless result is not sufficient.
