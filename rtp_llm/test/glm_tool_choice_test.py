@@ -162,6 +162,45 @@ class ToolChoiceRequestTest(TestCase):
                 tool_choice={"type": "function", "function": {"name": "missing"}}
             )
 
+    def test_duplicate_tool_names_are_rejected(self):
+        duplicate = make_tool("alpha")
+        duplicate.function.parameters = {
+            "type": "object",
+            "properties": {"other": {"type": "integer"}},
+        }
+
+        with self.assertRaises(ValidationError):
+            ChatCompletionRequest(
+                messages=[ChatMessage(role=RoleEnum.user, content="test")],
+                tools=[make_tool("alpha"), duplicate],
+            )
+
+    def test_named_choice_cannot_select_duplicate_tool_names(self):
+        with self.assertRaises(ValidationError):
+            ChatCompletionRequest(
+                messages=[ChatMessage(role=RoleEnum.user, content="test")],
+                tools=[make_tool("alpha"), make_tool("alpha")],
+                tool_choice={"type": "function", "function": {"name": "alpha"}},
+            )
+
+    def test_none_does_not_bypass_duplicate_tool_validation(self):
+        with self.assertRaises(ValidationError):
+            ChatCompletionRequest(
+                messages=[ChatMessage(role=RoleEnum.user, content="test")],
+                tools=[make_tool("alpha"), make_tool("alpha")],
+                tool_choice="none",
+            )
+
+    def test_tool_names_remain_case_sensitive(self):
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="test")],
+            tools=[make_tool("alpha"), make_tool("Alpha")],
+        )
+
+        self.assertEqual(
+            [tool.function.name for tool in request.tools or []], ["alpha", "Alpha"]
+        )
+
     def test_user_template_with_enabled_tools_is_rejected(self):
         with self.assertRaises(ValidationError):
             make_request(user_template="custom", tool_choice="auto")

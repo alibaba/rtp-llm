@@ -178,6 +178,10 @@ class ChatCompletionRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_tool_choice(self):
+        tool_names = [tool.function.name for tool in self.tools or []]
+        if len(tool_names) != len(set(tool_names)):
+            raise ValueError("tool function names must be unique")
+
         choice = self.tool_choice
         if choice == "required" and not self.tools:
             raise ValueError("tool_choice 'required' requires at least one tool")
