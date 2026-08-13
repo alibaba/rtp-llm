@@ -634,6 +634,35 @@ TEST(LogitsProcessorFactoryTest, GrammarThinkingCreatesReasoningGrammarAndSkipsT
     EXPECT_EQ(std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processors[0]), nullptr);
 }
 
+TEST(LogitsProcessorFactoryTest, JsonObjectResponseFormatAllowsObjectOrArray) {
+    GrammarConfig grammar_config;
+    grammar_config.grammar_backend     = "xgrammar";
+    grammar_config.tokenizer_info_json = makeTokenizerInfoJson();
+    LogitsProcessorFactory::init("", "", grammar_config);
+
+    auto generate_input                              = std::make_shared<GenerateInput>();
+    generate_input->generate_config                  = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->response_format = R"({"type":"json_object"})";
+    generate_input->input_ids                        = torch::tensor({1, 2}, torch::kInt32);
+
+    auto processors = LogitsProcessorFactory::createLogitsProcessors(
+        generate_input, /*init_batch_size=*/1, /*max_batch_size=*/1, /*eos_token_id=*/0);
+
+    ASSERT_EQ(processors.size(), 1);
+    auto processor = std::dynamic_pointer_cast<GrammarLogitsProcessor>(processors[0]);
+    ASSERT_NE(processor, nullptr);
+
+    SamplerInputs inputs;
+    inputs.logits        = torch::zeros({1, 128}, torch::kFloat32);
+    inputs.finished_mask = torch::zeros({1}, torch::kBool);
+    processor->process(inputs, 0, 1);
+
+    EXPECT_GT(inputs.logits[0][static_cast<int>('{')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_GT(inputs.logits[0][static_cast<int>('[')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0][static_cast<int>('"')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0][static_cast<int>('1')].item<float>(), BaseLogitsProcessor::neg_inf);
+}
+
 TEST(LogitsProcessorFactoryTest, GrammarThinkingWithoutEndIdsReportsInvalidParams) {
     GrammarConfig grammar_config;
     grammar_config.grammar_backend     = "xgrammar";

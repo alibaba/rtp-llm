@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 _CRASH_CONFIRMATION_ATTEMPTS = 2
 _MAX_COMPILE_ERROR_MESSAGE_LENGTH = 4096
+_JSON_OBJECT_RESPONSE_SCHEMA = {"anyOf": [{"type": "object"}, {"type": "array"}]}
 
 
 class _WorkerStatus(Enum):
@@ -199,7 +200,7 @@ class GrammarValidator:
         if fmt_type == "text":
             return True
         if fmt_type == "json_object":
-            return self._check_grammar("json", {"type": "object"})
+            return self._check_grammar("json", _JSON_OBJECT_RESPONSE_SCHEMA)
         if fmt_type == "json_schema":
             schema = payload.get("json_schema")
             if isinstance(schema, dict) and "schema" in schema:
