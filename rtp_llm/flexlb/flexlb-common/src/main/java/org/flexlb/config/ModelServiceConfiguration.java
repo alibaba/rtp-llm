@@ -6,7 +6,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.KvcmConfig;
 import org.flexlb.dao.route.LocalStandbyConfig;
-import org.flexlb.dao.route.OnlineOptimizerConfig;
+import org.flexlb.dao.route.OptimizerConfig;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.RoutingServiceDiscovery;
 import org.flexlb.util.JsonUtils;
@@ -57,7 +57,7 @@ public class ModelServiceConfiguration {
         }
 
         validateKvcm(serviceRoute.getKvcm(), serviceDiscovery);
-        validateOnlineOptimizer(serviceRoute.getOnlineOptimizer(), serviceDiscovery);
+        validateOptimizer(serviceRoute.getOptimizer(), serviceDiscovery);
     }
 
     private void validateKvcm(KvcmConfig kvcm, RoutingServiceDiscovery serviceDiscovery) {
@@ -100,8 +100,8 @@ public class ModelServiceConfiguration {
         }
     }
 
-    private void validateOnlineOptimizer(
-            OnlineOptimizerConfig optimizer,
+    private void validateOptimizer(
+            OptimizerConfig optimizer,
             RoutingServiceDiscovery serviceDiscovery) {
         if (optimizer == null || !optimizer.isEnabled()) {
             return;

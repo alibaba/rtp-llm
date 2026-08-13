@@ -11,7 +11,7 @@ import org.flexlb.dao.optimizer.OptimizerErrorCode;
 import org.flexlb.dao.optimizer.OptimizerTraceQueryRequest;
 import org.flexlb.dao.optimizer.OptimizerTraceQueryResponse;
 import org.flexlb.dao.route.Endpoint;
-import org.flexlb.dao.route.OnlineOptimizerConfig;
+import org.flexlb.dao.route.OptimizerConfig;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.engine.grpc.client.KvcmWorkerMetadataResolver;
@@ -52,7 +52,7 @@ public class OptimizerClient {
         this.workerMetadataResolver = workerMetadataResolver;
         this.monitor = monitor;
 
-        OnlineOptimizerConfig optimizerConfig = resolveOnlineOptimizerConfig(modelMetaConfig);
+        OptimizerConfig optimizerConfig = resolveOptimizerConfig(modelMetaConfig);
         this.enabled = optimizerConfig != null;
         if (!enabled) {
             this.addressResolver = null;
@@ -63,7 +63,7 @@ public class OptimizerClient {
         Endpoint endpoint = optimizerConfig.toEndpoint();
         this.addressResolver = new ServiceDiscoveryAddressResolver(serviceDiscovery, endpoint);
         this.basePath = stripTrailingSlash(optimizerConfig.getPath());
-        log.info("OnlineOptimizer trace query enabled: address={}", endpoint.getAddress());
+        log.info("Optimizer trace query enabled: address={}", endpoint.getAddress());
     }
 
     OptimizerClient(
@@ -82,17 +82,15 @@ public class OptimizerClient {
 
     @PostConstruct
     public void init() {
-        monitor.register(MetricConstant.ONLINE_OPTIMIZER_TRACE_QUERY_SKIPPED_QPS,
-                FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(MetricConstant.ONLINE_OPTIMIZER_TRACE_QUERY_FAILED_QPS,
-                FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(MetricConstant.OPTIMIZER_TRACE_QUERY_SKIPPED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(MetricConstant.OPTIMIZER_TRACE_QUERY_FAILED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         if (!enabled) {
             return;
         }
         try {
             addressResolver.start();
         } catch (Exception e) {
-            log.warn("OnlineOptimizer discovery resolver failed to start", e);
+            log.warn("Optimizer discovery resolver failed to start", e);
         }
     }
 
@@ -148,21 +146,21 @@ public class OptimizerClient {
     }
 
     private void reportSkipped(String reason) {
-        monitor.report(MetricConstant.ONLINE_OPTIMIZER_TRACE_QUERY_SKIPPED_QPS,
+        monitor.report(MetricConstant.OPTIMIZER_TRACE_QUERY_SKIPPED_QPS,
                 FlexMetricTags.of("reason", reason), 1.0);
-        log.warn("OnlineOptimizer trace query skipped: reason={}", reason);
+        log.warn("Optimizer trace query skipped: reason={}", reason);
     }
 
     private void reportFailed(String reason) {
-        monitor.report(MetricConstant.ONLINE_OPTIMIZER_TRACE_QUERY_FAILED_QPS,
+        monitor.report(MetricConstant.OPTIMIZER_TRACE_QUERY_FAILED_QPS,
                 FlexMetricTags.of("reason", reason), 1.0);
-        log.warn("OnlineOptimizer trace query failed: reason={}", reason);
+        log.warn("Optimizer trace query failed: reason={}", reason);
     }
 
     private void reportFailed(String reason, String requestId, URI uri, Throwable error) {
-        monitor.report(MetricConstant.ONLINE_OPTIMIZER_TRACE_QUERY_FAILED_QPS,
+        monitor.report(MetricConstant.OPTIMIZER_TRACE_QUERY_FAILED_QPS,
                 FlexMetricTags.of("reason", reason), 1.0);
-        log.warn("OnlineOptimizer trace query failed: reason={}, requestId={}, uri={}",
+        log.warn("Optimizer trace query failed: reason={}, requestId={}, uri={}",
                 reason, requestId, uri, error);
     }
 
@@ -184,10 +182,10 @@ public class OptimizerClient {
         }
     }
 
-    private static OnlineOptimizerConfig resolveOnlineOptimizerConfig(ModelMetaConfig modelMetaConfig) {
+    private static OptimizerConfig resolveOptimizerConfig(ModelMetaConfig modelMetaConfig) {
         for (ServiceRoute route : modelMetaConfig.getServiceRoutes()) {
-            if (route != null && route.isOnlineOptimizerEnabled()) {
-                return route.getOnlineOptimizer();
+            if (route != null && route.isOptimizerEnabled()) {
+                return route.getOptimizer();
             }
         }
         return null;

@@ -298,7 +298,7 @@ public class HttpLoadBalanceServer {
                 optimizerClient.traceQuery(req, selectedWorker);
             }
         } catch (Exception e) {
-            Logger.warn("Failed to dispatch OnlineOptimizer trace query", e);
+            Logger.warn("Failed to dispatch optimizer trace query", e);
         }
     }
 

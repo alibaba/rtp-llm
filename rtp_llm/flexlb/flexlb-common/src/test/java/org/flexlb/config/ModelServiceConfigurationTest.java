@@ -1,6 +1,6 @@
 package org.flexlb.config;
 
-import org.flexlb.dao.route.OnlineOptimizerConfig;
+import org.flexlb.dao.route.OptimizerConfig;
 import org.flexlb.discovery.ServiceDiscoveryType;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -85,14 +85,14 @@ class ModelServiceConfigurationTest {
     }
 
     @Test
-    void loadsEnabledOnlineOptimizerTraceConfiguration() {
+    void loadsEnabledOptimizerTraceConfiguration() {
         contextRunner
-                .withPropertyValues("MODEL_SERVICE_CONFIG=" + modelConfig(validOnlineOptimizerConfig()))
+                .withPropertyValues("MODEL_SERVICE_CONFIG=" + modelConfig(validOptimizerConfig()))
                 .run(context -> {
                     assertThat(context).hasNotFailed();
-                    OnlineOptimizerConfig optimizer = context.getBean(ModelMetaConfig.class)
+                    OptimizerConfig optimizer = context.getBean(ModelMetaConfig.class)
                             .getServiceRoute("test-service")
-                            .getOnlineOptimizer();
+                            .getOptimizer();
                     assertThat(optimizer.isEnabled()).isTrue();
                     assertThat(optimizer.getAddress()).isEqualTo("optimizer-service");
                     assertThat(optimizer.getPath()).isEqualTo("/custom/optimizer");
@@ -103,42 +103,42 @@ class ModelServiceConfigurationTest {
     }
 
     @Test
-    void appliesOnlineOptimizerTraceDefaults() {
+    void appliesOptimizerTraceDefaults() {
         contextRunner
                 .withPropertyValues("MODEL_SERVICE_CONFIG=" + modelConfig(
-                        validOnlineOptimizerConfig().replace(",\"path\":\"/custom/optimizer\"", "")))
+                        validOptimizerConfig().replace(",\"path\":\"/custom/optimizer\"", "")))
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     assertThat(context.getBean(ModelMetaConfig.class)
                             .getServiceRoute("test-service")
-                            .getOnlineOptimizer()
+                            .getOptimizer()
                             .getPath())
-                            .isEqualTo(OnlineOptimizerConfig.DEFAULT_PATH);
+                            .isEqualTo(OptimizerConfig.DEFAULT_PATH);
                 });
     }
 
     @Test
-    void ignoresOnlineOptimizerFieldsWhenDisabled() {
+    void ignoresOptimizerFieldsWhenDisabled() {
         contextRunner
                 .withPropertyValues("MODEL_SERVICE_CONFIG=" + modelConfig("{\"enabled\":false}"))
                 .run(context -> assertThat(context).hasNotFailed());
     }
 
     @Test
-    void allowsEnabledOnlineOptimizerWithoutInstanceId() {
+    void allowsEnabledOptimizerWithoutInstanceId() {
         contextRunner
-                .withPropertyValues("MODEL_SERVICE_CONFIG=" + modelConfig(validOnlineOptimizerConfig()))
+                .withPropertyValues("MODEL_SERVICE_CONFIG=" + modelConfig(validOptimizerConfig()))
                 .run(context -> assertThat(context).hasNotFailed());
     }
 
     @Test
-    void rejectsEnabledOnlineOptimizerWithInvalidPathOrDiscovery() {
-        assertOnlineOptimizerRejected(
-                validOnlineOptimizerConfig().replace("\"path\":\"/custom/optimizer\"",
+    void rejectsEnabledOptimizerWithInvalidPathOrDiscovery() {
+        assertOptimizerRejected(
+                validOptimizerConfig().replace("\"path\":\"/custom/optimizer\"",
                         "\"path\":\"custom/optimizer\""),
                 "MODEL_SERVICE_CONFIG online_optimizer.path must start with '/'");
-        assertOnlineOptimizerRejected(
-                validOnlineOptimizerConfig().replace("\"hosts\":[\"127.0.0.1:8082\"]",
+        assertOptimizerRejected(
+                validOptimizerConfig().replace("\"hosts\":[\"127.0.0.1:8082\"]",
                         "\"hosts\":[]"),
                 "static-env discovery hosts must be configured for address: optimizer-service");
     }
@@ -213,7 +213,7 @@ class ModelServiceConfigurationTest {
                 """;
     }
 
-    private void assertOnlineOptimizerRejected(String optimizerConfig, String message) {
+    private void assertOptimizerRejected(String optimizerConfig, String message) {
         contextRunner
                 .withPropertyValues("MODEL_SERVICE_CONFIG=" + modelConfig(optimizerConfig))
                 .run(context -> {
@@ -224,14 +224,14 @@ class ModelServiceConfigurationTest {
 
     private String modelConfig(String optimizerConfig) {
         return """
-                {"service_id":"test-service","online_optimizer":%s,
+                {"service_id":"test-service","optimizer":%s,
                 "role_endpoints":[{"group":"default",
                 "pd_fusion_endpoint":{"address":"service-a","protocol":"http","path":"/",
                 "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]}}}]}
                 """.formatted(optimizerConfig);
     }
 
-    private String validOnlineOptimizerConfig() {
+    private String validOptimizerConfig() {
         return """
                 {"enabled":true,"address":"optimizer-service","path":"/custom/optimizer",
                 "discovery":{"type":"static-env","hosts":["127.0.0.1:8082"]}}

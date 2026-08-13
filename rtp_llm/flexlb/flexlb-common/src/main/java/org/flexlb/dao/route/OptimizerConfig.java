@@ -5,11 +5,11 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 
 /**
- * Online Optimizer trace-query configuration.
+ * Optimizer trace-query configuration.
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
-public class OnlineOptimizerConfig {
+public class OptimizerConfig {
 
     public static final String DEFAULT_PATH = "/api/optimizer";
 

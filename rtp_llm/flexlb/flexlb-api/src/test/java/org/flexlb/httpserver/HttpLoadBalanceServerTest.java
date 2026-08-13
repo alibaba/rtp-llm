@@ -166,7 +166,7 @@ class HttpLoadBalanceServerTest {
     }
 
     @Test
-    void reportsStringRequestIdAndPreparedBlockKeysToOnlineOptimizer() {
+    void reportsStringRequestIdAndPreparedBlockKeysToOptimizer() {
         List<Long> blockCacheKeys = List.of(10L, 20L, 30L);
         when(requestBlockHashService.prepareBlockCacheKeys(any()))
                 .thenAnswer(invocation -> {

@@ -26,8 +26,8 @@ import java.net.URI;
 import java.time.Duration;
 import java.util.List;
 
-import static org.flexlb.constant.MetricConstant.ONLINE_OPTIMIZER_TRACE_QUERY_FAILED_QPS;
-import static org.flexlb.constant.MetricConstant.ONLINE_OPTIMIZER_TRACE_QUERY_SKIPPED_QPS;
+import static org.flexlb.constant.MetricConstant.OPTIMIZER_TRACE_QUERY_FAILED_QPS;
+import static org.flexlb.constant.MetricConstant.OPTIMIZER_TRACE_QUERY_SKIPPED_QPS;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
@@ -101,7 +101,7 @@ class OptimizerClientTest {
 
         verify(httpService, never()).request(any(), any(URI.class), any(), any());
         verify(monitor).report(
-                ONLINE_OPTIMIZER_TRACE_QUERY_SKIPPED_QPS,
+                OPTIMIZER_TRACE_QUERY_SKIPPED_QPS,
                 FlexMetricTags.of("reason", "empty_block_keys"),
                 1.0);
     }
@@ -115,7 +115,7 @@ class OptimizerClientTest {
 
         verify(httpService, never()).request(any(), any(URI.class), any(), any());
         verify(monitor).report(
-                ONLINE_OPTIMIZER_TRACE_QUERY_SKIPPED_QPS,
+                OPTIMIZER_TRACE_QUERY_SKIPPED_QPS,
                 FlexMetricTags.of("reason", "no_available_address"),
                 1.0);
     }
@@ -129,7 +129,7 @@ class OptimizerClientTest {
         disabledClient.traceQuery(traceRequest(List.of(1L)), selectedWorker());
 
         verify(httpService, never()).request(any(), any(URI.class), any(), any());
-        verify(monitor, never()).report(eq(ONLINE_OPTIMIZER_TRACE_QUERY_SKIPPED_QPS), any(), eq(1.0));
+        verify(monitor, never()).report(eq(OPTIMIZER_TRACE_QUERY_SKIPPED_QPS), any(), eq(1.0));
     }
 
     @Test
@@ -141,7 +141,7 @@ class OptimizerClientTest {
         verify(httpService, never()).request(any(), any(URI.class), any(), any());
         verify(workerMetadataResolver, never()).resolveNamespace(any(), anyString(), anyLong());
         verify(monitor).report(
-                ONLINE_OPTIMIZER_TRACE_QUERY_SKIPPED_QPS,
+                OPTIMIZER_TRACE_QUERY_SKIPPED_QPS,
                 FlexMetricTags.of("reason", "shutdown"),
                 1.0);
     }
@@ -157,7 +157,7 @@ class OptimizerClientTest {
         assertDoesNotThrow(() -> client.traceQuery(traceRequest(List.of(1L)), selectedWorker()));
 
         verify(monitor).report(
-                ONLINE_OPTIMIZER_TRACE_QUERY_FAILED_QPS,
+                OPTIMIZER_TRACE_QUERY_FAILED_QPS,
                 FlexMetricTags.of("reason", "http_error"),
                 1.0);
     }
@@ -173,7 +173,7 @@ class OptimizerClientTest {
         assertDoesNotThrow(() -> client.traceQuery(traceRequest(List.of(1L)), selectedWorker()));
 
         verify(monitor).report(
-                ONLINE_OPTIMIZER_TRACE_QUERY_FAILED_QPS,
+                OPTIMIZER_TRACE_QUERY_FAILED_QPS,
                 FlexMetricTags.of("reason", "dispatch_error"),
                 1.0);
     }
@@ -205,7 +205,7 @@ class OptimizerClientTest {
         client.traceQuery(traceRequest(List.of(1L)), selectedWorker());
 
         verify(monitor).report(
-                ONLINE_OPTIMIZER_TRACE_QUERY_FAILED_QPS,
+                OPTIMIZER_TRACE_QUERY_FAILED_QPS,
                 FlexMetricTags.of("reason", "status_UNKNOWN_ERROR"),
                 1.0);
     }
@@ -221,7 +221,7 @@ class OptimizerClientTest {
         client.traceQuery(traceRequest(List.of(1L)), selectedWorker());
 
         verify(monitor).report(
-                ONLINE_OPTIMIZER_TRACE_QUERY_FAILED_QPS,
+                OPTIMIZER_TRACE_QUERY_FAILED_QPS,
                 FlexMetricTags.of("reason", "status_MISSING"),
                 1.0);
     }
@@ -231,7 +231,7 @@ class OptimizerClientTest {
         client.handleTraceQueryResponse(null);
 
         verify(monitor).report(
-                ONLINE_OPTIMIZER_TRACE_QUERY_FAILED_QPS,
+                OPTIMIZER_TRACE_QUERY_FAILED_QPS,
                 FlexMetricTags.of("reason", "status_MISSING"),
                 1.0);
     }
@@ -251,7 +251,7 @@ class OptimizerClientTest {
 
         verify(httpService, never()).request(any(), any(URI.class), any(), any());
         verify(monitor).report(
-                ONLINE_OPTIMIZER_TRACE_QUERY_SKIPPED_QPS,
+                OPTIMIZER_TRACE_QUERY_SKIPPED_QPS,
                 FlexMetricTags.of("reason", "instance_id_unavailable"),
                 1.0);
     }
