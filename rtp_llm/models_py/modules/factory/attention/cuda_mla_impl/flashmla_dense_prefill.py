@@ -20,7 +20,10 @@ from rtp_llm.utils.model_weight import W
 
 _FLASHMLA_WORKSPACES: Dict[int, torch.Tensor] = {}
 _FLASHMLA_LOGGED_DEVICES: set[int] = set()
-_FLASHMLA_LOGGED_CONFIGS: set[tuple[int, int, int, int, bool]] = set()
+# Log each static execution shape once. KV lengths are intentionally excluded:
+# target verification grows them every iteration while reusing the same plan
+# shape, so including them turns this guard into a per-step INFO log.
+_FLASHMLA_LOGGED_CONFIGS: set[tuple[int, int, tuple[int, ...], bool]] = set()
 
 
 def _workspace(device: torch.device) -> torch.Tensor:
@@ -288,8 +291,7 @@ class MlaFlashMLAPrefillOp:
         config = (
             device_index,
             self.batch_size,
-            self.max_q_len,
-            self.max_kv_len,
+            tuple(self.q_lens),
             self.has_reuse_cache,
         )
         if config not in _FLASHMLA_LOGGED_CONFIGS:

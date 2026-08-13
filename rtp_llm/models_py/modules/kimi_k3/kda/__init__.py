@@ -70,11 +70,18 @@ class KimiK3KDA(nn.Module):
             raise NotImplementedError(
                 "K3 checkpoint manifest currently requires full-rank KDA output gate"
             )
-        if parallelism_config.role_type not in (RoleType.PREFILL, RoleType.DECODE):
+        if parallelism_config.role_type not in (
+            RoleType.PREFILL,
+            RoleType.DECODE,
+            RoleType.PDFUSION,
+        ):
             raise RuntimeError(
-                "Kimi K3 supports only PREFILL or DECODE roles, got "
+                "Kimi K3 supports only PREFILL, DECODE, or PDFUSION roles, got "
                 f"{parallelism_config.role_type}"
             )
+        # PDFUSION is used by the standalone BatchDecodeScheduler benchmark.
+        # Its synthetic streams are converted directly to Decode before model
+        # execution, so KDA must use the Decode kernel/cache layout here.
         self._is_prefill_role = parallelism_config.role_type == RoleType.PREFILL
 
         converter = LinearCacheConverter(
