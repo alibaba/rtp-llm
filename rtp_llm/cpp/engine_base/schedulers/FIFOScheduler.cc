@@ -151,6 +151,19 @@ std::vector<std::shared_ptr<GenerateStream>> FIFOScheduler::batchEnqueue(const v
 bool FIFOScheduler::evaluateRunningBatch(const list<GenerateStreamPtr>& streams,
                                           const GenerateStreamPtr&       new_stream) const {
     RTP_LLM_PROFILE_FUNCTION();
+    // Prefill produces different model outputs for speculative and target-only
+    // requests: Eagle3 requests carry auxiliary hidden states, while
+    // force_disable_sp_run requests intentionally omit them.  Never combine
+    // those two output contracts in a single model forward.
+    if (pd_sep_config_.role_type == RoleType::PREFILL) {
+        const auto same_sp_mode = [&new_stream](const GenerateStreamPtr& stream) {
+            return stream->forceDisableSpRun() == new_stream->forceDisableSpRun();
+        };
+        if (!std::all_of(streams.begin(), streams.end(), same_sp_mode)
+            || !std::all_of(running_streams_.begin(), running_streams_.end(), same_sp_mode)) {
+            return false;
+        }
+    }
     if (pd_sep_config_.role_type == RoleType::DECODE) {
         // Decode-only scheduling can top up an existing running decode batch.
         // max_generate_batch_size_ is an inclusive cap; only requests above it

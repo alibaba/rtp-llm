@@ -639,7 +639,13 @@ class KimiK3Model(GptModelBase):
                     int(value) for value in layer_map_host.tolist()
                 )
         eagle3_hidden_states = []
-        eagle3_enabled = os.environ.get("SP_TYPE", "").lower() == "eagle3"
+        # A target-only request must stay target-only on Prefill as well.  In
+        # particular, do not retain, concatenate, all-gather, or transfer the
+        # three full-sequence Eagle3 auxiliary hidden states.
+        eagle3_enabled = (
+            os.environ.get("SP_TYPE", "").lower() == "eagle3"
+            and not bool(getattr(inputs, "force_disable_sp_run", False))
+        )
         if eagle3_enabled:
             raw_aux_layers = os.environ.get("KIMI_K3_EAGLE3_AUX_LAYER_IDS")
             if raw_aux_layers:

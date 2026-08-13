@@ -527,6 +527,10 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     for (const auto& stream : stream_groups.contextStreams()) {
         model_input.need_all_logits        = model_input.need_all_logits || stream->calculateLoss();
         model_input.need_all_hidden_states = model_input.need_all_hidden_states || stream->needReturnHiddenStates();
+        // The FIFO scheduler keeps SP-enabled and target-only Prefill streams
+        // in separate batches, so this scalar describes the entire context
+        // batch and can be consumed directly by Python model implementations.
+        model_input.force_disable_sp_run = model_input.force_disable_sp_run || stream->forceDisableSpRun();
         auto  current_batch_size           = stream->currentBatchSize();
         auto& kv_cache                     = *stream->kvCachePtr();
         if (config_.enable_detail_log) {
