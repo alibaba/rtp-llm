@@ -1,3 +1,5 @@
+load(":sm120_prefill_targets.bzl", "sm120_dsv4_prefill_perf")
+
 py_library(
     name = "perf_test_lib",
     srcs = [
@@ -839,6 +841,14 @@ test_suite(
 #   v4_flash_dp4_decode_grid_perf           → DP=4 EP=4 captured-graph decode grid
 #   v4_flash_dp4_decode_bs128_64k_perf      → DP=4 EP=4 fixed bs=128/input=64K (perf-tuning canonical)
 #   v4_flash_dp4_decode_64k_mtp_grid_perf   → DP=4 EP=4 + MTP + cudagraph @ 64K, BS={1,8,16,32}
+# RTX PRO 5000 (SM120x) prefill-only targets. These deliberately do not reuse
+# the SM100 memory budget. Framework pages stay at 256 entries while the
+# FlashInfer sparse-attention kernel consumes 128-entry tiles.
+sm120_dsv4_prefill_perf(name = "v4_flash_sm120_cp4_ep4_prefill_perf", parallel_size = 4, use_cp = True)
+sm120_dsv4_prefill_perf(name = "v4_flash_sm120_cp8_ep8_prefill_perf", parallel_size = 8, use_cp = True)
+sm120_dsv4_prefill_perf(name = "v4_flash_sm120_tp4_ep4_prefill_perf", parallel_size = 4, use_cp = False)
+sm120_dsv4_prefill_perf(name = "v4_flash_sm120_tp8_ep8_prefill_perf", parallel_size = 8, use_cp = False)
+
 test_suite(
     name = "perf_dsv4_v4_flash",
     tests = [
