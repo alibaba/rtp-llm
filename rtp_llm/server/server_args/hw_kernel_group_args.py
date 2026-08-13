@@ -347,3 +347,33 @@ def _parse_decode_capture_config(config: str) -> List[int]:
     except ValueError as e:
         # Convert ValueError to ArgumentTypeError for argparse
         raise argparse.ArgumentTypeError(str(e))
+
+
+def validate_decode_capture_batch_sizes(
+    batch_sizes: List[int], max_batch_size: int
+) -> None:
+    """Validate explicit decode graph keys against their backing buffer size."""
+    if max_batch_size <= 0:
+        raise ValueError("CONCURRENCY_LIMIT must be positive when CUDA Graph is enabled")
+    if not batch_sizes:
+        return
+
+    duplicate_sizes = sorted(
+        batch_size
+        for batch_size in set(batch_sizes)
+        if batch_sizes.count(batch_size) > 1
+    )
+    if duplicate_sizes:
+        raise ValueError(
+            "DECODE_CAPTURE_CONFIG contains duplicate batch sizes: "
+            + ",".join(map(str, duplicate_sizes))
+        )
+
+    oversized = sorted(
+        batch_size for batch_size in batch_sizes if batch_size > max_batch_size
+    )
+    if oversized:
+        raise ValueError(
+            "DECODE_CAPTURE_CONFIG batch sizes must not exceed CONCURRENCY_LIMIT "
+            f"({max_batch_size}): {','.join(map(str, oversized))}"
+        )

@@ -6,6 +6,7 @@ from unittest import TestCase, main
 from rtp_llm.server.server_args.hw_kernel_group_args import (
     _parse_decode_capture_config,
     _parse_prefill_capture_config,
+    validate_decode_capture_batch_sizes,
 )
 
 
@@ -194,6 +195,25 @@ class DecodeCaptureBatchSizesTest(TestCase):
         """Test that empty comma-separated list returns empty list (no error)"""
         result = _parse_decode_capture_config(",,,")
         self.assertEqual(result, [])
+
+    def test_validate_rejects_batch_size_above_limit(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            r"must not exceed CONCURRENCY_LIMIT \(8\): 16",
+        ):
+            validate_decode_capture_batch_sizes([1, 2, 4, 8, 16], 8)
+
+    def test_validate_rejects_duplicate_batch_size(self):
+        with self.assertRaisesRegex(ValueError, "duplicate batch sizes: 4"):
+            validate_decode_capture_batch_sizes([1, 2, 4, 4, 8], 8)
+
+    def test_validate_accepts_unique_batch_sizes_within_limit(self):
+        validate_decode_capture_batch_sizes([1, 2, 4, 8], 8)
+        validate_decode_capture_batch_sizes([], 8)
+
+    def test_validate_rejects_non_positive_limit_for_default_capture(self):
+        with self.assertRaisesRegex(ValueError, "CONCURRENCY_LIMIT must be positive"):
+            validate_decode_capture_batch_sizes([], 0)
 
 
 if __name__ == "__main__":
