@@ -406,45 +406,112 @@ class FrontendWorker:
         iterators = [gen.__aiter__() for gen in generators]
         done_idxs: Set[int] = set()
         batch_state: List[Any] = [None] * len(iterators)
+        round_tasks = {}
+        primary_error = None
+        close_error = None
 
-        while True:
-            # 创建并行任务
-            tasks = []
-            for idx, itr in enumerate(iterators):
-                if idx not in done_idxs:  # 仅为未完成的迭代器创建任务
-                    tasks.append((idx, itr.__anext__()))
+        try:
+            while len(done_idxs) != len(iterators):
+                round_tasks = {}
+                for idx, itr in enumerate(iterators):
+                    if idx not in done_idxs:
+                        round_tasks[asyncio.create_task(itr.__anext__())] = idx
 
-            # 使用 asyncio.gather() 获取结果
-            if tasks:
-                results = await asyncio.gather(
-                    *(task[1] for task in tasks), return_exceptions=True
-                )
-                for idx, result in zip((task[0] for task in tasks), results):
-                    if isinstance(result, Exception):
-                        # 处理异常情况，如 StopAsyncIteration
-                        if isinstance(result, StopAsyncIteration):
+                pending = set(round_tasks)
+                round_results = {}
+                while pending:
+                    completed, pending = await asyncio.wait(
+                        pending, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    for task in sorted(completed, key=lambda item: round_tasks[item]):
+                        idx = round_tasks[task]
+                        try:
+                            round_results[idx] = task.result()
+                        except StopAsyncIteration:
                             done_idxs.add(idx)
-                            if batch_state[idx] is None:
+                            if batch_state[idx] is None or incremental:
                                 batch_state[idx] = PipelineResponse()
-                            if incremental:
-                                batch_state[idx] = PipelineResponse()
-                        else:
-                            error_msg = f'ErrorMsg: {str(result)} \n Traceback: {"".join(traceback.format_tb(result.__traceback__))}'
-                            logging.warning(error_msg)
-                            raise result
-                    else:
-                        batch_state[idx] = result
+                        except BaseException as e:
+                            primary_error = e
+                            if not isinstance(e, asyncio.CancelledError):
+                                error_msg = f'ErrorMsg: {str(e)} \n Traceback: {"".join(traceback.format_tb(e.__traceback__))}'
+                                logging.warning(error_msg)
+                            break
+                    if primary_error is not None:
+                        break
 
-            # 检查是否所有迭代器都完成
-            if len(done_idxs) == len(iterators):
-                break
+                if primary_error is not None:
+                    break
 
-            # 处理 batch 数据
-            batch = batch_state
-            if batch_infer:
-                yield BatchPipelineResponse(response_batch=batch)
-            else:
-                yield batch[0]
+                for idx, result in round_results.items():
+                    batch_state[idx] = result
+                round_tasks = {}
+                if len(done_idxs) == len(iterators):
+                    break
+                if batch_infer:
+                    yield BatchPipelineResponse(response_batch=batch_state)
+                else:
+                    yield batch_state[0]
+        except BaseException as e:
+            if primary_error is None:
+                primary_error = e
+        finally:
+            async def cleanup_batch():
+                for task in round_tasks:
+                    if not task.done():
+                        task.cancel()
+                if round_tasks:
+                    await asyncio.gather(*round_tasks, return_exceptions=True)
+
+                close_tasks = []
+                synchronous_errors = []
+                for iterator in iterators:
+                    close = getattr(iterator, "aclose", None)
+                    if close is None:
+                        continue
+                    try:
+                        close_tasks.append(asyncio.create_task(close()))
+                    except BaseException as e:
+                        synchronous_errors.append(e)
+                close_results = (
+                    await asyncio.gather(*close_tasks, return_exceptions=True)
+                    if close_tasks
+                    else []
+                )
+                return next(
+                    (
+                        result
+                        for result in (*synchronous_errors, *close_results)
+                        if isinstance(result, BaseException)
+                    ),
+                    None,
+                )
+
+            cleanup_task = asyncio.create_task(cleanup_batch())
+            while True:
+                try:
+                    close_error = await asyncio.shield(cleanup_task)
+                    break
+                except asyncio.CancelledError as e:
+                    if primary_error is None:
+                        primary_error = e
+                    if not cleanup_task.done():
+                        continue
+                    try:
+                        close_error = cleanup_task.result()
+                    except BaseException as cleanup_error:
+                        close_error = cleanup_error
+                    break
+                except BaseException as e:
+                    close_error = e
+                    break
+
+        if close_error is not None:
+            if primary_error is not None:
+                raise close_error from primary_error
+            raise close_error
+        if primary_error is not None:
+            raise primary_error
 
     # TODO(xinfei.sxf) 这个函数将逻辑又写了一遍
     @staticmethod

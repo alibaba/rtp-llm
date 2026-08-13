@@ -189,6 +189,17 @@ py_test(
 )
 
 py_test(
+    name = "frontend_worker_batch_close_test",
+    srcs = [
+        "frontend_worker_batch_close_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    timeout = "short",
+)
+
+py_test(
     name = "native_response_close_test",
     srcs = [
         "native_response_close_test.py",
