@@ -59,6 +59,42 @@ py_test(
 )
 
 py_test(
+    name = "cuda_graph_target_verify_metadata",
+    srcs = [
+        "cuda_graph_target_verify_metadata.py",
+    ],
+    data = [
+        ":test_cuda_graph_runner",
+        "//:th_transformer",
+    ],
+    deps = [
+        "//rtp_llm/test/model_test/test_util:test_util",
+    ],
+    env = {
+        "LOAD_METHOD": "scratch",
+        "NOT_USE_DEFAULT_STREAM": "1",
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
+
+py_test(
+    name = "cuda_graph_flashinfer_target_verify",
+    srcs = ["cuda_graph_flashinfer_target_verify.py"],
+    data = [
+        ":test_cuda_graph_runner",
+        "//:th_transformer",
+    ],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm/test/model_test/test_util:test_util",
+    ],
+    tags = ["manual"],
+    exec_properties = {"gpu": "SM100"},
+)
+
+py_test(
     name = "cuda_graph_prefill",
     srcs = [
         "cuda_graph_prefill.py",

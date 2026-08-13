@@ -27,47 +27,6 @@ if TYPE_CHECKING:
 _MLA_LATENT_NORM_EPS = 1e-6
 
 
-def prepare_mla_fmha_for_group(
-    fmha_impl: Any,
-    attention_inputs: PyAttentionInputs,
-    selected_group_id: int,
-    prepared_group_id: Optional[int],
-) -> int:
-    """Refresh cached MLA params when HybridCache switches FULL groups.
-
-    FlashInfer MLA derives ``slot_mapping`` and its page table from the
-    singular block-map fields during ``prepare``.  K3 owns several FULL cache
-    groups, so changing only ``attention_inputs`` leaves the wrapper writing
-    every later MLA layer through group 0's slot mapping.
-    """
-
-    if selected_group_id == prepared_group_id:
-        return selected_group_id
-    sequence_lengths = getattr(attention_inputs, "sequence_lengths", None)
-    is_capturing = bool(
-        sequence_lengths is not None
-        and sequence_lengths.is_cuda
-        and torch.cuda.is_current_stream_capturing()
-    )
-    if is_capturing:
-        prepare_group = getattr(fmha_impl, "prepare_cuda_graph_group", None)
-        if not callable(prepare_group):
-            raise RuntimeError(
-                "Kimi K3 HybridCache MLA requires graph-safe group refresh "
-                "during CUDA Graph capture"
-            )
-        prepare_group(attention_inputs)
-        return selected_group_id
-
-    prepare = getattr(fmha_impl, "prepare", None)
-    if not callable(prepare):
-        raise RuntimeError(
-            "Kimi K3 HybridCache MLA requires an FMHA implementation with prepare()"
-        )
-    prepare(attention_inputs)
-    return selected_group_id
-
-
 def _select_mla_attention_inputs(
     explicit_inputs: Optional[PyAttentionInputs],
     fmha_impl: Any,
@@ -129,9 +88,7 @@ class KimiK3MLA(MlaAttention):
         # Prefill 走 FlashMLA(dense prefill),Decode 走 FlashInfer("kernel")。
         # 与 KDA 一样按 PD 角色固定后端。
         self._mla_backend = (
-            "flashmla"
-            if parallelism_config.role_type == RoleType.PREFILL
-            else "kernel"
+            "flashmla" if parallelism_config.role_type == RoleType.PREFILL else "kernel"
         )
 
         self._q_a_norm = weights[W.mla_q_a_ln_gamma]
@@ -263,7 +220,7 @@ class KimiK3MLA(MlaAttention):
             self._sp_prefill_input_is_sharded = False
             self._sp_prefill_layout_for_forward = None
 
+
 __all__ = [
     "KimiK3MLA",
-    "prepare_mla_fmha_for_group",
 ]

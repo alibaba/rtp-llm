@@ -227,6 +227,56 @@ class TestConcatAndCacheMLA(unittest.TestCase):
         torch.testing.assert_close(kv_cache[1, 0, kv_lora_rank:], k_pe[0])
         torch.testing.assert_close(kv_cache[1, 1:], torch.zeros_like(kv_cache[1, 1:]))
 
+    def test_cuda_graph_multi_token_clear_precedes_all_page_writes(self):
+        block_size = 8
+        kv_lora_rank = 512
+        qk_rope_head_dim = 64
+        entry_size = kv_lora_rank + qk_rope_head_dim
+        num_tokens = 5
+        kv_c = torch.randn(
+            num_tokens, kv_lora_rank, dtype=torch.bfloat16, device=self.device
+        )
+        k_pe = torch.randn(
+            num_tokens, qk_rope_head_dim, dtype=torch.bfloat16, device=self.device
+        )
+        scale = torch.tensor(1.0, dtype=torch.float32, device=self.device)
+        kv_cache = torch.full(
+            (2, block_size, entry_size),
+            7.0,
+            dtype=torch.bfloat16,
+            device=self.device,
+        )
+        # One target-verify query crosses from page 0 into a newly allocated
+        # page 1.  The boundary token and later tokens must all survive the
+        # page clear recorded in the graph.
+        slot_mapping = torch.tensor(
+            [6, 7, 8, 9, 10], dtype=torch.long, device=self.device
+        )
+
+        # Compile/initialize before capture, matching the production warmup.
+        compute_ops.concat_and_cache_mla(
+            kv_c, k_pe, kv_cache, slot_mapping, "auto", scale, True
+        )
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            compute_ops.concat_and_cache_mla(
+                kv_c, k_pe, kv_cache, slot_mapping, "auto", scale, True
+            )
+
+        for _ in range(20):
+            kv_c.normal_()
+            k_pe.normal_()
+            kv_cache.fill_(7.0)
+            graph.replay()
+            torch.cuda.synchronize()
+
+            written = torch.cat((kv_c, k_pe), dim=1)
+            torch.testing.assert_close(kv_cache[0, 6:], written[:2])
+            torch.testing.assert_close(kv_cache[1, :3], written[2:])
+            torch.testing.assert_close(
+                kv_cache[1, 3:], torch.zeros_like(kv_cache[1, 3:])
+            )
+
     def test_clear_page_flag_does_not_clear_non_boundary_write(self):
         block_size = 8
         kv_lora_rank = 512

@@ -4,7 +4,7 @@ This module provides the KV cache writing operation specifically for MLA archite
 which uses a compressed KV cache layout.
 """
 
-from typing import Any, Optional, Tuple
+from typing import Optional
 
 import flashinfer.page as page
 import torch
@@ -40,7 +40,6 @@ class MlaKVCacheWriteOp:
         kv_cache: Optional[LayerKVCache],
         fmha_params: rtp_llm_ops.SparseMlaParams,
         total_global_ids: torch.Tensor = None,
-        slot_mapping_override: Optional[torch.Tensor] = None,
     ) -> None:
         """Write compressed KV and position-encoded key to MLA cache.
 
@@ -50,11 +49,7 @@ class MlaKVCacheWriteOp:
             kv_cache: MLA KV cache with compressed layout
         """
         if kv_cache is not None:
-            slot_mapping = (
-                slot_mapping_override
-                if slot_mapping_override is not None
-                else fmha_params.slot_mapping
-            )
+            slot_mapping = fmha_params.slot_mapping
             compute_ops.concat_and_cache_mla(
                 append_ckv_t,
                 key_pe,

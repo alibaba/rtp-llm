@@ -1572,6 +1572,10 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
             model_input_copy.sequence_lengths_plus_1 = model_input_copy.prefix_lengths + 1;
         }
     }
+    populateTargetVerifyHostMetadata(model_input_copy,
+                                     model_input.sequence_lengths_host_for_log,
+                                     batch_size,
+                                     static_cast<int32_t>(propose_step_ + 1));
     model_input_copy.last_hidden_states = torch::Tensor();
     model_input_copy.sequence_lengths =
         torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
@@ -2043,6 +2047,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     GptModelOutputs            draft_decode_model_output;
     std::vector<torch::Tensor> draft_token_columns;
     torch::Tensor              spec_prefix_lengths;
+    const torch::Tensor        spec_prefix_lengths_host = model_input.sequence_lengths_host_for_log;
 
     // update TP > 0 batch_size
     size_t     batch_size       = model_input.combo_tokens.size(0);
@@ -2212,12 +2217,8 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         // the original prompt length here (for example 23 while combo_tokens
         // contains 4 entries) makes an otherwise-correct verify input fail the
         // strict packed-sequence check.
-        const auto pinned_i32 = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
-        model_input.input_lengths_host_for_log = torch::full(
-            {static_cast<int64_t>(batch_size)}, static_cast<int64_t>(tokens_per_batch), pinned_i32);
-        buffer_holder_.hold_host(model_input.input_lengths_host_for_log);
-        model_input.prefix_lengths_host_for_log = torch::Tensor();
-        model_input.sequence_lengths_host_for_log = torch::Tensor();
+        populateTargetVerifyHostMetadata(
+            model_input, spec_prefix_lengths_host, batch_size, static_cast<int32_t>(tokens_per_batch));
         ensureModelInputsOnCuda(model_input, "draft_decode.build_spec_decode_input");
 
         // Since other tp ranks don't have streams, its combo_tokens' first token is not correct.
@@ -2252,6 +2253,19 @@ bool MtpExecutor::useAsyncPrepare() const {
         return readEnvFlagOnce("RTP_LLM_MTP_ASYNC_PREPARE", "async-prepare", "enabled");
     }();
     return enabled;
+}
+
+void MtpExecutor::populateTargetVerifyHostMetadata(GptModelInputs&      target,
+                                                   const torch::Tensor& prefix_lengths_host,
+                                                   size_t               batch_size,
+                                                   int32_t              query_length) {
+    const auto pinned_i32 = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+    target.input_lengths_host_for_log =
+        torch::full({static_cast<int64_t>(batch_size)}, query_length, pinned_i32);
+
+    target.prefix_lengths_host_for_log =
+        prefix_lengths_host.slice(0, 0, static_cast<int64_t>(batch_size));
+    target.sequence_lengths_host_for_log = torch::Tensor();
 }
 
 void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                          stream_groups,

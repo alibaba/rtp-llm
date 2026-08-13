@@ -475,6 +475,25 @@ __inline__ __device__ Tout scaled_convert_typed(const Tin& x, const float scale)
 
 }  // namespace fp8
 
+template<typename cache_t>
+__global__ void clear_mla_cache_pages_kernel(cache_t* __restrict__ kv_cache,
+                                             const int64_t* __restrict__ slot_mapping,
+                                             const int block_stride,
+                                             const int entry_stride,
+                                             const int block_size) {
+    const int64_t slot_idx = slot_mapping[blockIdx.x];
+    if (slot_idx < 0 || slot_idx % block_size != 0) {
+        return;
+    }
+
+    const int64_t block_idx  = slot_idx / block_size;
+    const int64_t page_start = block_idx * block_stride;
+    const int64_t page_size  = static_cast<int64_t>(block_size) * entry_stride;
+    for (int64_t i = threadIdx.x; i < page_size; i += blockDim.x) {
+        kv_cache[page_start + i] = cache_t{};
+    }
+}
+
 // Concat and cache MLA kernel (non-dynamic-scaling version)
 template<typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 __global__ void
@@ -489,8 +508,7 @@ concat_and_cache_mla_kernel(const scalar_t* __restrict__ kv_c,  // [num_tokens, 
                             const int    kv_lora_rank,                 //
                             const int    pe_dim,                       //
                             const int    block_size,                   //
-                            const float* scale,                        //
-                            const bool   clear_page_on_boundary        //
+                            const float* scale                         //
 ) {
     const int64_t token_idx = blockIdx.x;
     const int64_t slot_idx  = slot_mapping[token_idx];
@@ -500,15 +518,6 @@ concat_and_cache_mla_kernel(const scalar_t* __restrict__ kv_c,  // [num_tokens, 
     }
     const int64_t block_idx    = slot_idx / block_size;
     const int64_t block_offset = slot_idx % block_size;
-
-    if (clear_page_on_boundary && block_offset == 0) {
-        const int64_t page_start = block_idx * block_stride;
-        const int64_t page_size  = static_cast<int64_t>(block_size) * entry_stride;
-        for (int64_t i = threadIdx.x; i < page_size; i += blockDim.x) {
-            kv_cache[page_start + i] = cache_t{};
-        }
-        __syncthreads();
-    }
 
     auto copy = [&](const scalar_t* __restrict__ src,
                     cache_t* __restrict__ dst,
@@ -750,6 +759,14 @@ concat_and_cache_ds_model1_kernel(const scalar_t* __restrict__ kv_c,  // [num_to
 
 // Dispatch macro for MLA kernels
 #define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)                                                             \
+    if (clear_page_on_boundary) {                                                                                      \
+        clear_mla_cache_pages_kernel<CACHE_T>                                                                          \
+            <<<grid, block, 0, stream>>>(reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),                              \
+                                         slot_mapping.data_ptr<int64_t>(),                                             \
+                                         block_stride,                                                                 \
+                                         entry_stride,                                                                 \
+                                         block_size);                                                                  \
+    }                                                                                                                  \
     concat_and_cache_mla_kernel<KV_T, CACHE_T, KV_DTYPE>                                                               \
         <<<grid, block, 0, stream>>>(reinterpret_cast<const KV_T*>(kv_c.data_ptr()),                                   \
                                      reinterpret_cast<const KV_T*>(k_pe.data_ptr()),                                   \
@@ -762,8 +779,7 @@ concat_and_cache_ds_model1_kernel(const scalar_t* __restrict__ kv_c,  // [num_to
                                      kv_lora_rank,                                                                     \
                                      pe_dim,                                                                           \
                                      block_size,                                                                       \
-                                     reinterpret_cast<const float*>(scale.data_ptr()),                                 \
-                                     clear_page_on_boundary);
+                                     reinterpret_cast<const float*>(scale.data_ptr()));
 
 #define CALL_CONCAT_AND_CACHE_DS_MLA(KV_T, CACHE_T, KV_DTYPE)                                                          \
     concat_and_cache_ds_mla_kernel<KV_T, CACHE_T, KV_DTYPE>                                                            \

@@ -9,6 +9,9 @@ import torch
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
     tokenspeed_mla_impl,
 )
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
+    decode_query_length,
+)
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
     MlaKVCacheWriteOp,
 )
@@ -22,6 +25,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.tokenspeed_mla_im
     tokenspeed_mla_kernel_supported,
 )
 from rtp_llm.ops import KvCacheDataType, RopeConfig
+from rtp_llm.ops.compute_ops import rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
 
@@ -295,25 +299,6 @@ class TokenSpeedDecodeMetadataTest(TestCase):
             atol=0,
         )
 
-    def test_graph_refresh_preserves_metadata_addresses(self):
-        metadata = _TokenSpeedDecodeMetadata(64, 2, 192, True, torch.device("cpu"))
-        params = FakeMlaParams([64, 65], [0, 1, 3], [0, 3, 4], device="cpu")
-        metadata.plan(params)
-        table_ptr = metadata.block_tables.data_ptr()
-        lengths_ptr = metadata.seq_lens.data_ptr()
-        physical_table = torch.tensor([[7, 8, 9], [11, 12, 13]], dtype=torch.int32)
-        metadata.refresh_cuda_graph(
-            physical_table, torch.tensor([65, 129], dtype=torch.int32)
-        )
-        self.assertEqual(metadata.block_tables.data_ptr(), table_ptr)
-        self.assertEqual(metadata.seq_lens.data_ptr(), lengths_ptr)
-        torch.testing.assert_close(
-            metadata.block_tables,
-            torch.tensor([[7, 8, 0], [11, 12, 13]], dtype=torch.int32),
-            rtol=0,
-            atol=0,
-        )
-
     def test_zero_length_rows_do_not_alias_live_page_ids(self):
         metadata = _TokenSpeedDecodeMetadata(64, 0, 0, False, torch.device("cpu"))
         params = FakeMlaParams([0, 65, 0], [0, 0, 2, 2], [7, 9], device="cpu")
@@ -340,6 +325,23 @@ class TokenSpeedMlaDecodeOpTest(TestCase):
 
     def test_k3_tp8_single_request(self):
         run_case(self, self.geo, [384], num_pages=8)
+
+    def test_workspace_is_owned_by_each_graph_instance(self):
+        first, _, _ = make_op(
+            self.geo,
+            max_bs=1,
+            max_q_len=1,
+            max_context_len=128,
+            is_cuda_graph=True,
+        )
+        second, _, _ = make_op(
+            self.geo,
+            max_bs=1,
+            max_q_len=1,
+            max_context_len=128,
+            is_cuda_graph=True,
+        )
+        self.assertNotEqual(first._workspace.data_ptr(), second._workspace.data_ptr())
 
     def test_hybrid_model_mla_weights_need_not_be_on_layer_zero(self):
         base_op, kc_weight, _ = make_op(self.geo)
@@ -386,7 +388,117 @@ class TokenSpeedMlaDecodeOpTest(TestCase):
     def test_cuda_graph_supports_captured_q_len_greater_than_one(self):
         run_multi_query_case(self, self.geo, [384, 513], q_len=5, is_cuda_graph=True)
 
-    def test_cuda_graph_group_refresh_across_page_boundaries(self):
+    def test_target_verify_graph_writes_all_tokens_before_attention(self):
+        geo = self.geo
+        geo.page_size = 128
+        batch_size = 2
+        q_len = 5
+        prefix_lengths = torch.tensor([126, 255], dtype=torch.int32)
+        final_kv_lens = (prefix_lengths + q_len).tolist()
+        block_table_host = torch.tensor([[0, 1, 0], [2, 3, 4]], dtype=torch.int32)
+        page_indices = [0, 1, 2, 3, 4]
+        page_indptr = [0, 2, 5]
+
+        kv_cache, _, _ = build_kv_layout(geo, final_kv_lens, len(page_indices), seed=61)
+        # These pages are newly allocated during target verify.  Their tails
+        # must be cleared before any of the q_len writes execute.
+        kv_cache[1].fill_(float("nan"))
+        kv_cache[4].fill_(float("nan"))
+        initial_cache = kv_cache.clone()
+
+        compressed_kv = (
+            torch.randn(batch_size * q_len, geo.kv_lora_rank, device="cuda") * 0.1
+        ).to(torch.bfloat16)
+        k_pe = (
+            torch.randn(batch_size * q_len, geo.qk_rope_head_dim, device="cuda") * 0.1
+        ).to(torch.bfloat16)
+        q_nope = (
+            torch.randn(
+                batch_size * q_len,
+                geo.num_heads,
+                geo.qk_nope_head_dim,
+                device="cuda",
+            )
+            * 0.5
+        ).to(torch.bfloat16)
+        q_pe = (
+            torch.randn(
+                batch_size * q_len,
+                geo.num_heads,
+                geo.qk_rope_head_dim,
+                device="cuda",
+            )
+            * 0.5
+        ).to(torch.bfloat16)
+
+        params = rtp_llm_ops.FlashInferMlaAttnParams()
+        params.fill_params(
+            prefix_lengths,
+            torch.empty(0, dtype=torch.int32),
+            torch.full((batch_size,), q_len, dtype=torch.int32),
+            block_table_host,
+            geo.page_size,
+            False,
+        )
+        op, kc_weight, vc_weight = make_op(
+            geo,
+            max_bs=batch_size,
+            max_q_len=q_len,
+            max_context_len=384,
+            is_cuda_graph=True,
+        )
+        op.plan(params)
+        write_op = MlaKVCacheWriteOp(KvCacheDataType.BASE, clear_page_on_boundary=True)
+
+        def graph_forward():
+            write_op.forward(
+                compressed_kv,
+                k_pe,
+                FakeLayerKVCache(kv_cache),
+                params,
+            )
+            return op.forward(q_nope, q_pe, FakeLayerKVCache(kv_cache), 0)
+
+        # Warm every kernel before capture, then restore the live cache image.
+        graph_forward()
+        kv_cache.copy_(initial_cache)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = graph_forward()
+        kv_cache.copy_(initial_cache)
+        graph.replay()
+        torch.cuda.synchronize()
+
+        expected_slots = torch.tensor(
+            [126, 127, 128, 129, 130, 511, 512, 513, 514, 515],
+            dtype=torch.int64,
+            device="cuda",
+        )
+        torch.testing.assert_close(params.slot_mapping, expected_slots, rtol=0, atol=0)
+        written = torch.cat((compressed_kv, k_pe), dim=1)
+        flat_cache = kv_cache.view(-1, geo.head_dim_qk)
+        torch.testing.assert_close(flat_cache[expected_slots], written)
+        torch.testing.assert_close(kv_cache[1, 3:], torch.zeros_like(kv_cache[1, 3:]))
+        torch.testing.assert_close(kv_cache[4, 4:], torch.zeros_like(kv_cache[4, 4:]))
+
+        expected = reference_mla_decode(
+            q_nope,
+            q_pe,
+            kc_weight,
+            vc_weight,
+            kv_cache,
+            final_kv_lens,
+            page_indptr,
+            page_indices,
+            geo,
+        )
+        relative_error = (
+            (actual.float() - expected.float()).abs().max()
+            / expected.float().abs().max()
+        ).item()
+        self.assertLess(relative_error, 2e-2)
+
+    def test_cuda_graph_replan_across_page_boundaries(self):
         geo = self.geo
         batch_size = 2
         max_context_len = 192
@@ -408,9 +520,6 @@ class TokenSpeedMlaDecodeOpTest(TestCase):
             torch.randn(batch_size, geo.num_heads, geo.qk_rope_head_dim, device="cuda")
             * 0.5
         ).to(torch.bfloat16)
-        physical_table = torch.tensor(
-            [[0, 1, 2], [3, 4, 5]], dtype=torch.int32, device="cuda"
-        )
 
         def compact_layout(kv_lens):
             page_indptr = [0]
@@ -429,20 +538,17 @@ class TokenSpeedMlaDecodeOpTest(TestCase):
         initial_lens = [64, 65]
         initial_indptr, initial_indices = compact_layout(initial_lens)
         op.plan(FakeMlaParams(initial_lens, initial_indptr, initial_indices))
-        graph_lengths = torch.tensor(initial_lens, dtype=torch.int32, device="cuda")
-        op._metadata.refresh_cuda_graph(physical_table, graph_lengths)
         op.forward(q_nope, q_pe, FakeLayerKVCache(kv_cache), 0)
 
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            op._metadata.refresh_cuda_graph(physical_table, graph_lengths)
             output = op.forward(q_nope, q_pe, FakeLayerKVCache(kv_cache), 0)
 
         replay_lens = [65, 129]
-        graph_lengths.copy_(torch.tensor(replay_lens, dtype=torch.int32, device="cuda"))
+        replay_indptr, replay_indices = compact_layout(replay_lens)
+        op.plan(FakeMlaParams(replay_lens, replay_indptr, replay_indices))
         graph.replay()
         torch.cuda.synchronize()
-        replay_indptr, replay_indices = compact_layout(replay_lens)
         expected = reference_mla_decode(
             q_nope,
             q_pe,
@@ -467,7 +573,6 @@ class TokenSpeedMlaDecodeOpTest(TestCase):
         max_context_len = 65536
         tested_lens = (4095, 4096, 4097, 12287, 12288, 12289)
         live_pages = (max(tested_lens) + geo.page_size - 1) // geo.page_size
-        graph_pages = max_context_len // geo.page_size
         op, kc_weight, vc_weight = make_op(
             geo,
             max_bs=batch_size,
@@ -499,17 +604,6 @@ class TokenSpeedMlaDecodeOpTest(TestCase):
             torch.randn(batch_size, geo.num_heads, geo.qk_rope_head_dim, device="cuda")
             * 0.5
         ).to(torch.bfloat16)
-        physical_table = torch.zeros(
-            (batch_size, graph_pages), dtype=torch.int32, device="cuda"
-        )
-        initially_materialized_pages = (
-            tested_lens[0] + geo.page_size - 1
-        ) // geo.page_size
-        physical_table[0, :initially_materialized_pages] = torch.tensor(
-            physical_page_ids[:initially_materialized_pages],
-            dtype=torch.int32,
-            device="cuda",
-        )
 
         def compact_layout(kv_len):
             num_pages = (kv_len + geo.page_size - 1) // geo.page_size
@@ -518,30 +612,17 @@ class TokenSpeedMlaDecodeOpTest(TestCase):
         initial_len = tested_lens[0]
         initial_indptr, initial_indices = compact_layout(initial_len)
         op.plan(FakeMlaParams([initial_len], initial_indptr, initial_indices))
-        graph_lengths = torch.tensor([initial_len], dtype=torch.int32, device="cuda")
-        op._metadata.refresh_cuda_graph(physical_table, graph_lengths)
         op.forward(q_nope, q_pe, FakeLayerKVCache(kv_cache), 0)
 
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            op._metadata.refresh_cuda_graph(physical_table, graph_lengths)
             output = op.forward(q_nope, q_pe, FakeLayerKVCache(kv_cache), 0)
 
         for replay_len in tested_lens:
-            replay_pages = (replay_len + geo.page_size - 1) // geo.page_size
-            physical_table[0, :replay_pages].copy_(
-                torch.tensor(
-                    physical_page_ids[:replay_pages],
-                    dtype=torch.int32,
-                    device="cuda",
-                )
-            )
-            graph_lengths.copy_(
-                torch.tensor([replay_len], dtype=torch.int32, device="cuda")
-            )
+            replay_indptr, replay_indices = compact_layout(replay_len)
+            op.plan(FakeMlaParams([replay_len], replay_indptr, replay_indices))
             graph.replay()
             torch.cuda.synchronize()
-            replay_indptr, replay_indices = compact_layout(replay_len)
             expected = reference_mla_decode(
                 q_nope,
                 q_pe,
@@ -562,93 +643,6 @@ class TokenSpeedMlaDecodeOpTest(TestCase):
                 relative_error, 2e-2, f"length={replay_len}, rel_err={relative_error}"
             )
 
-    def test_cuda_graph_page128_refreshes_multiple_groups_before_kernel(self):
-        geo = self.geo
-        geo.page_size = 128
-        batch_size = 1
-        group_count = 3
-        max_context_len = 65536
-        old_len = 12288
-        new_len = 12289
-        live_pages = (new_len + geo.page_size - 1) // geo.page_size
-        graph_pages = max_context_len // geo.page_size
-        total_pages = group_count * live_pages + 1
-        op, kc_weight, vc_weight = make_op(
-            geo,
-            max_bs=batch_size,
-            max_context_len=max_context_len,
-            is_cuda_graph=True,
-        )
-        kv_cache, _, _ = build_kv_layout(
-            geo, [total_pages * geo.page_size], total_pages, seed=29
-        )
-        q_nope = (
-            torch.randn(batch_size, geo.num_heads, geo.qk_nope_head_dim, device="cuda")
-            * 0.5
-        ).to(torch.bfloat16)
-        q_pe = (
-            torch.randn(batch_size, geo.num_heads, geo.qk_rope_head_dim, device="cuda")
-            * 0.5
-        ).to(torch.bfloat16)
-
-        group_page_ids = [
-            list(range(1 + group_id * live_pages, 1 + (group_id + 1) * live_pages))
-            for group_id in range(group_count)
-        ]
-        old_pages = old_len // geo.page_size
-        group_tables = torch.zeros(
-            (group_count, batch_size, graph_pages),
-            dtype=torch.int32,
-            device="cuda",
-        )
-        for group_id, page_ids in enumerate(group_page_ids):
-            group_tables[group_id, 0, :old_pages] = torch.tensor(
-                page_ids[:old_pages], dtype=torch.int32, device="cuda"
-            )
-
-        op.plan(FakeMlaParams([old_len], [0, old_pages], group_page_ids[0][:old_pages]))
-        graph_lengths = torch.tensor([old_len], dtype=torch.int32, device="cuda")
-        op._metadata.refresh_cuda_graph(group_tables[0], graph_lengths)
-        op.forward(q_nope, q_pe, FakeLayerKVCache(kv_cache), 0)
-
-        graph_outputs = []
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            for group_id in range(group_count):
-                op._metadata.refresh_cuda_graph(group_tables[group_id], graph_lengths)
-                graph_outputs.append(
-                    op.forward(q_nope, q_pe, FakeLayerKVCache(kv_cache), 0)
-                )
-
-        for group_id, page_ids in enumerate(group_page_ids):
-            group_tables[group_id, 0, old_pages] = page_ids[old_pages]
-        graph_lengths.fill_(new_len)
-        graph.replay()
-        torch.cuda.synchronize()
-
-        for group_id, output in enumerate(graph_outputs):
-            expected = reference_mla_decode(
-                q_nope,
-                q_pe,
-                kc_weight,
-                vc_weight,
-                kv_cache,
-                [new_len],
-                [0, live_pages],
-                group_page_ids[group_id],
-                geo,
-            )
-            self.assertTrue(torch.isfinite(output).all(), f"group={group_id}")
-            relative_error = (
-                (output.float() - expected.float()).abs().max()
-                / expected.float().abs().max()
-            ).item()
-            self.assertLess(
-                relative_error,
-                2e-2,
-                f"group={group_id}, rel_err={relative_error}",
-            )
-
     def test_cuda_graph_masks_unwritten_new_page_after_graph_kv_write(self):
         geo = self.geo
         geo.page_size = 128
@@ -661,7 +655,6 @@ class TokenSpeedMlaDecodeOpTest(TestCase):
         old_pages = old_len // geo.page_size
         live_pages = old_pages + 1
         max_context_len = 65536
-        graph_pages = max_context_len // geo.page_size
         op, kc_weight, vc_weight = make_op(
             geo,
             max_bs=batch_size,
@@ -696,15 +689,7 @@ class TokenSpeedMlaDecodeOpTest(TestCase):
             torch.randn(batch_size, geo.num_heads, geo.qk_rope_head_dim, device="cuda")
             * 0.5
         ).to(torch.bfloat16)
-        physical_table = torch.zeros(
-            (batch_size, graph_pages), dtype=torch.int32, device="cuda"
-        )
-        physical_table[0, :old_pages] = torch.tensor(
-            physical_page_ids[:old_pages], dtype=torch.int32, device="cuda"
-        )
-        graph_lengths = torch.tensor([old_len], dtype=torch.int32, device="cuda")
         op.plan(FakeMlaParams([old_len], [0, old_pages], physical_page_ids[:old_pages]))
-        op._metadata.refresh_cuda_graph(physical_table, graph_lengths)
         op.forward(q_nope, q_pe, FakeLayerKVCache(kv_cache), 0)
 
         graph = torch.cuda.CUDAGraph()
@@ -715,15 +700,13 @@ class TokenSpeedMlaDecodeOpTest(TestCase):
                 FakeLayerKVCache(kv_cache),
                 write_params,
             )
-            op._metadata.refresh_cuda_graph(physical_table, graph_lengths)
             output = q_nope
             for _ in range(layer_count):
                 output = op.forward(output, q_pe, FakeLayerKVCache(kv_cache), 0)
 
         kv_cache[new_page_id].fill_(float("nan"))
         write_slot_mapping.fill_(new_page_id * geo.page_size)
-        physical_table[0, old_pages] = new_page_id
-        graph_lengths.fill_(new_len)
+        op.plan(FakeMlaParams([new_len], [0, live_pages], physical_page_ids))
         graph.replay()
         torch.cuda.synchronize()
 
@@ -768,11 +751,93 @@ class TokenSpeedMlaDecodeSupportTest(TestCase):
         configs.kernel_tokens_per_block = 64
         return configs
 
-    def _inputs(self, q_lens=(1,), is_prefill=False):
+    def _inputs(self, prompt_lengths=(1,), is_prefill=False, is_target_verify=False):
         return SimpleNamespace(
             is_prefill=is_prefill,
-            input_lengths_host=torch.tensor(q_lens, dtype=torch.int32),
+            is_target_verify=is_target_verify,
+            input_lengths=torch.tensor(prompt_lengths, dtype=torch.int32),
+            input_lengths_host=torch.tensor(prompt_lengths, dtype=torch.int32),
+            total_tokens=sum(prompt_lengths) if is_target_verify else 0,
         )
+
+    def test_normal_decode_ignores_original_prompt_lengths(self):
+        self.assertEqual(
+            decode_query_length(self._inputs(prompt_lengths=(17, 311))),
+            1,
+        )
+
+    def test_target_verify_reads_uniform_host_query_length(self):
+        self.assertEqual(
+            decode_query_length(
+                self._inputs(
+                    prompt_lengths=(4, 4),
+                    is_prefill=True,
+                    is_target_verify=True,
+                )
+            ),
+            4,
+        )
+
+    def test_target_verify_cuda_graph_capture_uses_host_query_length(self):
+        attn_inputs = self._inputs(
+            prompt_lengths=(4, 4),
+            is_prefill=True,
+            is_target_verify=True,
+        )
+        # CudaGraphRunner capture descriptors historically did not publish
+        # total_tokens. The pinned host descriptor is sufficient on its own.
+        attn_inputs.total_tokens = 0
+        self.assertEqual(decode_query_length(attn_inputs), 4)
+
+    def test_target_verify_without_host_uses_packed_query_shape(self):
+        attn_inputs = self._inputs(
+            prompt_lengths=(4, 4),
+            is_prefill=True,
+            is_target_verify=True,
+        )
+        attn_inputs.input_lengths_host = None
+        self.assertEqual(decode_query_length(attn_inputs), 4)
+
+    def test_target_verify_without_host_rejects_missing_packed_query_shape(self):
+        attn_inputs = self._inputs(
+            prompt_lengths=(4, 4),
+            is_prefill=True,
+            is_target_verify=True,
+        )
+        attn_inputs.input_lengths_host = None
+        attn_inputs.total_tokens = 0
+        with self.assertRaisesRegex(RuntimeError, "positive rectangular query shape"):
+            decode_query_length(attn_inputs)
+
+    def test_target_verify_rejects_nonuniform_host_query_lengths(self):
+        attn_inputs = self._inputs(
+            prompt_lengths=(4, 3),
+            is_prefill=True,
+            is_target_verify=True,
+        )
+        attn_inputs.total_tokens = 8
+        with self.assertRaisesRegex(RuntimeError, "uniform host query lengths"):
+            decode_query_length(attn_inputs)
+
+    def test_target_verify_rejects_stale_host_query_lengths(self):
+        attn_inputs = self._inputs(
+            prompt_lengths=(4, 4),
+            is_prefill=True,
+            is_target_verify=True,
+        )
+        attn_inputs.input_lengths_host = torch.tensor([17, 311], dtype=torch.int32)
+        with self.assertRaisesRegex(RuntimeError, "uniform host query lengths"):
+            decode_query_length(attn_inputs)
+
+    def test_target_verify_rejects_host_and_packed_shape_mismatch(self):
+        attn_inputs = self._inputs(
+            prompt_lengths=(4, 4),
+            is_prefill=True,
+            is_target_verify=True,
+        )
+        attn_inputs.total_tokens = 10
+        with self.assertRaisesRegex(RuntimeError, "do not match the packed query"):
+            decode_query_length(attn_inputs)
 
     def test_capability_is_delegated_to_tokenspeed(self):
         checker = mock.Mock()
@@ -801,6 +866,22 @@ class TokenSpeedMlaDecodeSupportTest(TestCase):
             compute_capability=(10, 3),
         )
 
+    def test_optional_dependency_abi_error_is_reported_as_unavailable(self):
+        with mock.patch(f"{self.module}._TOKENSPEED_MLA_API", None), mock.patch(
+            f"{self.module}._TOKENSPEED_GET_NUM_SM", None
+        ), mock.patch(f"{self.module}._TOKENSPEED_CAN_IMPLEMENT", None), mock.patch(
+            f"{self.module}._TOKENSPEED_IMPORT_ERROR", None
+        ), mock.patch(
+            f"{self.module}._TOKENSPEED_IMPORT_ATTEMPTED", False
+        ), mock.patch(
+            f"{self.module}._ensure_tokenspeed_cutlass_compat",
+            side_effect=RuntimeError("CuTe ABI mismatch"),
+        ):
+            self.assertFalse(_load_tokenspeed_mla())
+            self.assertIsInstance(
+                tokenspeed_mla_impl._TOKENSPEED_IMPORT_ERROR, RuntimeError
+            )
+
     def test_capability_rejection_is_not_reimplemented_in_rtp(self):
         with mock.patch(
             f"{self.module}._tokenspeed_compute_capability", return_value=(10, 0)
@@ -824,10 +905,10 @@ class TokenSpeedMlaDecodeSupportTest(TestCase):
             ) as capability:
                 self.assertTrue(
                     TokenSpeedMlaDecodeImpl.support(
-                        self._configs(), self._inputs(q_lens=(8, 8))
+                        self._configs(), self._inputs(prompt_lengths=(8, 8))
                     )
                 )
-        self.assertEqual(capability.call_args.args[4], 8)
+        self.assertEqual(capability.call_args.args[4], 1)
 
     def test_auto_falls_back_on_other_arch_or_missing_dependency(self):
         with mock.patch.dict(os.environ):
@@ -889,11 +970,11 @@ class TokenSpeedMlaDecodeSupportTest(TestCase):
             ):
                 self.assertFalse(
                     TokenSpeedMlaDecodeImpl.support(
-                        self._configs(), self._inputs(q_lens=(9, 9))
+                        self._configs(), self._inputs(prompt_lengths=(9, 9))
                     )
                 )
 
-    def test_explicit_selection_reports_shape_and_batch_contracts(self):
+    def test_explicit_selection_reports_unsupported_kernel_shape(self):
         with mock.patch.dict(
             os.environ, {MLA_DECODE_KERNEL_ENV: "tokenspeed_mla"}
         ), mock.patch(
@@ -905,12 +986,69 @@ class TokenSpeedMlaDecodeSupportTest(TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "does not support"):
                 TokenSpeedMlaDecodeImpl.support(
-                    self._configs(), self._inputs(q_lens=(9, 9))
+                    self._configs(), self._inputs(prompt_lengths=(9, 9))
                 )
-            with self.assertRaisesRegex(RuntimeError, "uniform q_len"):
+
+    def test_prompt_lengths_do_not_change_decode_query_shape(self):
+        with mock.patch.dict(
+            os.environ, {MLA_DECODE_KERNEL_ENV: "tokenspeed_mla"}
+        ), mock.patch(
+            f"{self.module}._is_tokenspeed_blackwell", return_value=True
+        ), mock.patch(
+            f"{self.module}._load_tokenspeed_mla", return_value=True
+        ), mock.patch(
+            f"{self.module}.tokenspeed_mla_kernel_supported", return_value=True
+        ) as capability:
+            self.assertTrue(
                 TokenSpeedMlaDecodeImpl.support(
-                    self._configs(), self._inputs(q_lens=(1, 2))
+                    self._configs(), self._inputs(prompt_lengths=(17, 311))
                 )
+            )
+        self.assertEqual(capability.call_args.args[4], 1)
+
+    def test_mtp_draft_decode_uses_one_query_per_step(self):
+        with mock.patch.dict(
+            os.environ, {MLA_DECODE_KERNEL_ENV: "tokenspeed_mla"}
+        ), mock.patch(
+            f"{self.module}._is_tokenspeed_blackwell", return_value=True
+        ), mock.patch(
+            f"{self.module}._load_tokenspeed_mla", return_value=True
+        ), mock.patch(
+            f"{self.module}.tokenspeed_mla_kernel_supported", return_value=True
+        ) as capability:
+            self.assertTrue(
+                TokenSpeedMlaDecodeImpl.support(
+                    self._configs(),
+                    self._inputs(
+                        prompt_lengths=(101, 307),
+                        is_prefill=False,
+                        is_target_verify=False,
+                    ),
+                )
+            )
+        self.assertEqual(capability.call_args.args[4], 1)
+
+    def test_mtp_target_verify_uses_propose_plus_one_query_tokens(self):
+        with mock.patch.dict(
+            os.environ, {MLA_DECODE_KERNEL_ENV: "tokenspeed_mla"}
+        ), mock.patch(
+            f"{self.module}._is_tokenspeed_blackwell", return_value=True
+        ), mock.patch(
+            f"{self.module}._load_tokenspeed_mla", return_value=True
+        ), mock.patch(
+            f"{self.module}.tokenspeed_mla_kernel_supported", return_value=True
+        ) as capability:
+            self.assertTrue(
+                TokenSpeedMlaDecodeImpl.support(
+                    self._configs(),
+                    self._inputs(
+                        prompt_lengths=(4, 4),
+                        is_prefill=True,
+                        is_target_verify=True,
+                    ),
+                )
+            )
+        self.assertEqual(capability.call_args.args[4], 4)
 
     def test_prefill_is_never_selected(self):
         with mock.patch.dict(os.environ, {MLA_DECODE_KERNEL_ENV: "tokenspeed_mla"}):
@@ -926,7 +1064,13 @@ class TokenSpeedMlaDecodeSupportTest(TestCase):
         configs.softmax_extra_scale = 1.0
         configs.rope_config = RopeConfig()
         configs.rope_config.is_neox_style = False
-        attn_inputs = SimpleNamespace(sequence_lengths=torch.empty(0))
+        attn_inputs = SimpleNamespace(
+            sequence_lengths=torch.zeros(1, dtype=torch.int32, device="cuda"),
+            input_lengths=torch.ones(1, dtype=torch.int32, device="cuda"),
+            kv_cache_kernel_block_id_device=torch.zeros(
+                (1, 1), dtype=torch.int32, device="cuda"
+            ),
+        )
 
         with mock.patch(f"{self.module}.TokenSpeedMlaDecodeOp"), mock.patch(
             f"{self.module}.NewMlaRotaryEmbeddingOp"
@@ -953,8 +1097,12 @@ class TokenSpeedMlaDecodeSupportTest(TestCase):
         configs.rope_config = RopeConfig()
         configs.rope_config.is_neox_style = False
         attn_inputs = SimpleNamespace(
-            sequence_lengths=torch.zeros(2, dtype=torch.int32),
+            sequence_lengths=torch.zeros(2, dtype=torch.int32, device="cuda"),
+            input_lengths=torch.ones(2, dtype=torch.int32, device="cuda"),
             input_lengths_host=torch.tensor([5, 5], dtype=torch.int32),
+            kv_cache_kernel_block_id_device=torch.zeros(
+                (2, 1), dtype=torch.int32, device="cuda"
+            ),
         )
 
         with mock.patch(
@@ -975,7 +1123,44 @@ class TokenSpeedMlaDecodeSupportTest(TestCase):
             )
 
         self.assertEqual(decode_op_cls.call_args.kwargs["max_bs"], 2)
-        self.assertEqual(decode_op_cls.call_args.kwargs["max_q_len"], 5)
+        self.assertEqual(decode_op_cls.call_args.kwargs["max_q_len"], 1)
+
+    def test_impl_sizes_target_verify_graph_from_actual_query_shape(self):
+        configs = self._configs()
+        configs.nope_head_dim = 128
+        configs.softmax_extra_scale = 1.0
+        configs.rope_config = RopeConfig()
+        configs.rope_config.is_neox_style = False
+        attn_inputs = SimpleNamespace(
+            is_prefill=True,
+            is_target_verify=True,
+            sequence_lengths=torch.empty(0, dtype=torch.int32, device="cuda"),
+            input_lengths=torch.tensor([4, 4], dtype=torch.int32, device="cuda"),
+            kv_cache_kernel_block_id_device=torch.zeros(
+                (2, 1), dtype=torch.int32, device="cuda"
+            ),
+            total_tokens=8,
+        )
+
+        with mock.patch(
+            f"{self.module}.TokenSpeedMlaDecodeOp"
+        ) as decode_op_cls, mock.patch(
+            f"{self.module}.NewMlaRotaryEmbeddingOp"
+        ), mock.patch(
+            f"{self.module}.MlaKVCacheWriteOp"
+        ), mock.patch(
+            f"{self.module}.MlaFlashInferImplBase.__init__", return_value=None
+        ):
+            TokenSpeedMlaDecodeImpl(
+                configs,
+                attn_inputs,
+                weights=[],
+                cos_sin_cache=torch.empty(0),
+                is_cuda_graph=True,
+            )
+
+        self.assertEqual(decode_op_cls.call_args.kwargs["max_bs"], 2)
+        self.assertEqual(decode_op_cls.call_args.kwargs["max_q_len"], 4)
 
 
 if __name__ == "__main__":

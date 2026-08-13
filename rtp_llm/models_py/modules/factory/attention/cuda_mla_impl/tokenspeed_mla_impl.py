@@ -9,6 +9,7 @@ import torch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
     MlaFlashInferImplBase,
+    decode_query_length,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
     MlaKVCacheWriteOp,
@@ -96,7 +97,7 @@ class _TokenSpeedDecodeMetadata:
             self.column_indices = torch.arange(padded_blocks, device=self.device)
 
     def plan(self, fmha_params: Any) -> None:
-        """Materialize dense block tables from RTP's compact FlashInfer metadata."""
+        """Materialize TokenSpeed's dense tables from RTP's compact MLA metadata."""
         batch_size = fmha_params.qo_indptr_h.numel() - 1
         kv_lens = fmha_params.kvlen_h.tolist()
         max_seq_len = max(kv_lens) if kv_lens else 0
@@ -140,35 +141,6 @@ class _TokenSpeedDecodeMetadata:
         self.batch_size = batch_size
         self.padded_blocks = width
         self.max_seq_len = max_seq_len
-
-    def refresh_cuda_graph(
-        self, block_table: torch.Tensor, sequence_lengths: torch.Tensor
-    ) -> None:
-        """Refresh captured metadata in place from the selected cache group."""
-        if not self.use_cuda_graph:
-            raise RuntimeError(
-                "TokenSpeed MLA graph metadata refresh requires CUDA graph"
-            )
-        assert self.block_tables is not None
-        assert self.seq_lens is not None
-        assert self.column_indices is not None
-        batch_size = self.batch_size
-        width = self.padded_blocks
-        src = block_table[:batch_size]
-        if src.dim() != 2 or src.size(1) < width:
-            raise RuntimeError(
-                "TokenSpeed MLA group refresh needs a block table of width "
-                f">= {width}, got {tuple(src.shape)}"
-            )
-        kv_lens = sequence_lengths[:batch_size].to(torch.int32)
-        live_blocks = (kv_lens + self.token_per_block - 1) // self.token_per_block
-        dense_tables = self.block_tables[:batch_size, :width]
-        dense_tables.copy_(src[:, :width])
-        dense_tables.masked_fill_(
-            self.column_indices[:width].view(1, -1) >= live_blocks.view(-1, 1),
-            0,
-        )
-        self.seq_lens[:batch_size].copy_(kv_lens)
 
 
 _TOKENSPEED_MLA_API = None
@@ -227,7 +199,12 @@ def _load_tokenspeed_mla() -> bool:
             raise ImportError(
                 "tokenspeed-mla does not expose a decode capability check"
             )
-    except (ImportError, AttributeError) as e:  # pragma: no cover - deployment wheel
+    except (
+        ImportError,
+        AttributeError,
+        OSError,
+        RuntimeError,
+    ) as e:  # pragma: no cover - deployment wheel
         _TOKENSPEED_IMPORT_ERROR = e
         logging.info("TokenSpeed MLA decode is unavailable: %s", e)
         _TOKENSPEED_MLA_API = None
@@ -237,8 +214,7 @@ def _load_tokenspeed_mla() -> bool:
     return True
 
 
-_g_tokenspeed_workspaces: Dict[tuple[int, int, int, int], torch.Tensor] = {}
-_g_tokenspeed_warmup_keys: set[tuple[int, int, int, int, int, int, int, int]] = set()
+_g_tokenspeed_warmup_keys: set[tuple[Any, ...]] = set()
 
 
 def _device_index(device: torch.device) -> int:
@@ -290,39 +266,23 @@ def tokenspeed_mla_kernel_supported(
     return True
 
 
-def _uniform_decode_q_len(attn_inputs: PyAttentionInputs) -> Optional[int]:
-    """Return the rectangular decode q_len without reading device metadata."""
-    input_lengths = getattr(attn_inputs, "input_lengths_host", None)
-    if input_lengths is None or not input_lengths.numel():
-        input_lengths = getattr(attn_inputs, "input_lengths", None)
-        if input_lengths is None or not input_lengths.numel() or input_lengths.is_cuda:
-            return 1
-    values = [int(value) for value in input_lengths.tolist()]
-    if not values:
-        return 1
-    if values[0] <= 0 or any(value != values[0] for value in values[1:]):
-        return None
-    return values[0]
-
-
 def _get_tokenspeed_workspace(
     device: torch.device,
     num_heads: int,
     kv_lora_rank: int,
     max_q_len: int,
 ) -> torch.Tensor:
-    """Allocate a split-KV upper bound without tying it to one batch size."""
+    """Allocate an op-owned split-KV upper bound.
+
+    TokenSpeed writes intermediate reductions into this buffer.  It therefore
+    cannot be shared by graph instances or concurrently executing streams.
+    """
     assert _TOKENSPEED_GET_NUM_SM is not None
     num_sms = int(_TOKENSPEED_GET_NUM_SM(device))
-    key = (_device_index(device), num_heads, kv_lora_rank, max_q_len)
-    workspace = _g_tokenspeed_workspaces.get(key)
     # B * split_kv never exceeds the active SM count. Each partial stores one
     # fp32 latent vector plus its normalization scalar per query head.
     required_bytes = num_sms * num_heads * max_q_len * (kv_lora_rank + 1) * 4
-    if workspace is None or workspace.numel() < required_bytes:
-        workspace = torch.empty(required_bytes, dtype=torch.int8, device=device)
-        _g_tokenspeed_workspaces[key] = workspace
-    return workspace
+    return torch.empty(required_bytes, dtype=torch.int8, device=device)
 
 
 class TokenSpeedMlaDecodeOp:
@@ -418,6 +378,7 @@ class TokenSpeedMlaDecodeOp:
         self._workspace = _get_tokenspeed_workspace(
             device, num_heads, kv_lora_rank, max_q_len
         )
+        self._validated_runtime_shapes = {(max_q_len, self._dtype)}
         self._attn_output: Optional[torch.Tensor] = None
         if is_cuda_graph and max_bs > 0:
             self._attn_output = torch.empty(
@@ -503,6 +464,7 @@ class TokenSpeedMlaDecodeOp:
             batch_size,
             q_len,
             max_seq_len,
+            self._dtype,
         )
         if key in _g_tokenspeed_warmup_keys:
             return
@@ -554,21 +516,6 @@ class TokenSpeedMlaDecodeOp:
         self._padded_blocks = self._metadata.padded_blocks
         self._max_seq_len = self._metadata.max_seq_len
 
-    def refresh_cuda_graph_metadata(
-        self,
-        fmha_params: Any,
-        block_table: torch.Tensor,
-        sequence_lengths: torch.Tensor,
-        seq_size_per_block: int,
-    ) -> None:
-        del fmha_params
-        if seq_size_per_block != self.token_per_block:
-            raise RuntimeError(
-                f"TokenSpeed MLA page-size mismatch: impl={self.token_per_block}, "
-                f"runtime={seq_size_per_block}"
-            )
-        self._metadata.refresh_cuda_graph(block_table, sequence_lengths)
-
     def _ensure_output(self, num_tokens: int, dtype: torch.dtype) -> torch.Tensor:
         if (
             self._attn_output is None
@@ -612,19 +559,22 @@ class TokenSpeedMlaDecodeOp:
                 "TokenSpeed MLA CUDA Graph query shape changed after capture: "
                 f"captured q_len={self._max_q_len}, runtime q_len={q_len}"
             )
-        if not tokenspeed_mla_kernel_supported(
-            self.num_heads,
-            self.kv_lora_rank,
-            self.qk_rope_head_dim,
-            self.token_per_block,
-            q_len,
-            q_absorbed.dtype,
-            self._device,
-        ):
-            raise RuntimeError(
-                "TokenSpeed MLA rejected the runtime configuration: "
-                f"q_len={q_len}, dtype={q_absorbed.dtype}"
-            )
+        runtime_shape = (q_len, q_absorbed.dtype)
+        if runtime_shape not in self._validated_runtime_shapes:
+            if not tokenspeed_mla_kernel_supported(
+                self.num_heads,
+                self.kv_lora_rank,
+                self.qk_rope_head_dim,
+                self.token_per_block,
+                q_len,
+                q_absorbed.dtype,
+                self._device,
+            ):
+                raise RuntimeError(
+                    "TokenSpeed MLA rejected the runtime configuration: "
+                    f"q_len={q_len}, dtype={q_absorbed.dtype}"
+                )
+            self._validated_runtime_shapes.add(runtime_shape)
 
         paged_kv = self._view_paged_kv(kv_cache)
         if paged_kv.dtype != q_absorbed.dtype:
@@ -663,7 +613,10 @@ class TokenSpeedMlaDecodeOp:
 
 
 class TokenSpeedMlaDecodeImpl(MlaFlashInferImplBase):
-    """RTP attention-framework adapter for TokenSpeed MLA decode."""
+    """RTP attention-framework adapter for TokenSpeed MLA decode.
+
+    The shared base supplies the host planner, RoPE, and KV-write pipeline.
+    """
 
     def __init__(
         self,
@@ -677,15 +630,13 @@ class TokenSpeedMlaDecodeImpl(MlaFlashInferImplBase):
         is_cuda_graph: bool = False,
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
-        max_q_len = _uniform_decode_q_len(attn_inputs)
-        if max_q_len is None:
-            raise RuntimeError(
-                "TokenSpeed MLA decode requires one uniform q_len per batch"
-            )
+        # The runtime forward path derives q_len from the actual query tensor
+        # and resizes the eager workspace if a future decode mode supplies more.
+        max_q_len = decode_query_length(attn_inputs)
         max_bs = (
-            attn_inputs.sequence_lengths.size(0)
-            if attn_inputs.sequence_lengths.numel() > 0
-            else 0
+            attn_inputs.input_lengths.size(0)
+            if getattr(attn_inputs, "is_target_verify", False)
+            else attn_inputs.sequence_lengths.size(0)
         )
         super().__init__(
             TokenSpeedMlaDecodeOp(
@@ -726,38 +677,15 @@ class TokenSpeedMlaDecodeImpl(MlaFlashInferImplBase):
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
         self.prepare(attn_inputs, forbid_realloc=True)
 
-    def prepare_cuda_graph_group(self, attn_inputs: PyAttentionInputs) -> None:
-        assert self.fmha_impl is not None
-        assert self.fmha_params is not None
-        self.attn_inputs = attn_inputs
-        sequence_lengths = getattr(attn_inputs, "sequence_lengths_plus_1_d", None)
-        block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
-        if sequence_lengths is None or sequence_lengths.numel() == 0:
-            raise RuntimeError(
-                "TokenSpeed MLA group refresh requires " "sequence_lengths_plus_1_d"
-            )
-        if block_table is None or block_table.numel() == 0:
-            raise RuntimeError(
-                "TokenSpeed MLA group refresh requires a device block table"
-            )
-        self.fmha_params.fill_decode_cuda_graph_params(
-            sequence_lengths,
-            block_table,
-            self.seq_size_per_block,
-        )
-        self.fmha_impl.refresh_cuda_graph_metadata(
-            self.fmha_params,
-            block_table,
-            sequence_lengths,
-            self.seq_size_per_block,
-        )
-
     @classmethod
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
         selector = _get_mla_decode_kernel()
-        if selector == "flashinfer" or attn_inputs.is_prefill:
+        is_target_verify = bool(getattr(attn_inputs, "is_target_verify", False))
+        if selector == "flashinfer" or (
+            attn_inputs.is_prefill and not is_target_verify
+        ):
             return False
 
         def unsupported(reason: str) -> bool:
@@ -781,9 +709,10 @@ class TokenSpeedMlaDecodeImpl(MlaFlashInferImplBase):
         if not _load_tokenspeed_mla():
             return unsupported("requires the tokenspeed-mla dependency")
 
-        q_len = _uniform_decode_q_len(attn_inputs)
-        if q_len is None:
-            return unsupported("requires one uniform q_len per batch")
+        try:
+            q_len = decode_query_length(attn_inputs)
+        except RuntimeError as error:
+            return unsupported(str(error))
         dtype = getattr(attn_inputs, "dtype", torch.bfloat16)
         if not isinstance(dtype, torch.dtype):
             dtype = torch.bfloat16

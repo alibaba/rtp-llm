@@ -160,6 +160,15 @@ protected:
 
     bool useAsyncPrepare() const;
 
+    // Target verify reinterprets the original decode sequence length as its
+    // prefix and packs one fixed-width query per request.  Publish matching
+    // CPU mirrors for host-side CUDA Graph planners without synchronizing the
+    // device length tensors.
+    static void populateTargetVerifyHostMetadata(GptModelInputs&     target,
+                                                 const torch::Tensor& prefix_lengths_host,
+                                                 size_t               batch_size,
+                                                 int32_t              query_length);
+
     // Opt-in gate to skip the broad sync at decodeStep start.
     // Device state, epoch-guarded clears, and single-slotted workers preserve
     // correctness while bookkeeping overlaps the next step.
