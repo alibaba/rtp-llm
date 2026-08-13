@@ -16,7 +16,10 @@ from rtp_llm.models_py.layers.linear import (
     RowParallelLinear,
 )
 from rtp_llm.models_py.layers.norm import RMSNorm, RMSResNorm
-from rtp_llm.models_py.model_desc.block_map import select_attention_inputs_for_layer
+from rtp_llm.models_py.model_desc.block_map import (
+    get_primary_attention_inputs,
+    select_attention_inputs_for_layer,
+)
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.module_base import RtpModule, copy_weight_
 from rtp_llm.models_py.modules import FakeBalanceExpert, SelectTopk
@@ -55,9 +58,7 @@ class Qwen3NextMetadata:
 def _build_qwen3_next_metadata(
     inputs: PyModelInputs, hidden_states: torch.Tensor
 ) -> Qwen3NextMetadata:
-    attention_inputs = inputs.attention_inputs
-    if attention_inputs is None:
-        raise ValueError("Qwen3-Next requires attention inputs")
+    attention_inputs = get_primary_attention_inputs(inputs)
     prefill_conv1d_meta = None
     if attention_inputs.is_prefill and not attention_inputs.is_target_verify:
         from rtp_llm.models_py.triton_kernels.causal_conv1d import (
