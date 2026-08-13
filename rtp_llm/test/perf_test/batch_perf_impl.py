@@ -181,7 +181,8 @@ class BatchPerfImpl(object):
             metric = analyze_results(responses)
             logging.info(
                 "[PERF_MEASURE_RUN] %d/%d trace=%s success=%d/%d "
-                "avg_prefill_ms=%.3f avg_total_ms=%.3f avg_wait_ms=%.3f",
+                "avg_prefill_ms=%.3f avg_total_ms=%.3f avg_wait_ms=%.3f "
+                "sp_accepted=%d sp_proposed=%d sp_rate=%.2f%%",
                 i + 1,
                 self.measure_runs,
                 self.profile_trace_name,
@@ -190,6 +191,9 @@ class BatchPerfImpl(object):
                 metric.avg_prefill_time,
                 metric.avg_total_time,
                 metric.avg_wait_time,
+                metric.speculative_accepted_tokens,
+                metric.speculative_proposed_tokens,
+                metric.speculative_acceptance_rate * 100.0,
             )
             all_measure_responses.extend(responses)
         results = analyze_results(all_measure_responses)

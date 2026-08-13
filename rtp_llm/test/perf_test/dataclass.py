@@ -16,6 +16,7 @@ class ResponseInfo:
     prefill_time: float = 0.0
     decode_time: float = 0.0
     decode_time_per_token: float = 0.0
+    iter_count: int = 0
     """
     output example:
     {
@@ -52,6 +53,7 @@ class ResponseInfo:
         aux_info = response.get("aux_info", {})
         self.input_len = aux_info.get("input_len", 0)
         self.output_len = aux_info.get("output_len", 0)
+        self.iter_count = aux_info.get("iter_count", 0)
         self.wait_time = aux_info.get("wait_time", 0.0)
         self.total_time = aux_info.get("cost_time", 0.0) - self.wait_time
         self.prefill_time = aux_info.get("first_token_cost_time", 0.0) - self.wait_time
@@ -78,6 +80,10 @@ class TestResultMetrics:
     avg_decode_time: float = 0.0
     max_decode_time: float = 0.0
     decode_time_var: float = 0.0
+    avg_iter_count: float = 0.0
+    speculative_accepted_tokens: int = 0
+    speculative_proposed_tokens: int = 0
+    speculative_acceptance_rate: float = 0.0
 
 
 def analyze_results(responses: List[ResponseInfo]) -> TestResultMetrics:
@@ -133,6 +139,24 @@ def analyze_results(responses: List[ResponseInfo]) -> TestResultMetrics:
             )
             / success_count
         )
+        metrics.avg_iter_count = (
+            sum([r.iter_count for r in success_requests]) / success_count
+        )
+        gen_num_per_cycle = int(
+            os.environ.get("PERF_SPEC_GEN_NUM_PER_CYCLE", "0")
+        )
+        if gen_num_per_cycle > 0 and all(r.iter_count > 0 for r in success_requests):
+            metrics.speculative_accepted_tokens = sum(
+                r.output_len - r.iter_count for r in success_requests
+            )
+            metrics.speculative_proposed_tokens = sum(
+                (r.iter_count - 1) * gen_num_per_cycle for r in success_requests
+            )
+            if metrics.speculative_proposed_tokens > 0:
+                metrics.speculative_acceptance_rate = (
+                    metrics.speculative_accepted_tokens
+                    / metrics.speculative_proposed_tokens
+                )
     return metrics
 
 
@@ -174,6 +198,9 @@ def create_metrics_table(
     }
     main_table = PrettyTable()
     main_table.title = title
+    has_spec_metrics = table_type == TableType.Decode and any(
+        item.metrics.speculative_proposed_tokens > 0 for item in metrics_list
+    )
     main_table.field_names = [
         "Seq Len",
         "Batch Size",
@@ -182,7 +209,7 @@ def create_metrics_table(
         "Waiting Time(ms)",
     ] + (
         ["Prefill Time(ms)"] if table_type == TableType.Prefill else ["Decode Time(ms)"]
-    )
+    ) + (["SP Accept"] if has_spec_metrics else [])
     for metrics_item in metrics_list:
         metrics = metrics_item.metrics
         if metrics.success_requests > 0:
@@ -199,6 +226,15 @@ def create_metrics_table(
                     if table_type == TableType.Prefill
                     else [f"{metrics.avg_decode_time:.2f}"]
                 )
+                + (
+                    [
+                        f"{metrics.speculative_accepted_tokens}/"
+                        f"{metrics.speculative_proposed_tokens} "
+                        f"({metrics.speculative_acceptance_rate:.2%})"
+                    ]
+                    if has_spec_metrics
+                    else []
+                )
             )
             json_result["metrics"].append(
                 {
@@ -208,6 +244,10 @@ def create_metrics_table(
                     "avg_wait_time": metrics.avg_wait_time,
                     "avg_prefill_time": metrics.avg_prefill_time,
                     "avg_decode_time": metrics.avg_decode_time,
+                    "avg_iter_count": metrics.avg_iter_count,
+                    "speculative_accepted_tokens": metrics.speculative_accepted_tokens,
+                    "speculative_proposed_tokens": metrics.speculative_proposed_tokens,
+                    "speculative_acceptance_rate": metrics.speculative_acceptance_rate,
                 }
             )
         else:
@@ -220,6 +260,7 @@ def create_metrics_table(
                     "N/A",
                     "N/A",
                 ]
+                + (["N/A"] if has_spec_metrics else [])
             )
     os.makedirs(dump_json_path, exist_ok=True)
     with open(f"{dump_json_path}/{title.replace(' ', '_')}.json", "w") as f:
