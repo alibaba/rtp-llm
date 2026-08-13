@@ -155,6 +155,15 @@ class _FakeLargeBlockKvCache:
     kernel_seq_size_per_block = 128
 
 
+class _FakeCp4SwaKvCache:
+    """CP4 fixed/SWA block-table rows cover 4 * 256 raw tokens."""
+
+    group_region_names = [SWA_KV]
+    group_seq_size_per_block = [1024]
+    seq_size_per_block = 256
+    kernel_seq_size_per_block = 128
+
+
 def _flat_positions(
     prefix_lengths: list[int], input_lengths: list[int], device
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -817,6 +826,31 @@ class BuildSwaPrefillMetaVarlenTest(unittest.TestCase):
                 self.assertEqual(int((sm >= 0).sum().item()), 17)
                 self.assertEqual(int(sm[0].item()), 1 * ring + (sp % ring))
                 self.assertEqual(int(sm[-1].item()), 1 * ring + ((sp + 16) % ring))
+
+    def test_cp4_group_stride_preserves_long_prompt_tail(self) -> None:
+        """Use the SWA group row size, not scalar seq_size_per_block.
+
+        A 2378-token CP4 prompt has three 1024-token SWA table rows.  The
+        final row must retain positions 2251..2377 in its 132-entry ring.
+        Regresses the production failure where scalar 256 indexed absent
+        columns and left the entire request tail mapped to -1.
+        """
+        ring = 132
+        stub = self._build_stub(
+            win=128,
+            compress_ratio=0,
+            n_reqs=1,
+            blocks_per_req=3,
+            eb=ring,
+            kv_cache=_FakeCp4SwaKvCache(),
+        )
+        meta = self._build_meta_varlen(stub, [0], [2378])
+        self.assertIsNotNone(meta.slot_mapping)
+        sm = meta.slot_mapping
+        self.assertTrue(torch.all(sm[2246:2378] >= 0))
+        self.assertEqual(int(sm[2245].item()), -1)
+        self.assertEqual(int(sm[2251].item()), 3 * ring + (2251 % ring))
+        self.assertEqual(int(sm[2377].item()), 3 * ring + (2377 % ring))
 
     # ----- Warmup (no kv_cache) -------------------------------------------
     def test_warmup_no_kv_cache_topk_length_only(self) -> None:
