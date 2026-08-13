@@ -14,6 +14,7 @@ coroutine automatically.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 from dataclasses import dataclass
@@ -35,6 +36,7 @@ from rtp_llm.config.exceptions import (
     FtRuntimeException,
 )
 from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.grammar_constraint import GrammarConstraint
 from rtp_llm.config.response_format import normalize_think_tag
 from rtp_llm.config.response_format_compiler import (
     ReasoningFormat,
@@ -68,6 +70,11 @@ from rtp_llm.dash_sc.grpc_metrics import (
     report_frontend_rpc_done,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
+from rtp_llm.dash_sc.inference.grammar_validator import (
+    GrammarCheckUnavailable,
+    GrammarCompilationError,
+    GrammarValidator,
+)
 from rtp_llm.dash_sc.repetition_monitor import RequestRepetitionMonitorConfig
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, kmonitor
@@ -585,6 +592,7 @@ async def iter_real_model_stream_infer(
     phase2_request_id_factory: Optional[Callable[[], int]] = None,
     access_agg: GrpcAccessRecord | None = None,
     yield_access_stats: bool = False,
+    grammar_validator: GrammarValidator | None = None,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
 
@@ -671,6 +679,41 @@ async def iter_real_model_stream_infer(
                 enable_thinking=generate_config.in_think_mode,
                 reasoning_format=reasoning_format,
             )
+        engine_constraint = GrammarConstraint.resolve_from_config(generate_config)
+        if grammar_validator is not None and engine_constraint is not None:
+            try:
+                grammar_ok = await asyncio.to_thread(
+                    grammar_validator.validate_constraint,
+                    engine_constraint,
+                    trace_str,
+                )
+            except GrammarCompilationError as e:
+                # This is the parent-side envelope for every catchable exception from
+                # the sandboxed xgrammar compile call. Preserve its diagnostic in the
+                # 400 response instead of replacing it with a generic Dash-side message.
+                raise FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    str(e),
+                ) from e
+            except GrammarCheckUnavailable as e:
+                raise FtRuntimeException(
+                    ExceptionType.TRAFFIC_LIMIT_ERROR,
+                    "grammar validation is temporarily unavailable; retry the request",
+                ) from e
+            if not grammar_ok:
+                field_name = (
+                    "response_format"
+                    if sampling.response_format is not None
+                    else "tool_call_structural_tag"
+                    if sampling.structural_tag is not None
+                    else "json_format"
+                    if sampling.json_format
+                    else engine_constraint.name
+                )
+                raise FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    f"invalid {field_name}: grammar validation or compilation failed",
+                )
         if runtime.eos_tokens and not generate_config.end_think_token_ids:
             generate_config.end_think_token_ids = list(runtime.eos_tokens)
         # All these are pre-resolved at servicer init via ``build_think_runtime``;
@@ -1106,9 +1149,9 @@ async def iter_real_model_stream_infer(
             phase2_pending: list[GenerateOutputs] = []
             phase2_seen_close = False
 
-            def _flush_phase2_pending() -> (
-                Iterator[predict_v2_pb2.ModelStreamInferResponse]
-            ):
+            def _flush_phase2_pending() -> Iterator[
+                predict_v2_pb2.ModelStreamInferResponse
+            ]:
                 """Yield buffered chunks, stripping a trailing eos artifact
                 from whichever chunk carries the finish flag."""
                 for buf_go in phase2_pending:
@@ -1243,6 +1286,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         think_runtime: Optional[_ThinkRuntime] = None,
         rank_id: Optional[int] = None,
         repetition_monitor_config: Optional[RequestRepetitionMonitorConfig] = None,
+        grammar_validator: Optional[GrammarValidator] = None,
     ):
         if backend_visitor is None:
             raise ValueError("backend_visitor is required for DashScInferenceServicer")
@@ -1275,6 +1319,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         self._rank_id = rank_id
         self._server_id = to_optional_int(server_id)
         self._rep_cfg = repetition_monitor_config or RequestRepetitionMonitorConfig()
+        self._grammar_validator = grammar_validator
 
     def _record_and_report_chunk(
         self,
@@ -1477,6 +1522,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     phase2_request_id_factory=self._next_rtp_llm_request_id,
                     access_agg=record,
                     yield_access_stats=True,
+                    grammar_validator=self._grammar_validator,
                 ):
                     (
                         delta_len,

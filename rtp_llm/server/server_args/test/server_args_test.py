@@ -458,6 +458,12 @@ class ServerArgsGrammarConfigTest(TestCase):
         self.assertEqual(g.terminate_without_stop_token, False)
         self.assertEqual(g.num_workers, 8)
         self.assertEqual(g.compiler_cache_bytes, 512 * 1024 * 1024)
+        worker_headroom_bytes = (
+            py_env_configs.grammar_admission_config.sandbox_process_memory_limit_mb
+            * 1024
+            * 1024
+        )
+        self.assertGreaterEqual(worker_headroom_bytes, 2 * g.compiler_cache_bytes)
 
     def test_grammar_parser_defaults_override_config_initial_values(self):
         """The CLI declaration is the source of truth for grammar defaults."""

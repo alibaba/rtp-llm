@@ -44,6 +44,18 @@ py_test(
 )
 
 py_test(
+    name = "grammar_validator_test",
+    srcs = ["inference/grammar_validator_test.py"],
+    main = "inference/grammar_validator_test.py",
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm:xgrammar",
+    ],
+    imports = [],
+    exec_properties = {"gpu": "A10"},
+)
+
+py_test(
     name = "access_log_test",
     srcs = ["access_log_test.py"],
     data = ["//rtp_llm/cpp/repetition:online_repetition_tracker"],

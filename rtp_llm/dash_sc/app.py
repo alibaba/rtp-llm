@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, List, Optional
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.response_format import normalize_think_tag
+from rtp_llm.dash_sc.inference.grammar_validator import GrammarValidator
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
     build_think_runtime,
@@ -36,6 +37,7 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.openai.renderer_factory import ChatRendererFactory
 from rtp_llm.openai.renderers.custom_renderer import RendererParams
+from rtp_llm.ops import TaskType
 from rtp_llm.server.backend_rpc_server_visitor import create_backend_rpc_server_visitor
 
 if TYPE_CHECKING:
@@ -607,6 +609,18 @@ class DashScApp:
                         env_terminate_id if env_terminate_id > 0 else None
                     ),
                 )
+                grammar_config = self.py_env_configs.grammar_config
+                grammar_validator = (
+                    GrammarValidator(
+                        grammar_config,
+                        self.py_env_configs.grammar_admission_config,
+                        tokenizer=base_tok,
+                        model_config=model_config,
+                    )
+                    if model_config.task_type == TaskType.LANGUAGE_MODEL
+                    and base_tok.get_real_tokenizer() is not None
+                    else None
+                )
                 servicer = DashScInferenceServicer(
                     backend_visitor=backend_visitor,
                     ip=self.server_config.ip,
@@ -619,6 +633,7 @@ class DashScApp:
                     think_runtime=think_runtime,
                     rank_id=self.server_config.rank_id,
                     repetition_monitor_config=repetition_monitor_config,
+                    grammar_validator=grammar_validator,
                 )
 
             loop = self._start_enqueue_loop()

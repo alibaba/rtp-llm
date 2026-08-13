@@ -1,7 +1,11 @@
 # BUILD for rtp_llm/dash_sc: Python frontend gRPC (same pattern as model_rpc).
 load("//bazel:arch_select.bzl", "requirement")
 
-requirement(["grpcio"])
+requirement([
+    "grpcio",
+    "jsonschema",
+    "xgrammar",
+])
 
 # Scripts and data to be packaged with the wheel (dash_sc gRPC client).
 filegroup(
@@ -23,6 +27,7 @@ py_library(
         "codec.py",
         "grpc_metrics.py",
         "inference/__init__.py",
+        "inference/grammar_validator.py",
         "inference/servicer.py",
         "proxy/__init__.py",
         "proxy/__main__.py",
@@ -43,9 +48,24 @@ py_library(
     deps = [
         "//rtp_llm/server:server",
         ":grpcio",
+        ":jsonschema",
+        ":xgrammar",
         "//rtp_llm/access_logger:access_logger",
+        "//rtp_llm:config",
         "//rtp_llm/dash_sc/proto:predict_v2_py_proto",
+        "//rtp_llm:frontend",
         "//rtp_llm/metrics:metrics",
+        "//rtp_llm:orjson",
+        "//rtp_llm:sentencepiece",
+        "//rtp_llm:tiktoken",
         "//rtp_llm:utils",
     ],
+)
+
+py_binary(
+    name = "grammar_validation_smoke",
+    srcs = ["grammar_validation_smoke.py"],
+    main = "grammar_validation_smoke.py",
+    visibility = ["//visibility:public"],
+    deps = ["//rtp_llm:testlib"],
 )
