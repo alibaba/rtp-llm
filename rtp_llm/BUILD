@@ -2,7 +2,7 @@ package(default_visibility = ["//visibility:public"])
 load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
 # make different torch for different device when in compiling
 load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel", "rename_wheel_aarch64")
-load("//bazel:arch_select.bzl", "requirement", "whl_deps", "internal_deps", "jit_deps", "triton_deps")
+load("//bazel:arch_select.bzl", "requirement", "whl_deps", "internal_deps", "jit_deps", "tokenspeed_mla_test_deps", "triton_deps")
 load("//open_source/bazel:arch_select.bzl", "platform_deps")
 load("//bazel:bundle.bzl", "bundle_files", "bundle_tar")
 
@@ -558,6 +558,24 @@ py_library(
     data = [
         "//rtp_llm/libs:whl_package_libs"
     ]
+)
+
+# Canonical Bazel launcher for production services and model-specific smoke
+# tests. Keep it with the runtime so example/ never needs a duplicate Python
+# entry point or a model-specific performance directory just to start RTP-LLM.
+py_binary(
+    name = "rtp_llm_server",
+    srcs = ["start_server.py"],
+    main = "start_server.py",
+    data = [
+        "//:rtp_compute_ops",
+        "//:th_transformer",
+        "//:th_transformer_config",
+    ],
+    deps = [
+        ":rtp_llm_lib",
+        ":sdk",
+    ] + tokenspeed_mla_test_deps(),
 )
 
 py_package(
