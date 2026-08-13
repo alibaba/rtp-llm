@@ -1,3 +1,4 @@
+import copy
 import itertools
 import json
 import logging
@@ -236,6 +237,33 @@ class OpenaiEndpoint(object):
         return config
 
     @staticmethod
+    def _merge_function_call(
+        existing_function_call: Optional[FunctionCall],
+        delta_function_call: Optional[FunctionCall],
+    ) -> Optional[FunctionCall]:
+        if delta_function_call is None:
+            return existing_function_call
+        if existing_function_call is None:
+            return FunctionCall(
+                name=delta_function_call.name,
+                arguments=delta_function_call.arguments,
+            )
+
+        if delta_function_call.name:
+            if (
+                existing_function_call.name
+                and existing_function_call.name != delta_function_call.name
+            ):
+                raise ValueError("conflicting function call name in response stream")
+            if not existing_function_call.name:
+                existing_function_call.name = delta_function_call.name
+        if delta_function_call.arguments:
+            existing_function_call.arguments = (
+                existing_function_call.arguments or ""
+            ) + delta_function_call.arguments
+        return existing_function_call
+
+    @staticmethod
     def _merge_tool_calls(
         existing_tool_calls: Optional[List[ToolCall]],
         delta_tool_calls: Optional[List[ToolCall]],
@@ -252,14 +280,95 @@ class OpenaiEndpoint(object):
             return existing_tool_calls
         if existing_tool_calls is None:
             existing_tool_calls = []
+        for tool_call in delta_tool_calls:
+            if tool_call.index is not None and (
+                type(tool_call.index) is not int or tool_call.index < 0
+            ):
+                raise ValueError(
+                    f"tool call index must be a non-negative integer: {tool_call.index!r}"
+                )
+            if tool_call.id is not None and not isinstance(tool_call.id, str):
+                raise ValueError(
+                    f"tool call id must be a string or null: {tool_call.id!r}"
+                )
+        indexes = [
+            tool_call.index
+            for tool_call in delta_tool_calls
+            if tool_call.index is not None
+        ]
+        ids = [tool_call.id for tool_call in delta_tool_calls if tool_call.id]
+        if len(indexes) != len(set(indexes)) or len(ids) != len(set(ids)):
+            raise ValueError("response chunk contains duplicate tool call identity")
+        identityless_delta_count = sum(
+            tool_call.index is None and not tool_call.id
+            for tool_call in delta_tool_calls
+        )
+        if identityless_delta_count and len(delta_tool_calls) != 1:
+            raise ValueError(
+                "tool call delta is missing index and id in a multi-call response"
+            )
+
         for delta_tool_call in delta_tool_calls:
-            # 查找是否已存在相同 index 的 tool_call
-            existing_tool_call = None
+            existing_by_index = None
             if delta_tool_call.index is not None:
-                for existing in existing_tool_calls:
-                    if existing.index == delta_tool_call.index:
-                        existing_tool_call = existing
-                        break
+                existing_by_index = next(
+                    (
+                        existing
+                        for existing in existing_tool_calls
+                        if existing.index == delta_tool_call.index
+                    ),
+                    None,
+                )
+            existing_by_id = None
+            if delta_tool_call.id:
+                existing_by_id = next(
+                    (
+                        existing
+                        for existing in existing_tool_calls
+                        if existing.id and existing.id == delta_tool_call.id
+                    ),
+                    None,
+                )
+            if (
+                existing_by_index is not None
+                and existing_by_id is not None
+                and existing_by_index is not existing_by_id
+            ):
+                raise ValueError("tool call delta has conflicting index and id")
+
+            existing_tool_call = existing_by_index or existing_by_id
+            if (
+                existing_tool_call is None
+                and delta_tool_call.index is None
+                and not delta_tool_call.id
+            ):
+                if len(existing_tool_calls) == 1:
+                    existing_tool_call = existing_tool_calls[0]
+                else:
+                    raise ValueError(
+                        "tool call delta is missing index and id without a unique call"
+                    )
+            if existing_tool_call is None and (
+                delta_tool_call.index is not None or bool(delta_tool_call.id)
+            ):
+                partially_matching_existing = [
+                    existing
+                    for existing in existing_tool_calls
+                    if not (
+                        existing.index is not None
+                        and delta_tool_call.index is not None
+                        and existing.index != delta_tool_call.index
+                    )
+                    and not (
+                        bool(existing.id)
+                        and bool(delta_tool_call.id)
+                        and existing.id != delta_tool_call.id
+                    )
+                ]
+                if partially_matching_existing:
+                    raise ValueError(
+                        "tool call identity cannot be resolved from partial identity"
+                    )
             if existing_tool_call is None:
                 # 创建新的 tool_call
                 new_tool_call = ToolCall(
@@ -282,9 +391,29 @@ class OpenaiEndpoint(object):
                 existing_tool_calls.append(new_tool_call)
             else:
                 # 增量更新现有的 tool_call
-                if delta_tool_call.id:
+                if (
+                    delta_tool_call.index is not None
+                    and existing_tool_call.index is not None
+                    and delta_tool_call.index != existing_tool_call.index
+                ):
+                    raise ValueError("tool call delta has conflicting index and id")
+                if (
+                    bool(delta_tool_call.id)
+                    and bool(existing_tool_call.id)
+                    and delta_tool_call.id != existing_tool_call.id
+                ):
+                    raise ValueError("tool call delta has conflicting index and id")
+                if existing_tool_call.index is None:
+                    existing_tool_call.index = delta_tool_call.index
+                if not existing_tool_call.id:
                     existing_tool_call.id = delta_tool_call.id
-                if delta_tool_call.type:
+                if (
+                    delta_tool_call.type
+                    and existing_tool_call.type
+                    and delta_tool_call.type != existing_tool_call.type
+                ):
+                    raise ValueError("conflicting tool call type in response stream")
+                if delta_tool_call.type and not existing_tool_call.type:
                     existing_tool_call.type = delta_tool_call.type
                 if delta_tool_call.function:
                     if existing_tool_call.function is None:
@@ -294,9 +423,18 @@ class OpenaiEndpoint(object):
                         )
                     else:
                         if delta_tool_call.function.name:
-                            existing_tool_call.function.name = (
-                                delta_tool_call.function.name
-                            )
+                            if (
+                                existing_tool_call.function.name
+                                and existing_tool_call.function.name
+                                != delta_tool_call.function.name
+                            ):
+                                raise ValueError(
+                                    "conflicting tool call function name in response stream"
+                                )
+                            if not existing_tool_call.function.name:
+                                existing_tool_call.function.name = (
+                                    delta_tool_call.function.name
+                                )
                         if delta_tool_call.function.arguments:
                             if existing_tool_call.function.arguments is None:
                                 existing_tool_call.function.arguments = (
@@ -325,8 +463,13 @@ class OpenaiEndpoint(object):
         extra_outputs = None
         async for response in choice_generator:
             choice_indexes = [choice.index for choice in response.choices]
-            if any(index < 0 for index in choice_indexes):
-                raise ValueError(f"choice index must be non-negative: {choice_indexes}")
+            if any(
+                type(index) is not int or index < 0 for index in choice_indexes
+            ):
+                raise ValueError(
+                    "choice index must be a non-negative integer: "
+                    f"{choice_indexes}"
+                )
             if len(choice_indexes) != len(set(choice_indexes)):
                 raise ValueError(
                     "response chunk contains duplicate choice indexes: "
@@ -364,7 +507,10 @@ class OpenaiEndpoint(object):
                     delta.role or accumulated_choice.message.role
                 )
                 accumulated_choice.message.function_call = (
-                    delta.function_call or accumulated_choice.message.function_call
+                    OpenaiEndpoint._merge_function_call(
+                        accumulated_choice.message.function_call,
+                        delta.function_call,
+                    )
                 )
                 accumulated_choice.message.tool_calls = (
                     OpenaiEndpoint._merge_tool_calls(
@@ -394,10 +540,31 @@ class OpenaiEndpoint(object):
                                         field_name,
                                         accumulated_logprobs,
                                     )
-                                accumulated_logprobs.extend(delta_logprobs)
-            usage = response.usage or usage
-            aux_info = response.aux_info or aux_info
-            extra_outputs = response.extra_outputs or extra_outputs
+                                accumulated_logprobs.extend(
+                                    item.model_copy(deep=True)
+                                    for item in delta_logprobs
+                                )
+            if response.usage is not None:
+                usage = response.usage.model_copy(deep=True)
+            if response.aux_info is not None:
+                aux_info = copy.deepcopy(response.aux_info)
+            if response.extra_outputs is not None:
+                extra_outputs = response.extra_outputs.model_copy(deep=True)
+
+        for accumulated_choice in all_choices_by_index.values():
+            tool_calls = accumulated_choice.message.tool_calls
+            if not tool_calls:
+                continue
+            if len(tool_calls) > 1 and any(
+                tool_call.index is None for tool_call in tool_calls
+            ):
+                raise ValueError(
+                    "multiple tool calls cannot be ordered with a missing index"
+                )
+            if all(tool_call.index is not None for tool_call in tool_calls):
+                accumulated_choice.message.tool_calls = sorted(
+                    tool_calls, key=lambda tool_call: tool_call.index
+                )
 
         all_choices = [
             all_choices_by_index[index] for index in sorted(all_choices_by_index)
