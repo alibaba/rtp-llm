@@ -2,8 +2,11 @@
 
 namespace rtp_llm {
 
+namespace {
+constexpr uint32_t kOutputWaitPollIntervalUs = 50 * 1000;
+}
+
 ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput(const OutputCancellationCheck& is_cancelled) {
-    // TODO(xinfei.sxf) 某些case下会出现1s的等待
     while ((!hasError()) && getStatus() != StreamState::FINISHED && generate_outputs_queue_.isEmpty()) {
         checkTimeout();
         if (hasError()) {
@@ -13,7 +16,10 @@ ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput(const OutputCancel
             reportError(ErrorCode::CANCELLED, "output wait cancelled");
             return statusInfo();
         }
-        generate_outputs_queue_.waitNotEmpty();
+        const auto wait_time_us = is_cancelled ?
+                                      kOutputWaitPollIntervalUs :
+                                      decltype(generate_outputs_queue_)::DEF_WAIT_TIME;
+        generate_outputs_queue_.waitNotEmpty(wait_time_us);
     }
     if (hasError()) {
         return statusInfo();

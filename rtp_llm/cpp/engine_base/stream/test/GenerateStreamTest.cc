@@ -103,26 +103,30 @@ TEST_F(GenerateStreamTest, testNextOutputConsumesCancellationWhileWaitingForFirs
 
     std::atomic<bool> cancelled{false};
     std::promise<void> predicate_seen;
+    auto               predicate_seen_future = predicate_seen.get_future();
+    std::promise<void> release_predicate;
+    auto               release_predicate_future = release_predicate.get_future().share();
     std::once_flag     predicate_seen_once;
     auto               wait_result = std::async(std::launch::async, [&]() {
         return stream->nextOutput([&]() {
             const bool observed_cancel = cancelled.load(std::memory_order_acquire);
             std::call_once(predicate_seen_once, [&]() { predicate_seen.set_value(); });
+            release_predicate_future.wait();
             return observed_cancel;
         });
     });
 
-    const bool entered_wait =
-        predicate_seen.get_future().wait_for(std::chrono::seconds(1)) == std::future_status::ready;
+    const bool entered_wait = predicate_seen_future.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
     cancelled.store(true, std::memory_order_release);
+    release_predicate.set_value();
     if (!entered_wait) {
         stream->reportError(ErrorCode::CANCELLED, "test cleanup before wait");
     }
 
-    const auto ready = wait_result.wait_for(std::chrono::milliseconds(2500));
+    const auto ready = wait_result.wait_for(std::chrono::milliseconds(200));
     if (ready != std::future_status::ready) {
         stream->reportError(ErrorCode::CANCELLED, "test cleanup");
-        EXPECT_EQ(wait_result.wait_for(std::chrono::milliseconds(2500)), std::future_status::ready);
+        EXPECT_EQ(wait_result.wait_for(std::chrono::milliseconds(1500)), std::future_status::ready);
     }
     EXPECT_TRUE(entered_wait);
     ASSERT_EQ(ready, std::future_status::ready);
@@ -131,6 +135,39 @@ TEST_F(GenerateStreamTest, testNextOutputConsumesCancellationWhileWaitingForFirs
     ASSERT_FALSE(result.ok());
     EXPECT_EQ(result.status().code(), ErrorCode::CANCELLED);
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
+}
+
+TEST_F(GenerateStreamTest, testNextOutputDoesNotLoseOutputNotificationBeforeWait) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createContextStream({1, 2, 3, 4}));
+
+    std::promise<void> predicate_seen;
+    auto               predicate_seen_future = predicate_seen.get_future();
+    std::promise<void> release_predicate;
+    auto               release_predicate_future = release_predicate.get_future().share();
+    std::once_flag     predicate_seen_once;
+    auto               wait_result = std::async(std::launch::async, [&]() {
+        return stream->nextOutput([&]() {
+            std::call_once(predicate_seen_once, [&]() { predicate_seen.set_value(); });
+            release_predicate_future.wait();
+            return false;
+        });
+    });
+
+    const bool before_wait = predicate_seen_future.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
+    GenerateOutputs output;
+    output.request_id = 17;
+    stream->generate_outputs_queue_.push(output);
+    release_predicate.set_value();
+
+    const auto ready = wait_result.wait_for(std::chrono::milliseconds(200));
+    if (ready != std::future_status::ready) {
+        stream->reportError(ErrorCode::CANCELLED, "test cleanup");
+        EXPECT_EQ(wait_result.wait_for(std::chrono::milliseconds(1500)), std::future_status::ready);
+    }
+    EXPECT_TRUE(before_wait);
+    ASSERT_EQ(ready, std::future_status::ready);
+    ASSERT_TRUE(wait_result.get().ok());
 }
 
 TEST_F(GenerateStreamTest, testNextOutputPreservesExistingErrorOverCancellation) {

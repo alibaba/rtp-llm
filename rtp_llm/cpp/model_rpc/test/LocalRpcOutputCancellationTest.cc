@@ -34,12 +34,14 @@ public:
     ObservedNormalGenerateStream():
         NormalGenerateStream(
             makeGenerateInput(), makeModelConfig(), RuntimeConfig{}, ResourceContext{}, nullptr),
-        first_check_future_(first_check_promise_.get_future().share()) {}
+        first_check_future_(first_check_promise_.get_future().share()),
+        first_check_release_future_(first_check_release_promise_.get_future().share()) {}
 
     ErrorResult<GenerateOutputs> nextOutput(const OutputCancellationCheck& is_cancelled = {}) override {
         return NormalGenerateStream::nextOutput([this, &is_cancelled]() {
             const bool observed_cancel = is_cancelled && is_cancelled();
             std::call_once(first_check_once_, [this]() { first_check_promise_.set_value(); });
+            first_check_release_future_.wait();
             return observed_cancel;
         });
     }
@@ -48,7 +50,12 @@ public:
         return first_check_future_.wait_for(timeout) == std::future_status::ready;
     }
 
+    void releaseFirstCheck() {
+        std::call_once(first_check_release_once_, [this]() { first_check_release_promise_.set_value(); });
+    }
+
     void stopForCleanup() {
+        releaseFirstCheck();
         reportError(ErrorCode::CANCELLED, "test cleanup");
     }
 
@@ -56,6 +63,9 @@ private:
     std::promise<void>        first_check_promise_;
     std::shared_future<void>  first_check_future_;
     std::once_flag            first_check_once_;
+    std::promise<void>        first_check_release_promise_;
+    std::shared_future<void>  first_check_release_future_;
+    std::once_flag            first_check_release_once_;
 };
 
 class LocalRpcServerHarness final: public LocalRpcServer {
@@ -214,19 +224,20 @@ TEST(LocalRpcOutputCancellationTest, StreamingCancelWhileWaitingReturnsFromServe
 
     const bool entered_wait = service.stream()->waitForFirstCheck(2500ms);
     context.TryCancel();
+    service.stream()->releaseFirstCheck();
     if (!entered_wait) {
         service.stream()->stopForCleanup();
     }
-    const auto client_status = reader->Finish();
 
     auto&      handler_result = service.streamStatusFuture();
-    const auto handler_ready  = handler_result.wait_for(2500ms);
+    const auto handler_ready  = handler_result.wait_for(200ms);
     if (handler_ready != std::future_status::ready) {
         service.stream()->stopForCleanup();
-        EXPECT_EQ(handler_result.wait_for(2500ms), std::future_status::ready);
+        EXPECT_EQ(handler_result.wait_for(1500ms), std::future_status::ready);
     }
 
     EXPECT_TRUE(entered_wait);
+    const auto client_status = reader->Finish();
     EXPECT_EQ(client_status.error_code(), grpc::StatusCode::CANCELLED);
     ASSERT_EQ(handler_ready, std::future_status::ready);
     EXPECT_EQ(handler_result.get().error_code(), grpc::StatusCode::CANCELLED);
@@ -248,20 +259,21 @@ TEST(LocalRpcOutputCancellationTest, BatchGenerateCancelWhileWaitingReturnsFromS
 
     const bool entered_wait = service.stream()->waitForFirstCheck(2500ms);
     context.TryCancel();
+    service.stream()->releaseFirstCheck();
     if (!entered_wait) {
         service.stream()->stopForCleanup();
     }
 
-    auto client_ready = client_result.wait_for(2500ms);
-    if (client_ready != std::future_status::ready) {
-        service.stream()->stopForCleanup();
-        EXPECT_EQ(client_result.wait_for(2500ms), std::future_status::ready);
-    }
     auto&      handler_result = service.batchStatusFuture();
-    const auto handler_ready  = handler_result.wait_for(2500ms);
+    const auto handler_ready  = handler_result.wait_for(200ms);
     if (handler_ready != std::future_status::ready) {
         service.stream()->stopForCleanup();
-        EXPECT_EQ(handler_result.wait_for(2500ms), std::future_status::ready);
+        EXPECT_EQ(handler_result.wait_for(1500ms), std::future_status::ready);
+    }
+    auto client_ready = client_result.wait_for(200ms);
+    if (client_ready != std::future_status::ready) {
+        service.stream()->stopForCleanup();
+        EXPECT_EQ(client_result.wait_for(1500ms), std::future_status::ready);
     }
 
     EXPECT_TRUE(entered_wait);

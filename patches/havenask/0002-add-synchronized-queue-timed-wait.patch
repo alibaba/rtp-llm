@@ -1,0 +1,15 @@
+diff --git aios/autil/autil/SynchronizedQueue.h aios/autil/autil/SynchronizedQueue.h
+index 19a766ac..987ad6b3 100644
+--- aios/autil/autil/SynchronizedQueue.h
++++ aios/autil/autil/SynchronizedQueue.h
+@@ -41,0 +42 @@ public:
++    void waitNotEmpty(uint32_t wait_time_us);
+@@ -139,0 +141,8 @@ void SynchronizedQueue<T>::waitNotEmpty() {
++template <class T>
++void SynchronizedQueue<T>::waitNotEmpty(uint32_t wait_time_us) {
++    ScopedLock lk(_cond);
++    if (_elements.empty()) {
++        _cond.wait(wait_time_us);
++    }
++}
++

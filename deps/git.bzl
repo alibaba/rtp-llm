@@ -163,7 +163,8 @@ def git_deps():
         patches=[
             "@rtp_llm//patches/havenask:havenask.patch",
             "@rtp_llm//patches/havenask:anet.patch",
-            "@rtp_llm//patches/havenask:0001-fix-PrometheusSink-need-header.patch"
+            "@rtp_llm//patches/havenask:0001-fix-PrometheusSink-need-header.patch",
+            "@rtp_llm//patches/havenask:0002-add-synchronized-queue-timed-wait.patch",
         ],
         build_file = clean_dep("@rtp_llm//3rdparty/kmonitor:kmonitor.BUILD"),
     )
