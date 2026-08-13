@@ -27,6 +27,18 @@ py_test(
 )
 
 py_test(
+    name = "test_fused_recurrent_multitoken",
+    srcs = [
+        "test_fused_recurrent_multitoken.py"
+    ],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:fla",
+    ] + [":triton", ":torch"],
+    visibility = ["//visibility:public"],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test(
     name = "test_chunk_prefill",
     srcs = [
         "test_chunk_prefill.py"

@@ -28,7 +28,6 @@ from rtp_llm.ops import (
     RopeStyle,
 )
 from rtp_llm.ops.compute_ops import (
-    FusedRopeKVCacheDecodeOp,
     LayerKVCache,
     ParamsBase,
     PyAttentionInputs,
@@ -665,6 +664,7 @@ class PyFlashinferDecodeAttnOp(object):
             use_tensor_cores=self.use_tensor_core,
         )
         self.kv_cache_dtype = attn_configs.kv_cache_dtype
+        self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
 
     def __del__(self):
         release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
@@ -690,9 +690,9 @@ class PyFlashinferDecodeAttnOp(object):
         )
         # Get torch.dtype from attention configs
         self.decode_wrapper.plan(
-            flashinfer_decode_params.decode_page_indptr_d,
-            flashinfer_decode_params.page_indice_d,
-            flashinfer_decode_params.paged_kv_last_page_len_d,
+            self.fmha_params.decode_page_indptr_d,
+            self.fmha_params.page_indice_d,
+            self.fmha_params.paged_kv_last_page_len_d,
             self.local_head_num,
             self.local_kv_head_num,
             self.head_dim_qk,
@@ -760,15 +760,24 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         self.fmha_impl = PyFlashinferDecodeAttnOp(attn_configs)
-        self.rope_impl = FusedRopeKVCacheDecodeOp(attn_configs)
         self.attn_configs = attn_configs
 
         # Store input info
         self.attn_inputs = attn_inputs
 
-        # Create params
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
-        self.rope_params = self.rope_impl.prepare(attn_inputs)
+        self.rope_impl: Optional[MhaRotaryEmbeddingOp] = None
+        self.kv_cache_write_op: Optional[KVCacheWriteOp] = None
+        if self.need_rope_kv_cache:
+            if attn_configs.rope_config.style != RopeStyle.No:
+                self.rope_impl = MhaRotaryEmbeddingOp(attn_configs)
+                self.rope_impl.set_params(self.fmha_params)
+            self.kv_cache_write_op = KVCacheWriteOp(
+                num_kv_heads=attn_configs.kv_head_num,
+                head_size=attn_configs.size_per_head,
+                token_per_block=attn_configs.kernel_tokens_per_block,
+            )
+            self.kv_cache_write_op.set_params(self.fmha_params)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
     @classmethod
@@ -777,15 +786,44 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
     ) -> bool:
         return not attn_configs.use_mla
 
+    def _split_qkv(
+        self, qkv: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        qkv = qkv.reshape(qkv.shape[0], -1)
+        num_heads = self.attn_configs.head_num
+        num_kv_heads = self.attn_configs.kv_head_num
+        head_dim = self.attn_configs.size_per_head
+        query, key, value = torch.split(
+            qkv,
+            [
+                head_dim * num_heads,
+                head_dim * num_kv_heads,
+                head_dim * num_kv_heads,
+            ],
+            dim=-1,
+        )
+        return (
+            query.reshape(query.shape[0], num_heads, head_dim),
+            key.reshape(key.shape[0], num_kv_heads, head_dim),
+            value.reshape(value.shape[0], num_kv_heads, head_dim),
+        )
+
     def forward(
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         layer_idx: int = 0,
     ) -> torch.Tensor:
-        # Apply RoPE and KV Cache processing
+        # Use Python FlashInfer RoPE and KV writes on architectures where the
+        # fused C++ decode kernel is unavailable.
         if self.need_rope_kv_cache:
-            qkv = self.rope_impl.forward(qkv, kv_cache, self.rope_params)
+            if self.rope_impl is not None:
+                query, key, value = self.rope_impl.forward(qkv)
+            else:
+                query, key, value = self._split_qkv(qkv)
+            if self.kv_cache_write_op is not None:
+                self.kv_cache_write_op.forward(key, value, kv_cache)
+            qkv = query
 
         # Apply write cache store if needed
         common.apply_write_cache_store(

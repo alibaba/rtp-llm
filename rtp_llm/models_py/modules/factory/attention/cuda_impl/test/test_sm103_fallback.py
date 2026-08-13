@@ -85,6 +85,25 @@ class Sm103FallbackTest(unittest.TestCase):
                 )
             )
 
+    def test_force_python_flashinfer_disables_native_decode_impls(self):
+        native_decode_impls = {
+            "FlashInferTRTLLMDecodeImpl",
+            "XQAImpl",
+            "XQADecodeImpl",
+            "FlashInferDecodeImpl",
+        }
+
+        with mock.patch.dict(
+            os.environ, {"RTP_LLM_FORCE_PY_FLASHINFER_DECODE": "true"}
+        ):
+            for impl_name in native_decode_impls:
+                self.assertTrue(
+                    attn_factory._is_fmha_impl_disabled(impl_name, None), impl_name
+                )
+            self.assertFalse(
+                attn_factory._is_fmha_impl_disabled("PyFlashinferDecodeImpl", None)
+            )
+
     def test_sm100_python_flashinfer_prefill_requires_opt_in(self):
         attn_inputs = SimpleNamespace(
             prefix_lengths=torch.empty(0, dtype=torch.int32)

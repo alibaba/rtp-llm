@@ -110,6 +110,17 @@ def _is_fmha_impl_disabled(
     }:
         return True
 
+    force_py_decode = os.environ.get(
+        "RTP_LLM_FORCE_PY_FLASHINFER_DECODE", ""
+    ).lower() in ("1", "true", "yes", "on")
+    if force_py_decode and impl_class_name in {
+        "FlashInferTRTLLMDecodeImpl",
+        "XQAImpl",
+        "XQADecodeImpl",
+        "FlashInferDecodeImpl",
+    }:
+        return True
+
     if fmha_config is None:
         return False
 
