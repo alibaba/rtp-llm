@@ -1115,14 +1115,12 @@ class AttentionFP8(nn.Module):
         attn_type_tag = TAG_BY_ATTN_TYPE.get(attn_type)
         if attn_type_tag is None:
             return None
-        # Polymorphic probe: build_paged_pool_specs sweeps every attn_type
-        # across every layer.  C++ raises "Layer X does not own attention
-        # type Y" for layers that don't own this region — catching it tells
-        # the caller to skip.  Not defensive bloat.
-        try:
-            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type_tag)
-        except RuntimeError:
+        # build_paged_pool_specs sweeps every attention type across every
+        # layer. Missing regions are expected, so probe without triggering
+        # the fatal assertion reserved for invalid get_layer_cache calls.
+        if not self._kv_cache.has_layer_cache(self.layer_id, attn_type_tag):
             return None
+        layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type_tag)
         base = layer_kv.kv_cache_base
         if base is None or base.numel() == 0 or base.dim() != 2:
             return None
@@ -1165,10 +1163,9 @@ class AttentionFP8(nn.Module):
         attn_type_tag = TAG_BY_ATTN_TYPE.get(attn_type)
         if attn_type_tag is None:
             return None
-        try:
-            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type_tag)
-        except RuntimeError:
+        if not self._kv_cache.has_layer_cache(self.layer_id, attn_type_tag):
             return None
+        layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type_tag)
         base = layer_kv.kv_cache_base
         if base is None or base.numel() == 0 or base.dim() != 2:
             return None
@@ -1197,10 +1194,9 @@ class AttentionFP8(nn.Module):
         attn_type_tag = TAG_BY_ATTN_TYPE.get(attn_type)
         if attn_type_tag is None:
             return None
-        try:
-            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type_tag)
-        except RuntimeError:
+        if not self._kv_cache.has_layer_cache(self.layer_id, attn_type_tag):
             return None
+        layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type_tag)
         base = layer_kv.kv_cache_base
         if base is None or base.numel() == 0 or base.dim() != 2:
             return None
@@ -1237,11 +1233,9 @@ class AttentionFP8(nn.Module):
         attn_type_tag = TAG_BY_ATTN_TYPE.get(attn_type)
         if attn_type_tag is None:
             return 0
-        # Polymorphic probe — see _pool_view for rationale.
-        try:
-            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type_tag)
-        except RuntimeError:
+        if not self._kv_cache.has_layer_cache(self.layer_id, attn_type_tag):
             return 0
+        layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type_tag)
         base = layer_kv.kv_cache_base
         if base is None or base.numel() == 0 or base.dim() != 2:
             return 0
