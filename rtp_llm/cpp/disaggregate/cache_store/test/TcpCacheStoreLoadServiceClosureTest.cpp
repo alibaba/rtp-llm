@@ -303,6 +303,19 @@ TEST(LoadCopyFenceTest, closeDrainsActiveCopyAndRejectsFutureCopy) {
     EXPECT_FALSE(mutated);
 }
 
+TEST(LoadCopyFenceTest, closeCallbacksRunOnceAndLateRegistrationRunsImmediately) {
+    auto fence = std::make_shared<LoadCopyFence>();
+
+    int callback_count = 0;
+    fence->addCloseCallback([&]() { ++callback_count; });
+    fence->closeAndDrain();
+    fence->closeAndDrain();
+    EXPECT_EQ(1, callback_count);
+
+    fence->addCloseCallback([&]() { ++callback_count; });
+    EXPECT_EQ(2, callback_count);
+}
+
 TEST(LoadContextTest, timeoutDrainsActiveCopyAndLateCallbackCannotOverwrite) {
     auto context = std::make_shared<LoadContext>(nullptr, false);
     context->expect_layer_cnt_ = 1;
@@ -380,35 +393,21 @@ TEST(LoadContextTest, cancelIsTerminalForLateCallback) {
     EXPECT_TRUE(context->failedBlockDebugInfos().empty());
 }
 
-TEST(LoadContextTest, directWriteTimeoutKeepsLeaseUntilCallback) {
+TEST(LoadContextTest, directWriteTimeoutClosesTransportAndReturns) {
     auto context = std::make_shared<LoadContext>(nullptr, true);
     context->expect_layer_cnt_ = 1;
     context->deadline_ms_      = 0;
 
-    auto wait_future =
-        std::async(std::launch::async, [&]() { context->waitDone(); });
-
-    bool       terminal = false;
-    const auto terminal_deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds(1);
-    while (!terminal && std::chrono::steady_clock::now() < terminal_deadline) {
-        {
-            std::lock_guard<std::mutex> lock(context->mutex_);
-            terminal = context->terminal_;
-        }
-        std::this_thread::yield();
-    }
-    EXPECT_TRUE(terminal);
-    EXPECT_EQ(std::future_status::timeout,
-              wait_future.wait_for(std::chrono::milliseconds(10)));
-    EXPECT_FALSE(context->copy_fence_->closed());
-
     auto request_buffer = std::make_shared<RequestBlockBuffer>("rdma-request");
-    context->updateResult(true, CacheStoreErrorCode::None, request_buffer);
+    context->copy_fence_->addCloseCallback([context, request_buffer]() {
+        context->updateResult(false, CacheStoreErrorCode::LoadBufferTimeout, request_buffer);
+    });
 
+    auto wait_future = std::async(std::launch::async, [&]() { context->waitDone(); });
     EXPECT_EQ(std::future_status::ready,
               wait_future.wait_for(std::chrono::seconds(1)));
     wait_future.get();
+    EXPECT_TRUE(context->copy_fence_->closed());
     EXPECT_EQ(ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT,
               context->getErrorInfo().code());
 }
