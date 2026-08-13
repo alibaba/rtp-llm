@@ -360,6 +360,27 @@ TEST(SharedBlockCacheTest, PutsForDifferentTagsShareOneRequestIdentityAndDepende
     EXPECT_EQ(evicted.evicted_dependencies.at(7).parent_key, 6);
 }
 
+TEST(SharedBlockCacheTest, RemoveKeepsTagBasedPublicItemContract) {
+    TestSharedBlockCache cache;
+    cache.put(7,
+              {groupBlock(kFullTag, 107), groupBlock(kLinearTag, 207)},
+              false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              rootDep(),
+              {{std::string(kFullTag), false}});
+
+    const auto removed = cache.remove(7);
+
+    ASSERT_TRUE(removed.has_value());
+    EXPECT_EQ(removed->group_block_ids.at(std::string(kFullTag)), 107);
+    EXPECT_EQ(removed->group_block_ids.at(std::string(kLinearTag)), 207);
+    EXPECT_EQ(removed->group_block_ids.count(std::string(kIndependentTag)), 0);
+    EXPECT_FALSE(removed->matchable_groups.at(std::string(kFullTag)));
+    EXPECT_TRUE(removed->matchable_groups.at(std::string(kLinearTag)));
+    EXPECT_GT(removed->group_block_created_time_us.at(std::string(kFullTag)), 0);
+    EXPECT_GT(removed->group_block_created_time_us.at(std::string(kLinearTag)), 0);
+}
+
 TEST(SharedBlockCacheTest, RejectsDuplicateEmptyAndUnknownInputTagsBeforeUpdatingExistingItem) {
     TestSharedBlockCache cache;
     putOne(cache, 1, 101, rootDep(0));
