@@ -569,13 +569,7 @@ class DeepSeekV4Model(GptModelBase):
         # lifetime. CP gather/restore region is sized only when CP is active.
         cp_size = int(self._prefill_cp_size)
         q_rows = int(self._resolve_prefill_q_token_capacity())
-        tp_size = max(int(self._v4_args.tp_size), 1)
-        n_heads = int(self._v4_args.n_heads)
-        if n_heads % tp_size != 0:
-            raise ValueError(
-                f"n_heads ({n_heads}) must be divisible by tp_size ({tp_size})"
-            )
-        q_dim = (n_heads // tp_size) * int(self._v4_args.head_dim)
+        q_dim = int(self._v4_args.n_heads) * int(self._v4_args.head_dim)
         if cp_size > 1:
             full_rows = q_rows * cp_size
             main_w, idx_w = self._resolve_prefill_ws_gather_widths()
