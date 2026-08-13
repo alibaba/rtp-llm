@@ -27,6 +27,8 @@
 
         <maven-antrun.version>3.1.0</maven-antrun.version>
         <maven-resources.version>3.3.1</maven-resources.version>
+        <jacoco.version>0.8.15</jacoco.version>
+        <jacocoArgLine/>
         <spring-boot.version>2.7.18</spring-boot.version>
         <grpc.version>1.65.0</grpc.version>
         <protoc.version>3.25.1</protoc.version>
@@ -261,6 +263,29 @@
     <build>
         <plugins>
             <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>${jacoco.version}</version>
+                <executions>
+                    <execution>
+                        <id>prepare-agent</id>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                        <configuration>
+                            <propertyName>jacocoArgLine</propertyName>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
                 <groupId>org.openrewrite.maven</groupId>
                 <artifactId>rewrite-maven-plugin</artifactId>
                 <version>6.21.1</version>
@@ -341,6 +366,7 @@
                     <artifactId>maven-surefire-plugin</artifactId>
                     <configuration>
                         <argLine>
+                            @{jacocoArgLine}
                             --add-modules ALL-SYSTEM
                             --add-opens java.base/java.lang=ALL-UNNAMED
                             --add-opens java.base/java.lang.invoke=ALL-UNNAMED

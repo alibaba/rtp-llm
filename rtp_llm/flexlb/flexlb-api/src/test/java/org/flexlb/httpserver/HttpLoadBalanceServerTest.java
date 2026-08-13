@@ -13,8 +13,7 @@ import org.flexlb.service.RouteService;
 import org.flexlb.service.address.FlexlbInstanceAddressService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.service.optimizer.OnlineOptimizerClient;
-import org.flexlb.service.optimizer.OnlineOptimizerHooker;
+import org.flexlb.service.optimizer.OptimizerClient;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -31,8 +30,10 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -42,8 +43,11 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -67,14 +71,18 @@ class HttpLoadBalanceServerTest {
     @Mock
     private FlexlbInstanceAddressService instanceAddressService;
     @Mock
-    private OnlineOptimizerHooker onlineOptimizerHooker;
+    private OptimizerClient optimizerClient;
     @Mock
-    private OnlineOptimizerClient onlineOptimizerClient;
+    private ExecutorService doFinallyExecutor;
 
     private WebTestClient webTestClient;
 
     @BeforeEach
     void setUp() {
+        org.mockito.Mockito.lenient().doAnswer(invocation -> {
+            invocation.getArgument(0, Runnable.class).run();
+            return null;
+        }).when(doFinallyExecutor).execute(any(Runnable.class));
         HttpLoadBalanceServer server = new HttpLoadBalanceServer(
                 generalHttpNettyService,
                 routeService,
@@ -85,7 +93,8 @@ class HttpLoadBalanceServerTest {
                 requestBlockHashService,
                 cacheAwareService,
                 instanceAddressService,
-                onlineOptimizerHooker);
+                optimizerClient,
+                doFinallyExecutor);
         webTestClient = WebTestClient.bindToRouterFunction(
                 server.loadBalancePrefill()).build();
     }
@@ -167,9 +176,11 @@ class HttpLoadBalanceServerTest {
                 });
         Response response = new Response();
         response.setSuccess(true);
+        ServerStatus selectedWorker = new ServerStatus();
+        selectedWorker.setRole(RoleType.PREFILL);
+        selectedWorker.setGroup("default");
+        response.setServerStatus(List.of(selectedWorker));
         when(routeService.route(any())).thenReturn(Mono.just(response));
-        when(onlineOptimizerHooker.getClient()).thenReturn(onlineOptimizerClient);
-
         String requestId = "request-optimizer-1";
         webTestClient.post()
                 .uri("/rtp_llm/schedule")
@@ -181,7 +192,127 @@ class HttpLoadBalanceServerTest {
                 .exchange()
                 .expectStatus().isOk();
 
-        verify(onlineOptimizerClient).traceQuery(requestId, blockCacheKeys, 4L);
+        ArgumentCaptor<Request> requestCaptor = ArgumentCaptor.forClass(Request.class);
+        verify(optimizerClient).traceQuery(requestCaptor.capture(), eq(selectedWorker));
+        assertEquals(requestId, requestCaptor.getValue().getRequestId());
+        assertEquals(blockCacheKeys, requestCaptor.getValue().getBlockCacheKeys());
+        assertEquals(4L, requestCaptor.getValue().getSeqLen());
+    }
+
+    @Test
+    void defersFinalizationAndTraceQueryToDoFinallyExecutor() {
+        AtomicReference<Runnable> submittedTask = new AtomicReference<>();
+        reset(doFinallyExecutor);
+        org.mockito.Mockito.doAnswer(invocation -> {
+            submittedTask.set(invocation.getArgument(0, Runnable.class));
+            return null;
+        }).when(doFinallyExecutor).execute(any(Runnable.class));
+        when(requestBlockHashService.prepareBlockCacheKeys(any())).thenReturn(Mono.empty());
+        Response response = new Response();
+        response.setSuccess(true);
+        ServerStatus selectedWorker = new ServerStatus();
+        selectedWorker.setRole(RoleType.PREFILL);
+        selectedWorker.setGroup("default");
+        response.setServerStatus(List.of(selectedWorker));
+        when(routeService.route(any())).thenAnswer(invocation -> {
+            BalanceContext ctx = invocation.getArgument(0);
+            ctx.setResponse(response);
+            return Mono.just(response);
+        });
+
+        webTestClient.post()
+                .uri("/rtp_llm/schedule")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(Map.of(
+                        "request_id", "request-async-finally",
+                        "seq_len", 4,
+                        "input_ids", new int[]{1, 2, 3, 4}))
+                .exchange()
+                .expectStatus().isOk();
+
+        verify(engineHealthReporter, never()).reportBalancingService(any());
+        verify(optimizerClient, never()).traceQuery(any(), any());
+
+        submittedTask.get().run();
+
+        InOrder inOrder = inOrder(engineHealthReporter, optimizerClient);
+        inOrder.verify(engineHealthReporter).reportBalancingService(any());
+        inOrder.verify(optimizerClient).traceQuery(any(), eq(selectedWorker));
+    }
+
+    @Test
+    void passesNullWorkerToTraceQueryWhenSuccessfulResponseHasNoServerStatus() {
+        when(requestBlockHashService.prepareBlockCacheKeys(any())).thenReturn(Mono.empty());
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setServerStatus(List.of());
+        when(routeService.route(any())).thenReturn(Mono.just(response));
+
+        webTestClient.post()
+                .uri("/rtp_llm/schedule")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(Map.of(
+                        "request_id", "request-without-server-status",
+                        "seq_len", 4,
+                        "input_ids", new int[]{1, 2, 3, 4}))
+                .exchange()
+                .expectStatus().isOk();
+
+        verify(optimizerClient).traceQuery(any(Request.class), isNull());
+    }
+
+    @Test
+    void stillAttemptsTraceQueryWhenFinalizationFails() {
+        when(requestBlockHashService.prepareBlockCacheKeys(any())).thenReturn(Mono.empty());
+        Response response = new Response();
+        response.setSuccess(true);
+        ServerStatus selectedWorker = new ServerStatus();
+        selectedWorker.setRole(RoleType.PREFILL);
+        response.setServerStatus(List.of(selectedWorker));
+        when(routeService.route(any())).thenReturn(Mono.just(response));
+        doThrow(new IllegalStateException("metric unavailable"))
+                .when(engineHealthReporter).reportRequestPayload(any());
+
+        webTestClient.post()
+                .uri("/rtp_llm/schedule")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(Map.of(
+                        "request_id", "request-finalization-failure",
+                        "seq_len", 4,
+                        "input_ids", new int[]{1, 2, 3, 4}))
+                .exchange()
+                .expectStatus().isOk();
+
+        verify(optimizerClient).traceQuery(any(Request.class), eq(selectedWorker));
+    }
+
+    @Test
+    void keepsScheduleSuccessfulWhenTraceQueryThrows() {
+        when(requestBlockHashService.prepareBlockCacheKeys(any()))
+                .thenReturn(Mono.empty());
+        Response response = new Response();
+        response.setSuccess(true);
+        ServerStatus selectedWorker = new ServerStatus();
+        selectedWorker.setRole(RoleType.PREFILL);
+        selectedWorker.setGroup("default");
+        response.setServerStatus(List.of(selectedWorker));
+        when(routeService.route(any())).thenReturn(Mono.just(response));
+        org.mockito.Mockito.doThrow(new IllegalStateException("optimizer unavailable"))
+                .when(optimizerClient)
+                .traceQuery(any(Request.class), any(ServerStatus.class));
+
+        webTestClient.post()
+                .uri("/rtp_llm/schedule")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(Map.of(
+                        "request_id", "request-optimizer-error",
+                        "seq_len", 4,
+                        "input_ids", new int[]{1, 2, 3, 4}))
+                .exchange()
+                .expectStatus().isOk();
+
+        verify(optimizerClient).traceQuery(
+                any(Request.class), eq(selectedWorker));
     }
 
     @Test
@@ -247,6 +378,7 @@ class HttpLoadBalanceServerTest {
         verify(cacheAwareService, never()).updateFromRoutedRequest(
                 any(Request.class),
                 any());
+        verify(optimizerClient, never()).traceQuery(any(), any());
     }
 
     @Test

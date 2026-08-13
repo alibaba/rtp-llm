@@ -1,5 +1,6 @@
 package org.flexlb.service.optimizer;
 
+import io.micrometer.core.instrument.util.NamedThreadFactory;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.Endpoint;
@@ -21,6 +22,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <p>Dynamic providers are pulled on a resolver-owned background thread. This avoids
  * installing a private listener in a shared provider and keeps {@link #getAddresses()}
  * non-blocking. A successful empty result clears the snapshot; a failed pull keeps the
+ * last known snapshot. Invalid hosts are skipped; a response with no valid hosts keeps the
  * last known snapshot. {@link #shutdown()} never closes the shared discovery bean.</p>
  */
 @Slf4j
@@ -30,11 +32,8 @@ public class ServiceDiscoveryAddressResolver implements OptimizerAddressResolver
     private final String address;
     private final Endpoint endpoint;
     private final ScheduledExecutorService refreshScheduler =
-            Executors.newSingleThreadScheduledExecutor(r -> {
-                Thread thread = new Thread(r, "optimizer-discovery-refresh");
-                thread.setDaemon(true);
-                return thread;
-            });
+            Executors.newSingleThreadScheduledExecutor(
+                    new NamedThreadFactory("optimizer-discovery-refresh"));
 
     private final AtomicBoolean started = new AtomicBoolean(false);
     private final AtomicBoolean shutdown = new AtomicBoolean(false);
@@ -46,51 +45,33 @@ public class ServiceDiscoveryAddressResolver implements OptimizerAddressResolver
         this.address = endpoint.getAddress();
     }
 
-    /** Idempotent + retryable. See {@link OptimizerAddressResolver#start()}. */
     @Override
-    public boolean start() {
+    public void start() {
         if (shutdown.get()) {
             log.info("ServiceDiscoveryAddressResolver already shutdown, skip start, address={}", address);
-            return false;
+            return;
         }
         if (!started.compareAndSet(false, true)) {
-            return true;
-        }
-        try {
-            serviceDiscovery.validate(endpoint);
-        } catch (Throwable t) {
-            started.set(false);
-            log.warn("ServiceDiscovery.validate failed, address={}, msg={}", address, t.getMessage());
-            return false;
-        }
-        refreshSafely();
-        if (shutdown.get()) {
-            started.set(false);
-            return false;
+            return;
         }
         if (isDynamicDiscovery()) {
             long pollIntervalMs = endpoint.getDiscovery().getPollIntervalMs();
-            if (pollIntervalMs <= 0) {
-                started.set(false);
-                log.warn("Service discovery poll interval must be greater than zero, address={}", address);
-                return false;
-            }
             try {
                 refreshScheduler.scheduleWithFixedDelay(
                         this::refreshSafely,
-                        pollIntervalMs,
+                        0,
                         pollIntervalMs,
                         TimeUnit.MILLISECONDS);
             } catch (RejectedExecutionException e) {
-                started.set(false);
                 log.warn("Service discovery refresh scheduling failed, address={}, msg={}",
                         address, e.getMessage());
-                return false;
+                return;
             }
+        } else {
+            refreshSafely();
         }
         log.info("ServiceDiscoveryAddressResolver started: address={}, initialCount={}",
                 address, resolvedAddresses.size());
-        return true;
     }
 
     private void refreshSafely() {
@@ -105,7 +86,6 @@ public class ServiceDiscoveryAddressResolver implements OptimizerAddressResolver
     }
 
     private void updateFromHosts(List<WorkerHost> hosts) {
-        // Drop callbacks after shutdown to avoid stale mutations
         if (shutdown.get()) {
             return;
         }
@@ -125,9 +105,15 @@ public class ServiceDiscoveryAddressResolver implements OptimizerAddressResolver
                     || ip.indexOf(':') >= 0
                     || port <= 0
                     || port > 65535) {
-                throw new IllegalArgumentException("Invalid discovered optimizer host: " + host);
+                log.warn("Ignoring invalid discovered optimizer host: {}", host);
+                continue;
             }
             addresses.add(ip + ":" + port);
+        }
+        if (addresses.isEmpty()) {
+            log.warn("ServiceDiscoveryAddressResolver found no valid hosts, keeping previous snapshot: {}",
+                    address);
+            return;
         }
         List<String> snapshot = Collections.unmodifiableList(addresses);
         if (!snapshot.equals(resolvedAddresses)) {

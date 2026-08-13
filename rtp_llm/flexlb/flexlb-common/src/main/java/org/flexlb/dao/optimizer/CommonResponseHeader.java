@@ -21,9 +21,5 @@ public class CommonResponseHeader {
     public static class Status {
         private OptimizerErrorCode code;
         private String message;
-
-        public boolean isOk() {
-            return code == OptimizerErrorCode.OK;
-        }
     }
 }

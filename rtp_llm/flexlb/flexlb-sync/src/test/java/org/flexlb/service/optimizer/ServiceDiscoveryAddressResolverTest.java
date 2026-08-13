@@ -8,13 +8,12 @@ import org.flexlb.discovery.ServiceDiscoveryType;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.clearInvocations;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
@@ -38,6 +37,25 @@ class ServiceDiscoveryAddressResolverTest {
     }
 
     @Test
+    void dynamic_discovery_should_run_initial_refresh_on_scheduler() {
+        ServiceDiscovery serviceDiscovery = mock(ServiceDiscovery.class);
+        Endpoint endpoint = endpoint(ServiceDiscoveryType.VIPSERVER);
+        AtomicReference<String> refreshThread = new AtomicReference<>();
+        when(serviceDiscovery.getHosts(endpoint)).thenAnswer(invocation -> {
+            refreshThread.compareAndSet(null, Thread.currentThread().getName());
+            return List.of(WorkerHost.of("1.1.1.1", 8000));
+        });
+        ServiceDiscoveryAddressResolver resolver =
+                new ServiceDiscoveryAddressResolver(serviceDiscovery, endpoint);
+
+        resolver.start();
+
+        verify(serviceDiscovery, timeout(1000).atLeastOnce()).getHosts(endpoint);
+        assertTrue(refreshThread.get().startsWith("optimizer-discovery-refresh"));
+        resolver.shutdown();
+    }
+
+    @Test
     void static_env_should_pull_once_without_polling_or_listener() throws Exception {
         ServiceDiscovery serviceDiscovery = mock(ServiceDiscovery.class);
         Endpoint endpoint = endpoint(ServiceDiscoveryType.STATIC_ENV);
@@ -46,24 +64,10 @@ class ServiceDiscoveryAddressResolverTest {
         ServiceDiscoveryAddressResolver resolver =
                 new ServiceDiscoveryAddressResolver(serviceDiscovery, endpoint);
 
-        assertTrue(resolver.start());
+        resolver.start();
         assertEquals(List.of("127.0.0.1:8082"), resolver.getAddresses());
         verify(serviceDiscovery, timeout(100).times(1)).getHosts(endpoint);
-        verify(serviceDiscovery, never()).listen(any(), any());
-        resolver.shutdown();
-    }
-
-    @Test
-    void should_fail_start_without_querying_hosts_when_endpoint_validation_fails() {
-        ServiceDiscovery serviceDiscovery = mock(ServiceDiscovery.class);
-        Endpoint endpoint = endpoint(ServiceDiscoveryType.DASHSCOPE);
-        doThrow(new IllegalArgumentException("invalid endpoint"))
-                .when(serviceDiscovery).validate(endpoint);
-        ServiceDiscoveryAddressResolver resolver =
-                new ServiceDiscoveryAddressResolver(serviceDiscovery, endpoint);
-
-        assertFalse(resolver.start());
-        verify(serviceDiscovery, never()).getHosts(any());
+        verify(serviceDiscovery, never()).validate(endpoint);
         verify(serviceDiscovery, never()).listen(any(), any());
         resolver.shutdown();
     }
@@ -78,7 +82,7 @@ class ServiceDiscoveryAddressResolverTest {
         ServiceDiscoveryAddressResolver resolver =
                 new ServiceDiscoveryAddressResolver(serviceDiscovery, endpoint);
 
-        assertTrue(resolver.start());
+        resolver.start();
         assertTrue(resolver.getAddresses().isEmpty());
         verify(serviceDiscovery, timeout(1000).atLeast(2)).getHosts(endpoint);
         awaitAddresses(resolver, List.of("4.4.4.4:7000"));
@@ -89,26 +93,46 @@ class ServiceDiscoveryAddressResolverTest {
     void successful_empty_refresh_should_clear_cached_addresses() throws Exception {
         ServiceDiscovery serviceDiscovery = mock(ServiceDiscovery.class);
         Endpoint endpoint = endpoint(ServiceDiscoveryType.DASHSCOPE);
+        endpoint.getDiscovery().setPollIntervalMs(100);
         when(serviceDiscovery.getHosts(endpoint))
                 .thenReturn(List.of(WorkerHost.of("1.1.1.1", 8000)))
                 .thenReturn(List.of());
         ServiceDiscoveryAddressResolver resolver =
                 new ServiceDiscoveryAddressResolver(serviceDiscovery, endpoint);
 
-        assertTrue(resolver.start());
+        resolver.start();
+        awaitAddresses(resolver, List.of("1.1.1.1:8000"));
         awaitAddresses(resolver, List.of());
         resolver.shutdown();
     }
 
     @Test
-    void get_addresses_should_only_read_snapshot() {
+    void invalidRefreshHostsShouldKeepThePreviousSnapshot() throws Exception {
+        ServiceDiscovery serviceDiscovery = mock(ServiceDiscovery.class);
+        Endpoint endpoint = endpoint(ServiceDiscoveryType.DASHSCOPE);
+        when(serviceDiscovery.getHosts(endpoint))
+                .thenReturn(List.of(WorkerHost.of("1.1.1.1", 8000)))
+                .thenReturn(List.of(WorkerHost.of("", 8000), WorkerHost.of("2.2.2.2", 0)));
+        ServiceDiscoveryAddressResolver resolver =
+                new ServiceDiscoveryAddressResolver(serviceDiscovery, endpoint);
+
+        resolver.start();
+        awaitAddresses(resolver, List.of("1.1.1.1:8000"));
+        verify(serviceDiscovery, timeout(1000).atLeast(2)).getHosts(endpoint);
+        assertEquals(List.of("1.1.1.1:8000"), resolver.getAddresses());
+        resolver.shutdown();
+    }
+
+    @Test
+    void get_addresses_should_only_read_snapshot() throws Exception {
         ServiceDiscovery serviceDiscovery = mock(ServiceDiscovery.class);
         Endpoint endpoint = endpoint(ServiceDiscoveryType.VIPSERVER);
         when(serviceDiscovery.getHosts(endpoint))
                 .thenReturn(List.of(WorkerHost.of("1.1.1.1", 8000)));
         ServiceDiscoveryAddressResolver resolver =
                 new ServiceDiscoveryAddressResolver(serviceDiscovery, endpoint);
-        assertTrue(resolver.start());
+        resolver.start();
+        awaitAddresses(resolver, List.of("1.1.1.1:8000"));
         resolver.shutdown();
         clearInvocations(serviceDiscovery);
 
@@ -126,12 +150,12 @@ class ServiceDiscoveryAddressResolverTest {
         ServiceDiscoveryAddressResolver resolver =
                 new ServiceDiscoveryAddressResolver(serviceDiscovery, endpoint);
 
-        assertTrue(resolver.start());
-        assertTrue(resolver.start());
+        resolver.start();
+        resolver.start();
         verify(serviceDiscovery, times(1)).getHosts(endpoint);
 
         resolver.shutdown();
-        assertFalse(resolver.start());
+        resolver.start();
         verify(serviceDiscovery, never()).shutdown();
     }
 
@@ -154,7 +178,7 @@ class ServiceDiscoveryAddressResolverTest {
         ServiceDiscoveryAddressResolver resolver =
                 new ServiceDiscoveryAddressResolver(serviceDiscovery, endpoint);
 
-        assertTrue(resolver.start());
+        resolver.start();
         verify(serviceDiscovery, timeout(1000).atLeast(2)).getHosts(endpoint);
         awaitAddresses(resolver, List.of("2.2.2.2:9000"));
         verify(serviceDiscovery, never()).listen(any(), any());

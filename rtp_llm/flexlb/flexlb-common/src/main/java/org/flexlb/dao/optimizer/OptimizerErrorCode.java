@@ -1,6 +1,8 @@
 package org.flexlb.dao.optimizer;
 
-/** Error codes defined by the latest online optimizer protobuf contract. */
+import com.fasterxml.jackson.annotation.JsonCreator;
+
+/** Error codes defined by the online optimizer protocol. */
 public enum OptimizerErrorCode {
     UNSPECIFIED,
     OK,
@@ -14,5 +16,18 @@ public enum OptimizerErrorCode {
     SERVER_NOT_LEADER,
     IO_ERROR,
     UNKNOWN_ERROR,
-    ERROR_MAX
+    ERROR_MAX;
+
+    @JsonCreator
+    public static OptimizerErrorCode fromValue(String value) {
+        if (value == null) {
+            return UNKNOWN_ERROR;
+        }
+        for (OptimizerErrorCode errorCode : values()) {
+            if (errorCode.name().equalsIgnoreCase(value)) {
+                return errorCode;
+            }
+        }
+        return UNKNOWN_ERROR;
+    }
 }

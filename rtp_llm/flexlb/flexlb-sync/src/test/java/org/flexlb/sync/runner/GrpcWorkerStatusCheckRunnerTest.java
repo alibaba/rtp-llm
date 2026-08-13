@@ -15,8 +15,8 @@ import org.flexlb.enums.KvCacheGroupMode;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.Test;
-import org.slf4j.LoggerFactory;
 import org.mockito.Mockito;
+import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.CompletableFuture;
 

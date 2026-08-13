@@ -8,11 +8,5 @@ public interface OptimizerAddressResolver {
 
     void shutdown();
 
-    /**
-     * Idempotent + retryable start. Returns true if started or already started;
-     * returns false on transient failure (state rolled back, caller should retry).
-     */
-    default boolean start() {
-        return true;
-    }
+    void start();
 }
