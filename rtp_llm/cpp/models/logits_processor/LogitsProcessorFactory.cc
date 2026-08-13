@@ -23,7 +23,7 @@ namespace rtp_llm {
 
 namespace {
 
-using JsonMap = autil::legacy::json::JsonMap;
+using JsonMap   = autil::legacy::json::JsonMap;
 using JsonArray = autil::legacy::json::JsonArray;
 
 std::mutex            g_grammar_backend_mutex;
@@ -97,7 +97,7 @@ GrammarKeyCpp keyFromResponseFormat(const std::string& response_format) {
         return {};
     }
     if (*type == "json_object") {
-        return {"json", R"({"type":"object"})"};
+        return {"json", R"({"anyOf":[{"type":"object"},{"type":"array"}]})"};
     }
     if (*type == "json_schema") {
         auto schema = extractJsonSchemaFromEnvelope(*response_map);
@@ -141,7 +141,7 @@ BaseLogitsProcessorPtr createGrammarProcessor(std::shared_ptr<GenerateInput>    
                                               int64_t                               eos_token_id,
                                               const GrammarKeyCpp&                  key,
                                               LogitsProcessorFactory::ErrorReporter error_reporter) {
-    auto config = generate_input->generate_config;
+    auto                  config = generate_input->generate_config;
     XGrammarBackendCppPtr backend;
     {
         std::lock_guard<std::mutex> lock(g_grammar_backend_mutex);
@@ -179,8 +179,8 @@ BaseLogitsProcessorPtr createGrammarProcessor(std::shared_ptr<GenerateInput>    
 
     const bool terminate_without_stop_token = key.key_type == "json";
     if (config->in_think_mode) {
-        auto matcher = backend->createMatcher(
-            compiled, /*require_reasoning=*/false, std::nullopt, terminate_without_stop_token);
+        auto matcher =
+            backend->createMatcher(compiled, /*require_reasoning=*/false, std::nullopt, terminate_without_stop_token);
         return std::make_shared<ReasoningGrammarLogitsProcessor>(std::move(matcher),
                                                                  eos_token_id,
                                                                  config->max_thinking_tokens,
@@ -190,8 +190,8 @@ BaseLogitsProcessorPtr createGrammarProcessor(std::shared_ptr<GenerateInput>    
                                                                  std::move(error_reporter));
     }
 
-    auto matcher = backend->createMatcher(
-        compiled, /*require_reasoning=*/false, std::nullopt, terminate_without_stop_token);
+    auto matcher =
+        backend->createMatcher(compiled, /*require_reasoning=*/false, std::nullopt, terminate_without_stop_token);
     return std::make_shared<GrammarLogitsProcessor>(std::move(matcher), eos_token_id, std::move(error_reporter));
 }
 
@@ -204,11 +204,11 @@ void appendThinkProcessor(std::vector<BaseLogitsProcessorPtr>& result,
     }
 }
 
-void appendGrammarProcessor(std::vector<BaseLogitsProcessorPtr>&       result,
-                            std::shared_ptr<GenerateInput>             generate_input,
-                            int64_t                                    eos_token_id,
-                            const GrammarKeyCpp&                       grammar_key,
-                            LogitsProcessorFactory::ErrorReporter      error_reporter) {
+void appendGrammarProcessor(std::vector<BaseLogitsProcessorPtr>&  result,
+                            std::shared_ptr<GenerateInput>        generate_input,
+                            int64_t                               eos_token_id,
+                            const GrammarKeyCpp&                  grammar_key,
+                            LogitsProcessorFactory::ErrorReporter error_reporter) {
     auto grammar_processor = createGrammarProcessor(generate_input, eos_token_id, grammar_key, error_reporter);
     if (grammar_processor != nullptr) {
         result.push_back(std::move(grammar_processor));

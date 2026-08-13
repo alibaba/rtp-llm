@@ -17,6 +17,7 @@ from rtp_llm.dash_sc.inference.grammar_validator import (
 class GrammarValidatorTest(unittest.TestCase):
     def setUp(self) -> None:
         self.validator = GrammarValidator.__new__(GrammarValidator)
+        self.validator._check_grammar = MagicMock(return_value=True)
 
     def test_allocation_failure_retires_worker_without_relabeling(self) -> None:
         status, retire_worker, message = _compile_exception_reply(
@@ -61,6 +62,25 @@ class GrammarValidatorTest(unittest.TestCase):
         self.assertEqual(crash_logs.count("worker fatal traceback"), 2)
         self.assertIn("compile attempt 1", crash_logs)
         self.assertIn("compile attempt 2", crash_logs)
+
+    def test_json_object_allows_object_or_array(self) -> None:
+        self.assertTrue(
+            self.validator.validate_response_format({"type": "json_object"})
+        )
+        self.validator._check_grammar.assert_called_once_with(
+            "json",
+            {"anyOf": [{"type": "object"}, {"type": "array"}]},
+        )
+
+    def test_json_schema_preserves_request_schema(self) -> None:
+        schema = {"type": "array", "items": {"type": "string"}}
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {"schema": schema},
+        }
+
+        self.assertTrue(self.validator.validate_response_format(response_format))
+        self.validator._check_grammar.assert_called_once_with("json", schema)
 
 
 if __name__ == "__main__":
