@@ -11,25 +11,19 @@ import hashlib
 import json
 import math
 import os
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from benchmark_cases import (
-    ALL_CASES,
-    CASE_REGISTRY,
-    BenchmarkCase,
-    compute_transfer_operation_count,
-    get_representative_perf_cases,
-    get_suite_cases,
-)
+from benchmark_cases import CASE_REGISTRY, BenchmarkCase, get_suite_cases
 
 
 def parse_args():
@@ -66,16 +60,26 @@ def parse_args():
         "--cuda-device", type=int, default=0, help="CUDA device ordinal"
     )
     parser.add_argument(
+        "--max-device-memory-fraction",
+        type=float,
+        default=0.8,
+        help="Fraction of currently free CUDA memory usable by preflight (default: 0.8)",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42, help="Base seed; repetition N uses seed+N"
+    )
+    parser.add_argument(
+        "--task-pool-size",
+        type=int,
+        action="append",
+        dest="task_pool_sizes",
+        help="Override Tree task-pool size; repeat for a paired matrix (for example 4 and 8)",
+    )
+    parser.add_argument(
         "--process-repetitions",
         type=int,
         default=1,
         help="Number of native process repetitions (default: 1)",
-    )
-    parser.add_argument(
-        "--min-measured-seconds",
-        type=int,
-        default=30,
-        help="Minimum measured phase seconds (default: 30)",
     )
     parser.add_argument(
         "--case-timeout-seconds",
@@ -114,30 +118,62 @@ def parse_args():
     return parser.parse_args()
 
 
+def build_native_command(
+    binary: str,
+    subcommand: str,
+    params: Dict[str, str],
+    output_json: str,
+    cuda_device: int,
+    max_device_memory_fraction: float,
+    seed: int,
+    repetition_id: int,
+    model_profile: str,
+) -> List[str]:
+    cmd = [binary, subcommand]
+    cmd.append("--cuda-device")
+    cmd.append(str(cuda_device))
+    cmd.append("--max-device-memory-fraction")
+    cmd.append(str(max_device_memory_fraction))
+    cmd.append("--model-profile")
+    cmd.append(model_profile)
+    cmd.append("--seed")
+    cmd.append(str(seed))
+    cmd.append("--repetition-id")
+    cmd.append(str(repetition_id))
+    if output_json:
+        cmd.extend(["--output-json", output_json])
+
+    for key, value in params.items():
+        cmd.append(key)
+        cmd.append(value)
+    return cmd
+
+
 def run_native_process(
     binary: str,
     subcommand: str,
     params: Dict[str, str],
     output_json: str,
     cuda_device: int,
+    max_device_memory_fraction: float,
+    seed: int,
+    repetition_id: int,
     model_profile: str,
     timeout_seconds: int,
     grace_seconds: int,
 ) -> Tuple[int, str, str]:
     """Run a single native benchmark process and return (exit_code, stdout, stderr)."""
-    cmd = [binary, subcommand]
-    cmd.append("--cuda-device")
-    cmd.append(str(cuda_device))
-    cmd.append("--model-profile")
-    cmd.append(model_profile)
-    cmd.append("--seed")
-    cmd.append("42")
-    cmd.append("--output-json")
-    cmd.append(output_json)
-
-    for key, value in params.items():
-        cmd.append(key)
-        cmd.append(value)
+    cmd = build_native_command(
+        binary,
+        subcommand,
+        params,
+        output_json,
+        cuda_device,
+        max_device_memory_fraction,
+        seed,
+        repetition_id,
+        model_profile,
+    )
 
     try:
         proc = subprocess.Popen(
@@ -248,6 +284,34 @@ def generate_flamegraph(
             or os.path.getsize(svg_path) == 0
         ):
             return False, f"flamegraph render failed: {rendered.stderr[:300]}"
+        total_samples = 0
+        unknown_samples = 0
+        weighted_depth = 0
+        with open(folded_path) as folded:
+            for line in folded:
+                stack, separator, count_text = line.rstrip().rpartition(" ")
+                if not separator:
+                    continue
+                try:
+                    count = int(count_text)
+                except ValueError:
+                    continue
+                total_samples += count
+                weighted_depth += count * (stack.count(";") + 1)
+                if "[unknown]" in stack:
+                    unknown_samples += count
+        quality_path = os.path.join(output_dir, "stack_quality.txt")
+        with open(quality_path, "w") as quality:
+            quality.write(f"unwind_mode=dwarf,16384\n")
+            quality.write(f"samples={total_samples}\n")
+            quality.write(
+                "unknown_sample_ratio="
+                f"{unknown_samples / total_samples if total_samples else 1.0:.6f}\n"
+            )
+            quality.write(
+                "average_stack_depth="
+                f"{weighted_depth / total_samples if total_samples else 0.0:.3f}\n"
+            )
         return True, "flamegraph.svg generated"
     except (OSError, subprocess.SubprocessError) as error:
         return False, str(error)
@@ -262,23 +326,30 @@ def run_perf_record(
     params: Dict[str, str],
     output_dir: str,
     cuda_device: int,
+    max_device_memory_fraction: float,
+    seed: int,
     model_profile: str,
     frequency: int,
     flamegraph_tools: Tuple[str, str],
-    min_measured_seconds: int = 30,
+    process_timeout_seconds: int = 180,
 ) -> Tuple[bool, str]:
     """Attach perf to the native process only during its measured window.
 
-    The native binary prints MEASURE_START right before the timed window; the
-    driver waits for that marker, then attaches perf record -p <pid> so the
-    perf.data only contains steady-state samples.
+    Every runner prints PROFILE_ATTACH_READY and then leaves a 2s attach
+    window before MEASURE_START, keeping profiler startup outside measurement.
     """
     perf_data = os.path.join(output_dir, "perf.data")
-    native_cmd = [binary, subcommand]
-    native_cmd += ["--cuda-device", str(cuda_device), "--model-profile", model_profile]
-    for key, value in params.items():
-        native_cmd.append(key)
-        native_cmd.append(value)
+    native_cmd = build_native_command(
+        binary,
+        subcommand,
+        params,
+        "",
+        cuda_device,
+        max_device_memory_fraction,
+        seed,
+        0,
+        model_profile,
+    )
 
     # Save command
     perf_cmd_path = os.path.join(output_dir, "perf_command.txt")
@@ -292,17 +363,17 @@ def run_perf_record(
             native_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
 
-        # Wait for MEASURE_START (with a generous timeout for build+warmup)
+        # Wait for the common attach marker with a generous setup+warmup timeout.
         ready = False
         deadline = time.time() + 900
         for raw_line in native.stdout:
             if time.time() > deadline:
                 break
-            if b"MEASURE_START" in raw_line:
+            if b"PROFILE_ATTACH_READY" in raw_line:
                 ready = True
                 break
         if not ready:
-            return False, "native process did not announce MEASURE_START"
+            return False, "native process did not announce a profiler attach marker"
 
         # Attach perf to the native pid; it samples until we terminate it.
         perf_cmd = [
@@ -312,7 +383,7 @@ def run_perf_record(
             str(frequency),
             "-g",
             "--call-graph",
-            "fp",
+            "dwarf,16384",
             "-p",
             str(native.pid),
             "-o",
@@ -323,7 +394,7 @@ def run_perf_record(
         )
 
         # Wait for the native process to finish its measured window and exit.
-        native.wait(timeout=min_measured_seconds + 60)
+        native.wait(timeout=process_timeout_seconds)
         native_rc = native.returncode
         native_stderr = native.stderr.read().decode()[:500] if native.stderr else ""
 
@@ -356,6 +427,11 @@ def run_perf_record(
         )
         if not flamegraph_ok:
             return False, flamegraph_summary
+        quality_path = os.path.join(output_dir, "stack_quality.txt")
+        if os.path.exists(quality_path):
+            with open(quality_path) as quality, open(summary_path, "a") as summary_file:
+                summary_file.write("\n\nStack quality\n")
+                summary_file.write(quality.read())
         return True, "\n".join(lines)
     except subprocess.TimeoutExpired:
         if native is not None:
@@ -387,26 +463,30 @@ def run_perf_stat(
     params: Dict[str, str],
     output_dir: str,
     cuda_device: int,
+    max_device_memory_fraction: float,
+    seed: int,
     model_profile: str,
 ) -> Tuple[bool, str]:
     """Run a single perf stat session."""
     perf_stat_path = os.path.join(output_dir, "perf_stat.txt")
+    native_cmd = build_native_command(
+        binary,
+        subcommand,
+        params,
+        "",
+        cuda_device,
+        max_device_memory_fraction,
+        seed,
+        0,
+        model_profile,
+    )
     cmd = [
         "perf",
         "stat",
         "--output",
         perf_stat_path,
         "--",
-        binary,
-        subcommand,
-        "--cuda-device",
-        str(cuda_device),
-        "--model-profile",
-        model_profile,
-    ]
-    for key, value in params.items():
-        cmd.append(key)
-        cmd.append(value)
+    ] + native_cmd
 
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -472,100 +552,33 @@ def sample_vmstat(output_dir: str, label: str) -> Optional[str]:
         return None
 
 
-def validate_result_json(json_path: str, process_start_ns: int) -> Tuple[bool, str]:
-    """Validate that this process produced a completed, internally consistent result."""
+def validate_result_json(
+    json_path: str, process_start_ns: int, expected_runner: str
+) -> Tuple[bool, str]:
+    """Validate only driver-owned result envelope and freshness invariants."""
     if not os.path.exists(json_path):
         return False, "result.json is missing"
     if os.stat(json_path).st_mtime_ns < process_start_ns:
         return False, "result.json predates this repetition"
     try:
-        with open(json_path) as f:
-            data = json.load(f)
-        required_fields = ["schema_version", "component", "binary", "status"]
-        for field in required_fields:
-            if field not in data:
-                return False, f"result.json is missing {field}"
-        if data["status"] != "completed":
-            return False, f"native result status is {data['status']}"
-
-        workload = data.get("workload", {})
-        operation_counters = [
-            workload.get("requested_operations"),
-            workload.get("attempted_operations"),
-            workload.get("succeeded_operations"),
-            workload.get("failed_operations"),
-        ]
-        if not all(isinstance(value, int) for value in operation_counters):
-            return False, "operation counters are missing"
-        requested, attempted, succeeded, failed = operation_counters
-        if requested != attempted or attempted != succeeded + failed or failed != 0:
-            return False, "operation counters do not close"
-
-        resolved_config = data.get("resolved_config", {})
-        min_measured_seconds = resolved_config.get("min_measured_seconds")
+        with open(json_path) as source:
+            data = json.load(source)
+        expected = {
+            "schema_version": 1,
+            "component": "BlockTreeCache",
+            "binary": "block_tree_cache_gpu_benchmark",
+            "runner": expected_runner,
+            "status": "completed",
+        }
+        for field, value in expected.items():
+            if data.get(field) != value:
+                return (
+                    False,
+                    f"result.json {field} is {data.get(field)!r}, expected {value!r}",
+                )
         measured_ns = data.get("phases_ns", {}).get("measured")
-        if not isinstance(min_measured_seconds, int) or not isinstance(
-            measured_ns, (int, float)
-        ):
-            return False, "measured duration metadata is missing"
-        if measured_ns < min_measured_seconds * 1_000_000_000:
-            return False, (
-                f"measured duration {measured_ns / 1e9:.3f}s is below "
-                f"the configured {min_measured_seconds}s floor"
-            )
-
-        transfer = data.get("transfer_workload")
-        if transfer:
-            transfer_counters = [
-                transfer.get("requested_transfer_operations"),
-                transfer.get("attempted_transfer_operations"),
-                transfer.get("succeeded_transfer_operations"),
-                transfer.get("failed_transfer_operations"),
-            ]
-            if transfer_counters != operation_counters:
-                return False, "transfer counters do not match workload counters"
-            working_set_counters = [
-                transfer.get("requested_working_set_blocks"),
-                transfer.get("addressable_working_set_blocks"),
-                transfer.get("visited_working_set_blocks"),
-            ]
-            if not all(isinstance(value, int) for value in working_set_counters):
-                return False, "working-set counters are missing"
-            if len(set(working_set_counters)) != 1:
-                return False, "working-set counters do not close"
-
-            metrics = data.get("metrics", {})
-            direction_names = {
-                key.split(".")[1]
-                for key in metrics
-                if key.startswith("direction.") and key.endswith(".attempted")
-            }
-            if not direction_names:
-                return False, "direction counters are missing"
-            direction_totals = [0, 0, 0]
-            for direction in direction_names:
-                values = [
-                    metrics.get(f"direction.{direction}.attempted"),
-                    metrics.get(f"direction.{direction}.succeeded"),
-                    metrics.get(f"direction.{direction}.failed"),
-                ]
-                if not all(isinstance(value, (int, float)) for value in values):
-                    return False, f"direction counters are missing for {direction}"
-                if values[0] != values[1] + values[2]:
-                    return False, f"direction counters do not close for {direction}"
-                direction_totals = [
-                    total + value for total, value in zip(direction_totals, values)
-                ]
-            if direction_totals != [attempted, succeeded, failed]:
-                return False, "direction totals do not match workload counters"
-
-            config = data.get("resolved_config", {})
-            requested_strategy = config.get("requested_copy_strategy", "auto")
-            if (
-                requested_strategy != "auto"
-                and config.get("actual_copy_strategy") != requested_strategy
-            ):
-                return False, "requested copy strategy was not used"
+        if not isinstance(measured_ns, (int, float)) or measured_ns <= 0:
+            return False, "result.json has no non-empty measured window"
         return True, ""
     except (json.JSONDecodeError, OSError, TypeError, ValueError) as error:
         return False, str(error)
@@ -648,13 +661,28 @@ def collect_environment(
     if uname_query.returncode == 0:
         environment["kernel"] = uname_query.stdout.strip()
     if disk_root:
+        # Record the mount as seen by the benchmark process. In Docker this is
+        # the container mount namespace; do not expose the huge overlay
+        # lowerdir/upperdir option list or pretend that it identifies the host
+        # physical block device.
+        environment["disk_scope"] = (
+            "benchmark process mount namespace (container-visible)"
+            if os.path.exists("/.dockerenv")
+            else "benchmark process mount namespace"
+        )
+        environment["disk_target"] = disk_root
         disk_query = subprocess.run(
-            ["findmnt", "-no", "SOURCE,FSTYPE,OPTIONS", "--target", disk_root],
+            ["findmnt", "-no", "TARGET,SOURCE,FSTYPE", "--target", disk_root],
             capture_output=True,
             text=True,
         )
         if disk_query.returncode == 0:
-            environment["disk"] = " ".join(disk_query.stdout.split())
+            mount_fields = disk_query.stdout.split()
+            if len(mount_fields) >= 3:
+                environment["disk_mount"] = (
+                    f"target={mount_fields[0]}, source={mount_fields[1]}, "
+                    f"fstype={mount_fields[2]}"
+                )
         else:
             disk_query = subprocess.run(
                 ["df", "--output=source,fstype", disk_root],
@@ -662,8 +690,20 @@ def collect_environment(
                 text=True,
             )
             if disk_query.returncode == 0:
-                environment["disk"] = " ".join(
+                environment["disk_mount"] = "source/fstype=" + " ".join(
                     disk_query.stdout.splitlines()[-1].split()
+                )
+        capacity_query = subprocess.run(
+            ["df", "-h", "--output=size,used,avail,pcent", disk_root],
+            capture_output=True,
+            text=True,
+        )
+        if capacity_query.returncode == 0:
+            capacity_fields = capacity_query.stdout.splitlines()[-1].split()
+            if len(capacity_fields) == 4:
+                environment["disk_capacity"] = (
+                    f"size={capacity_fields[0]}, used={capacity_fields[1]}, "
+                    f"available={capacity_fields[2]}, use={capacity_fields[3]}"
                 )
 
     # The driver normally runs from Bazel runfiles, where __file__ resolves
@@ -719,8 +759,9 @@ def run_case(
     model_profile: str,
     output_dir: str,
     cuda_device: int,
+    max_device_memory_fraction: float,
+    base_seed: int,
     repetitions: int,
-    min_measured_seconds: int,
     case_timeout: int,
     grace_seconds: int,
     perf_mode: str,
@@ -734,6 +775,15 @@ def run_case(
     case_dir = os.path.join(output_dir, case.suite, case.name)
     os.makedirs(case_dir, exist_ok=True)
 
+    # Native process timeout: case metadata overrides the driver default so
+    # the online Tree case covers setup + 15s warmup + 60s measured + drain
+    # + profiler teardown.
+    process_timeout = (
+        case.expected_process_timeout_seconds
+        if case.expected_process_timeout_seconds
+        else case_timeout
+    )
+
     manifest = {
         "case": case.name,
         "suite": case.suite,
@@ -743,6 +793,7 @@ def run_case(
         "perf": {"status": "skipped"},
         "start_time": datetime.now().isoformat(),
         "end_time": None,
+        "process_timeout_seconds": process_timeout,
     }
 
     # Check disk requirement
@@ -792,14 +843,31 @@ def run_case(
         sample_nvidia_smi(rep_dir, "before")
         sample_vmstat(rep_dir, "before")
         process_start_ns = time.time_ns()
+        native_cmd = build_native_command(
+            binary,
+            case.subcommand,
+            rep_params,
+            output_json,
+            cuda_device,
+            max_device_memory_fraction,
+            base_seed + rep,
+            rep,
+            model_profile,
+        )
+        command_path = os.path.join(rep_dir, "command.txt")
+        with open(command_path, "w") as command_file:
+            command_file.write(" ".join(map(shlex.quote, native_cmd)) + "\n")
         exit_code, stdout, stderr = run_native_process(
             binary,
             case.subcommand,
             rep_params,
             output_json,
             cuda_device,
+            max_device_memory_fraction,
+            base_seed + rep,
+            rep,
             model_profile,
-            case_timeout,
+            process_timeout,
             grace_seconds,
         )
 
@@ -815,6 +883,8 @@ def run_case(
 
         rep_manifest = {
             "repetition": rep,
+            "seed": base_seed + rep,
+            "command_file": command_path,
             "exit_code": exit_code,
             "stdout_file": os.path.join(rep_dir, "stdout.txt"),
             "stderr_file": os.path.join(rep_dir, "stderr.txt"),
@@ -833,7 +903,7 @@ def run_case(
 
         # Validate result
         result_valid, validation_error = validate_result_json(
-            output_json, process_start_ns
+            output_json, process_start_ns, case.subcommand
         )
         if exit_code == 0 and result_valid and not drain_error:
             rep_manifest["valid"] = True
@@ -883,10 +953,12 @@ def run_case(
                     perf_params,
                     perf_dir,
                     cuda_device,
+                    max_device_memory_fraction,
+                    base_seed,
                     model_profile,
                     perf_frequency,
                     flamegraph_tools,
-                    min_measured_seconds,
+                    process_timeout,
                 )
         else:
             perf_ok, perf_summary = run_perf_stat(
@@ -895,6 +967,8 @@ def run_case(
                 perf_params,
                 perf_dir,
                 cuda_device,
+                max_device_memory_fraction,
+                base_seed,
                 model_profile,
             )
 
@@ -908,6 +982,7 @@ def run_case(
             "summary": "perf_summary.txt",
             "folded": "perf.folded",
             "flamegraph": "flamegraph.svg",
+            "stack_quality": "stack_quality.txt",
         }
         manifest["perf"]["artifacts"] = {
             key: os.path.join("perf", filename)
@@ -946,6 +1021,29 @@ def run_case(
     return manifest
 
 
+def apply_task_pool_overrides(
+    cases: List[BenchmarkCase], task_pool_sizes: Optional[List[int]]
+) -> List[BenchmarkCase]:
+    if not task_pool_sizes:
+        return cases
+    expanded_cases = []
+    for case in cases:
+        if case.subcommand != "tree":
+            expanded_cases.append(case)
+            continue
+        for task_pool_size in task_pool_sizes:
+            params = dict(case.params)
+            params["--task-pool-size"] = str(task_pool_size)
+            expanded_cases.append(
+                replace(
+                    case,
+                    name=f"{case.name}_tp{task_pool_size}",
+                    params=params,
+                )
+            )
+    return expanded_cases
+
+
 def run_suite(
     suite: str,
     case_name: str,
@@ -953,8 +1051,10 @@ def run_suite(
     model_profile: str,
     output_dir: str,
     cuda_device: int,
+    max_device_memory_fraction: float,
+    base_seed: int,
+    task_pool_sizes: Optional[List[int]],
     repetitions: int,
-    min_measured_seconds: int,
     case_timeout: int,
     grace_seconds: int,
     perf_mode: str,
@@ -962,7 +1062,6 @@ def run_suite(
     flamegraph_tools: Optional[Tuple[str, str]],
     disk_root: Optional[str],
     allow_incomplete: bool = False,
-    max_workers: int = 2,
 ):
     """Run all cases in a suite."""
     if case_name == "all":
@@ -980,6 +1079,8 @@ def run_suite(
         if wrong_suite:
             print(f"Error: case(s) not in suite '{suite}': {', '.join(wrong_suite)}")
             sys.exit(1)
+
+    cases = apply_task_pool_overrides(cases, task_pool_sizes)
 
     print(f"Running {len(cases)} case(s) in suite '{suite}'")
     print(f"Output directory: {output_dir}")
@@ -999,8 +1100,9 @@ def run_suite(
             model_profile=model_profile,
             output_dir=output_dir,
             cuda_device=cuda_device,
+            max_device_memory_fraction=max_device_memory_fraction,
+            base_seed=base_seed,
             repetitions=rep_count,
-            min_measured_seconds=min_measured_seconds,
             case_timeout=case_timeout,
             grace_seconds=grace_seconds,
             perf_mode=perf_mode,
@@ -1019,6 +1121,7 @@ def run_suite(
         "binary": binary,
         "model_profile": model_profile,
         "cuda_device": cuda_device,
+        "max_device_memory_fraction": max_device_memory_fraction,
         "environment": collect_environment(
             binary, model_profile, disk_root, cuda_device
         ),
@@ -1026,7 +1129,8 @@ def run_suite(
             "suite": suite,
             "case": case_name,
             "process_repetitions": repetitions,
-            "min_measured_seconds": min_measured_seconds,
+            "base_seed": base_seed,
+            "task_pool_sizes": task_pool_sizes,
             "case_timeout_seconds": case_timeout,
             "termination_grace_seconds": grace_seconds,
             "perf": perf_mode,
@@ -1100,13 +1204,24 @@ def main():
 
     for name, value in [
         ("--process-repetitions", args.process_repetitions),
-        ("--min-measured-seconds", args.min_measured_seconds),
         ("--case-timeout-seconds", args.case_timeout_seconds),
         ("--termination-grace-seconds", args.termination_grace_seconds),
         ("--perf-frequency", args.perf_frequency),
     ]:
         if value <= 0:
             raise SystemExit(f"Error: {name} must be positive")
+    if args.cuda_device < 0:
+        raise SystemExit("Error: --cuda-device must be non-negative")
+    if not math.isfinite(args.max_device_memory_fraction) or not (
+        0.0 < args.max_device_memory_fraction <= 1.0
+    ):
+        raise SystemExit("Error: --max-device-memory-fraction must be in (0, 1]")
+    if args.seed < 0:
+        raise SystemExit("Error: --seed must be non-negative")
+    if args.task_pool_sizes:
+        if any(size <= 0 for size in args.task_pool_sizes):
+            raise SystemExit("Error: --task-pool-size must be positive")
+        args.task_pool_sizes = list(dict.fromkeys(args.task_pool_sizes))
 
     # Resolve binary path (explicit arg wins, else runfiles auto-detect)
     binary = args.binary
@@ -1164,8 +1279,10 @@ def main():
         model_profile=model_profile,
         output_dir=args.output_dir,
         cuda_device=args.cuda_device,
+        max_device_memory_fraction=args.max_device_memory_fraction,
+        base_seed=args.seed,
+        task_pool_sizes=args.task_pool_sizes,
         repetitions=args.process_repetitions,
-        min_measured_seconds=args.min_measured_seconds,
         case_timeout=args.case_timeout_seconds,
         grace_seconds=args.termination_grace_seconds,
         perf_mode=args.perf,

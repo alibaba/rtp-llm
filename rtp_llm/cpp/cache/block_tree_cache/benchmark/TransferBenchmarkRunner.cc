@@ -13,6 +13,8 @@
 #include <cuda_runtime.h>
 #include <unistd.h>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/benchmark/BenchmarkFixture.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/TransferBenchmarkWorkload.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
@@ -68,8 +70,7 @@ private:
 
 void installStrategyRecorders(PerRankBlockTransferEngine&                          engine,
                               const std::shared_ptr<BenchmarkDeviceHostCopyStats>& stats) {
-    auto& executor   = *engine.device_host_executor_;
-    auto& strategies = executor.strategies_;
+    auto& strategies = engine.device_host_executor_->strategies_;
     RTP_LLM_CHECK(strategies.size() == 3);
     for (auto& strategy : strategies) {
         std::atomic<size_t>* completed = nullptr;
@@ -86,6 +87,26 @@ void installStrategyRecorders(PerRankBlockTransferEngine&                       
 }
 
 }  // namespace
+
+bool TransferBenchmarkRunner::DirectionStats::descriptorBatchContractOk() const {
+    return batch_submissions == expected_batch_submissions
+           && max_descriptor_batch_size == expected_max_descriptor_batch_size;
+}
+
+void TransferBenchmarkRunner::DirectionStats::merge(const DirectionStats& other) {
+    attempted += other.attempted;
+    succeeded += other.succeeded;
+    failed += other.failed;
+    batch_submissions += other.batch_submissions;
+    max_descriptor_batch_size = std::max(max_descriptor_batch_size, other.max_descriptor_batch_size);
+    expected_batch_submissions += other.expected_batch_submissions;
+    expected_max_descriptor_batch_size =
+        std::max(expected_max_descriptor_batch_size, other.expected_max_descriptor_batch_size);
+    if (first_error.empty() && !other.first_error.empty()) {
+        first_error        = other.first_error;
+        first_failure_type = other.first_failure_type;
+    }
+}
 
 size_t TransferBenchmarkRunner::BatchResult::attempted() const {
     return std::accumulate(directions.begin(), directions.end(), size_t{0}, [](size_t total, const auto& entry) {
@@ -105,8 +126,36 @@ size_t TransferBenchmarkRunner::BatchResult::failed() const {
     });
 }
 
+size_t TransferBenchmarkRunner::BatchResult::batchSubmissions() const {
+    return std::accumulate(directions.begin(), directions.end(), size_t{0}, [](size_t total, const auto& entry) {
+        return total + entry.second.batch_submissions;
+    });
+}
+
+size_t TransferBenchmarkRunner::BatchResult::maxDescriptorBatchSize() const {
+    return std::accumulate(directions.begin(), directions.end(), size_t{0}, [](size_t maximum, const auto& entry) {
+        return std::max(maximum, entry.second.max_descriptor_batch_size);
+    });
+}
+
 size_t TransferBenchmarkRunner::BatchResult::visitedWorkingSetBlocks() const {
     return static_cast<size_t>(std::count(visited_working_set.begin(), visited_working_set.end(), true));
+}
+
+bool TransferBenchmarkRunner::BatchResult::descriptorBatchContractOk() const {
+    return std::all_of(directions.begin(), directions.end(), [](const auto& entry) {
+        return entry.second.descriptorBatchContractOk();
+    });
+}
+
+void TransferBenchmarkRunner::BatchResult::merge(const BatchResult& other) {
+    RTP_LLM_CHECK(visited_working_set.size() == other.visited_working_set.size());
+    for (size_t index = 0; index < visited_working_set.size(); ++index) {
+        visited_working_set[index] = visited_working_set[index] || other.visited_working_set[index];
+    }
+    for (const auto& [direction, other_stats] : other.directions) {
+        directions[direction].merge(other_stats);
+    }
 }
 
 TransferBenchmarkRunner::TransferBenchmarkRunner(const ModelProfile&    profile,
@@ -145,7 +194,12 @@ bool TransferBenchmarkRunner::run() {
 void TransferBenchmarkRunner::recordBatchFailure(const std::string& phase, const BatchResult& batch) {
     writer_.addResolvedConfigInt(phase + ".attempted", batch.attempted());
     writer_.addResolvedConfigInt(phase + ".failed", batch.failed());
+    writer_.addResolvedConfigInt(phase + ".batch_submissions", batch.batchSubmissions());
+    writer_.addResolvedConfigInt(phase + ".descriptor_batch_size_max", batch.maxDescriptorBatchSize());
     for (const auto& [direction, stats] : batch.directions) {
+        writer_.addResolvedConfigInt(phase + "." + direction + ".batch_submissions", stats.batch_submissions);
+        writer_.addResolvedConfigInt(phase + "." + direction + ".descriptor_batch_size_max",
+                                     stats.max_descriptor_batch_size);
         if (!stats.first_error.empty()) {
             writer_.addResolvedConfig(phase + "." + direction + ".first_error", stats.first_error);
             writer_.addResolvedConfig(phase + "." + direction + ".first_failure_type", stats.first_failure_type);
@@ -173,6 +227,7 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
     std::vector<size_t>                                          layer_strides;
     std::vector<size_t>                                          layer_counts;
     std::vector<size_t>                                          group_ids;
+    std::vector<size_t>                                          sliding_windows;
     size_t                                                       tile_count = 0;
     bool                                                         is_swa     = false;
     for (size_t member_index = 0; member_index < setup.members.size(); ++member_index) {
@@ -187,14 +242,15 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
         layer_strides.push_back(member->layer_stride_bytes);
         layer_counts.push_back(member->layer_count);
         group_ids.push_back(member_index);
+        sliding_windows.push_back(member->sliding_window_size);
         tile_count += member->layer_count;
         is_swa |= member->type == CacheGroupType::SWA;
     }
 
-    auto topology = BenchmarkFixture::createTopology(group_specs, layer_strides, layer_counts);
+    auto topology = BenchmarkFixture::createTopology(group_specs, layer_strides, layer_counts, sliding_windows);
     if (is_swa) {
-        setup.group_set =
-            BenchmarkFixture::createSWAGroupSet(setup.device_pools, host_pool, disk_pool, 0, topology, group_ids, 128);
+        setup.group_set = BenchmarkFixture::createSWAGroupSet(
+            setup.device_pools, host_pool, disk_pool, 0, topology, group_ids, gs_info.sliding_window_size);
     } else {
         setup.group_set =
             BenchmarkFixture::createFullGroupSet(setup.device_pools, host_pool, disk_pool, 0, topology, group_ids);
@@ -211,13 +267,13 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
         copy_options.staged_sm_copy_enabled  = false;
         copy_options.cuda_batch_copy_enabled = true;
     }
-    // Staging leases bound in-flight device<->disk ops; with more workers than
-    // leases the pool is guaranteed to be exhausted, so floor it at concurrency.
+    // Staging leases bound in-flight device<->disk ops; with more wave lanes
+    // than leases the pool is guaranteed to be exhausted, so floor it at the
+    // number of allocated lane blocks.
     const size_t staging_count = std::max(options_.device_disk_staging_block_count, device_block_count);
     setup.engine               = std::make_shared<PerRankBlockTransferEngine>(
         std::vector<GroupSetPtr>{setup.group_set}, copy_options, staging_count);
     installStrategyRecorders(*setup.engine, setup.copy_stats);
-
     writer_.addResolvedConfig("requested_copy_strategy", options_.copy_strategy);
     writer_.addResolvedConfigInt("member_group_count", setup.members.size());
     writer_.addResolvedConfigInt("copy_tile_count", tile_count);
@@ -250,17 +306,24 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
         throw std::runtime_error("--copy-strategy is only valid for a transfer path that touches device memory");
     }
 
-    const size_t payload_bytes       = group_set_info->payload_bytes;
-    const size_t concurrency         = options_.transfer_concurrency;
-    const size_t working_set_blocks  = options_.working_set_blocks == 0 ? concurrency * 4 : options_.working_set_blocks;
-    const bool   host_is_working_set = !need_disk;
+    const size_t payload_bytes      = group_set_info->payload_bytes;
+    const size_t concurrency        = options_.transfer_concurrency;
+    const size_t working_set_blocks = options_.working_set_blocks == 0 ? concurrency * 4 : options_.working_set_blocks;
+    const size_t wave_width         = std::min(concurrency, working_set_blocks);
+    const size_t requested_descriptor_batch_size =
+        options_.transfer_descriptor_batch_size == 0 ? concurrency : options_.transfer_descriptor_batch_size;
+    const size_t descriptor_batch_size = std::min(requested_descriptor_batch_size, wave_width);
+    const bool   host_is_working_set   = !need_disk;
     const size_t host_block_count =
-        need_host ? (host_is_working_set ? working_set_blocks : concurrency) : (need_disk ? 1 : 0);
+        need_host ? (host_is_working_set ? working_set_blocks : wave_width) : (need_disk ? 1 : 0);
 
     writer_.setPayloadMode("model_sized", payload_bytes);
     writer_.addResolvedConfigInt("requested_operation_count", options_.transfer_operation_count);
     writer_.addResolvedConfigInt("requested_working_set_blocks", working_set_blocks);
     writer_.addResolvedConfigInt("transfer_concurrency", concurrency);
+    writer_.addResolvedConfigInt("transfer_wave_width", wave_width);
+    writer_.addResolvedConfigInt("requested_transfer_descriptor_batch_size", options_.transfer_descriptor_batch_size);
+    writer_.addResolvedConfigInt("resolved_transfer_descriptor_batch_size", descriptor_batch_size);
     writer_.addResolvedConfig("disk_io_mode", options_.disk_io_mode);
     writer_.addResolvedConfig("disk_access_pattern", options_.disk_access_pattern);
 
@@ -277,11 +340,11 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
                                                      options_.disk_io_mode == "buffered");
     }
 
-    auto setup = buildTransferSetup(*group_set_info, concurrency, "transfer_", need_device, host_pool, disk_pool);
+    auto setup = buildTransferSetup(*group_set_info, wave_width, "transfer_", need_device, host_pool, disk_pool);
 
     MemberDeviceBlocks device_blocks(setup.device_pools.size());
     for (size_t member_index = 0; member_index < setup.device_pools.size(); ++member_index) {
-        for (size_t worker = 0; worker < concurrency; ++worker) {
+        for (size_t lane = 0; lane < wave_width; ++lane) {
             device_blocks[member_index].push_back(setup.device_pools[member_index]->malloc().value());
         }
     }
@@ -307,6 +370,14 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
     }
     cudaDeviceSynchronize();
 
+    std::unique_ptr<BlockTreeTaskPool> d2disk_submit_pool;
+    if (std::find(options_.transfer_directions.begin(), options_.transfer_directions.end(), "d2disk")
+        != options_.transfer_directions.end()) {
+        d2disk_submit_pool =
+            std::make_unique<BlockTreeTaskPool>(wave_width, wave_width, "benchmark_d2disk_submit");
+        RTP_LLM_CHECK_WITH_INFO(d2disk_submit_pool->start(), "failed to start D2Disk benchmark submit pool");
+    }
+
     bool disk_initialized = false;
     bool disk_prefill     = false;
     for (const auto& direction : options_.transfer_directions) {
@@ -326,34 +397,39 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
     } else if (need_disk) {
         writer_.addResolvedConfig("read_precondition", "paired_write_same_coordinate");
     } else {
-        writer_.addResolvedConfig("read_precondition", "initialized_worker_and_host_blocks");
+        writer_.addResolvedConfig("read_precondition", "initialized_lane_and_host_blocks");
     }
 
-    writer_.addResolvedConfigInt("tier.device.capacity_blocks", need_device ? concurrency : 0);
-    writer_.addResolvedConfigInt("tier.device.allocated_blocks", need_device ? concurrency : 0);
-    writer_.addResolvedConfigInt("tier.device.addressable_blocks", need_device ? concurrency : 0);
+    writer_.addResolvedConfigInt("tier.device.capacity_blocks", need_device ? wave_width : 0);
+    writer_.addResolvedConfigInt("tier.device.allocated_blocks", need_device ? wave_width : 0);
+    writer_.addResolvedConfigInt("tier.device.addressable_blocks", need_device ? wave_width : 0);
     writer_.addResolvedConfigInt("tier.host.capacity_blocks", host_block_count);
     writer_.addResolvedConfigInt("tier.host.allocated_blocks", host_blocks.size());
     writer_.addResolvedConfigInt("tier.host.addressable_blocks",
-                                 need_host ? (host_is_working_set ? working_set_blocks : concurrency) : 0);
+                                 need_host ? (host_is_working_set ? working_set_blocks : wave_width) : 0);
     writer_.addResolvedConfigInt("tier.disk.capacity_blocks", need_disk ? working_set_blocks : 0);
     writer_.addResolvedConfigInt("tier.disk.allocated_blocks", disk_blocks.size());
     writer_.addResolvedConfigInt("tier.disk.addressable_blocks", need_disk ? working_set_blocks : 0);
 
+    auto run_batch = [&](size_t operation_count, size_t start_coordinate) {
+        return runTransferBatch(setup.engine,
+                                options_.transfer_directions,
+                                device_blocks,
+                                host_blocks,
+                                disk_blocks,
+                                d2disk_submit_pool.get(),
+                                wave_width,
+                                descriptor_batch_size,
+                                operation_count,
+                                start_coordinate,
+                                working_set_blocks,
+                                host_is_working_set);
+    };
     size_t        coordinate_cursor = 0;
     const size_t  direction_count   = options_.transfer_directions.size();
     const size_t  warmup_operations = working_set_blocks * direction_count;
     const auto    warmup_start      = Clock::now();
-    const auto    warmup            = runTransferBatch(setup.engine,
-                                         options_.transfer_directions,
-                                         device_blocks,
-                                         host_blocks,
-                                         disk_blocks,
-                                         concurrency,
-                                         warmup_operations,
-                                         coordinate_cursor,
-                                         working_set_blocks,
-                                         host_is_working_set);
+    const auto    warmup            = run_batch(warmup_operations, coordinate_cursor);
     const int64_t warmup_ns         = elapsedNs(warmup_start, Clock::now());
     if (warmup.failed() != 0 || warmup.attempted() != warmup_operations) {
         recordBatchFailure("warmup", warmup);
@@ -370,16 +446,7 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
     size_t       calibrated_operations = options_.transfer_operation_count;
     for (int attempt = 0; attempt < 4; ++attempt) {
         const auto pilot_start = Clock::now();
-        const auto pilot       = runTransferBatch(setup.engine,
-                                            options_.transfer_directions,
-                                            device_blocks,
-                                            host_blocks,
-                                            disk_blocks,
-                                            concurrency,
-                                            pilot_operations,
-                                            coordinate_cursor,
-                                            working_set_blocks,
-                                            host_is_working_set);
+        const auto pilot       = run_batch(pilot_operations, coordinate_cursor);
         pilot_ns               = elapsedNs(pilot_start, Clock::now());
         if (pilot.failed() != 0 || pilot.attempted() != pilot_operations) {
             recordBatchFailure("pilot", pilot);
@@ -402,19 +469,11 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
               << " ms; initial measured global ops=" << initial_measured_operations << std::endl;
 
     setup.copy_stats->reset();
-    std::cout << "MEASURE_START" << std::endl;
+    std::cout << "PROFILE_ATTACH_READY" << std::endl;
     std::this_thread::sleep_for(std::chrono::seconds(2));
+    std::cout << "MEASURE_START" << std::endl;
     const auto start            = Clock::now();
-    auto       measured         = runTransferBatch(setup.engine,
-                                     options_.transfer_directions,
-                                     device_blocks,
-                                     host_blocks,
-                                     disk_blocks,
-                                     concurrency,
-                                     initial_measured_operations,
-                                     coordinate_cursor,
-                                     working_set_blocks,
-                                     host_is_working_set);
+    auto       measured         = run_batch(initial_measured_operations, coordinate_cursor);
     size_t     final_operations = initial_measured_operations;
     coordinate_cursor += (initial_measured_operations + direction_count - 1) / direction_count;
 
@@ -432,45 +491,25 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
         const size_t estimated_extension =
             static_cast<size_t>(std::ceil(static_cast<double>(final_operations) * remaining_ratio * 1.10));
         const size_t extension_operations =
-            std::max<size_t>(estimated_extension, std::max<size_t>(64, concurrency * direction_count));
+            std::max<size_t>(estimated_extension, std::max<size_t>(64, wave_width * direction_count));
 
         std::cout << "[transfer] extending measured window by " << extension_operations << " global ops after "
                   << static_cast<double>(measured_ns) / 1e9 << " s" << std::endl;
-        const auto extension = runTransferBatch(setup.engine,
-                                                options_.transfer_directions,
-                                                device_blocks,
-                                                host_blocks,
-                                                disk_blocks,
-                                                concurrency,
-                                                extension_operations,
-                                                coordinate_cursor,
-                                                working_set_blocks,
-                                                host_is_working_set);
+        const auto extension = run_batch(extension_operations, coordinate_cursor);
         coordinate_cursor += (extension_operations + direction_count - 1) / direction_count;
         final_operations += extension_operations;
 
-        for (size_t index = 0; index < working_set_blocks; ++index) {
-            measured.visited_working_set[index] =
-                measured.visited_working_set[index] || extension.visited_working_set[index];
-        }
-        for (const auto& [direction, extension_stats] : extension.directions) {
-            auto& aggregate = measured.directions.at(direction);
-            aggregate.attempted += extension_stats.attempted;
-            aggregate.succeeded += extension_stats.succeeded;
-            aggregate.failed += extension_stats.failed;
-            if (aggregate.first_error.empty() && !extension_stats.first_error.empty()) {
-                aggregate.first_error        = extension_stats.first_error;
-                aggregate.first_failure_type = extension_stats.first_failure_type;
-            }
-        }
+        measured.merge(extension);
         measured_ns = elapsedNs(start, Clock::now());
     }
 
-    const size_t attempted = measured.attempted();
-    const size_t succeeded = measured.succeeded();
-    const size_t failed    = measured.failed();
-    const size_t visited   = measured.visitedWorkingSetBlocks();
-    const bool   wrapped   = ((final_operations + direction_count - 1) / direction_count) > working_set_blocks;
+    const size_t attempted         = measured.attempted();
+    const size_t succeeded         = measured.succeeded();
+    const size_t failed            = measured.failed();
+    const size_t visited           = measured.visitedWorkingSetBlocks();
+    const size_t batch_submissions = measured.batchSubmissions();
+    const bool descriptor_batch_ok = measured.descriptorBatchContractOk();
+    const bool   wrapped           = ((final_operations + direction_count - 1) / direction_count) > working_set_blocks;
 
     std::vector<std::string> actual_strategies;
     if (setup.copy_stats->staged_sm.load(std::memory_order_relaxed) > 0)
@@ -491,6 +530,10 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
     writer_.addPhaseNs("measured", measured_ns);
     writer_.addResolvedConfigInt("resolved_operation_count", final_operations);
     writer_.addResolvedConfigInt("min_measured_seconds", min_seconds);
+    writer_.addMetric("transfer_batch_submissions", static_cast<double>(batch_submissions));
+    writer_.addMetric("descriptor_batch_size_avg",
+                      batch_submissions == 0 ? 0.0 : static_cast<double>(attempted) / batch_submissions);
+    writer_.addMetric("descriptor_batch_size_max", static_cast<double>(measured.maxDescriptorBatchSize()));
 
     const double seconds = static_cast<double>(measured_ns) / 1e9;
     if (succeeded > 0 && measured_ns > 0) {
@@ -508,6 +551,11 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
         writer_.addMetric(prefix + "succeeded", static_cast<double>(stats.succeeded));
         writer_.addMetric(prefix + "failed", static_cast<double>(stats.failed));
         writer_.addMetric(prefix + "bytes", static_cast<double>(stats.succeeded) * payload_bytes);
+        writer_.addMetric(prefix + "batch_submissions", static_cast<double>(stats.batch_submissions));
+        writer_.addMetric(
+            prefix + "descriptor_batch_size_avg",
+            stats.batch_submissions == 0 ? 0.0 : static_cast<double>(stats.attempted) / stats.batch_submissions);
+        writer_.addMetric(prefix + "descriptor_batch_size_max", static_cast<double>(stats.max_descriptor_batch_size));
         if (seconds > 0) {
             writer_.addMetric(prefix + "throughput_bps",
                               static_cast<double>(stats.succeeded) * payload_bytes / seconds);
@@ -531,22 +579,22 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
 
     const bool strategy_ok = options_.copy_strategy == "auto" || actual_strategy == options_.copy_strategy;
     return attempted == final_operations && succeeded + failed == attempted && failed == 0
-           && visited == working_set_blocks && strategy_ok;
+           && visited == working_set_blocks && strategy_ok && descriptor_batch_ok;
 }
 
 TransferDescriptor TransferBenchmarkRunner::createDescriptor(const std::string&               direction,
                                                              const MemberDeviceBlocks&        device_blocks,
                                                              const std::vector<BlockIdxType>& host_blocks,
                                                              const std::vector<BlockIdxType>& disk_blocks,
-                                                             size_t                           worker_slot_index,
+                                                             size_t                           lane_index,
                                                              size_t                           working_set_index,
                                                              bool                             host_is_working_set) {
     std::vector<BlockIdxType> member_blocks;
     member_blocks.reserve(device_blocks.size());
     for (const auto& blocks : device_blocks) {
-        member_blocks.push_back(blocks[worker_slot_index]);
+        member_blocks.push_back(blocks[lane_index]);
     }
-    const size_t host_index = host_is_working_set ? working_set_index : worker_slot_index;
+    const size_t host_index = host_is_working_set ? working_set_index : lane_index;
     if (direction == "d2h")
         return TransferDescriptor::deviceToHost(0, member_blocks, host_blocks[host_index]);
     if (direction == "h2d")
@@ -566,74 +614,110 @@ TransferBenchmarkRunner::runTransferBatch(const std::shared_ptr<PerRankBlockTran
                                           const MemberDeviceBlocks&                          device_blocks,
                                           const std::vector<BlockIdxType>&                   host_blocks,
                                           const std::vector<BlockIdxType>&                   disk_blocks,
-                                          size_t                                             worker_count,
+                                          BlockTreeTaskPool*                                 d2disk_submit_pool,
+                                          size_t                                             wave_width,
+                                          size_t                                             descriptor_batch_size,
                                           size_t                                             operation_count,
                                           size_t                                             start_coordinate,
                                           size_t                                             working_set_blocks,
                                           bool                                               host_is_working_set) {
-    std::vector<BatchResult> worker_results(worker_count);
-    std::vector<std::thread> workers;
-    workers.reserve(worker_count);
-    for (size_t worker = 0; worker < worker_count; ++worker) {
-        workers.emplace_back([&, worker]() {
-            auto& result = worker_results[worker];
-            result.visited_working_set.assign(working_set_blocks, false);
-            for (const auto& direction : directions)
-                result.directions.emplace(direction, DirectionStats{});
-            const auto operations = scheduleTransferWorker(operation_count,
-                                                           directions.size(),
-                                                           start_coordinate,
-                                                           working_set_blocks,
-                                                           options_.disk_access_pattern == "random",
-                                                           seed_,
-                                                           worker_count,
-                                                           worker);
+    BatchResult result;
+    result.visited_working_set.assign(working_set_blocks, false);
+    for (const auto& direction : directions) {
+        result.directions.emplace(direction, DirectionStats{});
+    }
+
+    struct PendingBatch {
+        size_t                        descriptor_count{0};
+        std::shared_ptr<AsyncContext> context;
+    };
+
+    const size_t direction_count  = directions.size();
+    const size_t coordinate_count = (operation_count + direction_count - 1) / direction_count;
+    std::vector<TransferDescriptor> descriptors;
+    std::vector<PendingBatch>       pending;
+    descriptors.reserve(wave_width);
+    pending.reserve(wave_width);
+    for (size_t coordinate_begin = 0; coordinate_begin < coordinate_count; coordinate_begin += wave_width) {
+        const auto operations = scheduleTransferWave(operation_count,
+                                                     direction_count,
+                                                     start_coordinate,
+                                                     working_set_blocks,
+                                                     options_.disk_access_pattern == "random",
+                                                     seed_,
+                                                     coordinate_begin,
+                                                     wave_width);
+        for (size_t direction_index = 0; direction_index < direction_count; ++direction_index) {
+            const auto& direction = directions[direction_index];
+            auto&       stats     = result.directions.at(direction);
+            descriptors.clear();
             for (const auto& operation : operations) {
-                const auto& direction = directions[operation.direction_index];
-                auto&       stats     = result.directions.at(direction);
-                ++stats.attempted;
+                if (operation.direction_index != direction_index) {
+                    continue;
+                }
                 result.visited_working_set[operation.working_set_index] = true;
-                auto descriptor                                         = createDescriptor(direction,
-                                                   device_blocks,
-                                                   host_blocks,
-                                                   disk_blocks,
-                                                   worker,
-                                                   operation.working_set_index,
-                                                   host_is_working_set);
-                auto context                                            = engine->submit({descriptor});
-                context->waitDone();
-                if (context->success()) {
-                    ++stats.succeeded;
+                descriptors.push_back(createDescriptor(direction,
+                                                       device_blocks,
+                                                       host_blocks,
+                                                       disk_blocks,
+                                                       operation.lane_index,
+                                                       operation.working_set_index,
+                                                       host_is_working_set));
+            }
+            if (descriptors.empty()) {
+                continue;
+            }
+
+            // PerRankBlockTransferEngine batches five directions. Device->Disk
+            // remains a synchronous singleton contract, so preserve its lane
+            // concurrency with parallel singleton submits inside this wave.
+            const size_t submit_batch_size = direction == "d2disk" ? 1 : descriptor_batch_size;
+            pending.clear();
+            stats.expected_batch_submissions +=
+                (descriptors.size() + submit_batch_size - 1) / submit_batch_size;
+            stats.expected_max_descriptor_batch_size =
+                std::max(stats.expected_max_descriptor_batch_size, std::min(submit_batch_size, descriptors.size()));
+            for (size_t begin = 0; begin < descriptors.size(); begin += submit_batch_size) {
+                const size_t end = std::min(begin + submit_batch_size, descriptors.size());
+                pending.push_back({end - begin, nullptr});
+                stats.attempted += end - begin;
+            }
+
+            if (direction == "d2disk") {
+                RTP_LLM_CHECK(d2disk_submit_pool != nullptr);
+                for (size_t index = 0; index < descriptors.size(); ++index) {
+                    RTP_LLM_CHECK(d2disk_submit_pool->submit(
+                        [&, index] { pending[index].context = engine->submit({descriptors[index]}); }));
+                }
+                d2disk_submit_pool->waitForIdle();
+                stats.batch_submissions += pending.size();
+                stats.max_descriptor_batch_size = std::max(stats.max_descriptor_batch_size, size_t{1});
+            } else {
+                size_t begin = 0;
+                for (auto& batch : pending) {
+                    const size_t end = begin + batch.descriptor_count;
+                    batch.context    = engine->submit(
+                        std::vector<TransferDescriptor>(descriptors.begin() + begin, descriptors.begin() + end));
+                    begin = end;
+                    ++stats.batch_submissions;
+                    stats.max_descriptor_batch_size =
+                        std::max(stats.max_descriptor_batch_size, batch.descriptor_count);
+                }
+            }
+
+            for (auto& batch : pending) {
+                RTP_LLM_CHECK(batch.context != nullptr);
+                batch.context->waitDone();
+                if (batch.context->success()) {
+                    stats.succeeded += batch.descriptor_count;
                 } else {
-                    ++stats.failed;
+                    stats.failed += batch.descriptor_count;
                     if (stats.first_error.empty()) {
-                        const auto error         = context->errorInfo();
+                        const auto error         = batch.context->errorInfo();
                         stats.first_error        = error.ToString();
                         stats.first_failure_type = ErrorCodeToString(error.code());
                     }
                 }
-            }
-        });
-    }
-    for (auto& worker : workers)
-        worker.join();
-
-    BatchResult result;
-    result.visited_working_set.assign(working_set_blocks, false);
-    for (const auto& direction : directions)
-        result.directions.emplace(direction, DirectionStats{});
-    for (const auto& worker_result : worker_results) {
-        for (size_t index = 0; index < working_set_blocks; ++index)
-            result.visited_working_set[index] =
-                result.visited_working_set[index] || worker_result.visited_working_set[index];
-        for (const auto& [direction, worker_stats] : worker_result.directions) {
-            auto& stats = result.directions.at(direction);
-            stats.attempted += worker_stats.attempted;
-            stats.succeeded += worker_stats.succeeded;
-            stats.failed += worker_stats.failed;
-            if (stats.first_error.empty() && !worker_stats.first_error.empty()) {
-                stats.first_error        = worker_stats.first_error;
-                stats.first_failure_type = worker_stats.first_failure_type;
             }
         }
     }

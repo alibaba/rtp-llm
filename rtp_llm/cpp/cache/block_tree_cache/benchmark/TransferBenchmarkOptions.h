@@ -18,6 +18,11 @@ struct TransferOptions {
     size_t transfer_operation_count{1024};
     size_t transfer_concurrency{1};
 
+    // Number of same-direction descriptors submitted in one transfer-engine
+    // API call. 0 follows transfer_concurrency. Device->Disk is the only
+    // direction whose engine contract still requires singleton submissions.
+    size_t transfer_descriptor_batch_size{0};
+
     // Device<->Host copy strategy. Explicit strategies disable the other
     // optimized path; the runner observes the actual strategy and rejects
     // fallback or mixed execution.

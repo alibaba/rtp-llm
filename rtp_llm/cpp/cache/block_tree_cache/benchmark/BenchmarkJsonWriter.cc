@@ -12,8 +12,7 @@ BenchmarkJsonWriter::BenchmarkJsonWriter():
     resource_budget_(rapidjson::kObjectType),
     phases_ns_(rapidjson::kObjectType),
     statistics_(rapidjson::kObjectType),
-    metrics_(rapidjson::kObjectType),
-    environment_(rapidjson::kObjectType) {
+    metrics_(rapidjson::kObjectType) {
     setSchemaVersion(1);
     setComponent("BlockTreeCache");
     setBinary("block_tree_cache_gpu_benchmark");
@@ -105,12 +104,6 @@ void BenchmarkJsonWriter::addMetric(const std::string& name, double value) {
     metrics_.AddMember(key_value, value, doc_.GetAllocator());
 }
 
-void BenchmarkJsonWriter::addEnvironment(const std::string& key, const std::string& value) {
-    rapidjson::Value key_value(key.c_str(), doc_.GetAllocator());
-    rapidjson::Value value_value(value.c_str(), doc_.GetAllocator());
-    environment_.AddMember(key_value, value_value, doc_.GetAllocator());
-}
-
 void BenchmarkJsonWriter::setTransferWorkload(size_t requested,
                                               size_t attempted,
                                               size_t succeeded,
@@ -134,13 +127,42 @@ void BenchmarkJsonWriter::setTransferWorkload(size_t requested,
     doc_.AddMember("transfer_workload", std::move(obj), doc_.GetAllocator());
 }
 
+void BenchmarkJsonWriter::setTreeLifecycle(size_t  completed_request_transactions,
+                                           size_t  failed_requests,
+                                           size_t  forward_batches,
+                                           size_t  forward_requests,
+                                           int64_t simulated_forward_sleep_ns,
+                                           size_t  unexpected_extra_match_count,
+                                           bool    pressure_ready,
+                                           size_t  final_active_requests,
+                                           size_t  final_pending_load_tickets,
+                                           size_t  final_pending_tasks,
+                                           size_t  drain_timeouts,
+                                           size_t  final_request_ref_blocks) {
+    rapidjson::Value obj(rapidjson::kObjectType);
+    obj.AddMember(
+        "completed_request_transactions", static_cast<uint64_t>(completed_request_transactions), doc_.GetAllocator());
+    obj.AddMember("failed_requests", static_cast<uint64_t>(failed_requests), doc_.GetAllocator());
+    obj.AddMember("forward_batches", static_cast<uint64_t>(forward_batches), doc_.GetAllocator());
+    obj.AddMember("forward_requests", static_cast<uint64_t>(forward_requests), doc_.GetAllocator());
+    obj.AddMember("simulated_forward_sleep_ns", static_cast<int64_t>(simulated_forward_sleep_ns), doc_.GetAllocator());
+    obj.AddMember(
+        "unexpected_extra_match_count", static_cast<uint64_t>(unexpected_extra_match_count), doc_.GetAllocator());
+    obj.AddMember("pressure_ready", pressure_ready, doc_.GetAllocator());
+    obj.AddMember("final_active_requests", static_cast<uint64_t>(final_active_requests), doc_.GetAllocator());
+    obj.AddMember("final_pending_load_tickets", static_cast<uint64_t>(final_pending_load_tickets), doc_.GetAllocator());
+    obj.AddMember("final_pending_tasks", static_cast<uint64_t>(final_pending_tasks), doc_.GetAllocator());
+    obj.AddMember("drain_timeouts", static_cast<uint64_t>(drain_timeouts), doc_.GetAllocator());
+    obj.AddMember("final_request_ref_blocks", static_cast<uint64_t>(final_request_ref_blocks), doc_.GetAllocator());
+    doc_.AddMember("tree_lifecycle", std::move(obj), doc_.GetAllocator());
+}
+
 std::string BenchmarkJsonWriter::toJson() {
     doc_.AddMember("resolved_config", resolved_config_, doc_.GetAllocator());
     doc_.AddMember("resource_budget", resource_budget_, doc_.GetAllocator());
     doc_.AddMember("phases_ns", phases_ns_, doc_.GetAllocator());
     doc_.AddMember("statistics", statistics_, doc_.GetAllocator());
     doc_.AddMember("metrics", metrics_, doc_.GetAllocator());
-    doc_.AddMember("environment", environment_, doc_.GetAllocator());
     rapidjson::StringBuffer                    buffer;
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
     doc_.Accept(writer);

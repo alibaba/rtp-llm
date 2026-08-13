@@ -1,386 +1,299 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/TreeWorkloadGenerator.h"
 
 #include <algorithm>
-#include <cmath>
-#include <limits>
+#include <iomanip>
+#include <numeric>
+#include <random>
+#include <sstream>
 #include <stdexcept>
 
 namespace rtp_llm::benchmark {
+
 namespace {
 
-void validateConfig(const StatefulPathConfig& config) {
-    if (config.max_path_length == 0 || config.initial_min_path_length == 0
-        || config.initial_min_path_length > config.initial_max_path_length
-        || config.initial_max_path_length > config.max_path_length || config.append_length == 0
-        || config.inserts_per_match == 0 || config.active_path_limit == 0
-        || config.append_length > config.max_path_length / config.inserts_per_match) {
-        throw std::invalid_argument("invalid stateful path length configuration");
+// Key spaces are disjoint by construction: shared base, background tree and
+// request-unique suffixes can never collide, so a request can never match
+// beyond its planned reuse prefix unless the key space layout is broken.
+constexpr int64_t kSharedBaseKeyBase    = 1;
+constexpr int64_t kBackgroundKeyBase    = 1'000'000;
+constexpr int64_t kRequestSuffixKeyBase = 1'000'000'000'000;
+// ceil(950000 / 256) = 3711 maximum input blocks; per-request stride leaves
+// slack so every request gets its own contiguous suffix key range.
+constexpr int64_t kRequestSuffixStride   = 4'096;
+constexpr size_t  kBackgroundBranchCount = 8;
+
+uint64_t fnv1a64(const void* data, size_t length, uint64_t hash = 1469598103934665603ULL) {
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    for (size_t i = 0; i < length; ++i) {
+        hash ^= bytes[i];
+        hash *= 1099511628211ULL;
     }
-    if (!std::isfinite(config.continuation_ratio) || !std::isfinite(config.fork_ratio)
-        || !std::isfinite(config.fork_reuse_min_ratio) || !std::isfinite(config.fork_reuse_max_ratio)
-        || !std::isfinite(config.hot_path_ratio) || config.continuation_ratio < 0.0 || config.fork_ratio < 0.0
-        || config.continuation_ratio + config.fork_ratio > 1.0 || config.fork_reuse_min_ratio < 0.0
-        || config.fork_reuse_min_ratio > config.fork_reuse_max_ratio || config.fork_reuse_max_ratio > 1.0
-        || config.hot_path_ratio < 0.0 || config.hot_path_ratio > 1.0) {
-        throw std::invalid_argument("invalid stateful path probability configuration");
+    return hash;
+}
+
+uint64_t fnv1a64Int(uint64_t value, uint64_t hash) {
+    return fnv1a64(&value, sizeof(value), hash);
+}
+
+uint64_t fnv1a64Double(double value, uint64_t hash) {
+    return fnv1a64(&value, sizeof(value), hash);
+}
+
+uint64_t hashVector(const std::vector<size_t>& values, uint64_t hash) {
+    hash = fnv1a64Int(values.size(), hash);
+    for (const size_t value : values) {
+        hash = fnv1a64Int(value, hash);
+    }
+    return hash;
+}
+
+size_t inputBlocksForTokens(size_t tokens, size_t tokens_per_block) {
+    return (tokens + tokens_per_block - 1) / tokens_per_block;
+}
+
+void validateConfig(const OnlineTreeWorkloadConfig& config) {
+    if (config.tokens_per_block == 0 || config.logical_concurrency == 0 || config.active_token_budget == 0
+        || config.forward_sleep_ms == 0 || config.request_lifecycle_timeout_ms == 0 || config.shared_base_nodes == 0
+        || config.background_tree_nodes == 0 || config.device_pool_blocks == 0 || config.host_pool_blocks == 0
+        || config.operation_trace_count == 0) {
+        throw std::invalid_argument("online tree workload constants must be positive");
+    }
+    if (config.length_buckets_tokens.size() != config.length_weights.size() || config.length_buckets_tokens.empty()
+        || config.hit_rates_percent.empty()) {
+        throw std::invalid_argument("online tree workload distributions are malformed");
+    }
+    for (size_t i = 0; i < config.length_buckets_tokens.size(); ++i) {
+        if (config.length_weights[i] == 0) {
+            throw std::invalid_argument("online tree length weights must be positive");
+        }
     }
 }
 
-size_t randomSize(std::mt19937_64& rng, size_t min_value, size_t max_value) {
-    if (min_value > max_value) {
-        throw std::invalid_argument("invalid random range");
-    }
-    return std::uniform_int_distribution<size_t>(min_value, max_value)(rng);
+}  // anonymous namespace
+
+OnlineTreeWorkloadConfig OnlineTreeWorkloadConfig::smokeTestConfig() {
+    OnlineTreeWorkloadConfig config;
+    config.logical_concurrency           = 8;
+    config.active_token_budget           = 2'000'000;
+    config.shared_base_nodes             = 640;
+    config.background_tree_nodes         = 640;
+    config.device_pool_blocks            = 16'384;
+    config.host_pool_blocks              = 16'384;
+    config.operation_trace_count         = 2'000;
+    config.warmup_seconds                = 2;
+    config.measured_seconds              = 5;
+    config.warmup_completed_requests_min = 8;
+    config.length_buckets_tokens         = {
+        32'000, 48'000, 92'000, 96'000, 117'000, 120'000, 128'000, 135'000, 141'000, 150'000};
+    config.length_weights    = {2, 3, 5, 10, 5, 20, 5, 10, 5, 5};
+    config.hit_rates_percent = {0, 10, 30, 50, 70, 90, 99};
+    return config;
 }
 
-double randomRatio(std::mt19937_64& rng) {
-    return std::uniform_real_distribution<double>(0.0, 1.0)(rng);
-}
-
-}  // namespace
-
-StatefulPathSession::StatefulPathSession(uint64_t                     seed,
-                                         uint64_t                     key_space_id,
-                                         const std::vector<PathKeys>& initial_paths,
-                                         size_t                       worker_id,
-                                         size_t                       num_workers,
-                                         const StatefulPathConfig&    config):
-    config_(config),
-    rng_(seed ^ (key_space_id * 0x9e3779b97f4a7c15ULL) ^ (worker_id * 0xbf58476d1ce4e5b9ULL)),
-    next_unique_key_(
-        static_cast<int64_t>(1000000000000ULL + key_space_id * 10000000000ULL + worker_id * 100000000ULL)) {
+TreeWorkloadGenerator::TreeWorkloadGenerator(uint64_t seed, const OnlineTreeWorkloadConfig& config):
+    seed_(seed), config_(config) {
     validateConfig(config_);
-    if (num_workers == 0 || worker_id >= num_workers) {
-        throw std::invalid_argument("invalid worker partition");
-    }
-
-    active_paths_.reserve(std::min(config_.active_path_limit, initial_paths.size()));
-    for (size_t i = worker_id; i < initial_paths.size() && active_paths_.size() < config_.active_path_limit;
-         i += num_workers) {
-        active_paths_.push_back(std::make_shared<const PathKeys>(initial_paths[i]));
-    }
-    // Small trees may have fewer leaves than workers. Give those workers a
-    // deterministic seed path instead of turning their workload into all-cold traffic.
-    if (active_paths_.empty() && !initial_paths.empty()) {
-        active_paths_.push_back(std::make_shared<const PathKeys>(initial_paths[worker_id % initial_paths.size()]));
-    }
-
-    const size_t hot_count = std::min<size_t>(active_paths_.size(), std::max<size_t>(1, active_paths_.size() / 10));
-    hot_paths_.assign(active_paths_.begin(), active_paths_.begin() + hot_count);
-}
-
-int64_t StatefulPathSession::nextUniqueKey() {
-    if (next_unique_key_ == std::numeric_limits<int64_t>::max()) {
-        throw std::overflow_error("stateful workload key space exhausted");
-    }
-    return next_unique_key_++;
-}
-
-SharedPath StatefulPathSession::createPath(const SharedPath& prefix, size_t prefix_length, size_t total_length) {
-    if (prefix_length > total_length || (prefix && prefix_length > prefix->size())) {
-        throw std::invalid_argument("invalid path prefix length");
-    }
-
-    PathKeys path;
-    path.reserve(total_length);
-    if (prefix && prefix_length > 0) {
-        path.insert(path.end(), prefix->begin(), prefix->begin() + prefix_length);
-    }
-    while (path.size() < total_length) {
-        path.push_back(nextUniqueKey());
-    }
-    return std::make_shared<const PathKeys>(std::move(path));
-}
-
-SharedPath StatefulPathSession::selectCandidate() {
-    if (active_paths_.empty()) {
-        return nullptr;
-    }
-
-    if (!hot_paths_.empty() && randomRatio(rng_) < config_.hot_path_ratio) {
-        return hot_paths_[randomSize(rng_, 0, hot_paths_.size() - 1)];
-    }
-
-    if (epoch_candidates_.empty()) {
-        epoch_candidates_ = active_paths_;
-        std::shuffle(epoch_candidates_.begin(), epoch_candidates_.end(), rng_);
-    }
-    const auto selected = epoch_candidates_.back();
-    epoch_candidates_.pop_back();
-    return selected;
-}
-
-void StatefulPathSession::addCandidate(const SharedPath& path, const SharedPath& parent, PathScenario scenario) {
-    if (scenario == PathScenario::CONTINUATION && parent) {
-        const auto active_it = std::find(active_paths_.begin(), active_paths_.end(), parent);
-        if (active_it != active_paths_.end()) {
-            *active_it        = path;
-            const auto hot_it = std::find(hot_paths_.begin(), hot_paths_.end(), parent);
-            if (hot_it != hot_paths_.end()) {
-                *hot_it = path;
-            }
-            return;
-        }
-    }
-
-    if (active_paths_.size() < config_.active_path_limit) {
-        active_paths_.push_back(path);
-        return;
-    }
-
-    // A bounded reservoir prevents a long benchmark from accumulating an
-    // unbounded path catalog. New paths become visible at the next epoch.
-    const size_t replacement   = randomSize(rng_, 0, active_paths_.size() - 1);
-    const auto   evicted       = active_paths_[replacement];
-    active_paths_[replacement] = path;
-    const auto hot_it          = std::find(hot_paths_.begin(), hot_paths_.end(), evicted);
-    if (hot_it != hot_paths_.end()) {
-        *hot_it = path;
-    }
-}
-
-StatefulPathOperation StatefulPathSession::nextOperation() {
-    StatefulPathOperation operation;
-    const size_t max_request_length = config_.max_path_length - config_.append_length * config_.inserts_per_match;
-    if (max_request_length == 0) {
-        throw std::invalid_argument("inserts leave no room for a match path");
-    }
-
-    const double roll = randomRatio(rng_);
-    if (roll < config_.continuation_ratio) {
-        operation.scenario = PathScenario::CONTINUATION;
-    } else if (roll < config_.continuation_ratio + config_.fork_ratio) {
-        operation.scenario = PathScenario::FORK;
-    } else {
-        operation.scenario = PathScenario::COLD;
-    }
-
-    SharedPath base;
-    if (operation.scenario != PathScenario::COLD) {
-        base = selectCandidate();
-        if (!base) {
-            operation.scenario = PathScenario::COLD;
-        }
-    }
-
-    if (operation.scenario == PathScenario::CONTINUATION && base->size() > max_request_length) {
-        // A session at the length ceiling can still branch from an earlier
-        // prefix; it cannot be extended without violating max_path_length.
-        operation.scenario = PathScenario::FORK;
-    }
-
-    if (operation.scenario == PathScenario::CONTINUATION) {
-        operation.match_path                  = base;
-        operation.planned_reuse_prefix_length = base->size();
-    } else {
-        const size_t request_min = std::min(config_.initial_min_path_length, max_request_length);
-        const size_t request_max = std::min(config_.initial_max_path_length, max_request_length);
-        const size_t request_len = randomSize(rng_, request_min, request_max);
-
-        if (operation.scenario == PathScenario::FORK && request_len > 1 && !base->empty()) {
-            const double reuse_ratio = std::uniform_real_distribution<double>(config_.fork_reuse_min_ratio,
-                                                                              config_.fork_reuse_max_ratio)(rng_);
-            const size_t raw_reuse   = static_cast<size_t>(std::floor(static_cast<double>(base->size()) * reuse_ratio));
-            operation.planned_reuse_prefix_length =
-                std::clamp<size_t>(raw_reuse, 1, std::min(base->size(), request_len - 1));
-            operation.match_path = createPath(base, operation.planned_reuse_prefix_length, request_len);
-        } else {
-            operation.scenario                    = PathScenario::COLD;
-            operation.planned_reuse_prefix_length = 0;
-            operation.match_path                  = createPath(nullptr, 0, request_len);
-        }
-    }
-
-    SharedPath previous              = operation.match_path;
-    operation.planned_new_node_count = operation.match_path->size() - operation.planned_reuse_prefix_length;
-    operation.insert_paths.reserve(config_.inserts_per_match);
-    for (size_t i = 0; i < config_.inserts_per_match; ++i) {
-        previous = createPath(previous, previous->size(), previous->size() + config_.append_length);
-        operation.planned_new_node_count += config_.append_length;
-        operation.insert_paths.push_back(previous);
-    }
-    addCandidate(previous, base, operation.scenario);
-    return operation;
-}
-
-TreeWorkloadGenerator::TreeWorkloadGenerator(uint64_t                  seed,
-                                             size_t                    tree_node_count,
-                                             size_t                    tree_branching_factor,
-                                             const StatefulPathConfig& config):
-    seed_(seed),
-    tree_node_count_(tree_node_count),
-    tree_branching_factor_(tree_branching_factor),
-    config_(config),
-    rng_(seed) {
-    validateConfig(config_);
-    if (tree_node_count_ == 0 || tree_branching_factor_ == 0) {
-        throw std::invalid_argument("tree topology dimensions must be positive");
-    }
 }
 
 int64_t TreeWorkloadGenerator::nextTopologyKey() {
-    if (next_topology_key_ == std::numeric_limits<int64_t>::max()) {
-        throw std::overflow_error("tree topology key space exhausted");
-    }
-    return next_topology_key_++;
+    return kBackgroundKeyBase + next_topology_key_++;
 }
 
-PathKeys TreeWorkloadGenerator::createTopologyPath(const PathKeys* prefix, size_t prefix_length, size_t total_length) {
-    if (prefix_length > total_length || (prefix && prefix_length > prefix->size())) {
-        throw std::invalid_argument("invalid topology prefix length");
-    }
-    PathKeys path;
-    path.reserve(total_length);
-    if (prefix && prefix_length > 0) {
-        path.insert(path.end(), prefix->begin(), prefix->begin() + prefix_length);
-    }
-    while (path.size() < total_length) {
-        path.push_back(nextTopologyKey());
-    }
-    return path;
+int64_t TreeWorkloadGenerator::nextSuffixKey(size_t request_index, size_t suffix_index) {
+    return kRequestSuffixKeyBase + static_cast<int64_t>(request_index) * kRequestSuffixStride
+           + static_cast<int64_t>(suffix_index);
 }
 
-WorkloadMetadata TreeWorkloadGenerator::generateTopology() {
-    tree_paths_.clear();
-    metadata_ = {};
-    rng_.seed(seed_);
-    next_topology_key_ = 1;
+OnlineWorkloadMetadata TreeWorkloadGenerator::generateTopology() {
+    topology_paths_.clear();
+    next_topology_key_ = 0;
 
-    // Node IDs let us enforce fanout without storing every long key prefix in
-    // an ordered map. A generated key is globally unique, so each divergent
-    // suffix maps one-to-one to newly assigned node IDs.
-    std::vector<std::vector<size_t>> path_node_ids;
-    std::vector<size_t>              child_counts;
-    size_t                           root_child_count = 0;
-    size_t                           node_count       = 0;
+    // Shared base: one path of shared_base_nodes blocks. Requests reuse its
+    // prefix and never pin it, so watermark eviction can partially demote it
+    // and actual reuse may drop below planned reuse.
+    PathKeys shared_base;
+    shared_base.reserve(config_.shared_base_nodes);
+    for (size_t i = 0; i < config_.shared_base_nodes; ++i) {
+        shared_base.push_back(kSharedBaseKeyBase + static_cast<int64_t>(i));
+    }
+    topology_paths_.push_back(std::move(shared_base));
 
-    const size_t min_length = std::min(config_.initial_min_path_length, tree_node_count_);
-    const size_t max_length = std::min(config_.initial_max_path_length, config_.max_path_length);
-
-    auto parentHasCapacity = [&](size_t path_index, size_t prefix_length) {
-        if (prefix_length == 0) {
-            return root_child_count < tree_branching_factor_;
+    // Background tree: kBackgroundBranchCount deterministic branches that
+    // share only the implicit tree root and fill the remaining node budget.
+    // They are never matched by requests and only supply churn/space pressure.
+    size_t remaining = config_.background_tree_nodes;
+    for (size_t branch = 0; branch < kBackgroundBranchCount; ++branch) {
+        const size_t branch_length = remaining / (kBackgroundBranchCount - branch);
+        PathKeys     branch_path;
+        branch_path.reserve(branch_length);
+        for (size_t i = 0; i < branch_length; ++i) {
+            branch_path.push_back(nextTopologyKey());
         }
-        return child_counts[path_node_ids[path_index][prefix_length - 1]] < tree_branching_factor_;
+        topology_paths_.push_back(std::move(branch_path));
+        remaining -= branch_length;
+    }
+
+    OnlineWorkloadMetadata metadata;
+    metadata.actual_node_count     = config_.shared_base_nodes + config_.background_tree_nodes;
+    metadata.shared_base_nodes     = config_.shared_base_nodes;
+    metadata.background_tree_nodes = config_.background_tree_nodes;
+    return metadata;
+}
+
+void TreeWorkloadGenerator::generateTrace() {
+    if (topology_paths_.empty()) {
+        throw std::logic_error("generateTopology() must be called before generateTrace()");
+    }
+    trace_.clear();
+    trace_hash_                 = fnv1a64Int(seed_, 1469598103934665603ULL);
+    base_request_count_         = 0;
+    continuation_request_count_ = 0;
+
+    // workload_definition_hash covers the fixed workload protocol (distributions,
+    // capacities, etc.) but not task-pool size, so tp4/tp8 share the same hash.
+    {
+        workload_definition_hash_ = fnv1a64Int(config_.tokens_per_block, 1469598103934665603ULL);
+        workload_definition_hash_ = fnv1a64Int(config_.logical_concurrency, workload_definition_hash_);
+        workload_definition_hash_ = fnv1a64Int(config_.active_token_budget, workload_definition_hash_);
+        workload_definition_hash_ = fnv1a64Int(config_.forward_sleep_ms, workload_definition_hash_);
+        workload_definition_hash_ = fnv1a64Int(config_.request_lifecycle_timeout_ms, workload_definition_hash_);
+        workload_definition_hash_ =
+            fnv1a64Int(config_.shared_base_nodes + config_.background_tree_nodes, workload_definition_hash_);
+        workload_definition_hash_ = fnv1a64Int(config_.shared_base_nodes, workload_definition_hash_);
+        workload_definition_hash_ = fnv1a64Int(config_.background_tree_nodes, workload_definition_hash_);
+        workload_definition_hash_ = fnv1a64Int(config_.device_pool_blocks, workload_definition_hash_);
+        workload_definition_hash_ = fnv1a64Int(config_.host_pool_blocks, workload_definition_hash_);
+        workload_definition_hash_ = fnv1a64Double(config_.device_watermark_ratio, workload_definition_hash_);
+        workload_definition_hash_ = fnv1a64Double(config_.host_watermark_ratio, workload_definition_hash_);
+        workload_definition_hash_ = fnv1a64Int(config_.operation_trace_count, workload_definition_hash_);
+        workload_definition_hash_ = fnv1a64Int(config_.warmup_seconds, workload_definition_hash_);
+        workload_definition_hash_ = fnv1a64Int(config_.measured_seconds, workload_definition_hash_);
+        workload_definition_hash_ = fnv1a64Int(config_.warmup_completed_requests_min, workload_definition_hash_);
+        workload_definition_hash_ = fnv1a64Int(config_.admission_allocation_retry_limit, workload_definition_hash_);
+        workload_definition_hash_ = hashVector(config_.length_buckets_tokens, workload_definition_hash_);
+        workload_definition_hash_ = hashVector(config_.length_weights, workload_definition_hash_);
+        workload_definition_hash_ = hashVector(config_.hit_rates_percent, workload_definition_hash_);
+    }
+
+    std::mt19937_64     rng(seed_);
+    std::vector<size_t> cumulative_weights(config_.length_weights.size());
+    std::partial_sum(config_.length_weights.begin(), config_.length_weights.end(), cumulative_weights.begin());
+    const size_t total_weight = cumulative_weights.back();
+
+    const size_t family_count = config_.logical_concurrency;
+
+    // Per-family generation state. Tracks the last published ancestor path so
+    // continuations can inherit it.
+    struct FamilyGenState {
+        std::vector<int64_t> last_path;
+        size_t               leaf_blocks{0};
+        size_t               last_request_id{0};
+        size_t               epoch_id{0};
+        size_t               generation{0};
+        bool                 has_epoch{false};
+    };
+    std::vector<FamilyGenState> families(family_count);
+
+    // Round-robin interleave: each "round" gives each family one entry.
+    const size_t rounds = (config_.operation_trace_count + family_count - 1) / family_count;
+    trace_.reserve(config_.operation_trace_count);
+    size_t request_index = 0;
+    size_t suffix_offset = 0;  // globally unique suffix key base offset
+
+    auto sampleLength = [&]() -> std::pair<size_t, size_t> {
+        const size_t roll       = static_cast<size_t>(rng() % total_weight);
+        const size_t bucket_idx = static_cast<size_t>(
+            std::upper_bound(cumulative_weights.begin(), cumulative_weights.end(), roll) - cumulative_weights.begin());
+        const size_t tokens = config_.length_buckets_tokens[bucket_idx];
+        const size_t blocks = inputBlocksForTokens(tokens, config_.tokens_per_block);
+        return {tokens, blocks};
     };
 
-    while (node_count < tree_node_count_) {
-        const size_t remaining  = tree_node_count_ - node_count;
-        size_t       base_index = 0;
-        size_t       prefix_len = 0;
-        size_t       target_len = 0;
-        bool         found      = false;
+    for (size_t round = 0; round < rounds && request_index < config_.operation_trace_count; ++round) {
+        for (size_t f = 0; f < family_count && request_index < config_.operation_trace_count; ++f) {
+            OnlineRequestDescriptor descriptor;
+            descriptor.request_id = request_index;
+            descriptor.family_id  = f;
 
-        for (size_t attempt = 0; attempt < 128 && !found; ++attempt) {
-            PathScenario scenario = PathScenario::COLD;
-            const double roll     = randomRatio(rng_);
-            if (!tree_paths_.empty() && roll < config_.continuation_ratio) {
-                scenario = PathScenario::CONTINUATION;
-            } else if (!tree_paths_.empty() && roll < config_.continuation_ratio + config_.fork_ratio) {
-                scenario = PathScenario::FORK;
-            }
+            const auto [tokens, blocks] = sampleLength();
+            descriptor.target_tokens    = tokens;
+            descriptor.input_blocks     = blocks;
 
-            if (scenario != PathScenario::COLD) {
-                base_index = randomSize(rng_, 0, tree_paths_.size() - 1);
-            }
-            if (scenario == PathScenario::CONTINUATION) {
-                prefix_len = tree_paths_[base_index].size();
-            } else if (scenario == PathScenario::FORK) {
-                const double reuse_ratio = std::uniform_real_distribution<double>(config_.fork_reuse_min_ratio,
-                                                                                  config_.fork_reuse_max_ratio)(rng_);
-                prefix_len =
-                    std::max<size_t>(1, static_cast<size_t>(std::floor(tree_paths_[base_index].size() * reuse_ratio)));
-                prefix_len = std::min(prefix_len, tree_paths_[base_index].size());
-            } else {
-                prefix_len = 0;
-            }
+            FamilyGenState& fam = families[f];
+            if (fam.last_path.empty() || blocks <= fam.leaf_blocks) {
+                // BASE — new epoch (no parent or sampled length ≤ current leaf).
+                const size_t hit_percent        = config_.hit_rates_percent[rng() % config_.hit_rates_percent.size()];
+                descriptor.planned_reuse_blocks = std::min(blocks * hit_percent / 100, blocks - 1);
+                descriptor.generation           = 0;
+                descriptor.predecessor_id       = -1;
+                descriptor.is_continuation      = false;
 
-            if (prefix_len >= max_length || (prefix_len > 0 && !parentHasCapacity(base_index, prefix_len))
-                || (prefix_len == 0 && root_child_count >= tree_branching_factor_)) {
-                continue;
-            }
-
-            const size_t lower = std::max(min_length, prefix_len + 1);
-            if (lower > max_length) {
-                continue;
-            }
-            target_len        = randomSize(rng_, lower, max_length);
-            size_t suffix_len = std::min(remaining, target_len - prefix_len);
-            if (prefix_len + suffix_len < min_length) {
-                suffix_len = min_length - prefix_len;
-            }
-            if (suffix_len > remaining || prefix_len + suffix_len > max_length) {
-                continue;
-            }
-            target_len = prefix_len + suffix_len;
-            found      = true;
-        }
-
-        if (!found) {
-            // Deterministic fallback is important for the final short suffix
-            // and for small branching factors.
-            for (size_t i = 0; i < tree_paths_.size() && !found; ++i) {
-                const size_t prefix_begin = min_length > remaining ? min_length - remaining : 0;
-                const size_t prefix_end   = std::min(tree_paths_[i].size(), max_length - 1);
-                for (size_t prefix = prefix_begin; prefix <= prefix_end; ++prefix) {
-                    if (!parentHasCapacity(i, prefix)) {
-                        continue;
-                    }
-                    const size_t suffix_len = std::min(remaining, max_length - prefix);
-                    if (prefix + suffix_len < min_length) {
-                        continue;
-                    }
-                    base_index = i;
-                    prefix_len = prefix;
-                    target_len = prefix + suffix_len;
-                    found      = true;
-                    break;
+                if (fam.has_epoch) {
+                    ++fam.epoch_id;
                 }
-            }
-        }
-        if (!found) {
-            if (tree_paths_.empty() && root_child_count < tree_branching_factor_) {
-                prefix_len = 0;
-                target_len = std::min(remaining, max_length);
-                found      = true;
+                fam.has_epoch       = true;
+                fam.generation      = 0;
+                descriptor.epoch_id = fam.epoch_id;
+
+                const size_t suffix_blocks = blocks - descriptor.planned_reuse_blocks;
+                descriptor.path.reserve(blocks);
+                descriptor.path.insert(descriptor.path.end(),
+                                       topology_paths_.front().begin(),
+                                       topology_paths_.front().begin()
+                                           + static_cast<ptrdiff_t>(descriptor.planned_reuse_blocks));
+                for (size_t s = 0; s < suffix_blocks; ++s) {
+                    descriptor.path.push_back(nextSuffixKey(suffix_offset, s));
+                }
+                ++suffix_offset;
+
+                fam.last_path       = descriptor.path;
+                fam.leaf_blocks     = blocks;
+                fam.last_request_id = descriptor.request_id;
+                ++base_request_count_;
             } else {
-                throw std::runtime_error("unable to generate topology within path/fanout bounds");
+                // CONTINUATION — sampled length > leaf, append to parent path.
+                const size_t append_blocks      = blocks - fam.leaf_blocks;
+                descriptor.planned_reuse_blocks = fam.leaf_blocks;
+                descriptor.epoch_id             = fam.epoch_id;
+                descriptor.generation           = fam.generation + 1;
+                descriptor.predecessor_id       = static_cast<int64_t>(fam.last_request_id);
+                descriptor.is_continuation      = true;
+
+                descriptor.path = fam.last_path;
+                for (size_t s = 0; s < append_blocks; ++s) {
+                    descriptor.path.push_back(nextSuffixKey(suffix_offset, s));
+                }
+                ++suffix_offset;
+
+                fam.last_path       = descriptor.path;
+                fam.leaf_blocks     = blocks;
+                fam.last_request_id = descriptor.request_id;
+                fam.generation      = descriptor.generation;
+                ++continuation_request_count_;
             }
-        }
 
-        const PathKeys*     prefix = prefix_len == 0 ? nullptr : &tree_paths_[base_index];
-        auto                path   = createTopologyPath(prefix, prefix_len, target_len);
-        std::vector<size_t> node_ids;
-        node_ids.reserve(target_len);
-        if (prefix_len > 0) {
-            node_ids.insert(
-                node_ids.end(), path_node_ids[base_index].begin(), path_node_ids[base_index].begin() + prefix_len);
-            ++child_counts[node_ids.back()];
-        } else {
-            ++root_child_count;
-        }
+            // Hash all descriptor fields into trace_hash_.
+            trace_hash_ = fnv1a64Int(descriptor.request_id, trace_hash_);
+            trace_hash_ = fnv1a64Int(static_cast<uint64_t>(descriptor.planned_reuse_blocks), trace_hash_);
+            trace_hash_ = fnv1a64Int(static_cast<uint64_t>(descriptor.input_blocks), trace_hash_);
+            trace_hash_ = fnv1a64Int(static_cast<uint64_t>(descriptor.target_tokens), trace_hash_);
+            trace_hash_ = fnv1a64(descriptor.path.data(), descriptor.path.size() * sizeof(int64_t), trace_hash_);
+            trace_hash_ = fnv1a64Int(descriptor.family_id, trace_hash_);
+            trace_hash_ = fnv1a64Int(descriptor.epoch_id, trace_hash_);
+            trace_hash_ = fnv1a64Int(descriptor.is_continuation ? 1ULL : 0ULL, trace_hash_);
+            trace_hash_ = fnv1a64Int(descriptor.generation, trace_hash_);
+            trace_hash_ = fnv1a64Int(static_cast<uint64_t>(descriptor.predecessor_id), trace_hash_);
 
-        for (size_t depth = prefix_len; depth < target_len; ++depth) {
-            const size_t node_id = child_counts.size();
-            child_counts.push_back(depth + 1 < target_len ? 1 : 0);
-            node_ids.push_back(node_id);
-            ++node_count;
-        }
-        tree_paths_.push_back(std::move(path));
-        path_node_ids.push_back(std::move(node_ids));
-    }
-
-    metadata_.actual_node_count = node_count;
-    metadata_.max_depth         = 0;
-    for (const auto& path : tree_paths_) {
-        metadata_.max_depth = std::max(metadata_.max_depth, path.size());
-    }
-    for (const size_t child_count : child_counts) {
-        if (child_count == 0) {
-            ++metadata_.leaf_count;
+            trace_.push_back(std::move(descriptor));
+            ++request_index;
         }
     }
-    return metadata_;
+}
+
+std::string TreeWorkloadGenerator::hashHex(uint64_t hash) {
+    std::ostringstream stream;
+    stream << std::hex << std::setw(16) << std::setfill('0') << hash;
+    return stream.str();
 }
 
 }  // namespace rtp_llm::benchmark

@@ -1,18 +1,24 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/BenchmarkFixture.h"
 
-#include <cstring>
-#include <fstream>
-#include <sstream>
+#include <algorithm>
 #include <stdexcept>
-#include <sys/resource.h>
-#include <sys/statvfs.h>
-#include <chrono>
 
 #include <cuda_runtime.h>
-#include <openssl/sha.h>
 
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/benchmark/ModelProfile.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/benchmark/TreeWorkloadGenerator.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm::benchmark {
@@ -28,35 +34,7 @@ size_t alignUp(size_t value, size_t alignment) {
     return (value + alignment - 1) & ~(alignment - 1);
 }
 
-int64_t getAvailableHostMemory() {
-    std::ifstream cgroup_file("/sys/fs/cgroup/memory/memory.limit_in_bytes");
-    if (cgroup_file) {
-        int64_t limit;
-        cgroup_file >> limit;
-        if (limit > 0 && limit < static_cast<int64_t>(1ULL << 50)) {
-            return limit;
-        }
-    }
-    struct rlimit rl;
-    if (getrlimit(RLIMIT_MEMLOCK, &rl) == 0) {
-        return static_cast<int64_t>(rl.rlim_cur);
-    }
-    return static_cast<int64_t>(128ULL << 30);
-}
-
-int64_t getAvailableDiskSpace(const std::string& path) {
-    struct statvfs stat;
-    if (statvfs(path.c_str(), &stat) == 0) {
-        return static_cast<int64_t>(stat.f_frsize) * static_cast<int64_t>(stat.f_bavail);
-    }
-    return -1;
-}
-
 }  // anonymous namespace
-
-BenchmarkFixture::BenchmarkFixture(const ModelProfile& profile, uint64_t seed): profile_(profile), seed_(seed) {}
-
-BenchmarkFixture::~BenchmarkFixture() = default;
 
 DeviceBlockPoolPtr BenchmarkFixture::createDevicePool(size_t             layer_stride_bytes,
                                                       size_t             layer_num,
@@ -91,11 +69,13 @@ DeviceBlockPoolPtr BenchmarkFixture::createDevicePool(size_t             layer_s
     return pool;
 }
 
-std::shared_ptr<HostBlockPool>
-BenchmarkFixture::createHostPool(size_t payload_bytes, size_t usable_count, bool enable_pinned) {
+std::shared_ptr<HostBlockPool> BenchmarkFixture::createHostPool(size_t             payload_bytes,
+                                                                size_t             usable_count,
+                                                                bool               enable_pinned,
+                                                                const std::string& pool_name) {
     auto config                  = std::make_shared<HostBlockPoolConfig>();
     config->pool_type            = BlockPoolType::HOST;
-    config->pool_name            = "benchmark_host";
+    config->pool_name            = pool_name;
     config->physical_block_count = usable_count + 1;
     config->payload_bytes        = payload_bytes;
     config->stride_bytes         = alignUp(payload_bytes, kPoolAlignment);
@@ -156,9 +136,11 @@ GroupSetPtr BenchmarkFixture::createSWAGroupSet(std::vector<DeviceBlockPoolPtr> 
 std::shared_ptr<const CacheTopology>
 BenchmarkFixture::createTopology(const std::vector<std::pair<std::string, rtp_llm::CacheGroupType>>& group_specs,
                                  const std::vector<size_t>& layer_stride_bytes_per_group,
-                                 const std::vector<size_t>& layer_counts_per_group) {
+                                 const std::vector<size_t>& layer_counts_per_group,
+                                 const std::vector<size_t>& sliding_windows) {
     RTP_LLM_CHECK(group_specs.size() == layer_stride_bytes_per_group.size());
     RTP_LLM_CHECK(layer_counts_per_group.empty() || layer_counts_per_group.size() == group_specs.size());
+    RTP_LLM_CHECK(sliding_windows.empty() || sliding_windows.size() == group_specs.size());
 
     std::vector<GroupBase> groups;
     std::vector<LayerBase> layers;
@@ -177,7 +159,8 @@ BenchmarkFixture::createTopology(const std::vector<std::pair<std::string, rtp_ll
         group_base.spec   = spec;
         group_base.policy = defaultCacheGroupPolicy(type);
         if (type == rtp_llm::CacheGroupType::SWA) {
-            group_base.policy.sliding_window_size = 128;
+            RTP_LLM_CHECK(!sliding_windows.empty() && sliding_windows[i] > 0);
+            group_base.policy.sliding_window_size = sliding_windows[i];
         }
         group_base.block_num                 = 0;
         group_base.local_kv_head_num         = 1;
@@ -238,109 +221,57 @@ std::unique_ptr<BlockTreeCache> BenchmarkFixture::createCache(std::vector<GroupS
     return cache;
 }
 
-ResourceBudget BenchmarkFixture::preflightResources(const ModelProfile& profile,
-                                                    const std::string&  payload_mode,
-                                                    size_t              tree_node_count,
-                                                    size_t              transfer_concurrency,
-                                                    const std::string&  host_memory_type,
-                                                    const std::string&  disk_path,
-                                                    double              max_device_memory_fraction) {
+ResourceBudget BenchmarkFixture::preflightTreeResources(const ModelProfile&             profile,
+                                                        const OnlineTreeWorkloadConfig& config,
+                                                        int                             cuda_device,
+                                                        double                          max_device_memory_fraction) {
     ResourceBudget budget;
 
+    // Per-block payload for one flattened coordinate, matching the scaled
+    // group-set pools created by TreeBenchmarkRunner.
     size_t total_payload_per_coordinate = 0;
     for (const auto& gs : profile.group_sets) {
-        total_payload_per_coordinate += gs.payload_bytes;
-    }
-    for (const auto& tag : profile.device_only_groups) {
-        const auto* group = profile.findGroup(tag);
-        if (group)
-            total_payload_per_coordinate += group->group_payload_bytes;
+        total_payload_per_coordinate += computeScaledPayload(gs.payload_bytes);
     }
 
-    if (payload_mode == "scaled") {
-        total_payload_per_coordinate = computeScaledPayload(total_payload_per_coordinate);
+    // Fixed pools plus the admission preparation peak: at most
+    // active_token_budget / tokens_per_block logical input blocks can be held
+    // by requests at once (matched prefix refs, load targets and suffix).
+    const size_t preparation_peak_blocks = config.active_token_budget / config.tokens_per_block;
+    const size_t device_block_count      = config.device_pool_blocks + preparation_peak_blocks;
+    const size_t host_block_count        = config.host_pool_blocks;
+
+    budget.estimated_device_bytes = static_cast<int64_t>(device_block_count * total_payload_per_coordinate);
+    budget.estimated_host_bytes   = static_cast<int64_t>(host_block_count * total_payload_per_coordinate);
+
+    const cudaError_t set_device_status = cudaSetDevice(cuda_device);
+    if (set_device_status != cudaSuccess) {
+        throw std::runtime_error("cudaSetDevice(" + std::to_string(cuda_device)
+                                 + ") failed during Tree preflight: " + cudaGetErrorString(set_device_status));
     }
-
-    size_t device_block_count = tree_node_count + std::max(static_cast<size_t>(64), tree_node_count / 10);
-    size_t transfer_blocks    = 2 * transfer_concurrency;
-
-    budget.estimated_device_bytes =
-        static_cast<int64_t>((device_block_count + transfer_blocks) * total_payload_per_coordinate);
-    budget.estimated_host_bytes      = static_cast<int64_t>((host_memory_type == "pinned" ? device_block_count / 2 : 0)
-                                                       * total_payload_per_coordinate);
-    budget.estimated_peak_host_bytes = budget.estimated_host_bytes;
-    budget.estimated_request_template_bytes = static_cast<int64_t>(tree_node_count * 64);
-
-    int device = 0;
-    cudaSetDevice(device);
-    size_t free_bytes, total_bytes;
-    cudaMemGetInfo(&free_bytes, &total_bytes);
+    size_t            free_bytes      = 0;
+    size_t            total_bytes     = 0;
+    const cudaError_t mem_info_status = cudaMemGetInfo(&free_bytes, &total_bytes);
+    if (mem_info_status != cudaSuccess) {
+        throw std::runtime_error("cudaMemGetInfo failed during Tree preflight: "
+                                 + std::string(cudaGetErrorString(mem_info_status)));
+    }
+    budget.raw_available_device_bytes = static_cast<int64_t>(free_bytes);
     budget.available_device_bytes = static_cast<int64_t>(static_cast<double>(free_bytes) * max_device_memory_fraction);
-    budget.available_host_or_cgroup_bytes = getAvailableHostMemory();
-
-    if (!disk_path.empty()) {
-        budget.available_disk_bytes = getAvailableDiskSpace(disk_path);
-    }
+    // Host allocation is validated by the real pinned-memory pool. The old
+    // cgroup-v1/RLIMIT_MEMLOCK/fixed-128-GiB fallback could reject healthy
+    // cgroup-v2 hosts, so no synthetic host availability is reported.
+    budget.available_host_or_cgroup_bytes = -1;
 
     budget.sufficient = true;
     if (budget.estimated_device_bytes > budget.available_device_bytes) {
         budget.sufficient = false;
     }
-    if (budget.estimated_host_bytes > budget.available_host_or_cgroup_bytes) {
-        budget.sufficient = false;
-    }
-
     return budget;
-}
-
-size_t BenchmarkFixture::scaleStride(size_t original_stride) {
-    return alignUp(std::max(kMinScaledStride, original_stride / kScaleFactor), kScaledAlignment);
 }
 
 size_t BenchmarkFixture::computeScaledPayload(size_t original_payload) {
     return alignUp(std::max(kMinScaledStride, original_payload / kScaleFactor), kScaledAlignment);
-}
-
-void BenchmarkFixture::setPhaseTime(const std::string& phase, int64_t ns) {
-    if (phase == "bootstrap")
-        timing_.bootstrap_ns = ns;
-    else if (phase == "profile_load")
-        timing_.profile_load_ns = ns;
-    else if (phase == "allocation")
-        timing_.allocation_ns = ns;
-    else if (phase == "setup")
-        timing_.setup_ns = ns;
-    else if (phase == "warmup")
-        timing_.warmup_ns = ns;
-    else if (phase == "measured")
-        timing_.measured_ns = ns;
-    else if (phase == "sync_drain")
-        timing_.sync_drain_ns = ns;
-    else if (phase == "teardown")
-        timing_.teardown_ns = ns;
-}
-
-std::string fileSha256(const std::string& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file)
-        return "";
-
-    SHA256_CTX ctx;
-    SHA256_Init(&ctx);
-
-    char buffer[8192];
-    while (file.read(buffer, sizeof(buffer)) || file.gcount() > 0) {
-        SHA256_Update(&ctx, buffer, file.gcount());
-    }
-
-    unsigned char hash[SHA256_DIGEST_LENGTH];
-    SHA256_Final(hash, &ctx);
-
-    char hex[SHA256_DIGEST_LENGTH * 2 + 1];
-    for (size_t i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
-        std::snprintf(hex + i * 2, 3, "%02x", hash[i]);
-    }
-    return std::string(hex, SHA256_DIGEST_LENGTH * 2);
 }
 
 }  // namespace rtp_llm::benchmark

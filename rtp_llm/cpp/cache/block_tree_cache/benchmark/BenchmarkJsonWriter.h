@@ -34,8 +34,6 @@ public:
     void addStatistic(const std::string& name, double value);
     void addMetric(const std::string& name, double value);
 
-    void addEnvironment(const std::string& key, const std::string& value);
-
     void setTransferWorkload(size_t requested,
                              size_t attempted,
                              size_t succeeded,
@@ -44,6 +42,21 @@ public:
                              size_t addressable_working_set_blocks,
                              size_t visited_working_set_blocks,
                              bool   wrapped);
+
+    // Online Tree lifecycle closure: the driver validates these fields instead
+    // of the legacy operation counters.
+    void setTreeLifecycle(size_t  completed_request_transactions,
+                          size_t  failed_requests,
+                          size_t  forward_batches,
+                          size_t  forward_requests,
+                          int64_t simulated_forward_sleep_ns,
+                          size_t  unexpected_extra_match_count,
+                          bool    pressure_ready,
+                          size_t  final_active_requests,
+                          size_t  final_pending_load_tickets,
+                          size_t  final_pending_tasks,
+                          size_t  drain_timeouts,
+                          size_t  final_request_ref_blocks);
 
     std::string toJson();
 
@@ -54,7 +67,6 @@ private:
     rapidjson::Value    phases_ns_;
     rapidjson::Value    statistics_;
     rapidjson::Value    metrics_;
-    rapidjson::Value    environment_;
 };
 
 }  // namespace rtp_llm::benchmark

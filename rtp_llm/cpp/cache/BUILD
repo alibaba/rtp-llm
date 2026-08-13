@@ -140,7 +140,6 @@ cc_library(
         ":cache_group_type",
         ":cache_layout",
         ":kv_cache_specs",
-        "//:rtp_compute_ops",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/model_utils:model_utils",

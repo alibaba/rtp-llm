@@ -2,21 +2,21 @@
 
 #include <algorithm>
 #include <chrono>
-#include <condition_variable>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <limits>
-#include <mutex>
 #include <numeric>
+#include <sstream>
 #include <stdexcept>
 #include <thread>
-#include <utility>
+#include <unordered_set>
 
 #include "rtp_llm/cpp/cache/BlockReleaseBatch.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/BenchmarkFixture.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/benchmark/BenchmarkJsonWriter.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/benchmark/TreeWorkloadGenerator.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/benchmark/ModelProfile.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 
 namespace rtp_llm::benchmark {
 
@@ -28,679 +28,267 @@ int64_t elapsedNs(Clock::time_point start, Clock::time_point end) {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
 }
 
-StatefulPathConfig pathConfig(const TreeOptions& options) {
-    StatefulPathConfig config;
-    config.max_path_length         = options.max_path_length;
-    config.initial_min_path_length = options.initial_min_path_length;
-    config.initial_max_path_length = options.initial_max_path_length;
-    config.append_length           = options.append_length;
-    config.inserts_per_match       = options.inserts_per_match;
-    config.active_path_limit       = options.active_path_limit;
-    config.continuation_ratio      = options.continuation_ratio;
-    config.fork_ratio              = options.fork_ratio;
-    config.fork_reuse_min_ratio    = options.fork_reuse_min_ratio;
-    config.fork_reuse_max_ratio    = options.fork_reuse_max_ratio;
-    config.hot_path_ratio          = options.hot_path_ratio;
-    return config;
+std::string joinSizeValues(const std::vector<size_t>& values) {
+    std::ostringstream output;
+    for (size_t index = 0; index < values.size(); ++index) {
+        if (index != 0) {
+            output << ',';
+        }
+        output << values[index];
+    }
+    return output.str();
 }
 
-std::vector<std::vector<StatefulPathOperation>> generateTraces(uint64_t                     seed,
-                                                               const std::vector<PathKeys>& initial_paths,
-                                                               size_t                       num_workers,
-                                                               size_t                       total_operations,
-                                                               const StatefulPathConfig&    config,
-                                                               const std::vector<size_t>&   advance_counts = {}) {
-    if (!advance_counts.empty() && advance_counts.size() != num_workers) {
-        throw std::invalid_argument("advance count does not match worker count");
-    }
-    std::vector<std::vector<StatefulPathOperation>> traces(num_workers);
-    for (size_t worker = 0; worker < num_workers; ++worker) {
-        StatefulPathSession session(seed, 1, initial_paths, worker, num_workers, config);
-        if (!advance_counts.empty()) {
-            for (size_t i = 0; i < advance_counts[worker]; ++i) {
-                session.nextOperation();
-            }
-        }
-        const size_t operation_count =
-            total_operations / num_workers + (worker < total_operations % num_workers ? 1 : 0);
-        traces[worker].reserve(operation_count);
-        for (size_t i = 0; i < operation_count; ++i) {
-            traces[worker].push_back(session.nextOperation());
-        }
-    }
-    return traces;
+size_t hardFailureCount(const OnlineSchedulerMetrics& metrics) {
+    return metrics.loads_failed + metrics.loads_cancelled + metrics.load_target_allocation_failed
+           + metrics.suffix_allocation_failed + metrics.load_commit_failed + metrics.joined_holder_failed
+           + metrics.cancel_request_failed + metrics.lifecycle_timeouts + metrics.dependency_failed_descendants;
 }
 
-}  // anonymous namespace
+// Test-only injection seam: the GPU smoke suite sets this env var so the
+// runner executes a small online lifecycle config. It is never a public CLI
+// option and never affects the formal workload.
+constexpr const char* kTestConfigEnv = "BLOCK_TREE_CACHE_BENCHMARK_TEST_CONFIG";
 
-TreeBenchmarkRunner::TreeBenchmarkRunner(const ModelProfile& profile,
-                                         const TreeOptions&  options,
-                                         uint64_t            seed,
-                                         const std::string&  output_json_path):
-    profile_(profile), options_(options), seed_(seed), output_json_path_(output_json_path) {
-    writer_.setRunner("tree");
-    writer_.setModelProfile(profile_.profile_id, profile_.sha256_hex);
-    writer_.setPayloadMode(options_.payload_mode, profile_.computeGroupSetPayloadBytes("full_context"));
+OnlineTreeWorkloadConfig resolvedConfig() {
+    const char* env = std::getenv(kTestConfigEnv);
+    if (env != nullptr && std::string(env) == "1") {
+        std::cerr << "[tree] using test-only small online workload config (env " << kTestConfigEnv << "=1)\n";
+        return OnlineTreeWorkloadConfig::smokeTestConfig();
+    }
+    return OnlineTreeWorkloadConfig{};
 }
 
-bool TreeBenchmarkRunner::run() {
-    writer_.setMeasurement("steady_mixed");
-    const bool benchmark_ok = runSteadyStateMeasurement();
-    writer_.setStatus(benchmark_ok ? "completed" : "failed");
+// Adapts BlockTreeCache to the scheduler's single-threaded cache surface.
+class BlockTreeCacheAdapter: public OnlineCacheApi {
+public:
+    explicit BlockTreeCacheAdapter(BlockTreeCache& cache): cache_(cache) {}
 
-    bool output_ok = true;
-    if (!output_json_path_.empty()) {
-        std::ofstream output(output_json_path_, std::ios::trunc);
-        output_ok = output.is_open();
-        if (output_ok) {
-            output << writer_.toJson() << '\n';
-            output_ok = output.good();
-        }
-        if (!output_ok) {
-            std::cerr << "Failed to write result JSON: " << output_json_path_ << std::endl;
-        }
-    }
-    return benchmark_ok && output_ok;
-}
-
-bool TreeBenchmarkRunner::runSteadyStateMeasurement() {
-    const size_t target      = options_.tree_node_count;
-    const size_t num_workers = std::max<size_t>(1, options_.steady_threads);
-    // Production-style eviction: inserts commit through
-    // BlockTreeStorer::publishDeviceLocked -> settled(true,true) ->
-    // checkWatermark, which demotes overflow down to the device watermark.
-    // No benchmark-side eviction thread exists; workers use the cache's explicit
-    // reclaim API only as a bounded request-admission fallback.
-    // For profile-sized trees the watermark sits just below the 1.25x pool
-    // capacity, so the excess after each insert commit is bounded and
-    // event-driven eviction keeps up. Small smoke trees get extra admission
-    // headroom in buildTreeCache() so one in-flight transaction can commit.
-    const double device_ratio = 0.8;
-    const double host_ratio   = 0.9;
-
-    auto cache = buildTreeCache(target, options_.payload_mode, true, device_ratio, host_ratio);
-    if (!cache)
-        return false;
-
-    const auto            path_config = pathConfig(options_);
-    TreeWorkloadGenerator gen(seed_, target, options_.tree_branching_factor, path_config);
-    const auto            topology = gen.generateTopology();
-
-    // Phase 1: build the tree up to pool capacity (the cache is full, like a
-    // production cache that has been running for a while).
-    std::cout << "[tree] building tree up to " << target << " nodes..." << std::endl;
-    const size_t built_nodes = insertTopology(*cache, gen.treePaths());
-    cache->waitForPendingTasks();
-    std::cout << "[tree] built, node_count=" << cache->getStats().tree_node_count << std::endl;
-    if (built_nodes != topology.actual_node_count || cache->getStats().tree_node_count != topology.actual_node_count) {
-        std::cerr << "[tree] topology build mismatch: generated=" << topology.actual_node_count
-                  << " inserted=" << built_nodes << " cache=" << cache->getStats().tree_node_count << std::endl;
-        return false;
-    }
-
-    // Phase 2: warmup — let the mixed workload reach dynamic balance.
-    std::cout << "[tree] warmup " << options_.warmup_seconds << "s with " << num_workers << " worker(s)..."
-              << std::endl;
-    std::vector<size_t>                            warmup_samples;
-    SteadyCounters                                 warmup_counters;
-    LatencySamples                                 warmup_latencies;
-    std::vector<std::shared_ptr<LoadAsyncContext>> warmup_pending_loads;
-    std::vector<size_t>                            warmup_executed;
-    auto                                           warmup_traces =
-        generateTraces(seed_, gen.treePaths(), num_workers, options_.operation_trace_count, path_config);
-    runSteadyWorkers(*cache,
-                     warmup_traces,
-                     num_workers,
-                     static_cast<double>(options_.warmup_seconds),
-                     warmup_counters,
-                     warmup_latencies,
-                     warmup_samples,
-                     warmup_pending_loads,
-                     warmup_executed);
-    warmup_traces.clear();
-    drainLoads(warmup_pending_loads, warmup_counters);
-    cache->waitForPendingTasks();
-    writer_.addMetric("warmup.load_target_allocation_retries",
-                      static_cast<double>(warmup_counters.load_target_allocation_retries.load()));
-    if (warmup_counters.loads_failed.load() != 0 || warmup_counters.loads_cancelled.load() != 0
-        || warmup_counters.load_target_allocation_failed.load() != 0 || warmup_counters.load_commit_failed.load() != 0
-        || warmup_counters.loads_succeeded.load() != warmup_counters.loads_committed.load()) {
-        writer_.addMetric("warmup.loads_committed", static_cast<double>(warmup_counters.loads_committed.load()));
-        writer_.addMetric("warmup.loads_succeeded", static_cast<double>(warmup_counters.loads_succeeded.load()));
-        writer_.addMetric("warmup.loads_failed", static_cast<double>(warmup_counters.loads_failed.load()));
-        writer_.addMetric("warmup.loads_cancelled", static_cast<double>(warmup_counters.loads_cancelled.load()));
-        writer_.addMetric("warmup.load_target_allocation_failed",
-                          static_cast<double>(warmup_counters.load_target_allocation_failed.load()));
-        writer_.addMetric("warmup.load_commit_failed", static_cast<double>(warmup_counters.load_commit_failed.load()));
-        std::cerr << "[tree] warmup load invariant failed: committed=" << warmup_counters.loads_committed.load()
-                  << " succeeded=" << warmup_counters.loads_succeeded.load()
-                  << " failed=" << warmup_counters.loads_failed.load()
-                  << " cancelled=" << warmup_counters.loads_cancelled.load()
-                  << " target_allocation_retries=" << warmup_counters.load_target_allocation_retries.load()
-                  << " target_allocation_failed=" << warmup_counters.load_target_allocation_failed.load()
-                  << " commit_failed=" << warmup_counters.load_commit_failed.load() << std::endl;
-        return false;
-    }
-
-    if (warmup_counters.trace_exhaustions.load() != 0) {
-        std::cerr << "[tree] warmup operation trace exhausted; increase --operation-trace-count" << std::endl;
-        return false;
-    }
-
-    // Recreate the deterministic worker sessions and advance them by exactly
-    // the operations that warmup committed. This keeps the measured trace
-    // logically continuous without generating paths inside the timed region.
-    auto measured_traces = generateTraces(
-        seed_, gen.treePaths(), num_workers, options_.operation_trace_count, path_config, warmup_executed);
-
-    // Phase 3: measured window. Announce MEASURE_START so the driver can attach
-    // perf to this process, then wait briefly for the attach before timing.
-    std::cout << "MEASURE_START" << std::endl;
-    std::this_thread::sleep_for(std::chrono::seconds(2));
-
-    std::vector<size_t>                            node_samples;
-    SteadyCounters                                 counters;
-    LatencySamples                                 latencies;
-    std::vector<std::shared_ptr<LoadAsyncContext>> pending_loads;
-    std::vector<size_t>                            measured_executed;
-    auto                                           start = Clock::now();
-    runSteadyWorkers(*cache,
-                     measured_traces,
-                     num_workers,
-                     static_cast<double>(options_.min_measured_seconds),
-                     counters,
-                     latencies,
-                     node_samples,
-                     pending_loads,
-                     measured_executed);
-    auto          end         = Clock::now();
-    const int64_t measured_ns = elapsedNs(start, end);
-    counters.loads_pending_at_measurement_end.store(pending_loads.size());
-    const auto drain_start = Clock::now();
-    drainLoads(pending_loads, counters);
-    cache->waitForPendingTasks();
-    const int64_t drain_ns = elapsedNs(drain_start, Clock::now());
-
-    const size_t insert_calls                   = counters.insert_calls.load();
-    const size_t insert_path_keys               = counters.insert_path_keys.load();
-    const size_t insert_new_nodes               = counters.insert_new_nodes.load();
-    const size_t match_requests                 = counters.match_requests.load();
-    const size_t match_keys                     = counters.match_keys.load();
-    const size_t match_device_blocks            = counters.match_device_blocks.load();
-    const size_t match_host_blocks              = counters.match_host_blocks.load();
-    const size_t loads_committed                = counters.loads_committed.load();
-    const size_t loads_succeeded                = counters.loads_succeeded.load();
-    const size_t loads_failed                   = counters.loads_failed.load();
-    const size_t loads_cancelled                = counters.loads_cancelled.load();
-    const size_t load_target_allocation_retries = counters.load_target_allocation_retries.load();
-    const size_t load_target_allocation_failed  = counters.load_target_allocation_failed.load();
-    const size_t load_commit_failed             = counters.load_commit_failed.load();
-    const size_t requested_ops =
-        insert_calls + match_requests + loads_committed + load_target_allocation_failed + load_commit_failed;
-    const size_t failed_ops    = loads_failed + loads_cancelled + load_target_allocation_failed + load_commit_failed;
-    const size_t succeeded_ops = requested_ops - failed_ops;
-
-    // Node count stats
-    double node_avg = 0;
-    size_t node_min = std::numeric_limits<size_t>::max(), node_max = 0;
-    if (!node_samples.empty()) {
-        node_avg =
-            static_cast<double>(std::accumulate(node_samples.begin(), node_samples.end(), 0ULL)) / node_samples.size();
-        for (auto n : node_samples) {
-            node_min = std::min(node_min, n);
-            node_max = std::max(node_max, n);
-        }
-    } else {
-        node_min = 0;
-    }
-
-    writer_.setWorkload(seed_, requested_ops, requested_ops, succeeded_ops, failed_ops);
-    writer_.addPhaseNs("measured", measured_ns);
-    writer_.addPhaseNs("sync_drain", drain_ns);
-    writer_.addResolvedConfigInt("target_node_count", target);
-    writer_.addResolvedConfig("topology", "stateful_shared_prefix_trie");
-    writer_.addResolvedConfigInt("initial_topology_path_count", gen.treePaths().size());
-    writer_.addResolvedConfigInt("initial_topology_max_depth", topology.max_depth);
-    writer_.addResolvedConfigInt("initial_topology_leaf_count", topology.leaf_count);
-    writer_.addResolvedConfigInt("max_path_length", options_.max_path_length);
-    writer_.addResolvedConfigInt("tree_branching_factor", options_.tree_branching_factor);
-    writer_.addResolvedConfigInt("initial_min_path_length", options_.initial_min_path_length);
-    writer_.addResolvedConfigInt("initial_max_path_length", options_.initial_max_path_length);
-    writer_.addResolvedConfig("continuation_ratio", std::to_string(options_.continuation_ratio));
-    writer_.addResolvedConfig("fork_ratio", std::to_string(options_.fork_ratio));
-    writer_.addResolvedConfig("cold_ratio", std::to_string(1.0 - options_.continuation_ratio - options_.fork_ratio));
-    writer_.addResolvedConfig("fork_reuse_min_ratio", std::to_string(options_.fork_reuse_min_ratio));
-    writer_.addResolvedConfig("fork_reuse_max_ratio", std::to_string(options_.fork_reuse_max_ratio));
-    writer_.addResolvedConfig("hot_path_ratio", std::to_string(options_.hot_path_ratio));
-    writer_.addResolvedConfigInt("active_path_limit", options_.active_path_limit);
-    writer_.addResolvedConfigInt("append_length", options_.append_length);
-    writer_.addResolvedConfigInt("inserts_per_match", options_.inserts_per_match);
-    writer_.addResolvedConfigInt("operation_trace_count", options_.operation_trace_count);
-    writer_.addResolvedConfigInt("device_watermark_ratio", static_cast<int>(device_ratio * 100));
-    writer_.addResolvedConfigInt("steady_threads", num_workers);
-    writer_.addResolvedConfigInt("warmup_seconds", options_.warmup_seconds);
-    writer_.addResolvedConfigInt("min_measured_seconds", options_.min_measured_seconds);
-
-    // Per-call latency stats: min / p50 / p99 / max / avg (ns).
-    auto add_latency_metrics = [&](const std::string& prefix, const std::vector<int64_t>& samples) {
-        if (samples.empty())
-            return;
-        std::vector<int64_t> sorted = samples;
-        std::sort(sorted.begin(), sorted.end());
-        auto percentile = [&](double q) {
-            const size_t idx = static_cast<size_t>(q * static_cast<double>(sorted.size() - 1));
-            return sorted[idx];
-        };
-        const double avg = static_cast<double>(std::accumulate(sorted.begin(), sorted.end(), 0LL))
-                           / static_cast<double>(sorted.size());
-        writer_.addMetric(prefix + "_latency_ns_min", static_cast<double>(sorted.front()));
-        writer_.addMetric(prefix + "_latency_ns_p50", static_cast<double>(percentile(0.5)));
-        writer_.addMetric(prefix + "_latency_ns_p99", static_cast<double>(percentile(0.99)));
-        writer_.addMetric(prefix + "_latency_ns_max", static_cast<double>(sorted.back()));
-        writer_.addMetric(prefix + "_latency_ns_avg", avg);
-        writer_.addMetric(prefix + "_calls", static_cast<double>(sorted.size()));
-    };
-    add_latency_metrics("insert", latencies.insert_ns);
-    add_latency_metrics("match", latencies.match_ns);
-    add_latency_metrics("load", latencies.load_ns);
-
-    writer_.addMetric("insert_path_keys_per_call",
-                      insert_calls ? static_cast<double>(insert_path_keys) / insert_calls : 0.0);
-    writer_.addMetric("insert_new_nodes_per_call",
-                      insert_calls ? static_cast<double>(insert_new_nodes) / insert_calls : 0.0);
-    writer_.addMetric("match_keys_per_call", match_requests ? static_cast<double>(match_keys) / match_requests : 0.0);
-    writer_.addMetric("match_device_matched_blocks_per_request",
-                      match_requests ? static_cast<double>(match_device_blocks) / match_requests : 0.0);
-    writer_.addMetric("match_host_matched_blocks_per_request",
-                      match_requests ? static_cast<double>(match_host_blocks) / match_requests : 0.0);
-    writer_.addMetric("trace_exhaustions", static_cast<double>(counters.trace_exhaustions.load()));
-    writer_.addMetric("loads_committed", static_cast<double>(loads_committed));
-    writer_.addMetric("loads_succeeded", static_cast<double>(loads_succeeded));
-    writer_.addMetric("loads_failed", static_cast<double>(loads_failed));
-    writer_.addMetric("loads_cancelled", static_cast<double>(loads_cancelled));
-    writer_.addMetric("load_target_allocation_retries", static_cast<double>(load_target_allocation_retries));
-    writer_.addMetric("load_target_allocation_failed", static_cast<double>(load_target_allocation_failed));
-    writer_.addMetric("load_commit_failed", static_cast<double>(load_commit_failed));
-    writer_.addMetric("loads_pending_at_measurement_end",
-                      static_cast<double>(counters.loads_pending_at_measurement_end.load()));
-    writer_.addMetric("steady_state_node_count_avg", node_avg);
-    writer_.addMetric("steady_state_node_count_min", static_cast<double>(node_min));
-    writer_.addMetric("steady_state_node_count_max", static_cast<double>(node_max));
-    writer_.addMetric("node_samples", static_cast<double>(node_samples.size()));
-
-    static const std::array<std::string, 3> kScenarios = {"continuation", "fork", "cold"};
-    for (size_t kind = 0; kind < kScenarios.size(); ++kind) {
-        const double      requests              = static_cast<double>(counters.scenario_requests[kind].load());
-        const double      scenario_insert_calls = static_cast<double>(counters.scenario_insert_calls[kind].load());
-        const std::string prefix                = "scenario." + kScenarios[kind] + ".";
-        writer_.addMetric(prefix + "requests", requests);
-        if (requests > 0) {
-            writer_.addMetric(prefix + "average_match_key_count",
-                              static_cast<double>(counters.scenario_match_keys[kind].load()) / requests);
-            writer_.addMetric(prefix + "average_matched_depth",
-                              static_cast<double>(counters.scenario_matched_depth[kind].load()) / requests);
-        }
-        writer_.addMetric(prefix + "insert_calls", scenario_insert_calls);
-        if (scenario_insert_calls > 0) {
-            writer_.addMetric(prefix + "average_insert_path_length",
-                              static_cast<double>(counters.scenario_insert_path_keys[kind].load())
-                                  / scenario_insert_calls);
-            writer_.addMetric(prefix + "average_new_nodes_per_insert",
-                              static_cast<double>(counters.scenario_insert_new_nodes[kind].load())
-                                  / scenario_insert_calls);
-        }
-        writer_.addMetric(prefix + "device_hits", static_cast<double>(counters.scenario_device_hits[kind].load()));
-        writer_.addMetric(prefix + "host_hits", static_cast<double>(counters.scenario_host_hits[kind].load()));
-        writer_.addMetric(prefix + "disk_hits", static_cast<double>(counters.scenario_disk_hits[kind].load()));
-        writer_.addMetric(prefix + "misses", static_cast<double>(counters.scenario_misses[kind].load()));
-    }
-
-    std::cout << "[tree] measured " << static_cast<double>(measured_ns) / 1e9 << "s with " << num_workers
-              << " worker(s): insert=" << insert_calls << " calls/" << insert_new_nodes << " new nodes"
-              << " (avg path " << (insert_calls ? insert_path_keys / insert_calls : 0) << ", new "
-              << (insert_calls ? insert_new_nodes / insert_calls : 0) << " nodes/call), "
-              << "match=" << match_requests << " (avg "
-              << (match_requests ? static_cast<double>(match_device_blocks) / match_requests : 0) << " device/"
-              << (match_requests ? static_cast<double>(match_host_blocks) / match_requests : 0)
-              << " host matched blocks/request, " << (match_requests ? match_keys / match_requests : 0)
-              << " keys/call), "
-              << "loads=" << loads_committed << " committed/" << loads_succeeded << " succeeded/" << loads_failed
-              << " failed, "
-              << "nodes avg=" << node_avg << " [" << node_min << "," << node_max << "]" << std::endl;
-
-    if (!latencies.insert_ns.empty()) {
-        std::vector<int64_t> v = latencies.insert_ns;
-        std::sort(v.begin(), v.end());
-        std::cout << "[tree] insert latency ns: min=" << v.front() << " p50=" << v[v.size() / 2]
-                  << " p99=" << v[v.size() * 99 / 100] << " max=" << v.back() << std::endl;
-    }
-    if (!latencies.match_ns.empty()) {
-        std::vector<int64_t> v = latencies.match_ns;
-        std::sort(v.begin(), v.end());
-        std::cout << "[tree] match latency ns: min=" << v.front() << " p50=" << v[v.size() / 2]
-                  << " p99=" << v[v.size() * 99 / 100] << " max=" << v.back() << std::endl;
-    }
-
-    return requested_ops > 0 && failed_ops == 0 && loads_succeeded == loads_committed
-           && counters.trace_exhaustions.load() == 0;
-}
-
-void TreeBenchmarkRunner::workerLoop(BlockTreeCache&                                 cache,
-                                     const std::vector<StatefulPathOperation>&       trace,
-                                     double                                          seconds,
-                                     SteadyCounters&                                 counters,
-                                     LatencySamples&                                 latencies,
-                                     std::mutex&                                     merge_mutex,
-                                     std::vector<std::shared_ptr<LoadAsyncContext>>& shared_pending_loads,
-                                     size_t&                                         executed_transactions) {
-    std::vector<std::shared_ptr<LoadAsyncContext>> pending_loads;
-    std::vector<int64_t>                           insert_lat_ns, match_lat_ns, load_lat_ns;
-
-    const auto start    = Clock::now();
-    const auto deadline = start + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(seconds));
-    size_t     trace_index = 0;
-    while (Clock::now() < deadline && trace_index < trace.size()) {
-        const auto&  operation = trace[trace_index];
-        const size_t scenario  = static_cast<size_t>(operation.scenario);
-
-        // A previous asynchronous load must settle before the next match can
-        // select the same lower-tier nodes again.
-        drainLoads(pending_loads, counters);
-        const auto match_start = Clock::now();
-        auto       result      = cache.match(*operation.match_path);
-        match_lat_ns.push_back(elapsedNs(match_start, Clock::now()));
-
-        const size_t matched_depth =
+    MatchOutcome match(const PathKeys& path) override {
+        auto         result = cache_.match(path);
+        MatchOutcome outcome;
+        outcome.matched_device_blocks = result.matched_device_blocks;
+        outcome.actual_matched_depth =
             result.async_context != nullptr ? result.async_context->matchedBlocks() : result.matched_device_blocks;
-        counters.match_requests.fetch_add(1);
-        counters.match_keys.fetch_add(operation.match_path->size());
-        counters.match_device_blocks.fetch_add(result.matched_device_blocks);
-        counters.scenario_requests[scenario].fetch_add(1);
-        counters.scenario_match_keys[scenario].fetch_add(operation.match_path->size());
-        counters.scenario_matched_depth[scenario].fetch_add(matched_depth);
-        if (result.matched_device_blocks > 0) {
-            counters.scenario_device_hits[scenario].fetch_add(1);
-        }
+        outcome.host_matched_blocks =
+            result.async_context != nullptr ? result.async_context->matchedBlocks(Tier::HOST) : 0;
+        outcome.matched_device_resources = std::move(result.matched_device_resources);
         if (result.async_context != nullptr) {
-            const size_t host_matched_blocks = result.async_context->matchedBlocks(Tier::HOST);
-            counters.match_host_blocks.fetch_add(host_matched_blocks);
-            if (host_matched_blocks > 0) {
-                counters.scenario_host_hits[scenario].fetch_add(1);
-            }
-            if (result.async_context->matchedBlocks(Tier::DISK) > 0) {
-                counters.scenario_disk_hits[scenario].fetch_add(1);
-            }
+            outcome.load_ticket = std::move(result.async_context);
         }
-        if (matched_depth == 0) {
-            counters.scenario_misses[scenario].fetch_add(1);
-        }
+        return outcome;
+    }
 
-        // Match misses carry an async lower-tier load: allocate device targets,
-        // commit the transfer, and keep its context alive until completion.
-        if (result.async_context != nullptr && !result.async_context->empty()) {
-            using OwnedTargets                   = std::pair<DeviceBlockPoolPtr, BlockIdList>;
-            const auto                load_start = Clock::now();
-            bool                      targets_ok = true;
-            const auto&               descs      = result.async_context->loadDescs();
-            std::vector<size_t>       required_targets(cache.groupSets().size(), 0);
-            std::vector<size_t>       next_target(cache.groupSets().size(), 0);
-            std::vector<OwnedTargets> owned_targets(cache.groupSets().size());
+    bool allocateLoadTargets(const MatchOutcome& outcome, PreparedRequestResources& out) override {
+        if (outcome.load_ticket == nullptr) {
+            return false;
+        }
+        const auto& context    = outcome.load_ticket;
+        const auto& group_sets = cache_.groupSets();
+        out.load_target_blocks.resize(group_sets.size());
+        if (context->empty()) {
+            return true;
+        }
+        const auto&         descs  = context->loadDescs();
+        const auto&         joined = context->joinedLoads();
+        std::vector<size_t> required(group_sets.size(), 0);
+        for (size_t d = 0; d < descs.size(); ++d) {
+            if (descs[d].source_tier == Tier::DEVICE || joined[d]) {
+                continue;
+            }
+            ++required[descs[d].group_set_id];
+        }
+        for (size_t gs = 0; gs < group_sets.size(); ++gs) {
+            if (required[gs] == 0) {
+                continue;
+            }
+            const auto& pools = group_sets[gs]->devicePools();
+            if (pools.empty()) {
+                releasePrepared(out);
+                return false;
+            }
+            auto blocks = pools[0]->malloc(required[gs]);
+            if (!blocks.has_value()) {
+                releasePrepared(out);
+                return false;
+            }
+            pools[0]->incRef(blocks.value(), BlockRefType::REQUEST);
+            out.load_target_blocks[gs] = std::move(blocks.value());
+        }
+        out.load_targets_allocated = true;
+        return true;
+    }
+
+    bool holdJoinedBlocks(const MatchOutcome& outcome, PreparedRequestResources& out) override {
+        if (outcome.load_ticket == nullptr) {
+            return true;  // no ticket, nothing to hold
+        }
+        const auto& context    = outcome.load_ticket;
+        const auto& group_sets = cache_.groupSets();
+        const auto& joined     = context->joinedLoads();
+        const auto& descs      = context->loadDescs();
+
+        // LoadJoinRegistry::join() already placed the initiator's real target
+        // blocks in each joined descriptor. Take this request's own REQUEST
+        // refs before commit() releases the loader's temporary holder.
+        out.joined_holder_blocks.resize(group_sets.size());
+        std::vector<std::unordered_set<BlockIdxType>> held(group_sets.size());
+        for (size_t gs = 0; gs < out.load_target_blocks.size() && gs < held.size(); ++gs) {
+            held[gs].insert(out.load_target_blocks[gs].begin(), out.load_target_blocks[gs].end());
+        }
+        bool referenced_any = false;
+        for (size_t d = 0; d < descs.size(); ++d) {
+            if (descs[d].source_tier == Tier::DEVICE || !joined[d]) {
+                continue;
+            }
+            const size_t gs            = descs[d].group_set_id;
+            const auto&  target_blocks = descs[d].target_blocks;
+            if (target_blocks.empty() || gs >= group_sets.size() || group_sets[gs]->devicePools().empty()) {
+                return false;
+            }
+            for (const BlockIdxType block : target_blocks) {
+                if (!held[gs].insert(block).second) {
+                    continue;
+                }
+                group_sets[gs]->devicePools()[0]->incRef(block, BlockRefType::REQUEST);
+                out.joined_holder_blocks[gs].push_back(block);
+                referenced_any = true;
+            }
+        }
+        out.joined_holder_allocated = referenced_any;
+        return true;
+    }
+
+    bool allocateSuffixBlocks(size_t suffix_block_count, PreparedRequestResources& out) override {
+        const auto& group_sets = cache_.groupSets();
+        if (out.suffix_blocks.empty()) {
+            out.suffix_blocks.resize(group_sets.size());
+        }
+        for (size_t gs = 0; gs < group_sets.size(); ++gs) {
+            const auto& pools = group_sets[gs]->devicePools();
+            if (pools.empty() || suffix_block_count == 0) {
+                continue;
+            }
+            auto blocks = pools[0]->malloc(suffix_block_count);
+            if (!blocks.has_value()) {
+                releasePrepared(out);
+                return false;
+            }
+            pools[0]->incRef(blocks.value(), BlockRefType::REQUEST);
+            out.suffix_blocks[gs] = std::move(blocks.value());
+        }
+        out.suffix_allocated = true;
+        return true;
+    }
+
+    bool commitLoad(const std::shared_ptr<LoadAsyncContext>& ticket, PreparedRequestResources& out) override {
+        if (ticket == nullptr) {
+            return false;
+        }
+        const auto& context    = ticket;
+        const auto& group_sets = cache_.groupSets();
+        if (!context->empty()) {
+            const auto&         descs  = context->loadDescs();
+            const auto&         joined = context->joinedLoads();
+            std::vector<size_t> next(group_sets.size(), 0);
             for (size_t d = 0; d < descs.size(); ++d) {
-                if (descs[d].source_tier == Tier::DEVICE || result.async_context->joinedLoads()[d]) {
+                if (descs[d].source_tier == Tier::DEVICE || joined[d]) {
                     continue;
                 }
-                ++required_targets[descs[d].group_set_id];
-            }
-            for (size_t gs = 0; gs < required_targets.size(); ++gs) {
-                if (required_targets[gs] == 0) {
-                    continue;
-                }
-                const auto& pools = cache.groupSets()[gs]->devicePools();
-                if (pools.empty()) {
-                    targets_ok = false;
-                    break;
-                }
-                auto   blocks             = pools[0]->malloc(required_targets[gs]);
-                size_t allocation_retries = 0;
-                while (!blocks.has_value() && allocation_retries < 250) {
-                    ++allocation_retries;
-                    counters.load_target_allocation_retries.fetch_add(1);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                    if (allocation_retries % 25 == 0 && !cache.groupSets()[gs]->groupIds().empty()) {
-                        cache.evictForGroup(cache.groupSets()[gs]->groupIds().front(), required_targets[gs]);
-                    }
-                    blocks = pools[0]->malloc(required_targets[gs]);
-                }
-                if (!blocks.has_value()) {
-                    targets_ok = false;
-                    break;
-                }
-                pools[0]->incRef(blocks.value(), BlockRefType::REQUEST);
-                owned_targets[gs] = {pools[0], std::move(blocks.value())};
-            }
-            if (targets_ok) {
-                for (size_t d = 0; d < descs.size(); ++d) {
-                    if (descs[d].source_tier == Tier::DEVICE || result.async_context->joinedLoads()[d]) {
-                        continue;
-                    }
-                    const size_t gs = descs[d].group_set_id;
-                    result.async_context->setTargetBlocks(d, {owned_targets[gs].second[next_target[gs]++]});
-                }
-            }
-            const bool committed = targets_ok && result.async_context->commit();
-            for (const auto& [pool, blocks] : owned_targets) {
-                if (pool != nullptr && !blocks.empty()) {
-                    pool->decRef(blocks, BlockRefType::REQUEST);
-                }
-            }
-            if (committed) {
-                counters.loads_committed.fetch_add(1);
-                load_lat_ns.push_back(elapsedNs(load_start, Clock::now()));
-                pending_loads.push_back(std::move(result.async_context));
-            } else {
-                if (targets_ok) {
-                    counters.load_commit_failed.fetch_add(1);
-                } else {
-                    counters.load_target_allocation_failed.fetch_add(1);
-                }
-                result.async_context.reset();
+                const size_t gs = descs[d].group_set_id;
+                context->setTargetBlocks(d, {out.load_target_blocks[gs][next[gs]++]});
             }
         }
-
-        // The first insert creates the part of the matched request that was not
-        // already cached, plus one append. Later inserts extend the path made by
-        // the preceding commit. Complete a started transaction even if it
-        // crosses the phase deadline so session reconstruction remains exact.
-        size_t existing_prefix_length = matched_depth;
-        for (const auto& insert_path : operation.insert_paths) {
-            size_t       failed_retries = 0;
-            const size_t new_nodes      = insert_path->size() - existing_prefix_length;
-            const auto   insert_start   = Clock::now();
-            while (!insertPathFromPrefix(cache, *insert_path, existing_prefix_length)) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                if (++failed_retries >= 50) {
-                    failed_retries = 0;
-                    for (const auto& group_set : cache.groupSets()) {
-                        if (!group_set->groupIds().empty()) {
-                            cache.evictForGroup(group_set->groupIds().front(), new_nodes);
-                        }
-                    }
-                }
-            }
-            insert_lat_ns.push_back(elapsedNs(insert_start, Clock::now()));
-            counters.insert_calls.fetch_add(1);
-            counters.insert_path_keys.fetch_add(insert_path->size());
-            counters.insert_new_nodes.fetch_add(new_nodes);
-            counters.scenario_insert_calls[scenario].fetch_add(1);
-            counters.scenario_insert_path_keys[scenario].fetch_add(insert_path->size());
-            counters.scenario_insert_new_nodes[scenario].fetch_add(new_nodes);
-            existing_prefix_length = insert_path->size();
+        if (!context->commit()) {
+            releasePrepared(out);
+            return false;
         }
-        cache.releaseMatchedResources(result.matched_device_resources);
-        ++trace_index;
+        return true;
+    }
 
-        for (const auto& context : pending_loads) {
-            if (context->done()) {
-                if (context->success()) {
-                    counters.loads_succeeded.fetch_add(1);
-                } else if (context->isRequestCanceled()) {
-                    counters.loads_cancelled.fetch_add(1);
-                } else {
-                    counters.loads_failed.fetch_add(1);
-                }
+    void publishInsert(const PathKeys&                 path,
+                       size_t                          actual_matched_depth,
+                       PreparedRequestResources&       out,
+                       std::vector<MultiNodeResource>& matched_resources) override {
+        const auto&                                group_sets = cache_.groupSets();
+        std::vector<std::vector<GroupSetResource>> resources(path.size(),
+                                                             std::vector<GroupSetResource>(group_sets.size()));
+        for (size_t gs = 0; gs < group_sets.size(); ++gs) {
+            if (out.suffix_blocks[gs].empty()) {
+                continue;
+            }
+            for (size_t j = 0; j < out.suffix_blocks[gs].size(); ++j) {
+                resources[actual_matched_depth + j][gs].device_blocks = {out.suffix_blocks[gs][j]};
             }
         }
-        pending_loads.erase(
-            std::remove_if(pending_loads.begin(),
-                           pending_loads.end(),
-                           [](const std::shared_ptr<LoadAsyncContext>& context) { return context->done(); }),
-            pending_loads.end());
+        cache_.insert(path, resources, Tier::DEVICE);
+        // Publish REQUEST-holder transitions: blocks accepted by the tree keep
+        // BLOCK_CACHE ownership, rejected ones return to the pool.
+        releaseMatched(matched_resources);
+        releasePrepared(out);
     }
 
-    if (trace_index == trace.size() && Clock::now() < deadline) {
-        counters.trace_exhaustions.fetch_add(1);
-    }
-    executed_transactions = trace_index;
-    {
-        std::lock_guard<std::mutex> lock(merge_mutex);
-        latencies.insert_ns.insert(latencies.insert_ns.end(), insert_lat_ns.begin(), insert_lat_ns.end());
-        latencies.match_ns.insert(latencies.match_ns.end(), match_lat_ns.begin(), match_lat_ns.end());
-        latencies.load_ns.insert(latencies.load_ns.end(), load_lat_ns.begin(), load_lat_ns.end());
-        shared_pending_loads.insert(shared_pending_loads.end(), pending_loads.begin(), pending_loads.end());
-    }
-}
-
-void TreeBenchmarkRunner::runSteadyWorkers(BlockTreeCache&                                        cache,
-                                           const std::vector<std::vector<StatefulPathOperation>>& traces,
-                                           size_t                                                 num_workers,
-                                           double                                                 seconds,
-                                           SteadyCounters&                                        counters,
-                                           LatencySamples&                                        latencies,
-                                           std::vector<size_t>&                                   node_samples,
-                                           std::vector<std::shared_ptr<LoadAsyncContext>>&        pending_loads,
-                                           std::vector<size_t>& executed_transactions) {
-    if (traces.size() != num_workers) {
-        throw std::invalid_argument("operation trace count does not match worker count");
-    }
-    executed_transactions.assign(num_workers, 0);
-    std::mutex              merge_mutex;
-    std::mutex              sampler_mutex;
-    std::condition_variable sampler_cv;
-    bool                    workers_done = false;
-    std::thread             sampler([&]() {
-        std::unique_lock<std::mutex> lock(sampler_mutex);
-        while (!workers_done) {
-            node_samples.push_back(cache.getStats().tree_node_count);
-            sampler_cv.wait_for(lock, std::chrono::milliseconds(100), [&]() { return workers_done; });
+    void releaseMatched(std::vector<MultiNodeResource>& resources) override {
+        if (!resources.empty()) {
+            cache_.releaseMatchedResources(resources);
+            resources.clear();
         }
-    });
-
-    std::vector<std::thread> threads;
-    threads.reserve(num_workers);
-    for (size_t w = 0; w < num_workers; ++w) {
-        threads.emplace_back([&, w]() {
-            workerLoop(
-                cache, traces[w], seconds, counters, latencies, merge_mutex, pending_loads, executed_transactions[w]);
-        });
     }
-    for (auto& t : threads) {
-        if (t.joinable())
-            t.join();
-    }
-    {
-        std::lock_guard<std::mutex> lock(sampler_mutex);
-        workers_done = true;
-    }
-    sampler_cv.notify_one();
-    sampler.join();
-}
 
-void TreeBenchmarkRunner::drainLoads(std::vector<std::shared_ptr<LoadAsyncContext>>& pending_loads,
-                                     SteadyCounters&                                 counters) {
-    for (const auto& context : pending_loads) {
-        context->waitDone();
-        if (context->success())
-            counters.loads_succeeded.fetch_add(1);
-        else if (context->isRequestCanceled())
-            counters.loads_cancelled.fetch_add(1);
-        else
-            counters.loads_failed.fetch_add(1);
+    void rollback(PreparedRequestResources& out, std::vector<MultiNodeResource>& matched_resources) override {
+        releasePrepared(out);
+        releaseMatched(matched_resources);
     }
-    pending_loads.clear();
-}
 
-std::unique_ptr<BlockTreeCache> TreeBenchmarkRunner::buildTreeCache(size_t             node_count,
-                                                                    const std::string& payload_mode,
-                                                                    bool               enable_host,
-                                                                    double             device_watermark_ratio,
-                                                                    double             host_watermark_ratio) {
-    // Pool sized just above the watermark so a commit's excess (and thus the
-    // number of async demote tasks submitted under the cache mutex) stays
-    // small; a 2.5x pool makes every insert commit flood the task pool. For a
-    // small smoke tree, however, 25% headroom can be smaller than one cold
-    // request. Reserve one maximum path per worker so allocation can reach the
-    // insert commit that triggers event-driven eviction.
-    const size_t watermark_capacity = static_cast<size_t>(static_cast<double>(node_count) * 1.25);
-    const size_t admission_headroom = options_.max_path_length * std::max<size_t>(1, options_.steady_threads);
-    const size_t device_block_count = std::max(watermark_capacity, node_count + admission_headroom);
+    // Bounded drain for setup/warmup/measured/finalize with a configurable deadline.
+    bool boundedDrain(std::chrono::milliseconds budget) {
+        return boundedPendingTaskDrain(
+            [this]() { return static_cast<size_t>(cache_.task_pool_->pending_tasks_.load()); }, budget);
+    }
 
-    // Shared topology: one group per group set with a globally unique group id.
-    std::vector<std::pair<std::string, rtp_llm::CacheGroupType>> group_specs;
-    std::vector<size_t>                                          group_payloads;
-    for (const auto& gs_info : profile_.group_sets) {
-        bool is_swa = false;
-        for (const auto& tag : gs_info.member_tags) {
-            const auto* group = profile_.findGroup(tag);
-            if (group && group->type == benchmark::CacheGroupType::SWA) {
-                is_swa = true;
-                break;
+    // Access pending task count for final-zero checks.
+    size_t pendingTaskCount() const {
+        return static_cast<size_t>(cache_.task_pool_->pending_tasks_.load());
+    }
+
+private:
+    static BlockIndicesType uniqueHeldBlocks(const PreparedRequestResources& out, size_t group_set_id) {
+        std::unordered_set<BlockIdxType> unique;
+        for (const auto* groups : {&out.load_target_blocks, &out.joined_holder_blocks, &out.suffix_blocks}) {
+            if (group_set_id < groups->size()) {
+                unique.insert((*groups)[group_set_id].begin(), (*groups)[group_set_id].end());
             }
         }
-        group_specs.emplace_back(gs_info.name, is_swa ? rtp_llm::CacheGroupType::SWA : rtp_llm::CacheGroupType::FULL);
-        group_payloads.push_back(payload_mode == "scaled" ?
-                                     BenchmarkFixture::computeScaledPayload(gs_info.payload_bytes) :
-                                     gs_info.payload_bytes);
-    }
-    auto topology = BenchmarkFixture::createTopology(group_specs, group_payloads);
-
-    std::vector<GroupSetPtr> group_sets;
-    for (size_t gs_idx = 0; gs_idx < profile_.group_sets.size(); ++gs_idx) {
-        const auto& gs_info    = profile_.group_sets[gs_idx];
-        size_t      gs_payload = group_payloads[gs_idx];
-
-        auto device_pool =
-            BenchmarkFixture::createDevicePool(gs_payload, 1, device_block_count, "device_" + gs_info.name);
-        std::shared_ptr<HostBlockPool> host_pool = nullptr;
-        BlockTreeDiskBlockPoolPtr      disk_pool = nullptr;
-
-        if (enable_host) {
-            // Host must hold the demoted steady-state working set; a half-size
-            // host fills up and drops data before match can load it back.
-            host_pool = BenchmarkFixture::createHostPool(gs_payload, device_block_count, true);
-        }
-
-        const std::vector<size_t> group_ids = {gs_idx};
-
-        GroupSetPtr gs;
-        if (group_specs[gs_idx].second == rtp_llm::CacheGroupType::SWA) {
-            gs = BenchmarkFixture::createSWAGroupSet(
-                {device_pool}, host_pool, disk_pool, gs_idx, topology, group_ids, 128);
-        } else {
-            gs = BenchmarkFixture::createFullGroupSet({device_pool}, host_pool, disk_pool, gs_idx, topology, group_ids);
-        }
-        group_sets.push_back(gs);
+        return BlockIndicesType(unique.begin(), unique.end());
     }
 
-    // Keep the async demote/load execution capacity identical across the
-    // single- and multi-worker cases, avoiding a second concurrency variable.
-    constexpr size_t task_pool_size = 32;
-    return BenchmarkFixture::createCache(
-        group_sets, enable_host, false, task_pool_size, device_watermark_ratio, host_watermark_ratio);
-}
+    void releasePrepared(PreparedRequestResources& out) {
+        const auto&       group_sets = cache_.groupSets();
+        BlockReleaseBatch releases;
+        for (size_t gs = 0; gs < group_sets.size(); ++gs) {
+            if (group_sets[gs]->devicePools().empty()) {
+                continue;
+            }
+            BlockIndicesType held = uniqueHeldBlocks(out, gs);
+            if (held.empty()) {
+                continue;
+            }
+            releases.append(group_sets[gs]->groupIds().front(),
+                            group_sets[gs]->devicePools()[0]->decRefWithResult(held, BlockRefType::REQUEST));
+        }
+        const auto receipts = releases.finish();
+        if (!receipts.empty()) {
+            cache_.onBlocksReleased(receipts);
+        }
+        out = PreparedRequestResources{};
+    }
 
-bool TreeBenchmarkRunner::insertPathFromPrefix(BlockTreeCache& cache,
-                                               const PathKeys& path,
-                                               size_t          existing_prefix_length) {
+    BlockTreeCache& cache_;
+};
+
+// Insert one complete path while allocating resources only for the suffix
+// after `existing_prefix_length`. Used for the initial topology only.
+bool insertPathFromPrefix(BlockTreeCache& cache, const PathKeys& path, size_t existing_prefix_length) {
     if (existing_prefix_length > path.size()) {
         throw std::invalid_argument("insert prefix exceeds full path length");
     }
@@ -718,10 +306,6 @@ bool TreeBenchmarkRunner::insertPathFromPrefix(BlockTreeCache& cache,
                 allocated = false;
                 break;
             }
-            // The tree takes BLOCK_CACHE ownership only when it accepts this
-            // incoming resource. Hold a temporary request reference across
-            // insert so rejected/adopted-race resources are released instead
-            // of leaking pool capacity.
             pools[0]->incRef(block.value(), BlockRefType::REQUEST);
             resources[i][gs].device_blocks = {block.value()};
         }
@@ -743,10 +327,6 @@ bool TreeBenchmarkRunner::insertPathFromPrefix(BlockTreeCache& cache,
         return false;
     }
     cache.insert(path, resources, Tier::DEVICE);
-    // Publish REQUEST-holder transitions through the cache so blocks accepted
-    // by the tree become eviction candidates as soon as their temporary holder
-    // is gone. Rejected resources have no reverse-index entry and are simply
-    // returned to the pool by the same release batch.
     BlockReleaseBatch releases;
     for (size_t gs = 0; gs < group_sets.size(); ++gs) {
         if (group_sets[gs]->devicePools().empty()) {
@@ -768,6 +348,95 @@ bool TreeBenchmarkRunner::insertPathFromPrefix(BlockTreeCache& cache,
     return true;
 }
 
+}  // anonymous namespace
+
+TreeBenchmarkRunner::TreeBenchmarkRunner(const ModelProfile& profile,
+                                         const TreeOptions&  options,
+                                         uint64_t            seed,
+                                         uint64_t            repetition_id,
+                                         int                 cuda_device,
+                                         double              max_device_memory_fraction,
+                                         const std::string&  output_json_path):
+    profile_(profile),
+    options_(options),
+    seed_(seed),
+    repetition_id_(repetition_id),
+    cuda_device_(cuda_device),
+    max_device_memory_fraction_(max_device_memory_fraction),
+    output_json_path_(output_json_path) {
+    writer_.setRunner("tree");
+    writer_.setModelProfile(profile_.profile_id, profile_.sha256_hex);
+    writer_.setPayloadMode("scaled", profile_.computeGroupSetPayloadBytes("full_context"));
+}
+
+bool TreeBenchmarkRunner::run() {
+    const OnlineTreeWorkloadConfig config       = resolvedConfig();
+    const bool                     benchmark_ok = runOnlineBenchmark(config);
+    writer_.setStatus(benchmark_ok ? "completed" : "failed");
+
+    bool output_ok = true;
+    if (!output_json_path_.empty()) {
+        std::ofstream output(output_json_path_, std::ios::trunc);
+        output_ok = output.is_open();
+        if (output_ok) {
+            output << writer_.toJson() << '\n';
+            output_ok = output.good();
+        }
+        if (!output_ok) {
+            std::cerr << "Failed to write result JSON: " << output_json_path_ << std::endl;
+        }
+    }
+    return benchmark_ok && output_ok;
+}
+
+std::unique_ptr<BlockTreeCache> TreeBenchmarkRunner::buildTreeCache(const OnlineTreeWorkloadConfig& config) {
+    // Real group-set fixture: reads the profile's actual group type (FULL or
+    // SWA) and constructs the corresponding GroupSet. No longer flattens SWA
+    // to FULL. Fixed device/host pools of 32,768 blocks (or the test config's
+    // smaller pools) with watermark eviction.
+    std::vector<std::pair<std::string, rtp_llm::CacheGroupType>> group_specs;
+    std::vector<size_t>                                          group_payloads;
+    std::vector<size_t>                                          sliding_windows;
+    for (const auto& gs_info : profile_.group_sets) {
+        // Convert benchmark CacheGroupType to production rtp_llm::CacheGroupType.
+        const auto prod_type = gs_info.group_type == benchmark::CacheGroupType::SWA ? rtp_llm::CacheGroupType::SWA :
+                                                                                      rtp_llm::CacheGroupType::FULL;
+        group_specs.emplace_back(gs_info.name, prod_type);
+        group_payloads.push_back(BenchmarkFixture::computeScaledPayload(gs_info.payload_bytes));
+        sliding_windows.push_back(gs_info.sliding_window_size);
+    }
+    auto topology = BenchmarkFixture::createTopology(group_specs, group_payloads, {}, sliding_windows);
+
+    std::vector<GroupSetPtr> group_sets;
+    for (size_t gs_idx = 0; gs_idx < profile_.group_sets.size(); ++gs_idx) {
+        auto device_pool = BenchmarkFixture::createDevicePool(
+            group_payloads[gs_idx], 1, config.device_pool_blocks, "device_" + profile_.group_sets[gs_idx].name);
+        auto host_pool = BenchmarkFixture::createHostPool(
+            group_payloads[gs_idx], config.host_pool_blocks, true, "host_" + profile_.group_sets[gs_idx].name);
+        const std::vector<size_t> group_ids = {gs_idx};
+
+        if (profile_.group_sets[gs_idx].group_type == benchmark::CacheGroupType::SWA) {
+            group_sets.push_back(BenchmarkFixture::createSWAGroupSet({device_pool},
+                                                                     host_pool,
+                                                                     nullptr,
+                                                                     gs_idx,
+                                                                     topology,
+                                                                     group_ids,
+                                                                     profile_.group_sets[gs_idx].sliding_window_size));
+        } else {
+            group_sets.push_back(
+                BenchmarkFixture::createFullGroupSet({device_pool}, host_pool, nullptr, gs_idx, topology, group_ids));
+        }
+    }
+
+    return BenchmarkFixture::createCache(group_sets,
+                                         /*enable_host=*/true,
+                                         /*enable_disk=*/false,
+                                         options_.task_pool_size,
+                                         config.device_watermark_ratio,
+                                         config.host_watermark_ratio);
+}
+
 size_t TreeBenchmarkRunner::insertTopology(BlockTreeCache& cache, const std::vector<PathKeys>& paths) {
     size_t inserted = 0;
     for (const auto& path : paths) {
@@ -778,6 +447,419 @@ size_t TreeBenchmarkRunner::insertTopology(BlockTreeCache& cache, const std::vec
         inserted += path.size() - existing_prefix_length;
     }
     return inserted;
+}
+
+void TreeBenchmarkRunner::addLatencyMetrics(const std::string& prefix, const std::vector<int64_t>& samples) {
+    if (samples.empty()) {
+        return;
+    }
+    std::vector<int64_t> sorted = samples;
+    std::sort(sorted.begin(), sorted.end());
+    auto percentile = [&](double q) {
+        const size_t idx = static_cast<size_t>(q * static_cast<double>(sorted.size() - 1));
+        return sorted[idx];
+    };
+    const double avg =
+        static_cast<double>(std::accumulate(sorted.begin(), sorted.end(), 0LL)) / static_cast<double>(sorted.size());
+    writer_.addMetric(prefix + "_latency_ns_min", static_cast<double>(sorted.front()));
+    writer_.addMetric(prefix + "_latency_ns_p50", static_cast<double>(percentile(0.5)));
+    writer_.addMetric(prefix + "_latency_ns_p99", static_cast<double>(percentile(0.99)));
+    writer_.addMetric(prefix + "_latency_ns_max", static_cast<double>(sorted.back()));
+    writer_.addMetric(prefix + "_latency_ns_avg", avg);
+    writer_.addMetric(prefix + "_calls", static_cast<double>(sorted.size()));
+}
+
+void TreeBenchmarkRunner::addDistributionMetrics(const std::string& prefix, const std::vector<int64_t>& samples) {
+    if (samples.empty()) {
+        return;
+    }
+    std::vector<int64_t> sorted = samples;
+    std::sort(sorted.begin(), sorted.end());
+    auto percentile = [&](double q) {
+        const size_t idx = static_cast<size_t>(q * static_cast<double>(sorted.size() - 1));
+        return sorted[idx];
+    };
+    const double avg =
+        static_cast<double>(std::accumulate(sorted.begin(), sorted.end(), 0LL)) / static_cast<double>(sorted.size());
+    writer_.addMetric(prefix + "_min", static_cast<double>(sorted.front()));
+    writer_.addMetric(prefix + "_p50", static_cast<double>(percentile(0.5)));
+    writer_.addMetric(prefix + "_p99", static_cast<double>(percentile(0.99)));
+    writer_.addMetric(prefix + "_max", static_cast<double>(sorted.back()));
+    writer_.addMetric(prefix + "_avg", avg);
+    writer_.addMetric(prefix + "_samples", static_cast<double>(sorted.size()));
+}
+
+void TreeBenchmarkRunner::writePressureMetrics(bool                                             pressure_ready,
+                                               const std::vector<BlockTreePoolMetricsSnapshot>& snapshots) {
+    writer_.addMetric("pressure_ready", pressure_ready ? 1.0 : 0.0);
+    double min_device_ratio = std::numeric_limits<double>::max();
+    size_t host_pools_used  = 0;
+    size_t host_pools_total = 0;
+    for (const auto& snapshot : snapshots) {
+        const std::string pool_key = "pool." + snapshot.pool_name + ".";
+        writer_.addMetric(pool_key + "used_blocks", static_cast<double>(snapshot.used_blocks));
+        writer_.addMetric(pool_key + "total_blocks", static_cast<double>(snapshot.total_blocks));
+        if (snapshot.tier == Tier::DEVICE && snapshot.total_blocks > 0) {
+            const double ratio = static_cast<double>(snapshot.used_blocks) / static_cast<double>(snapshot.total_blocks);
+            writer_.addMetric(pool_key + "used_ratio", ratio);
+            min_device_ratio = std::min(min_device_ratio, ratio);
+        } else if (snapshot.tier == Tier::HOST) {
+            ++host_pools_total;
+            if (snapshot.used_blocks > 0) {
+                ++host_pools_used;
+            }
+        }
+    }
+    if (min_device_ratio != std::numeric_limits<double>::max()) {
+        writer_.addMetric("warmup.device_pool_used_ratio_min", min_device_ratio);
+    }
+    writer_.addMetric("warmup.host_pools_used", static_cast<double>(host_pools_used));
+    writer_.addMetric("warmup.host_pools_total", static_cast<double>(host_pools_total));
+}
+
+void TreeBenchmarkRunner::writeFinalZeroMetrics(const std::vector<BlockTreePoolMetricsSnapshot>& snapshots) {
+    size_t request_ref_blocks = 0;
+    for (const auto& snapshot : snapshots) {
+        request_ref_blocks += snapshot.request_ref_blocks;
+    }
+    writer_.addMetric("final.request_ref_blocks", static_cast<double>(request_ref_blocks));
+    for (const auto& snapshot : snapshots) {
+        const std::string pool_key = "final.pool." + snapshot.pool_name + ".";
+        writer_.addMetric(pool_key + "used_blocks", static_cast<double>(snapshot.used_blocks));
+        writer_.addMetric(pool_key + "request_ref_blocks", static_cast<double>(snapshot.request_ref_blocks));
+    }
+}
+
+bool TreeBenchmarkRunner::runOnlineBenchmark(const OnlineTreeWorkloadConfig& config) {
+    writer_.setMeasurement("online_lifecycle");
+
+    // Resolved config: every fixed workload value, the trace hash, the model
+    // profile and the task pool. Written before preflight so even a failed
+    // preflight result is self-describing.
+    writer_.addResolvedConfigInt("tokens_per_block", static_cast<int64_t>(config.tokens_per_block));
+    writer_.addResolvedConfigInt("logical_concurrency", static_cast<int64_t>(config.logical_concurrency));
+    writer_.addResolvedConfigInt("active_token_budget", static_cast<int64_t>(config.active_token_budget));
+    writer_.addResolvedConfigInt("forward_sleep_ms", static_cast<int64_t>(config.forward_sleep_ms));
+    writer_.addResolvedConfigInt("request_lifecycle_timeout_ms",
+                                 static_cast<int64_t>(config.request_lifecycle_timeout_ms));
+    writer_.addResolvedConfigInt("initial_cache_node_count",
+                                 static_cast<int64_t>(config.shared_base_nodes + config.background_tree_nodes));
+    writer_.addResolvedConfigInt("shared_base_nodes", static_cast<int64_t>(config.shared_base_nodes));
+    writer_.addResolvedConfigInt("background_tree_nodes", static_cast<int64_t>(config.background_tree_nodes));
+    writer_.addResolvedConfigInt("device_pool_blocks", static_cast<int64_t>(config.device_pool_blocks));
+    writer_.addResolvedConfigInt("host_pool_blocks", static_cast<int64_t>(config.host_pool_blocks));
+    writer_.addResolvedConfig("device_watermark_ratio", std::to_string(config.device_watermark_ratio));
+    writer_.addResolvedConfig("host_watermark_ratio", std::to_string(config.host_watermark_ratio));
+    writer_.addResolvedConfigInt("operation_trace_count", static_cast<int64_t>(config.operation_trace_count));
+    writer_.addResolvedConfig("length_buckets_tokens", joinSizeValues(config.length_buckets_tokens));
+    writer_.addResolvedConfig("length_weights", joinSizeValues(config.length_weights));
+    writer_.addResolvedConfig("hit_rates_percent", joinSizeValues(config.hit_rates_percent));
+    writer_.addResolvedConfigInt("warmup_seconds", static_cast<int64_t>(config.warmup_seconds));
+    writer_.addResolvedConfigInt("measured_seconds", static_cast<int64_t>(config.measured_seconds));
+    writer_.addResolvedConfigInt("task_pool_size_resolved", static_cast<int64_t>(options_.task_pool_size));
+    writer_.addResolvedConfigInt("foreground_scheduler_threads", 1);
+    writer_.addResolvedConfigInt("repetition_identity", static_cast<int64_t>(repetition_id_));
+    writer_.addResolvedConfigInt("cuda_device_resolved", static_cast<int64_t>(cuda_device_));
+    writer_.addResolvedConfig("max_device_memory_fraction_resolved", std::to_string(max_device_memory_fraction_));
+    writer_.addResolvedConfig("fixture_layout", "scaled_group_set");
+    for (const auto& gs_info : profile_.group_sets) {
+        writer_.addResolvedConfig("group_set_" + gs_info.name + "_type",
+                                  gs_info.group_type == benchmark::CacheGroupType::SWA ? "SWA" : "FULL");
+        writer_.addResolvedConfigInt("group_set_" + gs_info.name + "_device_pool_blocks",
+                                     static_cast<int64_t>(config.device_pool_blocks));
+        writer_.addResolvedConfigInt("group_set_" + gs_info.name + "_host_pool_blocks",
+                                     static_cast<int64_t>(config.host_pool_blocks));
+        writer_.addResolvedConfigInt(
+            "group_set_" + gs_info.name + "_scaled_payload_bytes",
+            static_cast<int64_t>(BenchmarkFixture::computeScaledPayload(gs_info.payload_bytes)));
+        if (gs_info.group_type == benchmark::CacheGroupType::SWA) {
+            writer_.addResolvedConfigInt("group_set_" + gs_info.name + "_swa_window",
+                                         static_cast<int64_t>(gs_info.sliding_window_size));
+        }
+    }
+
+    // Preflight before any large allocation: fixed pools plus the admission
+    // preparation peak, never derived from the initial node count.
+    const ResourceBudget budget =
+        BenchmarkFixture::preflightTreeResources(profile_, config, cuda_device_, max_device_memory_fraction_);
+    writer_.addResourceBudget("estimated_device_bytes", budget.estimated_device_bytes);
+    writer_.addResourceBudget("estimated_host_bytes", budget.estimated_host_bytes);
+    writer_.addResourceBudget("available_device_bytes", budget.available_device_bytes);
+    writer_.addResourceBudget("raw_available_device_bytes", budget.raw_available_device_bytes);
+    writer_.addResourceBudget("available_host_or_cgroup_bytes", budget.available_host_or_cgroup_bytes);
+    writer_.addResourceBudget("sufficient", budget.sufficient ? 1 : 0);
+    if (!budget.sufficient) {
+        std::cerr << "[tree] resource preflight failed: estimated_device=" << budget.estimated_device_bytes
+                  << " available_device=" << budget.available_device_bytes
+                  << " estimated_host=" << budget.estimated_host_bytes
+                  << " available_host=" << budget.available_host_or_cgroup_bytes << std::endl;
+        return false;
+    }
+
+    auto cache = buildTreeCache(config);
+    if (!cache) {
+        return false;
+    }
+
+    TreeWorkloadGenerator generator(seed_, config);
+    const auto            setup_start = Clock::now();
+    const auto            metadata    = generator.generateTopology();
+    generator.generateTrace();
+    std::cout << "[tree] setup: inserting " << metadata.actual_node_count << " nodes..." << std::endl;
+    const size_t          built_nodes = insertTopology(*cache, generator.topologyPaths());
+    BlockTreeCacheAdapter adapter(*cache);
+    size_t                drain_timeouts = 0;
+    bool                  all_drains_ok  = true;
+    auto                  drain          = [&](const std::string& phase) {
+        const bool ok = adapter.boundedDrain(std::chrono::milliseconds(30'000));
+        writer_.addMetric("drain." + phase + ".pending_tasks_after", static_cast<double>(adapter.pendingTaskCount()));
+        if (!ok) {
+            ++drain_timeouts;
+            all_drains_ok = false;
+            std::cerr << "[tree] " << phase << " drain timed out with " << adapter.pendingTaskCount()
+                      << " pending task(s)" << std::endl;
+        }
+        return ok;
+    };
+    drain("setup");
+    const int64_t setup_ns = elapsedNs(setup_start, Clock::now());
+    writer_.addPhaseNs("setup", setup_ns);
+    const size_t setup_node_count = cache->getStats().tree_node_count;
+    writer_.addMetric("tree_node_count_setup", static_cast<double>(setup_node_count));
+    if (built_nodes != metadata.actual_node_count || setup_node_count != metadata.actual_node_count) {
+        std::cerr << "[tree] topology build mismatch: generated=" << metadata.actual_node_count
+                  << " inserted=" << built_nodes << " cache=" << setup_node_count << std::endl;
+        return false;
+    }
+
+    writer_.addResolvedConfig("trace_hash", TreeWorkloadGenerator::hashHex(generator.traceHash()));
+    writer_.addResolvedConfig("workload_definition_hash",
+                              TreeWorkloadGenerator::hashHex(generator.workloadDefinitionHash()));
+    writer_.addResolvedConfigInt("initial_topology_path_count", static_cast<int64_t>(generator.topologyPaths().size()));
+    writer_.addResolvedConfigInt("base_request_count", static_cast<int64_t>(generator.baseRequestCount()));
+    writer_.addResolvedConfigInt("continuation_request_count",
+                                 static_cast<int64_t>(generator.continuationRequestCount()));
+
+    OnlineTreeScheduler scheduler(adapter, config);
+
+    // Warmup: full request lifecycle, then quiesce (tree/host cache is kept).
+    std::cout << "[tree] warmup " << config.warmup_seconds << "s..." << std::endl;
+    size_t     trace_offset = 0;
+    int64_t    warmup_ns    = 0;
+    const bool warmup_ok =
+        scheduler.runPhase(generator.trace(), trace_offset, std::chrono::seconds(config.warmup_seconds), warmup_ns);
+    writer_.addPhaseNs("warmup", warmup_ns);
+    drain("warmup");
+    const OnlineSchedulerMetrics warmup_metrics   = scheduler.takeMetrics();
+    const auto                   warmup_snapshots = cache->poolMetricsSnapshots();
+    const auto                   warmup_stats     = cache->getStats();
+    const bool                   pressure_ready   = warmup_ok
+                                && std::all_of(warmup_snapshots.begin(),
+                                               warmup_snapshots.end(),
+                                               [](const auto& snapshot) {
+                                                   if (snapshot.tier == Tier::DEVICE && snapshot.total_blocks > 0) {
+                                                       return static_cast<double>(snapshot.used_blocks)
+                                                                  / static_cast<double>(snapshot.total_blocks)
+                                                              >= 0.75;
+                                                   }
+                                                   if (snapshot.tier == Tier::HOST) {
+                                                       return snapshot.used_blocks > 0;
+                                                   }
+                                                   return true;
+                                               })
+                                && warmup_stats.device_heap_total_size > 0
+                                && warmup_metrics.completed_transactions >= config.warmup_completed_requests_min
+                                && scheduler.activeContexts() == 0;
+    writePressureMetrics(pressure_ready, warmup_snapshots);
+    writer_.addMetric("warmup.completed_request_transactions",
+                      static_cast<double>(warmup_metrics.completed_transactions));
+    writer_.addMetric("warmup.device_heap_total_size", static_cast<double>(warmup_stats.device_heap_total_size));
+    writer_.addMetric("warmup.failed_requests", static_cast<double>(hardFailureCount(warmup_metrics)));
+    writer_.addMetric("warmup.trace_exhaustions", static_cast<double>(warmup_metrics.trace_exhaustions));
+    writer_.addMetric("warmup.dependency_failed_descendants",
+                      static_cast<double>(warmup_metrics.dependency_failed_descendants));
+    std::cout << "[tree] warmup done: completed=" << warmup_metrics.completed_transactions
+              << " pressure_ready=" << (pressure_ready ? "true" : "false") << std::endl;
+
+    // Measured: dual profiler markers; the 2s attach window is outside the
+    // measured timer. measured_ns spans MEASURE_START to the completion of the
+    // last admitted request (deadline drain may slightly exceed 60s).
+    std::cout << "PROFILE_ATTACH_READY" << std::endl;
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    std::cout << "MEASURE_START" << std::endl;
+    int64_t    measured_ns = 0;
+    const bool measured_ok =
+        scheduler.runPhase(generator.trace(), trace_offset, std::chrono::seconds(config.measured_seconds), measured_ns);
+    writer_.addPhaseNs("measured", measured_ns);
+    drain("measured");
+
+    // Finalize: verify contexts, tickets, task pool and REQUEST refs are zero.
+    const auto finalize_start = Clock::now();
+    drain("finalize");
+    const auto final_snapshots = cache->poolMetricsSnapshots();
+    const auto final_stats     = cache->getStats();
+    const auto finalize_ns     = elapsedNs(finalize_start, Clock::now());
+    writer_.addPhaseNs("finalize", finalize_ns);
+    const size_t final_active_requests      = scheduler.activeContexts();
+    const size_t final_pending_load_tickets = scheduler.pendingLoadTickets();
+    const size_t final_pending_tasks        = adapter.pendingTaskCount();
+    const size_t final_request_ref_blocks   = std::accumulate(
+        final_snapshots.begin(), final_snapshots.end(), size_t{0}, [](size_t sum, const auto& snapshot) {
+            return sum + snapshot.request_ref_blocks;
+        });
+    writeFinalZeroMetrics(final_snapshots);
+    writer_.addMetric("final.active_requests", static_cast<double>(final_active_requests));
+    writer_.addMetric("final.pending_load_tickets", static_cast<double>(final_pending_load_tickets));
+    writer_.addMetric("final.pending_tasks", static_cast<double>(final_pending_tasks));
+    writer_.addMetric("drain_timeouts", static_cast<double>(drain_timeouts));
+    writer_.addMetric("tree_node_count_final", static_cast<double>(final_stats.tree_node_count));
+    const bool final_zero = final_active_requests == 0 && final_pending_load_tickets == 0 && final_pending_tasks == 0
+                            && final_request_ref_blocks == 0;
+
+    const auto& m = scheduler.metrics();
+    addLatencyMetrics("match", m.match_ns);
+    addLatencyMetrics("insert", m.insert_ns);
+    addLatencyMetrics("load_commit", m.load_commit_ns);
+    addLatencyMetrics("match_to_ready", m.match_to_ready_ns);
+
+    const size_t measured_failed_requests = hardFailureCount(m);
+    const size_t failed_requests          = hardFailureCount(warmup_metrics) + measured_failed_requests;
+    const size_t completed_transactions   = warmup_metrics.completed_transactions + m.completed_transactions;
+    const size_t attempted_transactions   = completed_transactions + failed_requests;
+
+    writer_.setWorkload(seed_, attempted_transactions, attempted_transactions, completed_transactions, failed_requests);
+    const size_t  lifecycle_forward_batches  = warmup_metrics.forward_batches + m.forward_batches;
+    const size_t  lifecycle_forward_requests = warmup_metrics.forward_requests + m.forward_requests;
+    const int64_t simulated_forward_sleep_ns =
+        static_cast<int64_t>(lifecycle_forward_batches) * static_cast<int64_t>(config.forward_sleep_ms) * 1'000'000;
+    writer_.addMetric("logical_concurrency_resolved", static_cast<double>(config.logical_concurrency));
+    writer_.addMetric("foreground_scheduler_threads", 1.0);
+    writer_.addMetric("task_pool_size_resolved", static_cast<double>(options_.task_pool_size));
+    writer_.addMetric("active_requests_peak", static_cast<double>(m.active_requests_peak));
+    writer_.addMetric("waiting_requests_peak", static_cast<double>(m.waiting_requests_peak));
+    writer_.addMetric("loading_requests_peak", static_cast<double>(m.loading_requests_peak));
+    writer_.addMetric("load_tickets_pending_peak", static_cast<double>(m.load_tickets_pending_peak));
+    writer_.addMetric("ready_batch_size_avg",
+                      m.ready_batch_sizes.empty() ? 0.0 :
+                                                    static_cast<double>(std::accumulate(
+                                                        m.ready_batch_sizes.begin(), m.ready_batch_sizes.end(), 0ULL))
+                                                        / static_cast<double>(m.ready_batch_sizes.size()));
+    writer_.addMetric("ready_batch_size_max", static_cast<double>(m.ready_batch_max));
+    writer_.addMetric("scheduler_no_ready_wait_ns", static_cast<double>(m.scheduler_no_ready_wait_ns));
+    writer_.addMetric("forward_batches", static_cast<double>(m.forward_batches));
+    writer_.addMetric("forward_requests", static_cast<double>(m.forward_requests));
+    writer_.addMetric("simulated_forward_sleep_ns", static_cast<double>(simulated_forward_sleep_ns));
+    writer_.addMetric("held_request_blocks_peak", static_cast<double>(m.held_request_blocks_peak));
+    writer_.addMetric("completed_request_transactions", static_cast<double>(m.completed_transactions));
+    writer_.addMetric("loads_committed", static_cast<double>(m.loads_committed));
+    writer_.addMetric("loads_succeeded", static_cast<double>(m.loads_succeeded));
+    writer_.addMetric("loads_failed", static_cast<double>(m.loads_failed));
+    writer_.addMetric("loads_cancelled", static_cast<double>(m.loads_cancelled));
+    writer_.addMetric("cancel_request_failed", static_cast<double>(m.cancel_request_failed));
+    writer_.addMetric("load_target_allocation_failed", static_cast<double>(m.load_target_allocation_failed));
+    writer_.addMetric("suffix_allocation_failed", static_cast<double>(m.suffix_allocation_failed));
+    writer_.addMetric("load_commit_failed", static_cast<double>(m.load_commit_failed));
+    writer_.addMetric("joined_holder_failed", static_cast<double>(m.joined_holder_failed));
+    writer_.addMetric("joined_holder_blocks_total", static_cast<double>(m.joined_holder_blocks_total));
+    writer_.addMetric("admission_allocation_retries", static_cast<double>(m.admission_allocation_retries));
+    writer_.addMetric("unexpected_extra_match_count", static_cast<double>(m.unexpected_extra_match_count));
+    writer_.addMetric("trace_exhaustions", static_cast<double>(m.trace_exhaustions));
+    writer_.addMetric("lifecycle_timeouts", static_cast<double>(m.lifecycle_timeouts));
+    writer_.addMetric("dropped_waiting_at_deadline", static_cast<double>(m.dropped_waiting_at_deadline));
+
+    // Dependency metrics
+    writer_.addMetric("dependency_skip_count", static_cast<double>(m.dependency_skip_count));
+    writer_.addMetric("dependency_waiting_peak", static_cast<double>(m.dependency_waiting_peak));
+    writer_.addMetric("dependency_failed_descendants", static_cast<double>(m.dependency_failed_descendants));
+    writer_.addMetric("completed_base_transactions", static_cast<double>(m.completed_base_transactions));
+    writer_.addMetric("completed_continuation_transactions",
+                      static_cast<double>(m.completed_continuation_transactions));
+    writer_.addMetric("completed_continuation_family_count",
+                      static_cast<double>(m.completed_continuation_families.size()));
+    writer_.addMetric("completed_family_epoch_count", static_cast<double>(m.completed_family_epochs.size()));
+    writer_.addMetric("max_completed_generation", static_cast<double>(m.max_completed_generation));
+
+    std::vector<int64_t> completed_by_family(config.logical_concurrency, 0);
+    for (const auto& [family_id, count] : m.completed_requests_by_family) {
+        if (family_id < completed_by_family.size()) {
+            completed_by_family[family_id] = static_cast<int64_t>(count);
+        }
+    }
+    std::vector<int64_t> epochs_by_family(config.logical_concurrency, 0);
+    for (const auto& [family_id, epoch_id] : m.completed_family_epochs) {
+        (void)epoch_id;
+        if (family_id < epochs_by_family.size()) {
+            ++epochs_by_family[family_id];
+        }
+    }
+    addDistributionMetrics("completed_requests_per_family", completed_by_family);
+    addDistributionMetrics("completed_epochs_per_family", epochs_by_family);
+    addDistributionMetrics("completed_generation", m.completed_generation_samples);
+    addDistributionMetrics("planned_reuse_blocks", m.planned_reuse_blocks_samples);
+    addDistributionMetrics("actual_matched_depth_blocks", m.actual_matched_depth_samples);
+    addDistributionMetrics("actual_minus_planned_reuse_blocks", m.reuse_delta_blocks_samples);
+
+    writer_.addMetric("planned_reuse_blocks_per_request",
+                      m.completed_transactions ? static_cast<double>(m.planned_reuse_blocks_total)
+                                                     / static_cast<double>(m.completed_transactions) :
+                                                 0.0);
+    writer_.addMetric("actual_matched_depth_per_request",
+                      m.completed_transactions ? static_cast<double>(m.actual_matched_depth_total)
+                                                     / static_cast<double>(m.completed_transactions) :
+                                                 0.0);
+    writer_.addMetric("device_matched_blocks_per_request",
+                      m.completed_transactions ? static_cast<double>(m.device_matched_blocks_total)
+                                                     / static_cast<double>(m.completed_transactions) :
+                                                 0.0);
+    writer_.addMetric("host_matched_blocks_per_request",
+                      m.completed_transactions ? static_cast<double>(m.host_matched_blocks_total)
+                                                     / static_cast<double>(m.completed_transactions) :
+                                                 0.0);
+    writer_.addMetric("insert_path_keys_per_request",
+                      m.completed_transactions ? static_cast<double>(m.insert_path_keys_total)
+                                                     / static_cast<double>(m.completed_transactions) :
+                                                 0.0);
+    writer_.addMetric("insert_new_nodes_per_request",
+                      m.completed_transactions ? static_cast<double>(m.insert_new_nodes_total)
+                                                     / static_cast<double>(m.completed_transactions) :
+                                                 0.0);
+    writer_.addMetric("benchmark_request_transactions_per_second",
+                      measured_ns > 0 ?
+                          static_cast<double>(m.completed_transactions) / (static_cast<double>(measured_ns) / 1e9) :
+                          0.0);
+
+    writer_.setTreeLifecycle(completed_transactions,
+                             failed_requests,
+                             lifecycle_forward_batches,
+                             lifecycle_forward_requests,
+                             simulated_forward_sleep_ns,
+                             warmup_metrics.unexpected_extra_match_count + m.unexpected_extra_match_count,
+                             pressure_ready,
+                             final_active_requests,
+                             final_pending_load_tickets,
+                             final_pending_tasks,
+                             drain_timeouts,
+                             final_request_ref_blocks);
+
+    std::cout << "[tree] measured " << static_cast<double>(measured_ns) / 1e9
+              << "s: completed=" << m.completed_transactions << " transactions, batches=" << m.forward_batches
+              << " (avg ready "
+              << (m.ready_batch_sizes.empty() ?
+                      0.0 :
+                      static_cast<double>(std::accumulate(m.ready_batch_sizes.begin(), m.ready_batch_sizes.end(), 0ULL))
+                          / static_cast<double>(m.ready_batch_sizes.size()))
+              << "), loads=" << m.loads_committed << " committed/" << m.loads_succeeded << " succeeded,"
+              << " held_peak=" << m.held_request_blocks_peak
+              << ", pressure_ready=" << (pressure_ready ? "true" : "false")
+              << ", deps_skipped=" << m.dependency_skip_count << ", deps_failed=" << m.dependency_failed_descendants
+              << std::endl;
+
+    const bool continuation_coverage_ok = m.completed_base_transactions > 0 && m.completed_continuation_transactions > 0
+                                          && m.completed_continuation_families.size() == config.logical_concurrency;
+    const bool measured_duration_ok = measured_ns >= static_cast<int64_t>(config.measured_seconds) * 1'000'000'000LL;
+    return warmup_ok && measured_ok && all_drains_ok && final_zero && failed_requests == 0
+           && warmup_metrics.trace_exhaustions == 0 && m.trace_exhaustions == 0 && m.completed_transactions > 0
+           && measured_duration_ok && continuation_coverage_ok && lifecycle_forward_requests == completed_transactions;
 }
 
 }  // namespace rtp_llm::benchmark

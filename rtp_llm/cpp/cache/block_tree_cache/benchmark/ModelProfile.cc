@@ -35,14 +35,6 @@ CacheGroupType ModelProfile::parseGroupType(const std::string& type_str) {
     throw std::runtime_error("Unknown group type: " + type_str);
 }
 
-TierPolicy ModelProfile::parseTierPolicy(const std::string& policy_str) {
-    if (policy_str == "device_only")
-        return TierPolicy::DEVICE_ONLY;
-    if (policy_str == "device_host_disk")
-        return TierPolicy::DEVICE_HOST_DISK;
-    throw std::runtime_error("Unknown tier policy: " + policy_str);
-}
-
 std::string ModelProfile::computeSha256(const std::string& content) {
     unsigned char hash[SHA256_DIGEST_LENGTH];
     SHA256(reinterpret_cast<const unsigned char*>(content.data()), content.size(), hash);
@@ -72,9 +64,12 @@ void ModelProfile::validateGroup(const rapidjson::Value& group, const std::strin
         throw std::runtime_error("Profile " + profile_id + ": group " + group["tag"].GetString()
                                  + " missing 'group_payload_bytes'");
     }
-    if (!group.HasMember("tier_policy") || !group["tier_policy"].IsString()) {
-        throw std::runtime_error("Profile " + profile_id + ": group " + group["tag"].GetString()
-                                 + " missing 'tier_policy'");
+    const std::string type = group["type"].GetString();
+    if (type == "SWA"
+        && (!group.HasMember("sliding_window_size") || !group["sliding_window_size"].IsUint64()
+            || group["sliding_window_size"].GetUint64() == 0)) {
+        throw std::runtime_error("Profile " + profile_id + ": SWA group " + group["tag"].GetString()
+                                 + " missing positive 'sliding_window_size'");
     }
 }
 
@@ -136,31 +131,17 @@ ModelProfile ModelProfile::fromString(const std::string& json_content) {
         throw std::runtime_error("Profile " + profile.profile_id + ": missing or empty 'group_sets'");
     }
 
-    // Optional fields
-    if (doc.HasMember("model") && doc["model"].IsString())
-        profile.model_name = doc["model"].GetString();
-    if (doc.HasMember("dtype") && doc["dtype"].IsString())
-        profile.dtype = doc["dtype"].GetString();
-    if (doc.HasMember("tp_size") && doc["tp_size"].IsUint64())
-        profile.tp_size = doc["tp_size"].GetUint64();
-    if (doc.HasMember("prefill_cp_size") && doc["prefill_cp_size"].IsUint64())
-        profile.prefill_cp_size = doc["prefill_cp_size"].GetUint64();
-    if (doc.HasMember("tokens_per_block") && doc["tokens_per_block"].IsUint64())
-        profile.tokens_per_block = doc["tokens_per_block"].GetUint64();
-    if (doc.HasMember("kernel_tokens_block") && doc["kernel_tokens_block"].IsUint64())
-        profile.kernel_tokens_block = doc["kernel_tokens_block"].GetUint64();
-
     // Parse groups
     for (const auto& group : doc["groups"].GetArray()) {
         validateGroup(group, profile.profile_id);
         GroupInfo info;
-        info.tag                 = group["tag"].GetString();
-        info.layer_count         = group["layer_count"].GetUint64();
-        info.type                = parseGroupType(group["type"].GetString());
-        info.entries_per_block   = group.HasMember("entries_per_block") ? group["entries_per_block"].GetUint64() : 0;
+        info.tag         = group["tag"].GetString();
+        info.layer_count = group["layer_count"].GetUint64();
+        info.type        = parseGroupType(group["type"].GetString());
+        info.sliding_window_size =
+            group.HasMember("sliding_window_size") ? group["sliding_window_size"].GetUint64() : 0;
         info.layer_stride_bytes  = group["layer_stride_bytes"].GetUint64();
         info.group_payload_bytes = group["group_payload_bytes"].GetUint64();
-        info.tier_policy         = parseTierPolicy(group["tier_policy"].GetString());
 
         // Check for duplicate tags
         for (const auto& existing : profile.groups) {
@@ -180,27 +161,23 @@ ModelProfile ModelProfile::fromString(const std::string& json_content) {
             info.member_tags.push_back(member.GetString());
         }
         info.payload_bytes = gs.HasMember("payload_bytes") ? gs["payload_bytes"].GetUint64() : 0;
-        profile.group_sets.push_back(info);
-    }
-
-    // Parse device_only_groups
-    if (doc.HasMember("device_only_groups") && doc["device_only_groups"].IsArray()) {
-        for (const auto& g : doc["device_only_groups"].GetArray()) {
-            if (g.IsString()) {
-                profile.device_only_groups.push_back(g.GetString());
+        // Resolve one consistent type/window across every flattened member.
+        if (!info.member_tags.empty()) {
+            const auto* first_group = profile.findGroup(info.member_tags.front());
+            if (first_group != nullptr) {
+                info.group_type          = first_group->type;
+                info.sliding_window_size = first_group->sliding_window_size;
+                for (const auto& member_tag : info.member_tags) {
+                    const auto* member = profile.findGroup(member_tag);
+                    if (member == nullptr || member->type != info.group_type
+                        || member->sliding_window_size != info.sliding_window_size) {
+                        throw std::runtime_error("Profile " + profile.profile_id + ": group_set " + info.name
+                                                 + " mixes cache type or sliding-window policy");
+                    }
+                }
             }
         }
-    }
-
-    // Parse default_capacity
-    if (doc.HasMember("default_capacity") && doc["default_capacity"].IsObject()) {
-        const auto& cap = doc["default_capacity"];
-        if (cap.HasMember("device_block_count") && cap["device_block_count"].IsUint64())
-            profile.default_capacity.device_block_count = cap["device_block_count"].GetUint64();
-        if (cap.HasMember("host_block_count") && cap["host_block_count"].IsUint64())
-            profile.default_capacity.host_block_count = cap["host_block_count"].GetUint64();
-        if (cap.HasMember("disk_block_count") && cap["disk_block_count"].IsUint64())
-            profile.default_capacity.disk_block_count = cap["disk_block_count"].GetUint64();
+        profile.group_sets.push_back(info);
     }
 
     return profile;
@@ -220,14 +197,6 @@ const GroupSetInfo* ModelProfile::findGroupSet(const std::string& name) const {
             return &gs;
     }
     return nullptr;
-}
-
-bool ModelProfile::isDeviceOnly(const std::string& tag) const {
-    for (const auto& g : device_only_groups) {
-        if (g == tag)
-            return true;
-    }
-    return false;
 }
 
 size_t ModelProfile::computeGroupSetPayloadBytes(const std::string& name) const {

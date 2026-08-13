@@ -6,7 +6,6 @@
 #include <string>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/benchmark/BenchmarkFixture.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/BenchmarkJsonWriter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/ModelProfile.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/TransferBenchmarkOptions.h"
@@ -50,8 +49,15 @@ private:
         size_t      attempted{0};
         size_t      succeeded{0};
         size_t      failed{0};
+        size_t      batch_submissions{0};
+        size_t      max_descriptor_batch_size{0};
+        size_t      expected_batch_submissions{0};
+        size_t      expected_max_descriptor_batch_size{0};
         std::string first_error;
         std::string first_failure_type;
+
+        bool descriptorBatchContractOk() const;
+        void merge(const DirectionStats& other);
     };
 
     struct BatchResult {
@@ -61,7 +67,11 @@ private:
         size_t attempted() const;
         size_t succeeded() const;
         size_t failed() const;
+        size_t batchSubmissions() const;
+        size_t maxDescriptorBatchSize() const;
         size_t visitedWorkingSetBlocks() const;
+        bool   descriptorBatchContractOk() const;
+        void   merge(const BatchResult& other);
     };
 
     const ModelProfile& profile_;
@@ -85,7 +95,7 @@ private:
                                         const MemberDeviceBlocks&        device_blocks,
                                         const std::vector<BlockIdxType>& host_blocks,
                                         const std::vector<BlockIdxType>& disk_blocks,
-                                        size_t                           worker_slot_index,
+                                        size_t                           lane_index,
                                         size_t                           working_set_index,
                                         bool                             host_is_working_set);
 
@@ -94,7 +104,9 @@ private:
                                  const MemberDeviceBlocks&                          device_blocks,
                                  const std::vector<BlockIdxType>&                   host_blocks,
                                  const std::vector<BlockIdxType>&                   disk_blocks,
-                                 size_t                                             worker_count,
+                                 BlockTreeTaskPool*                                 d2disk_submit_pool,
+                                 size_t                                             wave_width,
+                                 size_t                                             descriptor_batch_size,
                                  size_t                                             operation_count,
                                  size_t                                             start_coordinate,
                                  size_t                                             working_set_blocks,
