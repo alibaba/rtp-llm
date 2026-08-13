@@ -31,6 +31,10 @@ from rtp_llm.utils.base_model_datatypes import GenerateOutputs
 _INT32_MIN = -2_147_483_648
 _INT32_MAX = 2_147_483_647
 _DEFAULT_MAX_NEW_TOKENS = 32000
+_LEGACY_JSON_OBJECT_GUIDED_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {"schema": {"type": "object"}},
+}
 
 
 class LLMFinishReason(IntEnum):
@@ -469,6 +473,25 @@ def _parse_guided_json_response_format(value: Any) -> dict[str, Any] | None:
     return {"type": "json_schema", "json_schema": {"schema": schema}}
 
 
+def _merge_guided_response_format(
+    response_format: Any, guided_response_format: dict[str, Any] | None
+) -> Any:
+    """Apply guided_json precedence without narrowing legacy json_object."""
+    if guided_response_format is None:
+        return response_format
+
+    is_json_object = (
+        isinstance(response_format, dict)
+        and response_format.get("type") == "json_object"
+    )
+    if (
+        is_json_object
+        and guided_response_format == _LEGACY_JSON_OBJECT_GUIDED_RESPONSE_FORMAT
+    ):
+        return response_format
+    return guided_response_format
+
+
 def _decode_structural_tag_payload(
     value: Any, field_name: str
 ) -> dict[str, Any] | None:
@@ -515,8 +538,11 @@ def _parse_grammar_controls(
         guided_response_format = _parse_guided_json_response_format(
             _lookup_ds_request_control(ds_attrs, "guided_json")
         )
-    if guided_response_format is not None:
-        response_format = guided_response_format
+    # DashScope serving sends both fields for json_object, including a legacy
+    # guided_json={"type":"object"}; custom guided schemas still override.
+    response_format = _merge_guided_response_format(
+        response_format, guided_response_format
+    )
 
     if json_format_value is None:
         json_format_value = _parse_optional_bool(

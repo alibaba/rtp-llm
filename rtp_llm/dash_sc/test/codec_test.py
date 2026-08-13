@@ -351,6 +351,40 @@ class DashScGrpcRequestTest(TestCase):
         self._assert_guided_json_response_format(config.response_format, schema)
         self.assertIsNone(config.json_schema)
 
+    def test_parse_dashscope_json_object_default_guided_schema(self) -> None:
+        schema = {"type": "object"}
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["response_format"].string_param = json.dumps(
+            {"type": "json_object"}
+        )
+        req.parameters["guided_json"].string_param = json.dumps([schema])
+
+        sp = parse_sampling_params(req)
+        config = sp.to_generate_config()
+
+        self.assertEqual(json.loads(sp.response_format), {"type": "json_object"})
+        self.assertEqual(json.loads(config.response_format), {"type": "json_object"})
+        self.assertIsNone(config.json_schema)
+
+    def test_parse_json_object_custom_guided_schema_still_overrides(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        }
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["response_format"].string_param = json.dumps(
+            {"type": "json_object"}
+        )
+        req.parameters["guided_json"].string_param = json.dumps([schema])
+
+        sp = parse_sampling_params(req)
+        config = sp.to_generate_config()
+
+        self._assert_guided_json_response_format(sp.response_format, schema)
+        self._assert_guided_json_response_format(config.response_format, schema)
+        self.assertIsNone(config.json_schema)
+
     def test_parse_sampling_guided_json_from_nested_dash_parameters(self) -> None:
         schema = {"type": "object", "properties": {"name": {"type": "string"}}}
         req = predict_v2_pb2.ModelInferRequest()
