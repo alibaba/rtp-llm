@@ -3,6 +3,7 @@
 #include <thread>
 #include <gtest/gtest.h>
 #include "grpc++/grpc++.h"
+#include "grpcpp/alarm.h"
 
 #include "autil/NetUtil.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
@@ -15,13 +16,17 @@ public:
     ::grpc::Status ExecuteFunction(::grpc::ServerContext*     context,
                                    const ::FunctionRequestPB* request,
                                    ::FunctionResponsePB*      response) override {
+        call_count_.fetch_add(1, std::memory_order_relaxed);
         if (sleep_millis_ > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(sleep_millis_));
         }
         if (context->IsCancelled()) {
+            cancelled_count_.fetch_add(1, std::memory_order_relaxed);
+            completed_count_.fetch_add(1, std::memory_order_relaxed);
             return ::grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled");
         }
         response->mutable_mem_response()->set_success(mem_response_success_);
+        completed_count_.fetch_add(1, std::memory_order_relaxed);
         return rpc_response_status_;
     }
     void setSleepMillis(int ms) {
@@ -33,11 +38,23 @@ public:
     void setRpcResponseStatus(const ::grpc::Status& status) {
         rpc_response_status_ = status;
     }
+    int callCount() const {
+        return call_count_.load(std::memory_order_relaxed);
+    }
+    int cancelledCount() const {
+        return cancelled_count_.load(std::memory_order_relaxed);
+    }
+    int completedCount() const {
+        return completed_count_.load(std::memory_order_relaxed);
+    }
 
 private:
     int            sleep_millis_{0};
     bool           mem_response_success_{true};
     ::grpc::Status rpc_response_status_{::grpc::Status::OK};
+    std::atomic<int> call_count_{0};
+    std::atomic<int> cancelled_count_{0};
+    std::atomic<int> completed_count_{0};
 };
 
 class TestRpcServer {
@@ -66,6 +83,10 @@ public:
 
     int listenPort() const {
         return listen_port_;
+    }
+
+    TestRpcService* service() const {
+        return service_.get();
     }
 
 private:
@@ -138,6 +159,17 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNull_RequestsSizeMismatch) {
     EXPECT_EQ(result, nullptr);
 }
 
+TEST_F(BroadcastManagerTest, Broadcast_ReturnNull_EmptyWorkers) {
+    std::vector<std::string> worker_addrs;
+    auto                     manager = std::make_unique<BroadcastManager>(worker_addrs);
+    std::vector<FunctionRequestPB> requests;
+    auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& ctx,
+                       const FunctionRequestPB&                    req,
+                       grpc::CompletionQueue* cq) { return stub->AsyncExecuteFunction(ctx.get(), req, cq); };
+    EXPECT_EQ((manager->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, 100, rpc_call)), nullptr);
+}
+
 TEST_F(BroadcastManagerTest, Broadcast_ReturnNull_GetConnectionFailed) {
     std::vector<std::string> empty_addrs;
     auto                     manager = std::make_unique<BroadcastManager>(empty_addrs);
@@ -182,11 +214,44 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsSuccess) {
     for (size_t i = 0; i < responses.size(); ++i) {
         EXPECT_TRUE(responses[i].has_mem_response());
         EXPECT_TRUE(responses[i].mem_response().success());
+        EXPECT_TRUE(result->worker_contexts_[i]->finish_observed);
+        EXPECT_TRUE(result->worker_contexts_[i]->completion_queue_drained);
     }
 
     manager.reset();
     for (auto& server : servers) {
         server->shutdown();
+    }
+}
+
+TEST_F(BroadcastManagerTest, BroadcastPrepared_ReturnNotNull_AllRequestsSuccess) {
+    std::vector<std::unique_ptr<TestRpcServer>> servers;
+    std::vector<std::string>                    server_addrs;
+    for (int i = 0; i < 2; ++i) {
+        auto service = std::make_unique<TestRpcService>();
+        auto server  = std::make_unique<TestRpcServer>(std::move(service));
+        ASSERT_TRUE(server->start());
+        server_addrs.push_back("127.0.0.1:" + std::to_string(server->listenPort()));
+        servers.push_back(std::move(server));
+    }
+
+    auto manager = std::make_unique<BroadcastManager>(server_addrs);
+    ASSERT_TRUE(manager->init());
+    std::vector<FunctionRequestPB> requests(manager->workerNum());
+    auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& ctx,
+                       const FunctionRequestPB&                    req,
+                       grpc::CompletionQueue* cq) { return stub->PrepareAsyncExecuteFunction(ctx.get(), req, cq); };
+
+    auto result = manager->broadcastPrepared<FunctionRequestPB, FunctionResponsePB>(
+        requests, /*timeout_ms=*/500, rpc_call);
+    ASSERT_NE(result, nullptr);
+    result->waitDone();
+
+    EXPECT_TRUE(result->success());
+    for (const auto& context : result->worker_contexts_) {
+        EXPECT_TRUE(context->finish_observed);
+        EXPECT_TRUE(context->completion_queue_drained);
     }
 }
 
@@ -216,6 +281,9 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsTimeout) {
     auto result   = manager->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, /*timeout_ms=*/50, rpc_call);
     ASSERT_NE(result, nullptr);
 
+    EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
+    EXPECT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
     EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
 }
 
@@ -248,6 +316,158 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_PartialRequestsTimeout) {
     ASSERT_NE(result, nullptr);
 
     EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
+    EXPECT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
+    EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
+}
+
+TEST_F(BroadcastManagerTest, Broadcast_DeadlineDrainsEveryRankBeforeThrowing) {
+    using ResultT  = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+    using ContextT = ResultT::WorkerRpcContext;
+
+    auto timeout_context            = std::make_shared<ContextT>();
+    timeout_context->client_context = std::make_shared<grpc::ClientContext>();
+    timeout_context->status         = grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "deadline");
+    timeout_context->timeout_ms     = 10;
+    timeout_context->server_addr    = "timeout-worker";
+    timeout_context->finish_posted  = true;
+    timeout_context->expected_finish_tag = reinterpret_cast<void*>(1);
+
+    auto delayed_context            = std::make_shared<ContextT>();
+    delayed_context->client_context = std::make_shared<grpc::ClientContext>();
+    delayed_context->status         = grpc::Status::OK;
+    delayed_context->server_addr    = "delayed-worker";
+    delayed_context->finish_posted  = true;
+    delayed_context->expected_finish_tag = reinterpret_cast<void*>(2);
+
+    auto timeout_alarm = std::make_unique<grpc::Alarm>();
+    auto delayed_alarm = std::make_unique<grpc::Alarm>();
+    const auto start   = std::chrono::system_clock::now();
+    timeout_alarm->Set(&timeout_context->completion_queue, start, reinterpret_cast<void*>(1));
+    delayed_alarm->Set(
+        &delayed_context->completion_queue, start + std::chrono::milliseconds(100), reinterpret_cast<void*>(2));
+
+    auto result = std::make_shared<ResultT>(std::vector<std::shared_ptr<ContextT>>{timeout_context, delayed_context});
+    const auto wait_start = std::chrono::steady_clock::now();
+    EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - wait_start).count();
+
+    EXPECT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
+    EXPECT_GE(elapsed_ms, 50);
+    EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
+}
+
+TEST_F(BroadcastManagerTest, Broadcast_ConcurrentWaitersObserveSameTerminalException) {
+    using ResultT  = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+    using ContextT = ResultT::WorkerRpcContext;
+
+    auto context            = std::make_shared<ContextT>();
+    context->client_context = std::make_shared<grpc::ClientContext>();
+    context->status         = grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "deadline");
+    context->timeout_ms     = 1;
+    context->server_addr    = "worker";
+    context->finish_posted  = true;
+    context->expected_finish_tag = reinterpret_cast<void*>(1);
+
+    auto alarm = std::make_unique<grpc::Alarm>();
+    alarm->Set(&context->completion_queue, std::chrono::system_clock::now(), reinterpret_cast<void*>(1));
+    auto result = std::make_shared<ResultT>(std::vector<std::shared_ptr<ContextT>>{context});
+
+    std::atomic<int>       exception_count{0};
+    std::vector<std::thread> waiters;
+    for (int i = 0; i < 3; ++i) {
+        waiters.emplace_back([&]() {
+            try {
+                result->waitDone();
+            } catch (const rtp_llm::RTPException&) {
+                exception_count.fetch_add(1);
+            }
+        });
+    }
+    for (auto& waiter : waiters) {
+        waiter.join();
+    }
+
+    EXPECT_EQ(exception_count.load(), 3);
+    EXPECT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
+}
+
+TEST_F(BroadcastManagerTest, Broadcast_UnrelatedTagDoesNotCompleteRankBeforeFinish) {
+    using ResultT  = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+    using ContextT = ResultT::WorkerRpcContext;
+
+    auto context                 = std::make_shared<ContextT>();
+    context->client_context      = std::make_shared<grpc::ClientContext>();
+    context->status              = grpc::Status::OK;
+    context->finish_posted       = true;
+    context->expected_finish_tag = context.get();
+
+    grpc::Alarm unrelated_alarm;
+    grpc::Alarm finish_alarm;
+    const auto  start = std::chrono::system_clock::now();
+    unrelated_alarm.Set(&context->completion_queue, start, reinterpret_cast<void*>(1));
+    finish_alarm.Set(&context->completion_queue, start + std::chrono::milliseconds(50), context->expected_finish_tag);
+
+    auto result = std::make_shared<ResultT>(std::vector<std::shared_ptr<ContextT>>{context});
+    const auto wait_start = std::chrono::steady_clock::now();
+    result->waitDone();
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - wait_start).count();
+
+    EXPECT_GE(elapsed_ms, 20);
+    EXPECT_TRUE(result->success());
+    EXPECT_TRUE(context->finish_observed);
+    EXPECT_TRUE(context->completion_queue_drained);
+}
+
+TEST_F(BroadcastManagerTest, Broadcast_CancelledUnrelatedAlarmDoesNotMasqueradeAsFinish) {
+    using ResultT  = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+    using ContextT = ResultT::WorkerRpcContext;
+
+    auto context                 = std::make_shared<ContextT>();
+    context->client_context      = std::make_shared<grpc::ClientContext>();
+    context->status              = grpc::Status::OK;
+    context->finish_posted       = true;
+    context->expected_finish_tag = context.get();
+
+    grpc::Alarm unrelated_alarm;
+    grpc::Alarm finish_alarm;
+    unrelated_alarm.Set(&context->completion_queue,
+                        std::chrono::system_clock::now() + std::chrono::seconds(1),
+                        reinterpret_cast<void*>(1));
+    unrelated_alarm.Cancel();
+    finish_alarm.Set(&context->completion_queue,
+                     std::chrono::system_clock::now() + std::chrono::milliseconds(50),
+                     context->expected_finish_tag);
+
+    auto result = std::make_shared<ResultT>(std::vector<std::shared_ptr<ContextT>>{context});
+    result->waitDone();
+
+    EXPECT_TRUE(result->success());
+    EXPECT_TRUE(context->finish_observed);
+    EXPECT_TRUE(context->completion_queue_drained);
+}
+
+TEST_F(BroadcastManagerTest, Broadcast_CompletionQueueShutdownBeforeFinishFailsClosed) {
+    using ResultT  = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+    using ContextT = ResultT::WorkerRpcContext;
+
+    auto context                 = std::make_shared<ContextT>();
+    context->client_context      = std::make_shared<grpc::ClientContext>();
+    context->status              = grpc::Status::OK;
+    context->finish_posted       = true;
+    context->expected_finish_tag = context.get();
+    context->completion_queue.Shutdown();
+
+    auto result = std::make_shared<ResultT>(std::vector<std::shared_ptr<ContextT>>{context});
+    EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
+    EXPECT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
+    EXPECT_FALSE(context->finish_observed);
+    EXPECT_TRUE(context->completion_queue_drained);
 }
 
 TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_PartialResponseRpcStatusFailed) {
@@ -506,6 +726,109 @@ TEST_F(BroadcastManagerTest, Broadcast_WaitDone_FailureStatePersistsAcrossTimeou
 
     server1->shutdown();
     server0->shutdown();
+}
+
+TEST_F(BroadcastManagerTest, BroadcastPrepared_PartialDispatchThrowDrainsStartedRanks) {
+    std::vector<std::unique_ptr<TestRpcServer>> servers;
+    std::vector<std::string>                    server_addrs;
+    for (int i = 0; i < 3; ++i) {
+        auto service = std::make_unique<TestRpcService>();
+        service->setSleepMillis(200);
+        auto server = std::make_unique<TestRpcServer>(std::move(service));
+        ASSERT_TRUE(server->start());
+        server_addrs.push_back("127.0.0.1:" + std::to_string(server->listenPort()));
+        servers.push_back(std::move(server));
+    }
+
+    auto manager = std::make_unique<BroadcastManager>(server_addrs);
+    ASSERT_TRUE(manager->init());
+    std::vector<FunctionRequestPB> requests(manager->workerNum());
+    std::atomic<int>               dispatch_count{0};
+    auto rpc_call = [&dispatch_count](const std::shared_ptr<RpcService::Stub>&    stub,
+                                      const std::shared_ptr<grpc::ClientContext>& ctx,
+                                      const FunctionRequestPB&                    req,
+                                      grpc::CompletionQueue* cq) {
+        if (dispatch_count.fetch_add(1) == 2) {
+            throw std::runtime_error("dispatch failed");
+        }
+        return stub->PrepareAsyncExecuteFunction(ctx.get(), req, cq);
+    };
+
+    EXPECT_THROW(
+        (manager->broadcastPrepared<FunctionRequestPB, FunctionResponsePB>(
+            requests, /*timeout_ms=*/1000, rpc_call)),
+        std::runtime_error);
+    EXPECT_EQ(dispatch_count.load(), 3);
+    EXPECT_EQ(servers[2]->service()->callCount(), 0);
+}
+
+TEST_F(BroadcastManagerTest, BroadcastPrepared_PartialDispatchNullDrainsStartedRanks) {
+    std::vector<std::unique_ptr<TestRpcServer>> servers;
+    std::vector<std::string>                    server_addrs;
+    for (int i = 0; i < 3; ++i) {
+        auto service = std::make_unique<TestRpcService>();
+        service->setSleepMillis(200);
+        auto server = std::make_unique<TestRpcServer>(std::move(service));
+        ASSERT_TRUE(server->start());
+        server_addrs.push_back("127.0.0.1:" + std::to_string(server->listenPort()));
+        servers.push_back(std::move(server));
+    }
+
+    auto manager = std::make_unique<BroadcastManager>(server_addrs);
+    ASSERT_TRUE(manager->init());
+    std::vector<FunctionRequestPB> requests(manager->workerNum());
+    std::atomic<int>               dispatch_count{0};
+    using Reader = grpc::ClientAsyncResponseReader<FunctionResponsePB>;
+    auto rpc_call = [&dispatch_count](const std::shared_ptr<RpcService::Stub>&    stub,
+                                      const std::shared_ptr<grpc::ClientContext>& ctx,
+                                      const FunctionRequestPB&                    req,
+                                      grpc::CompletionQueue* cq) -> std::unique_ptr<Reader> {
+        if (dispatch_count.fetch_add(1) == 2) {
+            return nullptr;
+        }
+        return stub->PrepareAsyncExecuteFunction(ctx.get(), req, cq);
+    };
+
+    auto result = manager->broadcastPrepared<FunctionRequestPB, FunctionResponsePB>(
+        requests, /*timeout_ms=*/1000, rpc_call);
+    EXPECT_EQ(result, nullptr);
+    EXPECT_EQ(dispatch_count.load(), 3);
+    EXPECT_EQ(servers[2]->service()->callCount(), 0);
+}
+
+TEST_F(BroadcastManagerTest, Broadcast_ResultDestructionDrainsInflightRanks) {
+    std::vector<std::unique_ptr<TestRpcServer>> servers;
+    std::vector<std::string>                    server_addrs;
+    for (int i = 0; i < 2; ++i) {
+        auto service = std::make_unique<TestRpcService>();
+        service->setSleepMillis(200);
+        auto server = std::make_unique<TestRpcServer>(std::move(service));
+        ASSERT_TRUE(server->start());
+        server_addrs.push_back("127.0.0.1:" + std::to_string(server->listenPort()));
+        servers.push_back(std::move(server));
+    }
+
+    auto manager = std::make_unique<BroadcastManager>(server_addrs);
+    ASSERT_TRUE(manager->init());
+    std::vector<FunctionRequestPB> requests(manager->workerNum());
+    auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& ctx,
+                       const FunctionRequestPB&                    req,
+                       grpc::CompletionQueue* cq) { return stub->AsyncExecuteFunction(ctx.get(), req, cq); };
+
+    auto result = manager->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, /*timeout_ms=*/1000, rpc_call);
+    ASSERT_NE(result, nullptr);
+    const auto reset_start = std::chrono::steady_clock::now();
+    result.reset();
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - reset_start).count();
+
+    for (const auto& server : servers) {
+        EXPECT_EQ(server->service()->callCount(), 1);
+        EXPECT_EQ(server->service()->completedCount(), 1);
+        EXPECT_EQ(server->service()->cancelledCount(), 0);
+    }
+    EXPECT_GE(elapsed_ms, 100);
 }
 
 // ---------------------------- workerNum ----------------------------
