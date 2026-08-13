@@ -27,6 +27,15 @@ bool MtpExecutor::isTpRank0() const {
     return tp_rank_ == 0;
 }
 
+void MtpExecutor::releaseAllModelBuffers() {
+    buffer_holder_.release();
+    model_->releaseBuffers();
+    draft_model_->releaseBuffers();
+    if (sp_prefill_draft_model_) {
+        sp_prefill_draft_model_->releaseBuffers();
+    }
+}
+
 void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
                                                        ModelBase&      source,
                                                        bool            request_actual_rows) {
@@ -369,8 +378,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     metrics_collector.not_skip = true;
 
     // release model input before forward
-    model_->releaseBuffers();
-    draft_model_->releaseBuffers();
+    releaseAllModelBuffers();
 
     // CP input handling replaces combo_tokens with the rank-local chunk and
     // rewrites input_lengths in place. The MTP shift below operates on the
@@ -440,8 +448,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
         cudaSyncAndCheck();
-        model_->releaseBuffers();
-        draft_model_->releaseBuffers();
+        releaseAllModelBuffers();
         return absl::OkStatus();
     }
 
@@ -486,8 +493,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                                                      draft_last_hidden_states);
         RTP_LLM_LOG_DEBUG("dispatch done");
 
-        model_->releaseBuffers();
-        draft_model_->releaseBuffers();
+        releaseAllModelBuffers();
 
         return result;
     }
@@ -639,8 +645,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     // release hold buffers before draft model forward
-    draft_model_->releaseBuffers();
-    model_->releaseBuffers();
+    releaseAllModelBuffers();
 
     if (propose_step_ > 1) {
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
@@ -747,8 +752,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
         cudaSyncAndCheck();
-        draft_model_->releaseBuffers();
-        model_->releaseBuffers();
+        releaseAllModelBuffers();
         return absl::OkStatus();
     }
 
@@ -791,8 +795,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             stream->getSPOutputBuffer()->tensors_holder.clear();
         }
 
-        draft_model_->releaseBuffers();
-        model_->releaseBuffers();
+        releaseAllModelBuffers();
 
         return result;
     }
