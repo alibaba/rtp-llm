@@ -11,6 +11,7 @@ checkpoint, so every exceptional dtype is represented explicitly.
 from __future__ import annotations
 
 import functools
+import os
 from typing import Iterator, List, Optional
 
 import torch
@@ -33,7 +34,7 @@ from rtp_llm.model_loader.weight_module import (
 from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
     DeepseekV3RotaryEmbedding,
 )
-from rtp_llm.ops import HybridAttentionType, MlaOpsType
+from rtp_llm.ops import HybridAttentionType, MlaOpsType, RoleType
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -80,6 +81,71 @@ def _merge_mla_input_projections(
     return torch.cat((q_a, kv_a, local_output_gate), dim=0).T.contiguous()
 
 
+_SHARED_EXPERT_WEIGHT_SHARD_ENV = "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD"
+
+
+def shared_expert_weight_shard_enabled(role_type: RoleType) -> bool:
+    """Enable the transient shared-expert weight layout only for PREFILL."""
+
+    if role_type != RoleType.PREFILL:
+        return False
+
+    raw = os.environ.get(_SHARED_EXPERT_WEIGHT_SHARD_ENV, "0").strip()
+    if raw not in ("0", "1"):
+        raise ValueError(
+            f"{_SHARED_EXPERT_WEIGHT_SHARD_ENV} must be 0 or 1, got {raw!r}"
+        )
+    return raw == "1"
+
+
+def _pack_shared_gate_up_full(ts: List[torch.Tensor]) -> torch.Tensor:
+    """Pack replicated checkpoint gate/up weights as ``[gate; up]``."""
+
+    if len(ts) != 2:
+        raise ValueError(f"K3 shared gate/up expects two tensors, got {len(ts)}")
+    gate, up = ts
+    if gate.ndim != 2 or gate.shape != up.shape:
+        raise ValueError(
+            "K3 shared gate/up checkpoint tensors must be matching matrices, "
+            f"got gate={tuple(gate.shape)} up={tuple(up.shape)}"
+        )
+    return torch.cat((gate, up), dim=0).contiguous()
+
+
+def _slice_shared_gate_up_tp_rank(
+    ts: List[torch.Tensor], *, tp_size: int, tp_rank: int
+) -> torch.Tensor:
+    """Select one rank's contiguous gate-or-up shard without local packing."""
+
+    if len(ts) != 1:
+        raise ValueError(
+            f"sharded K3 shared gate/up expects one checkpoint tensor, got {len(ts)}"
+        )
+    projection = ts[0]
+    if projection.ndim != 2:
+        raise ValueError(
+            "K3 shared gate/up checkpoint projection must be a matrix, got "
+            f"{tuple(projection.shape)}"
+        )
+    if tp_size <= 0 or not 0 <= tp_rank < tp_size:
+        raise ValueError(f"invalid TP placement size={tp_size} rank={tp_rank}")
+    if tp_size % 2:
+        raise ValueError(
+            "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD=1 requires an even FFN TP size, "
+            f"got {tp_size}"
+        )
+    shards_per_projection = tp_size // 2
+    if projection.shape[0] % shards_per_projection:
+        raise ValueError(
+            "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD=1 requires shared intermediate "
+            "size divisible by FFN TP/2, got "
+            f"width={projection.shape[0]} ffn_tp={tp_size}"
+        )
+    local_width = projection.shape[0] // shards_per_projection
+    projection_rank = tp_rank % shards_per_projection
+    return projection.narrow(0, projection_rank * local_width, local_width)
+
+
 def _unpad_kda_alog(ts: List[torch.Tensor], *, num_heads: int) -> torch.Tensor:
     """Remove the checkpoint's zero alignment tail before TP head sharding.
 
@@ -124,8 +190,7 @@ class KimiK3WeightNames:
     MOE_ROUTED_DOWN = "kimi_k3.moe.routed_down"
     MOE_ROUTED_UP = "kimi_k3.moe.routed_up"
     MOE_ROUTED_NORM = "kimi_k3.moe.routed_norm"
-    MOE_SHARED_GATE = "kimi_k3.moe.shared_gate"
-    MOE_SHARED_UP = "kimi_k3.moe.shared_up"
+    MOE_SHARED_GATE_UP = "kimi_k3.moe.shared_gate_up"
     MOE_SHARED_DOWN = "kimi_k3.moe.shared_down"
     MOE_W1_PACKED = "kimi_k3.moe.w1_packed"
     MOE_W1_SCALE = "kimi_k3.moe.w1_scale"
@@ -618,6 +683,42 @@ class KimiK3Weight(ModelDeployWeightInfo):
 
     def _moe_weights(self) -> List[WeightModule]:
         n = KimiK3WeightNames
+        shard_shared_expert = shared_expert_weight_shard_enabled(self.role_type)
+        gate_suffix = "block_sparse_moe.shared_experts.gate_proj.weight"
+        up_suffix = "block_sparse_moe.shared_experts.up_proj.weight"
+        if shard_shared_expert:
+            if self.ffn_tp_size <= 0 or self.ffn_tp_size % 2:
+                raise ValueError(
+                    "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD=1 requires an even FFN "
+                    f"TP size, got {self.ffn_tp_size}"
+                )
+            if not 0 <= self.ffn_tp_rank < self.ffn_tp_size:
+                raise ValueError(
+                    "invalid FFN TP placement for K3 shared-expert sharding: "
+                    f"size={self.ffn_tp_size} rank={self.ffn_tp_rank}"
+                )
+            projection_suffix = (
+                gate_suffix
+                if self.ffn_tp_rank < self.ffn_tp_size // 2
+                else up_suffix
+            )
+            shared_gate_up_ckpts = [
+                CkptWeightInfo(self._layer_ckpt(projection_suffix), identity)
+            ]
+            shared_gate_up_process = functools.partial(
+                _slice_shared_gate_up_tp_rank,
+                tp_size=self.ffn_tp_size,
+                tp_rank=self.ffn_tp_rank,
+            )
+            shared_down_split = ffn_sp_0
+        else:
+            shared_gate_up_ckpts = [
+                CkptWeightInfo(self._layer_ckpt(gate_suffix), identity),
+                CkptWeightInfo(self._layer_ckpt(up_suffix), identity),
+            ]
+            shared_gate_up_process = _pack_shared_gate_up_full
+            shared_down_split = sp_id
+
         weights: List[WeightModule] = [
             self._linear(n.MOE_GATE, "block_sparse_moe.gate.weight"),
             self._custom(
@@ -640,20 +741,16 @@ class KimiK3Weight(ModelDeployWeightInfo):
                 n.MOE_ROUTED_NORM,
                 "block_sparse_moe.routed_expert_norm.weight",
             ),
-            self._linear(
-                n.MOE_SHARED_GATE,
-                "block_sparse_moe.shared_experts.gate_proj.weight",
-                split_func=ffn_sp_neg1,
-            ),
-            self._linear(
-                n.MOE_SHARED_UP,
-                "block_sparse_moe.shared_experts.up_proj.weight",
-                split_func=ffn_sp_neg1,
+            CustomAtomicWeight(
+                n.MOE_SHARED_GATE_UP,
+                shared_gate_up_ckpts,
+                process_fun=shared_gate_up_process,
+                split_func=sp_id,
             ),
             self._linear(
                 n.MOE_SHARED_DOWN,
                 "block_sparse_moe.shared_experts.down_proj.weight",
-                split_func=ffn_sp_0,
+                split_func=shared_down_split,
             ),
         ]
 

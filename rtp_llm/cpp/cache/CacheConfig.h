@@ -103,6 +103,45 @@ struct CacheConfig {
         return std::max<int>(1, static_cast<int>(cache_specs.size()));
     }
 
+    uint32_t groupBlockNumForGlobal(size_t group_id, uint32_t global_block_num) const {
+        const int  step      = std::max(1, linear_step);
+        const bool is_swa    = group_id < group_types.size() && group_types[group_id] == CacheGroupType::SWA;
+        const bool is_linear =
+            group_id < group_types.size() && group_types[group_id] == CacheGroupType::LINEAR;
+        const auto region =
+            group_id < group_region_names.size() ? group_region_names[group_id] : KVCacheRegionName::DEFAULT;
+        const bool is_dsv4_fixed_region      = isDsv4FixedRegion(region);
+        const bool use_explicit_hca_blocks   = region == KVCacheRegionName::HCA_STATE
+                                             && dsv4_hca_state_pool_blocks > 0;
+        const bool use_explicit_fixed_blocks = is_dsv4_fixed_region && dsv4_fixed_pool_blocks > 0;
+
+        if (use_explicit_hca_blocks) {
+            return dsv4_hca_state_pool_blocks;
+        }
+        if (use_explicit_fixed_blocks) {
+            return dsv4_fixed_pool_blocks;
+        }
+        if ((is_swa || is_dsv4_fixed_region) && step > 1 && global_block_num > 0) {
+            return std::max(1u, global_block_num / static_cast<uint32_t>(step));
+        }
+        if (use_independent_block_pools && !use_typed_cache_regions && is_linear && step > 1
+            && global_block_num > 0) {
+            // Block zero remains reserved in every independent pool. For the
+            // remaining logical slots, LINEAR materializes every `step` slot
+            // plus the final two slots needed by causal_conv1d_update.
+            const uint32_t logical_slots = global_block_num - 1;
+            if (logical_slots == 0) {
+                return 1;
+            }
+            const uint32_t step_u         = static_cast<uint32_t>(step);
+            const uint32_t stepped_blocks = logical_slots / step_u;
+            const uint32_t remainder      = logical_slots % step_u;
+            const uint32_t unique_tail    = (remainder == 0 || remainder == 1) ? 1u : 2u;
+            return 1u + stepped_blocks + unique_tail;
+        }
+        return global_block_num;
+    }
+
     void finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config) {
         (void)runtime_config;
         if (!use_independent_block_pools || group_block_nums.empty()) {
@@ -110,26 +149,15 @@ struct CacheConfig {
             return;
         }
 
-        const int step    = std::max(1, linear_step);
         size_t    reserve = 0;
         for (size_t gid = 0; gid < group_block_nums.size(); ++gid) {
-            const bool is_swa = gid < group_types.size() && group_types[gid] == CacheGroupType::SWA;
             const auto region = gid < group_region_names.size() ? group_region_names[gid] : KVCacheRegionName::DEFAULT;
             const bool is_dsv4_fixed_region       = isDsv4FixedRegion(region);
             const bool use_explicit_hca_blocks    = region == KVCacheRegionName::HCA_STATE
                                                  && dsv4_hca_state_pool_blocks > 0;
             const bool use_explicit_fixed_blocks  = is_dsv4_fixed_region && dsv4_fixed_pool_blocks > 0;
             const bool use_explicit_dsv4_blocks   = use_explicit_hca_blocks || use_explicit_fixed_blocks;
-            uint32_t   rule_blocks;
-            if (use_explicit_hca_blocks) {
-                rule_blocks = dsv4_hca_state_pool_blocks;
-            } else if (use_explicit_fixed_blocks) {
-                rule_blocks = dsv4_fixed_pool_blocks;
-            } else if ((is_swa || is_dsv4_fixed_region) && step > 1 && global_block_num > 0) {
-                rule_blocks = std::max(1u, global_block_num / static_cast<uint32_t>(step));
-            } else {
-                rule_blocks = global_block_num;
-            }
+            const uint32_t rule_blocks = groupBlockNumForGlobal(gid, global_block_num);
             group_block_nums[gid] = rule_blocks;
 
             // Explicit DSV4 fixed pools are allocated outside the paged FULL

@@ -29,6 +29,16 @@ using namespace std;
 
 namespace rtp_llm {
 
+static bool kimiK3WholeChunkPrefillEnabled() {
+    const char* value = std::getenv("KIMI_K3_PREFILL_CHUNK_TOKENS");
+    if (value == nullptr) {
+        return false;
+    }
+    char* end = nullptr;
+    const long chunk_tokens = std::strtol(value, &end, 10);
+    return end != value && *end == '\0' && chunk_tokens > 0;
+}
+
 static torch::Tensor layerRegionToGroupTensor(const std::optional<CacheLayerLayout>& layout_opt) {
     if (!layout_opt.has_value() || layout_opt->layer_region_to_group_id.empty()) {
         return torch::Tensor();
@@ -1059,6 +1069,18 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         torch::Tensor last_hidden;
         if (has_context_request && !need_all_logits) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(index_select_last_hidden)");
+            // Model-side whole-prefill chunking returns only the final
+            // contiguous chunk.  The scheduler's lm_output_indexes still use
+            // the original request coordinate, so map the one next-token row
+            // to the final row of the chunk without materialising a [1M,H]
+            // hidden tensor solely for index_select.  This opt-in capacity
+            // path rejects multi-logit requests in Python's caller contract.
+            if (kimiK3WholeChunkPrefillEnabled()) {
+                RTP_LLM_CHECK_WITH_INFO(lm_output_indexes_device.numel() == 1,
+                                        "K3 whole-prefill chunking supports exactly one LM output row, got %ld",
+                                        lm_output_indexes_device.numel());
+                lm_output_indexes_device = torch::full_like(lm_output_indexes_device, hidden.size(0) - 1);
+            }
             last_hidden = torch::index_select(hidden, 0, lm_output_indexes_device);
         } else {
             last_hidden = hidden;

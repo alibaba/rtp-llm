@@ -360,6 +360,15 @@ class KimiK3KDA(nn.Module):
             sequence_parallel=sequence_parallel,
             prefill_sp_layout=prefill_sp_layout,
         )
+        whole_chunk_state_active = bool(
+            getattr(self, "_whole_chunk_prefill_state_active", False)
+            and mode == "prefill"
+        )
+        if whole_chunk_state_active:
+            # HybridPool deliberately materializes only sparse LINEAR cache
+            # checkpoints. Carry one compact KDA state per layer so the next
+            # contiguous 64K model chunk does not depend on an absent page.
+            state = getattr(self, "_whole_chunk_prefill_state", None)
 
         (
             q_projected,
@@ -414,6 +423,9 @@ class KimiK3KDA(nn.Module):
             hidden_states=hidden_states,
             mode=mode,
         )
+        if whole_chunk_state_active:
+            assert final_state is not None
+            self._whole_chunk_prefill_state = final_state
         return output, final_state
 
 

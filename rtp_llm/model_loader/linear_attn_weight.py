@@ -145,7 +145,15 @@ def split_out_linear(
     local_head_num_v = linear_config.linear_num_value_heads // load_config.tp_size
     start_head_num_v = local_head_num_v * load_config.tp_rank
     end_head_num_v = start_head_num_v + local_head_num_v
-    return t[start_head_num_v:end_head_num_v, :, :].reshape(-1, n)
+    # The returned tensor is retained for the lifetime of the model.  A view
+    # would keep the complete, transposed output projection alive on every TP
+    # rank even though each rank only consumes its local heads.  Materialize
+    # the TP-local payload so the loader source storage can be released.
+    return (
+        t[start_head_num_v:end_head_num_v, :, :]
+        .reshape(-1, n)
+        .clone(memory_format=torch.contiguous_format)
+    )
 
 
 def split_out_linear_t(

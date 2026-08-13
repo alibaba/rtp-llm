@@ -566,7 +566,10 @@ class KimiK3KDAPrefill(nn.Module):
         if kv_cache is not None:
             if attention_inputs is None:
                 raise ValueError("attention_inputs are required with a KDA cache")
-            state = self.cache.load_state(kv_cache, attention_inputs, cu_seqlens)
+            if state is None:
+                state = self.cache.load_state(
+                    kv_cache, attention_inputs, cu_seqlens
+                )
             return self._paged_prefill(
                 q_projected,
                 k_projected,

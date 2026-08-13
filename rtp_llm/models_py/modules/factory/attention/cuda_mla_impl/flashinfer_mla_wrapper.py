@@ -132,6 +132,20 @@ class MlaFlashInferImplBase(MlaImplBase):
             if input_lengths is not None and input_lengths.numel()
             else attn_inputs.input_lengths
         )
+        if use_host_metadata and input_lengths is not None and input_lengths.numel():
+            input_values = [int(value) for value in input_lengths.tolist()]
+            prefix_values = (
+                [int(value) for value in prefix_lengths.tolist()]
+                if prefix_lengths is not None and prefix_lengths.numel()
+                else [0] * len(input_values)
+            )
+            # Whole-model Prefill replaces the request metadata for every
+            # segment.  Refresh this host-side hint together with the planner;
+            # retaining the initial full-request length makes the first 64K
+            # segment gather and expand the entire 1M cache capacity.
+            self.fmha_impl.total_kv_lens_hint = sum(input_values) + sum(
+                prefix_values
+            )
         self.fmha_params.fill_params(
             prefix_lengths,
             sequence_lengths,

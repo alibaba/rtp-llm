@@ -2,6 +2,7 @@
 
 #include <numeric>
 #include <algorithm>
+#include <limits>
 
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridConfigCreator.h"
@@ -53,6 +54,41 @@ size_t fallbackFixedPoolHbmBytes(const CacheConfig& config) {
 
 size_t effectivePagedBlockBytes(const CacheConfig& config, int step) {
     return config.block_size_bytes + steppedBytes(fallbackFixedPoolHbmBytes(config), step);
+}
+
+bool independentPoolLayoutFits(const CacheConfig& config, uint32_t global_block_num, size_t budget_bytes) {
+    size_t used_bytes = 0;
+    for (size_t gid = 0; gid < config.group_block_size_bytes.size(); ++gid) {
+        const size_t   block_bytes = config.group_block_size_bytes[gid];
+        const uint32_t block_num   = config.groupBlockNumForGlobal(gid, global_block_num);
+        if (block_bytes > 0 && static_cast<size_t>(block_num) > (budget_bytes - used_bytes) / block_bytes) {
+            return false;
+        }
+        used_bytes += static_cast<size_t>(block_num) * block_bytes;
+    }
+    return true;
+}
+
+uint32_t maxIndependentPoolGlobalBlockNum(const CacheConfig& config, size_t budget_bytes) {
+    uint32_t low  = 0;
+    uint32_t high = 1;
+    while (independentPoolLayoutFits(config, high, budget_bytes)) {
+        low = high;
+        if (high > std::numeric_limits<uint32_t>::max() / 2) {
+            return high;
+        }
+        high *= 2;
+    }
+
+    while (low + 1 < high) {
+        const uint32_t mid = low + (high - low) / 2;
+        if (independentPoolLayoutFits(config, mid, budget_bytes)) {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    return low;
 }
 
 bool hasDsv4FixedPoolBytes(const CacheConfig& config) {
@@ -154,8 +190,12 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                              config.fixed_pool_reserve_bytes / 1024 / 1024,
                              paged_budget / 1024 / 1024);
         }
-        const int  joint_step       = std::max(1, config.linear_step);
-        block_num = paged_budget / effectivePagedBlockBytes(config, joint_step);
+        const int joint_step = std::max(1, config.linear_step);
+        if (config.use_independent_block_pools && !config.use_typed_cache_regions) {
+            block_num = maxIndependentPoolGlobalBlockNum(config, paged_budget);
+        } else {
+            block_num = paged_budget / effectivePagedBlockBytes(config, joint_step);
+        }
     }
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
                             "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",

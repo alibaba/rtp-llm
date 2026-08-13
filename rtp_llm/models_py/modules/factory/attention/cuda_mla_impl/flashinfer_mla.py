@@ -178,7 +178,6 @@ def concat_and_cast_mha_k_triton(
 
 class MlaFlashInferPrefillOp(object):
     _triton_compat_warned = False  # Class variable to track warning status
-    _k3_perf_wrapper_cache: dict[tuple[Any, ...], Any] = {}
 
     def __init__(
         self,
@@ -239,21 +238,28 @@ class MlaFlashInferPrefillOp(object):
         if self._k3_cache_plan:
             qo_host = mla_params.qo_indptr_h
             kv_host = mla_params.prefill_ragged_kv_len_indptr_h
+            qo_device = mla_params.qo_indptr_d
+            kv_device = mla_params.prefill_ragged_kv_len_indptr_d
             signature = (
                 torch.cuda.current_device(),
                 tuple(int(value) for value in qo_host.tolist()),
                 tuple(int(value) for value in kv_host.tolist()),
+                # FlashInfer's plan retains device-side metadata addresses.
+                # Shape alone is not a safe cache key: a later request can
+                # have identical lengths but freshly allocated indptr tensors.
+                # Reusing the old wrapper then dereferences freed addresses in
+                # the ragged-attention kernel.  Keep the fast path local to
+                # this FMHA instance and invalidate it whenever either device
+                # buffer changes.
+                int(qo_device.data_ptr()),
+                int(kv_device.data_ptr()),
                 self.num_heads,
                 self.qk_rope_head_dim + self.qk_nope_head_dim,
                 self.v_head_dim,
                 self.scale,
                 self.softmax_extra_scale,
             )
-            cached_wrapper = self._k3_perf_wrapper_cache.get(signature)
-            if cached_wrapper is not None:
-                self.prefill_wrapper = cached_wrapper
-                self._k3_perf_plan_signature = signature
-            elif getattr(self, "_k3_perf_plan_signature", None) != signature:
+            if getattr(self, "_k3_perf_plan_signature", None) != signature:
                 if self.prefill_wrapper is None:
                     self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
                         g_workspace_buffer,
@@ -276,7 +282,6 @@ class MlaFlashInferPrefillOp(object):
                     q_data_type=torch.bfloat16,
                     kv_data_type=torch.bfloat16,
                 )
-                self._k3_perf_wrapper_cache[signature] = self.prefill_wrapper
                 self._k3_perf_plan_signature = signature
         else:
             assert self.prefill_wrapper is not None
@@ -351,12 +356,20 @@ class MlaFlashInferPrefillOp(object):
         qo_indptr = self.qo_indptr
         batch_reuse_info = self.batch_reuse_info_vec
 
-        # 计算总长度
-        total_reuse_len = num_blocks * self.token_per_block
+        # Use the exact ragged KV length.  The number of cache pages includes
+        # a padded final page, so ``num_blocks * token_per_block`` can be larger
+        # than the real prefix and leaves an uninitialized tail in the gathered
+        # tensor.
+        total_final_len = self.total_kv_lens
+        total_reuse_len = total_final_len - compressed_kv.size(0)
+        if total_reuse_len < 0:
+            raise RuntimeError(
+                "invalid MLA reuse metadata: total KV length "
+                f"{total_final_len} is smaller than query KV length "
+                f"{compressed_kv.size(0)}"
+            )
         if total_reuse_len == 0:
             return compressed_kv, k_pe
-
-        total_final_len = compressed_kv.size(0) + total_reuse_len
 
         # 创建输出 tensor
         final_compressed_kv = torch.empty(

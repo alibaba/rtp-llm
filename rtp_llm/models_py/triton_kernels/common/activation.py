@@ -73,6 +73,9 @@ def _situ_and_mul_kernel(
     up,
     output,
     elements,
+    width,
+    gate_row_stride,
+    up_row_stride,
     beta: tl.constexpr,
     linear_beta: tl.constexpr,
     has_linear_beta: tl.constexpr,
@@ -80,8 +83,12 @@ def _situ_and_mul_kernel(
 ):
     offsets = tl.program_id(0) * block + tl.arange(0, block)
     mask = offsets < elements
-    gate_value = tl.load(gate + offsets, mask=mask).to(tl.float32)
-    up_value = tl.load(up + offsets, mask=mask).to(tl.float32)
+    row = offsets // width
+    column = offsets % width
+    gate_offsets = row * gate_row_stride + column
+    up_offsets = row * up_row_stride + column
+    gate_value = tl.load(gate + gate_offsets, mask=mask).to(tl.float32)
+    up_value = tl.load(up + up_offsets, mask=mask).to(tl.float32)
 
     gate_tanh = 2.0 * tl.sigmoid(2.0 * gate_value / beta) - 1.0
     activated = beta * gate_tanh * tl.sigmoid(gate_value)
@@ -113,15 +120,20 @@ def situ_and_mul(
         if linear_beta is not None:
             up_float = linear_beta * torch.tanh(up_float / linear_beta)
         return (activated_gate * up_float).to(dtype=gate.dtype)
-    gate = gate.contiguous()
-    up = up.contiguous()
-    output = torch.empty_like(gate)
+    if gate.ndim != 2 or gate.stride(1) != 1 or up.stride(1) != 1:
+        raise ValueError(
+            "CUDA SiTU requires 2-D gate/up tensors with contiguous columns"
+        )
+    output = torch.empty(gate.shape, dtype=gate.dtype, device=gate.device)
     block = 1024
     _situ_and_mul_kernel[(triton.cdiv(gate.numel(), block),)](
         gate,
         up,
         output,
         gate.numel(),
+        gate.shape[1],
+        gate.stride(0),
+        up.stride(0),
         beta=float(beta),
         linear_beta=0.0 if linear_beta is None else float(linear_beta),
         has_linear_beta=linear_beta is not None,

@@ -7,10 +7,9 @@
 #
 # Adapted for rtp-llm: forward-only, supports USE_EXP2 for log2-space gates.
 #
-# Only the deterministic CUBLAS chunk-state recurrence remains here.  The
-# Triton block-dim-64 kernel this file used to also carry was reachable only
-# through KIMI_K3_KDA_CHUNK_STATE_BACKEND=triton, a bring-up comparator; the
-# upstream FLA copy of that kernel still lives in triton_kernels/fla/.
+# Only the deterministic CUBLAS chunk-state recurrence remains here. The old
+# Triton block-dim-64 bring-up comparator still exists in the upstream FLA
+# copy under triton_kernels/fla/.
 
 import torch
 

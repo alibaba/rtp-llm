@@ -15,6 +15,7 @@ own their operator implementations.
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
 from dataclasses import dataclass
@@ -28,6 +29,7 @@ from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
 from rtp_llm.models_py.distributed.collective_torch import (
     Group,
     all_gather_trim,
+    barrier,
     get_process_group,
 )
 from rtp_llm.models_py.distributed.symm_mem import (
@@ -79,6 +81,41 @@ from rtp_llm.models_py.modules.kimi_k3.mla import (
 from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
 from rtp_llm.models_py.modules.kimi_k3.residual import KimiK3AttentionResidual
 from rtp_llm.models_py.modules.kimi_k3.sequence import sequence_offsets
+
+
+def _prefill_chunk_tokens() -> int:
+    """Return the opt-in whole-model Prefill chunk size."""
+
+    raw = os.environ.get("KIMI_K3_PREFILL_CHUNK_TOKENS", "0").strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            "KIMI_K3_PREFILL_CHUNK_TOKENS must be a non-negative integer, "
+            f"got {raw!r}"
+        ) from exc
+    if value < 0:
+        raise ValueError(
+            "KIMI_K3_PREFILL_CHUNK_TOKENS must be non-negative, "
+            f"got {value}"
+        )
+    return value
+
+
+def _fused_ag_workspace_global_tokens(
+    max_seq_len: int,
+    max_context_batch_size: int,
+    chunk_tokens: int,
+) -> int:
+    """Bound the symmetric AG/GEMM workspace by one model invocation."""
+
+    configured_tokens = int(max_seq_len) * int(max_context_batch_size)
+    if chunk_tokens <= 0:
+        return configured_tokens
+    return min(
+        configured_tokens,
+        int(chunk_tokens) * int(max_context_batch_size),
+    )
 
 
 @dataclass(frozen=True)
@@ -417,6 +454,7 @@ class KimiK3Model(GptModelBase):
         self._fused_ag_gemm_workspace_ready = False
         self._mtp_hidden_buffer: Optional[torch.Tensor] = None
         self._mtp_hidden_valid_tokens = 0
+        self._prefill_static_attn_res_bank: Optional[torch.Tensor] = None
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         """Bind runtime resources and reserve the largest Prefill AG workspace."""
@@ -426,8 +464,10 @@ class KimiK3Model(GptModelBase):
             return True
 
         tp_size = int(self.parallelism_config.get_attn_tp_size())
-        max_global_tokens = int(self.config.max_seq_len) * int(
-            init_resource.max_context_batch_size
+        max_global_tokens = _fused_ag_workspace_global_tokens(
+            int(self.config.max_seq_len),
+            int(init_resource.max_context_batch_size),
+            _prefill_chunk_tokens(),
         )
         max_local_tokens = (max_global_tokens + tp_size - 1) // tp_size
         max_physical_tokens = max_local_tokens * tp_size
@@ -468,6 +508,40 @@ class KimiK3Model(GptModelBase):
                 f"rows {self._mtp_hidden_buffer.size(0)}"
             )
         return self._mtp_hidden_buffer.narrow(0, 0, rows)
+
+    def _ensure_prefill_static_attn_res_bank(
+        self, hidden_states: torch.Tensor
+    ) -> torch.Tensor:
+        """Return a model-owned AttnRes bank reused across Prefill chunks."""
+
+        tp_size = int(self.parallelism_config.get_attn_tp_size())
+        chunk_tokens = _prefill_chunk_tokens()
+        chunk_local_rows = (
+            (chunk_tokens + tp_size - 1) // tp_size if chunk_tokens > 0 else 0
+        )
+        required_rows = int(hidden_states.shape[0])
+        capacity_rows = max(required_rows, chunk_local_rows)
+        required_shape = (
+            capacity_rows,
+            int(self.num_attn_res_blocks),
+            int(hidden_states.shape[1]),
+        )
+        bank = self._prefill_static_attn_res_bank
+        if (
+            bank is None
+            or bank.device != hidden_states.device
+            or bank.dtype != hidden_states.dtype
+            or bank.shape[1:] != required_shape[1:]
+            or bank.shape[0] < capacity_rows
+        ):
+            bank = hidden_states.new_empty(required_shape)
+            self._prefill_static_attn_res_bank = bank
+            logging.info(
+                "[K3_PREFILL_ATTN_RES_BANK] allocated shape=%s bytes=%.3fGiB",
+                tuple(bank.shape),
+                bank.numel() * bank.element_size() / float(1 << 30),
+            )
+        return bank.narrow(0, 0, required_rows)
 
     # ``prepare_fmha_impl`` is inherited from ``GptModelBase``: it builds the
     # framework MLA impl via ``AttnImplFactory.get_fmha_impl`` (identical to the
@@ -541,6 +615,153 @@ class KimiK3Model(GptModelBase):
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         attention_inputs = inputs.attention_inputs
+        input_ids = inputs.input_ids.reshape(-1)
+        chunk_tokens = _prefill_chunk_tokens()
+        if (
+            chunk_tokens > 0
+            and attention_inputs is not None
+            and attention_inputs.is_prefill
+            and input_ids.numel() > chunk_tokens
+        ):
+            return self._forward_whole_chunk_prefill(inputs, fmha_impl, chunk_tokens)
+        return self._forward_impl_one(inputs, fmha_impl)
+
+    def _validate_whole_chunk_prefill(
+        self,
+        inputs: PyModelInputs,
+        chunk_tokens: int,
+    ) -> None:
+        attention_inputs = inputs.attention_inputs
+        assert attention_inputs is not None
+        input_ids = inputs.input_ids.reshape(-1)
+        tp_size = int(self.parallelism_config.get_attn_tp_size())
+        ep_size = int(self.parallelism_config.ep_size)
+        if chunk_tokens <= 0 or chunk_tokens % tp_size:
+            raise RuntimeError(
+                "KIMI_K3_PREFILL_CHUNK_TOKENS must be divisible by attention TP; "
+                f"chunk={chunk_tokens}, TP={tp_size}"
+            )
+        if input_ids.numel() % tp_size:
+            raise RuntimeError(
+                "whole-model K3 Prefill requires total tokens divisible by "
+                f"attention TP; tokens={input_ids.numel()}, TP={tp_size}"
+            )
+        if ep_size != tp_size:
+            raise RuntimeError(
+                "whole-model K3 Prefill requires TP == EP Sequence Parallel; "
+                f"TP={tp_size}, EP={ep_size}"
+            )
+        if bool(getattr(attention_inputs, "is_target_verify", False)):
+            raise RuntimeError("whole-model K3 Prefill does not support target verify")
+        if bool(getattr(attention_inputs, "is_cuda_graph", False)):
+            raise RuntimeError("whole-model K3 Prefill does not support CUDA Graph")
+        prefix_lengths = attention_inputs.prefix_lengths
+        if prefix_lengths is not None and prefix_lengths.numel():
+            if bool(torch.any(prefix_lengths != 0).item()):
+                raise RuntimeError(
+                    "whole-model K3 Prefill currently requires a fresh request"
+                )
+
+    @staticmethod
+    def _chunk_attention_inputs(
+        attention_inputs: PyAttentionInputs,
+        *,
+        start: int,
+        end: int,
+        device: torch.device,
+        publish_cache_store: bool,
+    ) -> PyAttentionInputs:
+        length = end - start
+        if length <= 0:
+            raise ValueError(f"invalid whole-model Prefill chunk [{start}, {end})")
+        chunk = copy.copy(attention_inputs)
+        chunk.cu_seqlens = torch.tensor(
+            [0, length], dtype=torch.int32, device=device
+        )
+        chunk.cu_kv_seqlens = torch.tensor(
+            [0, end], dtype=torch.int32, device=device
+        )
+        chunk.input_lengths = torch.tensor(
+            [length], dtype=torch.int32, device=device
+        )
+        chunk.prefix_lengths = torch.tensor(
+            [start], dtype=torch.int32, device=device
+        )
+        chunk.sequence_lengths = torch.tensor(
+            [end], dtype=torch.int32, device=device
+        )
+        chunk.sequence_lengths_plus_1_d = torch.arange(
+            start + 1, end + 1, dtype=torch.int32, device=device
+        )
+        chunk.cu_seqlens_host = torch.tensor([0, length], dtype=torch.int32)
+        chunk.input_lengths_host = torch.tensor([length], dtype=torch.int32)
+        chunk.prefix_lengths_host = torch.tensor([start], dtype=torch.int32)
+        chunk.sequence_lengths_host = torch.tensor([end], dtype=torch.int32)
+        chunk.total_tokens = int(length)
+        chunk.context_total_kv_length = int(end)
+        chunk.is_prefill = True
+        chunk.is_cuda_graph = False
+        chunk.cache_store_inputs = (
+            attention_inputs.cache_store_inputs if publish_cache_store else None
+        )
+        return chunk
+
+    def _forward_whole_chunk_prefill(
+        self,
+        inputs: PyModelInputs,
+        fmha_impl: Any,
+        chunk_tokens: int,
+    ) -> PyModelOutputs:
+        self._validate_whole_chunk_prefill(inputs, chunk_tokens)
+        input_ids = inputs.input_ids.reshape(-1)
+        attention_inputs = inputs.attention_inputs
+        assert attention_inputs is not None
+        total_tokens = int(input_ids.numel())
+        barrier(Group.TP)
+        logging.info(
+            "[K3_WHOLE_CHUNK_PREFILL] enabled total_tokens=%d "
+            "chunk_tokens=%d TP=%d EP=%d",
+            total_tokens,
+            chunk_tokens,
+            int(self.parallelism_config.get_attn_tp_size()),
+            int(self.parallelism_config.ep_size),
+        )
+        kda_modules = [
+            layer.self_attn
+            for layer in self.layers
+            if layer.is_kda and isinstance(layer.self_attn, KimiK3KDA)
+        ]
+        for module in kda_modules:
+            module._whole_chunk_prefill_state_active = True
+            module._whole_chunk_prefill_state = None
+        final_output: Optional[PyModelOutputs] = None
+        try:
+            for start in range(0, total_tokens, chunk_tokens):
+                end = min(start + chunk_tokens, total_tokens)
+                chunk_attention = self._chunk_attention_inputs(
+                    attention_inputs,
+                    start=start,
+                    end=end,
+                    device=input_ids.device,
+                    publish_cache_store=end == total_tokens,
+                )
+                chunk_inputs = PyModelInputs()
+                chunk_inputs.input_ids = input_ids.narrow(0, start, end - start)
+                chunk_inputs.attention_inputs = chunk_attention
+                final_output = self._forward_impl_one(chunk_inputs, fmha_impl)
+                del chunk_inputs
+                del chunk_attention
+        finally:
+            for module in kda_modules:
+                module._whole_chunk_prefill_state_active = False
+                module._whole_chunk_prefill_state = None
+        assert final_output is not None
+        return final_output
+
+    def _forward_impl_one(
+        self, inputs: PyModelInputs, fmha_impl: Any = None
+    ) -> PyModelOutputs:
+        attention_inputs = inputs.attention_inputs
         if attention_inputs is None:
             raise ValueError("Kimi K3 requires PyAttentionInputs")
         if not attention_inputs.is_prefill and self.kv_cache is None:
@@ -606,10 +827,14 @@ class KimiK3Model(GptModelBase):
                 hidden_states,
                 prefill_sp_layout,
             )
-        block_residual = hidden_states.new_empty(
-            hidden_states.shape[0],
-            self.num_attn_res_blocks,
-            hidden_states.shape[1],
+        block_residual = (
+            self._ensure_prefill_static_attn_res_bank(hidden_states)
+            if prefill_sp
+            else hidden_states.new_empty(
+                hidden_states.shape[0],
+                self.num_attn_res_blocks,
+                hidden_states.shape[1],
+            )
         )
         # MTP target verification is represented as a packed multi-token
         # attention batch, so generic attention metadata may classify it as

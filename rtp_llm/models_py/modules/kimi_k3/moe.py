@@ -8,17 +8,16 @@ import os
 from typing import TYPE_CHECKING, Dict, Optional
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
-from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
+from rtp_llm.models.kimi_k3.kimi_k3_weight import (
+    KimiK3WeightNames as K3W,
+    shared_expert_weight_shard_enabled,
+)
 from rtp_llm.models_py.distributed.collective_torch import (
     Group,
     all_gather,
-)
-from rtp_llm.models_py.modules.factory.linear.parallel import (
-    row_parallel_linear,
-    sequence_parallel_column_weight,
-    sequence_parallel_row_weight,
 )
 from rtp_llm.models_py.modules.base import GroupTopK, RMSNorm
 from rtp_llm.models_py.triton_kernels.common.activation import situ_and_mul
@@ -28,6 +27,28 @@ if TYPE_CHECKING:
     from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
 
 _DEEPGEMM_MEGA_LOGGED_DEVICES: set[int] = set()
+
+
+def _transient_full_native_column_weight(
+    local_weight: torch.Tensor,
+    world_size: int,
+) -> torch.Tensor:
+    """Gather a checkpoint-native ``[out/world_size, in]`` shard transiently."""
+
+    if world_size <= 1:
+        return local_weight
+    return all_gather(local_weight.contiguous(), group=Group.TP)
+
+
+def _transient_full_row_weight(
+    local_weight: torch.Tensor,
+    world_size: int,
+) -> torch.Tensor:
+    """Gather an ``[in/world_size, out]`` shard without retaining it."""
+
+    if world_size <= 1:
+        return local_weight
+    return all_gather(local_weight.contiguous(), group=Group.TP)
 
 
 class KimiK3LatentMoE(nn.Module):
@@ -64,8 +85,11 @@ class KimiK3LatentMoE(nn.Module):
         self.attn_tp_rank = int(parallelism_config.get_attn_tp_rank())
         self.ffn_tp_size = int(parallelism_config.get_ffn_tp_size())
         self.ffn_tp_rank = int(parallelism_config.get_ffn_tp_rank())
-        self._full_column_weights: dict[str, torch.Tensor] = {}
-        self._full_row_weights: dict[str, torch.Tensor] = {}
+        self.shared_expert_weight_shard = shared_expert_weight_shard_enabled(
+            parallelism_config.role_type
+        )
+        self.shared_intermediate_size = int(config.inter_size)
+        self._validate_shared_expert_weight_layout(config.hidden_size)
         runtime = config.k3_runtime_config
         self.latent_moe_use_norm = runtime.latent_moe_use_norm
         self.beta = runtime.activation_situ_beta
@@ -78,17 +102,81 @@ class KimiK3LatentMoE(nn.Module):
         )
         self.latent_size = int(self.weights[K3W.MOE_ROUTED_DOWN].shape[1])
         self.layer_idx = int(layer_idx)
-        # Router weights are used only here. Materialize their FP32 form once
-        # instead of allocating two copies on every Decode step.
-        self.weights[K3W.MOE_GATE] = self.weights[K3W.MOE_GATE].float()
-        self.weights[K3W.MOE_CORRECTION_BIAS] = self.weights[
-            K3W.MOE_CORRECTION_BIAS
-        ].float()
         self._group_topk = GroupTopK()
-        self._fused_router_enabled = (
-            os.environ.get("KIMI_K3_FUSED_ROUTER", "1").strip() == "1"
-        )
         self._setup_deep_gemm_mega()
+
+    def _validate_shared_expert_weight_layout(self, hidden_size: int) -> None:
+        intermediate = self.shared_intermediate_size
+        if self.shared_expert_weight_shard:
+            if self.ffn_tp_size <= 0 or self.ffn_tp_size % 2:
+                raise ValueError(
+                    "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD=1 requires an even FFN "
+                    f"TP size, got {self.ffn_tp_size}"
+                )
+            if intermediate % (self.ffn_tp_size // 2):
+                raise ValueError(
+                    "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD=1 requires shared "
+                    "intermediate size divisible by FFN TP/2, got "
+                    f"intermediate={intermediate} ffn_tp={self.ffn_tp_size}"
+                )
+            if intermediate % self.ffn_tp_size:
+                raise ValueError(
+                    "sharded K3 shared-down weight requires shared intermediate "
+                    "size divisible by FFN TP, got "
+                    f"intermediate={intermediate} ffn_tp={self.ffn_tp_size}"
+                )
+            gate_up_rows = 2 * intermediate // self.ffn_tp_size
+            down_rows = intermediate // self.ffn_tp_size
+        else:
+            gate_up_rows = 2 * intermediate
+            down_rows = intermediate
+
+        gate_up_shape = tuple(self.weights[K3W.MOE_SHARED_GATE_UP].shape)
+        down_shape = tuple(self.weights[K3W.MOE_SHARED_DOWN].shape)
+        expected_gate_up = (gate_up_rows, hidden_size)
+        expected_down = (down_rows, hidden_size)
+        if gate_up_shape != expected_gate_up or down_shape != expected_down:
+            raise ValueError(
+                "K3 shared-expert storage layout does not match "
+                "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD="
+                f"{int(self.shared_expert_weight_shard)}: gate_up={gate_up_shape} "
+                f"expected={expected_gate_up}, down={down_shape} "
+                f"expected={expected_down}"
+            )
+
+    def _shared_expert_forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        shared_gate_up_weight = self.weights[K3W.MOE_SHARED_GATE_UP]
+        if self.shared_expert_weight_shard:
+            shared_gate_up_weight = _transient_full_native_column_weight(
+                shared_gate_up_weight,
+                self.ffn_tp_size,
+            )
+        shared_gate_up = F.linear(hidden_states, shared_gate_up_weight)
+        if self.shared_expert_weight_shard:
+            del shared_gate_up_weight
+
+        # Both halves are views into the single packed GEMM output.  The
+        # strided SiTU kernel consumes them directly without materializing a
+        # gate/up reorder or two contiguous activation copies.
+        shared_gate, shared_up = shared_gate_up.chunk(2, dim=-1)
+        shared_activation = situ_and_mul(
+            shared_gate,
+            shared_up,
+            self.beta,
+            self.linear_beta,
+        )
+        del shared_gate, shared_up, shared_gate_up
+
+        shared_down_weight = self.weights[K3W.MOE_SHARED_DOWN]
+        if self.shared_expert_weight_shard:
+            shared_down_weight = _transient_full_row_weight(
+                shared_down_weight,
+                self.ffn_tp_size,
+            )
+        shared_output = torch.matmul(shared_activation, shared_down_weight)
+        if self.shared_expert_weight_shard:
+            del shared_down_weight
+        return shared_output
 
     @staticmethod
     def _packed_fp4_view(tensor: torch.Tensor) -> torch.Tensor:
@@ -116,10 +204,10 @@ class KimiK3LatentMoE(nn.Module):
         """Transform K3's EP-local MXFP4 weights for SiTU MegaMoE."""
 
         max_tokens_per_rank = int(
-            os.environ.get("KIMI_K3_MEGA_MAX_TOKENS_PER_RANK", "65536")
+            os.environ.get("MEGA_MOE_MAX_TOKENS_PER_RANK", "65536")
         )
         if max_tokens_per_rank <= 0:
-            raise ValueError("KIMI_K3_MEGA_MAX_TOKENS_PER_RANK must be positive")
+            raise ValueError("MEGA_MOE_MAX_TOKENS_PER_RANK must be positive")
 
         import deep_gemm
         import torch.distributed as dist
@@ -214,7 +302,6 @@ class KimiK3LatentMoE(nn.Module):
             expert_count,
         )
         del s13_raw
-        torch.cuda.empty_cache()
 
         st_w2_w = self.weights.pop(K3W.MOE_W2_PACKED)
         st_w2_s = self.weights.pop(K3W.MOE_W2_SCALE)
@@ -244,7 +331,6 @@ class KimiK3LatentMoE(nn.Module):
             expert_count,
         )
         del s2_raw
-        torch.cuda.empty_cache()
 
         (self._mega_l1_w, self._mega_l1_sf), (
             self._mega_l2_w,
@@ -255,7 +341,6 @@ class KimiK3LatentMoE(nn.Module):
             activation="situ",
         )
         del w13, s13, w2, s2
-        torch.cuda.empty_cache()
 
         self._mega_group = dist.group.WORLD
         self._mega_buf = _get_or_create_mega_buf(
@@ -340,18 +425,18 @@ class KimiK3LatentMoE(nn.Module):
         return output
 
     def _route(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        router_weight = self.weights[K3W.MOE_GATE]
+        # Keep all router tensors resident in checkpoint BF16. The FP32
+        # conversion is scoped to this layer invocation so 93 layers do not
+        # retain about 1.10 GiB of extra allocator segments.
+        router_weight = self.weights[K3W.MOE_GATE].float()
         router_logits = torch.matmul(hidden_states.float(), router_weight)
-        correction_bias = self.weights[K3W.MOE_CORRECTION_BIAS]
-        if (
-            self._fused_router_enabled
-            and self._group_topk.fused_sigmoid_supported(
-                router_logits,
-                correction_bias,
-                self.num_expert_group,
-                self.topk_group,
-                self.top_k,
-            )
+        correction_bias = self.weights[K3W.MOE_CORRECTION_BIAS].float()
+        if self._group_topk.fused_sigmoid_supported(
+            router_logits,
+            correction_bias,
+            self.num_expert_group,
+            self.topk_group,
+            self.top_k,
         ):
             expert_weights = torch.empty(
                 (hidden_states.shape[0], self.top_k),
@@ -507,50 +592,7 @@ class KimiK3LatentMoE(nn.Module):
         routed_output = torch.matmul(
             routed_output, self.weights[K3W.MOE_ROUTED_UP]
         )
-        shared_gate_weight = sequence_parallel_column_weight(
-            self.weights,
-            K3W.MOE_SHARED_GATE,
-            self.ffn_tp_size,
-            self.ffn_tp_rank,
-            self._full_column_weights,
-            "sp_shared_gate",
-            sequence_parallel=sp_active,
-        )
-        shared_up_weight = sequence_parallel_column_weight(
-            self.weights,
-            K3W.MOE_SHARED_UP,
-            self.ffn_tp_size,
-            self.ffn_tp_rank,
-            self._full_column_weights,
-            "sp_shared_up",
-            sequence_parallel=sp_active,
-        )
-        shared_gate = torch.matmul(hidden_states, shared_gate_weight)
-        shared_up = torch.matmul(hidden_states, shared_up_weight)
-        shared_activation = situ_and_mul(
-            shared_gate,
-            shared_up,
-            self.beta,
-            self.linear_beta,
-        )
-        shared_down_weight = sequence_parallel_row_weight(
-            self.weights,
-            K3W.MOE_SHARED_DOWN,
-            self.ffn_tp_size,
-            self.ffn_tp_rank,
-            self._full_row_weights,
-            "sp_shared_down",
-            sequence_parallel=sp_active,
-        )
-        shared_output = (
-            torch.matmul(shared_activation, shared_down_weight)
-            if sp_active
-            else row_parallel_linear(
-                shared_activation,
-                shared_down_weight,
-                self.parallelism_config.get_ffn_tp_size(),
-            )
-        )
+        shared_output = self._shared_expert_forward(hidden_states)
         output = routed_output + shared_output
         if valid_token_count is not None and valid_token_count < hidden_states.shape[0]:
             output = output.clone()

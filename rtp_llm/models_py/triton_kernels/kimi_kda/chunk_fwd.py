@@ -77,10 +77,9 @@ def chunk_kda_fwd(
         disable_recompute=disable_recompute,
     )
 
-    # The chunk-state recurrence is always the deterministic CUBLAS GEMM path.
-    # KIMI_K3_KDA_CHUNK_STATE_BACKEND used to allow swapping in the FLA Triton
-    # kernel for comparison; it accumulates BF16 tensor-core products and was
-    # never a production choice.
+    # The chunk-state recurrence always uses deterministic CUBLAS GEMMs. The
+    # former FLA Triton comparator accumulated BF16 tensor-core products and
+    # was never a production choice.
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h_cublas(
         k=kg,
         w=w,
