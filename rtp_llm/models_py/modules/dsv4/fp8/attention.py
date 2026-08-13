@@ -5554,17 +5554,41 @@ class AttentionFP8(nn.Module):
                     # but vectorized loads still require every tail address to
                     # be a valid cache slot (vLLM zero-initializes this buffer).
                     chunk_indices.clamp_min_(0)
-                    o_part = torch.empty_like(q[start:end])
+                    q_part = q[start:end].contiguous()
+                    kernel_heads = int(q_part.shape[1])
+                    # FlashInfer's SM120 DSV4 sparse-MLA binary is instantiated
+                    # for at least 16 query heads. TP8 leaves 8 local heads, so
+                    # pad independent heads for the kernel and slice them away
+                    # afterwards. This is local to SM120 and leaves TP<=4 and
+                    # every non-SM120 path byte-for-byte unchanged.
+                    if kernel_heads < 16:
+                        q_kernel = torch.zeros(
+                            (end - start, 16, self.head_dim),
+                            dtype=q_part.dtype,
+                            device=q_part.device,
+                        )
+                        q_kernel[:, :kernel_heads].copy_(q_part)
+                        sinks_kernel = torch.zeros(
+                            16, dtype=torch.float32, device=q_part.device
+                        )
+                        sinks_kernel[:kernel_heads].copy_(
+                            self.attn_sink[:kernel_heads].float()
+                        )
+                        o_kernel = torch.empty_like(q_kernel)
+                    else:
+                        q_kernel = q_part
+                        sinks_kernel = self.attn_sink.float()
+                        o_kernel = torch.empty_like(q_kernel)
                     trtllm_batch_decode_sparse_mla_dsv4(
-                        query=q[start:end].contiguous(),
+                        query=q_kernel,
                         swa_kv_cache=sm120_cache.unsqueeze(-2),
                         workspace_buffer=SparseAttnV4DecodeFp8Op._get_sm120_workspace(
                             q.device
                         ),
                         sparse_indices=chunk_indices,
-                        out=o_part,
+                        out=o_kernel,
                         bmm1_scale=self.softmax_scale,
-                        sinks=self.attn_sink.float(),
+                        sinks=sinks_kernel,
                         kv_layout="NHD",
                         swa_topk_lens=(
                             sm120_swa_lens[start:end]
@@ -5585,6 +5609,7 @@ class AttentionFP8(nn.Module):
                             else None
                         ),
                     )
+                    o_part = o_kernel[:, :kernel_heads].contiguous()
                 else:
                     o_part, _, _ = flash_mla_sparse_fwd(
                         q=q[start:end],

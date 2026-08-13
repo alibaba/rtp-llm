@@ -27,7 +27,8 @@ def sm120_dsv4_prefill_perf(name, parallel_size, use_cp):
         "ENABLE_FP32_LM_HEAD": "0", "PERF_GRID_WARMUP_RUNS": "1",
         "PERF_FORMAL_WARMUP_RUNS": "1", "PERF_MEASURE_RUNS": "3",
         "PERF_PROFILE_RUNS": "1", "PERF_PROFILE_FLUSH_SLEEP": "120",
-        "GEN_TIMELINE_SYNC": "1",
+        "GEN_TIMELINE_SYNC": "1", "NCCL_P2P_DISABLE": "1",
+        "NCCL_IB_DISABLE": "1",
     }
     if use_cp:
         target_env["PREFILL_CP_KV_CACHE_SHARDED"] = "1"
