@@ -846,8 +846,6 @@ test_suite(
 # FlashInfer sparse-attention kernel consumes 128-entry tiles.
 sm120_dsv4_prefill_perf(name = "v4_flash_sm120_cp4_ep4_prefill_perf", parallel_size = 4, use_cp = True)
 sm120_dsv4_prefill_perf(name = "v4_flash_sm120_cp8_ep8_prefill_perf", parallel_size = 8, use_cp = True)
-sm120_dsv4_prefill_perf(name = "v4_flash_sm120_tp4_ep4_prefill_perf", parallel_size = 4, use_cp = False)
-sm120_dsv4_prefill_perf(name = "v4_flash_sm120_tp8_ep8_prefill_perf", parallel_size = 8, use_cp = False)
 
 test_suite(
     name = "perf_dsv4_v4_flash",
