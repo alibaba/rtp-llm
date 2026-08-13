@@ -216,6 +216,8 @@ mkdir -p "${FLASHINFER_WORKSPACE_BASE}"
 # ---------------------------------------------------------------------------
 
 max_seq_len="${MAX_SEQ_LEN:-16384}"
+# Keep frontend ModelArgs and backend --max_seq_len on the same limit.
+export MAX_SEQ_LEN="${max_seq_len}"
 max_batch_tokens_size="${MAX_BATCH_TOKENS_SIZE:-}"
 seq_size_per_block="${SEQ_SIZE_PER_BLOCK:-4096}"
 kernel_seq_size_per_block="${KERNEL_SEQ_SIZE_PER_BLOCK:-128}"
@@ -481,7 +483,7 @@ server_args=(
     --cache_store_rdma_mode 0
     --load_cache_timeout_ms 7200000
     --load_method "${LOAD_METHOD}"
-    --ft_core_dump_on_exception 0
+    --ft_core_dump_on_exception "${FT_CORE_DUMP_ON_EXCEPTION:-0}"
     --shutdown_timeout 5
 )
 
