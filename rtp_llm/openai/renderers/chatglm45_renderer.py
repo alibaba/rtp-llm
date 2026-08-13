@@ -29,13 +29,16 @@ class ChatGlm45Renderer(ReasoningToolBaseRenderer):
 
     @override
     def _preprocess_messages(self, messages: list[dict]) -> list[dict]:
-        """预处理消息，确保 tool_calls 中的 arguments 是字典对象"""
+        """Normalize tool arguments and associate tool results with their calls."""
         processed_messages = []
-        for message in messages:
+        message_index = 0
+        while message_index < len(messages):
+            message = messages[message_index]
             processed_message = message.copy()
-            if "tool_calls" in processed_message and processed_message["tool_calls"]:
+            tool_calls = processed_message.get("tool_calls") or []
+            if tool_calls:
                 processed_tool_calls = []
-                for tool_call in processed_message["tool_calls"]:
+                for tool_call in tool_calls:
                     processed_tool_call = tool_call.copy()
                     if "function" in processed_tool_call:
                         function = processed_tool_call["function"].copy()
@@ -60,8 +63,75 @@ class ChatGlm45Renderer(ReasoningToolBaseRenderer):
                             processed_tool_call["arguments"] = {}
                     processed_tool_calls.append(processed_tool_call)
                 processed_message["tool_calls"] = processed_tool_calls
+
+            if processed_message.get("role") == "tool":
+                raise ValueError(
+                    "Tool result must immediately follow an assistant tool call"
+                )
+
             processed_messages.append(processed_message)
+            message_index += 1
+
+            if not tool_calls:
+                continue
+            if processed_message.get("role") != "assistant":
+                raise ValueError("Only assistant messages may contain tool calls")
+
+            tool_results = []
+            while (
+                message_index < len(messages)
+                and messages[message_index].get("role") == "tool"
+            ):
+                tool_results.append(messages[message_index].copy())
+                message_index += 1
+            processed_messages.extend(
+                self._order_tool_results(processed_tool_calls, tool_results)
+            )
+
         return processed_messages
+
+    @staticmethod
+    def _order_tool_results(
+        tool_calls: list[dict], tool_results: list[dict]
+    ) -> list[dict]:
+        if len(tool_calls) != len(tool_results):
+            raise ValueError(
+                "Every assistant tool call must have exactly one adjacent tool result"
+            )
+
+        call_ids = [
+            ChatGlm45Renderer._optional_tool_id(tool_call, "id")
+            for tool_call in tool_calls
+        ]
+        result_ids = [
+            ChatGlm45Renderer._optional_tool_id(tool_result, "tool_call_id")
+            for tool_result in tool_results
+        ]
+
+        all_ids = call_ids + result_ids
+        if len(tool_calls) == 1 and all(tool_id is None for tool_id in all_ids):
+            return tool_results
+        if any(tool_id is None for tool_id in all_ids):
+            raise ValueError("Tool history must provide every tool call id")
+
+        if len(set(call_ids)) != len(call_ids):
+            raise ValueError("Assistant tool call ids must be unique")
+        if len(set(result_ids)) != len(result_ids):
+            raise ValueError("Tool result ids must be unique")
+
+        results_by_id = dict(zip(result_ids, tool_results))
+        if set(call_ids) != set(result_ids):
+            raise ValueError("Tool results do not match the assistant tool calls")
+        return [results_by_id[tool_id] for tool_id in call_ids]
+
+    @staticmethod
+    def _optional_tool_id(item: dict, field: str) -> Optional[str]:
+        tool_id = item.get(field)
+        if tool_id is None:
+            return None
+        if not isinstance(tool_id, str) or not tool_id:
+            raise ValueError(f"{field} must be a non-empty string")
+        return tool_id
 
     @override
     def _create_detector(

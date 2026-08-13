@@ -115,6 +115,20 @@ py_test(
 )
 
 py_test(
+    name = "glm_tool_history_test",
+    srcs = [
+        "glm_tool_history_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    data = [
+        "//rtp_llm/test/model_test/fake_test/testdata:testdata",
+    ],
+    timeout = "short",
+)
+
+py_test(
     name = "stop_words_pipeline_test",
     srcs = [
         "stop_words_pipeline_test.py",
