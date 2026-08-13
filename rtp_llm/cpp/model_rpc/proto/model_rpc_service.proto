@@ -308,6 +308,8 @@ message GenerateRequestPB {
     repeated string peer_addrs = 7;
     repeated int32 propose_token_ids = 8;
     repeated int32 position_ids = 9;
+    // Exact normalized distribution used to produce propose_token_ids, in
+    // draft-vocabulary space. PD peers follow the same-build protocol contract.
     TensorPB propose_probs = 10;
     TensorPB propose_hidden = 11;
 }
@@ -605,7 +607,8 @@ message SideChannelTensorPB {
 }
 
 // Side-channel payload: replaces fixed first_token/reuse/SP/position_ids fields
-// Keys: "propose_tokens", "propose_probs", "propose_hidden", "position_ids"
+// Keys: "propose_tokens", "propose_probs", "propose_hidden", "position_ids".
+// propose_probs follows GenerateRequestPB's draft-space exact-distribution contract.
 message SideChannelPayloadPB {
     map<string, SideChannelTensorPB> tensors = 1;
     // Scalar fields that don't fit tensor format

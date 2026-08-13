@@ -29,6 +29,7 @@ public:
 };
 
 struct FastTopKSamplerOutput {
+    // Exact proposal distribution in draft-vocabulary space.
     torch::Tensor all_probs;
     torch::Tensor token_ids;
 };
@@ -38,18 +39,25 @@ public:
     // Default: no draft-to-target vocab mapping (execMappingDraft2Target
     // no-ops on an undefined map). Keeps main's ctor contract for tests.
     FastTopKSampler() = default;
-    explicit FastTopKSampler(torch::Tensor d2t_map): d2t_map_(std::move(d2t_map)) {}
+    FastTopKSampler(torch::Tensor d2t_map, size_t target_vocab_size);
     virtual ~FastTopKSampler() {}
 
     virtual FastTopKSamplerOutput forward(const torch::Tensor& logits, int top_k = 1);
 
 private:
     torch::Tensor d2t_map_;
+    size_t        target_vocab_size_ = 0;
 };
 
 class SpeculativeSampler {
 public:
-    SpeculativeSampler(torch::Tensor d2t_map, size_t propose_step): d2t_map_(d2t_map), propose_step_(propose_step) {}
+    SpeculativeSampler(torch::Tensor d2t_map, size_t propose_step):
+        d2t_map_(std::move(d2t_map)), propose_step_(propose_step) {}
+
+    static torch::Tensor mapDraftProbsToTarget(const torch::Tensor& draft_probs,
+                                               const torch::Tensor& d2t_map,
+                                               int64_t              target_vocab_size,
+                                               torch::Tensor*       target_probs_buffer = nullptr);
 
     virtual SpeculativeSamplerOutput forward(const std::list<GenerateStreamPtr>& streams,
                                              SamplerOutput&                      draft_sampler_output,
@@ -67,13 +75,10 @@ private:
                       SamplerOutput&                      target_sampler_output) const;
 
 protected:
-    torch::Tensor        d2t_map_;
-    size_t               propose_step_;
-    mutable TensorHolder buffer_holder_;
-
-    // Reusable buffer for draft_probs vocab-padding when draft/target vocab sizes differ.
-    // Grow-only; reused across batchSample calls to avoid per-forward GPU allocation in hot path.
-    mutable torch::Tensor draft_probs_padding_buffer_;
+    torch::Tensor         d2t_map_;
+    size_t                propose_step_;
+    mutable TensorHolder  buffer_holder_;
+    mutable torch::Tensor draft_probs_target_buffer_;
 };
 
 }  // namespace speculative

@@ -42,6 +42,49 @@ protected:
         }
         return cpu.to(torch::kCUDA);
     }
+    void runLiteralCase(int                         batch_size,
+                        int                         num_speculative_tokens,
+                        int                         vocab_size,
+                        int                         target_token_stride,
+                        const std::vector<float>&   draft_probs,
+                        const std::vector<int32_t>& draft_token_ids,
+                        const std::vector<float>&   uniform_samples,
+                        const std::vector<float>&   target_probs,
+                        const std::vector<int32_t>& target_token_ids,
+                        const std::vector<bool>&    do_sample,
+                        const std::vector<int32_t>& expected_token_ids,
+                        const std::vector<int32_t>& expected_accepted_token_num) {
+        auto reference = referenceRejectionSampling(batch_size,
+                                                    num_speculative_tokens,
+                                                    vocab_size,
+                                                    target_token_stride,
+                                                    draft_probs,
+                                                    draft_token_ids,
+                                                    uniform_samples,
+                                                    target_probs,
+                                                    target_token_ids,
+                                                    do_sample);
+        ASSERT_NO_FATAL_FAILURE(assertVectorEqual(reference.token_ids, expected_token_ids));
+        ASSERT_NO_FATAL_FAILURE(assertVectorEqual(reference.accepted_token_num, expected_accepted_token_num));
+
+        RejectionSamplingParams params{
+            cudaFloatTensor({batch_size, num_speculative_tokens, vocab_size}, draft_probs),
+            cudaIntTensor({batch_size, num_speculative_tokens}, draft_token_ids),
+            cudaFloatTensor({batch_size, num_speculative_tokens + 1}, uniform_samples),
+            cudaFloatTensor({batch_size, num_speculative_tokens + 1, vocab_size}, target_probs),
+            cudaIntTensor({batch_size * (num_speculative_tokens + 1), target_token_stride}, target_token_ids),
+            torch::full({batch_size, num_speculative_tokens + 1},
+                        -7,
+                        torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA)),
+            torch::zeros({batch_size}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA)),
+            cudaBoolTensor(do_sample),
+        };
+
+        rejectionSampling(params);
+
+        assertVectorEqual(getTensorValues<int32_t>(params.output_token_ids_d), expected_token_ids);
+        assertVectorEqual(getTensorValues<int32_t>(params.output_accepted_token_num_d), expected_accepted_token_num);
+    }
 
     void runReferenceCases() {
         constexpr int batch_size             = 4;
@@ -117,6 +160,181 @@ protected:
 
         assertVectorEqual(getTensorValues<int32_t>(params.output_token_ids_d), expected.token_ids);
         assertVectorEqual(getTensorValues<int32_t>(params.output_accepted_token_num_d), expected.accepted_token_num);
+    }
+
+    void runStochasticSemanticsCases() {
+        // Three N=2 paths: full accept with different verifier IDs, immediate
+        // rejection despite an equal verifier ID, and rejection after one accept.
+        runLiteralCase(3,
+                       2,
+                       3,
+                       1,
+                       {
+                           0.2f,
+                           0.4f,
+                           0.4f,
+                           0.4f,
+                           0.2f,
+                           0.4f,
+                           0.5f,
+                           0.4f,
+                           0.1f,
+                           0.4f,
+                           0.4f,
+                           0.2f,
+                           0.2f,
+                           0.4f,
+                           0.4f,
+                           0.1f,
+                           0.5f,
+                           0.4f,
+                       },
+                       {0, 1, 0, 1, 0, 1},
+                       {
+                           0.5f,
+                           0.5f,
+                           0.2f,
+                           0.5f,
+                           0.2f,
+                           0.1f,
+                           0.5f,
+                           0.5f,
+                           0.2f,
+                       },
+                       {
+                           0.3f, 0.3f, 0.4f, 0.3f, 0.3f, 0.4f, 0.1f, 0.1f, 0.8f, 0.0f, 0.4f, 0.6f, 0.2f, 0.3f,
+                           0.5f, 0.1f, 0.1f, 0.8f, 0.3f, 0.3f, 0.4f, 0.1f, 0.0f, 0.9f, 0.1f, 0.1f, 0.8f,
+                       },
+                       {
+                           2,
+                           2,
+                           2,
+                           0,
+                           2,
+                           2,
+                           2,
+                           1,
+                           2,
+                       },
+                       {true, true, true},
+                       {
+                           0,
+                           1,
+                           2,
+                           2,
+                           -1,
+                           -1,
+                           0,
+                           2,
+                           -1,
+                       },
+                       {3, 1, 2});
+
+        // N=1 explicitly covers acceptance with a different verifier ID and
+        // rejection even when the sampled verifier ID equals the draft ID.
+        runLiteralCase(2,
+                       1,
+                       3,
+                       1,
+                       {
+                           0.2f,
+                           0.4f,
+                           0.4f,
+                           0.5f,
+                           0.4f,
+                           0.1f,
+                       },
+                       {0, 0},
+                       {0.5f, 0.2f, 0.5f, 0.2f},
+                       {
+                           0.3f,
+                           0.3f,
+                           0.4f,
+                           0.1f,
+                           0.8f,
+                           0.1f,
+                           0.0f,
+                           0.4f,
+                           0.6f,
+                           0.1f,
+                           0.8f,
+                           0.1f,
+                       },
+                       {2, 1, 0, 1},
+                       {true, true},
+                       {0, 1, 2, -1},
+                       {2, 1});
+    }
+
+    void runPointMassDraftCases() {
+        // Top-1 MTP proposals are explicit point masses. The kernel consumes
+        // this tensor through the same interface used by non-degenerate
+        // proposal distributions such as future top-p draft sampling.
+        runLiteralCase(3,
+                       2,
+                       5,
+                       1,
+                       {
+                           0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f,
+                           0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+                       },
+                       {4, 3, 4, 3, 4, 3},
+                       {0.5f, 0.5f, 0.2f, 0.5f, 0.2f, 0.5f, 0.5f, 0.2f, 0.5f},
+                       {
+                           0.1f, 0.1f, 0.1f, 0.1f, 0.6f, 0.1f, 0.1f, 0.1f, 0.6f, 0.1f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                           0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                           0.1f, 0.1f, 0.1f, 0.1f, 0.6f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                       },
+                       {0, 1, 2, 4, 2, 2, 0, 3, 2},
+                       {true, true, true},
+                       {4, 3, 2, 2, -1, -1, 4, 1, -1},
+                       {3, 1, 2});
+
+        runLiteralCase(1,
+                       1,
+                       5,
+                       1,
+                       {0.0f, 0.0f, 0.0f, 0.0f, 1.0f},
+                       {4},
+                       {0.5f, 0.2f},
+                       {0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f},
+                       {4, 0},
+                       {true},
+                       {2, -1},
+                       {1});
+
+        // Vocab size 8 selects a vectorized probability path. The proposal
+        // token is in a non-leading lane and is rejected, exercising the
+        // vectorized relu(q - p) residual sampler with an explicit point mass.
+        runLiteralCase(1,
+                       1,
+                       8,
+                       1,
+                       {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f},
+                       {6},
+                       {0.5f, 0.3f},
+                       {
+                           0.1f,
+                           0.2f,
+                           0.0f,
+                           0.0f,
+                           0.0f,
+                           0.0f,
+                           0.4f,
+                           0.3f,
+                           0.0f,
+                           0.0f,
+                           0.0f,
+                           0.0f,
+                           0.0f,
+                           0.0f,
+                           0.0f,
+                           1.0f,
+                       },
+                       {6, 7},
+                       {true},
+                       {1, -1},
+                       {1});
     }
 
     void runZeroAndOneSpeculativeTokenCases() {
@@ -267,6 +485,22 @@ protected:
         params             = makeParams();
         params.do_sample_d = torch::ones({batch_size}, int_options);
         EXPECT_ANY_THROW(rejectionSampling(params));
+
+        params               = makeParams();
+        params.draft_probs_d = torch::Tensor();
+        EXPECT_ANY_THROW(rejectionSampling(params));
+
+        params               = makeParams();
+        params.draft_probs_d = torch::zeros({batch_size, num_speculative_tokens, vocab_size + 1}, float_options);
+        EXPECT_ANY_THROW(rejectionSampling(params));
+
+        params               = makeParams();
+        params.draft_probs_d = torch::zeros({batch_size + 1, num_speculative_tokens, vocab_size}, float_options);
+        EXPECT_ANY_THROW(rejectionSampling(params));
+
+        params               = makeParams();
+        params.draft_probs_d = torch::zeros({batch_size, num_speculative_tokens + 1, vocab_size}, float_options);
+        EXPECT_ANY_THROW(rejectionSampling(params));
     }
 
 private:
@@ -338,8 +572,8 @@ private:
         output.accepted_token_num.assign(batch_size, 0);
 
         for (int batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
-            bool all_same_token = true;
-            int  pos            = num_speculative_tokens;
+            bool direct_target_fallback = false;
+            int  pos                    = num_speculative_tokens;
             for (int i = 0; i < num_speculative_tokens; ++i) {
                 auto draft_id = draft_token_ids[batch_idx * num_speculative_tokens + i];
                 auto target_id =
@@ -349,20 +583,27 @@ private:
                 auto u = uniform_samples[batch_idx * (num_speculative_tokens + 1) + i];
 
                 bool same_token = target_id == draft_id;
-                if (same_token || (do_sample[batch_idx] && u * p < q)) {
+                if ((do_sample[batch_idx] && u * p < q) || (!do_sample[batch_idx] && same_token)) {
                     output.token_ids[batch_idx * (num_speculative_tokens + 1) + i] = draft_id;
-                    all_same_token                                                 = all_same_token && same_token;
                 } else {
                     pos = i;
+                    if (!do_sample[batch_idx]) {
+                        output.token_ids[batch_idx * (num_speculative_tokens + 1) + i] = target_id;
+                        direct_target_fallback                                         = true;
+                    }
                     break;
                 }
             }
 
             output.accepted_token_num[batch_idx] = pos + 1;
 
-            if (all_same_token) {
+            if (pos == num_speculative_tokens) {
                 output.token_ids[batch_idx * (num_speculative_tokens + 1) + pos] =
                     targetTokenId(target_token_ids, num_speculative_tokens, target_token_stride, batch_idx, pos);
+                continue;
+            }
+
+            if (direct_target_fallback) {
                 continue;
             }
 
@@ -393,14 +634,12 @@ private:
         float              sum = 0.0f;
         for (int token_id = 0; token_id < vocab_size; ++token_id) {
             auto q = target_probs[((batch_idx * (num_speculative_tokens + 1) + pos) * vocab_size) + token_id];
-            auto p = pos == num_speculative_tokens ?
-                         0.0f :
-                         draft_probs[((batch_idx * num_speculative_tokens + pos) * vocab_size) + token_id];
+            auto p = draft_probs[((batch_idx * num_speculative_tokens + pos) * vocab_size) + token_id];
             relu_q_minus_p[token_id] = std::max(q - p, 0.0f);
             sum += relu_q_minus_p[token_id];
         }
 
-        auto uniform_idx = batch_idx * (num_speculative_tokens + 1) + std::min(pos + 1, num_speculative_tokens);
+        auto uniform_idx = batch_idx * (num_speculative_tokens + 1) + pos + 1;
         auto threshold   = uniform_samples[uniform_idx] * sum;
         auto aggregate   = 0.0f;
         for (int token_id = 0; token_id < vocab_size; ++token_id) {

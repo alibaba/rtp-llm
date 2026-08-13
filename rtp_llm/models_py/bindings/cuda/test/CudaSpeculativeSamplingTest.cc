@@ -103,8 +103,7 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_ImmediateReject) {
     auto draft_token_ids  = torch::full({batch_size, num_spec}, 3, intCuda());
     auto target_token_ids = torch::full({batch_size, num_spec + 1, target_stride}, 7, intCuda());
 
-    // u = 0.5, p(draft_id=3) in target = 0 => u*p=0 which is NOT < q=0, so rejection
-    // Actually: same_token is false, do_sample is false => reject
+    // Greedy verification rejects because the verifier token differs from the draft token.
     auto uniform_samples     = torch::full({batch_size, num_spec + 1}, 0.5f, floatCuda());
     auto output_token_ids    = torch::full({batch_size, num_spec + 1}, -1, intCuda());
     auto output_accepted_num = torch::zeros({batch_size}, intCuda());
@@ -129,10 +128,9 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_ImmediateReject) {
     auto acc_num_h = output_accepted_num.to(torch::kCPU);
     auto out_ids_h = output_token_ids.to(torch::kCPU);
 
-    // Rejected at position 0, so accepted count = 0 + 1 = 1 (the resampled token)
+    // Rejected at position 0, so accepted count includes the emitted verifier token.
     EXPECT_EQ(acc_num_h[0].item<int>(), 1);
-    // The resampled token at pos 0 should come from relu(q-p); target_probs is all on token 7,
-    // so the resampled token should be 7
+    // Greedy verification emits the verifier token directly.
     EXPECT_EQ(out_ids_h[0][0].item<int>(), 7);
     // Remaining positions padded with -1
     EXPECT_EQ(out_ids_h[0][1].item<int>(), -1);
@@ -149,9 +147,9 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_PartialAccept) {
     auto draft_probs  = torch::zeros({batch_size, num_spec, vocab_size}, floatCuda());
     auto target_probs = torch::zeros({batch_size, num_spec + 1, vocab_size}, floatCuda());
 
-    // Position 0: draft=5, target argmax=5 → same_token → accept
-    // Position 1: draft=5, target argmax=5 → same_token → accept
-    // Position 2: draft=3, target argmax=7 → mismatch, do_sample=false → reject
+    // Positions 0 and 1 match the verifier and are accepted greedily.
+    // Position 2 differs and emits the verifier token directly; residual
+    // stochastic sampling is not used when do_sample=false.
     draft_probs.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), 5}, 1.0f);
     draft_probs.index_put_({torch::indexing::Slice(), 2, 5}, 0.0f);
     draft_probs.index_put_({torch::indexing::Slice(), 2, 3}, 1.0f);
@@ -191,11 +189,11 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_PartialAccept) {
     auto acc_num_h = output_accepted_num.to(torch::kCPU);
     auto out_ids_h = output_token_ids.to(torch::kCPU);
 
-    // Accepted positions 0, 1, rejected at 2 → count = 2 + 1 = 3
+    // Accepted positions 0, 1, then the verifier token at 2 gives count 3.
     EXPECT_EQ(acc_num_h[0].item<int>(), 3);
     EXPECT_EQ(out_ids_h[0][0].item<int>(), 5);
     EXPECT_EQ(out_ids_h[0][1].item<int>(), 5);
-    // Resampled from relu(q-p) at position 2; target has all prob on token 7
+    // Greedy verification emits token 7 directly at the first mismatch.
     EXPECT_EQ(out_ids_h[0][2].item<int>(), 7);
     EXPECT_EQ(out_ids_h[0][3].item<int>(), -1);
 }

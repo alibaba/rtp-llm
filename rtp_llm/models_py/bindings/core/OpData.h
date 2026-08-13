@@ -349,6 +349,7 @@ struct SpeculativeSamplingParams {
 };
 
 struct RejectionSamplingParams {
+    // Exact proposal distribution after draft-to-target vocabulary mapping.
     torch::Tensor draft_probs_d;
     torch::Tensor draft_token_ids_d;
     torch::Tensor uniform_samples_d;

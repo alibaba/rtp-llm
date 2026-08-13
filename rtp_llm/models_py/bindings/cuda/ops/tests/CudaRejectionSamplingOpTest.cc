@@ -6,6 +6,14 @@ TEST_F(CudaRejectionSamplingOpTest, referenceCases) {
     runReferenceCases();
 }
 
+TEST_F(CudaRejectionSamplingOpTest, stochasticSemanticsCases) {
+    runStochasticSemanticsCases();
+}
+
+TEST_F(CudaRejectionSamplingOpTest, pointMassDraftCases) {
+    runPointMassDraftCases();
+}
+
 TEST_F(CudaRejectionSamplingOpTest, zeroAndOneSpeculativeTokenCases) {
     runZeroAndOneSpeculativeTokenCases();
 }
