@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import codecs
 import json
 import math
 import random
@@ -12,7 +13,7 @@ import statistics
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional
 
 import aiohttp
 
@@ -66,9 +67,21 @@ def bounded_repr(value: Any, max_length: int = 160) -> str:
 
 
 def get_recovery_error(
-    status_before: Any, status_after: Any, expected_cancel_count: int
+    status_before: Any,
+    status_after: Any,
+    expected_cancel_count: int,
+    skip_frontend_recovery_check: bool = False,
+    explicit_worker_status: bool = False,
 ) -> Optional[str]:
-    if expected_cancel_count == 0:
+    if explicit_worker_status and (
+        status_before is None or status_after is None
+    ):
+        return (
+            "cannot verify explicit worker status endpoint reachability: "
+            f"before={bounded_repr(status_before)}, "
+            f"after={bounded_repr(status_after)}"
+        )
+    if skip_frontend_recovery_check or expected_cancel_count == 0:
         return None
 
     before_available = (
@@ -295,6 +308,69 @@ def get_sse_error(chunk: dict[str, Any]) -> Optional[str]:
     return None
 
 
+async def iter_sse_lines(content: Any) -> AsyncIterator[str]:
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    pending = ""
+
+    async for raw_chunk in content:
+        pending += decoder.decode(raw_chunk)
+        while True:
+            cr_index = pending.find("\r")
+            lf_index = pending.find("\n")
+            indices = [index for index in (cr_index, lf_index) if index >= 0]
+            if not indices:
+                break
+            line_end = min(indices)
+            if pending[line_end] == "\r" and line_end + 1 == len(pending):
+                break
+            separator_length = (
+                2 if pending.startswith("\r\n", line_end) else 1
+            )
+            yield pending[:line_end]
+            pending = pending[line_end + separator_length :]
+
+    pending += decoder.decode(b"", final=True)
+    while True:
+        cr_index = pending.find("\r")
+        lf_index = pending.find("\n")
+        indices = [index for index in (cr_index, lf_index) if index >= 0]
+        if not indices:
+            break
+        line_end = min(indices)
+        separator_length = 2 if pending.startswith("\r\n", line_end) else 1
+        yield pending[:line_end]
+        pending = pending[line_end + separator_length :]
+    if pending:
+        yield pending
+
+
+async def iter_sse_data(
+    content: Any, structural_errors: list[str]
+) -> AsyncIterator[str]:
+    data_lines: list[str] = []
+    frame_open = False
+
+    async for line in iter_sse_lines(content):
+        if line == "":
+            if data_lines:
+                yield "\n".join(data_lines)
+            data_lines.clear()
+            frame_open = False
+            continue
+
+        frame_open = True
+        if line.startswith(":"):
+            continue
+        field, separator, value = line.partition(":")
+        if separator and value.startswith(" "):
+            value = value[1:]
+        if field == "data":
+            data_lines.append(value)
+
+    if frame_open:
+        structural_errors.append("SSE stream ended with an unterminated frame")
+
+
 def validate_completed_request(result: RequestResult) -> None:
     if result.http_status != 200 or result.terminal_error is not None:
         return
@@ -396,6 +472,7 @@ async def run_request(
     parallel_tool_calls: bool = False,
     cancel_after_s: float = 0.05,
     cancel_dispatch_timeout_s: float = 10.0,
+    api_key: str = "",
 ) -> RequestResult:
     result = RequestResult(
         request_index=request_index,
@@ -410,6 +487,9 @@ async def run_request(
 
     async def consume_response() -> None:
         try:
+            request_headers = (
+                {"Authorization": f"Bearer {api_key}"} if api_key else None
+            )
             async with session.post(
                 endpoint,
                 json=build_payload(
@@ -419,6 +499,8 @@ async def run_request(
                     tool_choice,
                     parallel_tool_calls,
                 ),
+                headers=request_headers,
+                allow_redirects=False,
             ) as response:
                 response_holder.append(response)
                 result.http_status = response.status
@@ -432,11 +514,18 @@ async def run_request(
                         result.structural_errors[-1] += f": {body}"
                     return result
 
-                async for raw_line in response.content:
-                    line = raw_line.decode("utf-8", errors="replace").strip()
-                    if not line or not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
+                content_type = response.headers.get("Content-Type", "")
+                media_type = content_type.split(";", 1)[0].strip().lower()
+                if media_type != "text/event-stream":
+                    result.structural_errors.append(
+                        "HTTP 200 Content-Type media type is "
+                        f"{media_type!r}, expected 'text/event-stream'"
+                    )
+                    return result
+
+                async for data in iter_sse_data(
+                    response.content, result.structural_errors
+                ):
                     if data == "[DONE]":
                         result.done_count += 1
                         result.saw_done = True
@@ -703,8 +792,15 @@ def summarize_results(
     structural_error_count = sum(len(r.structural_errors) for r in results)
     semantic_error_count = sum(len(r.semantic_errors) for r in results)
 
+    frontend_recovery_checked = (
+        bool(cancel_requests) and not args.skip_frontend_recovery_check
+    )
     recovery_error = get_recovery_error(
-        status_before, status_after, len(cancel_requests)
+        status_before,
+        status_after,
+        len(cancel_requests),
+        args.skip_frontend_recovery_check,
+        args.worker_status_url is not None,
     )
     if recovery_error:
         structural_error_count += 1
@@ -716,6 +812,10 @@ def summarize_results(
     return {
         "configuration": {
             "endpoint": endpoint,
+            "worker_status_url": resolve_worker_status_url(
+                args.base_url, args.worker_status_url
+            ),
+            "skip_frontend_recovery_check": args.skip_frontend_recovery_check,
             "model": args.model,
             "requests": args.requests,
             "concurrency": args.concurrency,
@@ -757,6 +857,7 @@ def summarize_results(
         },
         "worker_status_before": status_before,
         "worker_status_after": status_after,
+        "frontend_recovery_checked": frontend_recovery_checked,
         "recovery_error": recovery_error,
         "errors": [
             {
@@ -770,15 +871,24 @@ def summarize_results(
     }
 
 
-async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
-    endpoint = args.base_url.rstrip("/") + "/chat/completions"
-    root_url = args.base_url.rstrip("/")
+def resolve_worker_status_url(
+    base_url: str, worker_status_url: Optional[str]
+) -> str:
+    if worker_status_url is not None:
+        return worker_status_url
+
+    root_url = base_url.rstrip("/")
     if root_url.endswith("/v1"):
         root_url = root_url[:-3]
-    worker_status_url = root_url + "/worker_status"
+    return root_url + "/worker_status"
+
+
+async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
+    endpoint = args.base_url.rstrip("/") + "/chat/completions"
+    worker_status_url = resolve_worker_status_url(
+        args.base_url, args.worker_status_url
+    )
     headers = {"User-Agent": "rtp-llm-tool-call-benchmark"}
-    if args.api_key:
-        headers["Authorization"] = f"Bearer {args.api_key}"
     timeout = aiohttp.ClientTimeout(total=args.timeout)
     connector = aiohttp.TCPConnector(limit=max(args.concurrency * 2, 32))
     cancel_flags = select_cancel_flags(args.requests, args.cancel_rate, args.seed)
@@ -804,6 +914,7 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 args.parallel_tool_calls,
                 args.cancel_after,
                 args.cancel_dispatch_timeout,
+                args.api_key,
             )
             warmup_error = get_warmup_error(
                 warmup_result, args.fail_on_semantic_errors
@@ -826,6 +937,7 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                     args.parallel_tool_calls,
                     args.cancel_after,
                     args.cancel_dispatch_timeout,
+                    args.api_key,
                 )
             )
             for request_index in range(args.requests)
@@ -846,6 +958,15 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://127.0.0.1:30000/v1")
+    parser.add_argument(
+        "--worker-status-url",
+        help="full worker-status endpoint; defaults to BASE_URL/../worker_status",
+    )
+    parser.add_argument(
+        "--skip-frontend-recovery-check",
+        action="store_true",
+        help="record Frontend admission recovery as unchecked",
+    )
     parser.add_argument("--model", required=True)
     parser.add_argument("--api-key", default="")
     parser.add_argument("--requests", type=int, default=1000)

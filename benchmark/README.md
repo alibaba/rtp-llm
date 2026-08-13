@@ -39,6 +39,20 @@ arguments, call ID uniqueness, and model semantics. A deterministic fraction of
 requests is cancelled after dispatch, and `/worker_status` is compared before and
 after the recovery window.
 
+Use `--worker-status-url` when the status endpoint is hosted separately from the
+Frontend URL used for chat requests. If that status endpoint does not report the
+request Frontend's admission slots, use `--skip-frontend-recovery-check` only
+alongside a separate admission canary for the request Frontend. The benchmark
+result then explicitly reports `frontend_recovery_checked` as `false`.
+API-key authorization is sent only to the chat endpoint, never to the worker
+status URL. An explicitly configured status endpoint must be reachable both
+before and after the workload even when the Frontend recovery check is skipped.
+
+Every successful Chat response must use the `text/event-stream` media type and
+valid SSE framing. Frames are terminated by an empty line, multiple `data:`
+fields are joined with newlines, `[DONE]` must occur exactly once, and data after
+`[DONE]` or an unterminated final frame is a structural failure.
+
 ```bash
 python3 benchmark/benchmark_tool_call.py \
     --base-url http://127.0.0.1:30000/v1 \

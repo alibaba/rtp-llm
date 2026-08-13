@@ -19,6 +19,7 @@ from benchmark_tool_call import (
     get_recovery_error,
     get_warmup_error,
     parse_args,
+    resolve_worker_status_url,
     run_benchmark,
     run_request,
     select_cancel_flags,
@@ -51,9 +52,11 @@ class FakeResponse:
         include_done: bool = True,
         line_delay_s: float = 0.0,
         enter_delay_s: float = 0.0,
+        content_type: str = "text/event-stream",
     ):
         self.closed = False
         self.enter_delay_s = enter_delay_s
+        self.headers = {"Content-Type": content_type}
         lines = [f"data: {json.dumps(chunk)}\n\n".encode() for chunk in chunks]
         if include_done:
             lines.append(b"data: [DONE]\n\n")
@@ -78,14 +81,24 @@ class FakeSession:
         include_done: bool = True,
         line_delay_s: float = 0.0,
         enter_delay_s: float = 0.0,
+        content_type: str = "text/event-stream",
     ):
         self.response = FakeResponse(
-            chunks, include_done, line_delay_s, enter_delay_s
+            chunks,
+            include_done,
+            line_delay_s,
+            enter_delay_s,
+            content_type,
         )
         self.payload = None
+        self.headers = None
 
-    def post(self, endpoint: str, json: dict):
+    def post(
+        self, endpoint: str, json: dict, headers=None, allow_redirects=True
+    ):
         self.payload = json
+        self.headers = headers
+        self.allow_redirects = allow_redirects
         return self.response
 
 
@@ -163,7 +176,39 @@ class BenchmarkGateTest(unittest.TestCase):
         self.assertEqual(args.cancel_after, 0.05)
         self.assertEqual(args.cancel_dispatch_timeout, 10.0)
         self.assertEqual(args.worker_status_timeout, 5.0)
+        self.assertIsNone(args.worker_status_url)
+        self.assertFalse(args.skip_frontend_recovery_check)
         self.assertTrue(args.fail_on_semantic_errors)
+
+    def test_worker_status_url_defaults_to_base_url_root(self):
+        self.assertEqual(
+            resolve_worker_status_url("http://frontend.example/v1", None),
+            "http://frontend.example/worker_status",
+        )
+        self.assertEqual(
+            resolve_worker_status_url("http://frontend.example/api", None),
+            "http://frontend.example/api/worker_status",
+        )
+
+    def test_cli_can_override_worker_status_url(self):
+        args = parse_args(
+            [
+                "--model",
+                "fake-model",
+                "--worker-status-url",
+                "http://status.example/worker_status",
+                "--skip-frontend-recovery-check",
+            ]
+        )
+
+        self.assertEqual(
+            args.worker_status_url, "http://status.example/worker_status"
+        )
+        self.assertEqual(
+            resolve_worker_status_url(args.base_url, args.worker_status_url),
+            "http://status.example/worker_status",
+        )
+        self.assertTrue(args.skip_frontend_recovery_check)
 
     def test_cli_can_opt_into_auto_parallel_and_semantic_reporting(self):
         args = parse_args(
@@ -360,6 +405,30 @@ class ValidateCompletedRequestTest(unittest.TestCase):
 
 
 class RecoveryValidationTest(unittest.TestCase):
+    def test_explicit_status_failure_is_not_hidden_by_frontend_skip(self):
+        error = get_recovery_error(
+            None,
+            None,
+            expected_cancel_count=0,
+            skip_frontend_recovery_check=True,
+            explicit_worker_status=True,
+        )
+
+        self.assertIsNotNone(error)
+        self.assertIn("explicit worker status", error)
+        self.assertIn("before=None", error)
+        self.assertIn("after=None", error)
+
+    def test_explicit_skip_does_not_claim_frontend_recovery(self):
+        self.assertIsNone(
+            get_recovery_error(
+                {"frontend_available_concurrency": 32},
+                {"frontend_available_concurrency": 1},
+                expected_cancel_count=1,
+                skip_frontend_recovery_check=True,
+            )
+        )
+
     def test_missing_status_fails_when_cancellation_was_selected(self):
         self.assertEqual(
             get_recovery_error(None, None, expected_cancel_count=1),
@@ -416,6 +485,9 @@ class SummaryTest(unittest.TestCase):
             warmup=2,
             max_tokens=32,
             timeout=10.0,
+            base_url="http://frontend.example/v1",
+            worker_status_url=None,
+            skip_frontend_recovery_check=False,
             worker_status_timeout=1.0,
             recovery_wait=0.0,
             seed=7,
@@ -476,6 +548,33 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(summary["throughput_rps"], 0.5)
         self.assertEqual(summary["attempted_rps"], 2.0)
         self.assertEqual(summary["latency_s"]["mean"], 1.0)
+        self.assertTrue(summary["frontend_recovery_checked"])
+
+    def test_skip_frontend_recovery_is_explicitly_unchecked(self):
+        args = self.make_args()
+        args.skip_frontend_recovery_check = True
+        success = self.make_success(0)
+        cancellation = RequestResult(
+            request_index=1,
+            expected_cancel=True,
+            cancelled=True,
+        )
+
+        summary = summarize_results(
+            args,
+            "http://unused/chat/completions",
+            [success, cancellation],
+            wall_time_s=1.0,
+            status_before={"frontend_available_concurrency": 32},
+            status_after={"frontend_available_concurrency": 1},
+        )
+
+        self.assertTrue(
+            summary["configuration"]["skip_frontend_recovery_check"]
+        )
+        self.assertFalse(summary["frontend_recovery_checked"])
+        self.assertIsNone(summary["recovery_error"])
+        self.assertEqual(summary["structural_error_count"], 0)
 
     def test_duplicate_call_id_disqualifies_the_later_request(self):
         first = self.make_success(0)
@@ -737,6 +836,57 @@ class RunRequestTextValidationTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("stream ended before [DONE]", result.structural_errors)
         self.assertEqual(result.semantic_errors, [])
+
+    async def test_http_200_requires_event_stream_media_type(self):
+        session = FakeSession(
+            [self.make_tool_chunk()], content_type="application/json"
+        )
+        result = await run_request(
+            session,
+            "http://unused/chat/completions",
+            "fake-model",
+            self.REQUEST_INDEX,
+            32,
+            False,
+            asyncio.Semaphore(1),
+        )
+
+        self.assertFalse(session.allow_redirects)
+        self.assertIn(
+            "HTTP 200 Content-Type media type is 'application/json', expected 'text/event-stream'",
+            result.structural_errors,
+        )
+
+    async def test_multiple_data_lines_are_joined_with_newline(self):
+        tool_chunk = self.make_tool_chunk()
+        choices = json.dumps(tool_chunk["choices"]).encode("utf-8")
+        result = await self.run_raw_lines(
+            [
+                b'data: {"choices":\n',
+                b"data: " + choices + b"}\n",
+                b"\n",
+                b"data: [DONE]\n",
+                b"\n",
+            ]
+        )
+
+        self.assertEqual(result.structural_errors, [])
+        self.assertEqual(result.semantic_errors, [])
+
+    async def test_eof_before_done_frame_boundary_fails(self):
+        tool_chunk = json.dumps(self.make_tool_chunk()).encode("utf-8")
+        result = await self.run_raw_lines(
+            [
+                b"data: " + tool_chunk + b"\n\n",
+                b"data: [DONE]\n",
+            ]
+        )
+
+        self.assertIn(
+            "SSE stream ended with an unterminated frame",
+            result.structural_errors,
+        )
+        self.assertFalse(result.saw_done)
 
     async def test_exactly_one_done_sentinel_passes(self):
         result = await self.run_chunks([self.make_tool_chunk()])
@@ -1102,6 +1252,67 @@ class WireIntegrationTest(unittest.IsolatedAsyncioTestCase):
             ]
         }
 
+    async def test_http_200_non_sse_media_type_is_structural_failure(self):
+        async def handler(request):
+            await request.json()
+            return web.json_response(self.make_wire_chunk(7))
+
+        runner, endpoint = await self.start_server(handler)
+        try:
+            async with ClientSession(timeout=ClientTimeout(total=2.0)) as session:
+                result = await run_request(
+                    session,
+                    endpoint,
+                    "fake-model",
+                    7,
+                    32,
+                    False,
+                    asyncio.Semaphore(1),
+                )
+
+            self.assertIn(
+                "HTTP 200 Content-Type media type is 'application/json', expected 'text/event-stream'",
+                result.structural_errors,
+            )
+        finally:
+            await runner.cleanup()
+
+    async def test_eof_before_sse_frame_boundary_is_structural_failure(self):
+        async def handler(request):
+            await request.json()
+            response = web.StreamResponse(
+                status=200, headers={"Content-Type": "text/event-stream"}
+            )
+            await response.prepare(request)
+            chunk = self.make_wire_chunk(7)
+            await response.write(
+                f"data: {json.dumps(chunk)}\n\n".encode("utf-8")
+            )
+            await response.write(b"data: [DONE]\n")
+            await response.write_eof()
+            return response
+
+        runner, endpoint = await self.start_server(handler)
+        try:
+            async with ClientSession(timeout=ClientTimeout(total=2.0)) as session:
+                result = await run_request(
+                    session,
+                    endpoint,
+                    "fake-model",
+                    7,
+                    32,
+                    False,
+                    asyncio.Semaphore(1),
+                )
+
+            self.assertIn(
+                "SSE stream ended with an unterminated frame",
+                result.structural_errors,
+            )
+            self.assertFalse(result.saw_done)
+        finally:
+            await runner.cleanup()
+
     async def test_cancelled_stream_releases_the_connection_slot(self):
         accepted = asyncio.Event()
         disconnected = asyncio.Event()
@@ -1429,6 +1640,185 @@ class WireIntegrationTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(summary["failed_cancellation_requests"], 0)
             self.assertEqual(summary["structural_error_count"], 0)
             self.assertEqual(summary["semantic_error_count"], 0)
+            self.assertTrue(summary["frontend_recovery_checked"])
+            self.assertEqual(
+                summary["configuration"]["worker_status_url"],
+                f"http://127.0.0.1:{port}/worker_status",
+            )
+        finally:
+            await runner.cleanup()
+
+    async def test_full_benchmark_uses_explicit_worker_status_url(self):
+        chat_request_count = 0
+        status_request_count = 0
+        chat_authorizations = []
+        status_authorizations = []
+        chat_user_agents = []
+        status_user_agents = []
+
+        async def chat_handler(request):
+            nonlocal chat_request_count
+            chat_request_count += 1
+            chat_authorizations.append(request.headers.get("Authorization"))
+            chat_user_agents.append(request.headers.get("User-Agent"))
+            payload = await request.json()
+            prompt = payload["messages"][0]["content"]
+            marker = re.search(r"request-(\d{8})", prompt)
+            request_index = int(marker.group(1))
+            response = web.StreamResponse(
+                status=200, headers={"Content-Type": "text/event-stream"}
+            )
+            await response.prepare(request)
+            chunk = self.make_wire_chunk(request_index)
+            await response.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            await response.write(b"data: [DONE]\n\n")
+            await response.write_eof()
+            return response
+
+        async def status_handler(request):
+            nonlocal status_request_count
+            status_request_count += 1
+            status_authorizations.append(request.headers.get("Authorization"))
+            status_user_agents.append(request.headers.get("User-Agent"))
+            return web.json_response({"frontend_available_concurrency": 7})
+
+        frontend_app = web.Application()
+        frontend_app.router.add_post("/v1/chat/completions", chat_handler)
+        frontend_runner = web.AppRunner(frontend_app)
+        await frontend_runner.setup()
+        frontend_site = web.TCPSite(frontend_runner, "127.0.0.1", 0)
+        await frontend_site.start()
+        frontend_port = frontend_site._server.sockets[0].getsockname()[1]
+
+        status_app = web.Application()
+        status_app.router.add_get("/worker_status", status_handler)
+        status_runner = web.AppRunner(status_app)
+        await status_runner.setup()
+        status_site = web.TCPSite(status_runner, "127.0.0.1", 0)
+        await status_site.start()
+        status_port = status_site._server.sockets[0].getsockname()[1]
+
+        status_url = f"http://127.0.0.1:{status_port}/worker_status"
+        args = parse_args(
+            [
+                "--base-url",
+                f"http://127.0.0.1:{frontend_port}/v1",
+                "--worker-status-url",
+                status_url,
+                "--skip-frontend-recovery-check",
+                "--model",
+                "fake-model",
+                "--api-key",
+                "test-token",
+                "--requests",
+                "1",
+                "--concurrency",
+                "1",
+                "--cancel-rate",
+                "0",
+                "--recovery-wait",
+                "0",
+                "--warmup",
+                "0",
+                "--timeout",
+                "2",
+                "--worker-status-timeout",
+                "1",
+            ]
+        )
+        try:
+            summary = await run_benchmark(args)
+
+            self.assertEqual(chat_request_count, 1)
+            self.assertEqual(status_request_count, 2)
+            self.assertEqual(chat_authorizations, ["Bearer test-token"])
+            self.assertEqual(status_authorizations, [None, None])
+            self.assertEqual(chat_user_agents, ["rtp-llm-tool-call-benchmark"])
+            self.assertEqual(
+                status_user_agents,
+                [
+                    "rtp-llm-tool-call-benchmark",
+                    "rtp-llm-tool-call-benchmark",
+                ],
+            )
+            self.assertEqual(summary["completed_requests"], 1)
+            self.assertFalse(summary["frontend_recovery_checked"])
+            self.assertIsNone(summary["recovery_error"])
+            self.assertEqual(
+                summary["configuration"]["worker_status_url"], status_url
+            )
+            self.assertEqual(
+                summary["worker_status_before"],
+                {"frontend_available_concurrency": 7},
+            )
+            self.assertEqual(
+                summary["worker_status_after"], summary["worker_status_before"]
+            )
+        finally:
+            await status_runner.cleanup()
+            await frontend_runner.cleanup()
+
+    async def test_explicit_worker_status_failures_are_structural_with_skip(self):
+        async def chat_handler(request):
+            payload = await request.json()
+            prompt = payload["messages"][0]["content"]
+            marker = re.search(r"request-(\d{8})", prompt)
+            request_index = int(marker.group(1))
+            response = web.StreamResponse(
+                status=200, headers={"Content-Type": "text/event-stream"}
+            )
+            await response.prepare(request)
+            chunk = self.make_wire_chunk(request_index)
+            await response.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            await response.write(b"data: [DONE]\n\n")
+            await response.write_eof()
+            return response
+
+        async def status_handler(request):
+            return web.Response(status=503)
+
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", chat_handler)
+        app.router.add_get("/worker_status", status_handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        args = parse_args(
+            [
+                "--base-url",
+                f"http://127.0.0.1:{port}/v1",
+                "--worker-status-url",
+                f"http://127.0.0.1:{port}/worker_status",
+                "--skip-frontend-recovery-check",
+                "--model",
+                "fake-model",
+                "--requests",
+                "1",
+                "--concurrency",
+                "1",
+                "--cancel-rate",
+                "0",
+                "--recovery-wait",
+                "0",
+                "--warmup",
+                "0",
+                "--timeout",
+                "2",
+                "--worker-status-timeout",
+                "1",
+            ]
+        )
+        try:
+            summary = await run_benchmark(args)
+
+            self.assertEqual(summary["completed_requests"], 1)
+            self.assertEqual(summary["structural_error_count"], 1)
+            self.assertFalse(summary["frontend_recovery_checked"])
+            self.assertIn("explicit worker status", summary["recovery_error"])
+            self.assertIn("before=None", summary["recovery_error"])
+            self.assertIn("after=None", summary["recovery_error"])
         finally:
             await runner.cleanup()
 
