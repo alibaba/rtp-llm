@@ -16,13 +16,12 @@ struct MultiCopyParams {
     size_t split_kv_scale_stride_bytes = 0;
 };
 
-// Multi-tensor non-blocking copy with device-specific implementation.
-// CUDA: uses a dedicated stream + optional split-KV SM scatter path.
-// ROCm: plain tensor copy_.
-// Other devices: not supported (will abort).
+// Multi-tensor copy with a device-specific implementation. On asynchronous
+// implementations, return or exception propagation guarantees that all work
+// submitted by this call is terminal; failure to prove that condition aborts.
 void execNoBlockCopy(const MultiCopyParams& params);
 
-// Warmup split-KV copy kernels. No-op on non-CUDA / PPU devices.
+// Warmup split-KV copy kernels. No-op on implementations without that path.
 // Must be called after cudaSetDevice + setCurrentCUDAStream.
 void warmupNoBlockCopy();
 

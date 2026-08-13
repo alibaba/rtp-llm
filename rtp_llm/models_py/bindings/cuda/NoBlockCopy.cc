@@ -1,4 +1,5 @@
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
+#include "rtp_llm/models_py/bindings/MandatoryDrain.h"
 #include "rtp_llm/models_py/bindings/cuda/SplitKvCacheCopy.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 
@@ -37,27 +38,37 @@ void execNoBlockCopy(const MultiCopyParams& params) {
 
     auto stream = getNoBlockCopyStream().stream();
 
-    if (params.split_kv_layer_num > 0 && copy_device >= 0) {
-        if (splitKvMultiCopy(params.multi_src,
-                             params.multi_dst,
-                             params.split_kv_layer_num,
-                             static_cast<int64_t>(params.split_kv_cache_stride_bytes),
-                             static_cast<int64_t>(params.split_kv_scale_stride_bytes),
-                             stream)) {
-            check_cuda_value(cudaStreamSynchronize(stream));
-            check_cuda_error();
-            return;
-        }
+    if (params.split_kv_layer_num > 0 && copy_device >= 0
+        && splitKvMultiCopy(params.multi_src,
+                            params.multi_dst,
+                            params.split_kv_layer_num,
+                            static_cast<int64_t>(params.split_kv_cache_stride_bytes),
+                            static_cast<int64_t>(params.split_kv_scale_stride_bytes),
+                            stream)) {
+        check_cuda_error();
+        return;
     }
 
-    for (size_t i = 0; i < params.multi_src.size(); ++i) {
-        check_cuda_value(cudaMemcpyAsync(params.multi_dst[i].data_ptr(),
-                                         params.multi_src[i].data_ptr(),
-                                         params.multi_src[i].nbytes(),
-                                         cudaMemcpyDefault,
-                                         stream));
-    }
-    check_cuda_value(cudaStreamSynchronize(stream));
+    cudaError_t drain_status = cudaSuccess;
+    runWithMandatoryDrain(
+        [&]() {
+            for (size_t i = 0; i < params.multi_src.size(); ++i) {
+                check_cuda_value(cudaMemcpyAsync(params.multi_dst[i].data_ptr(),
+                                                 params.multi_src[i].data_ptr(),
+                                                 params.multi_src[i].nbytes(),
+                                                 cudaMemcpyDefault,
+                                                 stream));
+            }
+        },
+        [&]() {
+            drain_status = cudaStreamSynchronize(stream);
+            return drain_status == cudaSuccess;
+        },
+        [&]() {
+            RTP_LLM_LOG_ERROR("copy stream did not reach a terminal state, error=%d(%s)",
+                              static_cast<int>(drain_status),
+                              cudaGetErrorString(drain_status));
+        });
     check_cuda_error();
 }
 

@@ -6,6 +6,16 @@ test_copts = [
 ] + copts()
 
 cc_test(
+    name = "mandatory_drain_test",
+    srcs = ["MandatoryDrainTest.cc"],
+    deps = [
+        "//rtp_llm/models_py/bindings:mandatory_drain_hdr",
+        "@com_google_googletest//:gtest_main",
+    ],
+    copts = copts(),
+)
+
+cc_test(
     name = "exec_ops_test",
     srcs = ["ExecOpsTest.cc"],
     deps = [

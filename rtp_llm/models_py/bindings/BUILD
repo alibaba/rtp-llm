@@ -32,6 +32,13 @@ cc_library(
 )
 
 cc_library(
+    name = "mandatory_drain_hdr",
+    hdrs = ["MandatoryDrain.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "no_block_copy_hdr",
     hdrs = ["NoBlockCopy.h"],
     deps = torch_deps(),

@@ -126,6 +126,7 @@ cc_library(
     hdrs = ["SplitKvCacheCopy.h"],
     copts = copts(),
     deps = torch_deps() + [
+        "//rtp_llm/models_py/bindings:mandatory_drain_hdr",
         "//rtp_llm/models_py/bindings/common/kernels:sm_copy_kernel",
         ":cuda_host_utils",
     ],
@@ -137,6 +138,7 @@ cc_library(
     srcs = ["NoBlockCopy.cc"],
     copts = copts(),
     deps = [
+        "//rtp_llm/models_py/bindings:mandatory_drain_hdr",
         "//rtp_llm/models_py/bindings:no_block_copy_hdr",
         "//rtp_llm/cpp/utils:core_utils",
         ":split_kv_cache_copy",
