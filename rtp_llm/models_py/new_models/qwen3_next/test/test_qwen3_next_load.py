@@ -22,6 +22,7 @@ from rtp_llm.models_py.new_models.qwen3_next.language import (
 from rtp_llm.models_py.quant_methods import QuantizationConfig
 from rtp_llm.models_py.registry import get_model_class
 from rtp_llm.ops import DataType, HybridAttentionType
+from rtp_llm.ops.compute_ops import PyAttentionInputs
 from safetensors.torch import save_file
 
 
@@ -432,15 +433,23 @@ class Qwen3NextLoadTest(unittest.TestCase):
         )
 
     def test_attention_metadata_has_explicit_runtime_type(self):
-        inputs = types.SimpleNamespace(
-            attention_inputs=types.SimpleNamespace(
-                is_prefill=False,
-                is_target_verify=False,
-            )
-        )
+        attention_inputs = PyAttentionInputs()
+        attention_inputs.is_prefill = False
+        attention_inputs.is_target_verify = False
+        inputs = types.SimpleNamespace(attention_inputs=attention_inputs)
         metadata = _build_qwen3_next_metadata(inputs, torch.zeros(1, 4))
         self.assertIsInstance(metadata, Qwen3NextMetadata)
         self.assertIsNone(metadata.get_prefill_conv1d_meta())
+
+    def test_attention_metadata_selects_primary_tagged_input(self):
+        attention_inputs = PyAttentionInputs()
+        attention_inputs.is_prefill = False
+        attention_inputs.is_target_verify = True
+        inputs = types.SimpleNamespace(
+            attention_inputs={"linear": attention_inputs}
+        )
+        metadata = _build_qwen3_next_metadata(inputs, torch.zeros(1, 4))
+        self.assertTrue(metadata.is_target_verify)
 
     def test_public_loader_streams_pytorch_checkpoint_and_runs_postprocess(self):
         config = _config(tie=False)
