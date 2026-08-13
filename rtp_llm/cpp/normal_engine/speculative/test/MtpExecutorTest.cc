@@ -115,6 +115,8 @@ vector<T> catVectors(const vector<vector<T>>& vectors) {
 
 class FakeModel: public ModelBase {
 public:
+    FakeModel() = default;
+
     FakeModel(const GptModelInitParams& params) {
         weights_  = params.weights;
         model_id_ = params.model_id;
@@ -128,6 +130,14 @@ public:
 
     size_t forwardCount() const {
         return forward_count_;
+    }
+
+    void releaseBuffers() override {
+        ++release_count_;
+    }
+
+    size_t releaseCount() const {
+        return release_count_;
     }
 
     void checkTensorField(const char* name, const torch::Tensor& actual, const torch::Tensor& expected) {
@@ -158,6 +168,7 @@ private:
     TestDataHolder<GptModelInputs>  input_holder;
     TestDataHolder<GptModelOutputs> output_holder;
     size_t                          forward_count_ = 0;
+    size_t                          release_count_ = 0;
 };
 
 class FakeFastTopKSampler: public spec::FastTopKSampler {
@@ -455,6 +466,24 @@ public:
         return output;
     }
 };
+
+TEST_F(MtpExecutorTest, releaseAllModelBuffersIncludesSpeculativePrefillModel) {
+    auto components = createMtpExecutorComponents({});
+
+    auto* target_model = components.fake_target_model.get();
+    auto* draft_model  = components.fake_draft_model.get();
+    auto  sp_model     = std::make_shared<FakeModel>();
+
+    components.executor->setTargetModel(std::move(components.fake_target_model));
+    components.executor->setDraftModel(std::move(components.fake_draft_model));
+    components.executor->sp_prefill_draft_model_ = sp_model;
+
+    components.executor->releaseAllModelBuffers();
+
+    EXPECT_EQ(1, target_model->releaseCount());
+    EXPECT_EQ(1, draft_model->releaseCount());
+    EXPECT_EQ(1, sp_model->releaseCount());
+}
 
 TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     MtpExecutorTestConfig test_config;
