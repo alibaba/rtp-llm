@@ -90,25 +90,11 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
     py::object py_global_weights     = sp_model.attr("weight").attr("global_weights");
     auto       convert               = WeightsConverter(false, model_config.quant_algo);
     auto       py_layers_weights_vec = convertPyObjectToVec(py_layers_weights);
-    size_t     model_num             = py_layers_weights_vec.size();
-    size_t     gen_num_per_cycle     = base_params.sp_config.gen_num_per_cycle;
-    if (gen_num_per_cycle > 1 && py_layers_weights_vec.size() == 1) {
-        RTP_LLM_LOG_WARNING("duplicate py_layers_weights_vec from 1 to sp_config.gen_num_per_cycle: %ld",
-                            gen_num_per_cycle);
-        for (size_t i = 1; i < gen_num_per_cycle; i++) {
-            py_layers_weights_vec.push_back(py_layers_weights_vec[0]);
-        }
-        model_num = gen_num_per_cycle;
-    }
-    if (gen_num_per_cycle != py_layers_weights_vec.size()) {
-        RTP_LLM_LOG_WARNING("sp_config.gen_num_per_cycle: %ld  != py_layers_weights_vec.size(): %ld",
-                            gen_num_per_cycle,
-                            py_layers_weights_vec.size());
-        model_num = std::min(model_num, size_t(gen_num_per_cycle));
-    }
-    if (sp_type == SP_TYPE_EAGLE || sp_type == SP_TYPE_EAGLE3) {
-        model_num = 1;
-    }
+    RTP_LLM_CHECK_WITH_INFO(base_params.sp_config.gen_num_per_cycle > 0,
+                            "speculative proposal steps must be positive, got %ld",
+                            base_params.sp_config.gen_num_per_cycle);
+    const size_t gen_num_per_cycle = static_cast<size_t>(base_params.sp_config.gen_num_per_cycle);
+    RTP_LLM_CHECK_WITH_INFO(!py_layers_weights_vec.empty(), "draft model weights must contain at least one layer");
 
     // Get py_eplb if available (from model)
     py::object py_eplb = py::none();
@@ -116,42 +102,49 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
         py_eplb = sp_model.attr("py_eplb");
     }
 
-    // Create a temporary ModelConfig with num_layers = 1 for MTP
-    ModelConfig temp_model_config = model_config;
-    temp_model_config.num_layers  = 1;
-
-    for (int i = 0; i < model_num; i++) {
-        auto     layer_weigths = py_layers_weights_vec[i];
-        py::list tmp;
-        tmp.append(layer_weigths);
-        auto gpt_weight = convert.createGptWeights(tmp, py_global_weights);
-        mtp_params->push_back(std::move(std::make_unique<EngineInitParams>(model_id,
-                                                                           temp_model_config,
-                                                                           base_params.parallelism_config,
-                                                                           base_params.runtime_config,
-                                                                           base_params.pd_sep_config,
-                                                                           base_params.concurrency_config,
-                                                                           base_params.fmha_config,
-                                                                           base_params.kv_cache_config,
-                                                                           base_params.profiling_debug_logging_config,
-                                                                           base_params.hw_kernel_config,
-                                                                           base_params.device_resource_config,
-                                                                           base_params.moe_config,
-                                                                           base_params.model_specific_config,
-                                                                           base_params.sp_config,
-                                                                           base_params.cache_store_config,
-                                                                           base_params.misc_config,
-                                                                           base_params.arpc_config,
-                                                                           base_params.grpc_config,
-                                                                           base_params.ffn_disaggregate_config,
-                                                                           base_params.vit_config,
-                                                                           std::move(*gpt_weight),
-                                                                           py::none(),
-                                                                           py_eplb)));
-        model_id++;
+    ModelConfig draft_model_config  = model_config;
+    py::object  draft_layer_weights = py_layers_weights;
+    if (sp_type == SP_TYPE_MTP) {
+        RTP_LLM_CHECK_WITH_INFO(model_config.num_layers > 0,
+                                "MTP model must contain at least one layer, got %ld",
+                                model_config.num_layers);
+        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(model_config.num_layers) == py_layers_weights_vec.size(),
+                                "MTP model layer count mismatch: config=%ld, weights=%zu",
+                                model_config.num_layers,
+                                py_layers_weights_vec.size());
+    } else {
+        draft_model_config.num_layers = 1;
+        py::list first_layer_weights;
+        first_layer_weights.append(py_layers_weights_vec.front());
+        draft_layer_weights = std::move(first_layer_weights);
     }
 
-    return std::move(std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params)));
+    auto gpt_weight = convert.createGptWeights(draft_layer_weights, py_global_weights);
+    mtp_params->push_back(std::make_unique<EngineInitParams>(model_id,
+                                                             draft_model_config,
+                                                             base_params.parallelism_config,
+                                                             base_params.runtime_config,
+                                                             base_params.pd_sep_config,
+                                                             base_params.concurrency_config,
+                                                             base_params.fmha_config,
+                                                             base_params.kv_cache_config,
+                                                             base_params.profiling_debug_logging_config,
+                                                             base_params.hw_kernel_config,
+                                                             base_params.device_resource_config,
+                                                             base_params.moe_config,
+                                                             base_params.model_specific_config,
+                                                             base_params.sp_config,
+                                                             base_params.cache_store_config,
+                                                             base_params.misc_config,
+                                                             base_params.arpc_config,
+                                                             base_params.grpc_config,
+                                                             base_params.ffn_disaggregate_config,
+                                                             base_params.vit_config,
+                                                             std::move(*gpt_weight),
+                                                             py::none(),
+                                                             py_eplb));
+
+    return std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params));
 };
 
 RtpLLMOp::RtpLLMOp() {}
@@ -360,12 +353,7 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
             model_id_++;
         } else if (sp_type == SP_TYPE_MTP || sp_type == SP_TYPE_EAGLE || sp_type == SP_TYPE_EAGLE3) {
             params = prepareMTPEngineInitParams(model_id_, propose_model, base_params);
-            if (sp_type == SP_TYPE_MTP) {
-                size_t gen_num_per_cycle = base_params.sp_config.gen_num_per_cycle;
-                model_id_ += gen_num_per_cycle;
-            } else {
-                model_id_++;
-            }
+            model_id_++;
         } else if (sp_type == SP_TYPE_DETERMINISTIC) {
             // Get gen_num_per_cycle directly from propose_model.gen_num_per_circle
             size_t gen_num_per_cycle = propose_model.attr("gen_num_per_circle").cast<size_t>();

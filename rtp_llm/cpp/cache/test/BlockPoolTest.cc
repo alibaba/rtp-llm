@@ -51,9 +51,12 @@ static rtp_llm::ModelConfig makeTestModelConfig(uint32_t num_layers) {
 }
 
 static rtp_llm::CacheConfig
-makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers, int mtp_module_num, uint32_t block_num) {
+makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers,
+                                   int      proposal_steps,
+                                   uint32_t block_num,
+                                   uint32_t proposal_layers = 1) {
     auto score_model_config   = makeTestModelConfig(main_layers);
-    auto propose_model_config = makeTestModelConfig(/*num_layers=*/1);
+    auto propose_model_config = makeTestModelConfig(proposal_layers);
 
     rtp_llm::ParallelismConfig parallelism_config;
     parallelism_config.tp_size = 1;
@@ -65,7 +68,7 @@ makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers, int mtp_module_num, uin
 
     rtp_llm::SpeculativeExecutionConfig sp_config;
     sp_config.type              = SP_TYPE_MTP;
-    sp_config.gen_num_per_cycle = mtp_module_num;
+    sp_config.gen_num_per_cycle = proposal_steps;
 
     // NOTE: createSpConfig will fill global_layer_ids for main + MTP sub-models.
     auto cfg = rtp_llm::CacheConfigCreator::createSpConfig(score_model_config,
@@ -81,8 +84,8 @@ makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers, int mtp_module_num, uin
 }
 
 static rtp_llm::CacheConfig
-makeMtpCacheConfigWithAggregateScaleStride(uint32_t main_layers, int mtp_module_num, uint32_t block_num) {
-    auto cfg = makeMtpCacheConfigByCreateSpConfig(main_layers, mtp_module_num, block_num);
+makeMtpCacheConfigWithAggregateScaleStride(uint32_t main_layers, int proposal_steps, uint32_t block_num) {
+    auto cfg = makeMtpCacheConfigByCreateSpConfig(main_layers, proposal_steps, block_num);
     RTP_LLM_CHECK_WITH_INFO(!cfg.mtp_sub_configs.empty() && cfg.mtp_sub_configs[0] != nullptr,
                             "MTP sub config is required");
     auto& sub_config = *cfg.mtp_sub_configs[0];
@@ -105,41 +108,37 @@ TEST_F(BlockPoolTest, ConstructorAndInit) {
     EXPECT_EQ(block_pool_->freeBlocksNum(), config.block_num - 1);
 }
 
-TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
-    // Use createSpConfig logic so that global_layer_ids is filled for main + sub-model layers.
-    // main(2 layers) + mtp1(1 layer) + mtp2(1 layer)
-    auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/4);
+TEST_F(BlockPoolTest, MTPProposalStepsReuseOneDraftCacheLayout) {
+    auto single_step_cfg = makeMtpCacheConfigByCreateSpConfig(
+        /*main_layers=*/2, /*proposal_steps=*/1, /*block_num=*/4, /*proposal_layers=*/2);
+    auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(
+        /*main_layers=*/2, /*proposal_steps=*/3, /*block_num=*/4, /*proposal_layers=*/2);
 
     ASSERT_FALSE(cache_cfg.global_layer_ids.empty());
     ASSERT_EQ(cache_cfg.global_layer_ids[0].size(), static_cast<size_t>(cache_cfg.layer_all_num));
 
-    ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 2u);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 1u);
     ASSERT_NE(cache_cfg.mtp_sub_configs[0], nullptr);
-    ASSERT_NE(cache_cfg.mtp_sub_configs[1], nullptr);
     ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->groupNums(), 1);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->groupNums(), 1);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->cache_specs[0]->block_size_bytes(),
-              cache_cfg.mtp_sub_configs[1]->cache_specs[0]->block_size_bytes());
+    EXPECT_EQ(cache_cfg.layer_all_num, single_step_cfg.layer_all_num);
+    EXPECT_EQ(cache_cfg.block_size_bytes, single_step_cfg.block_size_bytes);
 
     ASSERT_FALSE(cache_cfg.mtp_sub_configs[0]->global_layer_ids.empty());
-    ASSERT_FALSE(cache_cfg.mtp_sub_configs[1]->global_layer_ids.empty());
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->global_layer_ids[0].size(), 1u);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->global_layer_ids[0].size(), 1u);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->global_layer_ids[0].size(), 2u);
     EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->global_layer_ids[0][0], 2);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->global_layer_ids[0][0], 3);
+    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->global_layer_ids[0][1], 3);
 
     auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
-    ASSERT_EQ(pool_cfg.memory_layouts.size(), 3u);
+    ASSERT_EQ(pool_cfg.memory_layouts.size(), 2u);
     ASSERT_EQ(pool_cfg.memory_layouts[0].layer_num, 2u);
-    ASSERT_EQ(pool_cfg.memory_layouts[1].layer_num, 1u);
-    ASSERT_EQ(pool_cfg.memory_layouts[2].layer_num, 1u);
+    ASSERT_EQ(pool_cfg.memory_layouts[1].layer_num, 2u);
 
     block_pool_ = std::make_shared<BlockPool>(pool_cfg);
     ASSERT_TRUE(block_pool_->init());
 
     const int global_main = 0;
-    const int global_mtp1 = static_cast<int>(pool_cfg.memory_layouts[0].layer_num);
-    const int global_mtp2 = global_mtp1 + 1;
+    const int global_mtp0 = static_cast<int>(pool_cfg.memory_layouts[0].layer_num);
+    const int global_mtp1 = global_mtp0 + 1;
 
     const int block_id  = 1;
     auto      base_addr = block_pool_->convertIndexToAddr(/*layer_id=*/0, /*block_id=*/0);
@@ -174,15 +173,15 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     };
 
     verify_one(global_main, /*expect_layout_idx=*/0, /*expect_local_layer=*/0);
-    verify_one(global_mtp1, /*expect_layout_idx=*/1, /*expect_local_layer=*/0);
-    verify_one(global_mtp2, /*expect_layout_idx=*/2, /*expect_local_layer=*/0);
+    verify_one(global_mtp0, /*expect_layout_idx=*/1, /*expect_local_layer=*/0);
+    verify_one(global_mtp1, /*expect_layout_idx=*/1, /*expect_local_layer=*/1);
 
     // Partitioned buffer correctness on mtp layer (heads=2, partition_count=2, partition_id=1)
     const auto& mtp_layout_cfg = pool_cfg.memory_layouts[1];
-    auto        addr_mtp1      = block_pool_->convertIndexToAddr(global_mtp1, block_id);
-    ASSERT_NE(addr_mtp1.kv_addr, nullptr);
-    ASSERT_NE(addr_mtp1.kv_scale_addr, nullptr);
-    auto parts = block_pool_->convertIndexToBuffer(global_mtp1, block_id, /*partition_count=*/2, /*partition_id=*/1);
+    auto        addr_mtp       = block_pool_->convertIndexToAddr(global_mtp0, block_id);
+    ASSERT_NE(addr_mtp.kv_addr, nullptr);
+    ASSERT_NE(addr_mtp.kv_scale_addr, nullptr);
+    auto parts = block_pool_->convertIndexToBuffer(global_mtp0, block_id, /*partition_count=*/2, /*partition_id=*/1);
     ASSERT_EQ(parts.size(), 4u);
     ASSERT_NE(parts[0].addr, nullptr);
     ASSERT_NE(parts[1].addr, nullptr);
@@ -197,16 +196,23 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     const size_t v_bytes_per_head = mtp_layout_cfg.v_block_stride_bytes / 2;
     const size_t k_off            = k_bytes_per_head;
     const size_t v_off            = mtp_layout_cfg.k_block_stride_bytes + v_bytes_per_head;
-    EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[0].addr) - reinterpret_cast<uintptr_t>(addr_mtp1.kv_addr), k_off);
-    EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[1].addr) - reinterpret_cast<uintptr_t>(addr_mtp1.kv_addr), v_off);
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[0].addr) - reinterpret_cast<uintptr_t>(addr_mtp.kv_addr), k_off);
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[1].addr) - reinterpret_cast<uintptr_t>(addr_mtp.kv_addr), v_off);
 
     const size_t sc_bytes_per_head = mtp_layout_cfg.k_scale_stride_bytes / 2;
     const size_t sc_k_off          = sc_bytes_per_head;
     const size_t sc_v_off          = mtp_layout_cfg.k_scale_stride_bytes + sc_bytes_per_head;
-    EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[2].addr) - reinterpret_cast<uintptr_t>(addr_mtp1.kv_scale_addr),
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[2].addr) - reinterpret_cast<uintptr_t>(addr_mtp.kv_scale_addr),
               sc_k_off);
-    EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[3].addr) - reinterpret_cast<uintptr_t>(addr_mtp1.kv_scale_addr),
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[3].addr) - reinterpret_cast<uintptr_t>(addr_mtp.kv_scale_addr),
               sc_v_off);
+}
+
+TEST_F(BlockPoolTest, MTPRejectsNonPositiveProposalSteps) {
+    EXPECT_ANY_THROW(makeMtpCacheConfigByCreateSpConfig(
+        /*main_layers=*/2, /*proposal_steps=*/0, /*block_num=*/4));
+    EXPECT_ANY_THROW(makeMtpCacheConfigByCreateSpConfig(
+        /*main_layers=*/2, /*proposal_steps=*/-1, /*block_num=*/4));
 }
 
 TEST_F(BlockPoolTest, MTPLayoutKeepsSparseMlaScaleStride) {

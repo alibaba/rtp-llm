@@ -75,7 +75,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                                const SpeculativeExecutionConfig&  sp_config,
                                                const std::optional<WarmUpResult>& warm_up_result,
                                                bool                               is_mtp,
-                                               bool                               is_eagle) {
+                                               bool /* is_eagle */) {
     CacheConfig score_config = CacheConfigCreator::createBasicConfig(score_model_config, parallelism_config, false);
     CacheConfig propose_config =
         CacheConfigCreator::createBasicConfig(propose_model_config, parallelism_config, is_mtp);
@@ -98,23 +98,13 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         propose_config.kernel_seq_size_per_block = propose_config.seq_size_per_block;
     }
 
-    int num_mtp_modules = 1;
-    if (is_mtp) {
-        num_mtp_modules = sp_config.gen_num_per_cycle;
-        if (is_eagle) {
-            num_mtp_modules = 1;
-        }
-    }
+    RTP_LLM_CHECK_WITH_INFO(sp_config.gen_num_per_cycle > 0,
+                            "speculative proposal steps must be positive, got %ld",
+                            sp_config.gen_num_per_cycle);
 
-    uint32_t total_layer_num = score_config.layer_num;
-    for (int i = 0; i < num_mtp_modules; ++i) {
-        total_layer_num += propose_config.layer_num;
-    }
-
-    size_t total_block_size_bytes = score_config.block_size_bytes;
-    for (int i = 0; i < num_mtp_modules; ++i) {
-        total_block_size_bytes += propose_config.block_size_bytes;
-    }
+    // Proposal steps reuse one physical draft model and its cache layout.
+    const uint32_t total_layer_num        = score_config.layer_num + propose_config.layer_num;
+    const size_t   total_block_size_bytes = score_config.block_size_bytes + propose_config.block_size_bytes;
 
     size_t block_num = 0;
     if (kv_cache_config.test_block_num > 0) {
@@ -125,7 +115,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
 
         block_num = kv_cache_mem_size
                     / (static_cast<size_t>(score_config.block_size_bytes)
-                       + static_cast<size_t>(propose_config.block_size_bytes) * static_cast<size_t>(num_mtp_modules));
+                       + static_cast<size_t>(propose_config.block_size_bytes));
     }
 
     RTP_LLM_CHECK_WITH_INFO(block_num > 0, "kv cache needs at least 1 block but %zu", block_num);
@@ -150,9 +140,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         }
     }
 
-    // Each sub-model needs an independent CacheConfig because global_layer_ids differs per module.
     config.mtp_sub_configs.clear();
-    config.mtp_sub_configs.reserve(num_mtp_modules);
+    config.mtp_sub_configs.reserve(1);
     config.layer_to_group_id.resize(total_layer_num, 0);
     config.layer_attn_types.resize(total_layer_num, CacheGroupType::FULL);
     config.layer_to_block_stride_bytes.assign(static_cast<size_t>(total_layer_num), 0);
@@ -171,46 +160,42 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         }
     }
 
-    for (int m = 0; m < num_mtp_modules; ++m) {
-        auto sub_cfg           = std::make_shared<CacheConfig>(propose_config);
-        sub_cfg->block_num     = block_num;
-        sub_cfg->layer_all_num = sub_cfg->layer_num;
+    auto sub_cfg           = std::make_shared<CacheConfig>(propose_config);
+    sub_cfg->block_num     = block_num;
+    sub_cfg->layer_all_num = sub_cfg->layer_num;
 
-        sub_cfg->global_layer_ids.clear();
-        sub_cfg->global_layer_ids.resize(1);
-        sub_cfg->global_layer_ids[0].resize(mtp_layer_num);
-        RTP_LLM_CHECK_WITH_INFO(sub_cfg->layer_to_block_stride_bytes.size() == static_cast<size_t>(mtp_layer_num),
-                                "sub_cfg.layer_to_block_stride_bytes size mismatch, got=%zu need=%u",
-                                sub_cfg->layer_to_block_stride_bytes.size(),
-                                mtp_layer_num);
-        for (size_t l = 0; l < mtp_layer_num; ++l) {
-            int global_layer_id                       = main_layer_num + m * mtp_layer_num + l;
-            sub_cfg->global_layer_ids[0][l]           = global_layer_id;
-            config.layer_to_group_id[global_layer_id] = static_cast<int>(full_gid);
-            config.global_layer_ids[full_gid].push_back(global_layer_id);
+    sub_cfg->global_layer_ids.clear();
+    sub_cfg->global_layer_ids.resize(1);
+    sub_cfg->global_layer_ids[0].resize(mtp_layer_num);
+    RTP_LLM_CHECK_WITH_INFO(sub_cfg->layer_to_block_stride_bytes.size() == static_cast<size_t>(mtp_layer_num),
+                            "sub_cfg.layer_to_block_stride_bytes size mismatch, got=%zu need=%u",
+                            sub_cfg->layer_to_block_stride_bytes.size(),
+                            mtp_layer_num);
+    for (size_t l = 0; l < mtp_layer_num; ++l) {
+        const int global_layer_id                = main_layer_num + l;
+        sub_cfg->global_layer_ids[0][l]           = global_layer_id;
+        config.layer_to_group_id[global_layer_id] = static_cast<int>(full_gid);
+        config.global_layer_ids[full_gid].push_back(global_layer_id);
 
-            const int stride_bytes = sub_cfg->layer_to_block_stride_bytes[static_cast<size_t>(l)];
-            config.layer_to_block_stride_bytes[static_cast<size_t>(global_layer_id)] = stride_bytes;
-            if (l < sub_cfg->layer_attn_types.size()) {
-                config.layer_attn_types[static_cast<size_t>(global_layer_id)] = sub_cfg->layer_attn_types[l];
-            }
+        const int stride_bytes = sub_cfg->layer_to_block_stride_bytes[l];
+        config.layer_to_block_stride_bytes[global_layer_id] = stride_bytes;
+        if (l < sub_cfg->layer_attn_types.size()) {
+            config.layer_attn_types[global_layer_id] = sub_cfg->layer_attn_types[l];
         }
-
-        sub_cfg->layer_to_group_id.assign(static_cast<size_t>(sub_cfg->layer_num), static_cast<int>(full_gid));
-        config.mtp_sub_configs.push_back(sub_cfg);
     }
 
+    sub_cfg->layer_to_group_id.assign(static_cast<size_t>(sub_cfg->layer_num), static_cast<int>(full_gid));
+    config.mtp_sub_configs.push_back(sub_cfg);
+
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
-    RTP_LLM_LOG_INFO("CacheConfig created: is_mtp=%d, total_layers=%u, num_mtp_modules=%d, block_num=%zu, "
-                     "allows storing %zu tokens, total_block_size=%zu bytes (main=%zu + %d*propose=%zu)",
+    RTP_LLM_LOG_INFO("CacheConfig created: is_mtp=%d, total_layers=%u, block_num=%zu, "
+                     "allows storing %zu tokens, total_block_size=%zu bytes (main=%zu + propose=%zu)",
                      is_mtp,
                      total_layer_num,
-                     num_mtp_modules,
                      block_num,
                      kv_cache_seq_len,
                      total_block_size_bytes,
                      score_config.block_size_bytes,
-                     num_mtp_modules,
                      propose_config.block_size_bytes);
 
     RTP_LLM_LOG_INFO("CacheConfig debugString(main_score_model):\n%s", score_config.debugString().c_str());

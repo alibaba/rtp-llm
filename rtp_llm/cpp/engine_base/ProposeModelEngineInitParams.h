@@ -61,7 +61,9 @@ struct ProposeModelEngineInitParams {
         sp_type(sp_type),
         gen_num_per_circle(gen_num_per_circle),
         vanilla_model_params(nullptr),
-        mtp_model_params_(std::move(mtp_model_params)) {};
+        mtp_model_params_(std::move(mtp_model_params)) {
+        validateRecurrentDraftParams();
+    };
 
     bool draftModel() {
         return sp_type == SP_TYPE_VANILLA || sp_type == SP_TYPE_MTP || sp_type == SP_TYPE_EAGLE3 || sp_type == SP_TYPE_EAGLE;
@@ -71,9 +73,8 @@ struct ProposeModelEngineInitParams {
         if (sp_type == SP_TYPE_VANILLA) {
             return *vanilla_model_params;
         } else if (sp_type == SP_TYPE_MTP || sp_type == SP_TYPE_EAGLE3 || sp_type == SP_TYPE_EAGLE) {
-            RTP_LLM_CHECK(!mtp_model_params_->empty());
-            RTP_LLM_CHECK(mtp_model_params_->at(0) != nullptr);
-            return *mtp_model_params_->at(0);
+            validateRecurrentDraftParams();
+            return *mtp_model_params_->front();
         } else {
             RTP_LLM_FAIL("error sp type[%d] do not have EngineInitParams", static_cast<int>(sp_type));
         }
@@ -82,6 +83,27 @@ struct ProposeModelEngineInitParams {
     const int genNumPerCircle() {
         return gen_num_per_circle;
     }
+
+private:
+    void validateRecurrentDraftParams() const {
+        RTP_LLM_CHECK_WITH_INFO(gen_num_per_circle > 0,
+                                "sampled recurrent proposal steps must be positive, got %zu",
+                                gen_num_per_circle);
+        RTP_LLM_CHECK_WITH_INFO(mtp_model_params_ != nullptr && mtp_model_params_->size() == 1
+                                    && mtp_model_params_->front() != nullptr,
+                                "sampled recurrent decoding requires exactly one draft model");
+        const auto& draft_params = *mtp_model_params_->front();
+        RTP_LLM_CHECK_WITH_INFO(draft_params.model_config_.num_layers > 0,
+                                "sampled recurrent draft model must contain at least one layer, got %ld",
+                                draft_params.model_config_.num_layers);
+        RTP_LLM_CHECK_WITH_INFO(
+            static_cast<size_t>(draft_params.model_config_.num_layers) == draft_params.gpt_weights.layers.size(),
+            "sampled recurrent draft layer mismatch: config=%ld, weights=%zu",
+            draft_params.model_config_.num_layers,
+            draft_params.gpt_weights.layers.size());
+    }
+
+public:
 
     SpeculativeType                  sp_type;
     size_t                           gen_num_per_circle   = 0;

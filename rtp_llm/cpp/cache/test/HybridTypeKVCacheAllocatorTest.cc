@@ -95,7 +95,7 @@ static ModelConfig makeTinyModelConfig(uint32_t num_layers) {
 
 static CacheConfig makeTinyHybridMtpConfigByCreateSpConfig() {
     auto score_model_cfg   = makeTinyModelConfig(/*num_layers=*/4);
-    auto propose_model_cfg = makeTinyModelConfig(/*num_layers=*/1);
+    auto propose_model_cfg = makeTinyModelConfig(/*num_layers=*/2);
 
     score_model_cfg.hybrid_attention_config.enable_hybrid_attention = true;
     score_model_cfg.hybrid_attention_config.hybrid_attention_types  = {
@@ -253,10 +253,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdHybridWithMtpSubCon
 
     EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/2), 2u);
     EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/0), 4u);
-    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/2, /*local_layer_id=*/0), 5u);
-    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/2, /*local_layer_id=*/1),
+    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/1), 5u);
+    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/2, /*local_layer_id=*/0),
               std::numeric_limits<uint32_t>::max());
-    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/3, /*local_layer_id=*/0),
+    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/2),
               std::numeric_limits<uint32_t>::max());
 }
 
