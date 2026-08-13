@@ -2,7 +2,10 @@
 
 #include <csignal>
 #include <chrono>
+#include <condition_variable>
 #include <execinfo.h>
+#include <future>
+#include <mutex>
 #include <thread>
 #include <unistd.h>
 
@@ -25,6 +28,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 
 namespace rtp_llm::test {
 
@@ -58,7 +62,56 @@ struct CrashHandlerInstaller {
 
 static CrashHandlerInstaller g_crash_handler_installer;
 
+struct BlockingCopyGate {
+    std::mutex              mutex;
+    std::condition_variable changed;
+    bool                    armed{false};
+    bool                    entered{false};
+    bool                    released{false};
+};
+
+BlockingCopyGate& blockingCopyGate() {
+    static BlockingCopyGate gate;
+    return gate;
+}
+
+void armBlockingCopy() {
+    auto&                       gate = blockingCopyGate();
+    std::lock_guard<std::mutex> lock(gate.mutex);
+    gate.armed    = true;
+    gate.entered  = false;
+    gate.released = false;
+}
+
+bool waitForBlockingCopy(std::chrono::milliseconds timeout) {
+    auto&                        gate = blockingCopyGate();
+    std::unique_lock<std::mutex> lock(gate.mutex);
+    return gate.changed.wait_for(lock, timeout, [&gate]() { return gate.entered; });
+}
+
+void releaseBlockingCopy() {
+    auto&                       gate = blockingCopyGate();
+    std::lock_guard<std::mutex> lock(gate.mutex);
+    gate.released = true;
+    gate.changed.notify_all();
+}
+
 }  // namespace
+
+extern "C" void __real__ZN7rtp_llm15execNoBlockCopyERKNS_15MultiCopyParamsE(const MultiCopyParams& params);
+
+extern "C" void __wrap__ZN7rtp_llm15execNoBlockCopyERKNS_15MultiCopyParamsE(const MultiCopyParams& params) {
+    auto&                        gate = blockingCopyGate();
+    std::unique_lock<std::mutex> lock(gate.mutex);
+    if (gate.armed) {
+        gate.entered = true;
+        gate.changed.notify_all();
+        gate.changed.wait(lock, [&gate]() { return gate.released; });
+        gate.armed = false;
+    }
+    lock.unlock();
+    __real__ZN7rtp_llm15execNoBlockCopyERKNS_15MultiCopyParamsE(params);
+}
 
 // Test-local helper struct. Business code no longer exposes a LayerBlock type.
 struct LayerBlock {
@@ -87,6 +140,19 @@ public:
     const std::vector<int64_t>& tokens() const override {
         return tokens_;
     }
+    std::optional<P2PRoutingContext> p2pRouting() const override {
+        return routing_ctx_;
+    }
+    void setRequestDeadline(int64_t deadline_ms) {
+        routing_ctx_.emplace();
+        routing_ctx_->deadline_ms               = deadline_ms;
+        routing_ctx_->request_deadline_enabled = true;
+    }
+    void setUnsetRequestDeadlineValue(int64_t deadline_ms) {
+        routing_ctx_.emplace();
+        routing_ctx_->deadline_ms               = deadline_ms;
+        routing_ctx_->request_deadline_enabled = false;
+    }
 
 private:
     bool                 enable_memory_cache_{false};
@@ -94,6 +160,7 @@ private:
     std::string          trace_id_;
     std::string          unique_id_ = "";
     std::vector<int64_t> tokens_;  // TODO : get tokens (remote connector)
+    std::optional<P2PRoutingContext> routing_ctx_;
 };
 
 class KVCacheMemoryConnectorTest: public ::testing::Test {
@@ -111,9 +178,15 @@ protected:
         connector_ =
             std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, allocator_, server_addrs_);
         ASSERT_TRUE(connector_->init());
+        connector_->copy_protocol_state_.store(KVCacheMemoryConnector::CopyProtocolState::READY);
     }
 
-    void TearDown() override {}
+    void TearDown() override {
+        // The connector drains background copy leases while its RPC endpoints are still alive.
+        connector_.reset();
+        servers_.clear();
+        server_addrs_.clear();
+    }
 
     CacheConfig                                 cache_config_;
     KVCacheConfig                               kv_cache_config_;
@@ -396,6 +469,19 @@ private:
         }
         item->set_mem_block(static_cast<int>(mem_block_index));
     }
+    void setCopyProtocol(MemoryOperationRequestPB& req, const std::string& operation_id = "test-memory-copy") const {
+        req.set_operation_kind(MemoryOperationRequestPB::COPY);
+        req.set_operation_id(operation_id);
+        req.set_protocol_version(1);
+        req.set_retention_timeout_ms(kv_cache_config_.memory_cache_sync_timeout_ms);
+        req.set_operation_deadline_unix_ms(MemoryCopyDeadline::make(
+            MemoryCopyDeadline::unixMillisNow(), kv_cache_config_.memory_cache_sync_timeout_ms));
+    }
+    void setPlanProtocol(const std::shared_ptr<KVCacheMemoryConnector::CopyPlan>& plan) {
+        plan->operation_id = connector_->makeCopyOperationId();
+        plan->operation_deadline_unix_ms = MemoryCopyDeadline::make(
+            MemoryCopyDeadline::unixMillisNow(), kv_cache_config_.memory_cache_sync_timeout_ms);
+    }
     LayerBlockIds makeLayerBlockIds(const std::vector<std::vector<BlockIdxType>>& per_layer_block_indices,
                                     size_t                                        cache_keys_num) const {
         LayerBlockIds lbs;
@@ -519,6 +605,28 @@ private:
         }
         return ctx->done();
     }
+    bool waitUntilPendingCopyLeasesDrained(int timeout_ms = 3000) const {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (connector_->pending_copy_leases_.activeJobsForTest() == 0) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return connector_->pending_copy_leases_.activeJobsForTest() == 0;
+    }
+    bool waitUntilBlockPoolFreeCount(const std::shared_ptr<BlockPool>& pool,
+                                     size_t                            expected,
+                                     int                               timeout_ms = 3000) const {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (pool->freeBlocksNum() == expected) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return pool->freeBlocksNum() == expected;
+    }
 };
 
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_NoWorkerAddrs) {
@@ -590,6 +698,92 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnTrue_WithWorkerAddrs) {
     ASSERT_NE(conn->block_cache_, nullptr);
     ASSERT_NE(conn->broadcast_manager_, nullptr);
     EXPECT_EQ(conn->broadcast_manager_->workerNum(), server_addrs_.size());
+}
+
+TEST_F(KVCacheMemoryConnectorTest, copyProtocol_ColdStartIsOneFlightAndDoesNotDispatchCopy) {
+    connector_->copy_protocol_state_.store(KVCacheMemoryConnector::CopyProtocolState::UNKNOWN);
+    for (auto& server : servers_) {
+        server->service()->setCapabilitySleepMillis(100);
+    }
+
+    constexpr int kCallerCount = 9;
+    std::vector<std::thread> callers;
+    callers.reserve(kCallerCount);
+    for (int i = 0; i < kCallerCount; ++i) {
+        callers.emplace_back([this]() { EXPECT_FALSE(connector_->copyProtocolReadyOrStartProbe()); });
+    }
+    for (auto& caller : callers) {
+        caller.join();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(connector_->copy_protocol_thread_mutex_);
+        if (connector_->copy_protocol_thread_.joinable()) {
+            connector_->copy_protocol_thread_.join();
+        }
+    }
+    EXPECT_EQ(connector_->copy_protocol_state_.load(), KVCacheMemoryConnector::CopyProtocolState::READY);
+    for (const auto& server : servers_) {
+        EXPECT_EQ(server->service()->capabilityCallCount(), 1);
+        EXPECT_EQ(server->service()->copyCallCount(), 0);
+    }
+}
+
+TEST_F(KVCacheMemoryConnectorTest, copyProtocol_MixedLegacyAndCurrentResponsesAreTransient) {
+    connector_->copy_protocol_state_.store(KVCacheMemoryConnector::CopyProtocolState::UNKNOWN);
+    servers_.front()->service()->setCapabilitySupported(false);
+
+    EXPECT_FALSE(connector_->copyProtocolReadyOrStartProbe());
+    {
+        std::lock_guard<std::mutex> lock(connector_->copy_protocol_thread_mutex_);
+        if (connector_->copy_protocol_thread_.joinable()) {
+            connector_->copy_protocol_thread_.join();
+        }
+    }
+    EXPECT_EQ(connector_->copy_protocol_state_.load(), KVCacheMemoryConnector::CopyProtocolState::UNKNOWN);
+    EXPECT_GT(connector_->copy_protocol_next_probe_unix_ms_.load(), MemoryCopyDeadline::unixMillisNow());
+    for (const auto& server : servers_) {
+        EXPECT_EQ(server->service()->capabilityCallCount(), 1);
+        EXPECT_EQ(server->service()->copyCallCount(), 0);
+    }
+}
+
+TEST_F(KVCacheMemoryConnectorTest, copyProtocol_AllLegacyResponsesDisableCopyForProcessLifetime) {
+    connector_->copy_protocol_state_.store(KVCacheMemoryConnector::CopyProtocolState::UNKNOWN);
+    for (auto& server : servers_) {
+        server->service()->setCapabilitySupported(false);
+    }
+
+    EXPECT_FALSE(connector_->copyProtocolReadyOrStartProbe());
+    {
+        std::lock_guard<std::mutex> lock(connector_->copy_protocol_thread_mutex_);
+        if (connector_->copy_protocol_thread_.joinable()) {
+            connector_->copy_protocol_thread_.join();
+        }
+    }
+    EXPECT_EQ(connector_->copy_protocol_state_.load(), KVCacheMemoryConnector::CopyProtocolState::UNSUPPORTED);
+    for (int i = 0; i < 9; ++i) {
+        EXPECT_FALSE(connector_->copyProtocolReadyOrStartProbe());
+    }
+    for (const auto& server : servers_) {
+        EXPECT_EQ(server->service()->capabilityCallCount(), 1);
+        EXPECT_EQ(server->service()->copyCallCount(), 0);
+    }
+}
+
+TEST_F(KVCacheMemoryConnectorTest, copyProtocol_ProbeExceptionIsTransientAndBackedOff) {
+    connector_->copy_protocol_state_.store(KVCacheMemoryConnector::CopyProtocolState::PROBING);
+    connector_->finishCopyProtocolProbe([]() -> KVCacheMemoryConnector::CapabilityProbeResult {
+        throw std::runtime_error("probe failed");
+    });
+
+    EXPECT_EQ(connector_->copy_protocol_state_.load(), KVCacheMemoryConnector::CopyProtocolState::UNKNOWN);
+    EXPECT_GT(connector_->copy_protocol_next_probe_unix_ms_.load(), MemoryCopyDeadline::unixMillisNow());
+    EXPECT_FALSE(connector_->copyProtocolReadyOrStartProbe());
+    for (const auto& server : servers_) {
+        EXPECT_EQ(server->service()->capabilityCallCount(), 0);
+        EXPECT_EQ(server->service()->copyCallCount(), 0);
+    }
 }
 
 TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenMemoryCacheSizeMbZero) {
@@ -789,14 +983,19 @@ TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnNull_WhenPrefixHitsButAllKey
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_InvalidInputs_ReturnNullOrThrow) {
-    // resource is nullptr => RTP_LLM_CHECK triggers exception
+    auto meta = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+
+    // Required inputs are validated independently.
     EXPECT_ANY_THROW(
-        (void)connector_->asyncRead(nullptr, nullptr, nullptr, /*start_read_block_index=*/0, /*read_block_num=*/0));
+        (void)connector_->asyncRead(nullptr, meta, nullptr, /*start_read_block_index=*/0, /*read_block_num=*/0));
+    auto valid_resource = makeCacheResource(/*cache_keys=*/{1, 2}, /*per_layer_block_indices=*/{{1, 2}});
+    EXPECT_ANY_THROW(
+        (void)connector_->asyncRead(valid_resource, nullptr, nullptr, /*start_read_block_index=*/0, /*read_block_num=*/1));
 
     // empty cache_keys
     auto res_empty_keys = makeCacheResource({}, {{1}});
     auto ctx1 =
-        connector_->asyncRead(res_empty_keys, nullptr, nullptr, /*start_read_block_index=*/0, /*read_block_num=*/0);
+        connector_->asyncRead(res_empty_keys, meta, nullptr, /*start_read_block_index=*/0, /*read_block_num=*/0);
     EXPECT_EQ(ctx1, nullptr);
 
     // empty layer_block_ids
@@ -804,7 +1003,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_InvalidInputs_ReturnNullOrThrow) {
     auto res_empty_lbs = makeCacheResource(/*cache_keys=*/{1, 2}, /*per_layer_block_indices=*/{{1, 2}});
     res_empty_lbs->layer_block_ids.clear();
     auto ctx2 =
-        connector_->asyncRead(res_empty_lbs, nullptr, nullptr, /*start_read_block_index=*/0, /*read_block_num=*/1);
+        connector_->asyncRead(res_empty_lbs, meta, nullptr, /*start_read_block_index=*/0, /*read_block_num=*/1);
     EXPECT_EQ(ctx2, nullptr);
 }
 
@@ -1025,6 +1224,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnMemResponse_NoReuseLenIncr
     ASSERT_TRUE(waitUntilDone(ctx));
     EXPECT_FALSE(ctx->success());
     EXPECT_EQ(res->reuseBlockNum(), 0u);
+    ASSERT_TRUE(waitUntilPendingCopyLeasesDrained());
 
     connector_->broadcast_manager_.reset();
     for (auto& s : servers) {
@@ -1032,6 +1232,167 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnMemResponse_NoReuseLenIncr
     }
     servers.clear();
     addrs.clear();
+}
+
+TEST_F(KVCacheMemoryConnectorTest, copyCache_QuiesceWaitsForActiveHandlerAndEchoesId) {
+    const std::string operation_id = "memory-copy-wait";
+    auto              begin        = connector_->copy_fence_.begin(operation_id, std::chrono::seconds(1));
+    ASSERT_TRUE(begin) << begin.error;
+
+    MemoryOperationRequestPB request;
+    request.set_operation_kind(MemoryOperationRequestPB::QUIESCE);
+    request.set_operation_id(operation_id);
+    request.set_protocol_version(1);
+    request.set_retention_timeout_ms(1000);
+    request.set_quiesce_timeout_ms(1000);
+    request.set_operation_deadline_unix_ms(MemoryCopyDeadline::unixMillisNow() + 1000);
+    MemoryOperationResponsePB response;
+
+    auto result = std::async(std::launch::async, [&]() { return connector_->copyCache(request, response); });
+    EXPECT_EQ(result.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+
+    begin.operation.reset();
+    EXPECT_TRUE(result.get());
+    EXPECT_TRUE(response.success());
+    EXPECT_TRUE(response.quiesced());
+    EXPECT_EQ(response.operation_id(), operation_id);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, copyCache_QuiesceWaitsForPhysicalCopyAndSealsOperation) {
+    using namespace std::chrono_literals;
+
+    const int    layer_id      = 0;
+    const int    gpu_block_idx = 2;
+    const auto   gpu_bufs      = allocator_->convertIndexToBuffer(layer_id, gpu_block_idx);
+    const size_t total         = sumBlockInfosBytes(gpu_bufs);
+    ASSERT_GT(total, 0u);
+
+    auto pool = ensureBlockPool(total);
+    ASSERT_NE(pool, nullptr);
+    auto mem_blocks = pool->malloc(1);
+    ASSERT_EQ(mem_blocks.size(), 1u);
+    const auto mem_block_index = static_cast<BlockIdxType>(mem_blocks[0]);
+    const auto mem_bufs        = pool->convertIndexToBuffer(0, mem_block_index);
+    ASSERT_EQ(mem_bufs.size(), 1u);
+    setBlockBytes(mem_bufs[0], /*byte_offset=*/0, total, 'q');
+
+    const std::string operation_id = "physical-copy-quiesce";
+    MemoryOperationRequestPB copy;
+    setCopyProtocol(copy, operation_id);
+    copy.set_copy_direction(MemoryOperationRequestPB::H2D);
+    auto* item = copy.add_copy_items();
+    item->set_mem_block(mem_block_index);
+    for (int layer = 0; layer < cache_config_.layer_num; ++layer) {
+        item->add_gpu_blocks(layer == layer_id ? gpu_block_idx : NULL_BLOCK_IDX);
+    }
+
+    armBlockingCopy();
+    MemoryOperationResponsePB copy_response;
+    auto copy_result = std::async(std::launch::async, [&]() { return connector_->copyCache(copy, copy_response); });
+    const bool copy_entered = waitForBlockingCopy(1s);
+    EXPECT_TRUE(copy_entered);
+    if (!copy_entered) {
+        releaseBlockingCopy();
+        EXPECT_TRUE(copy_result.get());
+        return;
+    }
+
+    MemoryOperationRequestPB quiesce;
+    quiesce.set_operation_kind(MemoryOperationRequestPB::QUIESCE);
+    quiesce.set_operation_id(operation_id);
+    quiesce.set_protocol_version(copy.protocol_version());
+    quiesce.set_retention_timeout_ms(copy.retention_timeout_ms());
+    quiesce.set_quiesce_timeout_ms(kv_cache_config_.memory_cache_sync_timeout_ms);
+    quiesce.set_operation_deadline_unix_ms(copy.operation_deadline_unix_ms());
+    MemoryOperationResponsePB quiesce_response;
+    auto quiesce_result =
+        std::async(std::launch::async, [&]() { return connector_->copyCache(quiesce, quiesce_response); });
+    EXPECT_EQ(quiesce_result.wait_for(20ms), std::future_status::timeout);
+
+    releaseBlockingCopy();
+    EXPECT_TRUE(copy_result.get());
+    EXPECT_TRUE(copy_response.success());
+    EXPECT_TRUE(copy_response.quiesced());
+    EXPECT_EQ(copy_response.operation_id(), operation_id);
+    EXPECT_EQ(copy_response.protocol_version(), copy.protocol_version());
+    verifyBlockInfosContent(gpu_bufs, 'q');
+
+    EXPECT_TRUE(quiesce_result.get());
+    EXPECT_TRUE(quiesce_response.success());
+    EXPECT_TRUE(quiesce_response.quiesced());
+    EXPECT_EQ(quiesce_response.operation_id(), operation_id);
+    EXPECT_EQ(quiesce_response.protocol_version(), copy.protocol_version());
+
+    MemoryOperationResponsePB late_copy_response;
+    EXPECT_TRUE(connector_->copyCache(copy, late_copy_response));
+    EXPECT_FALSE(late_copy_response.success());
+    EXPECT_FALSE(late_copy_response.quiesced());
+    EXPECT_EQ(late_copy_response.operation_id(), operation_id);
+    EXPECT_EQ(late_copy_response.protocol_version(), copy.protocol_version());
+}
+
+TEST_F(KVCacheMemoryConnectorTest, copyCache_QuiesceBeforeCopyRejectsLateHandler) {
+    const std::string operation_id = "memory-copy-late";
+    MemoryOperationRequestPB quiesce;
+    quiesce.set_operation_kind(MemoryOperationRequestPB::QUIESCE);
+    quiesce.set_operation_id(operation_id);
+    quiesce.set_protocol_version(1);
+    quiesce.set_retention_timeout_ms(1000);
+    quiesce.set_quiesce_timeout_ms(1000);
+    const auto operation_deadline_unix_ms = MemoryCopyDeadline::unixMillisNow() + 1000;
+    quiesce.set_operation_deadline_unix_ms(operation_deadline_unix_ms);
+    MemoryOperationResponsePB quiesce_response;
+    ASSERT_TRUE(connector_->copyCache(quiesce, quiesce_response));
+    ASSERT_TRUE(quiesce_response.quiesced());
+
+    MemoryOperationRequestPB copy;
+    copy.set_operation_kind(MemoryOperationRequestPB::COPY);
+    copy.set_operation_id(operation_id);
+    copy.set_protocol_version(1);
+    copy.set_retention_timeout_ms(1000);
+    copy.set_operation_deadline_unix_ms(operation_deadline_unix_ms);
+    MemoryOperationResponsePB copy_response;
+    EXPECT_TRUE(connector_->copyCache(copy, copy_response));
+    EXPECT_FALSE(copy_response.success());
+    EXPECT_FALSE(copy_response.quiesced());
+    EXPECT_EQ(copy_response.operation_id(), operation_id);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, copyCache_LegacyCopyWithoutIdFailsClosed) {
+    MemoryOperationRequestPB  request;
+    MemoryOperationResponsePB response;
+
+    EXPECT_TRUE(connector_->copyCache(request, response));
+    EXPECT_FALSE(response.success());
+    EXPECT_FALSE(response.quiesced());
+    EXPECT_TRUE(response.operation_id().empty());
+}
+
+TEST_F(KVCacheMemoryConnectorTest, copyCache_EmptyCopyPlanFailsClosed) {
+    MemoryOperationRequestPB request;
+    setCopyProtocol(request, "empty-copy-plan");
+    request.set_copy_direction(MemoryOperationRequestPB::H2D);
+    MemoryOperationResponsePB response;
+
+    EXPECT_TRUE(connector_->copyCache(request, response));
+    EXPECT_FALSE(response.success());
+    EXPECT_FALSE(response.quiesced());
+    EXPECT_EQ(response.operation_id(), "empty-copy-plan");
+}
+
+TEST_F(KVCacheMemoryConnectorTest, copyCache_UnknownDirectionFailsClosed) {
+    MemoryOperationRequestPB request;
+    setCopyProtocol(request, "unknown-direction");
+    auto* item = request.add_copy_items();
+    item->set_mem_block(1);
+    item->add_gpu_blocks(1);
+    request.set_copy_direction(static_cast<MemoryOperationRequestPB::CopyDirection>(99));
+    MemoryOperationResponsePB response;
+
+    EXPECT_TRUE(connector_->copyCache(request, response));
+    EXPECT_FALSE(response.success());
+    EXPECT_FALSE(response.quiesced());
+    EXPECT_EQ(response.operation_id(), "unknown-direction");
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnRpcStatus_NoReuseLenIncrement) {
@@ -1075,6 +1436,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnRpcStatus_NoReuseLenIncrem
     ASSERT_TRUE(waitUntilDone(ctx));
     EXPECT_FALSE(ctx->success());
     EXPECT_EQ(res->reuseBlockNum(), 0u);
+    ASSERT_TRUE(waitUntilPendingCopyLeasesDrained());
 
     connector_->broadcast_manager_.reset();
     for (auto& s : servers) {
@@ -1112,6 +1474,89 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenThreadPoolFull) {
 
     connector_->wait_done_thread_pool_.reset();
     connector_->wait_done_thread_pool_ = old_pool;
+}
+
+TEST_F(KVCacheMemoryConnectorTest, asyncWrite_UnsetRequestDeadlineUsesLocalTimeoutAndDispatches) {
+    const int64_t now_unix_ms = MemoryCopyDeadline::unixMillisNow();
+    auto          meta = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    meta->setUnsetRequestDeadlineValue(now_unix_ms - 1);
+    EXPECT_EQ(connector_->resolveOperationDeadline(*meta, now_unix_ms),
+              now_unix_ms + kv_cache_config_.memory_cache_sync_timeout_ms);
+
+    auto resource = makeCacheResource(/*cache_keys=*/{88001}, /*per_layer_block_indices=*/{{1}, {2}, {3}, {4}});
+    auto context  = connector_->asyncWrite(resource, meta);
+    ASSERT_NE(context, nullptr);
+    ASSERT_TRUE(waitUntilDone(context));
+    EXPECT_TRUE(context->success());
+    for (const auto& server : servers_) {
+        EXPECT_EQ(server->service()->copyCallCount(), 1);
+    }
+}
+
+TEST_F(KVCacheMemoryConnectorTest, defaultRequestDeadlineCompletesWriteMatchRead) {
+    CacheKeysType cache_keys{88011, 88012};
+    auto resource = makeCacheResource(cache_keys, /*per_layer_block_indices=*/{{1, 2}, {3, 4}, {5, 6}, {7, 8}});
+    auto meta     = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+
+    auto write_context = connector_->asyncWrite(resource, meta);
+    ASSERT_NE(write_context, nullptr);
+    ASSERT_TRUE(waitUntilDone(write_context));
+    ASSERT_TRUE(write_context->success());
+
+    auto match_context = connector_->asyncMatch(resource, meta);
+    ASSERT_NE(match_context, nullptr);
+    ASSERT_TRUE(match_context->success());
+    ASSERT_EQ(match_context->matchedBlockCount(), 1u);
+
+    auto read_context = connector_->asyncRead(
+        resource, meta, match_context, /*start_read_block_index=*/0, /*read_block_num=*/1);
+    ASSERT_NE(read_context, nullptr);
+    ASSERT_TRUE(waitUntilDone(read_context));
+    EXPECT_TRUE(read_context->success());
+    EXPECT_EQ(resource->memoryReuseBlockNum(), 1u);
+    for (const auto& server : servers_) {
+        EXPECT_EQ(server->service()->copyCallCount(), 2);
+    }
+}
+
+TEST_F(KVCacheMemoryConnectorTest, resolveOperationDeadlineHonorsExplicitRequestDeadline) {
+    constexpr int64_t kNowUnixMs = 1000;
+    auto              default_meta = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    EXPECT_EQ(connector_->resolveOperationDeadline(*default_meta, kNowUnixMs),
+              kNowUnixMs + kv_cache_config_.memory_cache_sync_timeout_ms);
+
+    auto explicit_meta = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    explicit_meta->setRequestDeadline(kNowUnixMs + 250);
+    EXPECT_EQ(connector_->resolveOperationDeadline(*explicit_meta, kNowUnixMs), kNowUnixMs + 250);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ExpiredExplicitRequestDeadlineDoesNotDispatch) {
+    auto meta = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    meta->setRequestDeadline(MemoryCopyDeadline::unixMillisNow() - 1);
+    auto resource = makeCacheResource(/*cache_keys=*/{88002}, /*per_layer_block_indices=*/{{1}, {2}, {3}, {4}});
+
+    EXPECT_EQ(connector_->asyncWrite(resource, meta), nullptr);
+    for (const auto& server : servers_) {
+        EXPECT_EQ(server->service()->copyCallCount(), 0);
+    }
+}
+
+TEST_F(KVCacheMemoryConnectorTest, asyncRead_ExpiredExplicitRequestDeadlineDoesNotDispatch) {
+    CacheKeysType cache_keys{88021, 88022};
+    putItemsToCache(cache_keys, memoryCacheBlockBytes());
+    auto resource = makeCacheResource(cache_keys, /*per_layer_block_indices=*/{{1, 2}, {3, 4}, {5, 6}, {7, 8}});
+    auto meta     = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    auto match_context = connector_->asyncMatch(resource, meta);
+    ASSERT_NE(match_context, nullptr);
+    ASSERT_EQ(match_context->matchedBlockCount(), 1u);
+
+    meta->setRequestDeadline(MemoryCopyDeadline::unixMillisNow() - 1);
+    EXPECT_EQ(connector_->asyncRead(
+                  resource, meta, match_context, /*start_read_block_index=*/0, /*read_block_num=*/1),
+              nullptr);
+    for (const auto& server : servers_) {
+        EXPECT_EQ(server->service()->copyCallCount(), 0);
+    }
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncWrite_InvalidInputs_ReturnNullOrThrow) {
@@ -1409,8 +1854,9 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_FailureOnMemResponse_FreesAllocate
     EXPECT_FALSE(ctx->success());
     // 应未插入缓存
     EXPECT_EQ(connector_->block_cache_->size(), cache_before);
-    // 分配的块应被回收
-    EXPECT_EQ(pool->freeBlocksNum(), free_before);
+    ASSERT_TRUE(waitUntilPendingCopyLeasesDrained());
+    // The failed operation releases its host blocks only after every worker has quiesced.
+    EXPECT_TRUE(waitUntilBlockPoolFreeCount(pool, free_before));
 
     connector_->broadcast_manager_.reset();
     for (auto& s : servers) {
@@ -1418,6 +1864,63 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_FailureOnMemResponse_FreesAllocate
     }
     servers.clear();
     addrs.clear();
+}
+
+TEST_F(KVCacheMemoryConnectorTest, asyncWrite_BadWorkerAckRetainsPlanUntilAllWorkersQuiesce) {
+    using namespace std::chrono_literals;
+
+    std::vector<std::unique_ptr<TestRpcServer>> servers;
+    std::vector<std::string>                    addrs;
+    TestRpcService*                             bad_worker = nullptr;
+    for (int i = 0; i < 2; ++i) {
+        auto service = std::make_unique<TestRpcService>();
+        if (i == 0) {
+            service->setMemResponseSuccess(false);
+            service->setQuiesceResponseSuccess(false);
+            bad_worker = service.get();
+        }
+        auto server = std::make_unique<TestRpcServer>(std::move(service));
+        ASSERT_TRUE(server->start());
+        addrs.push_back("127.0.0.1:" + std::to_string(server->listenPort()));
+        servers.push_back(std::move(server));
+    }
+    ASSERT_NE(bad_worker, nullptr);
+    auto broadcast_manager = std::make_shared<BroadcastManager>(addrs);
+    ASSERT_TRUE(broadcast_manager->init());
+    connector_->broadcast_manager_ = broadcast_manager;
+
+    auto resource = makeCacheResource(/*cache_keys=*/{303}, /*per_layer_block_indices=*/{{1}, {2}, {3}, {4}});
+    std::weak_ptr<KVCacheResource> weak_resource = resource;
+    auto meta = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    auto context = connector_->asyncWrite(resource, meta);
+    ASSERT_NE(context, nullptr);
+    resource.reset();
+
+    ASSERT_TRUE(waitUntilDone(context));
+    EXPECT_FALSE(context->success());
+    const auto first_failure_deadline = std::chrono::steady_clock::now() + 1s;
+    while (bad_worker->quiesceFailureCount() == 0 && std::chrono::steady_clock::now() < first_failure_deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    ASSERT_GT(bad_worker->quiesceFailureCount(), 0);
+    EXPECT_EQ(connector_->pending_copy_leases_.activeJobsForTest(), 1u);
+    EXPECT_FALSE(weak_resource.expired());
+
+    bad_worker->setQuiesceResponseSuccess(true);
+    const auto released_deadline = std::chrono::steady_clock::now() + 1s;
+    while ((connector_->pending_copy_leases_.activeJobsForTest() != 0 || !weak_resource.expired())
+           && std::chrono::steady_clock::now() < released_deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    EXPECT_EQ(connector_->pending_copy_leases_.activeJobsForTest(), 0u);
+    EXPECT_TRUE(weak_resource.expired());
+    EXPECT_GE(bad_worker->quiesceCallCount(), 2);
+    EXPECT_GE(servers[1]->service()->quiesceCallCount(), 2);
+
+    connector_->broadcast_manager_.reset();
+    for (auto& server : servers) {
+        server->shutdown();
+    }
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenThreadPoolFull) {
@@ -1452,19 +1955,16 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenThreadPoolFull) {
     connector_->wait_done_thread_pool_ = old_pool;
 }
 
-TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnContext_WhenNoWorkers_NoOp) {
-    // BroadcastManager treats "0 workers" as a no-op success (requests.size()==workerNum()==0).
+TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnNull_WhenNoWorkers) {
     connector_->broadcast_manager_->worker_addrs_.clear();
 
     std::vector<KVCacheMemoryConnector::CopyInfoPerKey> infos;
     auto                                                plan = std::make_shared<KVCacheMemoryConnector::CopyPlan>();
     plan->copy_infos                                         = std::move(infos);
     plan->direction                                          = KVCacheMemoryConnector::CopyDirection::H2D;
-    auto result                                              = connector_->sendCopyPlan(plan);
-    ASSERT_NE(result, nullptr);
-    result->waitDone();
-    EXPECT_TRUE(result->success());
-    EXPECT_TRUE(result->responses().empty());
+    setPlanProtocol(plan);
+    auto result = connector_->sendCopyPlan(plan);
+    EXPECT_EQ(result, nullptr);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnContext_AllRanksSuccess) {
@@ -1484,6 +1984,7 @@ TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnContext_AllRanksSuccess) {
     auto plan        = std::make_shared<KVCacheMemoryConnector::CopyPlan>();
     plan->copy_infos = std::move(infos);
     plan->direction  = KVCacheMemoryConnector::CopyDirection::H2D;
+    setPlanProtocol(plan);
     auto result      = connector_->sendCopyPlan(plan);
     ASSERT_NE(result, nullptr);
     result->waitDone();
@@ -1528,6 +2029,7 @@ TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnContext_PartialRanksFail) 
     auto plan        = std::make_shared<KVCacheMemoryConnector::CopyPlan>();
     plan->copy_infos = std::move(infos);
     plan->direction  = KVCacheMemoryConnector::CopyDirection::H2D;
+    setPlanProtocol(plan);
     auto result      = connector_->sendCopyPlan(plan);
     ASSERT_NE(result, nullptr);
 
@@ -1585,6 +2087,7 @@ TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnContext_RpcStatusError) {
     auto plan        = std::make_shared<KVCacheMemoryConnector::CopyPlan>();
     plan->copy_infos = std::move(infos);
     plan->direction  = KVCacheMemoryConnector::CopyDirection::H2D;
+    setPlanProtocol(plan);
     auto result      = connector_->sendCopyPlan(plan);
     ASSERT_NE(result, nullptr);
     result->waitDone();
@@ -1593,6 +2096,7 @@ TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnContext_RpcStatusError) {
 
 TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_CountMismatch) {
     MemoryOperationRequestPB req;
+    setCopyProtocol(req, "count-mismatch");
     auto*                    item = req.add_copy_items();
     item->add_gpu_blocks(1);
     // Intentionally do not set mem_block to trigger mismatch
@@ -1610,6 +2114,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_InvalidMemBlock) {
     ASSERT_GT(total, 0u);
 
     MemoryOperationRequestPB req;
+    setCopyProtocol(req, "invalid-memory-block");
     auto*                    item = req.add_copy_items();
     item->add_gpu_blocks(gpu_block_idx);
     // invalid mem_block index for block_pool_
@@ -1634,6 +2139,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_InvalidLayerId_BuildCop
     const BlockIdxType mem_block_index = static_cast<BlockIdxType>(mem_blocks[0]);
 
     MemoryOperationRequestPB req;
+    setCopyProtocol(req, "invalid-layer-id");
     auto*                    item = req.add_copy_items();
     // gpu_blocks size > layer_num => invalid "layer index"
     for (int l = 0; l < cache_config_.layer_num + 1; ++l) {
@@ -1669,6 +2175,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SingleLayer) {
     setBlockBytes(mem_buffer, /*byte_offset=*/0, total, 'a');
 
     MemoryOperationRequestPB req;
+    setCopyProtocol(req, "h2d-single-layer");
     auto*                    item = req.add_copy_items();
     for (int l = 0; l < cache_config_.layer_num; ++l) {
         item->add_gpu_blocks(l == layer_id ? gpu_block_idx : NULL_BLOCK_IDX);
@@ -1765,6 +2272,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
     }
 
     MemoryOperationRequestPB req;
+    setCopyProtocol(req, "h2d-split-kv");
     req.set_copy_direction(MemoryOperationRequestPB::H2D);
     for (int i = 0; i < kCopyBlockCount; ++i) {
         auto* item = req.add_copy_items();
@@ -1811,6 +2319,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_MultiLayer) {
     ASSERT_NE(mem_block_size2, 0);
 
     MemoryOperationRequestPB req;
+    setCopyProtocol(req, "h2d-multi-layer");
     req.set_copy_direction(MemoryOperationRequestPB::H2D);
     addOneCopyItemToPb(req, gpu_layer_blocks1, mem_block_index1);
     addOneCopyItemToPb(req, gpu_layer_blocks2, mem_block_index2);
@@ -1848,6 +2357,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_D2H_SingleLayer) {
     EXPECT_GE(mem_buffer.size_bytes, total);
 
     MemoryOperationRequestPB req;
+    setCopyProtocol(req, "d2h-single-layer");
     auto*                    item = req.add_copy_items();
     for (int l = 0; l < cache_config_.layer_num; ++l) {
         item->add_gpu_blocks(l == layer_id ? gpu_block_idx : NULL_BLOCK_IDX);
@@ -1887,6 +2397,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_D2H_MultiLayer) {
     ASSERT_NE(mem_block_size2, 0);
 
     MemoryOperationRequestPB req;
+    setCopyProtocol(req, "d2h-multi-layer");
     req.set_copy_direction(MemoryOperationRequestPB::D2H);
     addOneCopyItemToPb(req, gpu_layer_blocks1, mem_block_index1);
     addOneCopyItemToPb(req, gpu_layer_blocks2, mem_block_index2);
@@ -1937,6 +2448,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_D2H_MultiLayer_ValidatesByteOffsets
     setBlockBytes(mem_buffer, /*byte_offset=*/0, total_bytes, 0);
 
     MemoryOperationRequestPB req;
+    setCopyProtocol(req, "d2h-byte-offsets");
     req.set_copy_direction(MemoryOperationRequestPB::D2H);
     addOneCopyItemToPb(req, gpu_layer_blocks, mem_block_index);
 

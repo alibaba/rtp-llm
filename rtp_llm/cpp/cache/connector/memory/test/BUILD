@@ -31,6 +31,9 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/memory/test/mock:mock_memory_connector_lib",
         "//rtp_llm/cpp/cache/connector/memory/test/mock:test_rpc_service_lib",
     ],
+    linkopts = [
+        "-Wl,--wrap=_ZN7rtp_llm15execNoBlockCopyERKNS_15MultiCopyParamsE",
+    ],
     env = {},
     exec_properties = {'gpu':'H20'},
 )
@@ -55,11 +58,54 @@ cc_test(
     srcs = [
         "MemoryAsyncContextTest.cc",
     ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps + [
-        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache/connector/memory:memory_async_context",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
     ],
-    env = {},
-    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "memory_copy_fence_test",
+    srcs = ["MemoryCopyFenceTest.cc"],
+    deps = [
+        "//rtp_llm/cpp/cache/connector/memory:memory_copy_fence",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "memory_copy_operation_id_test",
+    srcs = ["MemoryCopyOperationIdTest.cc"],
+    deps = [
+        "//rtp_llm/cpp/cache/connector/memory:memory_copy_operation_id",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "memory_copy_deadline_test",
+    srcs = ["MemoryCopyDeadlineTest.cc"],
+    deps = [
+        "//rtp_llm/cpp/cache/connector/memory:memory_copy_deadline",
+        "//rtp_llm/cpp/cache/connector/memory:memory_copy_fence",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "memory_copy_task_guard_test",
+    srcs = ["MemoryCopyTaskGuardTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache/connector/memory:memory_copy_task_guard",
+        "//rtp_llm/cpp/model_rpc:remote_load_lease_retainer",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@havenask//aios/autil:lock_free",
+    ],
 )

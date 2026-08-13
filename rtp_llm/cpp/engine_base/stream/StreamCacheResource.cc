@@ -80,6 +80,7 @@ public:
             ctx.request_id      = stream->streamId();
             ctx.unique_key      = stream->uniqueKey();
             ctx.deadline_ms     = stream->deadlineMs();
+            ctx.request_deadline_enabled = stream->getTimeoutMs() > 0;
             ctx.prefill_addr    = stream->prefillAddr();
             ctx.prefill_tp_size = stream->getPrefillTpSize();
         }
@@ -677,6 +678,7 @@ std::shared_ptr<AsyncContext> StreamCacheResource::storeCacheAsync(
     const std::shared_ptr<BatchKVCacheResource>& batch_resource, bool enable_memory_cache, bool enable_remote_cache) {
     RTP_LLM_PROFILE_FUNCTION();
     auto meta              = std::make_shared<MetaImpl>(enable_memory_cache, enable_remote_cache, stream_->traceId());
+    meta->fillRoutingContext(stream_);
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_resource, meta);
     auto store_context     = resource_context_.cache_manager->asyncStoreCache(connector_context);
     if (resource_context_.write_cache_sync) {

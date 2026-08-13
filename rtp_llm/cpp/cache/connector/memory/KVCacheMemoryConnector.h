@@ -2,20 +2,29 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <chrono>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <string>
+#include <thread>
 #include <vector>
 
 #include "autil/LockFreeThreadPool.h"
 #include <torch/torch.h>
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
+#include "rtp_llm/cpp/cache/connector/memory/MemoryCopyFence.h"
+#include "rtp_llm/cpp/cache/connector/memory/MemoryCopyDeadline.h"
+#include "rtp_llm/cpp/cache/connector/memory/MemoryCopyOperationId.h"
+#include "rtp_llm/cpp/cache/connector/memory/MemoryCopyTaskGuard.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryBlockCache.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
+#include "rtp_llm/cpp/model_rpc/RemoteLoadLeaseRetainer.h"
 #include "kmonitor/client/MetricsReporter.h"
 
 namespace rtp_llm {
@@ -56,6 +65,17 @@ public:
     std::vector<CacheKeyType> cacheKeys() const;
 
 private:
+    enum class CopyProtocolState {
+        UNKNOWN,
+        PROBING,
+        READY,
+        UNSUPPORTED,
+    };
+    enum class CapabilityProbeResult {
+        READY,
+        TRANSIENT_FAILURE,
+        UNSUPPORTED,
+    };
     struct CopyInfoPerKey {
         CacheKeyType              cache_key{0};
         BlockIdxType              mem_block{NULL_BLOCK_IDX};
@@ -69,6 +89,9 @@ private:
     struct CopyPlan {
         std::vector<CopyInfoPerKey> copy_infos;
         CopyDirection               direction;
+        std::string                 operation_id;
+        int64_t                     operation_deadline_unix_ms{0};
+        std::shared_ptr<KVCacheResource> resource_lease;
     };
 
     std::shared_ptr<CopyPlan> buildCopyPlanForRead(const CacheKeysType& cache_keys,
@@ -82,7 +105,21 @@ private:
                                                     bool&                no_need_write);
     std::shared_ptr<CopyPlan> createCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos,
                                              const CopyDirection&               direction);
-    bool startCopyAsync(const std::shared_ptr<MemoryAsyncContext>& context, const std::shared_ptr<CopyPlan>& copy_plan);
+    bool startCopyAsync(const std::shared_ptr<MemoryAsyncContext>& context,
+                        const std::shared_ptr<CopyPlan>&           copy_plan,
+                        int64_t                                    operation_deadline_unix_ms);
+    int64_t resolveOperationDeadline(const Meta& meta, int64_t now_unix_ms) const;
+    bool waitForCopyResult(const std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>& result,
+                           const std::string& operation_id) const;
+    bool copyProtocolReadyOrStartProbe();
+    void finishCopyProtocolProbe(const std::function<CapabilityProbeResult()>& probe) noexcept;
+    CapabilityProbeResult probeCopyProtocol(const std::string& operation_id, int64_t operation_deadline_unix_ms);
+    static CapabilityProbeResult classifyCapabilityResponses(const std::vector<FunctionResponsePB>& responses,
+                                                              const std::string&                     operation_id);
+    std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>
+         sendCapabilityProbe(const std::string& operation_id, int64_t operation_deadline_unix_ms) const;
+    bool quiesceCopy(const std::string& operation_id, int64_t operation_deadline_unix_ms) const;
+    std::string makeCopyOperationId();
     std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>
          sendCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const;
     void printCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const;
@@ -92,6 +129,7 @@ private:
                             CopyDirection                    direction,
                             std::vector<torch::Tensor>&      dst,
                             std::vector<torch::Tensor>&      src);
+    bool executeCopy(const MemoryOperationRequestPB& request, CopyDirection direction);
     bool appendCopyBytesToBuffers(const BlockInfo&            mem_block,
                                   const BlockInfo&            gpu_block,
                                   size_t                      byte_off,
@@ -129,6 +167,13 @@ private:
     std::shared_ptr<MemoryBlockCache>          block_cache_;
     std::shared_ptr<BroadcastManager>          broadcast_manager_;
     std::shared_ptr<autil::LockFreeThreadPool> wait_done_thread_pool_;
+    MemoryCopyFence                            copy_fence_;
+    RemoteLoadLeaseRetainer                    pending_copy_leases_;
+    MemoryCopyOperationIdGenerator             copy_operation_ids_;
+    std::atomic<CopyProtocolState>             copy_protocol_state_{CopyProtocolState::UNKNOWN};
+    std::atomic<int64_t>                       copy_protocol_next_probe_unix_ms_{0};
+    std::mutex                                 copy_protocol_thread_mutex_;
+    std::thread                                copy_protocol_thread_;
 
     // metrics reporter
     kmonitor::MetricsReporterPtr metrics_reporter_;

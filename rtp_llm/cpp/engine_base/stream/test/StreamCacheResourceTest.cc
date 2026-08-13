@@ -396,6 +396,7 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TriggersStoreCacheAsync_Wh
     auto& resource = stream_->streamCacheResource();
 
     stream_->generate_input_->generate_config->reuse_cache = true;
+    stream_->generate_input_->generate_config->timeout_ms  = 60'000;
 
     // Enable memory cache gate just to validate meta(enableMemoryCache) is true.
     resource.resource_context_.enable_memory_cache                 = true;
@@ -432,6 +433,10 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TriggersStoreCacheAsync_Wh
     ASSERT_NE(captured_ctx, nullptr);
     ASSERT_NE(captured_ctx->meta(), nullptr);
     EXPECT_TRUE(captured_ctx->meta()->enableMemoryCache());
+    const auto routing = captured_ctx->meta()->p2pRouting();
+    ASSERT_TRUE(routing.has_value());
+    EXPECT_TRUE(routing->request_deadline_enabled);
+    EXPECT_EQ(routing->deadline_ms, stream_->deadlineMs());
 }
 
 TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_DoesNotStoreCacheAsync_WhenNotFinished) {

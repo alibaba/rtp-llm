@@ -11,11 +11,15 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
+#include <cstdlib>
+
 namespace rtp_llm {
 
-// When set on MultiCopyParams, execNoBlockCopy may try CUDA split scatter/gather (SplitKvCacheCopy; not on PPU).
-// Eligibility for the fast path is decided only by enable_memory_cache_sm_copy; splitKvMultiCopy falls back if layout
-// mismatches.
+constexpr size_t kMemoryCopyConcurrency = 8;
+constexpr int    kMemoryCopyProtocolVersion = 1;
+
+// Eligibility for the split scatter/gather path is decided by enable_memory_cache_sm_copy. The implementation falls
+// back to the generic copy path when the buffer layout does not match.
 static void applySplitKvMultiCopyFieldsIfEligible(bool enable_sm_copy, const CacheConfig& cfg, MultiCopyParams& out) {
     if (!enable_sm_copy) {
         return;
@@ -23,6 +27,18 @@ static void applySplitKvMultiCopyFieldsIfEligible(bool enable_sm_copy, const Cac
     out.split_kv_layer_num          = static_cast<int>(cfg.layer_all_num);
     out.split_kv_cache_stride_bytes = cfg.kv_block_stride_bytes;
     out.split_kv_scale_stride_bytes = cfg.kv_scale_stride_bytes;
+}
+
+RemoteLoadLeaseRetainer::Config makeMemoryCopyLeaseConfig(int64_t sync_timeout_ms) {
+    const auto bounded_timeout_ms = std::max<int64_t>(
+        1, std::min<int64_t>(sync_timeout_ms, MemoryCopyDeadline::kMaxWireDurationMs));
+    return RemoteLoadLeaseRetainer::Config{
+        /*max_jobs=*/1000,
+        /*initial_backoff=*/std::chrono::milliseconds(10),
+        /*max_backoff=*/std::chrono::milliseconds(std::min<int64_t>(1000, bounded_timeout_ms)),
+        /*stop_grace=*/std::chrono::milliseconds(bounded_timeout_ms),
+        /*worker_count=*/kMemoryCopyConcurrency,
+    };
 }
 
 KVCacheMemoryConnector::KVCacheMemoryConnector(const CacheConfig&                       cache_config,
@@ -34,11 +50,18 @@ KVCacheMemoryConnector::KVCacheMemoryConnector(const CacheConfig&               
     kv_cache_config_(kv_cache_config),
     allocator_(allocator),
     tp_addrs_(tp_addrs),
+    pending_copy_leases_(makeMemoryCopyLeaseConfig(kv_cache_config.memory_cache_sync_timeout_ms)),
     metrics_reporter_(metrics_reporter) {}
 
 KVCacheMemoryConnector::~KVCacheMemoryConnector() {
     RTP_LLM_LOG_INFO("KVCacheMemoryConnector destructor");
-    stop_.store(true);
+    {
+        std::lock_guard<std::mutex> lock(copy_protocol_thread_mutex_);
+        stop_.store(true, std::memory_order_release);
+        if (copy_protocol_thread_.joinable()) {
+            copy_protocol_thread_.join();
+        }
+    }
     if (metrics_reporter_thread_) {
         metrics_reporter_thread_->join();
         metrics_reporter_thread_.reset();
@@ -47,6 +70,18 @@ KVCacheMemoryConnector::~KVCacheMemoryConnector() {
         wait_done_thread_pool_->stop();
         wait_done_thread_pool_.reset();
     }
+    const auto drain_timeout_ms = std::max<int64_t>(1,
+                                                    std::min<int64_t>(kv_cache_config_.memory_cache_sync_timeout_ms,
+                                                                      MemoryCopyDeadline::kMaxWireDurationMs));
+    const auto drain_timeout = std::chrono::milliseconds(drain_timeout_ms);
+    if (!pending_copy_leases_.stop(drain_timeout)) {
+        RTP_LLM_LOG_ERROR("memory copy plans did not quiesce before connector destruction");
+        std::abort();
+    }
+    if (!copy_fence_.stopAndWait(drain_timeout)) {
+        RTP_LLM_LOG_ERROR("memory copy handlers did not quiesce before connector destruction");
+        std::abort();
+    }
     broadcast_manager_.reset();
     block_pool_.reset();
     block_cache_.reset();
@@ -54,7 +89,7 @@ KVCacheMemoryConnector::~KVCacheMemoryConnector() {
 
 bool KVCacheMemoryConnector::init() {
     const auto memory_cache_sync_timeout_ms = kv_cache_config_.memory_cache_sync_timeout_ms;
-    RTP_LLM_CHECK_WITH_INFO(memory_cache_sync_timeout_ms > 0,
+    RTP_LLM_CHECK_WITH_INFO(MemoryCopyDeadline::validWireDuration(memory_cache_sync_timeout_ms),
                             "init failed, sync timeout is invalid, sync timeout: %ld ms",
                             memory_cache_sync_timeout_ms);
 
@@ -66,7 +101,8 @@ bool KVCacheMemoryConnector::init() {
     broadcast_manager_ = std::make_shared<BroadcastManager>(tp_addrs_);
     RTP_LLM_CHECK_WITH_INFO(broadcast_manager_->init(), "init failed, broadcast manager init failed");
 
-    wait_done_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(8, 1000, nullptr, "WaitDoneThreadPool");
+    wait_done_thread_pool_ =
+        std::make_shared<autil::LockFreeThreadPool>(kMemoryCopyConcurrency, 1000, nullptr, "WaitDoneThreadPool");
     RTP_LLM_CHECK_WITH_INFO(wait_done_thread_pool_->start(), "init failed, wait done thread pool start failed");
 
     if (metrics_reporter_) {
@@ -111,6 +147,9 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
     RTP_LLM_CHECK_WITH_INFO(meta != nullptr, "async match failed, meta is null");
     RTP_LLM_CHECK_WITH_INFO(resource != nullptr, "async match failed, resource is null");
     if (!meta->enableMemoryCache()) {
+        return nullptr;
+    }
+    if (!copyProtocolReadyOrStartProbe()) {
         return nullptr;
     }
 
@@ -190,7 +229,17 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
                                                                 int start_read_block_index,
                                                                 int read_block_num) {
     RTP_LLM_PROFILE_FUNCTION();
+    RTP_LLM_CHECK_WITH_INFO(meta != nullptr, "async read failed, meta is null");
     RTP_LLM_CHECK_WITH_INFO(resource != nullptr, "async read failed, resource is null");
+    if (copy_protocol_state_.load(std::memory_order_acquire) != CopyProtocolState::READY) {
+        return nullptr;
+    }
+    const int64_t operation_deadline_unix_ms =
+        resolveOperationDeadline(*meta, MemoryCopyDeadline::unixMillisNow());
+    if (operation_deadline_unix_ms <= 0) {
+        RTP_LLM_LOG_WARNING("async read failed, request deadline has expired");
+        return nullptr;
+    }
     const auto& cache_keys      = resource->cacheKeys();
     const auto  cache_keys_size = cache_keys.empty() ? 0 : cache_keys.size() - 1;
     if (cache_keys_size == 0) {
@@ -222,6 +271,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
         reportReadMetrics(false, timer.done_us(), cache_keys_size, 0);
         return nullptr;
     }
+    copy_plan->resource_lease = resource;
 
     const auto total_block_num = cache_keys_size;
     auto       read_done = [resource, copy_plan, total_block_num, read_block_num, timer, this](bool success) mutable {
@@ -246,9 +296,8 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
     };
 
     auto context = std::make_shared<MemoryAsyncContext>(read_done);
-    if (!startCopyAsync(context, copy_plan)) {
+    if (!startCopyAsync(context, copy_plan, operation_deadline_unix_ms)) {
         RTP_LLM_LOG_WARNING("async read failed, start copy plan async failed");
-        read_done(false);
         return nullptr;
     }
     return context;
@@ -302,6 +351,15 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
     if (!meta->enableMemoryCache()) {
         return nullptr;
     }
+    if (!copyProtocolReadyOrStartProbe()) {
+        return nullptr;
+    }
+    const int64_t operation_deadline_unix_ms =
+        resolveOperationDeadline(*meta, MemoryCopyDeadline::unixMillisNow());
+    if (operation_deadline_unix_ms <= 0) {
+        RTP_LLM_LOG_WARNING("async write failed, request deadline has expired");
+        return nullptr;
+    }
 
     const auto& cache_keys = resource->cacheKeys();
     const auto  cache_keys_size =
@@ -342,6 +400,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
         reportWriteMetrics(no_need_write, timer.done_us(), static_cast<int64_t>(cache_keys_size), 0);
         return nullptr;
     }
+    copy_plan->resource_lease = resource;
 
     auto write_done =
         [copy_plan, resource_copy = resource, timer, total_block_num = cache_keys_size, this](bool success) mutable {
@@ -366,9 +425,8 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
         };
 
     auto context = std::make_shared<MemoryAsyncContext>(write_done);
-    if (!startCopyAsync(context, copy_plan)) {
+    if (!startCopyAsync(context, copy_plan, operation_deadline_unix_ms)) {
         RTP_LLM_LOG_WARNING("async write failed, start copy plan async failed");
-        write_done(false);
         return nullptr;
     }
     return context;
@@ -447,6 +505,7 @@ KVCacheMemoryConnector::createCopyPlan(const std::vector<CopyInfoPerKey>& copy_i
     auto plan        = new CopyPlan();
     plan->copy_infos = copy_infos;
     plan->direction  = direction;
+    plan->operation_id = makeCopyOperationId();
     auto deleter     = [this](CopyPlan* plan) {
         std::vector<BlockIdxType> blocks;
         blocks.reserve(plan->copy_infos.size());
@@ -460,25 +519,327 @@ KVCacheMemoryConnector::createCopyPlan(const std::vector<CopyInfoPerKey>& copy_i
 }
 
 bool KVCacheMemoryConnector::startCopyAsync(const std::shared_ptr<MemoryAsyncContext>& context,
-                                            const std::shared_ptr<CopyPlan>&           copy_plan) {
+                                            const std::shared_ptr<CopyPlan>&           copy_plan,
+                                            int64_t                                    operation_deadline_unix_ms) {
     if (stop_.load()) {
+        context->complete(false);
         return false;
     }
-    auto code = wait_done_thread_pool_->pushTask([this, context, copy_plan]() mutable {
-        auto send_result = sendCopyPlan(copy_plan);
-        context->setBroadcastResult(send_result);
-        context->waitDone();
+    if (copy_protocol_state_.load(std::memory_order_acquire) != CopyProtocolState::READY) {
+        context->complete(false);
+        return false;
+    }
+    const auto initial_admission = MemoryCopyDeadline::evaluateCopy(operation_deadline_unix_ms,
+                                                                    kv_cache_config_.memory_cache_sync_timeout_ms,
+                                                                    kv_cache_config_.memory_cache_sync_timeout_ms,
+                                                                    MemoryCopyDeadline::unixMillisNow());
+    if (!initial_admission) {
+        context->complete(false);
+        return false;
+    }
+    copy_plan->operation_deadline_unix_ms = operation_deadline_unix_ms;
+    auto ticket_status = pending_copy_leases_.reserve(
+        copy_plan->operation_id,
+        copy_plan,
+        [this, operation_id = copy_plan->operation_id, operation_deadline_unix_ms]() {
+            return quiesceCopy(operation_id, operation_deadline_unix_ms);
+        });
+    if (!ticket_status.ok()) {
+        RTP_LLM_LOG_WARNING("start copy plan async failed, cannot reserve copy lease: %s",
+                            ticket_status.status().ToString().c_str());
+        context->complete(false);
+        return false;
+    }
+    auto ticket = std::move(*ticket_status);
+
+    auto task_guard = std::make_shared<MemoryCopyTaskGuard>(context, std::move(ticket));
+    auto code = wait_done_thread_pool_->pushTask(
+        [this, context, copy_plan, operation_deadline_unix_ms, task_guard]() mutable {
+        if (!task_guard->enterBeforeDeadline(operation_deadline_unix_ms,
+                                             kv_cache_config_.memory_cache_sync_timeout_ms,
+                                             kv_cache_config_.memory_cache_sync_timeout_ms,
+                                             MemoryCopyDeadline::unixMillisNow())) {
+            return;
+        }
+        if (!task_guard->markStarted()) {
+            return;
+        }
+
+        try {
+            auto send_result = sendCopyPlan(copy_plan);
+            if (send_result == nullptr) {
+                task_guard->abandon();
+                return;
+            }
+            const bool copy_succeeded = waitForCopyResult(send_result, copy_plan->operation_id);
+            send_result.reset();
+            if (copy_succeeded) {
+                task_guard->finish(true);
+                return;
+            }
+            task_guard->abandon();
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("memory copy task failed: %s", e.what());
+            task_guard->abandon();
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("memory copy task failed with unknown exception");
+            task_guard->abandon();
+        }
     });
     if (code != autil::ThreadPoolBase::ERROR_NONE) {
+        task_guard->cancelBeforeDispatch();
         RTP_LLM_LOG_WARNING("start copy plan async failed, push send+wait task failed, code=%d", code);
         return false;
     }
     return true;
 }
 
+int64_t KVCacheMemoryConnector::resolveOperationDeadline(const Meta& meta, int64_t now_unix_ms) const {
+    const auto routing = meta.p2pRouting();
+    const auto request_deadline =
+        routing.has_value() && routing->request_deadline_enabled ? routing->deadline_ms : 0;
+    return MemoryCopyDeadline::resolve(now_unix_ms,
+                                       kv_cache_config_.memory_cache_sync_timeout_ms,
+                                       request_deadline);
+}
+
+bool KVCacheMemoryConnector::waitForCopyResult(
+    const std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>& result,
+    const std::string&                                                           operation_id) const {
+    if (result == nullptr) {
+        return false;
+    }
+    try {
+        result->waitDone();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("memory copy rpc failed: %s", e.what());
+        result->cancelAndDrain();
+        return false;
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("memory copy rpc failed with unknown exception");
+        result->cancelAndDrain();
+        return false;
+    }
+    if (!result->success()) {
+        return false;
+    }
+    const auto responses = result->responses();
+    if (responses.size() != broadcast_manager_->workerNum()) {
+        return false;
+    }
+    return std::all_of(responses.begin(), responses.end(), [&operation_id](const auto& response) {
+        return response.has_mem_response() && response.mem_response().operation_id() == operation_id
+               && response.mem_response().success() && response.mem_response().quiesced()
+               && response.mem_response().protocol_version() == kMemoryCopyProtocolVersion;
+    });
+}
+
+bool KVCacheMemoryConnector::copyProtocolReadyOrStartProbe() {
+    auto state = copy_protocol_state_.load(std::memory_order_acquire);
+    if (state == CopyProtocolState::READY) {
+        return true;
+    }
+    if (state != CopyProtocolState::UNKNOWN) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(copy_protocol_thread_mutex_);
+    if (stop_.load(std::memory_order_acquire)) {
+        return false;
+    }
+    state = copy_protocol_state_.load(std::memory_order_acquire);
+    if (state == CopyProtocolState::READY) {
+        return true;
+    }
+    if (state != CopyProtocolState::UNKNOWN) {
+        return false;
+    }
+    const auto now = MemoryCopyDeadline::unixMillisNow();
+    if (now < copy_protocol_next_probe_unix_ms_.load(std::memory_order_acquire)) {
+        return false;
+    }
+    if (!copy_protocol_state_.compare_exchange_strong(
+            state, CopyProtocolState::PROBING, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        return false;
+    }
+
+    try {
+        const auto operation_id = makeCopyOperationId();
+        const auto deadline = MemoryCopyDeadline::make(now, kv_cache_config_.memory_cache_sync_timeout_ms);
+        if (copy_protocol_thread_.joinable()) {
+            copy_protocol_thread_.join();
+        }
+        copy_protocol_thread_ = std::thread([this, operation_id, deadline]() {
+            finishCopyProtocolProbe(
+                [this, operation_id, deadline]() { return probeCopyProtocol(operation_id, deadline); });
+        });
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("memory copy capability probe could not start: %s", e.what());
+        copy_protocol_next_probe_unix_ms_.store(now + 1000, std::memory_order_release);
+        copy_protocol_state_.store(CopyProtocolState::UNKNOWN, std::memory_order_release);
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("memory copy capability probe could not start");
+        copy_protocol_next_probe_unix_ms_.store(now + 1000, std::memory_order_release);
+        copy_protocol_state_.store(CopyProtocolState::UNKNOWN, std::memory_order_release);
+    }
+    return false;
+}
+
+void KVCacheMemoryConnector::finishCopyProtocolProbe(
+    const std::function<CapabilityProbeResult()>& probe) noexcept {
+    CapabilityProbeResult result = CapabilityProbeResult::TRANSIENT_FAILURE;
+    try {
+        result = probe();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("memory copy capability probe failed: %s", e.what());
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("memory copy capability probe failed with unknown exception");
+    }
+
+    if (result == CapabilityProbeResult::READY) {
+        copy_protocol_state_.store(CopyProtocolState::READY, std::memory_order_release);
+    } else if (result == CapabilityProbeResult::UNSUPPORTED) {
+        copy_protocol_state_.store(CopyProtocolState::UNSUPPORTED, std::memory_order_release);
+    } else {
+        copy_protocol_next_probe_unix_ms_.store(
+            MemoryCopyDeadline::unixMillisNow() + 1000, std::memory_order_release);
+        copy_protocol_state_.store(CopyProtocolState::UNKNOWN, std::memory_order_release);
+    }
+}
+
+KVCacheMemoryConnector::CapabilityProbeResult
+KVCacheMemoryConnector::probeCopyProtocol(const std::string& operation_id, int64_t operation_deadline_unix_ms) {
+    auto result = sendCapabilityProbe(operation_id, operation_deadline_unix_ms);
+    if (result == nullptr) {
+        return CapabilityProbeResult::TRANSIENT_FAILURE;
+    }
+    try {
+        result->waitDone();
+    } catch (...) {
+        result->cancelAndDrain();
+        return CapabilityProbeResult::TRANSIENT_FAILURE;
+    }
+    if (!result->success()) {
+        return CapabilityProbeResult::TRANSIENT_FAILURE;
+    }
+    const auto responses = result->responses();
+    if (responses.size() != broadcast_manager_->workerNum()) {
+        return CapabilityProbeResult::TRANSIENT_FAILURE;
+    }
+    return classifyCapabilityResponses(responses, operation_id);
+}
+
+KVCacheMemoryConnector::CapabilityProbeResult KVCacheMemoryConnector::classifyCapabilityResponses(
+    const std::vector<FunctionResponsePB>& responses, const std::string& operation_id) {
+    if (responses.empty()) {
+        return CapabilityProbeResult::TRANSIENT_FAILURE;
+    }
+
+    bool all_current      = true;
+    bool all_incompatible = true;
+    for (const auto& response : responses) {
+        if (!response.has_mem_response()) {
+            return CapabilityProbeResult::TRANSIENT_FAILURE;
+        }
+        const auto& mem_response = response.mem_response();
+        const bool current = mem_response.protocol_version() == kMemoryCopyProtocolVersion
+                             && mem_response.operation_id() == operation_id && mem_response.success()
+                             && mem_response.quiesced();
+        const bool legacy = mem_response.protocol_version() == 0 && mem_response.operation_id().empty()
+                            && mem_response.success() && !mem_response.quiesced();
+        const bool known_incompatible =
+            legacy
+            || (mem_response.protocol_version() > 0
+                && mem_response.protocol_version() != kMemoryCopyProtocolVersion
+                && mem_response.operation_id() == operation_id && mem_response.success()
+                && mem_response.quiesced());
+
+        if (!current && !known_incompatible) {
+            return CapabilityProbeResult::TRANSIENT_FAILURE;
+        }
+        all_current      = all_current && current;
+        all_incompatible = all_incompatible && known_incompatible;
+    }
+
+    if (all_current) {
+        return CapabilityProbeResult::READY;
+    }
+    if (all_incompatible) {
+        return CapabilityProbeResult::UNSUPPORTED;
+    }
+    return CapabilityProbeResult::TRANSIENT_FAILURE;
+}
+
+std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>
+KVCacheMemoryConnector::sendCapabilityProbe(const std::string& operation_id,
+                                            int64_t            operation_deadline_unix_ms) const {
+    const int64_t rpc_timeout_ms = MemoryCopyDeadline::rpcTimeout(operation_deadline_unix_ms,
+                                                                  kv_cache_config_.memory_cache_sync_timeout_ms,
+                                                                  MemoryCopyDeadline::unixMillisNow());
+    if (rpc_timeout_ms <= 0) {
+        return nullptr;
+    }
+    MemoryOperationRequestPB mem_req;
+    mem_req.set_operation_kind(MemoryOperationRequestPB::CAPABILITY);
+    mem_req.set_operation_id(operation_id);
+    mem_req.set_protocol_version(kMemoryCopyProtocolVersion);
+
+    std::vector<FunctionRequestPB> requests(broadcast_manager_->workerNum());
+    for (auto& request : requests) {
+        request.mutable_mem_request()->CopyFrom(mem_req);
+    }
+    auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& context,
+                       const FunctionRequestPB&                    request,
+                       grpc::CompletionQueue*                      completion_queue) {
+        return stub->PrepareAsyncExecuteFunction(context.get(), request, completion_queue);
+    };
+    return broadcast_manager_->broadcastPrepared<FunctionRequestPB, FunctionResponsePB>(
+        requests, static_cast<int>(rpc_timeout_ms), rpc_call);
+}
+
+bool KVCacheMemoryConnector::quiesceCopy(const std::string& operation_id,
+                                         int64_t            operation_deadline_unix_ms) const {
+    MemoryOperationRequestPB mem_req;
+    mem_req.set_operation_kind(MemoryOperationRequestPB::QUIESCE);
+    mem_req.set_operation_id(operation_id);
+    mem_req.set_retention_timeout_ms(kv_cache_config_.memory_cache_sync_timeout_ms);
+    mem_req.set_quiesce_timeout_ms(kv_cache_config_.memory_cache_sync_timeout_ms);
+    mem_req.set_operation_deadline_unix_ms(operation_deadline_unix_ms);
+    mem_req.set_protocol_version(kMemoryCopyProtocolVersion);
+
+    std::vector<FunctionRequestPB> requests(broadcast_manager_->workerNum());
+    for (auto& request : requests) {
+        request.mutable_mem_request()->CopyFrom(mem_req);
+    }
+    auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& context,
+                       const FunctionRequestPB&                    request,
+                       grpc::CompletionQueue*                      completion_queue) {
+        return stub->PrepareAsyncExecuteFunction(context.get(), request, completion_queue);
+    };
+    auto result = broadcast_manager_->broadcastPrepared<FunctionRequestPB, FunctionResponsePB>(
+        requests, kv_cache_config_.memory_cache_sync_timeout_ms, rpc_call);
+    return waitForCopyResult(result, operation_id);
+}
+
+std::string KVCacheMemoryConnector::makeCopyOperationId() {
+    return copy_operation_ids_.next();
+}
+
 std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>
 KVCacheMemoryConnector::sendCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const {
+    const int64_t rpc_timeout_ms = MemoryCopyDeadline::rpcTimeout(copy_plan->operation_deadline_unix_ms,
+                                                                  kv_cache_config_.memory_cache_sync_timeout_ms,
+                                                                  MemoryCopyDeadline::unixMillisNow());
+    if (rpc_timeout_ms <= 0) {
+        return nullptr;
+    }
     MemoryOperationRequestPB mem_req;
+    mem_req.set_operation_kind(MemoryOperationRequestPB::COPY);
+    mem_req.set_operation_id(copy_plan->operation_id);
+    mem_req.set_retention_timeout_ms(kv_cache_config_.memory_cache_sync_timeout_ms);
+    mem_req.set_operation_deadline_unix_ms(copy_plan->operation_deadline_unix_ms);
+    mem_req.set_protocol_version(kMemoryCopyProtocolVersion);
     mem_req.set_copy_direction(copy_plan->direction == CopyDirection::H2D ? MemoryOperationRequestPB::H2D :
                                                                             MemoryOperationRequestPB::D2H);
     for (const auto& copy_info : copy_plan->copy_infos) {
@@ -501,10 +862,10 @@ KVCacheMemoryConnector::sendCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan)
                        const std::shared_ptr<grpc::ClientContext>& context,
                        const FunctionRequestPB&                    request,
                        grpc::CompletionQueue*                      completion_queue) {
-        return stub->AsyncExecuteFunction(context.get(), request, completion_queue);
+        return stub->PrepareAsyncExecuteFunction(context.get(), request, completion_queue);
     };
-    return broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
-        requests, kv_cache_config_.memory_cache_sync_timeout_ms, rpc_call);
+    return broadcast_manager_->broadcastPrepared<FunctionRequestPB, FunctionResponsePB>(
+        requests, static_cast<int>(rpc_timeout_ms), rpc_call);
 }
 
 void KVCacheMemoryConnector::printCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const {
@@ -526,9 +887,97 @@ void KVCacheMemoryConnector::printCopyPlan(const std::shared_ptr<CopyPlan>& copy
 bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, MemoryOperationResponsePB& response) {
     RTP_LLM_PROFILE_FUNCTION();
     autil::ScopedTime2 timer;
-    const auto         copy_direction =
-        (request.copy_direction() == MemoryOperationRequestPB::H2D) ? CopyDirection::H2D : CopyDirection::D2H;
+    response.set_operation_id(request.operation_id());
+    response.set_quiesced(false);
+    response.set_protocol_version(kMemoryCopyProtocolVersion);
 
+    if (request.operation_id().empty()) {
+        RTP_LLM_LOG_WARNING("memory copy request has no valid operation identity or retention");
+        response.set_success(false);
+        return true;
+    }
+
+    if (request.operation_kind() == MemoryOperationRequestPB::CAPABILITY) {
+        const bool supported = request.protocol_version() == kMemoryCopyProtocolVersion;
+        response.set_success(supported);
+        response.set_quiesced(supported);
+        return true;
+    }
+
+    if (request.protocol_version() != kMemoryCopyProtocolVersion) {
+        RTP_LLM_LOG_WARNING("memory copy request protocol version is unsupported: %d", request.protocol_version());
+        response.set_success(false);
+        return true;
+    }
+
+    if (request.operation_kind() == MemoryOperationRequestPB::QUIESCE) {
+        if (!MemoryCopyDeadline::validWireDuration(request.quiesce_timeout_ms())) {
+            RTP_LLM_LOG_WARNING("memory copy quiesce timeout is invalid");
+            response.set_success(false);
+            return true;
+        }
+        const auto deadline = MemoryCopyDeadline::evaluateQuiesce(request.operation_deadline_unix_ms(),
+                                                                  request.retention_timeout_ms(),
+                                                                  kv_cache_config_.memory_cache_sync_timeout_ms,
+                                                                  MemoryCopyDeadline::unixMillisNow());
+        if (!deadline) {
+            RTP_LLM_LOG_WARNING("memory copy quiesce rejected: %s", deadline.error.c_str());
+            response.set_success(false);
+            return true;
+        }
+        const auto wait_timeout = std::chrono::milliseconds(request.quiesce_timeout_ms());
+        const bool quiesced = copy_fence_.sealAndWait(request.operation_id(), wait_timeout, deadline.retention);
+        response.set_success(quiesced);
+        response.set_quiesced(quiesced);
+        return true;
+    }
+
+    if (request.operation_kind() != MemoryOperationRequestPB::COPY) {
+        RTP_LLM_LOG_WARNING("memory copy request has unsupported operation kind: %d", request.operation_kind());
+        response.set_success(false);
+        return true;
+    }
+    if (request.copy_items_size() == 0) {
+        RTP_LLM_LOG_WARNING("memory copy request has no copy items");
+        response.set_success(false);
+        return true;
+    }
+    if (request.copy_direction() != MemoryOperationRequestPB::H2D
+        && request.copy_direction() != MemoryOperationRequestPB::D2H) {
+        RTP_LLM_LOG_WARNING("memory copy request has unsupported copy direction: %d", request.copy_direction());
+        response.set_success(false);
+        return true;
+    }
+
+    const auto deadline = MemoryCopyDeadline::evaluateCopy(request.operation_deadline_unix_ms(),
+                                                           request.retention_timeout_ms(),
+                                                           kv_cache_config_.memory_cache_sync_timeout_ms,
+                                                           MemoryCopyDeadline::unixMillisNow());
+    if (!deadline) {
+        RTP_LLM_LOG_WARNING("memory copy rejected: %s", deadline.error.c_str());
+        response.set_success(false);
+        return true;
+    }
+    auto begin = copy_fence_.beginBeforeDeadline(
+        request.operation_id(), deadline.retention, request.operation_deadline_unix_ms());
+    if (!begin) {
+        RTP_LLM_LOG_WARNING("memory copy rejected: %s", begin.error.c_str());
+        response.set_success(false);
+        return true;
+    }
+    auto copy_operation = std::move(begin.operation);
+    const auto copy_direction =
+        (request.copy_direction() == MemoryOperationRequestPB::H2D) ? CopyDirection::H2D : CopyDirection::D2H;
+    const bool copy_succeeded = executeCopy(request, copy_direction);
+    copy_operation.reset();
+
+    response.set_success(copy_succeeded);
+    response.set_quiesced(true);
+    reportCopyMetrics(copy_succeeded, timer.done_us(), copy_direction);
+    return copy_succeeded;
+}
+
+bool KVCacheMemoryConnector::executeCopy(const MemoryOperationRequestPB& request, CopyDirection copy_direction) {
     std::vector<torch::Tensor> dst_buffers;
     std::vector<torch::Tensor> src_buffers;
     for (int i = 0; i < request.copy_items_size(); ++i) {
@@ -540,8 +989,6 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
             RTP_LLM_LOG_WARNING("copy cache failed, prepare copy buffers failed, mem_block=%d, direction=%s",
                                 mem_block,
                                 copy_direction == CopyDirection::H2D ? "H2D" : "D2H");
-            response.set_success(false);
-            reportCopyMetrics(false, timer.done_us(), copy_direction);
             return false;
         }
     }
@@ -552,8 +999,6 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
         execNoBlockCopy(mc);
     }
 
-    response.set_success(true);
-    reportCopyMetrics(true, timer.done_us(), copy_direction);
     return true;
 }
 

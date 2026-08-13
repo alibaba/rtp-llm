@@ -43,6 +43,7 @@ public:
         int64_t                          deadline_ms = 0;
         std::pair<std::string, uint32_t> prefill_addr;  // {ip, port}
         int                              prefill_tp_size = 0;
+        bool                             request_deadline_enabled = false;
     };
 
     // Returns P2P routing context if this is a P2P load Meta

@@ -1,11 +1,12 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <memory>
+#include <mutex>
 
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
-#include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 
 namespace rtp_llm {
 
@@ -35,12 +36,15 @@ public:
     void waitDone() override;
     bool done() const override;
     bool success() const override;
-    void setBroadcastResult(const std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>& result);
+    void complete(bool success);
 
 private:
-    std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>> broadcast_result_;
     std::function<void(bool)>                                               done_callback_;
     std::atomic<bool>                                                       already_done_{false};
+    std::atomic<bool>                                                       completion_success_{false};
+    mutable std::mutex                                                      completion_mutex_;
+    std::condition_variable                                                 completion_cv_;
+    bool                                                                    completion_started_{false};
 };
 
 }  // namespace rtp_llm

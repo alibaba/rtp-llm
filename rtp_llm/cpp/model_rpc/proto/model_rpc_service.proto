@@ -481,12 +481,26 @@ message MemoryOperationRequestPB {
         H2D = 0;
         D2H = 1;
     }
+    enum OperationKind {
+        COPY = 0;
+        QUIESCE = 1;
+        CAPABILITY = 2;
+    }
     repeated CopyItem copy_items = 1;
     CopyDirection copy_direction = 2;
+    string operation_id = 3;
+    OperationKind operation_kind = 4;
+    int64 retention_timeout_ms = 5;
+    int64 quiesce_timeout_ms = 6;
+    int64 operation_deadline_unix_ms = 7;
+    int32 protocol_version = 8;
 }
 
 message MemoryOperationResponsePB {
     bool success = 1;
+    string operation_id = 2;
+    bool quiesced = 3;
+    int32 protocol_version = 4;
 }
 
 message TPWorkerInfoPB {
