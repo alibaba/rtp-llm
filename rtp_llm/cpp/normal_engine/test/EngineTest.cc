@@ -382,4 +382,40 @@ TEST_F(NormalEngineTest, testRejectOutputVocabWithDeviceInput) {
     unsetenv("RTP_LLM_DEVICE_INPUT");
 }
 
+TEST_F(NormalEngineTest, testRejectOutputVocabWithSpeculative) {
+    CustomConfig config;
+    config.output_vocab_ids    = {0, 2, 7};
+    config.speculative_enabled = true;
+    EXPECT_THROW(createMockEngine(config), std::exception);
+}
+
+TEST_F(NormalEngineTest, testRejectOutputVocabWithWarmUpWithLoss) {
+    CustomConfig config;
+    config.output_vocab_ids  = {0, 2, 7};
+    config.warm_up_with_loss = true;
+    EXPECT_THROW(createMockEngine(config), std::exception);
+}
+
+TEST_F(NormalEngineTest, testRejectInvalidOutputVocabIds) {
+    CustomConfig unsorted;
+    unsorted.output_vocab_ids = {7, 2, 0};
+    EXPECT_THROW(createMockEngine(unsorted), std::exception);
+
+    CustomConfig duplicated;
+    duplicated.output_vocab_ids = {0, 2, 2, 7};
+    EXPECT_THROW(createMockEngine(duplicated), std::exception);
+
+    CustomConfig out_of_range;
+    out_of_range.output_vocab_ids = {0, 2, 100};  // vocab_size is 100
+    EXPECT_THROW(createMockEngine(out_of_range), std::exception);
+}
+
+TEST_F(NormalEngineTest, testAllowsUnsupportedCombosWithoutOutputVocab) {
+    CustomConfig config;
+    config.prefill_cp_enabled  = true;
+    config.speculative_enabled = true;
+    config.warm_up_with_loss   = true;
+    EXPECT_NO_THROW(createMockEngine(config));
+}
+
 }  // namespace rtp_llm

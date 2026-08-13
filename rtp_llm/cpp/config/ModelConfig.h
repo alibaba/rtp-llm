@@ -82,9 +82,11 @@ public:
     bool use_norm_input_residual    = false;
     bool use_norm_attn_out_residual = false;
 
-    int64_t              max_seq_len       = 0;
-    int64_t              gen_num_per_cycle = 0;  // speculative decoding: tokens per cycle
-    int64_t              vocab_size        = 0;
+    int64_t max_seq_len       = 0;
+    int64_t gen_num_per_cycle = 0;  // speculative decoding: tokens per cycle
+    int64_t vocab_size        = 0;
+    // Output vocab pruning contract: empty means disabled; otherwise ids must be strictly
+    // ascending and deduplicated, each in [0, vocab_size), and output_vocab_padded_size >= ids.size().
     std::vector<int64_t> output_vocab_ids;
     int64_t              output_vocab_padded_size   = 0;
     int64_t              input_vocab_size           = 0;  // 0 if not set

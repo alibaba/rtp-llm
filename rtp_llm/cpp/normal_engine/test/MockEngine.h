@@ -46,7 +46,9 @@ struct CustomConfig {
     DataType                                kv_cache_data_type = DataType::TYPE_FP16;
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
     std::vector<int64_t>                    output_vocab_ids;  // non-empty enables output-vocab pruning
-    bool                                    prefill_cp_enabled = false;
+    bool                                    prefill_cp_enabled  = false;
+    bool                                    speculative_enabled = false;
+    bool                                    warm_up_with_loss   = false;
 };
 
 inline void setDefaultMhaKVCacheSpecDescs(rtp_llm::ModelConfig& model_config) {
@@ -145,12 +147,14 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     rtp_llm::MoeConfig                   moe_config;
     rtp_llm::ModelSpecificConfig         model_specific_config;
     rtp_llm::SpeculativeExecutionConfig  sp_config;
-    rtp_llm::CacheStoreConfig            cache_store_config;
-    rtp_llm::MiscellaneousConfig         misc_config;
-    rtp_llm::ArpcConfig                  arpc_config;
-    rtp_llm::GrpcConfig                  grpc_config;
-    rtp_llm::FfnDisAggregateConfig       ffn_disaggregate_config;
-    rtp_llm::VitConfig                   vit_config;
+    sp_config.type                   = config.speculative_enabled ? SP_TYPE_VANILLA : SP_TYPE_NONE;
+    runtime_config.warm_up_with_loss = config.warm_up_with_loss;
+    rtp_llm::CacheStoreConfig      cache_store_config;
+    rtp_llm::MiscellaneousConfig   misc_config;
+    rtp_llm::ArpcConfig            arpc_config;
+    rtp_llm::GrpcConfig            grpc_config;
+    rtp_llm::FfnDisAggregateConfig ffn_disaggregate_config;
+    rtp_llm::VitConfig             vit_config;
 
     rtp_llm::EngineInitParams rtp_llm_params(0,
                                              model_config,
@@ -186,9 +190,12 @@ std::shared_ptr<NormalEngine> createMockEngine(const CustomConfig& config) {
     NormalExecutor::test_model_factory = [vocab](const GptModelInitParams&) {
         return std::make_unique<MockModel>(vocab);
     };
-    std::shared_ptr<NormalEngine> engine = make_shared<NormalEngine>(rtp_llm_params, nullptr);
-    NormalExecutor::test_model_factory   = nullptr;
-    return engine;
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() {
+            NormalExecutor::test_model_factory = nullptr;
+        }
+    } factory_reset_guard;
+    return make_shared<NormalEngine>(rtp_llm_params, nullptr);
 }
 
 }  // namespace rtp_llm

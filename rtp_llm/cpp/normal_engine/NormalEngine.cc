@@ -107,6 +107,15 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         // be fed to the embedding lookup as-is. Reject until that path restores them.
         RTP_LLM_CHECK_WITH_INFO(!deviceInputEnabled(),
                                 "output vocabulary pruning does not support device-input mode (RTP_LLM_DEVICE_INPUT)");
+        const auto& output_vocab_ids = model_config_.output_vocab_ids;
+        RTP_LLM_CHECK_WITH_INFO(std::is_sorted(output_vocab_ids.begin(), output_vocab_ids.end())
+                                    && std::adjacent_find(output_vocab_ids.begin(), output_vocab_ids.end())
+                                           == output_vocab_ids.end(),
+                                "output_vocab_ids must be strictly ascending and deduplicated");
+        RTP_LLM_CHECK_WITH_INFO(output_vocab_ids.front() >= 0 && output_vocab_ids.back() < model_config_.vocab_size,
+                                "output_vocab_ids must be within [0, vocab_size)");
+        RTP_LLM_CHECK_WITH_INFO(model_config_.output_vocab_padded_size >= static_cast<int64_t>(output_vocab_ids.size()),
+                                "output_vocab_padded_size must be >= output_vocab_ids.size()");
     }
     if (propose_params_) {
         reserve_step_ = propose_params_->gen_num_per_circle + 1;
