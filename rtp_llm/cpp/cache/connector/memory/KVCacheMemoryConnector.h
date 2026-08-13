@@ -105,7 +105,6 @@ private:
 
     bool mallocBlocks(size_t need_blocks, std::vector<BlockIdxType>& malloced_blocks);
     bool freeBlocks(const std::vector<BlockIdxType>& blocks, bool cache_free = true);
-    void referenceBlocks(const std::vector<BlockIdxType>& blocks, bool cache_ref = true);
     bool ensureEnoughFreeBlocks(size_t need_blocks);
 
     void                       initBlockPool();

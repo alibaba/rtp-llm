@@ -12,6 +12,8 @@
 
 namespace rtp_llm {
 
+class BlockPool;
+
 class MemoryBlockCache {
 public:
     struct CacheItem {
@@ -36,9 +38,14 @@ public:
 
     MatchResult match(CacheKeyType cache_key);
 
+    MatchResult matchAndRequestReference(CacheKeyType cache_key, BlockPool& block_pool);
+
     bool contains(CacheKeyType cache_key) const;
 
     std::pair<bool, std::optional<CacheItem>> put(const CacheItem& cache_item);
+
+    std::pair<bool, std::optional<CacheItem>>
+    putAndBlockCacheReference(const CacheItem& cache_item, BlockPool& block_pool);
 
     std::optional<CacheItem> remove(CacheKeyType cache_key);
 
@@ -55,6 +62,9 @@ public:
     std::vector<CacheKeyType> cacheKeys() const;
 
 private:
+    MatchResult                               matchLocked(CacheKeyType cache_key);
+    std::pair<bool, std::optional<CacheItem>> putLocked(const CacheItem& cache_item);
+
     mutable LRUCache<CacheKeyType, CacheItem> lru_cache_;
     mutable std::shared_mutex                 mutex_;
 };

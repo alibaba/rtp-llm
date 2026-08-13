@@ -10,6 +10,7 @@ cc_library(
         "*.cc",
     ]),
     deps = [
+        "//rtp_llm/cpp/cache:block_pool",
         "//rtp_llm/cpp/cache/connector:connector_base",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",

@@ -1,12 +1,11 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "no_block_copy_link_deps", "torch_deps")
 
 cc_test = cc_test_wrapper
 
 test_deps = [
     "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
     "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
-    "//rtp_llm/models_py/bindings/cuda:no_block_copy",
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/config:model_config",
     "//rtp_llm/cpp/utils:core_utils",
@@ -14,7 +13,7 @@ test_deps = [
     "@com_google_googletest//:gtest_main",
     "@local_config_cuda//cuda:cuda_headers",
     "@local_config_cuda//cuda:cudart",
-] + torch_deps()
+] + torch_deps() + no_block_copy_link_deps()
 
 test_copts = [
     "-fno-access-control",
@@ -44,6 +43,7 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = test_deps + [
+        "//rtp_llm/cpp/cache:block_pool",
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
     ],
     env = {},

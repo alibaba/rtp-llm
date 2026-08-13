@@ -4,6 +4,8 @@
 
 #include <unordered_map>
 
+#include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryBlockCache.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
@@ -11,6 +13,60 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm::test {
+
+std::shared_ptr<BlockPool> makeReferenceOnlyBlockPool() {
+    auto config = BlockPoolConfigHelper::createConfig(
+        /*layer_num=*/1, /*block_num=*/4, /*block_stride_bytes=*/1, rtp_llm::TYPE_INT8);
+    auto pool = std::make_shared<BlockPool>(config, AllocationType::HOST);
+    pool->initFreeBlocks();
+    return pool;
+}
+
+TEST(MemoryBlockCacheTest, matchAndRequestReference_KeepsEvictedBlockLeased) {
+    MemoryBlockCache cache;
+    auto             pool   = makeReferenceOnlyBlockPool();
+    auto             blocks = pool->malloc(1);
+    ASSERT_EQ(blocks.size(), 1u);
+    const auto block = blocks.front();
+
+    MemoryBlockCache::CacheItem item;
+    item.cache_key   = 101;
+    item.block_index = block;
+    item.is_complete = true;
+    ASSERT_TRUE(cache.putAndBlockCacheReference(item, *pool).first);
+    pool->requestFree(block);
+
+    const auto match = cache.matchAndRequestReference(item.cache_key, *pool);
+    ASSERT_EQ(match.matched_index, block);
+    const auto evicted = cache.pop(1);
+    ASSERT_EQ(evicted, BlockIndicesType({block}));
+    pool->blockCacheFree(evicted);
+    EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum() - 1);
+
+    pool->requestFree(block);
+    EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+}
+
+TEST(MemoryBlockCacheTest, putAndBlockCacheReference_KeepsPublishedBlockResident) {
+    MemoryBlockCache cache;
+    auto             pool   = makeReferenceOnlyBlockPool();
+    auto             blocks = pool->malloc(1);
+    ASSERT_EQ(blocks.size(), 1u);
+    const auto block = blocks.front();
+
+    MemoryBlockCache::CacheItem item;
+    item.cache_key   = 102;
+    item.block_index = block;
+    item.is_complete = true;
+    ASSERT_TRUE(cache.putAndBlockCacheReference(item, *pool).first);
+    pool->requestFree(block);
+    EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum() - 1);
+
+    const auto evicted = cache.pop(1);
+    ASSERT_EQ(evicted, BlockIndicesType({block}));
+    pool->blockCacheFree(evicted);
+    EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+}
 
 TEST(MemoryBlockCacheTest, match_ReturnNull_WhenKeyNotFoundAndCacheNonEmpty) {
     MemoryBlockCache cache;

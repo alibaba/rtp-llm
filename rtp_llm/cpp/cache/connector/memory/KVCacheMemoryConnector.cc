@@ -261,16 +261,14 @@ std::shared_ptr<KVCacheMemoryConnector::CopyPlan> KVCacheMemoryConnector::buildC
     bool                        success   = true;
 
     for (int i = start_index; i < start_index + read_num; ++i) {
-        const auto cache_key    = cache_keys.at(i);
-        const auto match_result = block_cache_->match(static_cast<CacheKeyType>(cache_key));
+        const auto cache_key = cache_keys.at(i);
+        const auto match_result =
+            block_cache_->matchAndRequestReference(static_cast<CacheKeyType>(cache_key), *block_pool_);
         if (isNullBlockIdx(match_result.matched_index)) {
             RTP_LLM_LOG_WARNING("build copy plan for read failed, cache key not found, cache key: %ld", cache_key);
             success = false;
             break;
         }
-        // 每次都加引用的原因是为了确保match到的block不会被释放(避免在写时malloc如果cache满弹出该block)
-        referenceBlocks({match_result.matched_index}, /*cache_ref=*/false);
-
         CopyInfoPerKey copy_info;
         copy_info.cache_key = cache_key;
         copy_info.mem_block = match_result.matched_index;
@@ -742,15 +740,6 @@ bool KVCacheMemoryConnector::freeBlocks(const std::vector<BlockIdxType>& blocks,
     return true;
 }
 
-void KVCacheMemoryConnector::referenceBlocks(const std::vector<BlockIdxType>& blocks, bool cache_ref) {
-    RTP_LLM_CHECK_WITH_INFO(block_pool_ != nullptr, "block pool is null");
-    if (cache_ref) {
-        block_pool_->blockCacheReference(blocks);
-    } else {
-        block_pool_->requestReference(blocks);
-    }
-}
-
 std::shared_ptr<BlockPool> KVCacheMemoryConnector::createBlockPool(size_t block_size, size_t pool_size_mb) const {
     RTP_LLM_CHECK_WITH_INFO(pool_size_mb > 0, "pool size must be > 0");
     const int64_t block_num = pool_size_mb * 1024 * 1024 / static_cast<int64_t>(block_size);
@@ -777,12 +766,11 @@ std::string KVCacheMemoryConnector::blockPoolDebugString() const {
 
 void KVCacheMemoryConnector::putToCache(const MemoryBlockCache::CacheItem& item) {
     RTP_LLM_PROFILE_FUNCTION();
-    if (auto [success, popped_item_opt] = block_cache_->put(item); success) {
+    if (auto [success, popped_item_opt] = block_cache_->putAndBlockCacheReference(item, *block_pool_); success) {
         RTP_LLM_LOG_DEBUG("write cache, cache key: %ld, block index: %d, block size: %zu",
                           item.cache_key,
                           item.block_index,
                           item.block_size);
-        referenceBlocks({item.block_index}, /*cache_ref=*/true);
         if (popped_item_opt.has_value()) {
             const auto popped_item = popped_item_opt.value();
             freeBlocks({popped_item.block_index}, /*cache_free=*/true);

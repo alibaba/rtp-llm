@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/cache/connector/memory/MemoryBlockCache.h"
 
+#include "rtp_llm/cpp/cache/BlockPool.h"
+
 #include <cassert>
 #include <iostream>
 #include <string>
@@ -17,6 +19,21 @@ namespace rtp_llm {
 MemoryBlockCache::MatchResult MemoryBlockCache::match(CacheKeyType cache_key) {
     RTP_LLM_PROFILE_FUNCTION();
     std::unique_lock<std::shared_mutex> lock(mutex_);
+    return matchLocked(cache_key);
+}
+
+MemoryBlockCache::MatchResult MemoryBlockCache::matchAndRequestReference(CacheKeyType cache_key,
+                                                                         BlockPool&   block_pool) {
+    RTP_LLM_PROFILE_FUNCTION();
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    auto                                result = matchLocked(cache_key);
+    if (!isNullBlockIdx(result.matched_index)) {
+        block_pool.requestReference(result.matched_index);
+    }
+    return result;
+}
+
+MemoryBlockCache::MatchResult MemoryBlockCache::matchLocked(CacheKeyType cache_key) {
     const auto& [success, item] = lru_cache_.get(cache_key);
     if (success) {
         return {item.block_index, item.block_size, item.is_complete};
@@ -35,6 +52,23 @@ std::pair<bool, std::optional<MemoryBlockCache::CacheItem>> MemoryBlockCache::pu
     RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(item.block_index), "put block id should not be null");
 
     std::unique_lock<std::shared_mutex> lock(mutex_);
+    return putLocked(item);
+}
+
+std::pair<bool, std::optional<MemoryBlockCache::CacheItem>>
+MemoryBlockCache::putAndBlockCacheReference(const CacheItem& item, BlockPool& block_pool) {
+    RTP_LLM_PROFILE_FUNCTION();
+    RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(item.block_index), "put block id should not be null");
+
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    auto                                result = putLocked(item);
+    if (result.first) {
+        block_pool.blockCacheReference(item.block_index);
+    }
+    return result;
+}
+
+std::pair<bool, std::optional<MemoryBlockCache::CacheItem>> MemoryBlockCache::putLocked(const CacheItem& item) {
     if (lru_cache_.contains(item.cache_key)) {
         // Key exists:
         // - Always increase old matched item's popularity
