@@ -1,5 +1,7 @@
 package org.flexlb.sync.runner;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.dao.master.CacheHitFeedback;
@@ -13,6 +15,7 @@ import org.flexlb.enums.KvCacheGroupMode;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.mockito.Mockito;
 
 import java.util.concurrent.CompletableFuture;
@@ -175,6 +178,65 @@ class GrpcWorkerStatusCheckRunnerTest {
                     && modelName.equals(arguments[0])
                     && unifiedComparison.equals(arguments[1]);
         }));
+    }
+
+    @Test
+    void shouldReportFinishedPrefillTasksForPdfusionButNotDecode() {
+        String requestId = "finished-request";
+        WorkerHost host = new WorkerHost(
+                "127.0.0.1", 8080, 8081, 8085, 18002, "test-site", "test-group", "deployment-a");
+        EngineRpcService.TaskInfoPB finishedTask = EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestId(requestId)
+                .setInputQueueEnqueueTimeMs(1_000)
+                .setInputQueueDrainTimeMs(1_100)
+                .setFirstTokenTimeMs(1_200)
+                .build();
+        EngineRpcService.WorkerStatusPB workerStatusPB = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole(RoleType.PDFUSION.getCode())
+                .setStatusVersion(100)
+                .setAlive(true)
+                .addFinishedTaskList(finishedTask)
+                .build();
+        when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(workerStatusPB);
+
+        ch.qos.logback.classic.Logger pvLogger =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger");
+        ListAppender<ILoggingEvent> pvEvents = new ListAppender<>();
+        pvEvents.start();
+        pvLogger.addAppender(pvEvents);
+        try {
+            new GrpcWorkerStatusRunner(
+                    "test-model", host, RoleType.PDFUSION, new WorkerStatus(), engineHealthReporter,
+                    engineGrpcService, 20, cacheAwareService).run();
+
+            assertTrue(pvEvents.list.stream()
+                    .map(ILoggingEvent::getFormattedMessage)
+                    .anyMatch(message -> message.contains("\"event\":\"prefill_worker_status\"")
+                            && message.contains("\"requestId\":\"" + requestId + "\"")
+                            && message.contains("\"role\":\"" + RoleType.PDFUSION.getCode() + "\"")));
+            assertTrue(Mockito.mockingDetails(engineHealthReporter).getInvocations().stream().anyMatch(invocation -> {
+                Object[] arguments = invocation.getArguments();
+                return invocation.getMethod().getName().equals("reportPrefillWorkerStatusTask")
+                        && arguments.length == 5
+                        && RoleType.PDFUSION.getCode().equals(arguments[2]);
+            }));
+
+            Mockito.reset(engineHealthReporter);
+            new GrpcWorkerStatusRunner(
+                    "test-model", host, RoleType.DECODE, new WorkerStatus(), engineHealthReporter,
+                    engineGrpcService, 20, cacheAwareService).run();
+
+            assertEquals(1, pvEvents.list.stream()
+                    .map(ILoggingEvent::getFormattedMessage)
+                    .filter(message -> message.contains("\"event\":\"prefill_worker_status\""))
+                    .count());
+            assertTrue(Mockito.mockingDetails(engineHealthReporter).getInvocations().stream()
+                    .noneMatch(invocation -> invocation.getMethod().getName().equals("reportPrefillWorkerStatusTask")));
+        } finally {
+            pvLogger.detachAppender(pvEvents);
+            pvEvents.stop();
+        }
     }
 
     @Test

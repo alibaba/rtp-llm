@@ -325,7 +325,7 @@ class ModelServiceConfigurationTest {
                 "max_query_retry_count":2,"recovery_success_threshold":2,
                 "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]},
                 "local_standby":{"auto_switch":true,"block_size":4096,
-                "entry_ttl_ms":300000,"minimum_entry_ttl_ms":120000,
+                "ttl_ms":300000,"minimum_ttl_ms":120000,
                 "ttl_reduction_start_ratio":0.75,"maximum_entries":1000000,
                 "capacity_multiplier":1.3,
                 "async_queue_capacity":8192,"hash_thread_count":6,
@@ -345,7 +345,7 @@ class ModelServiceConfigurationTest {
                     var standby = kvcm.getLocalStandby();
                     assertThat(standby.isAutoSwitch()).isTrue();
                     assertThat(standby.getBlockSize()).isEqualTo(4096);
-                    assertThat(standby.getMinimumEntryTtlMs()).isEqualTo(120000);
+                    assertThat(standby.getMinimumTtlMs()).isEqualTo(120000);
                     assertThat(standby.getTtlReductionStartRatio()).isEqualTo(0.75);
                     assertThat(standby.getCapacityMultiplier()).isEqualTo(1.3);
                     assertThat(standby.getHashThreadCount()).isEqualTo(6);
@@ -362,7 +362,7 @@ class ModelServiceConfigurationTest {
         String config = """
                 {"service_id":"test-service","kvcm":{"enabled":true,"address":"kvcm-service",
                 "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]},
-                "local_standby":{"entry_ttl_ms":1000,"minimum_entry_ttl_ms":2000}},
+                "local_standby":{"ttl_ms":1000,"minimum_ttl_ms":2000}},
                 "role_endpoints":[{"group":"default",
                 "pd_fusion_endpoint":{"address":"service-a","protocol":"http","path":"/",
                 "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]}}}]}

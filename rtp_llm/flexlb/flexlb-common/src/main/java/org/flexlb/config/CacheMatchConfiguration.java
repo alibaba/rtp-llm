@@ -83,13 +83,13 @@ public class CacheMatchConfiguration {
         }
         if (localStandbyEnabled) {
             log.info("Local standby cache configuration: autoSwitch={}, blockSize={}, "
-                            + "entryTtlMs={}, minimumEntryTtlMs={}, ttlReductionStartRatio={}, "
+                            + "ttlMs={}, minimumTtlMs={}, ttlReductionStartRatio={}, "
                             + "maximumEntries={}, capacityMultiplier={}, asyncQueueCapacity={}, "
                             + "hashThreadCount={}, hashQueueCapacity={}",
                     localStandbyConfig.isAutoSwitch(),
                     localStandbyConfig.getBlockSize(),
-                    localStandbyConfig.getEntryTtlMs(),
-                    localStandbyConfig.getMinimumEntryTtlMs(),
+                    localStandbyConfig.getTtlMs(),
+                    localStandbyConfig.getMinimumTtlMs(),
                     localStandbyConfig.getTtlReductionStartRatio(),
                     localStandbyConfig.getMaximumEntries(),
                     localStandbyConfig.getCapacityMultiplier(),

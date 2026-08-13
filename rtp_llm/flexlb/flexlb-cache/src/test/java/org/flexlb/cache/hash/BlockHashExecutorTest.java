@@ -25,6 +25,7 @@ import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class BlockHashExecutorTest {
 
@@ -33,7 +34,7 @@ class BlockHashExecutorTest {
 
     @BeforeEach
     void setUp() {
-        executor = new BlockHashExecutor(monitor, 1, 2, 60, 1);
+        executor = new BlockHashExecutor(monitor, new VllmBlockHashStrategy(), 1, 2, 60, 1);
     }
 
     @AfterEach
@@ -58,6 +59,65 @@ class BlockHashExecutorTest {
         assertEquals(List.of(2164874634404590027L), result.blockCacheKeys());
         assertTrue(result.queueWaitTimeUs() >= 0);
         assertTrue(result.executionTimeUs() >= 0);
+    }
+
+    @Test
+    void usesConfiguredBlockHashStrategy() {
+        BlockHashStrategy strategy = mock(BlockHashStrategy.class);
+        when(strategy.calculate(new int[]{1, 2, 3, 4, 5}, 4, 0))
+                .thenReturn(List.of(11L, 22L));
+        BlockHashExecutor configuredExecutor =
+                new BlockHashExecutor(monitor, strategy, 1, 2, 60, 1);
+
+        try {
+            BlockHashCalculationResult result =
+                    configuredExecutor.calculate(new int[]{1, 2, 3, 4, 5}, 4, 0).block();
+
+            assertNotNull(result);
+            assertEquals(List.of(11L, 22L), result.blockCacheKeys());
+            verify(strategy).calculate(new int[]{1, 2, 3, 4, 5}, 4, 0);
+        } finally {
+            configuredExecutor.shutdown();
+        }
+    }
+
+    @Test
+    void calculatesSglangHashChainForCompletePages() {
+        BlockHashExecutor sglangExecutor =
+                new BlockHashExecutor(monitor, new SglangBlockHashStrategy(), 1, 2, 60, 1);
+
+        try {
+            BlockHashCalculationResult result =
+                    sglangExecutor.calculate(new int[]{1, 2, 3, 4, 5}, 4, 0).block();
+
+            assertNotNull(result);
+            assertEquals(
+                    List.of(-3488128144981237669L),
+                    result.blockCacheKeys());
+        } finally {
+            sglangExecutor.shutdown();
+        }
+    }
+
+    @Test
+    void calculatesSglangEagleBigramHashAndCacheablePrefix() {
+        BlockHashExecutor sglangExecutor =
+                new BlockHashExecutor(monitor, new SglangBlockHashStrategy(), 1, 2, 60, 1);
+
+        try {
+            BlockHashCalculationResult result =
+                    sglangExecutor.calculate(new int[]{1, 2, 3, 4, 5, 6}, 4, 1).block();
+
+            assertNotNull(result);
+            assertEquals(
+                    List.of(-638950109823820341L),
+                    result.blockCacheKeys());
+            assertEquals(
+                    List.of(-638950109823820341L),
+                    sglangExecutor.cacheablePrefix(result.blockCacheKeys(), 6, 4, 1));
+        } finally {
+            sglangExecutor.shutdown();
+        }
     }
 
     @Test

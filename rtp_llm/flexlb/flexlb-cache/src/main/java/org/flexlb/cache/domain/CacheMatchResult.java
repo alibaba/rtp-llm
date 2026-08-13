@@ -24,6 +24,14 @@ public record CacheMatchResult(
         return new CacheMatchResult(Collections.emptyMap(), source, queryTimeUs, 0);
     }
 
+    public static long matchedTokens(double matchBlocks, long blockSize, long inputTokens) {
+        if (matchBlocks <= 0 || blockSize <= 0) {
+            return 0;
+        }
+        long matchedTokens = Math.round(blockSize * matchBlocks);
+        return inputTokens > 0 ? Math.min(inputTokens, matchedTokens) : matchedTokens;
+    }
+
     public HostCacheMatch hostMatch(String workerIpPort) {
         return hostMatches.get(workerIpPort);
     }

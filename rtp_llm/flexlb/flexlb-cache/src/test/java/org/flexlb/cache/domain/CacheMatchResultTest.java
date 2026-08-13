@@ -29,4 +29,14 @@ class CacheMatchResultTest {
 
         assertEquals(2, result.hostMatch("10.0.0.1:8080").localMatchBlocks());
     }
+
+    @Test
+    void shouldCapMatchedTokensAtRequestLength() {
+        assertEquals(5, CacheMatchResult.matchedTokens(2, 4, 5));
+    }
+
+    @Test
+    void shouldKeepMatchedTokensWhenRequestLengthIsUnknown() {
+        assertEquals(8, CacheMatchResult.matchedTokens(2, 4, 0));
+    }
 }

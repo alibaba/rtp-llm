@@ -73,6 +73,7 @@ class LocalStandbyCacheMatchProviderTest {
         Request request = new Request();
         request.setRequestId("request-1");
         request.setLocalStandbyBlockSize(4096);
+        request.setLocalStandbyCacheableBlockCacheKeys(List.of(11L));
         CompletableFuture<LocalStandbyHashResult> pendingHash = new CompletableFuture<>();
         when(hashService.getHashResult("request-1", null, 4096)).thenReturn(pendingHash);
 
@@ -90,7 +91,7 @@ class LocalStandbyCacheMatchProviderTest {
             pendingHash.complete(new LocalStandbyHashResult(List.of(11L, 22L), 4096));
 
             verify(cacheManager, timeout(1_000))
-                    .addRoutedRequestBlocks("10.0.0.1:8080", List.of(11L, 22L));
+                    .addRoutedRequestBlocks("10.0.0.1:8080", List.of(11L));
         } finally {
             provider.shutdown();
         }

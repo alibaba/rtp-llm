@@ -1,0 +1,708 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FlexLB · Prefill Request Replay</title>
+  <style>
+    :root {
+      --ink: #e7eef9;
+      --muted: #91a1b9;
+      --line: rgba(159, 179, 207, .2);
+      --panel: rgba(14, 24, 42, .94);
+      --panel-2: rgba(20, 34, 57, .94);
+      --canvas: #08111f;
+      --blue: #64b5ff;
+      --orange: #ffc266;
+      --purple: #c88cff;
+      --green: #63e6b0;
+      --red: #ff7b7b;
+      --yellow: #f5d66e;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: var(--canvas); color: var(--ink); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
+    body { overflow-x: hidden; }
+    button, select, input { font: inherit; }
+    button { color: var(--ink); background: #1c3457; border: 1px solid #355477; border-radius: 7px; padding: 7px 10px; cursor: pointer; transition: .15s; }
+    button:hover { border-color: #7ab6ee; background: #26466f; }
+    button.active { background: #2676bd; border-color: #80c5ff; }
+    select { color: var(--ink); background: #132946; border: 1px solid #355477; border-radius: 7px; padding: 6px 8px; }
+    .app { max-width: 1800px; padding: 18px; margin: auto; }
+    .topbar { display: grid; grid-template-columns: minmax(300px, 1fr) auto; gap: 16px; align-items: start; }
+    h1 { margin: 0; font-size: clamp(22px, 2vw, 32px); letter-spacing: -.03em; }
+    .subtitle, .muted { color: var(--muted); font-size: 13px; line-height: 1.45; }
+    .legend { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+    .badge { color: #b9c8db; border: 1px solid var(--line); background: rgba(60, 82, 114, .22); border-radius: 999px; padding: 4px 8px; font-size: 11px; white-space: nowrap; }
+    .badge.fact { border-color: rgba(99, 230, 176, .45); color: #9cf2cc; }
+    .badge.inferred { border-color: rgba(255, 194, 102, .45); color: #ffd78d; }
+    .warning { margin: 13px 0 0; padding: 9px 12px; border-left: 3px solid var(--yellow); background: rgba(245, 214, 110, .1); color: #e8dba6; font-size: 12px; line-height: 1.5; border-radius: 0 7px 7px 0; }
+    .controls { margin-top: 16px; padding: 13px; display: grid; gap: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.2); }
+    .control-row { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+    #time-range { flex: 1 1 480px; accent-color: var(--blue); min-width: 220px; }
+    .time-label { font-variant-numeric: tabular-nums; min-width: 178px; font-size: 13px; color: #dceeff; }
+    .control-label { color: var(--muted); font-size: 12px; margin-left: 8px; }
+    .key-hint { margin-left:auto; display:flex; align-items:center; gap:5px; color:var(--muted); font-size:11px; }
+    kbd { min-width:24px; padding:2px 6px; border:1px solid #bdb3a3; border-bottom-width:2px; border-radius:5px; background:#fffdf8; color:#3a332a; font-family:inherit; font-size:12px; font-weight:750; text-align:center; }
+    .overview { width: 100%; height: 42px; display: block; border-radius: 6px; background: #0d1b30; border: 1px solid rgba(99,128,168,.24); }
+    .summary { margin-top: 14px; display: grid; grid-template-columns: repeat(5, minmax(0,1fr)); gap: 9px; }
+    .metric { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; min-height: 67px; }
+    .metric .label { font-size: 11px; color: var(--muted); }
+    .metric .value { margin-top: 4px; font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .metric .note { font-size: 10px; color: #8295b0; margin-top: 2px; }
+    .replay-main { position: relative; margin-top: 14px; }
+    .analysis-drawer { margin-bottom:14px; border:1px solid var(--line); border-radius:12px; background:var(--panel); overflow:hidden; box-shadow:0 10px 30px rgba(0,0,0,.12); }
+    .analysis-toggle { list-style:none; display:flex; align-items:center; gap:10px; padding:11px 13px; cursor:pointer; user-select:none; border-bottom:1px solid transparent; }
+    .analysis-toggle::-webkit-details-marker { display:none; }
+    .analysis-toggle-title { font-size:14px; font-weight:800; }
+    .analysis-toggle-note { flex:1; color:var(--muted); font-size:11px; }
+    .drawer-chevron { width:26px; height:26px; display:grid; place-items:center; border:1px solid var(--line); border-radius:50%; transition:transform .16s ease; }
+    .analysis-drawer[open] .analysis-toggle { border-bottom-color:var(--line); }
+    .analysis-drawer[open] .drawer-chevron { transform:rotate(180deg); }
+    .analysis-grid { display:grid; grid-template-columns:minmax(260px,1fr) minmax(360px,1.45fr) minmax(250px,.85fr); gap:12px; padding:12px; align-items:start; }
+    .analysis-grid .panel { min-width:0; box-shadow:none; }
+    .analysis-grid #request-detail, .analysis-grid #decision-microscope, .analysis-grid .event-list { max-height:360px; overflow:auto; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+    .panel-title { display: flex; align-items: center; justify-content: space-between; gap: 7px; padding: 10px 12px; border-bottom: 1px solid var(--line); font-size: 13px; font-weight: 700; }
+    .panel-title .small { font-size: 10px; font-weight: 500; color: var(--muted); }
+    #request-detail, #decision-microscope { padding: 10px 12px 12px; }
+    .request-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; color: #d9ebff; font-size: 12px; }
+    .kv-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 7px; margin-top: 10px; }
+    .kv { border: 1px solid rgba(122, 157, 196, .2); background: rgba(19,41,70,.65); border-radius: 7px; padding: 6px 7px; min-width: 0; }
+    .kv .key { color: var(--muted); font-size: 10px; }
+    .kv .val { color: #eaf4ff; font-size: 12px; margin-top: 2px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .phase-track { display: grid; grid-template-columns: repeat(5,1fr); gap: 2px; margin-top: 12px; }
+    .phase-segment { height: 8px; border-radius: 3px; background: #26374f; opacity: .45; }
+    .phase-segment.current { opacity: 1; box-shadow: 0 0 0 1px rgba(255,255,255,.5); }
+    .phase-labels { display: grid; grid-template-columns: repeat(5,1fr); gap: 2px; margin-top: 4px; font-size: 8px; color: var(--muted); text-align: center; }
+    .candidate { position: relative; margin-top: 9px; padding: 8px; background: rgba(19,41,70,.58); border: 1px solid rgba(122,157,196,.18); border-radius: 7px; cursor: pointer; }
+    .candidate.selected { border-color: rgba(99,230,176,.7); box-shadow: inset 3px 0 0 var(--green); }
+    .candidate.special { border-color: rgba(245,214,110,.45); }
+    .candidate-top { display:flex; align-items:center; gap:5px; font-size:11px; }
+    .rank { width: 22px; height:22px; display:grid; place-items:center; border-radius:50%; background:#284466; color:#c9e6ff; font-weight:700; }
+    .candidate .host { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .candidate .symbols { font-size: 12px; letter-spacing: 2px; color: #ffd774; }
+    .candidate-bar { position:relative; height:6px; background:#1a2b43; border-radius:3px; overflow:hidden; margin:7px 0 5px; }
+    .candidate-bar > span { display:block; height:100%; background:linear-gradient(90deg,#41a5f5,#f4bc62); }
+    .candidate-numbers { display:grid; grid-template-columns:repeat(3,1fr); gap:4px; color:#aabbd0; font-size:10px; }
+    .candidate-numbers b { display:block; color:#e9f4ff; font-size:11px; font-weight:600; }
+    .event-list { max-height: 276px; overflow: auto; padding: 5px; }
+    .event { padding: 8px; border-radius: 7px; cursor: pointer; margin: 3px 0; border: 1px solid transparent; }
+    .event:hover { background: rgba(47,82,122,.35); }
+    .event.active { background: rgba(50,112,169,.32); border-color: rgba(117,188,249,.48); }
+    .event-time { color:#a7c4e3; font-size:10px; }
+    .event-main { margin-top:2px; display:flex; gap:7px; align-items:center; min-width:0; }
+    .event-host { color:#d9ecff; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11px; white-space:nowrap; }
+    .event-id { color:#91a9c3; font-size:10px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .stage-dot { width:8px; height:8px; border-radius:50%; flex:0 0 auto; }
+    .host-area { min-width: 0; }
+    .host-heading { display:flex; justify-content:space-between; gap:14px; align-items:flex-end; margin: 0 0 10px 2px; }
+    .host-heading h2 { margin:0; font-size:14px; }
+    .host-heading span { color:var(--muted); font-size:11px; }
+    .host-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:10px; }
+    .host-card { min-height:240px; position:relative; display:flex; flex-direction:column; background:var(--panel); border:1px solid var(--line); border-radius:12px; overflow:hidden; transition:.18s; }
+    .host-card.focus { border-color:rgba(117,188,249,.85); box-shadow:0 0 0 1px rgba(117,188,249,.18), 0 10px 30px rgba(5,20,38,.35); }
+    .host-card.decision-sampled { border-color:rgba(99,230,176,.34); }
+    .host-card-header { display:flex; gap:5px; align-items:center; padding:9px 10px 7px; background:rgba(21,38,64,.72); border-bottom:1px solid rgba(142,171,206,.17); }
+    .host-name { flex:1; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; color:#dcedff; }
+    .host-count { font-size:10px; color:#9fc1e5; }
+    .host-work { font-size:11px; color:#b8d4f1; font-variant-numeric:tabular-nums; }
+    .snapshot-strip { min-height:34px; padding:5px 9px; color:#a4b8d0; border-bottom:1px dashed rgba(142,171,206,.17); font-size:9px; display:flex; align-items:center; gap:5px; }
+    .snapshot-strip.fact { color:#a5ebcb; background:rgba(44,112,83,.13); }
+    .snapshot-strip .snap-label { font-weight:700; }
+    .bucket { position:relative; flex:1; margin:8px; min-height:127px; border:1px solid rgba(142,171,206,.26); border-top:0; border-radius:0 0 16px 16px; background:linear-gradient(180deg,rgba(68,110,158,.12),rgba(15,28,47,.35)); overflow:hidden; }
+    .bucket:before { content:""; position:absolute; left:0; right:0; top:0; height:4px; background:rgba(129,168,209,.27); }
+    .bucket-scale { position:absolute; inset:7px 4px auto 4px; display:flex; justify-content:space-between; color:#607895; font-size:8px; pointer-events:none; }
+    .bucket-gridline { position:absolute; left:0; right:0; height:1px; background:rgba(142,171,206,.1); pointer-events:none; }
+    .bucket-gridline:nth-of-type(2) { top:33%; }
+    .bucket-gridline:nth-of-type(3) { top:66%; }
+    .chips { position:absolute; inset:24px 7px 7px; display:flex; align-items:flex-end; gap:4px; overflow:hidden; }
+    .bucket-empty { position:absolute; inset:0; display:grid; place-items:center; color:#536983; font-size:11px; }
+    .host-footer { padding:0 9px 8px; color:#90a4bd; font-size:9px; display:flex; justify-content:space-between; }
+    #flight-layer { position:absolute; left:0; right:0; top:0; height:105px; pointer-events:none; overflow:hidden; }
+    .flight { position:absolute; top:60px; left:calc(25% + 10px); display:flex; align-items:center; gap:5px; color:#e7f6ff; font-size:10px; white-space:nowrap; animation:fly 1.25s ease-out forwards; }
+    .flight:after { content:""; height:1px; width:90px; background:linear-gradient(90deg,#86cdfd,transparent); }
+    @keyframes fly { 0% { transform:translateX(-30px); opacity:0; } 20% { opacity:1; } 100% { transform:translateX(420px); opacity:0; } }
+    .tooltip { position:fixed; z-index:100; max-width:320px; pointer-events:none; display:none; padding:10px; background:#071222; border:1px solid rgba(140,192,239,.65); border-radius:8px; box-shadow:0 12px 42px rgba(0,0,0,.45); font-size:11px; color:#d9eaff; }
+    .tooltip.visible { display:block; }
+    .tooltip .tooltip-title { font-weight:700; margin-bottom:5px; }
+    .tooltip-grid { display:grid; grid-template-columns:1fr 1fr; gap:4px 12px; color:#aebfd2; }
+    .tooltip-grid b { color:#e7f4ff; font-weight:600; }
+    .empty { padding:12px; font-size:12px; color:var(--muted); }
+    @media(max-width: 1100px) { .flow { grid-template-columns:1fr; } .side { grid-template-columns:1fr 1fr; } .summary { grid-template-columns:repeat(3,1fr); } }
+    @media(max-width: 720px) { .app { padding:10px; } .topbar { grid-template-columns:1fr; } .legend { justify-content:flex-start; } .side { grid-template-columns:1fr; } .summary { grid-template-columns:repeat(2,1fr); } .host-grid { grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); } .time-label { min-width:auto; } }
+
+    /* Warm, high-contrast readability theme. */
+    :root {
+      --ink: #24211d;
+      --muted: #686259;
+      --line: #d8d0c3;
+      --panel: #fffdf8;
+      --panel-2: #f7f1e7;
+      --canvas: #eee9df;
+      --blue: #176f63;
+      --orange: #c76d19;
+      --purple: #7c4d9b;
+      --green: #25856f;
+      --red: #c6473d;
+      --yellow: #a36b00;
+    }
+    html, body {
+      background: linear-gradient(145deg, #f5f1e9 0%, #e9e2d6 100%);
+      color: var(--ink);
+      font-family: "PingFang SC", "Microsoft YaHei", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 15px;
+      line-height: 1.5;
+    }
+    .app { max-width: 1920px; }
+    h1 { color: #29251f; font-weight: 760; }
+    .subtitle, .muted { color: #6e675d; font-size: 14px; }
+    button {
+      color: #2d2923;
+      background: #f3eee4;
+      border-color: #bdb3a3;
+      font-size: 14px;
+      font-weight: 650;
+      box-shadow: 0 1px 1px rgba(72, 56, 38, .05);
+    }
+    button:hover { color: #173f39; border-color: #448b7f; background: #e7f1ec; }
+    button.active { color: #fff; background: #176f63; border-color: #0e5e54; }
+    select { color: #2d2923; background: #fffdf8; border-color: #bdb3a3; font-size: 14px; }
+    .badge { color: #5d564d; background: rgba(255,253,248,.78); border-color: #cfc6b8; font-size: 12px; font-weight: 600; }
+    .badge.fact { color: #176b58; border-color: #7eb9a8; background: #eef8f3; }
+    .badge.inferred { color: #915711; border-color: #d6a765; background: #fff6e7; }
+    .warning { color: #6c4a07; background: #fff8df; border-left-color: #c18a1c; font-size: 13px; }
+    .controls, .metric, .panel, .host-card { background: rgba(255,253,248,.97); border-color: #d3cabd; box-shadow: 0 8px 24px rgba(74, 57, 36, .08); }
+    .overview { background: #f6f1e8; border-color: #d4c9b8; }
+    .time-label { color: #3a332a; font-size: 14px; font-weight: 700; }
+    .metric .label { color: #6f685e; font-size: 12px; font-weight: 650; }
+    .metric .value { color: #27231e; font-size: 22px; }
+    .metric .note { color: #746d63; font-size: 11px; }
+    .panel-title { color: #312c26; border-bottom-color: #ded6ca; font-size: 14px; }
+    .panel-title .small { color: #746d63; font-size: 11px; }
+    .request-id { color: #34302a; font-size: 13px; font-weight: 650; }
+    .kv { background: #faf6ee; border-color: #ddd3c5; }
+    .kv .key { color: #71695f; font-size: 11px; font-weight: 600; }
+    .kv .val { color: #29251f; font-size: 13px; font-weight: 600; }
+    .phase-segment { background: #ddd5c9; }
+    .phase-labels { color: #6e675d; font-size: 9px; font-weight: 600; }
+    .candidate { background: #faf6ee; border-color: #dbd1c3; }
+    .candidate:hover { background: #f4eee3; }
+    .candidate.selected { border-color: #25856f; box-shadow: inset 4px 0 0 #25856f; }
+    .candidate.special { border-color: #c9a35f; }
+    .candidate-top { color: #332f29; font-size: 12px; }
+    .rank { color: #fff; background: #756b5e; }
+    .candidate .symbols { color: #9a6508; }
+    .candidate-bar { background: #e4ddd1; }
+    .candidate-bar > span { background: linear-gradient(90deg, #2a9d8f, #e9ad53); }
+    .candidate-numbers { color: #6c655c; font-size: 11px; }
+    .candidate-numbers b { color: #29251f; font-size: 12px; }
+    .event { color: #39342e; }
+    .event:hover { background: #f3ede3; }
+    .event.active { background: #e9f4ef; border-color: #74aa9d; }
+    .event-time { color: #766c5f; font-size: 11px; }
+    .event-host { color: #2f2a24; font-size: 12px; font-weight: 700; }
+    .event-id { color: #746d63; font-size: 11px; }
+    .host-heading h2 { color: #302b25; font-size: 16px; }
+    .host-heading span { color: #6b655c; font-size: 12px; }
+    .host-grid { grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 10px; }
+    .host-card { min-height: 178px; }
+    .host-card.focus { border-color: #1d7a69; box-shadow: 0 0 0 2px rgba(29,122,105,.15), 0 10px 28px rgba(74,57,36,.11); }
+    .host-card.decision-sampled { border-color: #7fb6a8; }
+    .host-card-header { background: #f4efe6; border-bottom-color: #d8d0c4; padding: 8px 9px 7px; flex-wrap:nowrap; gap:6px; overflow-x:auto; scrollbar-width:none; }
+    .host-card-header::-webkit-scrollbar, .lane-header::-webkit-scrollbar { display:none; }
+    .host-name { color: #302c26; font-size: 12px; font-weight: 750; }
+    .host-count { flex:0 0 auto; color: #6d665d; font-size: 10px; white-space:nowrap; }
+    .host-work { flex:0 0 auto; color: #176f63; font-size: 11px; font-weight: 750; white-space:nowrap; }
+    .host-work-breakdown { flex:0 0 auto; display:flex; gap:6px; color:#6d665d; font-size:9.5px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+    .snapshot-strip { color: #6f685f; border-bottom-color: #d8d0c4; font-size: 10.5px; }
+    .snapshot-strip.fact { color: #166853; background: #edf7f2; }
+    .hit-legend { display:flex; align-items:center; gap:6px; color:#665f55; font-size:11px; font-weight:650; white-space:nowrap; }
+    .hit-gradient { width:112px; height:12px; border:1px solid #b9ae9f; border-radius:999px; background:linear-gradient(90deg,#ef897d 0%,#efcf67 50%,#71c987 100%); }
+    .work-lanes { flex:1; display:grid; grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr); gap:6px; padding:6px; min-height:130px; }
+    .work-lane { min-width:0; display:flex; flex-direction:column; border:1px solid #d1c7b9; border-radius:10px; overflow:hidden; background:#faf7f0; }
+    .running-lane { background:linear-gradient(180deg,#eef7f4 0%,#f8fbf9 100%); border-color:#9fc7bd; }
+    .waiting-lane { background:linear-gradient(180deg,#fff8e9 0%,#fdfaf3 100%); border-color:#d8bd8f; }
+    .lane-header { display:flex; flex-wrap:nowrap; gap:6px; align-items:baseline; padding:5px 7px 4px; border-bottom:1px solid rgba(113,97,75,.16); overflow-x:auto; scrollbar-width:none; white-space:nowrap; }
+    .lane-title { color:#2d2923; font-size:11px; font-weight:800; letter-spacing:.04em; }
+    .lane-count { color:#6f675c; font-size:10px; }
+    .lane-work { flex:0 0 auto; color:#4d473f; font-size:10px; font-weight:750; font-variant-numeric:tabular-nums; }
+    .lane-note { color:#7b7266; font-size:9px; font-weight:500; }
+    .lane-bucket { position:relative; flex:1; min-height:82px; overflow:hidden; }
+    .lane-bars { position:absolute; inset:4px 4px 2px; display:flex; align-items:flex-end; gap:6px; overflow-x:auto; overflow-y:hidden; padding:0 2px 1px; scrollbar-width:thin; }
+    .request-stack { flex:0 0 88px; min-width:88px; height:76px; display:grid; grid-template-columns:16px minmax(0,1fr); gap:5px; align-items:end; cursor:pointer; }
+    .gauge-space { height:72px; display:flex; align-items:flex-end; justify-content:center; }
+    .gauge-shell { position:relative; width:12px; min-height:10px; border-radius:4px 4px 2px 2px; overflow:hidden; background:rgba(255,255,255,.58); transition:height .14s ease; }
+    .running-gauge { border:1.5px dashed #177668; }
+    .waiting-gauge { border:1px solid rgba(77,64,50,.34); }
+    .gauge-fill { position:absolute; left:1px; right:1px; bottom:1px; min-height:0; border-radius:2px 2px 1px 1px; background:linear-gradient(180deg,#31a18f 0%,#176f63 100%); transition:height .14s ease; }
+    .request-stack:hover .gauge-shell, .request-stack.selected .gauge-shell { outline:2px solid #2d6e63; outline-offset:2px; }
+    .request-stack.tail .gauge-shell { box-shadow:0 0 0 2px #c6473d; }
+    .bar-caption { min-width:0; align-self:end; padding-bottom:1px; text-align:left; color:#39332c; font-size:8.5px; line-height:1.18; font-variant-numeric:tabular-nums; overflow:hidden; }
+    .bar-caption b, .bar-caption span { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .bar-caption b { font-size:10px; color:#27231e; }
+    .lane-empty { position:absolute; inset:0; display:grid; place-items:center; color:#93897c; font-size:11px; }
+    .tooltip { color: #f9f4ec; background: #302b26; border-color: #8ebdac; font-size: 12px; }
+    .tooltip-grid { color: #d4cbc0; }
+    .tooltip-grid b { color: #fffdfa; }
+    .empty { color: #777066; }
+    @media(max-width: 1200px) {
+      .topbar { grid-template-columns: 1fr; }
+      .legend { justify-content: flex-start; }
+      h1 { font-size: 30px; }
+      .analysis-grid { grid-template-columns:1fr 1fr; }
+      .analysis-grid .panel:last-child { grid-column:1 / -1; }
+    }
+    @media(max-width: 760px) {
+      .host-grid { grid-template-columns:1fr; }
+      .host-heading { align-items:flex-start; flex-direction:column; }
+      .work-lanes { grid-template-columns:1fr; }
+      .host-card { min-height:310px; }
+      .analysis-grid { grid-template-columns:1fr; }
+      .analysis-grid .panel:last-child { grid-column:auto; }
+      .analysis-toggle-note { display:none; }
+      .key-hint { margin-left:0; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <section class="topbar">
+      <div>
+        <h1>FlexLB → vLLM Prefill 请求回放</h1>
+        <div class="subtitle" id="subtitle"></div>
+      </div>
+      <div class="legend">
+        <span class="badge fact">实线 · 决策瞬间 Top5 快照</span>
+        <span class="badge inferred">斜纹/动画 · 生命周期后验重建</span>
+        <span class="badge">RUNNING · 虚线框 = 原始 work · 水位 = remaining</span>
+        <span class="badge">右侧 WAITING · 红→黄→绿 = 低→高命中率</span>
+        <span class="badge">P / A = 预测 / 实际命中率</span>
+      </div>
+    </section>
+    <div class="warning">注意：只有 route、enqueue、drain、first-token 是请求时间边界。RUNNING 起点由 first-token − running_to_first_token 反推；step 没有逐步时间戳，动画中的 step 是均匀插值，不是引擎真实逐 step trace。首 token 出桶，不等价于 Chat/Decode 全请求完成。</div>
+
+    <section class="controls">
+      <div class="control-row">
+        <button id="play" title="空格键">▶ 回放</button>
+        <button id="prev-decision" title="快捷键：←">◀ 上一决策</button>
+        <button id="next-decision" title="快捷键：→">下一决策 ▶</button>
+        <span class="control-label">速度</span>
+        <button class="speed" data-speed="1">1×</button>
+        <button class="speed" data-speed="8">8×</button>
+        <button class="speed active" data-speed="32">32×</button>
+        <button class="speed" data-speed="128">128×</button>
+        <span class="control-label">聚焦 host</span>
+        <select id="host-filter"></select>
+        <span class="key-hint"><kbd>←</kbd><kbd>→</kbd> 上一个 / 下一个决策</span>
+      </div>
+      <div class="control-row">
+        <span class="time-label" id="time-label"></span>
+        <input id="time-range" type="range">
+        <button id="reset">↺ 起点</button>
+      </div>
+      <canvas class="overview" id="overview" aria-label="请求事件概览时间轴"></canvas>
+    </section>
+
+    <section class="summary" id="summary"></section>
+    <section class="replay-main">
+      <details class="analysis-drawer">
+        <summary class="analysis-toggle"><span class="analysis-toggle-title">决策分析面板</span><span class="analysis-toggle-note">当前请求生命周期 · PV Top5 决策快照 · FlexLB ingress（点击收起 / 展开）</span><span class="drawer-chevron">⌄</span></summary>
+        <div class="analysis-grid">
+          <div class="panel">
+            <div class="panel-title"><span>当前请求 · 生命周期</span><span class="small">点击请求或时间线事件</span></div>
+            <div id="request-detail"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-title"><span>Decision microscope</span><span class="small">PV Top5 / 关键候选事实快照</span></div>
+            <div id="decision-microscope"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-title"><span>FlexLB ingress</span><span class="small">当前时间附近的决策</span></div>
+            <div class="event-list" id="event-list"></div>
+          </div>
+        </div>
+      </details>
+      <section class="host-area">
+        <div class="host-heading">
+          <div><h2>vLLM Prefill host buckets</h2><span>左侧 RUNNING、右侧 WAITING；一根柱体代表一个请求。绿色快照条仅在当前决策所记录的候选 host 上出现。</span></div>
+          <div class="hit-legend"><span>WAITING 命中率</span><span>0%</span><span class="hit-gradient"></span><span>100%</span></div>
+        </div>
+        <div class="host-grid" id="host-grid"></div>
+      </section>
+      <div id="flight-layer"></div>
+    </section>
+  </main>
+  <div id="tooltip" class="tooltip"></div>
+  <script>
+  const REPLAY = __REPLAY_DATA__;
+  (() => {
+    const $ = (selector) => document.querySelector(selector);
+    const fmt = new Intl.DateTimeFormat('zh-CN', { timeZone: REPLAY.meta.timezone, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3, hour12: false });
+    const nf = new Intl.NumberFormat('en-US');
+    const state = { time: REPLAY.meta.start, playing: false, speed: 32, lastFrame: 0, selectedId: null, latestId: null, cacheMode: 'actual', focusedHost: 'all' };
+    const requests = REPLAY.requests;
+    const maxBarWork = Math.max(1_000_000, ...requests.map((request) => Math.max(request.uncache || 0, request.selectedSnapshotUncache || 0)));
+    const byId = new Map(requests.map((item) => [item.id, item]));
+    const hosts = REPLAY.hosts;
+    const derived = new Map();
+    const hostFilter = $('#host-filter');
+    const tooltip = $('#tooltip');
+    let currentActive = [];
+
+    const shortId = (id) => id ? `${id.slice(0, 8)}…${id.slice(-5)}` : '—';
+    const number = (value) => value == null ? '—' : nf.format(Math.round(value));
+    const pct = (value) => value == null ? '—' : `${Number(value).toFixed(2)}%`;
+    const work = (value) => value == null ? '—' : value >= 1_000_000 ? `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 2)}M` : value >= 1_000 ? `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}k` : number(value);
+    const timeText = (value) => value == null ? '—' : fmt.format(new Date(value));
+    const duration = (ms) => ms == null ? '—' : ms >= 60_000 ? `${(ms / 60_000).toFixed(1)}m` : `${(ms / 1000).toFixed(ms >= 10_000 ? 0 : 1)}s`;
+    const isTail = (request) => /P99|P95/.test(request.percentile || '');
+    const phaseColor = (phase) => ({ handoff: '#7952a3', input: '#a16bbb', waiting: '#c97721', running: '#178374', unresolved: '#c6473d' }[phase] || '#80776d');
+
+    function lifecycle(request) {
+      if (derived.has(request.id)) return derived.get(request.id);
+      const route = request.route;
+      const enqueue = Math.max(route, request.enqueue || route);
+      const drain = Math.max(enqueue, request.drain || enqueue);
+      let running = null;
+      if (request.firstToken && request.runningToFirst != null && request.runningToFirst >= 0) running = request.firstToken - request.runningToFirst;
+      if (running == null && request.schedulerToRunning != null && request.schedulerToRunning >= 0) running = drain + request.schedulerToRunning;
+      running = Math.max(drain, running == null ? drain : running);
+      let first = request.firstToken;
+      if (!first && request.runningToFirst != null && request.runningToFirst >= 0) first = running + request.runningToFirst;
+      const unresolved = !request.firstToken;
+      const end = Math.max(running, first || REPLAY.meta.end);
+      const value = { route, enqueue, drain, running, first, end, unresolved };
+      derived.set(request.id, value);
+      return value;
+    }
+
+    function phaseAt(request, time) {
+      const points = lifecycle(request);
+      if (time < points.route) return 'future';
+      if (time < points.enqueue) return 'handoff';
+      if (time < points.drain) return 'input';
+      if (time < points.running) return 'waiting';
+      if (time < points.end) return 'running';
+      return points.unresolved ? 'unresolved' : 'first-token';
+    }
+
+    function activeWork(request, time, phase) {
+      const predicted = request.selectedSnapshotUncache ?? request.uncache ?? 0;
+      const actual = request.uncache ?? predicted;
+      const p = lifecycle(request);
+      if (phase !== 'running') {
+        if (phase === 'unresolved') return Math.max(0, actual);
+        return Math.max(0, state.cacheMode === 'actual' ? actual : predicted);
+      }
+      const span = Math.max(1, p.end - p.running);
+      const fraction = Math.max(0, Math.min(1, (p.end - time) / span));
+      return Math.max(0, Math.round(actual * fraction));
+    }
+
+    function runningStep(request, time, phase) {
+      if (phase !== 'running' || !request.stepCount) return null;
+      const p = lifecycle(request);
+      const fraction = Math.max(0, Math.min(.999, (time - p.running) / Math.max(1, p.end - p.running)));
+      const completed = Math.floor(fraction * request.stepCount);
+      return { completed, current: Math.min(request.stepCount, completed + 1), total: request.stepCount, id: request.firstStep != null ? request.firstStep + completed : null };
+    }
+
+    function currentRequest() {
+      const selected = state.selectedId && byId.get(state.selectedId);
+      if (selected) return selected;
+      let candidate = null;
+      for (const request of requests) {
+        if (request.route > state.time) break;
+        candidate = request;
+      }
+      return candidate || requests[0];
+    }
+
+    function currentCandidates() { return REPLAY.candidates[currentRequest()?.id] || []; }
+
+    function snapshotFor(host) { return currentCandidates().find((candidate) => candidate.host === host); }
+
+    function hitColor(value) {
+      const ratio = Math.max(0, Math.min(100, Number(value) || 0)) / 100;
+      return `hsl(${5 + ratio * 115} 72% 68%)`;
+    }
+
+    function requestBarHeight(value, minimum, maximum) {
+      const ratio = Math.max(0, Math.min(1, (Number(value) || 0) / maxBarWork));
+      return Math.round(minimum + ratio * (maximum - minimum));
+    }
+
+    function waitingElapsed(request) {
+      const p = lifecycle(request);
+      return Math.max(0, state.time - p.enqueue);
+    }
+
+    function runningElapsed(request) {
+      const p = lifecycle(request);
+      return Math.max(0, state.time - p.running);
+    }
+
+    function requestTooltip(request, phase) {
+      const p = lifecycle(request);
+      const step = runningStep(request, state.time, phase);
+      return `<div class="tooltip-title">${shortId(request.requestId || request.id)} · ${request.host}</div>
+        <div class="tooltip-grid">
+          <span>状态 <b>${phase === 'first-token' ? '已观测首 token' : phase}</b></span><span>决策 <b>${timeText(request.route)}</b></span>
+          <span>预测 / 实际命中 <b>${pct(request.predictedHitRate)} / ${pct(request.actualHitRate)}</b></span><span>预测 / 实际未命中 <b>${work(request.selectedSnapshotUncache)} / ${work(request.uncache)}</b></span>
+          <span>FlexLB reason <b>${request.reason}</b></span><span>TTFT <b>${duration(request.engineTtft)}</b></span>
+          <span>scheduler wait <b>${duration(request.schedulerWait)}</b></span><span>RUNNING → first <b>${duration(request.runningToFirst)}</b></span>
+          <span>step <b>${step ? `${step.current}/${step.total}${step.id == null ? '' : ` · #${step.id}`}` : `${number(request.stepCount)} steps`}</b></span><span>HBM / remote <b>${work(request.hbmLocal)} / ${work(request.remoteKvAdded)}</b></span>
+          <span>enqueue → drain <b>${duration(p.drain - p.enqueue)}</b></span><span>first token <b>${timeText(request.firstToken)}</b></span>
+        </div>`;
+    }
+
+    function renderSummary() {
+      const active = currentActive;
+      const workSum = active.reduce((sum, item) => sum + item.work, 0);
+      const waiting = active.filter((item) => ['handoff', 'input', 'waiting'].includes(item.phase)).length;
+      const running = active.filter((item) => item.phase === 'running').length;
+      const request = currentRequest();
+      const candidates = currentCandidates();
+      const selected = candidates.find((item) => item.selected);
+      const cards = [
+        ['回放时刻', timeText(state.time), `${Math.round((state.time - REPLAY.meta.start) / 1000)}s from first decision`],
+        ['活跃 Prefill 请求', number(active.length), `waiting/handoff ${waiting} · running ${running}`],
+        ['重建待执行 work', work(workSum), state.cacheMode === 'decision' ? '按决策时预测缓存' : '按后验实际缓存'],
+        ['当前决策选择', request ? request.host : '—', request ? request.reason : '—'],
+        ['当前快照预测 TTFT', selected ? work(selected.estimatedTtft) : '—', selected ? `rank ${selected.rank} · queue ${work(selected.queueWork)}` : '—'],
+      ];
+      $('#summary').innerHTML = cards.map(([label, value, note]) => `<div class="metric"><div class="label">${label}</div><div class="value">${value}</div><div class="note">${note}</div></div>`).join('');
+    }
+
+    function renderRequestDetail() {
+      const request = currentRequest();
+      if (!request) { $('#request-detail').innerHTML = '<div class="empty">没有可显示的请求。</div>'; return; }
+      const phase = phaseAt(request, state.time);
+      const p = lifecycle(request);
+      const step = runningStep(request, state.time, phase);
+      const segments = [['handoff','FlexLB'],['input','input queue'],['waiting','scheduler'],['running','RUNNING'],['first-token','first token']];
+      $('#request-detail').innerHTML = `
+        <div class="request-id">${request.requestId || request.id}</div>
+        <div class="muted">${request.host} · ${request.reason} · ${request.percentile || 'No percentile'}</div>
+        <div class="phase-track">${segments.map(([key]) => `<div class="phase-segment ${phase === key ? 'current' : ''}" style="background:${phaseColor(key)}"></div>`).join('')}</div>
+        <div class="phase-labels">${segments.map(([, label]) => `<span>${label}</span>`).join('')}</div>
+        <div class="kv-grid">
+          <div class="kv"><div class="key">当前阶段</div><div class="val">${phase === 'first-token' ? '已观测首 token' : phase}</div></div>
+          <div class="kv"><div class="key">预测 / 实际 hit</div><div class="val">${pct(request.predictedHitRate)} / ${pct(request.actualHitRate)}</div></div>
+          <div class="kv"><div class="key">预测 / 实际 uncache</div><div class="val">${work(request.selectedSnapshotUncache)} / ${work(request.uncache)}</div></div>
+          <div class="kv"><div class="key">当前重建剩余</div><div class="val">${work(activeWork(request, state.time, phase))}</div></div>
+          <div class="kv"><div class="key">scheduler → RUNNING</div><div class="val">${duration(request.schedulerToRunning)}</div></div>
+          <div class="kv"><div class="key">RUNNING → first token</div><div class="val">${duration(request.runningToFirst)}</div></div>
+          <div class="kv"><div class="key">step（插值）</div><div class="val">${step ? `${step.current} / ${step.total}` : `${number(request.stepCount)} total`}</div></div>
+          <div class="kv"><div class="key">first token</div><div class="val">${timeText(p.first)}</div></div>
+        </div>`;
+    }
+
+    function renderDecisionMicroscope() {
+      const request = currentRequest();
+      const candidates = currentCandidates();
+      if (!request || !candidates.length) { $('#decision-microscope').innerHTML = '<div class="empty">此请求没有决策候选快照。</div>'; return; }
+      const maxTtft = Math.max(...candidates.map((item) => item.estimatedTtft || 0), 1);
+      const text = candidates.map((candidate) => {
+        const special = candidate.cacheLeader || candidate.shortest || candidate.selected;
+        const symbols = `${candidate.selected ? '✓' : ''}${candidate.cacheLeader ? '★' : ''}${candidate.shortest ? 'ϟ' : ''}` || '·';
+        return `<div class="candidate ${candidate.selected ? 'selected' : ''} ${special ? 'special' : ''}" data-candidate-host="${candidate.host}">
+          <div class="candidate-top"><span class="rank">${candidate.rank}</span><span class="host">${candidate.host}:${candidate.port || 8001}</span><span class="symbols">${symbols}</span></div>
+          <div class="candidate-bar"><span style="width:${Math.max(3, (candidate.estimatedTtft || 0) / maxTtft * 100)}%"></span></div>
+          <div class="candidate-numbers"><span>queue<b>${work(candidate.queueWork)}</b></span><span>req work<b>${work(candidate.uncache)}</b></span><span>est TTFT<b>${work(candidate.estimatedTtft)}</b></span></div>
+          <div class="candidate-numbers" style="margin-top:4px"><span>hit<b>${pct(candidate.hitRate)}</b></span><span>outstanding<b>${work(candidate.outstanding)}</b></span><span>engine W/R<b>${work(candidate.engineWaiting)} / ${work(candidate.engineRunningRemaining)}</b></span></div>
+        </div>`;
+      }).join('');
+      $('#decision-microscope').innerHTML = `<div class="muted">${timeText(request.route)} · ${shortId(request.requestId || request.id)} · 共记录 ${candidates.length} 个关键候选；★ cache leader · ϟ shortest TTFT · ✓ selected</div>${text}`;
+    }
+
+    function chipsForHost(host) {
+      return currentActive.filter((item) => item.request.host === host).sort((a, b) => a.request.route - b.request.route);
+    }
+
+    function renderHostGrid() {
+      const chosen = currentRequest();
+      const html = hosts.map((host) => {
+        const chips = chipsForHost(host);
+        const runningChips = chips.filter((item) => item.phase === 'running' || item.phase === 'unresolved');
+        const waitingChips = chips.filter((item) => ['handoff', 'input', 'waiting'].includes(item.phase));
+        const runningWork = runningChips.reduce((total, item) => total + item.work, 0);
+        const waitingWork = waitingChips.reduce((total, item) => total + item.work, 0);
+        const sum = runningWork + waitingWork;
+        const candidate = snapshotFor(host);
+        const focused = state.focusedHost === host || chosen?.host === host;
+        const runningHtml = runningChips.length ? runningChips.map((item) => {
+          const { request, phase, work: remaining } = item;
+          const original = Math.max(0, request.uncache ?? remaining);
+          const originHeight = requestBarHeight(original, 16, 64);
+          const remainingPercent = original > 0 ? Math.max(0, Math.min(100, remaining / original * 100)) : 0;
+          const step = runningStep(request, state.time, phase);
+          const elapsed = runningElapsed(request);
+          return `<div class="request-stack ${isTail(request) ? 'tail' : ''} ${request.id === state.selectedId ? 'selected' : ''}" data-request-id="${request.id}" aria-label="${request.requestId || request.id}">
+            <div class="gauge-space"><div class="gauge-shell running-gauge" style="height:${originHeight}px" title="原始 work ${work(original)}"><div class="gauge-fill" style="height:${remainingPercent}%"></div></div></div>
+            <div class="bar-caption"><b>rem ${work(remaining)}</b><span>orig ${work(original)}</span><span>${step ? `step ${step.current}/${step.total}` : phase === 'unresolved' ? '首 token 未观测' : 'step —'}</span><span>运行 ${duration(elapsed)}</span></div>
+          </div>`;
+        }).join('') : '<div class="lane-empty">无 RUNNING 请求</div>';
+        const waitingHtml = waitingChips.length ? waitingChips.map((item) => {
+          const { request, phase, work: remaining } = item;
+          const predictedRate = request.predictedHitRate ?? 0;
+          const actualRate = request.actualHitRate ?? 0;
+          const colorRate = state.cacheMode === 'actual' ? actualRate : predictedRate;
+          const height = requestBarHeight(remaining, 16, 64);
+          return `<div class="request-stack ${isTail(request) ? 'tail' : ''} ${request.id === state.selectedId ? 'selected' : ''}" data-request-id="${request.id}" aria-label="${request.requestId || request.id}">
+            <div class="gauge-space"><div class="gauge-shell waiting-gauge" style="height:${height}px"><div class="gauge-fill" style="height:100%;background:${hitColor(colorRate)}"></div></div></div>
+            <div class="bar-caption"><b>work ${work(remaining)}</b><span>P ${pct(predictedRate)}</span><span>A ${pct(actualRate)}</span><span>等待 ${duration(waitingElapsed(request))}</span></div>
+          </div>`;
+        }).join('') : '<div class="lane-empty">无 WAITING 请求</div>';
+        return `<article class="host-card ${candidate ? 'decision-sampled' : ''} ${focused ? 'focus' : ''}" data-host="${host}">
+          <div class="host-card-header"><span class="host-name">${host}</span><span class="host-count">${chips.length} active</span><span class="host-work" title="总待执行">总 ${work(sum)}</span><div class="host-work-breakdown" title="RUNNING / WAITING"><span>R ${work(runningWork)}</span><span>W ${work(waitingWork)}</span></div></div>
+          <div class="work-lanes">
+            <section class="work-lane running-lane"><div class="lane-header"><span class="lane-title">RUNNING</span><span class="lane-count">${runningChips.length} 请求</span><span class="lane-work">remaining ${work(runningWork)}</span></div><div class="lane-bucket"><div class="lane-bars">${runningHtml}</div></div></section>
+            <section class="work-lane waiting-lane"><div class="lane-header"><span class="lane-title">WAITING</span><span class="lane-count">${waitingChips.length} 请求</span><span class="lane-work">待执行 ${work(waitingWork)} <span class="lane-note">· 柱色表示命中率</span></span></div><div class="lane-bucket"><div class="lane-bars">${waitingHtml}</div></div></section>
+          </div>
+        </article>`;
+      }).join('');
+      $('#host-grid').innerHTML = html;
+    }
+
+    function renderEventList() {
+      const index = requests.findIndex((request) => request.route > state.time);
+      const pivot = index < 0 ? requests.length : index;
+      const around = requests.slice(Math.max(0, pivot - 5), Math.min(requests.length, pivot + 6));
+      $('#event-list').innerHTML = around.map((request) => {
+        const phase = phaseAt(request, state.time);
+        return `<div class="event ${request.id === currentRequest()?.id ? 'active' : ''}" data-request-id="${request.id}"><div class="event-time">${timeText(request.route)} · ${request.reason}</div><div class="event-main"><span class="stage-dot" style="background:${phaseColor(phase)}"></span><span class="event-host">${request.host}</span><span class="event-id">${shortId(request.requestId || request.id)}</span></div></div>`;
+      }).join('');
+    }
+
+    function renderOverview() {
+      const canvas = $('#overview');
+      const ratio = devicePixelRatio || 1;
+      const width = canvas.clientWidth || 100;
+      const height = canvas.clientHeight || 42;
+      canvas.width = Math.round(width * ratio); canvas.height = Math.round(height * ratio);
+      const ctx = canvas.getContext('2d'); ctx.scale(ratio, ratio); ctx.clearRect(0, 0, width, height);
+      const span = REPLAY.meta.end - REPLAY.meta.start;
+      const x = (time) => (time - REPLAY.meta.start) / span * width;
+      ctx.fillStyle = 'rgba(190,111,31,.58)';
+      for (const request of requests) { const px = x(request.route); ctx.fillRect(px, 5, 1, 13); }
+      ctx.fillStyle = 'rgba(31,132,110,.42)';
+      for (const request of requests) if (request.firstToken) { const px = x(request.firstToken); ctx.fillRect(px, 22, 1, 12); }
+      ctx.strokeStyle = '#9a6508'; ctx.lineWidth = 2; const now = x(state.time); ctx.beginPath(); ctx.moveTo(now, 0); ctx.lineTo(now, height); ctx.stroke();
+    }
+
+    function refreshActive() {
+      currentActive = [];
+      for (const request of requests) {
+        const phase = phaseAt(request, state.time);
+        if (!['handoff','input','waiting','running','unresolved'].includes(phase)) continue;
+        currentActive.push({ request, phase, work: activeWork(request, state.time, phase) });
+      }
+    }
+
+    function fireFlight() {
+      const request = currentRequest();
+      if (!request || request.id === state.latestId) return;
+      state.latestId = request.id;
+      const flight = document.createElement('div'); flight.className = 'flight'; flight.textContent = `${shortId(request.requestId || request.id)} → ${request.host}`; $('#flight-layer').append(flight);
+      setTimeout(() => flight.remove(), 1350);
+    }
+
+    function render() {
+      refreshActive();
+      $('#time-label').textContent = `${timeText(state.time)}  ·  ${duration(state.time - REPLAY.meta.start)}`;
+      $('#time-range').value = state.time;
+      renderSummary(); renderRequestDetail(); renderDecisionMicroscope(); renderEventList(); renderHostGrid(); renderOverview(); fireFlight();
+    }
+
+    function setTime(value, renderNow = true) {
+      state.time = Math.max(REPLAY.meta.start, Math.min(REPLAY.meta.end, Number(value)));
+      if (renderNow) render();
+    }
+
+    function pausePlayback() {
+      state.playing = false;
+      $('#play').textContent = '▶ 回放';
+      $('#play').classList.remove('active');
+    }
+
+    function decisionIndexAtTime(time) {
+      let low = 0;
+      let high = requests.length - 1;
+      let result = 0;
+      while (low <= high) {
+        const middle = Math.floor((low + high) / 2);
+        if (requests[middle].route <= time) { result = middle; low = middle + 1; }
+        else high = middle - 1;
+      }
+      return result;
+    }
+
+    function stepDecision(direction) {
+      pausePlayback();
+      const selectedIndex = state.selectedId ? requests.findIndex((request) => request.id === state.selectedId) : -1;
+      const currentIndex = selectedIndex >= 0 ? selectedIndex : decisionIndexAtTime(state.time);
+      const targetIndex = Math.max(0, Math.min(requests.length - 1, currentIndex + direction));
+      const target = requests[targetIndex];
+      state.selectedId = target.id;
+      state.focusedHost = target.host;
+      hostFilter.value = target.host;
+      setTime(target.route);
+    }
+
+    function togglePlay() {
+      state.playing = !state.playing;
+      if (state.playing) state.selectedId = null;
+      $('#play').textContent = state.playing ? '❚❚ 暂停' : '▶ 回放';
+      $('#play').classList.toggle('active', state.playing);
+      state.lastFrame = performance.now();
+      if (state.playing) requestAnimationFrame(tick);
+    }
+
+    function tick(now) {
+      if (!state.playing) return;
+      const elapsed = now - state.lastFrame; state.lastFrame = now;
+      setTime(state.time + elapsed * state.speed, true);
+      if (state.time >= REPLAY.meta.end) { state.playing = false; $('#play').textContent = '▶ 回放'; $('#play').classList.remove('active'); return; }
+      requestAnimationFrame(tick);
+    }
+
+    function showTooltip(event, request) {
+      const phase = phaseAt(request, state.time);
+      tooltip.innerHTML = requestTooltip(request, phase); tooltip.classList.add('visible');
+      moveTooltip(event);
+    }
+    function moveTooltip(event) { tooltip.style.left = `${Math.min(window.innerWidth - 340, event.clientX + 14)}px`; tooltip.style.top = `${Math.min(window.innerHeight - 230, event.clientY + 14)}px`; }
+    function hideTooltip() { tooltip.classList.remove('visible'); }
+
+    $('#subtitle').textContent = `${REPLAY.meta.source} · ${number(REPLAY.meta.requestCount)} requests · ${number(REPLAY.meta.hostCount)} Prefill hosts · ${number(REPLAY.meta.candidateCount)} recorded decision candidates`;
+    hostFilter.innerHTML = `<option value="all">全部 host</option>${hosts.map((host) => `<option value="${host}">${host}</option>`).join('')}`;
+    $('#time-range').min = REPLAY.meta.start; $('#time-range').max = REPLAY.meta.end; $('#time-range').step = 10; $('#time-range').value = state.time;
+    $('#play').addEventListener('click', togglePlay);
+    $('#reset').addEventListener('click', () => { state.selectedId = null; setTime(REPLAY.meta.start); });
+    $('#prev-decision').addEventListener('click', () => stepDecision(-1));
+    $('#next-decision').addEventListener('click', () => stepDecision(1));
+    $('#time-range').addEventListener('input', (event) => { pausePlayback(); state.selectedId = null; setTime(event.target.value); });
+    document.querySelectorAll('.speed').forEach((button) => button.addEventListener('click', () => { state.speed = Number(button.dataset.speed); document.querySelectorAll('.speed').forEach((item) => item.classList.toggle('active', item === button)); }));
+    hostFilter.addEventListener('change', () => { state.focusedHost = hostFilter.value; render(); });
+    document.addEventListener('click', (event) => {
+      const requestElement = event.target.closest('[data-request-id]');
+      if (requestElement) { const request = byId.get(requestElement.dataset.requestId); if (request) { state.selectedId = request.id; state.focusedHost = request.host; hostFilter.value = request.host; setTime(Math.max(request.route, Math.min(state.time, lifecycle(request).end))); } return; }
+      const candidate = event.target.closest('[data-candidate-host]');
+      if (candidate) { state.focusedHost = candidate.dataset.candidateHost; hostFilter.value = state.focusedHost; render(); }
+    });
+    document.addEventListener('pointerover', (event) => { const element = event.target.closest('.request-stack'); if (element) { const request = byId.get(element.dataset.requestId); if (request) showTooltip(event, request); } });
+    document.addEventListener('pointermove', (event) => { if (tooltip.classList.contains('visible')) moveTooltip(event); });
+    document.addEventListener('pointerout', (event) => { if (event.target.closest('.request-stack')) hideTooltip(); });
+    document.addEventListener('keydown', (event) => {
+      if (event.target.closest('input, select, textarea, [contenteditable="true"]')) return;
+      if (event.code === 'Space') { event.preventDefault(); togglePlay(); }
+      if (event.code === 'ArrowLeft') { event.preventDefault(); stepDecision(-1); }
+      if (event.code === 'ArrowRight') { event.preventDefault(); stepDecision(1); }
+    });
+    window.addEventListener('resize', renderOverview);
+    render();
+  })();
+  </script>
+</body>
+</html>

@@ -236,9 +236,9 @@ class LocalStandbyCacheManagerTest {
 
     private ModelMetaConfig modelMetaConfig(long expirationMs, long maximumEntries, double capacityMultiplier, long blockSize) {
         LocalStandbyConfig standby = new LocalStandbyConfig();
-        standby.setEntryTtlMs(expirationMs);
-        standby.setMinimumEntryTtlMs(
-                Math.min(expirationMs, LocalStandbyConfig.DEFAULT_MINIMUM_ENTRY_TTL_MS));
+        standby.setTtlMs(expirationMs);
+        standby.setMinimumTtlMs(
+                Math.min(expirationMs, LocalStandbyConfig.DEFAULT_MINIMUM_TTL_MS));
         standby.setMaximumEntries(maximumEntries);
         standby.setCapacityMultiplier(capacityMultiplier);
         standby.setBlockSize(blockSize);

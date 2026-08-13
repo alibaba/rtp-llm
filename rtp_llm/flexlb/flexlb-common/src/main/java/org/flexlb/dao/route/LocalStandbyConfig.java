@@ -11,8 +11,8 @@ import lombok.Data;
 @Data
 public class LocalStandbyConfig {
 
-    public static final long DEFAULT_ENTRY_TTL_MS = 300_000L;
-    public static final long DEFAULT_MINIMUM_ENTRY_TTL_MS = 100_000L;
+    public static final long DEFAULT_TTL_MS = 300_000L;
+    public static final long DEFAULT_MINIMUM_TTL_MS = 100_000L;
     public static final double DEFAULT_TTL_REDUCTION_START_RATIO = 0.8;
     public static final long DEFAULT_MAXIMUM_ENTRIES = 2_000_000L;
     public static final double DEFAULT_CAPACITY_MULTIPLIER = 10.0;
@@ -32,16 +32,16 @@ public class LocalStandbyConfig {
     private long blockSize;
 
     /**
-     * Lifetime of one worker/block-hash association after its most recent write.
+     * Lifetime of a worker/block-hash association after its most recent write.
      */
-    @JsonProperty("entry_ttl_ms")
-    private long entryTtlMs = DEFAULT_ENTRY_TTL_MS;
+    @JsonProperty("ttl_ms")
+    private long ttlMs = DEFAULT_TTL_MS;
 
     /**
      * Minimum global lifetime used when metadata reaches its capacity estimate.
      */
-    @JsonProperty("minimum_entry_ttl_ms")
-    private long minimumEntryTtlMs = DEFAULT_MINIMUM_ENTRY_TTL_MS;
+    @JsonProperty("minimum_ttl_ms")
+    private long minimumTtlMs = DEFAULT_MINIMUM_TTL_MS;
 
     /**
      * Global capacity usage ratio at which TTL starts decreasing linearly.

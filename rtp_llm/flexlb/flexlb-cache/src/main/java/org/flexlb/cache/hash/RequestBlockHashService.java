@@ -82,6 +82,12 @@ public class RequestBlockHashService {
                     request.setBlockCacheKeys(result.blockCacheKeys());
                     if (reusePrimaryHash) {
                         request.setLocalStandbyBlockCacheKeys(result.blockCacheKeys());
+                        request.setLocalStandbyCacheableBlockCacheKeys(
+                                blockHashExecutor.cacheablePrefix(
+                                        result.blockCacheKeys(),
+                                        inputIds.length,
+                                        blockSize,
+                                        hashConfig.lookaheadTokens()));
                     }
                     request.setInputIds(null);
                     context.recordBlockHashTiming(result.queueWaitTimeUs(), result.executionTimeUs());
@@ -98,6 +104,7 @@ public class RequestBlockHashService {
             // Provided hashes have the highest priority and describe the request's block size.
             request.setLocalStandbyBlockSize(requestBlockSize);
             request.setLocalStandbyBlockCacheKeys(blockCacheKeys);
+            request.setLocalStandbyCacheableBlockCacheKeys(blockCacheKeys);
         }
         request.setInputIds(null);
         return Mono.empty();

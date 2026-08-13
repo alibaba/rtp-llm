@@ -99,7 +99,7 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
   `HttpLoadBalanceServer` 调 `updateFromRoutedRequest` 异步落库。master/follower 之间不复制。
 - `LocalStandbyCacheIndex`：`ConcurrentHashMap<Long blockHash, ConcurrentHashMap<worker,
   lastUpdatedNanos>>`，TTL 过期（用量超 `ttlReductionStartRatio(0.8)` 后 TTL 从
-  `entryTtlMs(300s)` 线性降至 `minimumEntryTtlMs(100s)`），容量上限
+  `ttlMs(300s)` 线性降至 `minimumTtlMs(100s)`），容量上限
   `min(存活 worker HBM 估算块数 × capacityMultiplier(10), maximumEntries(200万))`，
   达到上限拒绝新映射；daemon 清理线程每 10s 增量扫描。
 - 匹配时对每个 worker 的命中块数**减去其 `cacheMatchRollbackBlocks`**（下限 0）。
@@ -122,17 +122,30 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
 `GET /flexlb/cache_match/status`）。
 
 `CacheMatchResult` 恒携带**应答源自己的 blockSize**（KVCM/standby 的块大小可能与请求主
-hash 不同），路由侧统一用 `blockSize × 匹配块数` 折算 token。
+hash 不同），路由侧统一用 `blockSize × 匹配块数` 折算 token，并以请求 token 数作为上限。
 
 ## Block hash 计算
 
-- 算法：`BlockCacheKeyCalculator`（flexlb-common）——vLLM 兼容的 `sha256_cbor` 链式块哈希
-  （`PYTHONHASHSEED=0` 语义）：每满块 CBOR 编码 `[parentHash, tokens, null]` → SHA-256 →
-  取低 64 位为 Long key；末尾不满块丢弃。
+- 策略：`BlockHashStrategy`（flexlb-cache）由 `FlexlbConfig.blockHashStrategy` 选择，默认
+  `VLLM`；`FLEXLB_CONFIG` JSON 或 `BLOCK_HASH_STRATEGY` 环境变量可切换为 `SGLANG`。
+- `VllmBlockHashStrategy` 委托 `BlockCacheKeyCalculator`（flexlb-common）计算 vLLM 兼容的
+  `sha256_cbor` 链式块哈希（`PYTHONHASHSEED=0` 语义）：每满块 CBOR 编码
+  `[parentHash, tokens, null]` → SHA-256 → 取低 64 位为 Long key；末尾不满块丢弃。
+- `SglangBlockHashStrategy`：每页计算
+  `SHA256(parentFullDigest || tokenIdsAsUint32LittleEndian)`，用完整 32-byte digest 串联下一页，
+  取 digest 高 64 位作为有符号 Long key；与 SGLang page_size 对齐，末尾不满页不计算。
+  `block_hash_lookahead_tokens=0`
+  时每个逻辑单元是单 token；值为 1 时匹配 SGLang EAGLE，把 N 个 raw tokens 表示为 N-1 个
+  overlapping `(t_i, t_{i+1})`，每个 pair 的两个 token 都写入 hash。其他 lookahead 值请求失败。
+  可缓存前缀同样按完整页截取：普通模式按 `floor(N/blockSize)`、EAGLE 按
+  `floor((N-1)/blockSize)`。
 - 配置解析：`WorkerBlockHashConfigResolver` 每 1 分钟从存活 PREFILL（退化 PDFUSION）worker
   的 `blockSize` + `blockHashLookaheadTokens` 刷新，不可用时保留上次有效值。
 - 执行：`BlockHashExecutor` 专用线程池（默认 core 8 / max 32 / 队列 16384，
   `flexlb.block-hash.*` 可调），出队等待/执行耗时指标，完成后 `publishOn(parallel)` 不占
   hash 线程。请求自带 `block_cache_keys` 时直接采用不再计算。
 - Local Standby 块大小与主请求不同时，由 `LocalStandbyHashService`（低优先级独立线程池 +
-  Caffeine 60s 结果缓存）异步补算，路由只等主 hash。
+  Caffeine 60s 结果缓存）异步补算，路由只等主 hash；主 hash 与 standby 共用同一个
+  `BlockHashStrategy` bean。
+- LOCAL_SYNC、Local Standby 与 KVCM 查询都消费有序 block key 链，按请求顺序连续匹配并在
+  首个 miss 停止；这与 SGLang HashTree 的前缀匹配语义一致，不按算法拆分 matcher。

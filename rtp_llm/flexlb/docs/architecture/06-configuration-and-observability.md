@@ -12,6 +12,7 @@
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
+| `blockHashStrategy` | `VLLM` | cache block hash 策略：`VLLM` / `SGLANG`；可由 `BLOCK_HASH_STRATEGY` 覆盖 |
 | `loadBalanceStrategy` | `SHORTEST_TTFT` | PDFUSION/PREFILL 策略 |
 | `decodeLoadBalanceStrategy` | `WEIGHTED_CACHE` | DECODE 策略 |
 | `vitLoadBalanceStrategy` | `RANDOM` | VIT 策略 |
@@ -48,7 +49,7 @@ Spring 属性/env，缺省**启动失败**。反序列化为 `ServiceRoute`：
   `heartbeat_failure_threshold=3`、`query_failure_threshold=10`、`max_query_retry_count=1`、
   `recovery_success_threshold=3`、`local_standby`。
 - `LocalStandbyConfig`：`auto_switch=true`、`block_size=0`（0=沿用引擎块大小）、
-  `entry_ttl_ms=300000`、`minimum_entry_ttl_ms=100000`、`ttl_reduction_start_ratio=0.8`、
+  `ttl_ms=300000`、`minimum_ttl_ms=100000`、`ttl_reduction_start_ratio=0.8`、
   `maximum_entries=2000000`、`capacity_multiplier=10.0`、`async_queue_capacity=100000`、
   `hash_thread_count=4`、`hash_queue_capacity=100000`。
 
@@ -135,4 +136,5 @@ zookeeperConfig{zkHost, zkTimeoutMs}}`；另需 env `HIPPO_ROLE`。见
   `-Dspring.profiles.active=${FLEXLB_ACTIVE_PROFILES}` 由环境注入。
 - 其他 env：`MAX_IN_MEMORY_SIZE`（codec 默认 10MB）、`FLEXLB_LOG_LEVEL`、`FLEXLB_LOG_PATH`、
   `FLEXLB_APP_LOG_PATH`、`FLEXLB_MONITOR_PROVIDER`、
+  `BLOCK_HASH_STRATEGY`（`VLLM` / `SGLANG`）、
   `FLEXLB_BLOCK_HASH_{CORE_THREAD_COUNT,MAX_THREAD_COUNT,KEEP_ALIVE_SECONDS,QUEUE_CAPACITY}`。
