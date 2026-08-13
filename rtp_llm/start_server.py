@@ -24,6 +24,7 @@ from rtp_llm.utils.process_manager import (
     DEFER_FIRST_SIGTERM_VALUE,
     ProcessManager,
 )
+from rtp_llm.utils.warmup import configure_warmup
 
 setup_logging()
 
@@ -407,8 +408,8 @@ def _is_startup_real_warmup_entry_rank(py_env_configs: PyEnvConfigs) -> bool:
 
 
 def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
-    flag = os.environ.get("DSV4_STARTUP_REAL_WARMUP", "auto").strip().lower()
-    if flag in ("0", "false", "off", "no"):
+    runtime_config = py_env_configs.runtime_config
+    if not runtime_config.warm_up or not runtime_config.model_warm_up:
         return False
 
     role_is_prefill = _role_is_prefill(py_env_configs)
@@ -426,10 +427,7 @@ def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
         )
         return False
 
-    model_type = getattr(py_env_configs.model_args, "model_type", "")
-    if flag in ("1", "true", "on", "yes", "force"):
-        return True
-    return model_type == "deepseek_v4"
+    return getattr(py_env_configs.model_args, "model_type", "") == "deepseek_v4"
 
 
 def _setup_startup_warmup_health_gate(py_env_configs: PyEnvConfigs):
@@ -476,6 +474,10 @@ def main():
 
 def start_server(py_env_configs: PyEnvConfigs):
     logging.info(f"[PROCESS_START]Start server")
+    configure_warmup(
+        py_env_configs.runtime_config.warm_up,
+        py_env_configs.runtime_config.model_warm_up,
+    )
     start_time = time.time()
     try:
         multiprocessing.set_start_method("spawn")

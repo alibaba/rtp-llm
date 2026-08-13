@@ -24,6 +24,7 @@ from rtp_llm.config.py_config_modules import (
 from rtp_llm.model_factory_register import _model_factory, ensure_model_registered
 from rtp_llm.ops import ProfilingDebugLoggingConfig, SpeculativeType, VitSeparation
 from rtp_llm.utils.util import check_with_info
+from rtp_llm.utils.warmup import configure_warmup
 
 
 class ModelFactory:
@@ -72,6 +73,10 @@ class ModelFactory:
             vit_config: Optional VitConfig (needed for multimodal models)
             merge_lora: Whether to merge LoRA weights
         """
+        configure_warmup(
+            engine_config.runtime_config.warm_up,
+            engine_config.runtime_config.model_warm_up,
+        )
         model_type = model_config.model_type
         model_cls = ModelFactory.get_model_cls(model_type)
 
@@ -115,6 +120,10 @@ class ModelFactory:
         Returns:
             ProposeModel instance or None if no propose model needed
         """
+        configure_warmup(
+            engine_config.runtime_config.warm_up,
+            engine_config.runtime_config.model_warm_up,
+        )
         sp_type = engine_config.sp_config.type  # Get SpeculativeType enum value
         if sp_type == SpeculativeType.NONE:
             return None

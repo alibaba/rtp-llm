@@ -71,6 +71,12 @@ py_test(
 )
 
 py_test(
+    name = "warmup_test",
+    srcs = ["warmup_test.py"],
+    deps = ["//rtp_llm:warmup"],
+)
+
+py_test(
     name = "hot_hook_runtime_test",
     srcs = [
         "hot_hook_runtime_test.py",

@@ -19,6 +19,8 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.utils.warmup import model_warm_up_enabled
+
 _log = _logging.getLogger(__name__)
 
 _TILELANG_AVAILABLE: bool = False
@@ -260,7 +262,7 @@ def prewarm(
     compilation; subsequent calls with the same (h_padded, d, scale) hit the
     module-level _SPARSE_ATTN_KERNEL_CACHE and skip compilation.
     """
-    if not _TILELANG_AVAILABLE:
+    if not model_warm_up_enabled() or not _TILELANG_AVAILABLE:
         return
     h_padded = max(n_heads, 16)
     _log.info(

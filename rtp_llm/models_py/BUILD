@@ -46,6 +46,7 @@ py_library(
     deps = [
         ":utils",
         ":tile_kernels_mhc",
+        "//rtp_llm:warmup",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         "//rtp_llm/models_py/distributed:deepep_wrapper",
         "//rtp_llm/models_py/distributed:collective_torch",
@@ -148,6 +149,7 @@ py_library(
         ":modules",
         ":kernels",
         ":configs",
+        "//rtp_llm:warmup",
         "//rtp_llm/model_loader:loader",
     ] + select({
         "@//:using_cuda12": [

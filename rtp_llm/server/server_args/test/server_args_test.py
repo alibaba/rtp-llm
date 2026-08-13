@@ -80,6 +80,8 @@ class ServerArgsSetTest(TestCase):
 
         # Verify runtime_config (warm_up is now in RuntimeConfig)
         self.assertEqual(py_env_configs.runtime_config.warm_up, True)  # bool in C++
+        self.assertEqual(py_env_configs.runtime_config.warm_up_with_loss, False)
+        self.assertEqual(py_env_configs.runtime_config.model_warm_up, True)
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
         self.assertEqual(
@@ -158,12 +160,54 @@ class ServerArgsSetTest(TestCase):
 
         # Verify runtime_config (warm_up is now in RuntimeConfig)
         self.assertEqual(py_env_configs.runtime_config.warm_up, False)  # bool in C++
+        self.assertEqual(py_env_configs.runtime_config.warm_up_with_loss, False)
+        self.assertEqual(py_env_configs.runtime_config.model_warm_up, True)
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
 
         # Verify cache_store_config
         self.assertEqual(py_env_configs.cache_store_config.rdma_io_thread_count, 4)
         self.assertEqual(py_env_configs.cache_store_config.rdma_worker_thread_count, 2)
+
+    def test_model_warm_up_env_and_global_master(self):
+        os.environ["WARM_UP"] = "0"
+        os.environ["WARM_UP_WITH_LOSS"] = "1"
+        os.environ["MODEL_WARM_UP"] = "1"
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertFalse(py_env_configs.runtime_config.warm_up)
+        self.assertTrue(py_env_configs.runtime_config.warm_up_with_loss)
+        self.assertTrue(py_env_configs.runtime_config.model_warm_up)
+        self.assertEqual(os.environ["WARM_UP"], "0")
+        self.assertEqual(os.environ["WARM_UP_WITH_LOSS"], "1")
+        self.assertEqual(os.environ["MODEL_WARM_UP"], "1")
+
+    def test_warm_up_with_loss_is_independent_of_model_warm_up(self):
+        os.environ["WARM_UP"] = "1"
+        os.environ["WARM_UP_WITH_LOSS"] = "1"
+        os.environ["MODEL_WARM_UP"] = "0"
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertTrue(py_env_configs.runtime_config.warm_up)
+        self.assertTrue(py_env_configs.runtime_config.warm_up_with_loss)
+        self.assertFalse(py_env_configs.runtime_config.model_warm_up)
+
+        restored_runtime_config = pickle.loads(
+            pickle.dumps(py_env_configs.runtime_config)
+        )
+        self.assertTrue(restored_runtime_config.warm_up)
+        self.assertTrue(restored_runtime_config.warm_up_with_loss)
+        self.assertFalse(restored_runtime_config.model_warm_up)
 
     def test_cmd_args_override_env_vars(self):
         """Test that command line arguments override environment variables."""

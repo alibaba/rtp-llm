@@ -406,6 +406,8 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
     @torch.inference_mode()
     def warmup_jit(self, token_counts: list[int]) -> None:
         """Compile MegaMoE JIT buckets with synthetic rank-local tokens."""
+        if not mega_moe_jit_warmup_enabled():
+            return
         import torch.distributed as dist
 
         cfg = self.cfg
