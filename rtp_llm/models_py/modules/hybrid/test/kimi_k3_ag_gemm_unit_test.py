@@ -664,6 +664,45 @@ class KimiK3AllGatherMatmulUnitTest(unittest.TestCase):
         reserve.assert_called_once_with(group, expected_bytes)
         self.assertTrue(model._fused_ag_gemm_workspace_ready)
 
+    def test_decode_eagle3_uses_fixed_hidden_buffer_across_graph_shapes(self) -> None:
+        model = KimiK3Model.__new__(KimiK3Model)
+        nn.Module.__init__(model)
+        model.config = SimpleNamespace(
+            max_seq_len=32768,
+            hidden_size=16,
+            gen_num_per_cycle=3,
+        )
+        model.parallelism_config = SimpleNamespace(
+            get_attn_tp_size=lambda: 8,
+        )
+        model.embedding_weight = torch.empty(1, dtype=torch.bfloat16)
+        model._max_generate_batch_size = 8
+        model._fused_ag_gemm_workspace_ready = False
+        model._mtp_hidden_buffer = None
+        model._mtp_hidden_valid_tokens = 0
+        init_resource = SimpleNamespace(
+            kv_cache=None,
+            is_decode_role=True,
+            max_context_batch_size=1,
+        )
+
+        with patch.dict(kimi_k3.os.environ, {"SP_TYPE": "eagle3"}):
+            self.assertTrue(model.initialize(init_resource))
+
+        self.assertEqual(tuple(model._mtp_hidden_buffer.shape), (32, 48))
+        original_ptr = model._mtp_hidden_buffer.data_ptr()
+        captured_small = torch.arange(4 * 48, dtype=torch.bfloat16).reshape(4, 48)
+        captured = torch.arange(12 * 48, dtype=torch.bfloat16).reshape(12, 48)
+
+        model._write_mtp_hidden_buffer(captured_small, is_cuda_graph=True)
+        model._write_mtp_hidden_buffer(captured, is_cuda_graph=True)
+
+        self.assertEqual(model._mtp_hidden_buffer.data_ptr(), original_ptr)
+        self.assertEqual(model._mtp_hidden_valid_tokens, 0)
+        torch.testing.assert_close(
+            model.get_mtp_target_hidden_states(12), captured, rtol=0, atol=0
+        )
+
     def test_decode_packed_projection_is_cuda_graph_safe_and_local(self) -> None:
         if not torch.cuda.is_available():
             self.skipTest("CUDA is required")

@@ -452,6 +452,8 @@ class KimiK3Model(GptModelBase):
         )
         self._layer_group_ids: Optional[tuple[int, ...]] = None
         self._fused_ag_gemm_workspace_ready = False
+        self._max_generate_batch_size = int(max_generate_batch_size)
+        self._is_decode_role = False
         self._mtp_hidden_buffer: Optional[torch.Tensor] = None
         self._mtp_hidden_valid_tokens = 0
         self._prefill_static_attn_res_bank: Optional[torch.Tensor] = None
@@ -460,6 +462,22 @@ class KimiK3Model(GptModelBase):
         """Bind runtime resources and reserve the largest Prefill AG workspace."""
 
         super().initialize(init_resource)
+        self._is_decode_role = bool(init_resource.is_decode_role)
+        if (
+            self._is_decode_role
+            and self._mtp_hidden_buffer is None
+            and os.environ.get("SP_TYPE", "").lower() == "eagle3"
+        ):
+            tokens_per_batch = max(int(self.config.gen_num_per_cycle) + 1, 1)
+            token_capacity = self._max_generate_batch_size * tokens_per_batch
+            self._mtp_hidden_buffer = self.embedding_weight.new_empty(
+                token_capacity,
+                3 * int(self.config.hidden_size),
+            )
+            logging.info(
+                "[K3_EAGLE3] allocated Decode hidden buffer shape=%s",
+                tuple(self._mtp_hidden_buffer.shape),
+            )
         if self._fused_ag_gemm_workspace_ready:
             return True
 
@@ -495,6 +513,37 @@ class KimiK3Model(GptModelBase):
             tp_size,
         )
         return True
+
+    def _write_mtp_hidden_buffer(
+        self, hidden_states: torch.Tensor, *, is_cuda_graph: bool
+    ) -> None:
+        rows = int(hidden_states.size(0))
+        if self._is_decode_role:
+            buffer = self._mtp_hidden_buffer
+            if buffer is None:
+                raise RuntimeError(
+                    "Kimi K3 EAGLE Decode hidden buffer was not initialized"
+                )
+            if hidden_states.shape[1:] != buffer.shape[1:]:
+                raise ValueError(
+                    "Kimi K3 EAGLE hidden width does not match the Decode buffer: "
+                    f"hidden={tuple(hidden_states.shape)}, buffer={tuple(buffer.shape)}"
+                )
+            if rows > buffer.size(0):
+                raise ValueError(
+                    f"Kimi K3 EAGLE hidden rows {rows} exceed Decode capacity "
+                    f"{buffer.size(0)}"
+                )
+            # CUDA Graph replay does not execute Python. Every captured graph must
+            # therefore write into the same model-owned storage instead of replacing
+            # this attribute with the tensor from one captured batch shape.
+            buffer.narrow(0, 0, rows).copy_(hidden_states)
+        else:
+            # Prefill can have far more rows than the Decode graph budget and is not
+            # graph-captured, so retain its exact-size tensor without a large reserve.
+            self._mtp_hidden_buffer = hidden_states
+        if not is_cuda_graph:
+            self._mtp_hidden_valid_tokens = rows
 
     def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
         if self._mtp_hidden_buffer is None:
@@ -948,8 +997,13 @@ class KimiK3Model(GptModelBase):
                     prefill_sp_layout.logical_tokens,
                     group=Group.TP,
                 )
-            self._mtp_hidden_buffer = mtp_hidden_buffer
-            self._mtp_hidden_valid_tokens = self._mtp_hidden_buffer.size(0)
+            self._write_mtp_hidden_buffer(
+                mtp_hidden_buffer,
+                is_cuda_graph=(
+                    bool(getattr(attention_inputs, "is_cuda_graph", False))
+                    or (input_ids.is_cuda and torch.cuda.is_current_stream_capturing())
+                ),
+            )
         hidden_states = self.norm(hidden_states, block_residual)
         if prefill_sp:
             assert prefill_sp_layout is not None
