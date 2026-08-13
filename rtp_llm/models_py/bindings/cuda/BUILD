@@ -20,6 +20,8 @@ cc_library(
         "//rtp_llm/cpp/utils:stack_trace",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:static_config",
+        "@local_config_cuda//cuda:cublas_headers",
+        "@local_config_cuda//cuda:cuda_driver",
         "@local_config_cuda//cuda:nvml",
     ],
     copts = copts(),
@@ -159,6 +161,7 @@ cc_library(
     copts = cuda_copts(),
     deps = torch_deps() + [
         ":cuda_host_utils",
+        "@local_config_cuda//cuda:cuda_headers",
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "//rtp_llm/models_py/bindings/core:types_hdr",
         "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp8_quant",
