@@ -409,6 +409,7 @@ struct PyModelInputs {
     PyMultimodalInputs  multimodal_inputs;
     PyAttentionInputs   attention_inputs;
     BertEmbeddingInputs bert_embedding_inputs;
+    bool                force_disable_sp_run = false;
 };
 
 struct PyModelOutputs {

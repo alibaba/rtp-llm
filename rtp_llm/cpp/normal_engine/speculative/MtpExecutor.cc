@@ -765,6 +765,17 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         model_input                              = std::move(model_input_status.value());
         executor_collector.gather_model_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
+    if (isTpRank0()) {
+        bool any_disabled = false;
+        bool any_enabled  = false;
+        for (const auto& stream : streams) {
+            any_disabled |= stream->forceDisableSpRun();
+            any_enabled  |= !stream->forceDisableSpRun();
+        }
+        RTP_LLM_CHECK_WITH_INFO(!(any_disabled && any_enabled),
+                                "mixed force_disable_sp_run values in one Prefill scheduler batch are unsupported");
+        model_input.force_disable_sp_run = any_disabled;
+    }
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(tp_sync_input)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -851,9 +862,30 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                 model_input.combo_tokens  = saved_combo_tokens;
                 model_input.input_lengths = saved_input_lengths;
             }
-            batch_stream_processor_->updatePrefillPostDraftModelInput(
-                model_input, model_output, sampler_output, buffer_holder_);
+            if (!model_input.force_disable_sp_run) {
+                batch_stream_processor_->updatePrefillPostDraftModelInput(
+                    model_input, model_output, sampler_output, buffer_holder_);
+            }
         }
+    }
+
+    if (model_input.force_disable_sp_run) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_only_dispatch)");
+        if (!isTpRank0() || warm_up_ || streams.empty() || model_input.is_fake_stream) {
+            cudaSyncAndCheck();
+            return absl::OkStatus();
+        }
+        executor_collector.context_batch_size = stream_groups.totalContextBatchSize();
+        executor_collector.execute_token_size = stream_groups.modelExecuteTokenSize();
+        executor_collector.max_seq_len        = stream_groups.maxSeqLen();
+        executor_collector.model_forward_us += model_forward_us;
+        tps_collector.addTokenSize(stream_groups.contextExecuteTokenSize(),
+                                   stream_groups.contextExecuteTokenSizeWithCache(),
+                                   0,
+                                   stream_groups.modelExecuteTokenSize(),
+                                   model_forward_us);
+        return batch_stream_processor_->dispatch(
+            stream_groups, {std::move(model_output), std::move(sampler_output)});
     }
 
     // draft model prefill

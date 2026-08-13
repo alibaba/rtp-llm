@@ -591,6 +591,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                                               multimodal_inputs,
                                               py_attn_inputs,
                                               bert_embedding_inputs});
+        input_list.back().force_disable_sp_run = inputs.force_disable_sp_run;
     }
 
     if (!inputs.warmup && inputs.pd_separation) {
@@ -868,6 +869,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                                         multimodal_inputs,
                                                         attention_inputs_,
                                                         bert_embedding_inputs});
+        py_model_inputs.force_disable_sp_run = inputs.force_disable_sp_run;
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
