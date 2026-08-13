@@ -273,61 +273,66 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                                     maga_init_params_.sp_config.gen_num_per_cycle);
         }
 
-        generate_stream->setReuseLength(generate_stream->seqLength() - 1);
-        generate_stream->setSpEditRun(false);
-        generate_stream->setMtpTokenIndex(generate_stream->seqLength() - 1);
-        generate_stream->setContainProposeToken(true);
         std::vector<int> propose_tokens;
         propose_tokens.assign(generate_request.propose_token_ids().begin(), generate_request.propose_token_ids().end());
-        RTP_LLM_CHECK_WITH_INFO(propose_tokens.size() >= 2,
-                                "decode rpc propose_tokens should contain target and draft token, count=%zu",
-                                propose_tokens.size());
-        generate_stream->setProposeToken(propose_tokens);
+        // A DSpARK seeding handoff carries no proposal (commit-only prefill);
+        // the decode round head produces the first one. Traditional MTP/Eagle
+        // retain their target+draft handoff contract.
+        RTP_LLM_CHECK_WITH_INFO(engine_->isDSpark() ? propose_tokens.empty() : propose_tokens.size() >= 2,
+                                "decode rpc speculative handoff has invalid proposal count=%zu for dspark=%d",
+                                propose_tokens.size(),
+                                static_cast<int>(engine_->isDSpark()));
+        generate_stream->initSpeculativeHandoffPositions();
+        if (!propose_tokens.empty()) {
+            generate_stream->setContainProposeToken(true);
+            generate_stream->setProposeToken(propose_tokens);
 
-        auto sp_output_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
-        sp_output_buffer->propose_step = propose_step;
-        sp_output_buffer->tokens       = torch::zeros({1, (int64_t)propose_tokens.size()},
-                                                torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
-        memcpy(sp_output_buffer->tokens.data_ptr<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
+            auto sp_output_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
+            sp_output_buffer->propose_step = propose_step;
+            sp_output_buffer->tokens = torch::zeros({1, (int64_t)propose_tokens.size()},
+                                                    torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+            memcpy(
+                sp_output_buffer->tokens.data_ptr<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
 
-        auto propose_probs_t  = QueryConverter::transTensor(generate_request.propose_probs());
-        auto propose_hidden_t = QueryConverter::transTensor(generate_request.propose_hidden());
+            auto propose_probs_t  = QueryConverter::transTensor(generate_request.propose_probs());
+            auto propose_hidden_t = QueryConverter::transTensor(generate_request.propose_hidden());
 
-        const auto cuda_i32             = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-        sp_output_buffer->all_probs     = propose_probs_t.to(torch::kCUDA);
-        sp_output_buffer->hidden_states = propose_hidden_t.to(torch::kCUDA);
+            const auto cuda_i32             = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+            sp_output_buffer->all_probs     = propose_probs_t.to(torch::kCUDA);
+            sp_output_buffer->hidden_states = propose_hidden_t.to(torch::kCUDA);
 
-        auto propose_tokens_gpu = torch::empty({1}, cuda_i32);
-        auto accept_len         = torch::ones({1}, cuda_i32);
-        auto accept_tokens      = torch::zeros({1, static_cast<int64_t>(propose_step + 1)}, cuda_i32);
-        accept_tokens[0][0]     = sp_output_buffer->tokens[0][0];
-        propose_tokens_gpu[0]   = sp_output_buffer->tokens[0][1];
+            auto propose_tokens_gpu = torch::empty({1}, cuda_i32);
+            auto accept_len         = torch::ones({1}, cuda_i32);
+            auto accept_tokens      = torch::zeros({1, static_cast<int64_t>(propose_step + 1)}, cuda_i32);
+            accept_tokens[0][0]     = sp_output_buffer->tokens[0][0];
+            propose_tokens_gpu[0]   = sp_output_buffer->tokens[0][1];
 
-        auto next_seq_len = torch::ones({1}, cuda_i32);
-        next_seq_len[0]   = generate_stream->seqLength();
+            auto next_seq_len = torch::ones({1}, cuda_i32);
+            next_seq_len[0]   = generate_stream->seqLength();
 
-        generate_stream->setSPOutputBuffer(sp_output_buffer);
-        // The per-step refresher (MtpExecutor's device-state publish) is gated
-        // on RTP_LLM_STREAM_ASYNC / RTP_LLM_MTP_ASYNC_DEVICE_STATE. Publishing
-        // this static snapshot without those pipelines active would leave a
-        // stale next_real_seq_len that overrides incrKVBlock forever (same
-        // failure mode as the normal-decode grpc device state).
-        auto env_on = [](const char* name) {
-            const char* value = std::getenv(name);
-            return value != nullptr && std::string(value) == "1";
-        };
-        if (env_on("RTP_LLM_STREAM_ASYNC") || env_on("RTP_LLM_MTP_ASYNC_DEVICE_STATE")) {
-            generate_stream->setMtpAsyncDeviceState(GenerateStream::MtpAsyncDeviceState{
-                .epoch                  = 0,
-                .accept_len_gpu         = std::move(accept_len),
-                .accept_tokens_gpu      = std::move(accept_tokens),
-                .next_seq_len_gpu       = std::move(next_seq_len),
-                .propose_tokens_gpu     = std::move(propose_tokens_gpu),
-                .last_hidden_states_gpu = sp_output_buffer->hidden_states,
-                .draft_all_probs_gpu    = sp_output_buffer->all_probs,
-                .last_real_seq_len      = generate_stream->seqLength(),
-                .next_real_seq_len      = generate_stream->seqLength(),
-            });
+            generate_stream->setSPOutputBuffer(sp_output_buffer);
+            // The per-step refresher (MtpExecutor's device-state publish) is gated
+            // on RTP_LLM_STREAM_ASYNC / RTP_LLM_MTP_ASYNC_DEVICE_STATE. Publishing
+            // this static snapshot without those pipelines active would leave a
+            // stale next_real_seq_len that overrides incrKVBlock forever (same
+            // failure mode as the normal-decode grpc device state).
+            auto env_on = [](const char* name) {
+                const char* value = std::getenv(name);
+                return value != nullptr && std::string(value) == "1";
+            };
+            if (env_on("RTP_LLM_STREAM_ASYNC") || env_on("RTP_LLM_MTP_ASYNC_DEVICE_STATE")) {
+                generate_stream->setMtpAsyncDeviceState(GenerateStream::MtpAsyncDeviceState{
+                    .epoch                  = 0,
+                    .accept_len_gpu         = std::move(accept_len),
+                    .accept_tokens_gpu      = std::move(accept_tokens),
+                    .next_seq_len_gpu       = std::move(next_seq_len),
+                    .propose_tokens_gpu     = std::move(propose_tokens_gpu),
+                    .last_hidden_states_gpu = sp_output_buffer->hidden_states,
+                    .draft_all_probs_gpu    = sp_output_buffer->all_probs,
+                    .last_real_seq_len      = generate_stream->seqLength(),
+                    .next_real_seq_len      = generate_stream->seqLength(),
+                });
+            }
         }
     }
 

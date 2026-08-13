@@ -82,6 +82,9 @@ enum GptModelInputIndex : size_t {
     skipRun,
     gptModelRequestLength,  // length of request id & pd_separation
     isFakeStream,
+    // last_hidden_states can have a different row count from combo_tokens for
+    // DSpARK prefill seeding, so transmit its leading dimension explicitly.
+    mtpHiddenStatesRows,
     // Per-tensor device hint bitmap from root so non-root ranks allocate
     // matching GPU buffers and keep tpSync broadcast lanes consistent.
     tensorDeviceMap,

@@ -338,6 +338,15 @@ class QWenV2Weight(ModelDeployWeightInfo):
 class QWenV2(QWen):
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
+        config_path = os.path.join(ckpt_path, "config.json")
+        with open(config_path) as reader:
+            config_json = json.load(reader)
+        return cls._create_config_from_json(ckpt_path, config_json)
+
+    @classmethod
+    def _create_config_from_json(
+        cls, ckpt_path: str, config_json: Dict[str, Any]
+    ) -> ModelConfig:
         config = ModelConfig()
         config.ckpt_path = ckpt_path
         config.vocab_size = 152064
@@ -350,7 +359,7 @@ class QWenV2(QWen):
         # <|im_start|> and <|im_end|>
         config.special_tokens.stop_words_id_list = [[151645], [151644]]
 
-        QWenV2._from_hf(config, ckpt_path)
+        cls._from_config_json(config, config_json)
         assert (
             config.attn_config.head_num > 0
             and config.attn_config.kv_head_num > 0

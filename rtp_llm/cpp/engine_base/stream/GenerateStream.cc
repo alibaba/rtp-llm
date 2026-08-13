@@ -802,16 +802,18 @@ size_t GenerateStream::curBlocksNum() const {
 }
 
 size_t GenerateStream::maxTokenNum() const {
-    int reserve_tokens = 0;
+    size_t reserve_tokens = 0;
     if (sp_output_buffer_) {
-        reserve_tokens = sp_output_buffer_->propose_step;
+        reserve_tokens = static_cast<size_t>(sp_output_buffer_->propose_step);
         if (useStreamAsyncReserveTokens()) {
             reserve_tokens = reserve_tokens * 2 + 1;
         }
     }
 
-    return std::min(max_seq_len_ > reserve_tokens ? max_seq_len_ - reserve_tokens : 0,
-                    generate_input_->generate_config->max_new_tokens + generate_input_->inputLength());
+    const auto max_token_num_by_seq_len  = max_seq_len_ > reserve_tokens ? max_seq_len_ - reserve_tokens : 0;
+    const auto max_token_num_by_generate = static_cast<size_t>(generate_input_->generate_config->max_new_tokens)
+                                           + static_cast<size_t>(generate_input_->inputLength());
+    return std::min(max_token_num_by_seq_len, max_token_num_by_generate);
 }
 
 bool GenerateStream::needFinish() {
@@ -941,8 +943,18 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     int  target_last_token = new_tokens.data_ptr<int>()[num_new_tokens - 1];
     int* spec_tokens       = sp_output_buffer_->tokens.data_ptr<int>();
     spec_tokens[0]         = target_last_token;
-    spec_tokens[1]         = update_info.draft_token;
-    propose_token_         = {target_last_token, update_info.draft_token};
+    if (update_info.draft_token >= 0) {
+        RTP_LLM_CHECK_WITH_INFO(sp_output_buffer_->tokens.numel() >= 2,
+                                "speculative token buffer must contain target and draft slots");
+        spec_tokens[1] = update_info.draft_token;
+        propose_token_ = {target_last_token, update_info.draft_token};
+    } else {
+        // Commit-only speculative steps (DSpARK prefill/decode tail) publish
+        // only accepted target tokens. Their next proposal is produced at the
+        // following decode round head and must not become persistent stream
+        // or PD side-channel state.
+        propose_token_.clear();
+    }
 
     sp_output_buffer_->hidden_states = update_info.draft_hidden_states;
     sp_output_buffer_->all_probs     = update_info.draft_token_probs;

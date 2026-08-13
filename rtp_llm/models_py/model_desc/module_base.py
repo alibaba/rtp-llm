@@ -2,6 +2,7 @@ import logging
 from collections.abc import Mapping
 from typing import Any, Optional
 
+import torch
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
@@ -53,6 +54,8 @@ class GptModelBase(nn.Module):
 
         self.kv_cache: Optional[KVCache] = None
         self.device_type: DeviceType = get_device_type()
+        self._mtp_target_hidden_parts: list[torch.Tensor] = []
+        self._mtp_target_hidden_states: Optional[torch.Tensor] = None
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
@@ -111,6 +114,31 @@ class GptModelBase(nn.Module):
     def _get_fmha_group_tags(self) -> Optional[list[str]]:
         """Model hook: None means every attention-input tag requires FMHA."""
         return None
+
+    def begin_aux_hidden_capture(self) -> None:
+        self._mtp_target_hidden_parts.clear()
+        self._mtp_target_hidden_states = None
+
+    def capture_aux_hidden(self, layer_id: int, hidden_states: torch.Tensor) -> None:
+        layer_ids = self.config.capture_aux_hidden_layer_ids
+        if layer_ids is not None and layer_id in layer_ids:
+            self._mtp_target_hidden_parts.append(hidden_states)
+
+    def finish_aux_hidden_capture(self) -> None:
+        if self._mtp_target_hidden_parts:
+            self._mtp_target_hidden_states = torch.cat(
+                self._mtp_target_hidden_parts, dim=-1
+            )
+
+    def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
+        hidden = self._mtp_target_hidden_states
+        if hidden is None:
+            return None
+        if num_tokens < 0 or num_tokens > hidden.shape[0]:
+            raise RuntimeError(
+                f"requested {num_tokens} MTP target rows from {hidden.shape[0]} captured rows"
+            )
+        return hidden[:num_tokens]
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         raise NotImplementedError("forward method must be implemented in subclass")

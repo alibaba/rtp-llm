@@ -551,14 +551,16 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         torch::Tensor token_ids = micro_inputs.combo_tokens.clone().cuda();
         torch::Tensor input_hiddens =
             inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
-        input_list.emplace_back(PyModelInputs{token_ids,
+        auto py_model_inputs = PyModelInputs{token_ids,
                                               input_hiddens,
                                               combo_position_ids,
                                               embedding_inputs,
                                               multimodal_inputs,
                                               py_attn_inputs,
                                               attention_inputs_by_tag,
-                                              bert_embedding_inputs});
+                                              bert_embedding_inputs};
+        py_model_inputs.dspark_call_phase = micro_inputs.dspark_call_phase;
+        input_list.emplace_back(std::move(py_model_inputs));
     }
 
     const bool                has_cache_store_work = !inputs.warmup && inputs.pd_separation;
@@ -691,6 +693,7 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
                                           attention_inputs_,
                                           attention_inputs_by_tag_,
                                           torch_ext::BertEmbeddingInputs()});
+    py_model_inputs.dspark_call_phase = inputs.dspark_call_phase;
     if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
         graph_runner_->prepareAttentionInputs(py_model_inputs, graph_state_, skip_forward_event_sync);
     }
@@ -717,6 +720,7 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
                                               attention_inputs_,
                                               attention_inputs_by_tag_,
                                               torch_ext::BertEmbeddingInputs()});
+        py_model_inputs.dspark_call_phase = inputs.dspark_call_phase;
         if (graph_runner_->canRun(py_model_inputs, graph_state_)) {
             graph_runner_->updateKVCacheKernelBlockId(py_model_inputs, graph_state_);
         }
@@ -742,7 +746,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             return forwardMicroBatched(inputs);
         }
         PyContextParallelParams cp_params;
-        if (device_props_.enable_prefill_cp) {
+        if (enable_prefill_cp_) {
             context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
         }
 
@@ -796,6 +800,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                                         attention_inputs_,
                                                         attention_inputs_by_tag_,
                                                         bert_embedding_inputs});
+        py_model_inputs.dspark_call_phase = inputs.dspark_call_phase;
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
@@ -826,18 +831,32 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_outputs      = outputs.cast<PyModelOutputs>();
             hidden_states         = py_model_outputs.hidden_states.clone();
         }
+        // The cloned tensor is the only hidden-state owner needed below. Drop
+        // the Python output's rank-local tensor before CP post-processing so a
+        // long-context gather/restore can reuse that storage.
+        py_model_outputs.hidden_states = torch::Tensor();
 
         cache_store_write_cycle.finish();
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
         const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
-        if (device_props_.enable_prefill_cp && has_context_request) {
+        if (is_dspark_draft_) {
+            if (inputs.dspark_call_phase == DSparkCallPhase::PROPOSE) {
+                return callForwardPostLayers(hidden_states, inputs, true);
+            }
+            GptModelOutputs outputs;
+            outputs.hidden_states     = hidden_states;
+            outputs.all_hidden_states = hidden_states;
+            return outputs;
+        }
+        if (enable_prefill_cp_ && has_context_request) {
             if (!inputs.need_all_logits && !inputs.need_all_hidden_states) {
                 context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
                 return forwardPostLayersLastHidden(hidden_states, inputs);
+            } else {
+                const auto num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
+                return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
             }
-            size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
-            return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
         }
         return callForwardPostLayers(hidden_states, inputs, true);
 

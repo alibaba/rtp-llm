@@ -24,6 +24,12 @@ void registerCacheGroupType(pybind11::module& m) {
 void registerPyOpDefs(pybind11::module& m) {
     registerCacheGroupType(m);
 
+    pybind11::enum_<rtp_llm::DSparkCallPhase>(m, "DSparkCallPhase")
+        .value("NONE", rtp_llm::DSparkCallPhase::NONE)
+        .value("PROPOSE", rtp_llm::DSparkCallPhase::PROPOSE)
+        .value("COMMIT", rtp_llm::DSparkCallPhase::COMMIT)
+        .export_values();
+
     pybind11::class_<LayerKVCache>(m, "LayerKVCache")
         .def(pybind11::init<>())
         .def(
@@ -207,7 +213,8 @@ void registerPyOpDefs(pybind11::module& m) {
                                PyEmbeddingInputs   embedding_inputs,
                                PyMultimodalInputs  multimodal_inputs,
                                pybind11::object    attention_inputs,
-                               BertEmbeddingInputs bert_embedding_inputs) {
+                               BertEmbeddingInputs bert_embedding_inputs,
+                               rtp_llm::DSparkCallPhase dspark_call_phase) {
                  PyModelInputs result;
                  result.input_ids             = std::move(input_ids);
                  result.input_hiddens         = std::move(input_hiddens);
@@ -215,6 +222,7 @@ void registerPyOpDefs(pybind11::module& m) {
                  result.embedding_inputs      = std::move(embedding_inputs);
                  result.multimodal_inputs     = std::move(multimodal_inputs);
                  result.bert_embedding_inputs = std::move(bert_embedding_inputs);
+                 result.dspark_call_phase      = dspark_call_phase;
                  if (pybind11::isinstance<PyAttentionInputs>(attention_inputs)) {
                      result.attention_inputs = attention_inputs.cast<PyAttentionInputs>();
                  } else {
@@ -231,7 +239,8 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::arg("embedding_inputs")      = PyEmbeddingInputs(),
              pybind11::arg("multimodal_inputs")     = PyMultimodalInputs(),
              pybind11::arg("attention_inputs")      = PyAttentionInputs(),
-             pybind11::arg("bert_embedding_inputs") = BertEmbeddingInputs())
+             pybind11::arg("bert_embedding_inputs") = BertEmbeddingInputs(),
+             pybind11::arg("dspark_call_phase")     = rtp_llm::DSparkCallPhase::NONE)
         .def_readwrite("input_ids", &PyModelInputs::input_ids, "Input token IDs tensor")
         .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
         .def_readwrite("combo_position_ids", &PyModelInputs::combo_position_ids, "Combo position IDs tensor")
@@ -264,7 +273,8 @@ void registerPyOpDefs(pybind11::module& m) {
             },
             "A PyAttentionInputs value or a tag-to-PyAttentionInputs mapping")
         .def_readwrite(
-            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure");
+            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure")
+        .def_readwrite("dspark_call_phase", &PyModelInputs::dspark_call_phase, "Explicit DSpARK proposal/commit phase");
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")

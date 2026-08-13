@@ -50,10 +50,6 @@ public:
         draft_model_ = std::move(model);
     }
 
-    void setBatchProcessor(std::unique_ptr<MtpBatchStreamProcessor> processor) {
-        batch_stream_processor_ = std::move(processor);
-    }
-
     void setFastTopKSampler(std::unique_ptr<speculative::FastTopKSampler> sampler) {
         fast_topk_sampler_ = std::move(sampler);
     }
@@ -75,14 +71,18 @@ public:
                                                        const ModelConfig&     model_config,
                                                        const RuntimeConfig&   runtime_config,
                                                        const ResourceContext& resource_context,
-                                                       int                    vocab_size);
+                                                       int                    vocab_size,
+                                                       bool                   is_dspark = false);
 
 protected:
+    static bool dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type);
+    static bool shouldCreateDraftPrefillGraph(bool enable_cuda_graph, bool is_dspark);
+    static bool shouldSyncBookkeepingBeforePrepare(bool stream_async, bool drop_broad_sync, bool is_dspark);
+
     struct AcceptLenMetricsSnapshot {
         int64_t total_accept_len        = 0;
         int64_t total_stream_num        = 0;
         int64_t total_propose_token_num = 0;
-        bool    valid                   = false;
     };
 
     bool isTpRank0() const;
@@ -110,7 +110,11 @@ protected:
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
                                                          const StreamGroups&   stream_groups) const;
     void            broadcastPostRejectionInputs(GptModelInputs& model_input);
-    GptModelOutputs runDraftPrefillForward(GptModelInputs& model_input);
+    GptModelOutputs runDSparkProposeForward(GptModelInputs& model_input);
+    SamplerOutput   sampleDSparkDraft(const StreamGroups&  stream_groups,
+                                      const torch::Tensor& base_logits,
+                                      const torch::Tensor& anchors);
+    GptModelOutputs runDraftCommitForward(GptModelInputs& model_input);
     SpecLogitsVerifyRunner::LaunchResult
                  buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
                                              const torch::Tensor&                draft_tokens,
@@ -198,11 +202,19 @@ private:
     size_t                                                                   vocab_size_;
 
     // for mtp
-    DataType                                         data_type_;
-    size_t                                           hidden_size_;
-    size_t                                           propose_step_;
+    DataType data_type_;
+    size_t   hidden_size_;
+    size_t   propose_step_;
+    // Fixed-width block diffusion: one draft forward emits gamma proposals;
+    // unlike MTP there is no autoregressive draft loop or hidden-state chain.
+    bool                                             is_dspark_ = false;
     size_t                                           draft_vocab_size_;
+    torch::Tensor                                    dspark_markov_w1_;
+    torch::Tensor                                    dspark_markov_w2_;
     std::shared_ptr<ModelBase>                       draft_model_;
+    // DSpARK uses two prefill-shaped graph contracts: gamma query rows for
+    // proposal and gamma+1 verified rows for commit. They must not share one
+    // capture-width/phase identity.
     std::shared_ptr<ModelBase>                       sp_prefill_draft_model_;
     std::unique_ptr<speculative::SpeculativeSampler> speculative_sampler_;
     std::unique_ptr<speculative::FastTopKSampler>    fast_topk_sampler_;
@@ -226,10 +238,11 @@ private:
     int64_t                       metrics_accept_len_stream_num_        = 0;
     int64_t                       metrics_accept_len_propose_token_num_ = 0;
 
-    AsyncRunner                             target_verify_prepare_runner_;
-    AsyncRunner                             draft_prefill_prepare_runner_;
-    AsyncRunner                             spec_logits_verify_async_runner_;
+    AsyncRunner target_verify_prepare_runner_;
+    AsyncRunner draft_prefill_prepare_runner_;
+    // Declare the worker after its target so destruction joins the worker first.
     std::unique_ptr<SpecLogitsVerifyRunner> spec_logits_verify_runner_;
+    AsyncRunner                             spec_logits_verify_async_runner_;
 
     // Bookkeeping worker for stream-async decode dispatch. It owns a CUDA
     // stream + thread and runs D2H/specUpdate/KV release off the main thread.

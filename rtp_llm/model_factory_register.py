@@ -235,6 +235,9 @@ def _register_builtin_lazy_models() -> None:
         "qwen_2_moe", "rtp_llm.models.qwen_v2_moe", ["Qwen2MoeForCausalLM"]
     )
     register_lazy_model("qwen_3", "rtp_llm.models.qwen_v3", ["Qwen3ForCausalLM"])
+    register_lazy_model(
+        "qwen_3_dspark", "rtp_llm.models.qwen_3_dspark", ["Qwen3DSparkForCausalLM"]
+    )
     register_lazy_model("qwen_3_tool", "rtp_llm.models.qwen_v3")
     register_lazy_model(
         "qwen_3_moe", "rtp_llm.models.qwen_v3_moe", ["Qwen3MoeForCausalLM"]

@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/models_py/bindings/CacheStoreWriter.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
+#include "rtp_llm/models_py/bindings/core/DSparkCallPhase.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -358,6 +359,7 @@ struct PyModelInputs {
     PyAttentionInputs    attention_inputs;
     AttentionInputsByTag attention_inputs_by_tag;
     BertEmbeddingInputs  bert_embedding_inputs;
+    rtp_llm::DSparkCallPhase dspark_call_phase = rtp_llm::DSparkCallPhase::NONE;
 
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();

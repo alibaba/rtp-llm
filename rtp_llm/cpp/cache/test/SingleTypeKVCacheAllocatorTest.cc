@@ -644,6 +644,16 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MtpModuleConfigPlanKeepsWeightsAndCopiesA
     }
 }
 
+TEST_F(SingleTypeKVCacheAllocatorTest, DSparkModuleConfigPlanPreservesAllLayers) {
+    auto config = makeTestModelConfig(/*num_layers=*/5);
+    const auto plan =
+        buildMTPModuleConfigPlan(config, /*weight_count=*/5, /*gen_num_per_cycle=*/7, SP_TYPE_DSPARK);
+    ASSERT_EQ(plan.module_configs.size(), 1u);
+    EXPECT_EQ(plan.source_layer_indices, (std::vector<size_t>{0}));
+    EXPECT_EQ(plan.module_configs[0].num_layers, 5);
+    EXPECT_EQ(plan.module_configs[0].kv_cache_spec_descs.size(), 5u);
+}
+
 // Test convert index to buffer
 TEST_F(SingleTypeKVCacheAllocatorTest, ConvertIndexToBuffer) {
     auto config = createSingleTypeTestConfig();

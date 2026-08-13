@@ -586,7 +586,8 @@ void NormalEngine::startTimelineProfiling(const std::string& trace_name, int sta
 
 bool NormalEngine::isMTPEagle() {
     if (propose_params_) {
-        return propose_params_->sp_type == SP_TYPE_MTP || propose_params_->sp_type == SP_TYPE_EAGLE;
+        return propose_params_->sp_type == SP_TYPE_MTP || propose_params_->sp_type == SP_TYPE_EAGLE
+               || propose_params_->sp_type == SP_TYPE_DSPARK;
     }
     return false;
 }
@@ -598,10 +599,15 @@ bool NormalEngine::isEagle() {
     return false;
 }
 
+bool NormalEngine::isDSpark() {
+    return propose_params_ && propose_params_->sp_type == SP_TYPE_DSPARK;
+}
+
 void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
     if (isMTPEagle()) {
-        int propose_step   = sp_config.gen_num_per_cycle;
-        int mtp_vocab_size = propose_params_->getEngineInitParams().model_config_.vocab_size;
+        int        propose_step   = sp_config.gen_num_per_cycle;
+        int        mtp_vocab_size = propose_params_->getEngineInitParams().model_config_.vocab_size;
+        const bool is_dspark      = propose_params_->sp_type == SP_TYPE_DSPARK;
         switch (pd_sep_config.role_type) {
             case RoleType::PREFILL:
                 if (streams.empty()) {
@@ -612,7 +618,7 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
             case RoleType::DECODE:
                 if (streams.empty()) {
                     streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
-                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size));
+                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size, is_dspark));
                 }
                 break;
             case RoleType::PDFUSION: {
@@ -631,7 +637,7 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
                 }
                 if (!has_decode) {
                     streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
-                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size));
+                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size, is_dspark));
                 }
                 break;
             }

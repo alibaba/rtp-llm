@@ -2,6 +2,12 @@ load("//:def.bzl", "rpm_library", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "dspark_call_phase",
+    hdrs = ["DSparkCallPhase.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "types_hdr",
     hdrs = [
         "Types.h",

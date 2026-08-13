@@ -78,6 +78,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     shape_hints_ptr[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
+    shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesRows] =
+        inputs.last_hidden_states.defined() ? inputs.last_hidden_states.size(0) : 0;
     {
         // encode root-side tensor device for fields that may live on
         // GPU on the PDFUSION fast path, so non-root ranks can allocate matching
@@ -122,7 +124,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     if (inputs.skip_run) {
         return;
     }
-    const size_t mm_features_num = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum];
+    const size_t mm_features_num = (size_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesNum];
     if (mm_features_num) {
         mm_features_shape_t   = torch::empty({(int64_t)mm_features_num}, torch::kInt32).pin_memory();
         mm_features_shape_ptr = mm_features_shape_t.data_ptr<int32_t>();
@@ -164,12 +166,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                         std::vector<size_t>     dims,
                         rtp_llm::AllocationType atype = rtp_llm::AllocationType::HOST) -> torch::Tensor {
         auto torch_dtype = dataTypeToTorchType(dtype);
-        auto options     = torch::TensorOptions(torch_dtype);
+        auto options = torch::TensorOptions(torch_dtype);
         if (atype == rtp_llm::AllocationType::DEVICE) {
             options = options.device(torch::kCUDA);
         }
         std::vector<int64_t> dims64(dims.begin(), dims.end());
-        auto                 tensor = torch::empty(dims64, options);
+        auto tensor = torch::empty(dims64, options);
         // NCCL broadcast requires pinned memory for CPU buffers
         if (atype != rtp_llm::AllocationType::DEVICE) {
             tensor = tensor.pin_memory();
@@ -179,7 +181,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
 
     bool is_non_root = parallelism_config.tp_rank != 0;
     if (is_non_root) {
-        auto context_batch_size = (size_t)shape_hints_ptr[GptModelInputIndex::prefixLengths];
+        const auto context_batch_size = (size_t)shape_hints_ptr[GptModelInputIndex::prefixLengths];
 
         // Respect the root-side device bitmap so all ranks classify tensors the
         // same way and preserve NCCL broadcast ordering.
@@ -213,9 +215,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                 rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum], 3});
         }
         if (max_blocks != 0) {
-            inputs.kv_cache_block_id =
-                allocBuf(rtp_llm::DataType::TYPE_INT32,
-                         {kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_blocks});
+            inputs.kv_cache_block_id = allocBuf(
+                rtp_llm::DataType::TYPE_INT32,
+                {kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_blocks});
             if (inputs.pd_separation) {
                 inputs.cache_keys = allocBuf(rtp_llm::DataType::TYPE_INT64,
                                              {context_batch_size, cache_keys_width ? cache_keys_width : max_blocks});
@@ -230,31 +232,33 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                                                 {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputIndexes]},
                                             pickAlloc(GptModelInputDeviceBit::kDeviceBitLmOutputIndexes));
         if (combo_position_ids_size) {
-            inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)combo_position_ids_size});
+            inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32, {combo_position_ids_size});
         }
-        if (shape_hints_ptr[GptModelInputIndex::mtpHiddenStates]) {
-            auto hidden_states_dim0 = (size_t)shape_hints_ptr[GptModelInputIndex::comboTokens];
-            auto hidden_states_dim1 = (size_t)hidden_states_size / hidden_states_dim0;
-            RTP_LLM_CHECK(hidden_states_size % hidden_states_dim0 == 0);
+        if (hidden_states_size) {
+            const auto hidden_states_dim0 = (size_t)shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesRows];
+            RTP_LLM_CHECK_WITH_INFO(hidden_states_dim0 > 0 && (size_t)hidden_states_size % hidden_states_dim0 == 0,
+                                    "invalid last_hidden_states shape hints");
+            const auto hidden_states_dim1 = (size_t)hidden_states_size / hidden_states_dim0;
             inputs.last_hidden_states =
                 allocBuf((rtp_llm::DataType)shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesDtype],
                          {hidden_states_dim0, hidden_states_dim1},
                          rtp_llm::AllocationType::DEVICE);
         }
         if (text_tokens_mask_size) {
-            inputs.text_tokens_mask = allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)text_tokens_mask_size});
+            inputs.text_tokens_mask = allocBuf(rtp_llm::DataType::TYPE_INT32, {text_tokens_mask_size});
         }
         if (mm_features_locs_size) {
-            inputs.mm_features_locs = allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)mm_features_locs_size});
+            inputs.mm_features_locs = allocBuf(rtp_llm::DataType::TYPE_INT32, {mm_features_locs_size});
         }
         if (mm_features_num) {
             std::vector<torch::Tensor> mm_features;
-            auto                       mm_dtype =
-                dataTypeToTorchType((rtp_llm::DataType)shape_hints_ptr[GptModelInputIndex::mmFeaturesDtype]);
-            for (auto mm_index = 0; mm_index < mm_features_num; ++mm_index) {
-                mm_features.emplace_back(torch::empty({(int64_t)mm_features_shape_ptr[mm_index],
-                                                       (int64_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesSize]},
-                                                      torch::TensorOptions().dtype(mm_dtype).device(torch::kCUDA)));
+            const auto                 mm_data_type =
+                static_cast<rtp_llm::DataType>(shape_hints_ptr[GptModelInputIndex::mmFeaturesDtype]);
+            for (size_t mm_index = 0; mm_index < mm_features_num; ++mm_index) {
+                const auto mm_rows = (size_t)mm_features_shape_ptr[mm_index];
+                const auto mm_cols = (size_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesSize];
+                auto options = torch::TensorOptions().dtype(dataTypeToTorchType(mm_data_type)).device(torch::kCUDA);
+                mm_features.emplace_back(torch::empty({(int64_t)mm_rows, (int64_t)mm_cols}, options));
             }
             inputs.multimodal_features = std::move(mm_features);
         }
@@ -326,6 +330,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     // and GPU memory coalescing / NCCL transfers stay on fast paths.
     constexpr int64_t kPackAlignment = 16;
     auto              align_up       = [](int64_t size, int64_t alignment) -> int64_t {
+        RTP_LLM_CHECK_WITH_INFO(size >= 0 && alignment > 0, "tpSyncModelInputs invalid packed-buffer alignment input");
+        RTP_LLM_CHECK_WITH_INFO(size <= std::numeric_limits<int64_t>::max() - (alignment - 1),
+                                "tpSyncModelInputs packed-buffer alignment overflow");
         return (size + alignment - 1) & ~(alignment - 1);
     };
 
@@ -338,13 +345,21 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     int64_t                cpu_total_bytes = 0, gpu_total_bytes = 0;
 
     for (auto* tp : tensor_ptrs) {
-        auto nb = static_cast<int64_t>(tp->nbytes());
+        const auto raw_nbytes = tp->nbytes();
+        RTP_LLM_CHECK_WITH_INFO(raw_nbytes <= static_cast<size_t>(std::numeric_limits<int64_t>::max()),
+                                "tpSyncModelInputs tensor byte size exceeds int64");
+        const auto nb      = static_cast<int64_t>(raw_nbytes);
+        const auto aligned = align_up(nb, kPackAlignment);
         if (tp->is_cuda()) {
             gpu_entries.push_back({tp, gpu_total_bytes, nb});
-            gpu_total_bytes += align_up(nb, kPackAlignment);
+            RTP_LLM_CHECK_WITH_INFO(gpu_total_bytes <= std::numeric_limits<int64_t>::max() - aligned,
+                                    "tpSyncModelInputs GPU packed-buffer size overflow");
+            gpu_total_bytes += aligned;
         } else {
             cpu_entries.push_back({tp, cpu_total_bytes, nb});
-            cpu_total_bytes += align_up(nb, kPackAlignment);
+            RTP_LLM_CHECK_WITH_INFO(cpu_total_bytes <= std::numeric_limits<int64_t>::max() - aligned,
+                                    "tpSyncModelInputs CPU packed-buffer size overflow");
+            cpu_total_bytes += aligned;
         }
     }
 

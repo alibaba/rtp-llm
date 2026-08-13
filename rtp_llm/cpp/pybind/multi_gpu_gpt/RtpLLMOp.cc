@@ -44,7 +44,8 @@ std::unique_ptr<ProposeModelEngineInitParams>
 prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const EngineInitParams& base_params) {
     auto            sp_model = propose_model.attr("model");
     SpeculativeType sp_type  = propose_model.attr("sp_type").cast<SpeculativeType>();
-    RTP_LLM_CHECK(sp_type == SP_TYPE_MTP || sp_type == SP_TYPE_EAGLE3 || sp_type == SP_TYPE_EAGLE);
+    RTP_LLM_CHECK(sp_type == SP_TYPE_MTP || sp_type == SP_TYPE_EAGLE3 || sp_type == SP_TYPE_EAGLE
+                  || sp_type == SP_TYPE_DSPARK);
 
     std::unique_ptr<std::vector<std::unique_ptr<EngineInitParams>>> mtp_params =
         std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
@@ -83,7 +84,13 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
                                 source_layer);
         auto     layer_weigths = py_layers_weights_vec[source_layer];
         py::list tmp;
-        tmp.append(layer_weigths);
+        if (sp_type == SP_TYPE_DSPARK) {
+            for (const auto& weights : py_layers_weights_vec) {
+                tmp.append(weights);
+            }
+        } else {
+            tmp.append(layer_weigths);
+        }
         auto gpt_weight = convert.createGptWeights(tmp, py_global_weights);
         mtp_params->push_back(std::move(std::make_unique<EngineInitParams>(model_id,
                                                                            module_plan.module_configs[i],
@@ -274,7 +281,8 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
                                                                     py::none(),
                                                                     py_eplb);
             model_id_++;
-        } else if (sp_type == SP_TYPE_MTP || sp_type == SP_TYPE_EAGLE || sp_type == SP_TYPE_EAGLE3) {
+        } else if (sp_type == SP_TYPE_MTP || sp_type == SP_TYPE_EAGLE || sp_type == SP_TYPE_EAGLE3
+                   || sp_type == SP_TYPE_DSPARK) {
             params = prepareMTPEngineInitParams(model_id_, propose_model, base_params);
             if (sp_type == SP_TYPE_MTP) {
                 size_t gen_num_per_cycle = base_params.sp_config.gen_num_per_cycle;

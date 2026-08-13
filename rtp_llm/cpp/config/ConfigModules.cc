@@ -261,6 +261,8 @@ SpeculativeType SpeculativeExecutionConfig::from_string(const std::string& str) 
         return SP_TYPE_EAGLE;
     } else if (str == "deterministic") {
         return SP_TYPE_DETERMINISTIC;
+    } else if (str == "dspark") {
+        return SP_TYPE_DSPARK;
     } else {
         return SP_TYPE_NONE;  // Default to NONE for unknown values
     }
@@ -280,6 +282,8 @@ std::string SpeculativeExecutionConfig::to_string(SpeculativeType type) {
             return "eagle";
         case SP_TYPE_DETERMINISTIC:
             return "deterministic";
+        case SP_TYPE_DSPARK:
+            return "dspark";
         default:
             return "none";
     }
@@ -296,7 +300,9 @@ std::string SpeculativeExecutionConfig::to_string() const {
         << "force_stream_sample: " << force_stream_sample << "\n"
         << "force_score_context_attention: " << force_score_context_attention << "\n"
         << "quantization: " << quantization << "\n"
-        << "checkpoint_path: " << checkpoint_path;
+        << "checkpoint_path: " << checkpoint_path << "\n"
+        << "sp_dspark_mask_token_id: " << sp_dspark_mask_token_id << ", "
+        << "sp_dspark_sample_from_anchor: " << sp_dspark_sample_from_anchor;
     return oss.str();
 }
 

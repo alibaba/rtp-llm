@@ -35,7 +35,8 @@ public:
     PyWrappedModel(const GptModelInitParams& params,
                    py::object                py_instance,
                    bool                      is_prefill_cuda_graph_mode = false,
-                   bool                      use_spec_decoding          = false);
+                   bool                      use_spec_decoding          = false,
+                   bool                      is_dspark_draft            = false);
     ~PyWrappedModel();
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
@@ -83,6 +84,8 @@ private:
 
     // Member variables (formerly inherited from GptModel)
     const rtp_llm::ExecProperties                   device_props_;
+    const bool                                      enable_prefill_cp_;
+    const bool                                      is_dspark_draft_;
     const rtp_llm::MlaOpsType                       mla_ops_type_;
     const size_t                                    layer_num_;
     const GptModelDescription                       description_;
@@ -121,13 +124,25 @@ private:
 inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                       py::object                py_instance,
                                       bool                      is_prefill_cuda_graph_mode,
-                                      bool                      use_spec_decoding):
+                                      bool                      use_spec_decoding,
+                                      bool                      is_dspark_draft):
     device_props_(buildExecProperties(params.parallelism_config, params.device_resource_config)),
+    // Every prefill-shaped forward of a CP-enabled model goes through the
+    // standard split/gather path — including the DSpARK draft commit, whose
+    // incremental-prefill geometry CP-splits like any prompt while its
+    // already-rank-local hidden rows pass through untouched. The fixed-width
+    // non-causal propose block never reaches a CP-enabled model: proposals
+    // run only on decode roles, where prefill CP is off (colocated CP is
+    // rejected at executor construction).
+    enable_prefill_cp_(device_props_.enable_prefill_cp),
+    is_dspark_draft_(is_dspark_draft),
     mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
     description_(params.description),
     cache_manager_(params.cache_manager),
-    enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph),
+    // DSpARK consumes auxiliary hidden states between target verify and draft
+    // commit, which are not a valid CUDA-graph replay output today.
+    enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph && !is_dspark_draft),
     is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
     use_spec_decoding_(use_spec_decoding),
     enable_device_perf_(params.profile_debug_logging_config.enable_device_perf),
@@ -277,7 +292,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                                 model_id_,
                                                 params.mtp_cache_config_index);
 
-    if (device_props_.enable_prefill_cp) {
+    if (enable_prefill_cp_) {
         context_parallel_processor_ =
             ContextParallelProcessorFactory::create(ProcessorType::ZIG_ZAG, params.parallelism_config);
         RTP_LLM_LOG_INFO("Context parallel processor initialized with ZIG_ZAG strategy.");

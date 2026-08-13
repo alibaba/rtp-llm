@@ -66,6 +66,20 @@ inline MTPModuleConfigPlan buildMTPModuleConfigPlan(const ModelConfig& model_con
                                                     SpeculativeType    sp_type) {
     RTP_LLM_CHECK_WITH_INFO(weight_count > 0, "MTP module config plan requires at least one layer weight");
 
+    // DSpARK is one block proposer containing every draft transformer layer.
+    // Gamma is its proposal width, not a number of one-layer MTP modules.
+    if (sp_type == SP_TYPE_DSPARK) {
+        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(model_config.num_layers) == weight_count,
+                                "DSpARK layer config/weight mismatch: layers=%ld weights=%zu",
+                                model_config.num_layers,
+                                weight_count);
+        RTP_LLM_CHECK_WITH_INFO(model_config.kv_cache_spec_descs.size() == weight_count,
+                                "DSpARK requires one cache descriptor row per layer: rows=%zu weights=%zu",
+                                model_config.kv_cache_spec_descs.size(),
+                                weight_count);
+        return {{0}, {model_config}};
+    }
+
     size_t model_num = weight_count;
     if (gen_num_per_cycle > 1 && weight_count == 1) {
         model_num = gen_num_per_cycle;

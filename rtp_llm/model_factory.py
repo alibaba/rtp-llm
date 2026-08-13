@@ -136,6 +136,7 @@ class ModelFactory:
             or sp_type == SpeculativeType.MTP
             or sp_type == SpeculativeType.EAGLE3
             or sp_type == SpeculativeType.EAGLE
+            or sp_type == SpeculativeType.DSPARK
         ):
             model_type = propose_model_config.model_type
             if model_type == "deepseek-v3-mtp" or model_type == "mixtbstars-mtp":
@@ -380,14 +381,18 @@ class ModelFactory:
         if not sp_config.checkpoint_path:
             return None
 
-        # Current SP engine only supports MTP and EAGLE
-        if sp_config.type not in [SpeculativeType.MTP, SpeculativeType.EAGLE]:
+        # Current learned-draft SP engine supports MTP, EAGLE and DSpARK.
+        if sp_config.type not in [
+            SpeculativeType.MTP,
+            SpeculativeType.EAGLE,
+            SpeculativeType.DSPARK,
+        ]:
             logging.error(
-                "Speculative engine only supports MTP and EAGLE, but got %s",
+                "Speculative engine only supports MTP, EAGLE and DSpARK, but got %s",
                 sp_config.type.name,
             )
             raise ValueError(
-                "Speculative engine only supports MTP and EAGLE, but got %s"
+                "Speculative engine only supports MTP, EAGLE and DSpARK, but got %s"
                 % sp_config.type.name
             )
 
@@ -424,4 +429,83 @@ class ModelFactory:
         )
         propose_model_cls._post_build_model_config(propose_model_config)
 
+        if sp_config.type == SpeculativeType.DSPARK:
+            ModelFactory._setup_dspark_configs(
+                sp_config, model_config, propose_model_config
+            )
+
         return propose_model_config
+
+    @staticmethod
+    def _setup_dspark_configs(
+        sp_config, model_config: ModelConfig, propose_model_config: ModelConfig
+    ) -> None:
+        """Validate fixed-width DSpARK and wire target aux-state capture.
+
+        DeepSeek-V4 DSpARK uses a draft query block of exactly ``gamma`` rows
+        (one anchor plus ``gamma - 1`` noise tokens). The target verifies
+        ``gamma + 1`` rows. ``gen_num_per_cycle`` therefore remains the single
+        source of truth for the fixed proposal width in the engine.
+        """
+        required = {
+            "dspark_noise_token_id": propose_model_config.dspark_noise_token_id,
+            "dspark_target_layer_ids": propose_model_config.dspark_target_layer_ids,
+            "dspark_markov_rank": propose_model_config.dspark_markov_rank,
+        }
+        missing = [name for name, value in required.items() if value is None]
+        if missing:
+            raise ValueError(
+                "sp_type dspark requires draft checkpoint metadata: "
+                + ", ".join(missing)
+            )
+
+        gamma = int(sp_config.gen_num_per_cycle)
+        if gamma <= 0:
+            raise ValueError(
+                f"dspark requires a positive gen_num_per_cycle, got {gamma}"
+            )
+
+        noise_token_id = int(propose_model_config.dspark_noise_token_id)
+        if noise_token_id < 0 or noise_token_id >= propose_model_config.vocab_size:
+            raise ValueError(
+                f"invalid dspark_noise_token_id {noise_token_id} for vocab_size "
+                f"{propose_model_config.vocab_size}"
+            )
+
+        target_layer_ids = [
+            int(layer_id) for layer_id in propose_model_config.dspark_target_layer_ids
+        ]
+        if not target_layer_ids:
+            raise ValueError("dspark_target_layer_ids must not be empty")
+        invalid_layer_ids = [
+            layer_id
+            for layer_id in target_layer_ids
+            if layer_id < 0 or layer_id >= model_config.num_layers
+        ]
+        if invalid_layer_ids:
+            raise ValueError(
+                f"dspark_target_layer_ids {invalid_layer_ids} are out of range "
+                f"for target with {model_config.num_layers} layers"
+            )
+
+        markov_rank = int(propose_model_config.dspark_markov_rank)
+        if markov_rank <= 0:
+            raise ValueError(f"invalid dspark_markov_rank: {markov_rank}")
+
+        sp_config.sp_dspark_mask_token_id = noise_token_id
+        sp_config.sp_dspark_sample_from_anchor = bool(
+            getattr(propose_model_config, "dspark_sample_from_anchor", True)
+        )
+        # Both models carry the capture ids: the target uses them to capture
+        # and to size the shared MTP hidden buffer rows; the draft only needs
+        # them for the same row-width derivation (it never captures).
+        model_config.capture_aux_hidden_layer_ids = target_layer_ids
+        propose_model_config.capture_aux_hidden_layer_ids = target_layer_ids
+        logging.info(
+            "DSpARK fixed-width wiring: gamma=%d, noise_token_id=%d, "
+            "target capture layer ids=%s, markov_rank=%d",
+            gamma,
+            noise_token_id,
+            target_layer_ids,
+            markov_rank,
+        )

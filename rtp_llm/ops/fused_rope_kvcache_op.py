@@ -19,6 +19,15 @@ def _get_fused_rope_kvcache():
 
     return fused_rope_kvcache
 
+# TODO: remove this compatibility probe after the CUDA 13 rtp_kernel artifact
+# is upgraded.  Older wheels expose the same tensor as ``cp_position_ids``;
+# current wheels call it ``position_ids``.
+_PREFILL_POSITION_IDS_ARG = (
+    "position_ids"
+    if "position_ids" in prefill_fused_rope_kvcache.__annotations__
+    else "cp_position_ids"
+)
+
 
 @dataclass
 class FusedRopeAttnParams:
@@ -115,7 +124,7 @@ class FusedRopeKVCachePrefillOpBase:
                 rope_cache.data if check_rope_cache(rope_config, rope_cache) else None
             ),
             padding_offset=params.padding_offset,
-            position_ids=params.position_ids,
+            **{_PREFILL_POSITION_IDS_ARG: params.position_ids},
             use_logn_attn=self.attn_configs.use_logn_attn,
             rope_style=rope_config.style,
             rope_dim=rope_config.dim,

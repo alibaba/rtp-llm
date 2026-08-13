@@ -204,11 +204,11 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
                           payload->memory_reuse_len);
     }
 
-    // 3. Speculative proposal info
+    // 3. Speculative proposal info. Unlike the gRPC handoff, this channel
+    // carries real reuse accounting (block 2) and initKVBlock refreshes the
+    // positions after allocation, so proposal-less streams keep them intact.
     if (!payload->propose_tokens.empty()) {
-        stream->setReuseLength(stream->seqLength() - 1);
-        stream->setSpEditRun(false);
-        stream->setMtpTokenIndex(stream->seqLength() - 1);
+        stream->initSpeculativeHandoffPositions();
         stream->setContainProposeToken(true);
         stream->setProposeToken(payload->propose_tokens);
 
@@ -231,7 +231,10 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
         stream->setSPOutputBuffer(sp_output_buffer);
 
         if (payload->propose_tokens.size() >= 2) {
-            auto propose_tokens_gpu = sp_output_buffer->tokens.narrow(1, 1, 1).to(cuda_i32, /*non_blocking=*/true);
+            auto propose_tokens_gpu =
+                sp_output_buffer->tokens
+                    .narrow(1, 1, static_cast<int64_t>(payload->propose_tokens.size() - 1))
+                    .to(cuda_i32, /*non_blocking=*/true);
             auto accept_len         = torch::ones({1}, cuda_i32);
             auto accept_tokens =
                 torch::zeros({1, static_cast<int64_t>(payload->propose_tokens.size())}, cuda_i32);

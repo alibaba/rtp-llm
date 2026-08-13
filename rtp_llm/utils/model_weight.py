@@ -1393,6 +1393,12 @@ class W:
     # rotary embedding cos sin cache
     rope_cos_sin_cache = "rotary_embedding.cos_sin_cache"
 
+    # Model-agnostic DSpARK globals.
+    dspark_fc_w = "dspark_fc.weight"
+    dspark_hidden_norm_gamma = "dspark_hidden_norm.gamma"
+    dspark_markov_w1 = "dspark_markov_w1.weight"
+    dspark_markov_w2 = "dspark_markov_w2.weight"
+
     gpt_style_tp_strategy: Dict[str, Any] = {
         embedding: sp_neg1,
         lm_head: sp_0_pad8,
@@ -1416,6 +1422,10 @@ class W:
         eagle3_fc_proj: sp_id,
         eagle3_fc_norm_gamma: sp_id,
         eagle3_input_norm_gamma: sp_id,
+        dspark_fc_w: sp_id,
+        dspark_hidden_norm_gamma: sp_id,
+        dspark_markov_w1: sp_id,
+        dspark_markov_w2: sp_id,
         pre_attn_ln_gamma: sp_id,
         pre_attn_ln_beta: sp_id,
         qk_ln_gamma: sp_head_qk_norm,
