@@ -153,10 +153,13 @@ from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
 
 def _swa_block_table_tokens_per_block(kv_cache: Any) -> int:
     """Framework logical block-table row coverage, independent of CP slicing."""
-    value = int(getattr(kv_cache, "seq_size_per_block", 0))
-    if value <= 0:
-        raise RuntimeError("SWA requires positive KVCache.seq_size_per_block")
-    return value
+    from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+
+    # CP-sharded fixed/SWA groups deliberately use a wider block-table row
+    # than the framework scalar (CP4: 1024 vs 256 tokens).  Using the scalar
+    # indexes long prompts into non-existent columns and silently drops the
+    # request tail from the SWA write mapping.
+    return _dsv4_pool_tokens_per_block(kv_cache, region=int(SWA_KV))
 
 
 # Phase-Z (post-revert): overlap the prefill CP all-gather with same-layer

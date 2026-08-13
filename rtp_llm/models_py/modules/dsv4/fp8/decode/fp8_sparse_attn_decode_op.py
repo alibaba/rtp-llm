@@ -215,15 +215,15 @@ class SparseAttnV4DecodeFp8Op:
             gathered rows form exactly the logical attention workspace.
             """
             from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
-                dequantize_slots_to_bf16,
+                gather_k_cache_slots_packed,
             )
             from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
-                quantize_and_insert_k_cache,
+                insert_packed_k_cache_flat,
             )
 
             flat_indices = indices.reshape(-1)
             valid = flat_indices >= 0
-            logical_kv = dequantize_slots_to_bf16(pool, flat_indices)
+            packed_rows = gather_k_cache_slots_packed(pool, flat_indices)
             slot_count = int(flat_indices.numel())
             page_count = max((slot_count + page_size - 1) // page_size, 1)
             packed = torch.zeros(
@@ -232,7 +232,7 @@ class SparseAttnV4DecodeFp8Op:
                 device=pool.device,
             )
             local_slots = torch.arange(slot_count, dtype=torch.int64, device=pool.device)
-            quantize_and_insert_k_cache(logical_kv, packed, local_slots)
+            insert_packed_k_cache_flat(packed_rows, packed, local_slots)
             # FlashInfer masks with the explicit top-k length, but still
             # vector-loads tail indices. Match vLLM's zero-initialized index
             # buffers so every speculative load addresses a valid slot.
