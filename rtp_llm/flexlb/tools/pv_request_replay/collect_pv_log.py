@@ -360,6 +360,7 @@ def _fetch_remote_file(
     source_manifest["reported_line_count"] = line_count
     fetched: list[tuple[int, str]] = []
     next_line = 1
+    pending_boundary_line: str | None = None
 
     while next_line <= line_count:
         try:
@@ -388,28 +389,74 @@ def _fetch_remote_file(
             source_manifest["fetched_line_count"] = len(fetched)
             source_manifest["errors"] = [message]
             raise _SourceCollectionError(message, source_manifest)
-        # ``dashctl exec`` can truncate a large tail response, but all complete
-        # lines in that response are safe to consume.  Limiting this to
-        # ``page_lines`` would re-transfer the same unconsumed suffix on every
-        # iteration and makes a large pv.log effectively quadratic to fetch.
-        take = min(remaining, len(complete))
-        page = complete[:take]
-        page_end = next_line + take - 1
-        fetched.extend(
-            (source_line, line)
-            for source_line, line in zip(range(next_line, page_end + 1), page)
-        )
+        # ``dashctl exec`` can append a newline while truncating an output
+        # response in the middle of a source log line.  A trailing newline
+        # alone is therefore insufficient evidence that the final returned
+        # line is complete.  Leave that boundary line pending and re-read it
+        # as the first line of the next ``tail -n +N`` response.  A match
+        # verifies it; a mismatch drops the synthetic partial line and starts
+        # again from the real source line at the same offset.  Even when an
+        # apparent response has as many newline-delimited chunks as the rest
+        # of the file, defer its final line: the transport can synthesize that
+        # final newline too.
+        request_start = next_line
+        boundary_verified = pending_boundary_line is None
+        accepted: list[tuple[int, str]] = []
+        candidate_start = next_line
+        candidates = complete[:remaining]
+        if pending_boundary_line is not None:
+            if complete[0] == pending_boundary_line:
+                accepted.append((next_line, pending_boundary_line))
+                candidates = complete[1:]
+                candidate_start = next_line + 1
+                boundary_verified = True
+            else:
+                boundary_verified = False
+        candidates = candidates[: line_count - candidate_start + 1]
+
+        if request_start == line_count:
+            # This response starts at the physical final source line.  It is
+            # safe to finish after the overlap check above; all observed PV
+            # lines are well below the command transport limit.
+            if not accepted:
+                accepted.append((line_count, candidates[0]))
+            pending_boundary_line = None
+            next_line = line_count + 1
+        elif candidates:
+            safe_candidates = candidates[:-1]
+            accepted.extend(
+                (source_line, line)
+                for source_line, line in zip(
+                    range(candidate_start, candidate_start + len(safe_candidates)),
+                    safe_candidates,
+                )
+            )
+            pending_boundary_line = candidates[-1]
+            next_line = candidate_start + len(candidates) - 1
+        else:
+            # The verified overlap was the only complete source line in this
+            # response.  Move past it and re-read the next source line.
+            pending_boundary_line = None
+            next_line = candidate_start
+
+        fetched.extend(accepted)
+        endpoint_verified = next_line > line_count
+        raw_response_covers_remaining = len(complete) >= remaining
+        page_start = accepted[0][0] if accepted else request_start
+        page_end = accepted[-1][0] if accepted else request_start - 1
         source_manifest["pages"].append(
             {
-                "start_line": next_line,
+                "start_line": request_start,
                 "end_line": page_end,
-                "line_count": take,
+                "line_count": len(accepted),
                 "tail_returned_complete_lines": len(complete),
-                "tail_response_complete": len(complete) >= remaining,
-                "transport_response_truncated": len(complete) < remaining,
+                "tail_response_complete": endpoint_verified,
+                "transport_response_truncated": not raw_response_covers_remaining,
+                "raw_response_covers_remaining": raw_response_covers_remaining,
+                "boundary_verified": boundary_verified,
+                "endpoint_verified": endpoint_verified,
             }
         )
-        next_line = page_end + 1
 
     if len(fetched) != line_count:
         message = (

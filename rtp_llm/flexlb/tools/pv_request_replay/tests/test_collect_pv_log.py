@@ -91,6 +91,24 @@ class ChangingStatDashctl(FakeDashctl):
         return super().__call__(command)
 
 
+class NewlineTerminatingTruncationDashctl(FakeDashctl):
+    """Emulate a transport that adds a newline after a partial log record."""
+
+    def __call__(self, command: Sequence[str]) -> str:
+        command = list(command)
+        if "--" in command:
+            remote = command[command.index("--") + 1 :]
+            if remote[:2] == ["tail", "-n"] and remote[2].startswith("+"):
+                self.commands.append(command)
+                path = remote[3]
+                start = int(remote[2][1:])
+                output = "".join(self.files[path][start - 1 :])
+                if len(output) > self.response_limit:
+                    return output[: self.response_limit].rstrip("\n") + "\n"
+                return output
+        return super().__call__(command)
+
+
 class CollectPvLogTest(unittest.TestCase):
     def test_local_multi_instance_filters_extended_window(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -212,7 +230,7 @@ class CollectPvLogTest(unittest.TestCase):
             self.assertFalse(manifest["snapshot_truncated"])
             rotated_manifest = manifest["instances"][0]["source_files"][0]
             self.assertGreater(len(rotated_manifest["pages"]), 1)
-            self.assertGreater(rotated_manifest["pages"][0]["line_count"], 1)
+            self.assertGreaterEqual(rotated_manifest["pages"][0]["line_count"], 1)
             self.assertTrue(
                 any(
                     page["transport_response_truncated"]
@@ -224,6 +242,45 @@ class CollectPvLogTest(unittest.TestCase):
             ).read_text()
             self.assertNotIn("application.log", snapshot_text)
             self.assertNotIn("pv.log.1", [Path(path).name for path in files])
+
+    def test_remote_collection_recovers_newline_terminated_partial_boundary(self) -> None:
+        path = "/home/admin/logs/pv.log"
+        files = {
+            path: [
+                log_line(
+                    f"2026-08-11 02:00:0{index}.000",
+                    f"request-{index}" + "x" * 80,
+                )
+                for index in range(4)
+            ]
+        }
+        fake = NewlineTerminatingTruncationDashctl(
+            files, response_limit=len(files[path][0]) + 20
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest = collector.collect_logs(
+                workspace="ai-lab-test",
+                deployment="flexlb-deployment",
+                instances=None,
+                start="2026-08-11 02:00:00",
+                end="2026-08-11 02:00:03",
+                output_dir=temp_dir,
+                lead_grace=timedelta(0),
+                tail_grace=timedelta(0),
+                command_runner=fake,
+            )
+
+            self.assertEqual("complete", manifest["status"])
+            source = manifest["instances"][0]["source_files"][0]
+            self.assertFalse(source["snapshot_truncated"])
+            self.assertTrue(
+                any(
+                    page["boundary_verified"] is False
+                    for page in source["pages"]
+                )
+            )
+            snapshot = Path(temp_dir) / manifest["snapshots"][0]["path"]
+            self.assertEqual("".join(files[path]), snapshot.read_text())
 
     def test_remote_skips_files_whose_probed_bounds_do_not_overlap(self) -> None:
         log_dir = "/home/admin/logs"
@@ -275,7 +332,11 @@ class CollectPvLogTest(unittest.TestCase):
                     and remote[2].startswith("+")
                 ):
                     fetched_paths.append(remote[3])
-            self.assertEqual([selected], fetched_paths)
+            # The collector re-reads the last apparent line of a response to
+            # verify that the transport did not add a newline to a partial
+            # record, so a small one-file snapshot needs an overlap request.
+            self.assertGreaterEqual(len(fetched_paths), 2)
+            self.assertTrue(all(path == selected for path in fetched_paths))
             self.assertEqual(2, fake.stat_calls[current])
 
     def test_active_log_rollover_or_shrink_is_never_complete(self) -> None:
