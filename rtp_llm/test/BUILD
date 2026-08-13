@@ -297,6 +297,17 @@ py_test(
 )
 
 py_test(
+    name="frontend_streaming_utf8_replay_test",
+    srcs=[
+        "frontend_streaming_utf8_replay_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties={"gpu": "H20"},
+)
+
+py_test(
     name="format_convert_helper_test",
     srcs=[
         "format_convert_helper_test.py",
