@@ -17,6 +17,8 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 
 import torch
 
+from rtp_llm.utils.warmup import model_warm_up_enabled
+
 _DENSE_GEMM_FALLBACK_M_GRID = [
     1,
     2,
@@ -552,6 +554,8 @@ def warmup_compressor_combine_branch_kernels(
 ) -> None:
     """Compile batched/varlen Triton branches that B=1 gRPC warmup misses."""
 
+    if not model_warm_up_enabled():
+        return
     device = torch.device(device)
     if not _is_cuda_device(device):
         return
@@ -1495,6 +1499,8 @@ def warmup_dense_gemm_jit(
 ) -> None:
     """Compile representative DeepGEMM dense GEMM M buckets at startup."""
 
+    if not model_warm_up_enabled():
+        return
     device = torch.device(device)
     if not _is_cuda_device(device) or not shapes:
         return
@@ -1575,6 +1581,8 @@ def warmup_batched_fp8_einsum_jit(
 ) -> None:
     """Compile reachable DeepGEMM wo_a batched FP8 einsum layouts."""
 
+    if not model_warm_up_enabled():
+        return
     device = torch.device(device)
     if not _is_cuda_device(device) or not shapes:
         return
@@ -1660,6 +1668,8 @@ def warmup_mhc_prenorm_gemm_jit(
 ) -> None:
     """Compile reachable mHC prenorm GEMM and TileLang post-fuse variants."""
 
+    if not model_warm_up_enabled():
+        return
     device = torch.device(device)
     if not _is_cuda_device(device) or not shapes:
         return
@@ -1773,6 +1783,8 @@ def warmup_mhc_head_fused_jit(
 ) -> None:
     """Compile the final TileLang fused mHC head before the first real request."""
 
+    if not model_warm_up_enabled():
+        return
     device = torch.device(device)
     if not _is_cuda_device(device) or not shapes:
         return
@@ -1834,6 +1846,8 @@ def warmup_fp8_mqa_logits_jit(
 ) -> None:
     """Compile DeepGEMM non-paged FP8 MQA logits used by prefill indexer."""
 
+    if not model_warm_up_enabled():
+        return
     device = torch.device(device)
     if not _is_cuda_device(device) or not shapes:
         return
@@ -1904,6 +1918,8 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
 ) -> None:
     """Compile the CP byte-sliced SWA slot dequant kernel with real block width."""
 
+    if not model_warm_up_enabled():
+        return
     device = torch.device(device)
     if not _is_cuda_device(device) or kv_cache is None:
         return

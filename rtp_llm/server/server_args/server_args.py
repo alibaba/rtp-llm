@@ -512,4 +512,12 @@ def setup_args() -> PyEnvConfigs:
     # 解析参数（会自动应用所有配置绑定）
     parsed_args = parser.parse_args()
 
+    # Normalize the two switches before model construction and process spawn.
+    from rtp_llm.utils.warmup import configure_warmup
+
+    configure_warmup(
+        py_env_configs.runtime_config.warm_up,
+        py_env_configs.runtime_config.model_warm_up,
+    )
+
     return py_env_configs

@@ -150,6 +150,7 @@ py_library(
     ], exclude = [
         "utils/jit_cache_manager.py",
         "utils/jit_cache_store.py",
+        "utils/warmup.py",
         "utils/test/*.py",
         "utils/test/**/*.py",
     ]),
@@ -163,6 +164,11 @@ py_library(
         ":psutil",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
     ] + arch_dep + internal_deps()
+)
+
+py_library(
+    name = "warmup",
+    srcs = ["utils/warmup.py"],
 )
 
 py_library(
@@ -451,6 +457,7 @@ py_library(
         ":blobfile",
         ":partial_json_parser",
         ":utils",
+        ":warmup",
         ":jit_cache_manager_lib",
     ],
     data = jit_deps(),

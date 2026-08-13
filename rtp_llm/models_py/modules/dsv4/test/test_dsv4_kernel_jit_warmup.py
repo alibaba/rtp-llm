@@ -53,6 +53,13 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     _sm100_dense_layout_signature,
     _state_ring_entries_warmup_values,
     _warmup_fused_kv_compress_norm_rope_insert,
+    warmup_batched_fp8_einsum_jit,
+    warmup_compressor_combine_branch_kernels,
+    warmup_dense_gemm_jit,
+    warmup_dsv4_fp8_swa_slot_dequant_jit,
+    warmup_fp8_mqa_logits_jit,
+    warmup_mhc_head_fused_jit,
+    warmup_mhc_prenorm_gemm_jit,
     resolve_dense_gemm_warmup_max_m,
 )
 import rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup as warmup_module
@@ -68,6 +75,38 @@ def _module_type(name, attrs):
 
 
 class Dsv4KernelJitWarmupTest(unittest.TestCase):
+    def test_public_jit_warmup_entrypoints_skip_when_model_warmup_disabled(self):
+        with mock.patch.object(
+            warmup_module, "model_warm_up_enabled", return_value=False
+        ):
+            device = torch.device("cpu")
+            warmup_compressor_combine_branch_kernels(
+                device=device,
+                gen_num_per_cycle=1,
+            )
+            warmup_dense_gemm_jit({}, max_m=1, device=device)
+            warmup_batched_fp8_einsum_jit({}, max_m=1, device=device)
+            warmup_mhc_prenorm_gemm_jit({}, max_m=1, device=device)
+            warmup_mhc_head_fused_jit({}, device=device)
+            warmup_fp8_mqa_logits_jit({}, device=device)
+            warmup_dsv4_fp8_swa_slot_dequant_jit(
+                kv_cache=None,
+                cp_size=1,
+                device=device,
+            )
+
+    def test_tilelang_prewarm_skips_when_model_warmup_disabled(self):
+        from rtp_llm.models_py.modules.dsv4 import tilelang_kernels
+
+        with mock.patch.object(
+            tilelang_kernels, "model_warm_up_enabled", return_value=False
+        ), mock.patch.object(tilelang_kernels, "_TILELANG_AVAILABLE", True), mock.patch(
+            "torch.zeros"
+        ) as zeros:
+            tilelang_kernels.prewarm(64, 512, 0.125)
+
+        zeros.assert_not_called()
+
     def test_dense_warmup_prefill_uses_sequence_bound_without_rank_cap(self):
         self.assertEqual(
             resolve_dense_gemm_warmup_max_m(
