@@ -655,6 +655,28 @@ class TargetVerifyTokenMetadataTest(unittest.TestCase):
 
         self.assertTrue(all(lhs is rhs for lhs, rhs in zip(first, later)))
 
+    def test_rebuilds_addressing_for_a_different_forward_owner(self):
+        draft_layer = self._attention(2)
+        target_layer = self._attention(5)
+        draft_inputs = self._inputs(torch.tensor([[1, 2], [3, 4]], dtype=torch.int32))
+        target_inputs = self._inputs(torch.tensor([[5, 6], [7, 8]], dtype=torch.int32))
+        target_inputs.prefix_lengths.add_(1)
+
+        draft = draft_layer._target_verify_addressing(
+            draft_inputs, total_tokens=6, device=torch.device("cpu")
+        )
+        target = target_layer._target_verify_addressing(
+            target_inputs, total_tokens=6, device=torch.device("cpu")
+        )
+
+        self.assertTrue(all(lhs is not rhs for lhs, rhs in zip(draft, target)))
+        torch.testing.assert_close(
+            target[0], torch.tensor([[5, 6], [7, 8]], dtype=torch.int32)
+        )
+        torch.testing.assert_close(
+            target[2], torch.tensor([11, 12, 13, 21, 22, 23], dtype=torch.int32)
+        )
+
     def test_fused_cuda_addressing_is_explicit(self):
         attention = self._attention(2)
         inputs = self._inputs(torch.tensor([[1, 2], [3, 4]], dtype=torch.int32))

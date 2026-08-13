@@ -1989,9 +1989,15 @@ class MSAAttention(nn.Module):
         # Sparse layers execute in increasing layer order within one target
         # forward. The MSA request block table, positions, and validity metadata
         # are shared across those layers, so expand them once in the first sparse
-        # layer. A new target forward rolls the layer index back and rebuilds.
+        # layer. The cache is process-wide because the layers are separate module
+        # instances, so its owner must also match: target verify and MTP draft
+        # prefill/refresh reuse this path in one process with overlapping indices.
         cache = MSAAttention._target_verify_shared_meta
-        if cache is not None and cache["layer_idx"] < self.layer_idx:
+        if (
+            cache is not None
+            and cache.get("owner") is attn_inputs
+            and cache["layer_idx"] < self.layer_idx
+        ):
             cache["layer_idx"] = self.layer_idx
             return cache["addressing"]
 
@@ -2016,6 +2022,7 @@ class MSAAttention(nn.Module):
             valid_token_mask,
         )
         MSAAttention._target_verify_shared_meta = {
+            "owner": attn_inputs,
             "layer_idx": self.layer_idx,
             "addressing": addressing,
         }
