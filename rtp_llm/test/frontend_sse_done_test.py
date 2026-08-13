@@ -16,6 +16,7 @@ class _Response:
         self._values = iter(values)
         self._error = error
         self._error_raised = False
+        self.close_calls = 0
 
     def __aiter__(self):
         return self
@@ -28,6 +29,9 @@ class _Response:
                 self._error_raised = True
                 raise self._error
             raise StopAsyncIteration
+
+    async def aclose(self):
+        self.close_calls += 1
 
 
 class _Controller:
@@ -91,7 +95,7 @@ class FrontendSseDoneTest(IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(server.complete_response_calls, 1)
-        self.assertEqual(server._global_controller.decrement_calls, 1)
+        self.assertEqual(response.close_calls, 1)
 
     async def test_legacy_natural_completion_keeps_existing_done(self):
         response = _Response([_Chunk()])
@@ -105,6 +109,7 @@ class FrontendSseDoneTest(IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(server.complete_response_calls, 1)
+        self.assertEqual(response.close_calls, 1)
 
     async def test_cancel_does_not_emit_success_done(self):
         response = _Response(error=asyncio.CancelledError())
@@ -113,6 +118,7 @@ class FrontendSseDoneTest(IsolatedAsyncioTestCase):
         self.assertEqual(chunks, [])
         self.assertEqual(server.complete_response_calls, 0)
         self.assertEqual(len(server._access_logger.errors), 1)
+        self.assertEqual(response.close_calls, 1)
 
     async def test_error_does_not_emit_success_done(self):
         response = _Response(error=RuntimeError("injected"))
@@ -127,6 +133,7 @@ class FrontendSseDoneTest(IsolatedAsyncioTestCase):
         self.assertIn("injected", chunks[0])
         self.assertEqual(server.complete_response_calls, 0)
         self.assertEqual(len(server._access_logger.errors), 1)
+        self.assertEqual(response.close_calls, 1)
 
     async def test_tool_parse_error_after_chunk_emits_606_without_done(self):
         response = _Response(
@@ -147,7 +154,7 @@ class FrontendSseDoneTest(IsolatedAsyncioTestCase):
         self.assertNotIn("Traceback", chunks[1])
         self.assertEqual(server.complete_response_calls, 0)
         self.assertEqual(len(server._access_logger.errors), 1)
-        self.assertEqual(server._global_controller.decrement_calls, 1)
+        self.assertEqual(response.close_calls, 1)
 
     async def test_collect_error_does_not_emit_success_done(self):
         response = _Response([_Chunk()])
@@ -166,7 +173,7 @@ class FrontendSseDoneTest(IsolatedAsyncioTestCase):
         self.assertIn("collect failed", chunks[-1])
         self.assertEqual(server.complete_response_calls, 1)
         self.assertEqual(len(server._access_logger.errors), 1)
-        self.assertEqual(server._global_controller.decrement_calls, 1)
+        self.assertEqual(response.close_calls, 1)
 
     async def test_collect_cancel_does_not_emit_success_done(self):
         response = _Response([_Chunk()])
@@ -179,7 +186,7 @@ class FrontendSseDoneTest(IsolatedAsyncioTestCase):
         self.assertEqual(chunks, ['data: {"id":"chunk"}\r\n\r\n'])
         self.assertEqual(server.complete_response_calls, 1)
         self.assertEqual(len(server._access_logger.errors), 1)
-        self.assertEqual(server._global_controller.decrement_calls, 1)
+        self.assertEqual(response.close_calls, 1)
 
     async def test_done_waits_for_successful_collection(self):
         collect_gate = asyncio.Event()
@@ -203,7 +210,7 @@ class FrontendSseDoneTest(IsolatedAsyncioTestCase):
         self.assertEqual(await pending_done, "data: [DONE]\r\n\r\n")
         with self.assertRaises(StopAsyncIteration):
             await body.__anext__()
-        self.assertEqual(server._global_controller.decrement_calls, 1)
+        self.assertEqual(response.close_calls, 1)
 
 
 if __name__ == "__main__":

@@ -44,6 +44,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
 from rtp_llm.ops import SpecialTokens
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.utils.complete_response_async_generator import (
+    CloseDependencyRegistry,
     CompleteResponseAsyncGenerator,
 )
 from rtp_llm.utils.base_model_datatypes import (
@@ -435,37 +436,40 @@ class OpenaiEndpoint(object):
         debug_info: Optional[DebugInfo],
         tokenizer: Optional[Any] = None,
         model_name: str = "",
+        close_dependencies: Optional[CloseDependencyRegistry] = None,
     ) -> CompleteResponseAsyncGenerator:
         response_metadata = create_chat_completion_response_metadata()
 
         async def response_generator():
             debug_info_responded = False
+            try:
+                async for response in choice_generator:
+                    output = None
+                    if (
+                        debug_info is not None
+                        and response.extra_outputs is not None
+                        and response.extra_outputs.output_ids is not None
+                    ):
+                        output = DebugInfo()
+                        output.output_ids = response.extra_outputs.output_ids
+                        output.raw_output = [
+                            tokenizer.decode(output_ids)
+                            for output_ids in response.extra_outputs.output_ids
+                        ]
 
-            async for response in choice_generator:
-                output = None
-                if (
-                    debug_info is not None
-                    and response.extra_outputs is not None
-                    and response.extra_outputs.output_ids is not None
-                ):
-                    output = DebugInfo()
-                    output.output_ids = response.extra_outputs.output_ids
-                    output.raw_output = [
-                        tokenizer.decode(output_ids)
-                        for output_ids in response.extra_outputs.output_ids
-                    ]
-
-                yield ChatCompletionStreamResponse(
-                    id=response_metadata.id,
-                    created=response_metadata.created,
-                    model=model_name,
-                    choices=response.choices,
-                    usage=response.usage,
-                    aux_info=response.aux_info,
-                    debug_info=debug_info if not debug_info_responded else output,
-                    extra_outputs=response.extra_outputs,
-                )
-                debug_info_responded = True
+                    yield ChatCompletionStreamResponse(
+                        id=response_metadata.id,
+                        created=response_metadata.created,
+                        model=model_name,
+                        choices=response.choices,
+                        usage=response.usage,
+                        aux_info=response.aux_info,
+                        debug_info=debug_info if not debug_info_responded else output,
+                        extra_outputs=response.extra_outputs,
+                    )
+                    debug_info_responded = True
+            finally:
+                await choice_generator.aclose()
 
         complete_response_collect_func = partial(
             OpenaiEndpoint._collect_complete_response,
@@ -475,7 +479,9 @@ class OpenaiEndpoint(object):
             response_metadata=response_metadata,
         )
         return CompleteResponseAsyncGenerator(
-            response_generator(), complete_response_collect_func
+            response_generator(),
+            complete_response_collect_func,
+            close_dependencies=close_dependencies or (),
         )
 
     def _get_debug_info(
@@ -552,6 +558,7 @@ class OpenaiEndpoint(object):
             else None
         )
 
+        close_dependencies = CloseDependencyRegistry()
         choice_generator = renderer.generate_choice(
             request_id,
             rendered_input.input_ids,
@@ -560,6 +567,7 @@ class OpenaiEndpoint(object):
             self.backend_rpc_server_visitor,
             chat_request,
             request_deadline_anchor,
+            close_dependencies=close_dependencies,
         )
 
         return self._complete_stream_response(
@@ -567,6 +575,7 @@ class OpenaiEndpoint(object):
             debug_info,
             self.tokenizer,
             chat_request.model or self.model_name,
+            close_dependencies,
         )
 
     def _prepare_chat_input(

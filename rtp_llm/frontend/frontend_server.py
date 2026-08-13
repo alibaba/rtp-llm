@@ -3,6 +3,7 @@ import json
 import logging
 import threading
 import time
+from enum import Enum, auto
 from typing import Any, Callable, Dict, Union
 
 from fastapi import Request
@@ -28,17 +29,131 @@ from rtp_llm.ops import SpecialTokens, TaskType
 from rtp_llm.server.misc import format_exception
 from rtp_llm.structure.request_extractor import request_id_field_name
 from rtp_llm.utils.complete_response_async_generator import (
+    CloseDependencyRegistry,
     CompleteResponseAsyncGenerator,
 )
 from rtp_llm.utils.base_model_datatypes import RequestDeadlineAnchor
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyException,
+    ConcurrencyLease,
     get_global_controller,
 )
 from rtp_llm.utils.time_util import current_time_ms
 from rtp_llm.utils.util import check_with_info
 
 USAGE_HEADER = "USAGE"
+
+
+class _AdmissionState(Enum):
+    ENTRY = auto()
+    STREAMING = auto()
+    CLEANUP = auto()
+    RELEASED = auto()
+    RETAINED = auto()
+
+
+class _AdmissionOwner:
+    def __init__(self, lease: ConcurrencyLease) -> None:
+        self._lease = lease
+        self._state = _AdmissionState.ENTRY
+        self._state_lock = threading.Lock()
+
+    def _transition(self, expected, target) -> None:
+        with self._state_lock:
+            if self._state is not expected:
+                raise RuntimeError(
+                    f"invalid admission ownership transition: {self._state} -> {target}"
+                )
+            self._state = target
+
+    def transfer_to_streaming(self) -> None:
+        self._transition(_AdmissionState.ENTRY, _AdmissionState.STREAMING)
+
+    def transfer_to_cleanup(self) -> None:
+        self._transition(_AdmissionState.ENTRY, _AdmissionState.CLEANUP)
+
+    def release_if_entry(self) -> bool:
+        with self._state_lock:
+            if self._state is not _AdmissionState.ENTRY:
+                return False
+            self._state = _AdmissionState.RELEASED
+        return self._lease.release()
+
+    def release_after_cleanup(self) -> bool:
+        with self._state_lock:
+            if self._state not in (
+                _AdmissionState.STREAMING,
+                _AdmissionState.CLEANUP,
+            ):
+                return False
+            self._state = _AdmissionState.RELEASED
+        return self._lease.release()
+
+    def retain_after_cleanup_failure(self) -> None:
+        with self._state_lock:
+            if self._state in (
+                _AdmissionState.STREAMING,
+                _AdmissionState.CLEANUP,
+            ):
+                self._state = _AdmissionState.RETAINED
+
+
+class AdmissionStreamingResponse(StreamingResponse):
+    def __init__(
+        self,
+        content,
+        response: CompleteResponseAsyncGenerator,
+        admission_owner: _AdmissionOwner,
+        **kwargs,
+    ):
+        super().__init__(content, **kwargs)
+        self._response = response
+        self._admission_owner = admission_owner
+        self._admission_owner.transfer_to_streaming()
+        self._cleanup_task = None
+
+    async def _close_and_release(self) -> None:
+        body_close_error = None
+        try:
+            close_body = getattr(self.body_iterator, "aclose", None)
+            if close_body is not None:
+                await close_body()
+        except BaseException as e:
+            body_close_error = e
+            logging.warning("failed to close streaming response body: %s", e)
+
+        try:
+            await self._response.aclose()
+        except BaseException as e:
+            self._admission_owner.retain_after_cleanup_failure()
+            logging.warning("failed to close streaming response: %s", e)
+            raise
+
+        self._admission_owner.release_after_cleanup()
+        if body_close_error is not None:
+            raise body_close_error
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            if self._cleanup_task is None:
+                self._cleanup_task = asyncio.create_task(self._close_and_release())
+            cancelled_error = None
+            while True:
+                try:
+                    await asyncio.shield(self._cleanup_task)
+                    break
+                except asyncio.CancelledError as e:
+                    if self._cleanup_task.done():
+                        self._cleanup_task.result()
+                        raise
+                    if cancelled_error is None:
+                        cancelled_error = e
+                except BaseException:
+                    raise
+            if cancelled_error is not None:
+                raise cancelled_error
 
 
 class FrontendServer(object):
@@ -144,47 +259,60 @@ class FrontendServer(object):
             kmonitor.report(
                 AccMetrics.QPS_METRIC, 1, {"source": request.get("source", "unknown")}
             )
-            sequence = self._global_controller.increment() % 4096  # 12 bits
-            request[request_id_field_name] = generate_request_id(
-                self.py_env_configs.server_config.ip,
-                self.py_env_configs.server_config.server_port,
-                self.server_id,
-                sequence,
-            )
         except Exception as e:
             return self._handle_exception(request, e)
 
         try:
-            assert (
-                self._embedding_endpoint is not None
-            ), "embedding pipeline should not be None"
-            result, logable_result = await self._embedding_endpoint.embedding(request)
-            # do not log result since too big
-            if logable_result is not None:
-                self._access_logger.log_success_access(request, logable_result)
-            end_time = time.time()
-            kmonitor.report(
-                GaugeMetrics.LANTENCY_METRIC, (end_time - start_time) * 1000
-            )
-            kmonitor.report(
-                AccMetrics.SUCCESS_QPS_METRIC,
-                1,
-                {"source": request.get("source", "unknown")},
-            )
-            usage = result.get("usage", {})
-            if not isinstance(usage, dict):
-                usage = {}
-            return ORJSONResponse(result, headers={USAGE_HEADER: json.dumps(usage)})
-        except BaseException as e:
+            admission_lease = self._global_controller.acquire()
+        except ConcurrencyException as e:
             return self._handle_exception(request, e)
+
+        try:
+            try:
+                sequence = admission_lease.sequence % 4096  # 12 bits
+                request[request_id_field_name] = generate_request_id(
+                    self.py_env_configs.server_config.ip,
+                    self.py_env_configs.server_config.server_port,
+                    self.server_id,
+                    sequence,
+                )
+            except Exception as e:
+                return self._handle_exception(request, e)
+
+            try:
+                assert (
+                    self._embedding_endpoint is not None
+                ), "embedding pipeline should not be None"
+                result, logable_result = await self._embedding_endpoint.embedding(request)
+                # do not log result since too big
+                if logable_result is not None:
+                    self._access_logger.log_success_access(request, logable_result)
+                end_time = time.time()
+                kmonitor.report(
+                    GaugeMetrics.LANTENCY_METRIC, (end_time - start_time) * 1000
+                )
+                kmonitor.report(
+                    AccMetrics.SUCCESS_QPS_METRIC,
+                    1,
+                    {"source": request.get("source", "unknown")},
+                )
+                usage = result.get("usage", {})
+                if not isinstance(usage, dict):
+                    usage = {}
+                return ORJSONResponse(
+                    result, headers={USAGE_HEADER: json.dumps(usage)}
+                )
+            except BaseException as e:
+                return self._handle_exception(request, e)
         finally:
-            self._global_controller.decrement()
+            admission_lease.release()
 
     # use asyncio.sleep(0) to correctly exit when client closed https://github.com/tiangolo/fastapi/issues/4146
     async def stream_response(
         self,
         request: Dict[str, Any],
         response: CompleteResponseAsyncGenerator,
+        close_response: bool = True,
     ):
         is_openai_response = request.get("stream", False)
         response_data_prefix = "data: " if is_openai_response else "data:"
@@ -200,6 +328,8 @@ class FrontendServer(object):
                 yield "data: [DONE]\r\n\r\n"
             else:
                 yield f"data:[done]\r\n\r\n"
+        except GeneratorExit:
+            raise
         except asyncio.CancelledError as e:
             self._access_logger.log_exception_access(request, e)
             kmonitor.report(
@@ -229,46 +359,62 @@ class FrontendServer(object):
                 format_e, ensure_ascii=False
             ) + "\r\n\r\n"
         finally:
-            self._global_controller.decrement()
+            if close_response:
+                try:
+                    await response.aclose()
+                except asyncio.CancelledError:
+                    pass
+                except BaseException as e:
+                    logging.warning("failed to close streaming response: %s", e)
 
     async def inference(self, req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
         try:
             if isinstance(req, str):
                 req = json.loads(req)
             assert isinstance(req, dict)
-            sequence = self._global_controller.increment() % 4096  # 12 bits
-            req[request_id_field_name] = generate_request_id(
-                self.py_env_configs.server_config.ip,
-                self.py_env_configs.server_config.server_port,
-                self.server_id,
-                sequence,
-            )
         except Exception as e:
             return self._handle_exception(req, e)
 
-        def generate_call():
-            assert self._frontend_worker is not None
-            return self._frontend_worker.inference(**req)
-
         try:
-            rep = await self._infer_wrap(req, raw_request, generate_call)
-        except Exception as e:
-            self._global_controller.decrement()
-            raise e
+            admission_lease = self._global_controller.acquire()
+        except ConcurrencyException as e:
+            return self._handle_exception(req, e)
 
-        if not isinstance(rep, StreamingResponse):
-            self._global_controller.decrement()
+        admission_owner = _AdmissionOwner(admission_lease)
+        try:
+            try:
+                sequence = admission_lease.sequence % 4096  # 12 bits
+                req[request_id_field_name] = generate_request_id(
+                    self.py_env_configs.server_config.ip,
+                    self.py_env_configs.server_config.server_port,
+                    self.server_id,
+                    sequence,
+                )
+            except Exception as e:
+                return self._handle_exception(req, e)
 
-        return rep
+            def generate_call():
+                assert self._frontend_worker is not None
+                return self._frontend_worker.inference(**req)
+
+            rep = await self._infer_wrap(
+                req, raw_request, generate_call, admission_owner
+            )
+            return rep
+        finally:
+            admission_owner.release_if_entry()
 
     async def _infer_wrap(
         self,
         req: Dict[str, Any],
         raw_request: RawRequest,
         generate_call: Callable[[], CompleteResponseAsyncGenerator],
+        admission_owner: _AdmissionOwner,
     ):
         try:
-            rep = await self._infer_impl(req, raw_request, generate_call)
+            rep = await self._infer_impl(
+                req, raw_request, generate_call, admission_owner
+            )
         except BaseException as e:
             rep = self._handle_exception(req, e)
         return rep
@@ -276,50 +422,67 @@ class FrontendServer(object):
     async def chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
     ):
-        sequence = self._global_controller.increment() % 4096  # 12 bits
-        request_deadline_anchor = RequestDeadlineAnchor.now()
-        request_id = generate_request_id(
-            self.py_env_configs.server_config.ip,
-            self.py_env_configs.server_config.server_port,
-            self.server_id,
-            sequence,
-        )
-
-        def generate_call():
-            assert self._openai_endpoint != None
-            response = self._openai_endpoint.chat_completion(
-                request_id, request, raw_request, request_deadline_anchor
-            )
-            assert isinstance(
-                response, CompleteResponseAsyncGenerator
-            ), f"error type: {type(response)}"
-            return response
-
+        request_dict: Dict[str, Any] = {}
         try:
-            request_dict = request.model_dump(exclude_none=True)
+            admission_lease = self._global_controller.acquire()
+        except ConcurrencyException as e:
+            return self._handle_exception(request_dict, e)
+
+        admission_owner = _AdmissionOwner(admission_lease)
+        try:
+            try:
+                sequence = admission_lease.sequence % 4096  # 12 bits
+                request_deadline_anchor = RequestDeadlineAnchor.now()
+                request_dict = request.model_dump(exclude_none=True)
+                request_id = generate_request_id(
+                    self.py_env_configs.server_config.ip,
+                    self.py_env_configs.server_config.server_port,
+                    self.server_id,
+                    sequence,
+                )
+            except Exception as e:
+                return self._handle_exception(request_dict, e)
+
+            def generate_call():
+                assert self._openai_endpoint != None
+                response = self._openai_endpoint.chat_completion(
+                    request_id, request, raw_request, request_deadline_anchor
+                )
+                assert isinstance(
+                    response, CompleteResponseAsyncGenerator
+                ), f"error type: {type(response)}"
+                return response
+
             request_dict[request_id_field_name] = request_id
-            rep = await self._infer_wrap(request_dict, raw_request, generate_call)
-        except Exception as e:
-            self._global_controller.decrement()
-            raise e
-
-        if not isinstance(rep, StreamingResponse):
-            self._global_controller.decrement()
-
-        return rep
+            rep = await self._infer_wrap(
+                request_dict, raw_request, generate_call, admission_owner
+            )
+            return rep
+        finally:
+            admission_owner.release_if_entry()
 
     async def batch_chat_completion(self, request, raw_request: Request):
         from rtp_llm.openai.api_datatype import BatchChatCompletionResponse
 
-        sequence = self._global_controller.increment() % 4096
-        request_deadline_anchor = RequestDeadlineAnchor.now()
-        request_id = generate_request_id(
-            self.py_env_configs.server_config.ip,
-            self.py_env_configs.server_config.server_port,
-            self.server_id,
-            sequence,
-        )
+        request_dict: Dict[str, Any] = {}
         try:
+            admission_lease = self._global_controller.acquire()
+        except ConcurrencyException as e:
+            return self._handle_exception(request_dict, e)
+
+        try:
+            try:
+                sequence = admission_lease.sequence % 4096
+                request_deadline_anchor = RequestDeadlineAnchor.now()
+                request_id = generate_request_id(
+                    self.py_env_configs.server_config.ip,
+                    self.py_env_configs.server_config.server_port,
+                    self.server_id,
+                    sequence,
+                )
+            except Exception as e:
+                return self._handle_exception(request_dict, e)
+
             assert self._openai_endpoint is not None
             responses = await self._openai_endpoint.batch_chat_completion(
                 request_id, request, request_deadline_anchor
@@ -330,23 +493,29 @@ class FrontendServer(object):
                 ).model_dump()
             )
         finally:
-            self._global_controller.decrement()
+            admission_lease.release()
 
     async def batch_infer(self, req: dict, raw_request: Request):
         from rtp_llm.frontend.frontend_worker import BatchPipelineResponse
 
-        # Concurrency accounting: a batch counts as ONE scheduling unit because the engine
-        # atomically enqueues all prompts via BatchGenerateCall. Per-item counting would over-
-        # reject under the same concurrency_limit; the trade-off is that a large batch occupies
-        # only one slot regardless of N.
-        sequence = self._global_controller.increment() % 4096
-        request_id = generate_request_id(
-            self.py_env_configs.server_config.ip,
-            self.py_env_configs.server_config.server_port,
-            self.server_id,
-            sequence,
-        )
+        # Frontend admission currently counts an HTTP batch as one request.
         try:
+            admission_lease = self._global_controller.acquire()
+        except ConcurrencyException as e:
+            return self._handle_exception(req, e)
+
+        try:
+            try:
+                sequence = admission_lease.sequence % 4096
+                request_id = generate_request_id(
+                    self.py_env_configs.server_config.ip,
+                    self.py_env_configs.server_config.server_port,
+                    self.server_id,
+                    sequence,
+                )
+            except Exception as e:
+                return self._handle_exception(req, e)
+
             assert self._frontend_worker is not None
             prompts = req.get("prompt_batch", [])
             generate_config = req.get("generate_config", {})
@@ -357,7 +526,7 @@ class FrontendServer(object):
             )
             return ORJSONResponse(content=result.model_dump(exclude_none=True))
         finally:
-            self._global_controller.decrement()
+            admission_lease.release()
 
     async def chat_render(self, request: ChatCompletionRequest, raw_request: Request):
         try:
@@ -395,7 +564,8 @@ class FrontendServer(object):
             )
             self._access_logger.log_exception_access(request, e)
 
-        rep = ORJSONResponse(exception_json, status_code=500)
+        status_code = 409 if isinstance(e, ConcurrencyException) else 500
+        rep = ORJSONResponse(exception_json, status_code=status_code)
         return rep
 
     async def _call_generate_with_report(
@@ -405,61 +575,69 @@ class FrontendServer(object):
             last_iterate_time = current_time_ms()
             first_token = True
             iter_count = 0
-            async for response in response_generator:
-                end_time = current_time_ms()
-                if first_token:
-                    first_token = False
-                    kmonitor.report(
-                        GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC,
-                        end_time - last_iterate_time,
-                    )
-                else:
-                    step_output_len = 1
-                    if hasattr(response, "aux_info"):
-                        if isinstance(response.aux_info, list):
-                            step_output_len = 0
-                            for info in response.aux_info:
-                                step_output_len += info.get("step_output_len", 1)
-                        elif isinstance(response.aux_info, dict):
-                            step_output_len = max(
-                                response.aux_info.get("step_output_len", 1),
-                                step_output_len,
-                            )
+            try:
+                async for response in response_generator:
+                    end_time = current_time_ms()
+                    if first_token:
+                        first_token = False
+                        kmonitor.report(
+                            GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC,
+                            end_time - last_iterate_time,
+                        )
+                    else:
+                        step_output_len = 1
+                        if hasattr(response, "aux_info"):
+                            if isinstance(response.aux_info, list):
+                                step_output_len = 0
+                                for info in response.aux_info:
+                                    step_output_len += info.get("step_output_len", 1)
+                            elif isinstance(response.aux_info, dict):
+                                step_output_len = max(
+                                    response.aux_info.get("step_output_len", 1),
+                                    step_output_len,
+                                )
 
+                        kmonitor.report(
+                            GaugeMetrics.RESPONSE_ITER_RT_METRIC,
+                            (end_time - last_iterate_time) / step_output_len,
+                        )
                     kmonitor.report(
-                        GaugeMetrics.RESPONSE_ITER_RT_METRIC,
-                        (end_time - last_iterate_time) / step_output_len,
+                        AccMetrics.ITER_QPS_METRIC,
+                        1,
+                        {
+                            "rank_id": self.rank_id,
+                            "server_id": self.server_id,
+                        },
                     )
+                    last_iterate_time = end_time
+                    iter_count += 1
+                    yield response
                 kmonitor.report(
-                    AccMetrics.ITER_QPS_METRIC,
+                    GaugeMetrics.RESPONSE_ITERATE_COUNT, iter_count
+                )
+                kmonitor.report(
+                    GaugeMetrics.LANTENCY_METRIC, current_time_ms() - start_time
+                )
+                kmonitor.report(
+                    AccMetrics.SUCCESS_QPS_METRIC,
                     1,
                     {
                         "rank_id": self.rank_id,
                         "server_id": self.server_id,
                     },
                 )
-                last_iterate_time = end_time
-                iter_count += 1
-                yield response
-            kmonitor.report(GaugeMetrics.RESPONSE_ITERATE_COUNT, iter_count)
-            kmonitor.report(
-                GaugeMetrics.LANTENCY_METRIC, current_time_ms() - start_time
-            )
-            kmonitor.report(
-                AccMetrics.SUCCESS_QPS_METRIC,
-                1,
-                {
-                    "rank_id": self.rank_id,
-                    "server_id": self.server_id,
-                },
-            )
+            finally:
+                await response_generator.aclose()
 
         assert self._frontend_worker is not None
         start_time = current_time_ms()
         response_generator = generate_call()
+        close_dependencies = CloseDependencyRegistry()
+        managed_response = close_dependencies.wrap(response_generator)
         return CompleteResponseAsyncGenerator(
-            __gen_response_with_report(start_time, response_generator),
+            __gen_response_with_report(start_time, managed_response),
             response_generator._collect_complete_response_func,
+            close_dependencies=close_dependencies,
         )
 
     async def _collect_complete_response_and_record_access_log(
@@ -480,6 +658,7 @@ class FrontendServer(object):
         req: Dict[Any, Any],
         raw_request: RawRequest,
         generate_call: Callable[[], CompleteResponseAsyncGenerator],
+        admission_owner: _AdmissionOwner,
     ):
         assert self._frontend_worker is not None
         kmonitor.report(
@@ -498,19 +677,67 @@ class FrontendServer(object):
         res = await self._call_generate_with_report(generate_call)
 
         if is_streaming:
-            return StreamingResponse(
-                self.stream_response(req, res), media_type="text/event-stream"
+            return AdmissionStreamingResponse(
+                self.stream_response(req, res, close_response=False),
+                res,
+                admission_owner,
+                media_type="text/event-stream",
             )
-        async for x in res:
-            if await raw_request.is_disconnected():
-                # Abort the request if the client disconnects.
-                await res.aclose()
-                raise asyncio.CancelledError("client disconnects")
+        admission_owner.transfer_to_cleanup()
+        primary_error = None
+        complete_response = None
+        try:
+            async for x in res:
+                if await raw_request.is_disconnected():
+                    raise asyncio.CancelledError("client disconnects")
 
-        complete_response = await self._collect_complete_response_and_record_access_log(
-            req, res
-        )
+            complete_response = (
+                await self._collect_complete_response_and_record_access_log(req, res)
+            )
+        except BaseException as e:
+            primary_error = e
+        finally:
+            try:
+                await self._close_nonstream_response(res, admission_owner)
+            except BaseException as close_error:
+                if primary_error is not None and close_error is not primary_error:
+                    raise close_error from primary_error
+                raise
+
+        if primary_error is not None:
+            raise primary_error
         return ORJSONResponse(content=complete_response)
+
+    @staticmethod
+    async def _close_nonstream_response(
+        response: CompleteResponseAsyncGenerator,
+        admission_owner: _AdmissionOwner,
+    ) -> None:
+        close_task = asyncio.create_task(response.aclose())
+        cancelled_error = None
+        while True:
+            try:
+                await asyncio.shield(close_task)
+                break
+            except asyncio.CancelledError as e:
+                if close_task.done():
+                    try:
+                        close_task.result()
+                    except BaseException:
+                        admission_owner.retain_after_cleanup_failure()
+                        raise
+                    if cancelled_error is None:
+                        cancelled_error = e
+                    break
+                if cancelled_error is None:
+                    cancelled_error = e
+            except BaseException:
+                admission_owner.retain_after_cleanup_failure()
+                raise
+
+        admission_owner.release_after_cleanup()
+        if cancelled_error is not None:
+            raise cancelled_error
 
     def tokenize(self, req: str | Dict[str, Any]):
         try:

@@ -1,11 +1,29 @@
 import logging
 import os
+import threading
 from multiprocessing import Lock, Value
 from typing import Optional
 
 
 class ConcurrencyException(Exception):
     pass
+
+
+class ConcurrencyLease:
+    def __init__(self, controller: "ConcurrencyController", sequence: int) -> None:
+        self._controller: Optional["ConcurrencyController"] = controller
+        self._release_lock = threading.Lock()
+        self.sequence = sequence
+
+    def release(self) -> bool:
+        with self._release_lock:
+            controller = self._controller
+            if controller is None:
+                return False
+            self._controller = None
+
+        controller.decrement()
+        return True
 
 
 class ConcurrencyController:
@@ -19,7 +37,7 @@ class ConcurrencyController:
         with self.lock:
             return self.max_concurrency - self.current_concurrency.value
 
-    def increment(self) -> None:
+    def increment(self) -> int:
         while True:
             with self.lock:
                 if self.current_concurrency.value < self.max_concurrency:
@@ -31,8 +49,15 @@ class ConcurrencyController:
                     f"Concurrency limit {self.max_concurrency} reached"
                 )
 
+    def acquire(self) -> ConcurrencyLease:
+        return ConcurrencyLease(self, self.increment())
+
     def decrement(self) -> None:
         with self.lock:
+            if self.current_concurrency.value <= 0:
+                raise RuntimeError(
+                    "Concurrency controller released without an active request"
+                )
             self.current_concurrency.value -= 1
 
     def get_request_counter(self) -> int:

@@ -55,7 +55,9 @@ class FrontendDeadlineAnchorTest(IsolatedAsyncioTestCase):
     async def test_chat_completion_passes_one_ingress_anchor_to_renderer_chain(self):
         server = object.__new__(FrontendServer)
         server._global_controller = MagicMock()
-        server._global_controller.increment.return_value = 1
+        admission_lease = MagicMock()
+        admission_lease.sequence = 1
+        server._global_controller.acquire.return_value = admission_lease
         server.py_env_configs = SimpleNamespace(
             server_config=SimpleNamespace(ip="127.0.0.1", server_port=1234)
         )
@@ -65,7 +67,9 @@ class FrontendDeadlineAnchorTest(IsolatedAsyncioTestCase):
             CompleteResponseAsyncGenerator(empty_source(), collect_last)
         )
 
-        async def infer_wrap(_request, _raw_request, generate_call):
+        async def infer_wrap(
+            _request, _raw_request, generate_call, _admission_lease
+        ):
             return generate_call()
 
         server._infer_wrap = infer_wrap
@@ -86,6 +90,7 @@ class FrontendDeadlineAnchorTest(IsolatedAsyncioTestCase):
             17, request, ANY, anchor
         )
         deadline_now.assert_called_once_with()
+        admission_lease.release.assert_called_once_with()
         await response.aclose()
 
     async def test_generate_choice_uses_anchor_before_backend_enqueue(self):

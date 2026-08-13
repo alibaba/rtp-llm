@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -25,6 +26,7 @@ from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.structure.request_extractor import Request, RequestExtractor
 from rtp_llm.utils.base_model_datatypes import GenerateResponse
 from rtp_llm.utils.complete_response_async_generator import (
+    CloseDependencyRegistry,
     CompleteResponseAsyncGenerator,
 )
 
@@ -229,7 +231,10 @@ class FrontendWorker:
                 "request is non_stream but use incremental decoder",
             )
 
-        response_generator = self._inference(request, **kwargs)
+        close_dependencies = CloseDependencyRegistry()
+        response_generator = self._inference(
+            request, close_dependencies=close_dependencies, **kwargs
+        )
 
         complete_response_collect_func = partial(
             FrontendWorker.collect_complete_response,
@@ -238,10 +243,17 @@ class FrontendWorker:
             num_return_sequences=request.num_return_sequences,
         )
         return CompleteResponseAsyncGenerator(
-            response_generator, complete_response_collect_func
+            response_generator,
+            complete_response_collect_func,
+            close_dependencies=close_dependencies,
         )
 
-    def _inference(self, request: Request, **kwargs: Any):
+    def _inference(
+        self,
+        request: Request,
+        close_dependencies: Optional[CloseDependencyRegistry] = None,
+        **kwargs: Any,
+    ):
         if (
             len(request.input_texts) > 1
             or request.batch_infer
@@ -262,6 +274,7 @@ class FrontendWorker:
                         text,
                         urls,
                         generate_config=generate_config,
+                        close_dependencies=close_dependencies,
                         batch_group_size=batch_group_size,
                         batch_group_id=batch_group_id,
                         **kwargs,
@@ -278,6 +291,7 @@ class FrontendWorker:
                 request.input_texts[0],
                 request.input_urls[0],
                 generate_config=request.generate_configs[0],
+                close_dependencies=close_dependencies,
                 **kwargs,
             )
 
@@ -360,6 +374,7 @@ class FrontendWorker:
         text: str,
         urls: List[str],
         generate_config: GenerateConfig,
+        close_dependencies: Optional[CloseDependencyRegistry] = None,
         batch_group_size: int = 1,
         batch_group_id: int = -1,
         **kwargs: Any,
@@ -372,10 +387,12 @@ class FrontendWorker:
             generate_env_config=self.generate_env_config,
             batch_group_size=batch_group_size,
             batch_group_id=batch_group_id,
+            close_dependencies=close_dependencies,
             **kwargs,
         )
-        async for generate_response in stream:
-            yield self._format_response_new(generate_response, generate_config)
+        async with contextlib.aclosing(stream):
+            async for generate_response in stream:
+                yield self._format_response_new(generate_response, generate_config)
 
     def is_streaming(self, req: Dict[str, Any]):
         return RequestExtractor.is_streaming(req) or req.get("stream", False)

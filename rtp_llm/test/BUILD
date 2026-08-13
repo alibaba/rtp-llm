@@ -156,6 +156,51 @@ py_test(
 )
 
 py_test(
+    name = "complete_response_close_test",
+    srcs = [
+        "complete_response_close_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    timeout = "short",
+)
+
+py_test(
+    name = "response_stream_close_test",
+    srcs = [
+        "response_stream_close_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    timeout = "short",
+)
+
+py_test(
+    name = "frontend_admission_overflow_test",
+    srcs = [
+        "frontend_admission_overflow_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    timeout = "short",
+)
+
+py_test(
+    name = "native_response_close_test",
+    srcs = [
+        "native_response_close_test.py",
+    ],
+    deps = [
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib",
+    ],
+    timeout = "short",
+)
+
+py_test(
     name = "frontend_deadline_anchor_test",
     srcs = [
         "frontend_deadline_anchor_test.py",

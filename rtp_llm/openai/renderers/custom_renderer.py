@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import copy
 import functools
 import json
@@ -44,6 +46,7 @@ from rtp_llm.utils.base_model_datatypes import (
     RequestDeadlineAnchor,
     initialize_request_deadlines,
 )
+from rtp_llm.utils.complete_response_async_generator import CloseDependencyRegistry
 from rtp_llm.utils.util import has_overlap_kmp
 from rtp_llm.utils.word_util import (
     get_stop_word_slices,
@@ -609,6 +612,7 @@ class CustomChatRenderer:
         backend_rpc_server_visitor: BackendRPCServerVisitor,
         request: ChatCompletionRequest,
         request_deadline_anchor: Optional[RequestDeadlineAnchor] = None,
+        close_dependencies: Optional[CloseDependencyRegistry] = None,
     ) -> AsyncGenerator[StreamResponseObject, None]:
 
         token_type_ids = []
@@ -630,15 +634,23 @@ class CustomChatRenderer:
         output_generator: AsyncGenerator[GenerateOutputs, None] = (
             await backend_rpc_server_visitor.enqueue(generate_input)
         )
+        if close_dependencies is not None:
+            managed_output = close_dependencies.wrap(output_generator)
+            output_generator = managed_output
+            if not managed_output.accepted:
+                await managed_output.aclose()
+                raise asyncio.CancelledError("response closed during backend admission")
 
         # 处理非流式请求的合并逻辑
         if not generate_config.is_streaming:
             output_generator = await self._merge_non_streaming_outputs(output_generator)
 
-        async for response in self.render_response_stream(
+        response_generator = self.render_response_stream(
             output_generator, request, generate_config
-        ):
-            yield response
+        )
+        async with contextlib.aclosing(response_generator):
+            async for response in response_generator:
+                yield response
 
     async def _merge_non_streaming_outputs(
         self, output_generator: AsyncGenerator[GenerateOutputs, None]
@@ -654,8 +666,9 @@ class CustomChatRenderer:
         """
         # 收集所有输出
         collected_outputs = []
-        async for output in output_generator:
-            collected_outputs.append(output)
+        async with contextlib.aclosing(output_generator):
+            async for output in output_generator:
+                collected_outputs.append(output)
 
         # 合并输出
         merged_output = self._merge_generate_outputs(collected_outputs)
@@ -1255,78 +1268,83 @@ class CustomChatRenderer:
         request: ChatCompletionRequest,
         generate_config: GenerateConfig,
     ) -> AsyncGenerator[StreamResponseObject, None]:
-        stop_word_slice_list = get_stop_word_slices(generate_config.stop_words_str)
-        nums_output = request.n if request.n is not None else 1
-        # FIXME(zhangjianning.zjn): for variable width beam search,
-        # the num_ouput may not be the last num beams,
-        # and is dependent to the length of sequence
-        last_num_beams = (
-            generate_config.variable_num_beams[-1]
-            if len(generate_config.variable_num_beams) > 1
-            else generate_config.num_beams
-        )
-        nums_output = last_num_beams if last_num_beams != 1 else nums_output
-        status_list = await self._create_status_list(nums_output, request)
-        index = 0
-        think_status_list = [
-            ThinkStatus(
-                enable_think_mode=bool(self.in_think_mode(request)),
-                in_think_mode=bool(self.should_process_think(request)),
-                think_buffer="",
-                think_tokens=0,
-                is_streaming=generate_config.is_streaming,
+        async with contextlib.aclosing(output_generator):
+            stop_word_slice_list = get_stop_word_slices(generate_config.stop_words_str)
+            nums_output = request.n if request.n is not None else 1
+            # FIXME(zhangjianning.zjn): for variable width beam search,
+            # the num_ouput may not be the last num beams,
+            # and is dependent to the length of sequence
+            last_num_beams = (
+                generate_config.variable_num_beams[-1]
+                if len(generate_config.variable_num_beams) > 1
+                else generate_config.num_beams
             )
-            for _ in range(nums_output)
-        ]
-        async for outputs in output_generator:
-            if index == 0:
-                yield await self._generate_first(nums_output)
-            index += 1
-            if len(outputs.generate_outputs) != nums_output:
-                raise Exception(
-                    f"output num {len(outputs.generate_outputs)} != nums_output {nums_output}"
-            )
-            delta_list: List[OutputDelta] = []
-            for status, output in zip(status_list, outputs.generate_outputs):
-                delta = await self._update_single_status(
-                    status,
-                    output,
-                    generate_config.max_new_tokens,
-                    generate_config.stop_words_str,
-                    stop_word_slice_list,
-                    generate_config.is_streaming,
+            nums_output = last_num_beams if last_num_beams != 1 else nums_output
+            status_list = await self._create_status_list(nums_output, request)
+            index = 0
+            think_status_list = [
+                ThinkStatus(
+                    enable_think_mode=bool(self.in_think_mode(request)),
+                    in_think_mode=bool(self.should_process_think(request)),
+                    think_buffer="",
+                    think_tokens=0,
+                    is_streaming=generate_config.is_streaming,
                 )
-                projected_output = output
-                if isinstance(status, StreamStatus):
-                    delta.output_length = status.reported_output_length(
-                        delta.output_length
+                for _ in range(nums_output)
+            ]
+            async for outputs in output_generator:
+                if index == 0:
+                    yield await self._generate_first(nums_output)
+                index += 1
+                if len(outputs.generate_outputs) != nums_output:
+                    raise Exception(
+                        f"output num {len(outputs.generate_outputs)} != nums_output {nums_output}"
                     )
-                    if (
-                        status.output_was_clipped
-                        and generate_config.return_cum_log_probs
-                    ):
-                        raise RuntimeError(
-                            "cannot project cumulative log probabilities from a clipped output chunk"
+                delta_list: List[OutputDelta] = []
+                for status, output in zip(status_list, outputs.generate_outputs):
+                    delta = await self._update_single_status(
+                        status,
+                        output,
+                        generate_config.max_new_tokens,
+                        generate_config.stop_words_str,
+                        stop_word_slice_list,
+                        generate_config.is_streaming,
+                    )
+                    projected_output = output
+                    if isinstance(status, StreamStatus):
+                        delta.output_length = status.reported_output_length(
+                            delta.output_length
                         )
-                    projected_output = self._project_generate_output(
-                        status, output, generate_config
-                    )
-                if delta.extra_outputs is None:
-                    delta.extra_outputs = await self._generate_extra_outputs(
-                        projected_output, generate_config
-                    )
-                delta_list.append(delta)
-            yield await self._generate_stream_response(delta_list, think_status_list)
-            if self._check_all_finished(status_list):
-                break
-        if index != 0:
-            yield await self._flush_buffer(
-                status_list,
-                generate_config.stop_words_str,
-                generate_config.is_streaming,
-                think_status_list,
-            )
-            yield await self._generate_final(status_list, request, think_status_list)
+                        if (
+                            status.output_was_clipped
+                            and generate_config.return_cum_log_probs
+                        ):
+                            raise RuntimeError(
+                                "cannot project cumulative log probabilities from a clipped output chunk"
+                            )
+                        projected_output = self._project_generate_output(
+                            status, output, generate_config
+                        )
+                    if delta.extra_outputs is None:
+                        delta.extra_outputs = await self._generate_extra_outputs(
+                            projected_output, generate_config
+                        )
+                    delta_list.append(delta)
+                yield await self._generate_stream_response(
+                    delta_list, think_status_list
+                )
+                if self._check_all_finished(status_list):
+                    break
+            if index != 0:
+                yield await self._flush_buffer(
+                    status_list,
+                    generate_config.stop_words_str,
+                    generate_config.is_streaming,
+                    think_status_list,
+                )
+                yield await self._generate_final(
+                    status_list, request, think_status_list
+                )
 
     def _create_empty_delta_sync(self, input_len: int, output_len: int, reuse_len: int):
         return OutputDelta(

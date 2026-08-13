@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import copy
 import logging
 import queue
@@ -31,6 +32,7 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutputs,
     GenerateResponse,
 )
+from rtp_llm.utils.complete_response_async_generator import CloseDependencyRegistry
 from rtp_llm.utils.time_util import current_time_ms
 from rtp_llm.utils.util import AtomicCounter
 from rtp_llm.utils.word_util import (
@@ -169,6 +171,7 @@ class Pipeline(object):
         prompt: str,
         request_id: int = None,
         urls: Optional[List[str]] = None,
+        close_dependencies: Optional[CloseDependencyRegistry] = None,
         **kwargs: Any
     ) -> AsyncGenerator[GenerateResponse, None]:
         begin_time = current_time_ms()
@@ -225,7 +228,12 @@ class Pipeline(object):
         kmonitor.report(GaugeMetrics.NUM_BEAMS_METRIC, generate_config.max_num_beams())
         kmonitor.report(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC, len(token_ids))
         return self.generate_stream(
-            request_id, token_ids, mm_inputs, generate_config, **kwargs
+            request_id,
+            token_ids,
+            mm_inputs,
+            generate_config,
+            close_dependencies=close_dependencies,
+            **kwargs,
         )
 
     @staticmethod
@@ -468,6 +476,7 @@ class Pipeline(object):
         token_ids: List[int],
         mm_inputs: List[MultimodalInput],
         generate_config: GenerateConfig,
+        close_dependencies: Optional[CloseDependencyRegistry] = None,
         **kwargs: Any
     ) -> AsyncGenerator[GenerateResponse, None]:
         token_type_ids = []
@@ -493,6 +502,12 @@ class Pipeline(object):
         stream: AsyncGenerator[GenerateOutputs, None] = (
             await self.backend_rpc_server_visitor.enqueue(input)
         )
+        if close_dependencies is not None:
+            managed_stream = close_dependencies.wrap(stream)
+            stream = managed_stream
+            if not managed_stream.accepted:
+                await managed_stream.aclose()
+                raise asyncio.CancelledError("response closed during backend admission")
 
         decoding_states: List[DecodingState] = []
         ouput_tokens_list: List[torch.Tensor] = []
@@ -500,82 +515,85 @@ class Pipeline(object):
         generate_outputs_cache = GenerateOutputs()
 
         # TODO(xinfei.sxf) add batch and stop test
-        async for generate_outputs in stream:
-            if not generate_outputs_cache.generate_outputs:
-                generate_outputs_cache.generate_outputs = (
+        async with contextlib.aclosing(stream):
+            async for generate_outputs in stream:
+                if not generate_outputs_cache.generate_outputs:
+                    generate_outputs_cache.generate_outputs = (
+                        generate_outputs.generate_outputs
+                    )
+                else:
+                    generate_outputs_cache.generate_outputs = [
+                        out if out.finished else generate_outputs.generate_outputs[i]
+                        for i, out in enumerate(generate_outputs_cache.generate_outputs)
+                    ]
+                assert len(generate_outputs_cache.generate_outputs) == len(
                     generate_outputs.generate_outputs
                 )
-            else:
-                generate_outputs_cache.generate_outputs = [
-                    out if out.finished else generate_outputs.generate_outputs[i]
-                    for i, out in enumerate(generate_outputs_cache.generate_outputs)
-                ]
-            assert len(generate_outputs_cache.generate_outputs) == len(
-                generate_outputs.generate_outputs
-            )
-            begin_time = current_time_ms()
-            is_incremental = (
-                not generate_config.has_num_beams() and generate_config.is_streaming
-            )
-            if is_incremental:
-                (
-                    generate_texts,
-                    output_lens,
-                    decoding_states,
-                    token_buffers,
-                    ouput_tokens_list,
-                ) = self.decode_incremental_tokens(
-                    generate_config,
-                    generate_outputs_cache,
-                    stop_word_strs,
-                    stop_word_str_slices,
-                    stop_word_ids,
-                    stop_word_id_slices,
-                    decoding_states,
-                    token_buffers,
-                    ouput_tokens_list,
-                    **kwargs
+                begin_time = current_time_ms()
+                is_incremental = (
+                    not generate_config.has_num_beams() and generate_config.is_streaming
                 )
-            else:
-                (
-                    generate_texts,
-                    output_lens,
-                    ouput_tokens_list,
-                ) = self.decode_non_incremental_tokens(
-                    generate_config,
-                    generate_outputs_cache,
-                    stop_word_strs,
-                    stop_word_str_slices,
-                    stop_word_ids,
-                    stop_word_id_slices,
-                    ouput_tokens_list,
-                    **kwargs
-                )
-
-            kmonitor.report(
-                GaugeMetrics.POST_PIPELINE_RT_METRIC, current_time_ms() - begin_time
-            )
-
-            yield GenerateResponse(
-                generate_outputs=generate_outputs_cache, generate_texts=generate_texts
-            )
-            if (
-                all(
-                    output.finished
-                    for output in generate_outputs_cache.generate_outputs
-                )
-                and generate_config.aux_info
-            ):
-                kmonitor.report(
-                    GaugeMetrics.FT_ITERATE_COUNT_METRIC,
-                    generate_outputs_cache.generate_outputs[0].aux_info.iter_count,
-                )
-                if len(output_lens) > 0:
-                    kmonitor.report(
-                        GaugeMetrics.OUTPUT_TOKEN_SIZE_METRIC,
-                        sum(output_lens) / len(output_lens),
+                if is_incremental:
+                    (
+                        generate_texts,
+                        output_lens,
+                        decoding_states,
+                        token_buffers,
+                        ouput_tokens_list,
+                    ) = self.decode_incremental_tokens(
+                        generate_config,
+                        generate_outputs_cache,
+                        stop_word_strs,
+                        stop_word_str_slices,
+                        stop_word_ids,
+                        stop_word_id_slices,
+                        decoding_states,
+                        token_buffers,
+                        ouput_tokens_list,
+                        **kwargs
                     )
-                break
+                else:
+                    (
+                        generate_texts,
+                        output_lens,
+                        ouput_tokens_list,
+                    ) = self.decode_non_incremental_tokens(
+                        generate_config,
+                        generate_outputs_cache,
+                        stop_word_strs,
+                        stop_word_str_slices,
+                        stop_word_ids,
+                        stop_word_id_slices,
+                        ouput_tokens_list,
+                        **kwargs
+                    )
+
+                kmonitor.report(
+                    GaugeMetrics.POST_PIPELINE_RT_METRIC,
+                    current_time_ms() - begin_time,
+                )
+
+                yield GenerateResponse(
+                    generate_outputs=generate_outputs_cache,
+                    generate_texts=generate_texts,
+                )
+                if (
+                    all(
+                        output.finished
+                        for output in generate_outputs_cache.generate_outputs
+                    )
+                    and generate_config.aux_info
+                ):
+                    kmonitor.report(
+                        GaugeMetrics.FT_ITERATE_COUNT_METRIC,
+                        generate_outputs_cache.generate_outputs[0].aux_info.iter_count,
+                    )
+                    if len(output_lens) > 0:
+                        kmonitor.report(
+                            GaugeMetrics.OUTPUT_TOKEN_SIZE_METRIC,
+                            sum(output_lens) / len(output_lens),
+                        )
+                    break
 
     @torch.inference_mode()
     async def batch_infer(
