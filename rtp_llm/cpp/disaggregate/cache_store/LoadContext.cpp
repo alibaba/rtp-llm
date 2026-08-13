@@ -86,16 +86,11 @@ void SyncContext::waitDone() {
     std::unique_lock<std::mutex> lock(mutex_);
     auto                         once_time_ms = 30;
     auto finish_terminal = [this, &lock]() {
-        if (combine_load_) {
-            // RDMA writes directly into caller-owned buffers and cannot be
-            // stopped by the local copy fence. Keep the buffer lease until
-            // the transport completion callback retires the request.
-            RTP_LLM_LOG_WARNING("load context terminal result waiting for direct-write completion");
-            cond_.wait(lock, [this]() { return done_layer_cnt_ == expect_layer_cnt_; });
-        } else {
-            lock.unlock();
-            abortPendingWrites();
-        }
+        lock.unlock();
+        // closeAndDrain rejects work that has not entered the transport, drains
+        // any launch already holding a fence permit, and synchronously invokes
+        // the transport abort callbacks registered before launch.
+        abortPendingWrites();
     };
     while (true) {
         if (done_layer_cnt_ == expect_layer_cnt_) {
