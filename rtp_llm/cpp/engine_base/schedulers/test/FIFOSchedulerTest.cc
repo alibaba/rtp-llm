@@ -804,9 +804,9 @@ TEST_F(FIFOSchedulerTest, testCpForceSinglePrefillConfig) {
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
         RuntimeConfig runtime_config;
-        runtime_config.max_generate_batch_size                       = 100;
-        runtime_config.fifo_scheduler_config.max_batch_tokens_size   = 8192;
-        runtime_config.fifo_scheduler_config.cp_force_single_prefill = cp_force_single_prefill;
+        runtime_config.max_generate_batch_size                         = 100;
+        runtime_config.fifo_scheduler_config.max_batch_tokens_size     = 8192;
+        runtime_config.fifo_scheduler_config.cp_force_single_prefill   = cp_force_single_prefill;
         PDSepConfig         pd_sep_config;
         ParallelismConfig   parallelism_config;
         ModelSpecificConfig model_specific_config;

@@ -1389,7 +1389,7 @@ bool KVCacheMemoryConnector::startCopyAsync(const std::shared_ptr<MemoryAsyncCon
     if (stop_.load()) {
         return false;
     }
-    auto   task_copy_plan  = copy_plan;
+    auto   task_copy_plan = copy_plan;
     auto   enqueue_time_us = currentTimeUs();
     auto   direction       = copy_plan->direction;
     size_t copy_item_num   = copy_plan->copy_infos.size();
@@ -1400,34 +1400,39 @@ bool KVCacheMemoryConnector::startCopyAsync(const std::shared_ptr<MemoryAsyncCon
             ++disk_item_num;
         }
     }
-    auto code = wait_done_thread_pool_->pushTask(
-        [this, context, task_copy_plan, enqueue_time_us, direction, copy_item_num, disk_item_num]() mutable {
-            const auto task_start_us = currentTimeUs();
-            const auto send_start_us = currentTimeUs();
-            try {
-                auto send_result = sendCopyPlan(task_copy_plan);
-                context->setBroadcastResult(send_result);
-            } catch (const std::exception& e) {
-                RTP_LLM_LOG_WARNING("start copy plan async failed while sending copy plan: %s", e.what());
-                context->markFailed(e.what());
-            } catch (...) {
-                RTP_LLM_LOG_WARNING("start copy plan async failed while sending copy plan with unknown exception");
-                context->markFailed("unknown send copy plan exception");
-            }
-            const auto send_done_us = currentTimeUs();
-            task_copy_plan.reset();
-            const auto wait_start_us = currentTimeUs();
-            context->waitDone();
-            const auto wait_done_us = currentTimeUs();
-            reportCopyTaskMetrics(context->success(),
-                                  wait_done_us - task_start_us,
-                                  task_start_us - enqueue_time_us,
-                                  send_done_us - send_start_us,
-                                  wait_done_us - wait_start_us,
-                                  static_cast<int64_t>(copy_item_num),
-                                  static_cast<int64_t>(disk_item_num),
-                                  direction);
-        });
+    auto code = wait_done_thread_pool_->pushTask([this,
+                                                  context,
+                                                  task_copy_plan,
+                                                  enqueue_time_us,
+                                                  direction,
+                                                  copy_item_num,
+                                                  disk_item_num]() mutable {
+        const auto task_start_us = currentTimeUs();
+        const auto send_start_us = currentTimeUs();
+        try {
+            auto send_result = sendCopyPlan(task_copy_plan);
+            context->setBroadcastResult(send_result);
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("start copy plan async failed while sending copy plan: %s", e.what());
+            context->markFailed(e.what());
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("start copy plan async failed while sending copy plan with unknown exception");
+            context->markFailed("unknown send copy plan exception");
+        }
+        const auto send_done_us = currentTimeUs();
+        task_copy_plan.reset();
+        const auto wait_start_us = currentTimeUs();
+        context->waitDone();
+        const auto wait_done_us = currentTimeUs();
+        reportCopyTaskMetrics(context->success(),
+                              wait_done_us - task_start_us,
+                              task_start_us - enqueue_time_us,
+                              send_done_us - send_start_us,
+                              wait_done_us - wait_start_us,
+                              static_cast<int64_t>(copy_item_num),
+                              static_cast<int64_t>(disk_item_num),
+                              direction);
+    });
     if (code != autil::ThreadPoolBase::ERROR_NONE) {
         RTP_LLM_LOG_WARNING("start copy plan async failed, push send+wait task failed, code=%d", code);
         return false;
@@ -2936,7 +2941,8 @@ void KVCacheMemoryConnector::reportCopyTaskMetrics(bool          success,
     collector.disk_item_num      = disk_item_num;
     collector.from_gpu           = direction == CopyDirection::D2H;
 
-    metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheCopyTaskMetricsCollector>(nullptr, &collector);
+    metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheCopyTaskMetricsCollector>(nullptr,
+                                                                                                   &collector);
 }
 
 void KVCacheMemoryConnector::reportDiskMatchMetrics(bool    success,
