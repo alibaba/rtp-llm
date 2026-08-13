@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase, main
 from unittest.mock import MagicMock, patch
 
+from fastapi import Request
+
 from rtp_llm.frontend.frontend_server import (
     _AdmissionOwner,
     AdmissionStreamingResponse,
@@ -17,8 +19,35 @@ from rtp_llm.utils.concurrency_controller import ConcurrencyController
 
 
 class _RawRequest:
+    def __init__(self):
+        self._receive_blocker = asyncio.Event()
+
     async def is_disconnected(self):
         return False
+
+    async def receive(self):
+        await self._receive_blocker.wait()
+        raise AssertionError("unreachable")
+
+
+class _ControlledReceive:
+    def __init__(self):
+        self.disconnect = asyncio.Event()
+        self.calls = 0
+        self.active_receives = 0
+        self.max_active_receives = 0
+
+    async def __call__(self):
+        self.calls += 1
+        self.active_receives += 1
+        self.max_active_receives = max(
+            self.max_active_receives, self.active_receives
+        )
+        try:
+            await self.disconnect.wait()
+            return {"type": "http.disconnect"}
+        finally:
+            self.active_receives -= 1
 
 
 class _Chunk:
@@ -172,14 +201,31 @@ class FrontendAdmissionOverflowTest(IsolatedAsyncioTestCase):
                 chat_completion=response_factory,
             )
 
-    async def invoke_language_route(self, server, route, streaming=False):
+    @staticmethod
+    def make_raw_request(receive) -> Request:
+        return Request(
+            {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "method": "POST",
+                "path": "/",
+                "headers": [],
+                "query_string": b"",
+            },
+            receive=receive,
+        )
+
+    async def invoke_language_route(
+        self, server, route, streaming=False, raw_request=None
+    ):
+        raw_request = raw_request or _RawRequest()
         if route == "native":
             return await server.inference(
-                {"prompt": "test", "stream": streaming}, _RawRequest()
+                {"prompt": "test", "stream": streaming}, raw_request
             )
         request = MagicMock()
         request.model_dump.return_value = {"model": "test", "stream": streaming}
-        return await server.chat_completion(request, _RawRequest())
+        return await server.chat_completion(request, raw_request)
 
     def make_streaming_server(self, max_concurrency=1) -> FrontendServer:
         server = self.make_server(max_concurrency=max_concurrency)
@@ -471,6 +517,155 @@ class FrontendAdmissionOverflowTest(IsolatedAsyncioTestCase):
                 self.assertEqual(response.status_code, 500)
                 self.assertTrue(source.closed)
                 self.assertEqual(source.close_calls, 1)
+                self.assertEqual(
+                    server._global_controller.get_available_concurrency(), 1
+                )
+
+    async def test_nonstream_disconnect_closes_backend_before_releasing_slot(self):
+        for route in ("native", "openai"):
+            with self.subTest(route=route):
+                server = self.make_server()
+                source = _ControlledStreamingSource()
+                self.configure_terminal_backend(server, route, source)
+                receive = _ControlledReceive()
+                raw_request = self.make_raw_request(receive)
+
+                with patch(
+                    "rtp_llm.frontend.frontend_server.kmonitor", new=MagicMock()
+                ):
+                    response_task = asyncio.create_task(
+                        self.invoke_language_route(
+                            server, route, raw_request=raw_request
+                        )
+                    )
+                    try:
+                        await asyncio.wait_for(source.next_started.wait(), timeout=1)
+                        receive.disconnect.set()
+                        await asyncio.wait_for(
+                            source.close_started.wait(), timeout=0.2
+                        )
+                        self.assertFalse(response_task.done())
+                        self.assertEqual(
+                            server._global_controller.get_available_concurrency(), 0
+                        )
+                        rejected = await server.batch_infer({}, MagicMock())
+                        self.assert_concurrency_response(rejected)
+                        source.allow_close.set()
+                        response = await asyncio.wait_for(response_task, timeout=1)
+                    except BaseException:
+                        source.allow_close.set()
+                        if not response_task.done():
+                            response_task.cancel()
+                        await asyncio.gather(response_task, return_exceptions=True)
+                        raise
+
+                self.assertEqual(response.status_code, 500)
+                self.assertTrue(response_task.done())
+                self.assertTrue(source.closed)
+                self.assertEqual(source.close_calls, 1)
+                self.assertGreaterEqual(receive.calls, 1)
+                self.assertEqual(receive.max_active_receives, 1)
+                self.assertEqual(receive.active_receives, 0)
+                self.assertEqual(
+                    server._global_controller.get_available_concurrency(), 1
+                )
+
+    async def test_nonstream_completion_cancels_disconnect_receiver(self):
+        for route in ("native", "openai"):
+            with self.subTest(route=route):
+                server = self.make_server()
+                self.configure_language_backends(server)
+                receive = _ControlledReceive()
+                raw_request = self.make_raw_request(receive)
+
+                with patch(
+                    "rtp_llm.frontend.frontend_server.kmonitor", new=MagicMock()
+                ):
+                    response = await self.invoke_language_route(
+                        server, route, raw_request=raw_request
+                    )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertLessEqual(receive.max_active_receives, 1)
+                self.assertEqual(receive.active_receives, 0)
+                self.assertEqual(
+                    server._global_controller.get_available_concurrency(), 1
+                )
+
+    async def test_nonstream_observes_disconnect_already_consumed_by_request(self):
+        server = self.make_server()
+        source = _ControlledStreamingSource()
+        self.configure_terminal_backend(server, "openai", source)
+        receive = _ControlledReceive()
+        raw_request = self.make_raw_request(receive)
+        receive.disconnect.set()
+        self.assertTrue(await raw_request.is_disconnected())
+
+        with patch("rtp_llm.frontend.frontend_server.kmonitor", new=MagicMock()):
+            response_task = asyncio.create_task(
+                self.invoke_language_route(
+                    server, "openai", raw_request=raw_request
+                )
+            )
+            await asyncio.wait_for(source.close_started.wait(), timeout=1)
+            try:
+                self.assertFalse(response_task.done())
+                self.assertEqual(
+                    server._global_controller.get_available_concurrency(), 0
+                )
+            finally:
+                source.allow_close.set()
+            response = await asyncio.wait_for(response_task, timeout=1)
+
+        self.assertEqual(response.status_code, 500)
+        self.assertTrue(source.closed)
+        self.assertEqual(source.close_calls, 1)
+        self.assertEqual(receive.active_receives, 0)
+        self.assertEqual(server._global_controller.get_available_concurrency(), 1)
+
+    async def test_nonstream_success_wins_when_disconnect_arrives_at_completion(self):
+        for route in ("native", "openai"):
+            with self.subTest(route=route):
+                server = self.make_server()
+                receive = _ControlledReceive()
+
+                async def source():
+                    yield _Chunk()
+
+                async def collect_response(responses):
+                    async for _ in responses:
+                        pass
+                    receive.disconnect.set()
+                    return {"result": "ok"}
+
+                response_factory = lambda *args, **kwargs: (
+                    CompleteResponseAsyncGenerator(source(), collect_response)
+                )
+                if route == "native":
+                    server._frontend_worker = SimpleNamespace(
+                        inference=response_factory,
+                        is_streaming=lambda request: False,
+                    )
+                else:
+                    server._frontend_worker = SimpleNamespace(
+                        is_streaming=lambda request: False,
+                    )
+                    server._openai_endpoint = SimpleNamespace(
+                        chat_completion=response_factory
+                    )
+
+                with patch(
+                    "rtp_llm.frontend.frontend_server.kmonitor", new=MagicMock()
+                ):
+                    response = await self.invoke_language_route(
+                        server,
+                        route,
+                        raw_request=self.make_raw_request(receive),
+                    )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(json.loads(response.body), {"result": "ok"})
+                self.assertEqual(receive.active_receives, 0)
                 self.assertEqual(
                     server._global_controller.get_available_concurrency(), 1
                 )

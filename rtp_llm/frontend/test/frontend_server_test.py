@@ -38,6 +38,10 @@ class FakeRawRequest(object):
     async def is_disconnected(self):
         return False
 
+    async def receive(self):
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
 
 class FrontendServerTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):

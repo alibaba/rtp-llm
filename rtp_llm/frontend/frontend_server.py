@@ -653,6 +653,59 @@ class FrontendServer(object):
 
         return complete_response
 
+    @staticmethod
+    async def _wait_for_http_disconnect(raw_request: RawRequest) -> None:
+        if await raw_request.is_disconnected():
+            return
+        while True:
+            message = await raw_request.receive()
+            if message.get("type") == "http.disconnect":
+                return
+
+    async def _drain_nonstream_response(
+        self, req: Dict[Any, Any], res: CompleteResponseAsyncGenerator
+    ):
+        async for _ in res:
+            pass
+        return await self._collect_complete_response_and_record_access_log(req, res)
+
+    async def _cleanup_nonstream_tasks(
+        self,
+        res: CompleteResponseAsyncGenerator,
+        admission_owner: _AdmissionOwner,
+        response_task: asyncio.Task,
+        disconnect_task: asyncio.Task,
+    ) -> None:
+        async def cleanup() -> None:
+            disconnect_task.cancel()
+            if not response_task.done():
+                response_task.cancel()
+            await asyncio.gather(disconnect_task, return_exceptions=True)
+            try:
+                await self._close_nonstream_response(res, admission_owner)
+            finally:
+                await asyncio.gather(response_task, return_exceptions=True)
+
+        cleanup_task = asyncio.create_task(cleanup())
+        cancelled_error = None
+        while True:
+            try:
+                await asyncio.shield(cleanup_task)
+                break
+            except asyncio.CancelledError as e:
+                if cleanup_task.done():
+                    cleanup_task.result()
+                    if cancelled_error is None:
+                        cancelled_error = e
+                    break
+                if cancelled_error is None:
+                    cancelled_error = e
+            except BaseException:
+                raise
+
+        if cancelled_error is not None:
+            raise cancelled_error
+
     async def _infer_impl(
         self,
         req: Dict[Any, Any],
@@ -672,7 +725,7 @@ class FrontendServer(object):
         )
         self._access_logger.log_query_access(req)
         is_streaming = self._frontend_worker.is_streaming(req)
-        if await raw_request.is_disconnected():
+        if is_streaming and await raw_request.is_disconnected():
             raise asyncio.CancelledError("client disconnects")
         res = await self._call_generate_with_report(generate_call)
 
@@ -684,21 +737,31 @@ class FrontendServer(object):
                 media_type="text/event-stream",
             )
         admission_owner.transfer_to_cleanup()
+        response_task = asyncio.create_task(
+            self._drain_nonstream_response(req, res)
+        )
+        disconnect_task = asyncio.create_task(
+            self._wait_for_http_disconnect(raw_request)
+        )
         primary_error = None
         complete_response = None
         try:
-            async for x in res:
-                if await raw_request.is_disconnected():
-                    raise asyncio.CancelledError("client disconnects")
-
-            complete_response = (
-                await self._collect_complete_response_and_record_access_log(req, res)
+            await asyncio.wait(
+                (response_task, disconnect_task),
+                return_when=asyncio.FIRST_COMPLETED,
             )
+            if response_task.done():
+                complete_response = response_task.result()
+            else:
+                disconnect_task.result()
+                raise asyncio.CancelledError("client disconnects")
         except BaseException as e:
             primary_error = e
         finally:
             try:
-                await self._close_nonstream_response(res, admission_owner)
+                await self._cleanup_nonstream_tasks(
+                    res, admission_owner, response_task, disconnect_task
+                )
             except BaseException as close_error:
                 if primary_error is not None and close_error is not primary_error:
                     raise close_error from primary_error
