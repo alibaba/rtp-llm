@@ -43,7 +43,12 @@ class BuildHtmlTest(unittest.TestCase):
             self.assertNotIn("__REPLAY_DATA__", html)
             self.assertNotIn("<script src=", html)
             self.assertNotIn("https://", html)
-            self.assertIn("RUNNING · 虚线框 = 原始 work · 水位 = remaining", html)
+            self.assertIn('id="speed-select"', html)
+            self.assertIn("所选机器的预测首 Token 前工作量（Token）", html)
+            self.assertIn("引擎首 Token 分位", html)
+            self.assertIn("空格</kbd> 播放 / 暂停", html)
+            self.assertNotIn("recorded decision candidates", html)
+            self.assertNotIn("目标机器：", html)
             self.assertIn("event.code === 'ArrowLeft'", html)
             self.assertIn("event.code === 'ArrowRight'", html)
 

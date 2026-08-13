@@ -239,7 +239,7 @@ def _build_replay(input_path: Path) -> dict[str, Any]:
             "timezone": "Asia/Shanghai",
             "notice": (
                 "决策候选为 PV 中的真实 Top5/关键候选快照；请求生命周期和 "
-                "step 进度按观测边界后验重建。"
+                "step 进度依据观测边界展示。"
             ),
         },
         "hosts": hosts,

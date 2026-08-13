@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>FlexLB · Prefill Request Replay</title>
+  <title>FlexLB决策回放</title>
   <style>
     :root {
       --ink: #e7eef9;
@@ -34,7 +34,6 @@
     .legend { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
     .badge { color: #b9c8db; border: 1px solid var(--line); background: rgba(60, 82, 114, .22); border-radius: 999px; padding: 4px 8px; font-size: 11px; white-space: nowrap; }
     .badge.fact { border-color: rgba(99, 230, 176, .45); color: #9cf2cc; }
-    .badge.inferred { border-color: rgba(255, 194, 102, .45); color: #ffd78d; }
     .warning { margin: 13px 0 0; padding: 9px 12px; border-left: 3px solid var(--yellow); background: rgba(245, 214, 110, .1); color: #e8dba6; font-size: 12px; line-height: 1.5; border-radius: 0 7px 7px 0; }
     .controls { margin-top: 16px; padding: 13px; display: grid; gap: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.2); }
     .control-row { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
@@ -44,7 +43,7 @@
     .key-hint { margin-left:auto; display:flex; align-items:center; gap:5px; color:var(--muted); font-size:11px; }
     kbd { min-width:24px; padding:2px 6px; border:1px solid #bdb3a3; border-bottom-width:2px; border-radius:5px; background:#fffdf8; color:#3a332a; font-family:inherit; font-size:12px; font-weight:750; text-align:center; }
     .overview { width: 100%; height: 42px; display: block; border-radius: 6px; background: #0d1b30; border: 1px solid rgba(99,128,168,.24); }
-    .summary { margin-top: 14px; display: grid; grid-template-columns: repeat(5, minmax(0,1fr)); gap: 9px; }
+    .summary { margin-top: 14px; display: grid; grid-template-columns: repeat(6, minmax(0,1fr)); gap: 9px; }
     .metric { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; min-height: 67px; }
     .metric .label { font-size: 11px; color: var(--muted); }
     .metric .value { margin-top: 4px; font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
@@ -58,9 +57,9 @@
     .drawer-chevron { width:26px; height:26px; display:grid; place-items:center; border:1px solid var(--line); border-radius:50%; transition:transform .16s ease; }
     .analysis-drawer[open] .analysis-toggle { border-bottom-color:var(--line); }
     .analysis-drawer[open] .drawer-chevron { transform:rotate(180deg); }
-    .analysis-grid { display:grid; grid-template-columns:minmax(260px,1fr) minmax(360px,1.45fr) minmax(250px,.85fr); gap:12px; padding:12px; align-items:start; }
+    .analysis-grid { display:grid; grid-template-columns:minmax(300px,.85fr) minmax(520px,1.65fr); gap:12px; padding:12px; align-items:start; }
     .analysis-grid .panel { min-width:0; box-shadow:none; }
-    .analysis-grid #request-detail, .analysis-grid #decision-microscope, .analysis-grid .event-list { max-height:360px; overflow:auto; }
+    .analysis-grid #request-detail, .analysis-grid #decision-microscope { max-height:360px; overflow:auto; }
     .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
     .panel-title { display: flex; align-items: center; justify-content: space-between; gap: 7px; padding: 10px 12px; border-bottom: 1px solid var(--line); font-size: 13px; font-weight: 700; }
     .panel-title .small { font-size: 10px; font-weight: 500; color: var(--muted); }
@@ -85,15 +84,6 @@
     .candidate-bar > span { display:block; height:100%; background:linear-gradient(90deg,#41a5f5,#f4bc62); }
     .candidate-numbers { display:grid; grid-template-columns:repeat(3,1fr); gap:4px; color:#aabbd0; font-size:10px; }
     .candidate-numbers b { display:block; color:#e9f4ff; font-size:11px; font-weight:600; }
-    .event-list { max-height: 276px; overflow: auto; padding: 5px; }
-    .event { padding: 8px; border-radius: 7px; cursor: pointer; margin: 3px 0; border: 1px solid transparent; }
-    .event:hover { background: rgba(47,82,122,.35); }
-    .event.active { background: rgba(50,112,169,.32); border-color: rgba(117,188,249,.48); }
-    .event-time { color:#a7c4e3; font-size:10px; }
-    .event-main { margin-top:2px; display:flex; gap:7px; align-items:center; min-width:0; }
-    .event-host { color:#d9ecff; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11px; white-space:nowrap; }
-    .event-id { color:#91a9c3; font-size:10px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .stage-dot { width:8px; height:8px; border-radius:50%; flex:0 0 auto; }
     .host-area { min-width: 0; }
     .host-heading { display:flex; justify-content:space-between; gap:14px; align-items:flex-end; margin: 0 0 10px 2px; }
     .host-heading h2 { margin:0; font-size:14px; }
@@ -169,7 +159,6 @@
     select { color: #2d2923; background: #fffdf8; border-color: #bdb3a3; font-size: 14px; }
     .badge { color: #5d564d; background: rgba(255,253,248,.78); border-color: #cfc6b8; font-size: 12px; font-weight: 600; }
     .badge.fact { color: #176b58; border-color: #7eb9a8; background: #eef8f3; }
-    .badge.inferred { color: #915711; border-color: #d6a765; background: #fff6e7; }
     .warning { color: #6c4a07; background: #fff8df; border-left-color: #c18a1c; font-size: 13px; }
     .controls, .metric, .panel, .host-card { background: rgba(255,253,248,.97); border-color: #d3cabd; box-shadow: 0 8px 24px rgba(74, 57, 36, .08); }
     .overview { background: #f6f1e8; border-color: #d4c9b8; }
@@ -245,12 +234,15 @@
     .tooltip-grid { color: #d4cbc0; }
     .tooltip-grid b { color: #fffdfa; }
     .empty { color: #777066; }
+    .metric.selection { border-color:#69a996; background:#eef8f3; }
+    .metric.selection .label, .metric.selection .note { color:#176f63; }
+    .metric.selection .note { font-weight:750; }
+    #speed-select { min-width:92px; }
     @media(max-width: 1200px) {
       .topbar { grid-template-columns: 1fr; }
       .legend { justify-content: flex-start; }
       h1 { font-size: 30px; }
       .analysis-grid { grid-template-columns:1fr 1fr; }
-      .analysis-grid .panel:last-child { grid-column:1 / -1; }
     }
     @media(max-width: 760px) {
       .host-grid { grid-template-columns:1fr; }
@@ -258,7 +250,6 @@
       .work-lanes { grid-template-columns:1fr; }
       .host-card { min-height:310px; }
       .analysis-grid { grid-template-columns:1fr; }
-      .analysis-grid .panel:last-child { grid-column:auto; }
       .analysis-toggle-note { display:none; }
       .key-hint { margin-left:0; }
     }
@@ -268,32 +259,27 @@
   <main class="app">
     <section class="topbar">
       <div>
-        <h1>FlexLB → vLLM Prefill 请求回放</h1>
+        <h1>FlexLB决策回放</h1>
         <div class="subtitle" id="subtitle"></div>
       </div>
-      <div class="legend">
-        <span class="badge fact">实线 · 决策瞬间 Top5 快照</span>
-        <span class="badge inferred">斜纹/动画 · 生命周期后验重建</span>
-        <span class="badge">RUNNING · 虚线框 = 原始 work · 水位 = remaining</span>
-        <span class="badge">右侧 WAITING · 红→黄→绿 = 低→高命中率</span>
-        <span class="badge">P / A = 预测 / 实际命中率</span>
-      </div>
     </section>
-    <div class="warning">注意：只有 route、enqueue、drain、first-token 是请求时间边界。RUNNING 起点由 first-token − running_to_first_token 反推；step 没有逐步时间戳，动画中的 step 是均匀插值，不是引擎真实逐 step trace。首 token 出桶，不等价于 Chat/Decode 全请求完成。</div>
 
     <section class="controls">
       <div class="control-row">
-        <button id="play" title="空格键">▶ 回放</button>
+        <button id="play" title="空格：播放 / 暂停">▶ 回放</button>
         <button id="prev-decision" title="快捷键：←">◀ 上一决策</button>
         <button id="next-decision" title="快捷键：→">下一决策 ▶</button>
-        <span class="control-label">速度</span>
-        <button class="speed" data-speed="1">1×</button>
-        <button class="speed" data-speed="8">8×</button>
-        <button class="speed active" data-speed="32">32×</button>
-        <button class="speed" data-speed="128">128×</button>
+        <label class="control-label" for="speed-select">播放速度</label>
+        <select id="speed-select" aria-label="播放速度">
+          <option value="1">1×</option>
+          <option value="2">2×</option>
+          <option value="4" selected>4×</option>
+          <option value="8">8×</option>
+          <option value="32">32×</option>
+        </select>
         <span class="control-label">聚焦 host</span>
         <select id="host-filter"></select>
-        <span class="key-hint"><kbd>←</kbd><kbd>→</kbd> 上一个 / 下一个决策</span>
+        <span class="key-hint"><kbd>空格</kbd> 播放 / 暂停　<kbd>←</kbd><kbd>→</kbd> 切换决策</span>
       </div>
       <div class="control-row">
         <span class="time-label" id="time-label"></span>
@@ -306,26 +292,22 @@
     <section class="summary" id="summary"></section>
     <section class="replay-main">
       <details class="analysis-drawer">
-        <summary class="analysis-toggle"><span class="analysis-toggle-title">决策分析面板</span><span class="analysis-toggle-note">当前请求生命周期 · PV Top5 决策快照 · FlexLB ingress（点击收起 / 展开）</span><span class="drawer-chevron">⌄</span></summary>
+        <summary class="analysis-toggle"><span class="analysis-toggle-title">决策分析面板</span><span class="analysis-toggle-note">当前请求信息 · PV Top5 候选快照（点击收起 / 展开）</span><span class="drawer-chevron">⌄</span></summary>
         <div class="analysis-grid">
           <div class="panel">
-            <div class="panel-title"><span>当前请求 · 生命周期</span><span class="small">点击请求或时间线事件</span></div>
+            <div class="panel-title"><span>当前请求</span><span class="small">点击请求或时间线事件</span></div>
             <div id="request-detail"></div>
           </div>
           <div class="panel">
-            <div class="panel-title"><span>Decision microscope</span><span class="small">PV Top5 / 关键候选事实快照</span></div>
+            <div class="panel-title"><span>候选机器对比</span><span class="small">PV 中记录的 Top5 候选快照</span></div>
             <div id="decision-microscope"></div>
-          </div>
-          <div class="panel">
-            <div class="panel-title"><span>FlexLB ingress</span><span class="small">当前时间附近的决策</span></div>
-            <div class="event-list" id="event-list"></div>
           </div>
         </div>
       </details>
       <section class="host-area">
         <div class="host-heading">
-          <div><h2>vLLM Prefill host buckets</h2><span>左侧 RUNNING、右侧 WAITING；一根柱体代表一个请求。绿色快照条仅在当前决策所记录的候选 host 上出现。</span></div>
-          <div class="hit-legend"><span>WAITING 命中率</span><span>0%</span><span class="hit-gradient"></span><span>100%</span></div>
+          <div><h2>Prefill 机器待执行 Token</h2><span>每根柱代表一个请求，柱高和水位均表示尚待执行的 Token；左侧为执行中，右侧为等待 / 调度中。</span></div>
+          <div class="hit-legend"><span>等待队列实际命中率</span><span>0%</span><span class="hit-gradient"></span><span>100%</span></div>
         </div>
         <div class="host-grid" id="host-grid"></div>
       </section>
@@ -339,13 +321,14 @@
     const $ = (selector) => document.querySelector(selector);
     const fmt = new Intl.DateTimeFormat('zh-CN', { timeZone: REPLAY.meta.timezone, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3, hour12: false });
     const nf = new Intl.NumberFormat('en-US');
-    const state = { time: REPLAY.meta.start, playing: false, speed: 32, lastFrame: 0, selectedId: null, latestId: null, cacheMode: 'actual', focusedHost: 'all' };
+    const state = { time: REPLAY.meta.start, playing: false, speed: 4, lastFrame: 0, selectedId: null, latestId: null, cacheMode: 'actual', focusedHost: 'all' };
     const requests = REPLAY.requests;
     const maxBarWork = Math.max(1_000_000, ...requests.map((request) => Math.max(request.uncache || 0, request.selectedSnapshotUncache || 0)));
     const byId = new Map(requests.map((item) => [item.id, item]));
     const hosts = REPLAY.hosts;
     const derived = new Map();
     const hostFilter = $('#host-filter');
+    const speedSelect = $('#speed-select');
     const tooltip = $('#tooltip');
     let currentActive = [];
 
@@ -353,8 +336,9 @@
     const number = (value) => value == null ? '—' : nf.format(Math.round(value));
     const pct = (value) => value == null ? '—' : `${Number(value).toFixed(2)}%`;
     const work = (value) => value == null ? '—' : value >= 1_000_000 ? `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 2)}M` : value >= 1_000 ? `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}k` : number(value);
+    const tokenWork = (value) => value == null ? '—' : `${work(value)} Token`;
     const timeText = (value) => value == null ? '—' : fmt.format(new Date(value));
-    const duration = (ms) => ms == null ? '—' : ms >= 60_000 ? `${(ms / 60_000).toFixed(1)}m` : `${(ms / 1000).toFixed(ms >= 10_000 ? 0 : 1)}s`;
+    const duration = (ms) => ms == null ? '—' : ms >= 60_000 ? `${(ms / 60_000).toFixed(1)} 分钟` : `${(ms / 1000).toFixed(ms >= 10_000 ? 0 : 1)} 秒`;
     const isTail = (request) => /P99|P95/.test(request.percentile || '');
     const phaseColor = (phase) => ({ handoff: '#7952a3', input: '#a16bbb', waiting: '#c97721', running: '#178374', unresolved: '#c6473d' }[phase] || '#80776d');
 
@@ -442,17 +426,19 @@
       return Math.max(0, state.time - p.running);
     }
 
+    const strategyLabel = (reason) => reason === 'SHORTEST_TTFT' ? '最短首 Token' : (reason || '—');
+
     function requestTooltip(request, phase) {
       const p = lifecycle(request);
       const step = runningStep(request, state.time, phase);
       return `<div class="tooltip-title">${shortId(request.requestId || request.id)} · ${request.host}</div>
         <div class="tooltip-grid">
-          <span>状态 <b>${phase === 'first-token' ? '已观测首 token' : phase}</b></span><span>决策 <b>${timeText(request.route)}</b></span>
-          <span>预测 / 实际命中 <b>${pct(request.predictedHitRate)} / ${pct(request.actualHitRate)}</b></span><span>预测 / 实际未命中 <b>${work(request.selectedSnapshotUncache)} / ${work(request.uncache)}</b></span>
-          <span>FlexLB reason <b>${request.reason}</b></span><span>TTFT <b>${duration(request.engineTtft)}</b></span>
-          <span>scheduler wait <b>${duration(request.schedulerWait)}</b></span><span>RUNNING → first <b>${duration(request.runningToFirst)}</b></span>
-          <span>step <b>${step ? `${step.current}/${step.total}${step.id == null ? '' : ` · #${step.id}`}` : `${number(request.stepCount)} steps`}</b></span><span>HBM / remote <b>${work(request.hbmLocal)} / ${work(request.remoteKvAdded)}</b></span>
-          <span>enqueue → drain <b>${duration(p.drain - p.enqueue)}</b></span><span>first token <b>${timeText(request.firstToken)}</b></span>
+          <span>路由决策时刻 <b>${timeText(request.route)}</b></span>
+          <span>预测 / 实际命中率 <b>${pct(request.predictedHitRate)} / ${pct(request.actualHitRate)}</b></span><span>预测 / 实际未命中 Token <b>${work(request.selectedSnapshotUncache)} / ${work(request.uncache)}</b></span>
+          <span>路由策略 <b>${strategyLabel(request.reason)}（${request.reason || '—'}）</b></span><span>引擎首 Token 耗时 <b>${duration(request.engineTtft)}</b></span>
+          <span>调度等待 <b>${duration(request.schedulerWait)}</b></span><span>执行到首 Token <b>${duration(request.runningToFirst)}</b></span>
+          <span>执行步数 <b>${step ? `${step.current}/${step.total}${step.id == null ? '' : ` · #${step.id}`}` : `${number(request.stepCount)} 步`}</b></span><span>本地 HBM / 远端 KV 命中 <b>${work(request.hbmLocal)} / ${work(request.remoteKvAdded)}</b></span>
+          <span>进入队列到出队 <b>${duration(p.drain - p.enqueue)}</b></span><span>首 Token 时刻 <b>${timeText(request.firstToken)}</b></span>
         </div>`;
     }
 
@@ -465,13 +451,14 @@
       const candidates = currentCandidates();
       const selected = candidates.find((item) => item.selected);
       const cards = [
-        ['回放时刻', timeText(state.time), `${Math.round((state.time - REPLAY.meta.start) / 1000)}s from first decision`],
-        ['活跃 Prefill 请求', number(active.length), `waiting/handoff ${waiting} · running ${running}`],
-        ['重建待执行 work', work(workSum), state.cacheMode === 'decision' ? '按决策时预测缓存' : '按后验实际缓存'],
-        ['当前决策选择', request ? request.host : '—', request ? request.reason : '—'],
-        ['当前快照预测 TTFT', selected ? work(selected.estimatedTtft) : '—', selected ? `rank ${selected.rank} · queue ${work(selected.queueWork)}` : '—'],
+        ['回放时刻', timeText(state.time), `距第一条决策 ${Math.round((state.time - REPLAY.meta.start) / 1000)} 秒`],
+        ['活跃 Prefill 请求', number(active.length), `尚未开始执行 ${waiting} · 执行中 ${running}`],
+        ['待执行 Token', tokenWork(workSum), '活跃请求合计'],
+        ['路由策略', request ? strategyLabel(request.reason) : '—', request ? `策略标识：${request.reason} · 所选机器：${request.host}` : '—'],
+        ['引擎首 Token 分位', request ? (request.percentile || '—') : '—', '按本批请求的引擎首 Token 耗时排名'],
+        ['所选机器的预测首 Token 前工作量（Token）', selected ? tokenWork(selected.estimatedTtft) : '—', selected ? `候选第 ${selected.rank} 名 · 路由前排队工作 ${tokenWork(selected.queueWork)}` : '—'],
       ];
-      $('#summary').innerHTML = cards.map(([label, value, note]) => `<div class="metric"><div class="label">${label}</div><div class="value">${value}</div><div class="note">${note}</div></div>`).join('');
+      $('#summary').innerHTML = cards.map(([label, value, note], index) => `<div class="metric ${index === 3 ? 'selection' : ''}"><div class="label">${label}</div><div class="value">${value}</div><div class="note">${note}</div></div>`).join('');
     }
 
     function renderRequestDetail() {
@@ -480,21 +467,15 @@
       const phase = phaseAt(request, state.time);
       const p = lifecycle(request);
       const step = runningStep(request, state.time, phase);
-      const segments = [['handoff','FlexLB'],['input','input queue'],['waiting','scheduler'],['running','RUNNING'],['first-token','first token']];
       $('#request-detail').innerHTML = `
         <div class="request-id">${request.requestId || request.id}</div>
-        <div class="muted">${request.host} · ${request.reason} · ${request.percentile || 'No percentile'}</div>
-        <div class="phase-track">${segments.map(([key]) => `<div class="phase-segment ${phase === key ? 'current' : ''}" style="background:${phaseColor(key)}"></div>`).join('')}</div>
-        <div class="phase-labels">${segments.map(([, label]) => `<span>${label}</span>`).join('')}</div>
         <div class="kv-grid">
-          <div class="kv"><div class="key">当前阶段</div><div class="val">${phase === 'first-token' ? '已观测首 token' : phase}</div></div>
-          <div class="kv"><div class="key">预测 / 实际 hit</div><div class="val">${pct(request.predictedHitRate)} / ${pct(request.actualHitRate)}</div></div>
-          <div class="kv"><div class="key">预测 / 实际 uncache</div><div class="val">${work(request.selectedSnapshotUncache)} / ${work(request.uncache)}</div></div>
-          <div class="kv"><div class="key">当前重建剩余</div><div class="val">${work(activeWork(request, state.time, phase))}</div></div>
-          <div class="kv"><div class="key">scheduler → RUNNING</div><div class="val">${duration(request.schedulerToRunning)}</div></div>
-          <div class="kv"><div class="key">RUNNING → first token</div><div class="val">${duration(request.runningToFirst)}</div></div>
-          <div class="kv"><div class="key">step（插值）</div><div class="val">${step ? `${step.current} / ${step.total}` : `${number(request.stepCount)} total`}</div></div>
-          <div class="kv"><div class="key">first token</div><div class="val">${timeText(p.first)}</div></div>
+          <div class="kv"><div class="key">预测 / 实际命中率</div><div class="val">${pct(request.predictedHitRate)} / ${pct(request.actualHitRate)}</div></div>
+          <div class="kv"><div class="key">预测 / 实际未命中 Token</div><div class="val">${tokenWork(request.selectedSnapshotUncache)} / ${tokenWork(request.uncache)}</div></div>
+          <div class="kv"><div class="key">调度到开始执行</div><div class="val">${duration(request.schedulerToRunning)}</div></div>
+          <div class="kv"><div class="key">开始执行到首 Token</div><div class="val">${duration(request.runningToFirst)}</div></div>
+          <div class="kv"><div class="key">执行步数</div><div class="val">${step ? `${step.current} / ${step.total}` : `${number(request.stepCount)} 步`}</div></div>
+          <div class="kv"><div class="key">首 Token 时刻</div><div class="val">${timeText(p.first)}</div></div>
         </div>`;
     }
 
@@ -509,11 +490,11 @@
         return `<div class="candidate ${candidate.selected ? 'selected' : ''} ${special ? 'special' : ''}" data-candidate-host="${candidate.host}">
           <div class="candidate-top"><span class="rank">${candidate.rank}</span><span class="host">${candidate.host}:${candidate.port || 8001}</span><span class="symbols">${symbols}</span></div>
           <div class="candidate-bar"><span style="width:${Math.max(3, (candidate.estimatedTtft || 0) / maxTtft * 100)}%"></span></div>
-          <div class="candidate-numbers"><span>queue<b>${work(candidate.queueWork)}</b></span><span>req work<b>${work(candidate.uncache)}</b></span><span>est TTFT<b>${work(candidate.estimatedTtft)}</b></span></div>
-          <div class="candidate-numbers" style="margin-top:4px"><span>hit<b>${pct(candidate.hitRate)}</b></span><span>outstanding<b>${work(candidate.outstanding)}</b></span><span>engine W/R<b>${work(candidate.engineWaiting)} / ${work(candidate.engineRunningRemaining)}</b></span></div>
+          <div class="candidate-numbers"><span>路由前排队工作<b>${tokenWork(candidate.queueWork)}</b></span><span>本请求未命中 Token<b>${tokenWork(candidate.uncache)}</b></span><span>预测首 Token 前工作量<b>${tokenWork(candidate.estimatedTtft)}</b></span></div>
+          <div class="candidate-numbers" style="margin-top:4px"><span>预测命中率<b>${pct(candidate.hitRate)}</b></span><span>已有未命中积压<b>${tokenWork(candidate.outstanding)}</b></span><span>引擎等待 / 执行中剩余<b>${tokenWork(candidate.engineWaiting)} / ${tokenWork(candidate.engineRunningRemaining)}</b></span></div>
         </div>`;
       }).join('');
-      $('#decision-microscope').innerHTML = `<div class="muted">${timeText(request.route)} · ${shortId(request.requestId || request.id)} · 共记录 ${candidates.length} 个关键候选；★ cache leader · ϟ shortest TTFT · ✓ selected</div>${text}`;
+      $('#decision-microscope').innerHTML = `<div class="muted">${timeText(request.route)} · ${shortId(request.requestId || request.id)} · 共记录 ${candidates.length} 个候选；★ 缓存命中最多 · ϟ 预估首 Token 工作量最小 · ✓ 最终选中</div>${text}`;
     }
 
     function chipsForHost(host) {
@@ -539,10 +520,10 @@
           const step = runningStep(request, state.time, phase);
           const elapsed = runningElapsed(request);
           return `<div class="request-stack ${isTail(request) ? 'tail' : ''} ${request.id === state.selectedId ? 'selected' : ''}" data-request-id="${request.id}" aria-label="${request.requestId || request.id}">
-            <div class="gauge-space"><div class="gauge-shell running-gauge" style="height:${originHeight}px" title="原始 work ${work(original)}"><div class="gauge-fill" style="height:${remainingPercent}%"></div></div></div>
-            <div class="bar-caption"><b>rem ${work(remaining)}</b><span>orig ${work(original)}</span><span>${step ? `step ${step.current}/${step.total}` : phase === 'unresolved' ? '首 token 未观测' : 'step —'}</span><span>运行 ${duration(elapsed)}</span></div>
+            <div class="gauge-space"><div class="gauge-shell running-gauge" style="height:${originHeight}px" title="初始未命中 Token：${tokenWork(original)}；当前剩余：${tokenWork(remaining)}"><div class="gauge-fill" style="height:${remainingPercent}%"></div></div></div>
+            <div class="bar-caption"><b>剩余 ${tokenWork(remaining)}</b><span>初始 ${tokenWork(original)}</span><span>${step ? `第 ${step.current}/${step.total} 步` : '步数 —'}</span><span>已执行 ${duration(elapsed)}</span></div>
           </div>`;
-        }).join('') : '<div class="lane-empty">无 RUNNING 请求</div>';
+        }).join('') : '<div class="lane-empty">无执行中请求</div>';
         const waitingHtml = waitingChips.length ? waitingChips.map((item) => {
           const { request, phase, work: remaining } = item;
           const predictedRate = request.predictedHitRate ?? 0;
@@ -551,28 +532,18 @@
           const height = requestBarHeight(remaining, 16, 64);
           return `<div class="request-stack ${isTail(request) ? 'tail' : ''} ${request.id === state.selectedId ? 'selected' : ''}" data-request-id="${request.id}" aria-label="${request.requestId || request.id}">
             <div class="gauge-space"><div class="gauge-shell waiting-gauge" style="height:${height}px"><div class="gauge-fill" style="height:100%;background:${hitColor(colorRate)}"></div></div></div>
-            <div class="bar-caption"><b>work ${work(remaining)}</b><span>P ${pct(predictedRate)}</span><span>A ${pct(actualRate)}</span><span>等待 ${duration(waitingElapsed(request))}</span></div>
+            <div class="bar-caption"><b>待执行 ${tokenWork(remaining)}</b><span>预测命中 ${pct(predictedRate)}</span><span>实际命中 ${pct(actualRate)}</span><span>已等待 ${duration(waitingElapsed(request))}</span></div>
           </div>`;
-        }).join('') : '<div class="lane-empty">无 WAITING 请求</div>';
+        }).join('') : '<div class="lane-empty">无等待执行请求</div>';
         return `<article class="host-card ${candidate ? 'decision-sampled' : ''} ${focused ? 'focus' : ''}" data-host="${host}">
-          <div class="host-card-header"><span class="host-name">${host}</span><span class="host-count">${chips.length} active</span><span class="host-work" title="总待执行">总 ${work(sum)}</span><div class="host-work-breakdown" title="RUNNING / WAITING"><span>R ${work(runningWork)}</span><span>W ${work(waitingWork)}</span></div></div>
+          <div class="host-card-header"><span class="host-name">${host}</span><span class="host-count">${chips.length} 个活跃请求</span><span class="host-work" title="待执行 Token">待执行 ${tokenWork(sum)}</span><div class="host-work-breakdown" title="执行中剩余 / 尚未开始执行"><span>执行中 ${tokenWork(runningWork)}</span><span>未开始 ${tokenWork(waitingWork)}</span></div></div>
           <div class="work-lanes">
-            <section class="work-lane running-lane"><div class="lane-header"><span class="lane-title">RUNNING</span><span class="lane-count">${runningChips.length} 请求</span><span class="lane-work">remaining ${work(runningWork)}</span></div><div class="lane-bucket"><div class="lane-bars">${runningHtml}</div></div></section>
-            <section class="work-lane waiting-lane"><div class="lane-header"><span class="lane-title">WAITING</span><span class="lane-count">${waitingChips.length} 请求</span><span class="lane-work">待执行 ${work(waitingWork)} <span class="lane-note">· 柱色表示命中率</span></span></div><div class="lane-bucket"><div class="lane-bars">${waitingHtml}</div></div></section>
+            <section class="work-lane running-lane"><div class="lane-header"><span class="lane-title">执行中</span><span class="lane-count">${runningChips.length} 个请求</span><span class="lane-work">剩余 ${tokenWork(runningWork)}</span></div><div class="lane-bucket"><div class="lane-bars">${runningHtml}</div></div></section>
+            <section class="work-lane waiting-lane"><div class="lane-header"><span class="lane-title">等待执行</span><span class="lane-count">${waitingChips.length} 个请求</span><span class="lane-work">待执行 ${tokenWork(waitingWork)} <span class="lane-note">· 柱色表示实际命中率</span></span></div><div class="lane-bucket"><div class="lane-bars">${waitingHtml}</div></div></section>
           </div>
         </article>`;
       }).join('');
       $('#host-grid').innerHTML = html;
-    }
-
-    function renderEventList() {
-      const index = requests.findIndex((request) => request.route > state.time);
-      const pivot = index < 0 ? requests.length : index;
-      const around = requests.slice(Math.max(0, pivot - 5), Math.min(requests.length, pivot + 6));
-      $('#event-list').innerHTML = around.map((request) => {
-        const phase = phaseAt(request, state.time);
-        return `<div class="event ${request.id === currentRequest()?.id ? 'active' : ''}" data-request-id="${request.id}"><div class="event-time">${timeText(request.route)} · ${request.reason}</div><div class="event-main"><span class="stage-dot" style="background:${phaseColor(phase)}"></span><span class="event-host">${request.host}</span><span class="event-id">${shortId(request.requestId || request.id)}</span></div></div>`;
-      }).join('');
     }
 
     function renderOverview() {
@@ -612,7 +583,7 @@
       refreshActive();
       $('#time-label').textContent = `${timeText(state.time)}  ·  ${duration(state.time - REPLAY.meta.start)}`;
       $('#time-range').value = state.time;
-      renderSummary(); renderRequestDetail(); renderDecisionMicroscope(); renderEventList(); renderHostGrid(); renderOverview(); fireFlight();
+      renderSummary(); renderRequestDetail(); renderDecisionMicroscope(); renderHostGrid(); renderOverview(); fireFlight();
     }
 
     function setTime(value, renderNow = true) {
@@ -675,15 +646,16 @@
     function moveTooltip(event) { tooltip.style.left = `${Math.min(window.innerWidth - 340, event.clientX + 14)}px`; tooltip.style.top = `${Math.min(window.innerHeight - 230, event.clientY + 14)}px`; }
     function hideTooltip() { tooltip.classList.remove('visible'); }
 
-    $('#subtitle').textContent = `${REPLAY.meta.source} · ${number(REPLAY.meta.requestCount)} requests · ${number(REPLAY.meta.hostCount)} Prefill hosts · ${number(REPLAY.meta.candidateCount)} recorded decision candidates`;
-    hostFilter.innerHTML = `<option value="all">全部 host</option>${hosts.map((host) => `<option value="${host}">${host}</option>`).join('')}`;
+    $('#subtitle').textContent = `${REPLAY.meta.source} · ${number(REPLAY.meta.requestCount)} 个请求 · ${number(REPLAY.meta.hostCount)} 个 Prefill 主机`;
+    hostFilter.innerHTML = `<option value="all">全部主机</option>${hosts.map((host) => `<option value="${host}">${host}</option>`).join('')}`;
+    speedSelect.value = String(state.speed);
     $('#time-range').min = REPLAY.meta.start; $('#time-range').max = REPLAY.meta.end; $('#time-range').step = 10; $('#time-range').value = state.time;
     $('#play').addEventListener('click', togglePlay);
     $('#reset').addEventListener('click', () => { state.selectedId = null; setTime(REPLAY.meta.start); });
     $('#prev-decision').addEventListener('click', () => stepDecision(-1));
     $('#next-decision').addEventListener('click', () => stepDecision(1));
     $('#time-range').addEventListener('input', (event) => { pausePlayback(); state.selectedId = null; setTime(event.target.value); });
-    document.querySelectorAll('.speed').forEach((button) => button.addEventListener('click', () => { state.speed = Number(button.dataset.speed); document.querySelectorAll('.speed').forEach((item) => item.classList.toggle('active', item === button)); }));
+    speedSelect.addEventListener('change', () => { state.speed = Number(speedSelect.value); });
     hostFilter.addEventListener('change', () => { state.focusedHost = hostFilter.value; render(); });
     document.addEventListener('click', (event) => {
       const requestElement = event.target.closest('[data-request-id]');
