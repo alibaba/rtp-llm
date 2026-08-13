@@ -67,7 +67,13 @@ class MegaMoEJitWarmupTest(unittest.TestCase):
     def test_env_switch_defaults_on(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertTrue(mega_moe_jit_warmup_enabled())
-        with mock.patch.dict(os.environ, {"DSV4_MEGA_MOE_JIT_WARMUP": "0"}):
+        with mock.patch.dict(os.environ, {"MODEL_WARM_UP": "0"}):
+            self.assertFalse(mega_moe_jit_warmup_enabled())
+        with mock.patch.dict(
+            os.environ,
+            {"WARM_UP": "0", "MODEL_WARM_UP": "1"},
+            clear=True,
+        ):
             self.assertFalse(mega_moe_jit_warmup_enabled())
 
     def test_rank_local_nvcc_tmpdir_uses_deepgemm_cache_and_rank(self):

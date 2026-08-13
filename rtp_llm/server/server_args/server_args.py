@@ -551,4 +551,12 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
         py_env_configs.runtime_config.model_warm_up,
     )
 
+    # Normalize the two switches before model construction and process spawn.
+    from rtp_llm.utils.warmup import configure_warmup
+
+    configure_warmup(
+        py_env_configs.runtime_config.warm_up,
+        py_env_configs.runtime_config.model_warm_up,
+    )
+
     return py_env_configs
