@@ -208,6 +208,10 @@ mkdir -p "${FLASHINFER_WORKSPACE_BASE}"
 # BF16,93 层 Decode 首次使用即耗尽显存。
 
 max_seq_len="${KIMI_K3_MAX_SEQ_LEN:-16384}"
+# The frontend builds its own ModelArgs from MAX_SEQ_LEN, while the backend
+# also receives --max_seq_len below. Keep both sides of the local service on
+# the same limit.
+export MAX_SEQ_LEN="${max_seq_len}"
 max_batch_tokens_size="${MAX_BATCH_TOKENS_SIZE:-}"
 seq_size_per_block="${SEQ_SIZE_PER_BLOCK:-4096}"
 kernel_seq_size_per_block="${KERNEL_SEQ_SIZE_PER_BLOCK:-128}"
@@ -452,7 +456,7 @@ server_args=(
     --cache_store_rdma_mode 0
     --load_cache_timeout_ms 7200000
     --load_method "${LOAD_METHOD}"
-    --ft_core_dump_on_exception 0
+    --ft_core_dump_on_exception "${FT_CORE_DUMP_ON_EXCEPTION:-0}"
     --shutdown_timeout 5
 )
 
