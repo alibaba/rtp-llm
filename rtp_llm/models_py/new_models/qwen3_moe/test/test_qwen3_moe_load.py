@@ -824,6 +824,25 @@ class MoEQuantizedDispatchTest(unittest.TestCase):
         torch.testing.assert_close(layer._w4a8_up_packed[0], gate_up[0, 8:])
         torch.testing.assert_close(layer._w4a8_down_packed[0], down[0])
 
+    def test_w4a8_weight_shape_metadata_is_validated_and_consumed(self):
+        quant = QuantizationConfig(
+            "W4A8_INT4_PER_CHANNEL_COMPRESSED",
+            source_config=types.SimpleNamespace(group_size=lambda: 4),
+        )
+        layer = _make_experts(
+            num_experts=1,
+            hidden_size=8,
+            moe_intermediate_size=8,
+            quant_config=quant,
+        )
+        layer.load_weights(
+            {"0.down_proj.weight_shape": torch.tensor([8, 8], dtype=torch.int64)}
+        )
+        with self.assertRaisesRegex(ValueError, "describes 56 elements"):
+            layer.load_weights(
+                {"0.gate_proj.weight_shape": torch.tensor([7, 8], dtype=torch.int64)}
+            )
+
     def test_ignored_moe_layer_uses_unquantized_method_and_runtime_config(self):
         source_quant = types.SimpleNamespace(get_method=lambda: "FP8")
         quant = QuantizationConfig(
