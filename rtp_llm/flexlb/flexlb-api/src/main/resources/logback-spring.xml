@@ -6,6 +6,7 @@
     <property name="APP_NAME" value="ai-whale" />
     <springProperty scope="context" name="LOG_PATH" source="flexlb.log.path" defaultValue="${user.home}/ai-whale/logs" />
     <property name="LOG_FILE" value="${LOG_PATH}/application.log" />
+    <property name="PV_LOG_FILE" value="${LOG_PATH}/pv.log" />
     <property name="SYNC_LOG_FILE" value="${LOG_PATH}/sync.log" />
     <property name="SYNC_CONSISTENCY_LOG_FILE" value="${LOG_PATH}/sync_consistency.log" />
     <property name="FLEXLB_LOG_FILE" value="${LOG_PATH}/flexlb.log" />
@@ -31,6 +32,26 @@
         <queueSize>512</queueSize>
         <neverBlock>true</neverBlock>
         <appender-ref ref="APPLICATION"/>
+    </appender>
+
+    <appender name="PV" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${PV_LOG_FILE}</file>
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+        </encoder>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${PV_LOG_FILE}.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxHistory>5</maxHistory>
+            <maxFileSize>50MB</maxFileSize>
+            <totalSizeCap>2GB</totalSizeCap>
+        </rollingPolicy>
+    </appender>
+
+    <appender name="PV-async" class="ch.qos.logback.classic.AsyncAppender">
+        <discardingThreshold>0</discardingThreshold>
+        <queueSize>512</queueSize>
+        <neverBlock>true</neverBlock>
+        <appender-ref ref="PV"/>
     </appender>
 
     <appender name="sync" class="ch.qos.logback.core.rolling.RollingFileAppender">
@@ -109,6 +130,10 @@
 
     <logger name="syncLogger" level="INFO" additivity="false">
         <appender-ref ref="sync-async"/>
+    </logger>
+
+    <logger name="pvLogger" level="INFO" additivity="false">
+        <appender-ref ref="PV-async"/>
     </logger>
 
     <!-- needConsistency=false 时此文件几乎为空（仅 1 行 WARN），属于正常行为 -->

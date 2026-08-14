@@ -6,6 +6,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.util.Logger;
 import org.springframework.beans.factory.ObjectFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -246,9 +247,26 @@ public class EndpointRegistry {
      * @param ttlMs max age before eviction
      */
     private void evictExpiredAll(long ttlMs) {
-        prefillEndpoints.values().forEach(ep -> ep.evictExpiredBatches(ttlMs));
-        decodeEndpoints.values().forEach(ep -> ep.evictExpiredRequests(ttlMs));
-        pdFusionEndpoints.values().forEach(ep -> ep.evictExpiredBatches(ttlMs));
+        prefillEndpoints.forEach((endpoint, ep) ->
+                logEndpointEviction(RoleType.PREFILL, endpoint,
+                        ep.evictExpiredBatches(ttlMs), ttlMs));
+        decodeEndpoints.forEach((endpoint, ep) ->
+                logEndpointEviction(RoleType.DECODE, endpoint,
+                        ep.evictExpiredRequests(ttlMs), ttlMs));
+        pdFusionEndpoints.forEach((endpoint, ep) ->
+                logEndpointEviction(RoleType.PDFUSION, endpoint,
+                        ep.evictExpiredBatches(ttlMs), ttlMs));
+    }
+
+    private static void logEndpointEviction(RoleType role,
+                                            String endpoint,
+                                            int evicted,
+                                            long ttlMs) {
+        if (evicted > 0) {
+            Logger.info("event=endpoint_inflight_ttl_eviction role={} endpoint={} "
+                            + "evicted={} ttl_ms={}",
+                    role, endpoint, evicted, ttlMs);
+        }
     }
 
     /**

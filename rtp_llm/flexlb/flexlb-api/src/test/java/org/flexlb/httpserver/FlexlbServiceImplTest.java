@@ -1,5 +1,7 @@
 package org.flexlb.httpserver;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.balance.scheduler.RequestLifecycleState;
@@ -19,8 +21,10 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PrioritySloPolicy;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.slf4j.LoggerFactory;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -38,6 +42,8 @@ class FlexlbServiceImplTest {
     private BatchSchedulerReporter batchSchedulerReporter;
     private ServerScheduleLatencyRecorder serverLatencyRecorder;
     private FlexlbServiceImpl service;
+    private ch.qos.logback.classic.Logger pvLogger;
+    private ListAppender<ILoggingEvent> pvAppender;
 
     @BeforeEach
     void setUp() {
@@ -70,6 +76,17 @@ class FlexlbServiceImplTest {
                         PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
                 mock(PrioritySchedulerReporter.class)
         );
+
+        pvLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger");
+        pvAppender = new ListAppender<>();
+        pvAppender.start();
+        pvLogger.addAppender(pvAppender);
+    }
+
+    @AfterEach
+    void tearDown() {
+        pvLogger.detachAppender(pvAppender);
+        pvAppender.stop();
     }
 
     @Test
@@ -103,6 +120,7 @@ class FlexlbServiceImplTest {
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB resp = captor.getValue();
         assertTrue(resp.getSuccess());
         assertEquals(200, resp.getCode());
+        assertPvContains("\"scheduleOrigin\":\"LOCAL_STANDALONE\"");
         verify(serverLatencyRecorder).recordArrival(anyLong());
         verify(serverLatencyRecorder).recordCompletion(any(BalanceContext.class), anyLong());
     }
@@ -133,6 +151,8 @@ class FlexlbServiceImplTest {
         assertEquals(
                 FlexlbScheduleProtocol.ScheduleFailureReasonPB.SAME_PRIORITY_AHEAD,
                 captor.getValue().getAdmissionRejectReason());
+        assertPvContains("\"code\":8430");
+        assertPvContains("\"admissionRejectReason\":\"SAME_PRIORITY_AHEAD\"");
     }
 
     @Test
@@ -145,7 +165,9 @@ class FlexlbServiceImplTest {
                 .setSuccess(true)
                 .setCode(200)
                 .build();
-        when(grpcForwarder.forwardToMaster(any())).thenReturn(masterResponse);
+        when(grpcForwarder.forwardToMaster(any())).thenReturn(
+                FlexlbGrpcForwarder.MasterForwardResult.forwarded(
+                        masterResponse, "10.0.0.2:7001"));
 
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(12345L)
@@ -163,17 +185,47 @@ class FlexlbServiceImplTest {
         ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
                 ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
         verify(observer).onNext(captor.capture());
+        verify(observer).onCompleted();
 
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB resp = captor.getValue();
         assertTrue(resp.getSuccess());
+        assertTrue(pvAppender.list.isEmpty());
     }
 
     @Test
-    void testSchedule_forwardToMaster_fallbackToLocal() {
-        // Given: consistency needed, not master, forward fails (returns null)
+    void testSchedule_forwardObserverFailureDoesNotSendSecondResponse() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
         when(lbStatusConsistencyService.isMaster()).thenReturn(false);
-        when(grpcForwarder.forwardToMaster(any())).thenReturn(null);
+        FlexlbScheduleProtocol.FlexlbScheduleResponsePB masterResponse =
+                FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                        .setSuccess(true)
+                        .setCode(200)
+                        .build();
+        when(grpcForwarder.forwardToMaster(any())).thenReturn(
+                FlexlbGrpcForwarder.MasterForwardResult.forwarded(
+                        masterResponse, "10.0.0.2:7001"));
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
+                mock(StreamObserver.class);
+        doThrow(new RuntimeException("client disconnected"))
+                .when(observer).onNext(any());
+
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(12_346L)
+                .build(), observer);
+
+        verify(grpcForwarder, times(1)).forwardToMaster(any());
+        verify(routeService, never()).route(any());
+        verify(observer, times(1)).onNext(any());
+        verify(observer, never()).onCompleted();
+    }
+
+    @Test
+    void testSchedule_masterNotFoundRoutesLocallyAsFallback() {
+        // No Master address was selected, so no RPC was attempted.
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+        when(grpcForwarder.forwardToMaster(any())).thenReturn(
+                FlexlbGrpcForwarder.MasterForwardResult.noMaster());
 
         Response localResponse = new Response();
         localResponse.setSuccess(true);
@@ -196,9 +248,44 @@ class FlexlbServiceImplTest {
         ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
                 ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
         verify(observer).onNext(captor.capture());
+        verify(observer).onCompleted();
 
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB resp = captor.getValue();
         assertTrue(resp.getSuccess());
+        assertPvContains("\"scheduleOrigin\":\"LOCAL_FALLBACK\"");
+    }
+
+    @Test
+    void testSchedule_forwardFailureIsTerminalAndNeverRoutesLocally() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+        when(grpcForwarder.forwardToMaster(any())).thenReturn(
+                FlexlbGrpcForwarder.MasterForwardResult.failed(
+                        "DEADLINE_EXCEEDED", "10.0.0.2:7001"));
+
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(12348L)
+                        .setGenerateTimeout(12_345L)
+                        .build();
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
+                mock(StreamObserver.class);
+
+        service.schedule(request, observer);
+
+        verify(routeService, never()).route(any());
+        ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
+                ArgumentCaptor.forClass(
+                        FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(observer).onNext(captor.capture());
+        verify(observer).onCompleted();
+        assertFalse(captor.getValue().getSuccess());
+        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
+                captor.getValue().getCode());
+        assertPvContains("\"code\":8511");
+        assertPvContains("\"scheduleOrigin\":\"FORWARD_FAILED\"");
+        assertPvContains("\"generateTimeoutMs\":12345");
+        assertPvContains("\"realMasterHost\":\"10.0.0.2:7001\"");
     }
 
     @Test
@@ -226,6 +313,29 @@ class FlexlbServiceImplTest {
         assertFalse(resp.getSuccess());
         assertEquals(500, resp.getCode());
         assertTrue(resp.getErrorMessage().contains("test error"));
+    }
+
+    @Test
+    void testSchedule_observerFailureStillWritesPvRecord() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        when(routeService.route(any(BalanceContext.class)))
+                .thenReturn(CompletableFuture.completedFuture(response));
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
+                mock(StreamObserver.class);
+        doThrow(new RuntimeException("client disconnected"))
+                .when(observer).onNext(any());
+
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(88_001L)
+                .build(), observer);
+
+        verify(observer, times(1)).onNext(any());
+        verify(observer, never()).onCompleted();
+        assertPvContains("\"requestId\":88001");
+        assertPvContains("\"scheduleOrigin\":\"LOCAL_STANDALONE\"");
     }
 
     @Test
@@ -301,6 +411,12 @@ class FlexlbServiceImplTest {
                 ArgumentCaptor.forClass(FlexlbScheduleProtocol.GetRequestStateResponsePB.class);
         verify(observer).onNext(captor.capture());
         assertFalse(captor.getValue().getFound());
+    }
+
+    private void assertPvContains(String expected) {
+        assertEquals(1, pvAppender.list.size());
+        assertTrue(pvAppender.list.get(0).getFormattedMessage().contains(expected),
+                pvAppender.list.get(0).getFormattedMessage());
     }
 
 }

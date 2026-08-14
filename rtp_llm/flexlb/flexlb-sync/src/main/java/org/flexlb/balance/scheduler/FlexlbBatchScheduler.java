@@ -1049,9 +1049,12 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         long ttlMs = configService.loadBalanceConfig().getFlexlbInflightTtlMs();
         long now = System.currentTimeMillis();
         int expiredCount = 0;
+        long oldestExpiredAgeMs = 0;
+        List<Long> expiredRequestSamples = new ArrayList<>(3);
         for (Map.Entry<Long, InflightEntry> candidate : inflight.entrySet()) {
             InflightEntry entry = candidate.getValue();
-            if (now - entry.createdAtMs() <= ttlMs) {
+            long ageMs = now - entry.createdAtMs();
+            if (ageMs <= ttlMs) {
                 continue;
             }
             synchronized (entry) {
@@ -1064,12 +1067,19 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     // the entry and must not be raced by TTL.
                     continue;
                 }
+                oldestExpiredAgeMs = Math.max(oldestExpiredAgeMs, ageMs);
+                if (expiredRequestSamples.size() < 3) {
+                    expiredRequestSamples.add(candidate.getKey());
+                }
                 timeoutEntry(entry, "inflight TTL expired");
                 expiredCount++;
             }
         }
         if (expiredCount > 0) {
             reporter.reportInflightTtlExpired(expiredCount);
+            Logger.info("event=scheduler_inflight_ttl_eviction evicted={} "
+                            + "oldest_age_ms={} ttl_ms={} request_samples={}",
+                    expiredCount, oldestExpiredAgeMs, ttlMs, expiredRequestSamples);
         }
         long cutoff = System.currentTimeMillis() - ttlMs;
         terminalStates.entrySet().removeIf(entry -> entry.getValue().updatedAtMs() < cutoff);
