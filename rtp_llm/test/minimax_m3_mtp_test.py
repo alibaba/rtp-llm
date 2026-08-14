@@ -9,6 +9,15 @@ import torch
 from torch import nn
 
 from rtp_llm.model_factory_register import ModelDict, get_lazy_model_module_path
+from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models.deepseek_v2 import DeepSeekV2
+from rtp_llm.models.minimax_m3 import (
+    _TARGET_EMBEDDING_BY_DEVICE,
+    _TARGET_LM_HEAD_BY_DEVICE,
+    MiniMaxM3,
+    _get_target_embedding,
+    _get_target_lm_head,
+)
 from rtp_llm.models.minimax_m3_mtp import MiniMaxM3MTP, MiniMaxM3MTPWeight
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
 from rtp_llm.models_py.model_desc.generic_moe_mtp import GenericMoeMTPModel
@@ -432,6 +441,81 @@ class MiniMaxM3MTPWeightTest(unittest.TestCase):
                     "model.mtp.layers.1.enorm.weight",
                 },
             )
+
+
+class MiniMaxM3MTPSharedWeightTest(unittest.TestCase):
+    def setUp(self):
+        _TARGET_EMBEDDING_BY_DEVICE.clear()
+        _TARGET_LM_HEAD_BY_DEVICE.clear()
+
+    def tearDown(self):
+        _TARGET_EMBEDDING_BY_DEVICE.clear()
+        _TARGET_LM_HEAD_BY_DEVICE.clear()
+
+    @staticmethod
+    def _model(model_cls, embedding, lm_head, is_mtp):
+        model = object.__new__(model_cls)
+        model.model_config = SimpleNamespace(is_mtp=is_mtp)
+        model.weight = ModelWeights(1, "cpu", embedding.dtype)
+        model.weight.set_global_weight(W.embedding, embedding)
+        model.weight.set_global_weight(W.lm_head, lm_head)
+        return model
+
+    def test_mtp_reuses_target_embedding_and_lm_head_storage(self):
+        # These shapes also model CP: embedding is full while lm_head is the
+        # vocabulary shard owned by this physical rank.
+        target_embedding = torch.randn(16, 8)
+        target_lm_head = torch.randn(4, 8)
+        target = self._model(MiniMaxM3, target_embedding, target_lm_head, is_mtp=False)
+        draft_embedding = torch.randn_like(target_embedding)
+        draft_lm_head = torch.randn_like(target_lm_head)
+        draft = self._model(MiniMaxM3MTP, draft_embedding, draft_lm_head, is_mtp=True)
+
+        with patch.object(DeepSeekV2, "_load"), patch(
+            "rtp_llm.models.minimax_m3_mtp.ModelLoader.force_clean_cuda_memory"
+        ) as clean_cuda_memory:
+            target._load("cpu")
+            draft._load("cpu")
+
+        self.assertIs(draft.weight.get_global_weight(W.embedding), target_embedding)
+        self.assertIs(draft.weight.get_global_weight(W.lm_head), target_lm_head)
+        self.assertEqual(
+            draft.weight.get_global_weight(W.embedding).data_ptr(),
+            target_embedding.data_ptr(),
+        )
+        self.assertEqual(
+            draft.weight.get_global_weight(W.lm_head).data_ptr(),
+            target_lm_head.data_ptr(),
+        )
+        self.assertIs(_get_target_embedding("cpu"), target_embedding)
+        self.assertIs(_get_target_lm_head("cpu"), target_lm_head)
+        clean_cuda_memory.assert_called_once_with()
+
+    def test_mtp_rejects_mismatched_target_embedding_shard(self):
+        target = self._model(
+            MiniMaxM3, torch.randn(16, 8), torch.randn(4, 8), is_mtp=False
+        )
+        draft = self._model(
+            MiniMaxM3MTP, torch.randn(16, 4), torch.randn(4, 8), is_mtp=True
+        )
+
+        with patch.object(DeepSeekV2, "_load"):
+            target._load("cpu")
+            with self.assertRaisesRegex(RuntimeError, "embedding.*matching shape"):
+                draft._load("cpu")
+
+    def test_mtp_rejects_mismatched_target_lm_head_shard(self):
+        target = self._model(
+            MiniMaxM3, torch.randn(16, 8), torch.randn(4, 8), is_mtp=False
+        )
+        draft = self._model(
+            MiniMaxM3MTP, torch.randn(16, 8), torch.randn(8, 8), is_mtp=True
+        )
+
+        with patch.object(DeepSeekV2, "_load"):
+            target._load("cpu")
+            with self.assertRaisesRegex(RuntimeError, "lm_head.*matching shape"):
+                draft._load("cpu")
 
 
 class _FakeDecoderLayer(nn.Module):

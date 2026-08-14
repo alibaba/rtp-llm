@@ -70,21 +70,38 @@ from rtp_llm.utils.model_weight import (
     transpose_pad,
 )
 
+_TARGET_EMBEDDING_BY_DEVICE: Dict[str, weakref.ReferenceType[torch.Tensor]] = {}
 _TARGET_LM_HEAD_BY_DEVICE: Dict[str, weakref.ReferenceType[torch.Tensor]] = {}
 
 
+def _register_target_embedding(device: str, embedding: torch.Tensor) -> None:
+    """Expose the live MiniMax-M3 target embedding to a colocated draft."""
+    _TARGET_EMBEDDING_BY_DEVICE[device] = weakref.ref(embedding)
+
+
 def _register_target_lm_head(device: str, lm_head: torch.Tensor) -> None:
-    """Expose the live MiniMax-M3 target head to its colocated EAGLE1 draft."""
+    """Expose the live MiniMax-M3 target head to a colocated draft."""
     _TARGET_LM_HEAD_BY_DEVICE[device] = weakref.ref(lm_head)
 
 
+def _get_target_embedding(device: str) -> torch.Tensor:
+    """Return the already-loaded target embedding for a MiniMax-M3 draft."""
+    embedding_ref = _TARGET_EMBEDDING_BY_DEVICE.get(device)
+    embedding = embedding_ref() if embedding_ref is not None else None
+    if embedding is None:
+        raise RuntimeError(
+            "MiniMax-M3 draft requires a live target embedding on " f"{device}"
+        )
+    return embedding
+
+
 def _get_target_lm_head(device: str) -> torch.Tensor:
-    """Return the already-loaded target head for a MiniMax-M3 EAGLE1 draft."""
+    """Return the already-loaded target head for a MiniMax-M3 draft."""
     lm_head_ref = _TARGET_LM_HEAD_BY_DEVICE.get(device)
     lm_head = lm_head_ref() if lm_head_ref is not None else None
     if lm_head is None:
         raise RuntimeError(
-            "MiniMax-M3 EAGLE1 requires a live target lm_head on " f"{device}"
+            "MiniMax-M3 draft requires a live target lm_head on " f"{device}"
         )
     return lm_head
 
@@ -667,7 +684,15 @@ class MiniMaxM3(DeepSeekV2):
 
     def _load(self, device: str):
         super()._load(device)
-        _register_target_lm_head(device, self.weight.get_global_weight(W.lm_head))
+        # The native MTP model inherits MiniMaxM3's loader, but it must consume
+        # rather than replace the target-owned tensors registered on this device.
+        if not bool(getattr(getattr(self, "model_config", None), "is_mtp", False)):
+            embedding = self.weight.get_global_weight_or_none(W.embedding)
+            lm_head = self.weight.get_global_weight_or_none(W.lm_head)
+            if embedding is not None:
+                _register_target_embedding(device, embedding)
+            if lm_head is not None:
+                _register_target_lm_head(device, lm_head)
 
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:

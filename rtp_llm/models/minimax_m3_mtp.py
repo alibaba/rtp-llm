@@ -8,6 +8,7 @@ from typing import Any, List
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
+from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.minimax_m3 import MiniMaxM3, MiniMaxM3Weight, add_unit_offset
@@ -136,6 +137,53 @@ class MiniMaxM3MTPWeight(MiniMaxM3Weight):
 
 class MiniMaxM3MTP(MiniMaxM3):
     """A single MiniMax-M3 MTP module reused for every proposal step."""
+
+    def _reuse_target_weight(
+        self, device: str, name: str, target_weight, draft_weight
+    ) -> None:
+        if (
+            target_weight.shape != draft_weight.shape
+            or target_weight.dtype != draft_weight.dtype
+            or target_weight.device != draft_weight.device
+        ):
+            raise RuntimeError(
+                f"MiniMax-M3 MTP target/draft {name} must have matching shape, "
+                "dtype and device; "
+                f"target={tuple(target_weight.shape)}/{target_weight.dtype}/"
+                f"{target_weight.device}, "
+                f"draft={tuple(draft_weight.shape)}/{draft_weight.dtype}/"
+                f"{draft_weight.device}"
+            )
+        self.weight.set_global_weight(name, target_weight)
+        logging.info(
+            "MiniMax-M3 MTP reuses target %s on %s "
+            "(target_data_ptr=%d, discarded_draft_data_ptr=%d)",
+            name,
+            device,
+            target_weight.data_ptr(),
+            draft_weight.data_ptr(),
+        )
+
+    def _load(self, device: str):
+        super()._load(device)
+
+        from rtp_llm.models.minimax_m3 import _get_target_embedding, _get_target_lm_head
+
+        target_embedding = _get_target_embedding(device)
+        target_lm_head = _get_target_lm_head(device)
+        draft_embedding = self.weight.get_global_weight(W.embedding)
+        draft_lm_head = self.weight.get_global_weight(W.lm_head)
+        self._reuse_target_weight(
+            device, W.embedding, target_embedding, draft_embedding
+        )
+        self._reuse_target_weight(device, W.lm_head, target_lm_head, draft_lm_head)
+
+        # Both replacements must succeed before releasing the placeholders.
+        # Emptying the allocator cache here makes the reclaimed memory visible
+        # to the C++ KV/cache allocations that run after model loading. This is
+        # a one-time startup operation and never enters the inference path.
+        del draft_embedding, draft_lm_head
+        ModelLoader.force_clean_cuda_memory()
 
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
