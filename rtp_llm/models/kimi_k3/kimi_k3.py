@@ -204,6 +204,7 @@ class KimiK3(BaseModel):
         config.special_tokens.stop_words_id_list = [
             [config.special_tokens.eos_token_id]
         ]
+
     @classmethod
     def _parse_attention_config(
         cls, text_config: Dict[str, Any], config: KimiK3ModelConfig
@@ -464,10 +465,6 @@ class KimiK3Eagle3(KimiK3):
         config.has_lm_head = True
         config.tie_word_embeddings = bool(raw.get("tie_word_embeddings", False))
         config.config_dtype = raw.get("torch_dtype", "bfloat16")
-        # The draft checkpoint stores the full K3 vocabulary head in BF16.
-        # Converting it to FP32 adds roughly 4.4 GiB per rank during startup
-        # and can exhaust B300 memory after the target model is loaded.
-        config.enable_fp32_lm_head = False
         config.has_positional_encoding = False
         config.position_ids_style = 0
         config.qk_norm = False

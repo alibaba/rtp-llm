@@ -329,6 +329,24 @@ class KimiK3LatentMoE(nn.Module):
         )
         del s2_raw
 
+        # Each layer's MegaMoE layout transform uses large temporary tensors.
+        # Release inactive blocks from the previous layer and the raw staging
+        # tensors above before asking DeepGEMM for another contiguous buffer.
+        allocated_before = torch.cuda.memory_allocated(device)
+        reserved_before = torch.cuda.memory_reserved(device)
+        torch.cuda.empty_cache()
+        reserved_after = torch.cuda.memory_reserved(device)
+        if reserved_after < reserved_before:
+            logging.info(
+                "[KimiK3 DeepGEMM MegaMoE] layer=%d released CUDA allocator "
+                "cache before weight transform: allocated=%.2f GiB, "
+                "reserved=%.2f GiB -> %.2f GiB",
+                self.layer_idx,
+                allocated_before / 1024**3,
+                reserved_before / 1024**3,
+                reserved_after / 1024**3,
+            )
+
         (self._mega_l1_w, self._mega_l1_sf), (
             self._mega_l2_w,
             self._mega_l2_sf,
