@@ -178,12 +178,10 @@ TEST_F(MtpBatchStreamProcessorTest, DISABLED_benchmarkScoreTokenIdsTorchCopyVsMe
     fillScoreTokenIdsWithTorchCopy(dst_torch, complete_token_ids, seq_lens, score_len);
     ASSERT_TRUE(torch::equal(dst_memcpy, dst_torch));
 
-    auto memcpy_us =
-        benchmarkUs([&]() { fillScoreTokenIdsWithMemcpy(dst_memcpy, complete_token_ids, seq_lens, score_len); },
-                    iterations);
-    auto torch_us =
-        benchmarkUs([&]() { fillScoreTokenIdsWithTorchCopy(dst_torch, complete_token_ids, seq_lens, score_len); },
-                    iterations);
+    auto memcpy_us = benchmarkUs(
+        [&]() { fillScoreTokenIdsWithMemcpy(dst_memcpy, complete_token_ids, seq_lens, score_len); }, iterations);
+    auto torch_us = benchmarkUs(
+        [&]() { fillScoreTokenIdsWithTorchCopy(dst_torch, complete_token_ids, seq_lens, score_len); }, iterations);
 
     std::cout << "[mtp-score-token-ids-copy] streams=" << stream_count << " score_len=" << score_len
               << " max_seq_len=" << max_seq_len << " iterations=" << iterations << " memcpy_us=" << memcpy_us
@@ -651,7 +649,7 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInputFromDe
 
     auto stream_groups = StreamGroups({stream1, stream2});
 
-    auto processor           = MtpBatchStreamProcessor(
+    auto processor = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
     TensorHolder holder;
     auto         model_input_status = processor.gatherDecodeModelInput(stream_groups, holder);
@@ -765,17 +763,16 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     EXPECT_TRUE(lm_output_indexes.is_cuda());
     EXPECT_EQ(expect_lm_output_indexes, toVec<int>(lm_output_indexes));
 
-    auto expect_positions = [](const GptModelInputs& input,
-                               const vector<int>&    expected_prefix,
-                               const vector<int>&    expected_sequence) {
-        EXPECT_TRUE(input.prefix_lengths.is_cuda());
-        EXPECT_TRUE(input.sequence_lengths.is_cuda());
-        EXPECT_EQ(torch::kInt32, input.prefix_lengths.scalar_type());
-        EXPECT_EQ(torch::kInt32, input.sequence_lengths.scalar_type());
-        EXPECT_EQ(expected_prefix, toVec<int>(input.prefix_lengths));
-        EXPECT_EQ(expected_sequence, toVec<int>(input.sequence_lengths));
-        EXPECT_EQ(expected_sequence, toVec<int>(input.prefix_lengths + 1));
-    };
+    auto expect_positions =
+        [](const GptModelInputs& input, const vector<int>& expected_prefix, const vector<int>& expected_sequence) {
+            EXPECT_TRUE(input.prefix_lengths.is_cuda());
+            EXPECT_TRUE(input.sequence_lengths.is_cuda());
+            EXPECT_EQ(torch::kInt32, input.prefix_lengths.scalar_type());
+            EXPECT_EQ(torch::kInt32, input.sequence_lengths.scalar_type());
+            EXPECT_EQ(expected_prefix, toVec<int>(input.prefix_lengths));
+            EXPECT_EQ(expected_sequence, toVec<int>(input.sequence_lengths));
+            EXPECT_EQ(expected_sequence, toVec<int>(input.prefix_lengths + 1));
+        };
     expect_positions(model_input, {1, 2}, {2, 3});
 
     // Legacy GPU propose-token path receives the normal decode position.
@@ -1045,9 +1042,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsCo
               toVec<int>(model_input.combo_position_ids));
 }
 
-TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
-    unsetenv("RTP_LLM_STREAM_ASYNC");
-    unsetenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE");
+TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputKeepsDenseLayout) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -1090,78 +1085,41 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
 
     auto& model_input            = model_input_status.value();
     model_input.is_target_verify = true;
+    model_input.input_lengths    = torch::full({2}, 3, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
 
     speculative::SpeculativeSamplerOutput spec_decode_output;
-    spec_decode_output.accept_len_cpu    = torch::tensor({3, 1}, torch::kInt32);
-    spec_decode_output.accept_tokens_cpu = torch::tensor({{2, 3, 1}, {2, 0, 0}}, torch::kInt32);
-    spec_decode_output.accept_len        = spec_decode_output.accept_len_cpu.to(torch::kCUDA);
-    spec_decode_output.accept_tokens     = spec_decode_output.accept_tokens_cpu.to(torch::kCUDA);
-
-    torch::Tensor hidden_states_d_t;
+    spec_decode_output.accept_len    = torch::tensor({3, 1}, torch::kInt32).to(torch::kCUDA);
+    spec_decode_output.accept_tokens = torch::tensor({{2, 3, 1}, {2, 0, 0}}, torch::kInt32).to(torch::kCUDA);
 
     GptModelOutputs model_output;
     model_output.all_hidden_states =
         torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 1.1f, 1.2f, 1.3f, 1.4f, 1.5f, 1.6f}, torch::kFloat32)
-            .reshape({6, 2});
+            .reshape({6, 2})
+            .to(torch::kCUDA);
 
-    processor.updateDecodePostDraftModelInput(
-        model_input, model_output, spec_decode_output, 2, hidden_states_d_t, holder);
+    processor.updateDecodePostDraftModelInput(model_input, model_output, spec_decode_output, 2, holder);
 
+    EXPECT_TRUE(model_input.combo_tokens.is_cuda());
     auto        combo_tokens        = model_input.combo_tokens.cpu();
-    vector<int> expect_combo_tokens = {2, 3, 1, 2};
+    vector<int> expect_combo_tokens = {2, 3, 1, 2, 0, 0};
     EXPECT_EQ(expect_combo_tokens, toVec<int>(combo_tokens));
 
-    auto        input_lengths        = model_input.input_lengths;
-    vector<int> expect_input_lengths = {3, 1};
+    auto        input_lengths        = model_input.input_lengths.cpu();
+    vector<int> expect_input_lengths = {3, 3};
     EXPECT_EQ(expect_input_lengths, toVec<int>(input_lengths));
 
     auto        lm_output_indexes        = model_input.lm_output_indexes.cpu();
     vector<int> expect_lm_output_indexes = {2, 3};
     EXPECT_EQ(expect_lm_output_indexes, toVec<int>(lm_output_indexes));
 
+    EXPECT_TRUE(model_input.last_hidden_states.is_cuda());
     auto          last_hidden_states        = model_input.last_hidden_states;
-    vector<float> expect_last_hidden_states = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 1.1f, 1.2f};
+    vector<float> expect_last_hidden_states = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 1.1f, 1.2f, 1.3f, 1.4f, 1.5f, 1.6f};
     EXPECT_EQ(expect_last_hidden_states, toVec<float>(last_hidden_states));
     EXPECT_FALSE(model_input.is_target_verify);
 }
 
-TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputKeepsDenseDeviceState) {
-    setenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "1", 1);
-    ModelConfig                 model_config;
-    PDSepConfig                 pd_sep_config;
-    ProfilingDebugLoggingConfig profiling_debug_logging_config;
-    CacheConfig                 cache_config = makeProcessorCacheConfig();
-    SpeculativeExecutionConfig  sp_config;
-    model_config.num_layers    = 1;
-    sp_config.gen_num_per_cycle = 2;
-
-    MtpBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    GptModelInputs model_input;
-    speculative::SpeculativeSamplerOutput spec_decode_output;
-    spec_decode_output.accept_len    = torch::tensor({3, 1}, torch::kInt32).to(torch::kCUDA);
-    spec_decode_output.accept_tokens = torch::tensor({{2, 3, 1}, {2, 0, 0}}, torch::kInt32).to(torch::kCUDA);
-    GptModelOutputs model_output;
-    model_output.all_hidden_states =
-        torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 1.1f, 1.2f, 1.3f, 1.4f, 1.5f, 1.6f},
-                      torch::kFloat32)
-            .reshape({6, 2})
-            .to(torch::kCUDA);
-    torch::Tensor hidden_states_d_t;
-    TensorHolder  holder;
-
-    processor.updateDecodePostDraftModelInput(
-        model_input, model_output, spec_decode_output, 2, hidden_states_d_t, holder);
-
-    EXPECT_TRUE(model_input.combo_tokens.is_cuda());
-    EXPECT_EQ((vector<int>{2, 3, 1, 2, 0, 0}), toVec<int>(model_input.combo_tokens));
-    EXPECT_TRUE(model_input.lm_output_indexes.is_cuda());
-    EXPECT_EQ((vector<int>{2, 3}), toVec<int>(model_input.lm_output_indexes));
-    EXPECT_EQ(6, model_input.last_hidden_states.size(0));
-    unsetenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE");
-}
-
-TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputCompactsComboPositionIds) {
+TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputKeepsDenseComboPositionIds) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -1216,8 +1174,6 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputCompactsC
     spec_decode_output.accept_len        = spec_decode_output.accept_len_cpu.to(torch::kCUDA);
     spec_decode_output.accept_tokens     = spec_decode_output.accept_tokens_cpu.to(torch::kCUDA);
 
-    torch::Tensor hidden_states_d_t;
-
     GptModelOutputs model_output;
     model_output.all_hidden_states = torch::tensor({0.1f,
                                                     0.2f,
@@ -1240,11 +1196,11 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputCompactsC
                                                    torch::kFloat32)
                                          .reshape({9, 2});
 
-    processor.updateDecodePostDraftModelInput(model_input, model_output, spec_decode_output, 3, hidden_states_d_t, holder);
+    processor.updateDecodePostDraftModelInput(model_input, model_output, spec_decode_output, 3, holder);
 
-    auto        combo_position_ids        = model_input.combo_position_ids;
-    vector<int> expect_combo_position_ids = {10, 11, 12, 20, 21, 22, 30, 31, 32, 40, 41, 42, 50, 51, 52, 70, 71, 72};
-    EXPECT_EQ(expect_combo_position_ids, toVec<int>(combo_position_ids));
+    EXPECT_EQ((vector<int>{10, 11, 12, 20, 21, 22, 30, 31, 32, 40, 41, 42, 50, 51,
+                           52, 60, 61, 62, 70, 71, 72, 80, 81, 82, 90, 91, 92}),
+              toVec<int>(model_input.combo_position_ids));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodeDraftModelInputAdvancesComboPositionIds) {
