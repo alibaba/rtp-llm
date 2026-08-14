@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <limits.h>
 #include <condition_variable>
+#include <optional>
 #include <unordered_set>
 #include <c10/core/DeviceGuard.h>
 #include <c10/core/InferenceMode.h>
@@ -51,6 +52,9 @@ grpc::Status DecodeRpcServer::init(const EngineInitParams&                      
     if (!ret.ok()) {
         return ret;
     }
+    decode_admission_.setLimit(
+        static_cast<size_t>(std::max<int64_t>(maga_init_params.runtime_config.max_generate_batch_size, 1)));
+    RTP_LLM_LOG_INFO("Decode RPC admission limit is [%zu]", decode_admission_.limit());
     return grpc::Status::OK;
 }
 
@@ -144,6 +148,11 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
     } else {
         decode_context.prefill_cp_size = 1;
     }
+
+    auto input                        = QueryConverter::transQuery(&decode_context.allocate_request.input());
+    auto generate_stream              = engine_->makeStream(input);
+    decode_context.request_timeout_ms = generate_stream->getTimeoutMs();
+    decode_context.setStream(generate_stream);
     RTP_LLM_LOG_DEBUG("request [%s] prepare generate context done, prefill_cp_size=%d",
                       decode_context.request_key.c_str(),
                       decode_context.prefill_cp_size);
@@ -156,25 +165,20 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     decode_context.request_info       = input->request_info;
     auto generate_stream              = engine_->makeStream(input);
     decode_context.request_timeout_ms = generate_stream->getTimeoutMs();
-
-    // Set CanRun event so that handleWaiting() will execute initKVBlock()
-    generate_stream->reportEvent(StreamEvents::CanRun);
     decode_context.setStream(generate_stream);
 
-    // WAITING -> LOADING_CACHE -> WAITING, 直到load cache完成并移动到 WAITING 状态
-    // NOTE: 此处的 busy-wait 是安全的，因为 stream 尚未 enqueue 到 scheduler，
-    // 不会与其他线程并发调用 moveToNext()。gRPC 线程独占驱动状态机直到 WAITING。
-    while (!generate_stream->hasError() && generate_stream->moveToNext() == StreamState::LOADING_CACHE) {
-        this_thread::sleep_for(chrono::milliseconds(1));
-    }
-    if (generate_stream->hasError()) {
-        auto   stream_error = generate_stream->statusInfo();
-        string error_msg    = stream_error.ToString();
-        if (error_msg.empty()) {
-            error_msg = "malloc kv cache block failed at decode node";
-        }
-        error_msg = "request: [" + decode_context.request_key + "] " + error_msg;
+    // Allocate the destination blocks before Prefill transfers KV, but leave
+    // CanRun unset so enqueue must pass the scheduler's batch admission check.
+    // Reporting CanRun here and driving the state machine to WAITING would hand
+    // the stream its KV without the scheduler ever admitting it, which is the
+    // case the admission gate in RemoteGenerate exists to prevent.
+    auto allocate_status = generate_stream->prepareForRemoteCacheLoad();
+    if (!allocate_status.ok()) {
+        string error_msg = "request: [" + decode_context.request_key + "] malloc kv cache block failed at decode node";
         RTP_LLM_LOG_ERROR(error_msg);
+        // Keep the stream retryable. EXECUTE_WITH_RETRY may call this again
+        // after another request releases KV; the context destructor reports
+        // the terminal error and releases resources if all retries fail.
         decode_context.error_status = grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, error_msg);
         return;
     }
@@ -1265,6 +1269,9 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
     c10::InferenceMode inference_guard(true);
     AtomicGuard        request_guard(onflight_requests_);
     DecodeRpcContext   rpc_context{grpc_stream};
+    // Declare the lease before the context so the context stops its stream and
+    // releases KV before the admission slots become available on every exit.
+    std::optional<DecodeAdmissionGuard> admission_guard;
     // TODO(xinfei.sxf) request id is 0 here
     auto decode_context              = DecodeGenerateContext(rpc_context, 0, server_context, metrics_reporter_, meta_);
     decode_context.onflight_requests = onflight_requests_;
@@ -1276,6 +1283,75 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
 
     try {
         EXECUTE_STAGE_FUNC(prepareGenerateContext, decode_context);
+
+        // One slot per stream, matching FIFOScheduler::evaluateRunningMemory, which
+        // compares running_streams_.size() against the same max_generate_batch_size.
+        // Charging maxBatchSize() instead would count beam width here and stream count
+        // there, capping concurrency at limit/num_beams while the scheduler still had
+        // room; the real per-beam cost is KV blocks, which the scheduler already
+        // accounts for. One slot also keeps a wide request from having to wait for the
+        // whole controller to drain, which it never would: the guard below is held for
+        // the entire generation, not just resource setup.
+        const size_t admission_slots = 1;
+        // Bound the admission wait on its own, instead of inheriting the request
+        // deadline: timeout_ms defaults to an hour, so inheriting it would let a queued
+        // request pin a gRPC handler thread for that long, and an unset deadline would
+        // pin it forever. A few seconds is enough to ride out a burst; past that the
+        // role is genuinely saturated and the caller should retry rather than occupy a
+        // thread. Deliberately not a config knob -- it protects the thread pool, which
+        // is not something a deployment should be able to tune itself into losing.
+        static constexpr int64_t kMaxAdmissionWaitMs = 5000;
+        int64_t                  admission_timeout_ms = kMaxAdmissionWaitMs;
+        if (decode_context.request_timeout_ms > 0) {
+            const int64_t request_remaining_ms = decode_context.request_timeout_ms - decode_context.executeTimeMs();
+            if (request_remaining_ms <= 0) {
+                decode_context.error_status = grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED,
+                                                           "request timed out while waiting for decode admission");
+                return decode_context.error_status;
+            }
+            admission_timeout_ms = std::min(admission_timeout_ms, request_remaining_ms);
+        }
+
+        const auto admission_begin_us = currentTimeUs();
+        const auto admission_result   = decode_admission_.acquire(
+            admission_slots, [server_context]() { return server_context->IsCancelled(); }, admission_timeout_ms);
+        const auto admission_wait_us = currentTimeUs() - admission_begin_us;
+        if (admission_result != DecodeAdmissionController::AcquireResult::ACQUIRED) {
+            switch (admission_result) {
+                case DecodeAdmissionController::AcquireResult::CANCELLED:
+                    decode_context.error_status = grpc::Status(grpc::StatusCode::CANCELLED,
+                                                               "request cancelled while waiting for decode admission");
+                    break;
+                case DecodeAdmissionController::AcquireResult::TIMED_OUT:
+                    // Deliberately not RESOURCE_EXHAUSTED: PrefillRpcServer maps that
+                    // code to DECODE_MALLOC_FAILED(8211), which would report a queueing
+                    // timeout as a decode KV allocation failure and send operators
+                    // looking at memory water marks instead of the admission limit.
+                    // The message also deliberately avoids the "Deadline Exceeded"
+                    // substring that PrefillRpcServer greps for: that branch closes the
+                    // gRPC connection, and a decode role that is merely saturated is
+                    // healthy -- forcing a reconnect would turn back-pressure into a
+                    // transport fault. The cost is a less specific error code upstream.
+                    decode_context.error_status = grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED,
+                                                               "request timed out while waiting for decode admission");
+                    break;
+                case DecodeAdmissionController::AcquireResult::OVERSIZED:
+                    decode_context.error_status = grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED,
+                                                               "request batch exceeds the decode admission limit");
+                    break;
+                case DecodeAdmissionController::AcquireResult::ACQUIRED:
+                    break;
+            }
+            return decode_context.error_status;
+        }
+        admission_guard.emplace(decode_admission_, admission_slots);
+        if (admission_wait_us > 1000) {
+            RTP_LLM_LOG_INFO("request [%s] waited [%ld] us for [%zu] decode admission slot(s)",
+                             decode_context.request_key.c_str(),
+                             admission_wait_us,
+                             admission_slots);
+        }
+
         EXECUTE_WITH_RETRY(
             allocateResourceFunc, decode_context, max_retry_times, max_retry_timeout_ms, retry_interval_ms);
         if (decode_context.hasError()) {

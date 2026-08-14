@@ -83,11 +83,13 @@ protected:
                                    bool                    reuse_cache         = false,
                                    bool                    enable_memory_cache = false,
                                    int                     max_new_tokens      = 1,
-                                   const std::vector<int>& variable_num_beams  = {}) {
+                                   const std::vector<int>& variable_num_beams  = {},
+                                   RoleType                role_type           = RoleType::PDFUSION) {
         ResourceContext resource_context;
         resource_context.cache_manager       = cache_manager_;
         resource_context.reuse_cache         = reuse_cache;
         resource_context.enable_memory_cache = enable_memory_cache;
+        resource_context.role_type           = role_type;
 
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
@@ -257,8 +259,8 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionCompletedAsyncLoadStaysInAdmissi
     auto done_ctx = createDoneAsyncContext();
     EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(done_ctx)));
 
-    auto scheduler = createPDFusionRatioScheduler();
-    auto loaded    = createStream({1, 2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+    auto scheduler                           = createPDFusionRatioScheduler();
+    auto loaded                              = createStream({1, 2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
     loaded->generateConfig()->max_new_tokens = 2;
     ASSERT_TRUE(scheduler->enqueue(loaded).ok());
 
@@ -269,7 +271,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionCompletedAsyncLoadStaysInAdmissi
     ASSERT_EQ(cache_manager_->freeBlocksNum(), 1);
     ASSERT_EQ(loaded->estimatePeakNeedBlocks(/*remaining_tokens=*/1), 1);
 
-    auto candidate = createStream({3});
+    auto candidate                              = createStream({3});
     candidate->generateConfig()->max_new_tokens = 2;
     ASSERT_EQ(candidate->estimatePeakNeedBlocks(/*remaining_tokens=*/1), 1);
     ASSERT_TRUE(scheduler->enqueue(candidate).ok());
@@ -299,10 +301,10 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionLoadingCacheReservesDelayedBeamT
 
     auto scheduler = createPDFusionRatioScheduler();
     auto loaded    = createStream({1, 2, 3, 4, 5},
-                                  /*reuse_cache=*/true,
-                                  /*enable_memory_cache=*/true,
-                                  /*max_new_tokens=*/3,
-                                  /*variable_num_beams=*/{1, 4});
+                               /*reuse_cache=*/true,
+                               /*enable_memory_cache=*/true,
+                               /*max_new_tokens=*/3,
+                               /*variable_num_beams=*/{1, 4});
     ASSERT_EQ(loaded->currentBatchSize(), 1);
     ASSERT_EQ(loaded->maxBatchSize(), 4);
     ASSERT_TRUE(scheduler->enqueue(loaded).ok());
@@ -432,6 +434,41 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCacheStreams_CountedInBatchLimit)
     // With max=2, only 2 streams should be scheduled (into LOADING_CACHE)
     // The 3rd stream should remain in waiting
     ASSERT_LE(result.value().size(), 2);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testRemotePreparedDecodeStreamsRespectBatchLimit) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 2;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig pd_sep_config;
+    pd_sep_config.role_type = RoleType::DECODE;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    auto                scheduler = std::make_shared<FIFOScheduler>(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
+
+    std::vector<GenerateStreamPtr> streams;
+    for (int token = 1; token <= 3; ++token) {
+        auto stream = createStream({token},
+                                   /*reuse_cache=*/false,
+                                   /*enable_memory_cache=*/false,
+                                   /*max_new_tokens=*/1,
+                                   /*variable_num_beams=*/{},
+                                   RoleType::DECODE);
+        ASSERT_TRUE(stream->prepareForRemoteCacheLoad().ok());
+        ASSERT_FALSE(stream->hasEvent(StreamEvents::CanRun));
+        ASSERT_TRUE(scheduler->enqueue(stream).ok());
+        streams.push_back(stream);
+    }
+
+    auto result = scheduler->schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.value().size(), 2);
+    ASSERT_EQ(scheduler->runningStreamsSize(), 2);
+    ASSERT_EQ(scheduler->waitingStreamsSize(), 1);
+    ASSERT_FALSE(streams.back()->hasEvent(StreamEvents::CanRun));
 }
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionLoadingCacheStreamsCountTowardBatchLimit) {

@@ -160,6 +160,7 @@ public:
     int                  reuseBlockSize() const;
     void                 fakeInitKVBlock(size_t reserved_blocks = 0);
     virtual absl::Status initKVBlock();
+    absl::Status         prepareForRemoteCacheLoad();
     virtual absl::Status incrKVBlock();
     virtual void         releaseResource();
     int                  nextNeedBlockNums(int reserve_step) const;
