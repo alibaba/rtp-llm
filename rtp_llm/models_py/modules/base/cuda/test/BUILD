@@ -54,6 +54,13 @@ py_test (
     exec_properties = {'gpu':'H20'},
 )
 
+py_test (
+    name = "group_topk_benchmark",
+    srcs = ["group_topk_benchmark.py"],
+    deps = py_test_deps,
+    tags = ["manual"],
+)
+
 
 py_test (
     name = "torch_symm_mem_test",

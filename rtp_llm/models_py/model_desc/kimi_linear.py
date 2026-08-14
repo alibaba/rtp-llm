@@ -699,6 +699,11 @@ class KimiLinearDecoderLayer(nn.Module):
         attention_inputs: Optional[PyAttentionInputs] = None,
         attn_meta: KimiLinearMetadata = KimiLinearMetadata(),
     ) -> DecodeLayerOutput:
+        mlp_phase_kwargs = (
+            {"is_prefill": bool(attention_inputs and attention_inputs.is_prefill)}
+            if isinstance(self.mlp, GenericMoeLayer)
+            else {}
+        )
         # Fused: residual = residual + hidden_states, hidden_states = RMSNorm(residual)
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
@@ -722,7 +727,10 @@ class KimiLinearDecoderLayer(nn.Module):
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
         # MLP (Dense or MoE)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(
+            hidden_states,
+            **mlp_phase_kwargs,
+        )
 
         return DecodeLayerOutput(hidden_states, residual)
 

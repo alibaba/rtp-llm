@@ -52,3 +52,23 @@ py_test(
     tags = ["H20"],
     exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
 )
+
+py_test(
+    name = "test_q_rope_direct_write",
+    srcs = ["test_q_rope_direct_write.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20"],
+    exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
+)
+
+py_test(
+    name = "q_rope_direct_write_benchmark",
+    srcs = ["q_rope_direct_write_benchmark.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    tags = ["manual"],
+)

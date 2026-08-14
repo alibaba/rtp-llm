@@ -26,6 +26,7 @@ from rtp_llm.models_py.modules import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
+from rtp_llm.models_py.utils.fuse_config import glm5_prefill_refine_enabled
 from rtp_llm.models_py.modules.factory.linear.fixed_m_linear import fixed_m_linear
 from rtp_llm.models_py.modules.hybrid.glm5_cmp import (
     Glm5Cmp,
@@ -33,7 +34,7 @@ from rtp_llm.models_py.modules.hybrid.glm5_cmp import (
     should_enable_glm5_cmp,
 )
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
+from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
 from rtp_llm.utils.model_weight import W
 
@@ -307,6 +308,7 @@ class GenericMoeLayer(nn.Module):
         hidden_states: torch.Tensor,
         x_fp8: "Optional[torch.Tensor]" = None,
         x_scale: "Optional[torch.Tensor]" = None,
+        is_prefill: bool = False,
     ) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         if self.gate_chunk_rows > 0 and num_tokens > 0:
@@ -335,23 +337,25 @@ class GenericMoeLayer(nn.Module):
         )
 
         if self.correction_bias is not None:
-            self.group_topk = GroupTopK()
+            self.group_topk = GroupTopK(hw_kernel_config=None)
             self.renormalize = self.config.has_moe_norm
             self.num_expert_group = self.config.moe_n_group
 
             self.topk_group = self.config.moe_topk_group
             self.n_routed_experts = self.config.expert_num  # config.n_routed_experts
             self.routed_scaling_factor = self.config.routed_scaling_factor
+            use_fused_group_topk = is_prefill and glm5_prefill_refine_enabled()
             self.group_topk(
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                scores=router_logits_fp32,
+                scores=router_logits if use_fused_group_topk else router_logits_fp32,
                 correction_bias=self.correction_bias,
                 n_group=self.num_expert_group,
                 topk_group=self.topk_group,
                 topk=self.top_k,
                 renormalize=self.renormalize,
                 routed_scaling_factor=self.routed_scaling_factor,
+                use_fused=use_fused_group_topk,
             )
         else:
             # Top-K selection using C++ SelectTopkOp
@@ -582,6 +586,7 @@ class GenericMoeDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
+        is_prefill: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run residual add, RMSNorm, then the dense MLP or MoE."""
         # Dense MLP: fuse add + RMSNorm + FP8 quant; up_proj consumes FP8 directly.
@@ -594,7 +599,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 group_size=128,
                 scale_ue8m0=self.mlp.up_proj.scale_ue8m0,
             )
-            hidden_states = self.mlp(hidden_states, x_fp8=fp8_hs, x_scale=scale)
+            hidden_states = self.mlp(hidden_states, x_fp8=fp8_hs, x_scale=scale, is_prefill=is_prefill) if isinstance(self.mlp, GenericMoeLayer) else self.mlp(hidden_states, x_fp8=fp8_hs, x_scale=scale)
         # MoE: keep BF16 for routing/routed experts and FP8 for the shared expert.
         elif self._fuse_post_norm_quant_moe and hidden_states.dim() == 2:
             bf16_hs, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
@@ -605,13 +610,13 @@ class GenericMoeDecoderLayer(nn.Module):
                 group_size=128,
                 scale_ue8m0=self.mlp.shared_expert.up_proj.scale_ue8m0,
             )
-            hidden_states = self.mlp(bf16_hs, x_fp8=fp8_hs, x_scale=scale)
+            hidden_states = self.mlp(bf16_hs, x_fp8=fp8_hs, x_scale=scale, is_prefill=is_prefill) if isinstance(self.mlp, GenericMoeLayer) else self.mlp(bf16_hs, x_fp8=fp8_hs, x_scale=scale)
         # Fallback: use the standard norm path and let MLP/MoE prepare its inputs.
         else:
             hidden_states, residual = self.post_attention_layernorm(
                 hidden_states, residual
             )
-            hidden_states = self.mlp(hidden_states)
+            hidden_states = self.mlp(hidden_states, is_prefill=is_prefill) if isinstance(self.mlp, GenericMoeLayer) else self.mlp(hidden_states)
         return hidden_states, residual
 
     def _forward_cmp(
@@ -686,6 +691,7 @@ class GenericMoeDecoderLayer(nn.Module):
         prev_topk_indices: Optional[torch.Tensor] = None,
         enable_cmp: bool = False,
         force_reuse_topk_indices: bool = False,
+        attention_inputs: Optional[PyAttentionInputs] = None,
     ) -> DecodeLayerOutput:
         if enable_cmp:
             return self._forward_cmp(
@@ -741,7 +747,7 @@ class GenericMoeDecoderLayer(nn.Module):
                     hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
                 )
 
-        hidden_states, residual = self._fwd_mlp_or_moe(hidden_states, residual)
+            hidden_states, residual = self._fwd_mlp_or_moe(hidden_states, residual, bool(attention_inputs and attention_inputs.is_prefill))
 
         return DecodeLayerOutput(hidden_states, residual, topk_indices)
 
@@ -841,6 +847,7 @@ class GenericMoeModel(GptModelBase):
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 prev_topk_indices=prev_topk_indices,
                 enable_cmp=enable_cmp,
+                attention_inputs=inputs.attention_inputs,
             )
             hidden_states = output.hidden_states
             residual = output.residual

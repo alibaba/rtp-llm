@@ -34,4 +34,24 @@ void invokeNoAuxTc(T*                 scores,
                    double const       routed_scaling_factor,
                    cudaStream_t const stream = 0);
 
+template<typename InputT, typename IdxT>
+void invokeFusedNoAuxTc(const InputT*      logits,
+                        const float*       correction_bias,
+                        float*             topk_values,
+                        IdxT*              topk_indices,
+                        int64_t const      num_tokens,
+                        int                norm_node,
+                        double const       routed_scaling_factor,
+                        cudaStream_t const stream = 0);
+
+template<typename InputT, typename IdxT>
+void invokeFusedNoAuxTcSingleGroup(const InputT*      logits,
+                                   const float*       correction_bias,
+                                   float*             topk_values,
+                                   IdxT*              topk_indices,
+                                   int64_t const      num_tokens,
+                                   int                norm_node,
+                                   double const       routed_scaling_factor,
+                                   cudaStream_t const stream = 0);
+
 }  // namespace rtp_llm
