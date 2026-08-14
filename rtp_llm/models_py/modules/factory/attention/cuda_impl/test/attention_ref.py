@@ -5,11 +5,116 @@ single_prefill_with_kv_cache and single_decode_with_kv_cache functions.
 These can be used as ground truth for testing custom attention implementations.
 """
 
-from typing import List
+import math
+from typing import List, Optional, Sequence
 
 import torch
 from flashinfer.decode import single_decode_with_kv_cache
 from flashinfer.prefill import single_prefill_with_kv_cache
+
+from rtp_llm.ops.compute_ops import LayerKVCache
+
+
+def apply_base_rope_to_qkv_reference(
+    qkv: torch.Tensor,
+    input_lengths: Sequence[int],
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    rope_base: float = 10000.0,
+    position_offsets: Optional[Sequence[int]] = None,
+) -> torch.Tensor:
+    """Apply non-interleaved Base RoPE to packed QKV in float32."""
+    if position_offsets is None:
+        position_offsets = [0] * len(input_lengths)
+    if len(position_offsets) != len(input_lengths):
+        raise ValueError("position_offsets and input_lengths must have equal size")
+
+    q_size = num_q_heads * head_dim
+    kv_size = num_kv_heads * head_dim
+    q = qkv[:, :q_size].reshape(-1, num_q_heads, head_dim).float()
+    k = qkv[:, q_size : q_size + kv_size].reshape(-1, num_kv_heads, head_dim).float()
+    v = qkv[:, q_size + kv_size :]
+
+    positions = torch.cat(
+        [
+            torch.arange(offset, offset + length, device=qkv.device)
+            for offset, length in zip(position_offsets, input_lengths)
+        ]
+    ).float()
+    inv_freq = 1.0 / (
+        rope_base
+        ** (
+            torch.arange(0, head_dim, 2, device=qkv.device, dtype=torch.float32)
+            / head_dim
+        )
+    )
+    freqs = torch.outer(positions, inv_freq)
+    cos = torch.cat([freqs.cos(), freqs.cos()], dim=-1).unsqueeze(1)
+    sin = torch.cat([freqs.sin(), freqs.sin()], dim=-1).unsqueeze(1)
+
+    def rotate_half(x: torch.Tensor) -> torch.Tensor:
+        x1, x2 = x.chunk(2, dim=-1)
+        return torch.cat([-x2, x1], dim=-1)
+
+    q = q * cos + rotate_half(q) * sin
+    k = k * cos + rotate_half(k) * sin
+    return torch.cat([q.flatten(1), k.flatten(1), v.float()], dim=-1).to(qkv.dtype)
+
+
+def compute_paged_prefill_reference(
+    query: torch.Tensor,
+    kv_cache: LayerKVCache,
+    page_table: torch.Tensor,
+    sequence_lengths: Sequence[int],
+    query_lengths: Sequence[int],
+    causal: bool = True,
+) -> torch.Tensor:
+    """Compute a PyTorch prefill reference from an HND paged KV cache."""
+    if len(sequence_lengths) != len(query_lengths):
+        raise ValueError("sequence_lengths and query_lengths must have equal size")
+    if sum(query_lengths) != query.shape[0]:
+        raise ValueError("query_lengths must sum to the number of query tokens")
+
+    cache = kv_cache.kv_cache_base
+    page_size = cache.shape[3]
+    num_kv_heads = cache.shape[2]
+    num_q_heads = query.shape[1]
+    head_dim = query.shape[2]
+    if num_q_heads % num_kv_heads != 0:
+        raise ValueError("num_q_heads must be divisible by num_kv_heads")
+
+    outputs = []
+    query_offset = 0
+    scale = head_dim**-0.5
+    for batch_idx, (kv_len, query_len) in enumerate(
+        zip(sequence_lengths, query_lengths)
+    ):
+        page_count = math.ceil(kv_len / page_size)
+        page_ids = page_table[batch_idx, :page_count].to(
+            device=cache.device, dtype=torch.long
+        )
+        key = cache[page_ids, 0].permute(0, 2, 1, 3)
+        value = cache[page_ids, 1].permute(0, 2, 1, 3)
+        key = key.reshape(-1, num_kv_heads, head_dim)[:kv_len]
+        value = value.reshape(-1, num_kv_heads, head_dim)[:kv_len]
+        head_group_size = num_q_heads // num_kv_heads
+        key = key.repeat_interleave(head_group_size, dim=1).float()
+        value = value.repeat_interleave(head_group_size, dim=1).float()
+        q = query[query_offset : query_offset + query_len].float()
+        query_offset += query_len
+
+        scores = torch.einsum("qhd,khd->hqk", q, key) * scale
+        if causal:
+            q_positions = (
+                torch.arange(query_len, device=query.device) + kv_len - query_len
+            )
+            k_positions = torch.arange(kv_len, device=query.device)
+            causal_mask = k_positions[None, :] <= q_positions[:, None]
+            scores.masked_fill_(~causal_mask.unsqueeze(0), float("-inf"))
+        probs = torch.softmax(scores, dim=-1)
+        outputs.append(torch.einsum("hqk,khd->qhd", probs, value))
+    return torch.cat(outputs).to(query.dtype)
 
 
 def compute_flashinfer_prefill_reference(
