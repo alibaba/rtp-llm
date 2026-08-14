@@ -133,17 +133,12 @@ class SparseAttnV4DecodeFp8Op:
             extra_topk_length,
         )
 
-    _sm120_workspace: dict[torch.device, torch.Tensor] = {}
-
     @classmethod
     def _get_sm120_workspace(cls, device: torch.device) -> torch.Tensor:
-        workspace = cls._sm120_workspace.get(device)
-        if workspace is None:
-            workspace = torch.empty(
-                128 * 1024 * 1024, dtype=torch.uint8, device=device
-            )
-            cls._sm120_workspace[device] = workspace
-        return workspace
+        # Kept as a compatibility shim for existing focused tests.
+        from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import workspace
+
+        return workspace(device)
 
     def _forward_sm120_flashinfer(
         self,
@@ -157,95 +152,28 @@ class SparseAttnV4DecodeFp8Op:
         extra_topk_length: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """SM120 packed sparse MLA through FlashInfer (vLLM main parity)."""
-        try:
-            from flashinfer.decode import trtllm_batch_decode_sparse_mla_dsv4
-        except ImportError as exc:
-            raise RuntimeError(
-                "SM120 DSV4 sparse decode requires FlashInfer's "
-                "trtllm_batch_decode_sparse_mla_dsv4"
-            ) from exc
-        batch, q_len, heads, dim = q.shape
-
-        def flattened_indices(indices: torch.Tensor) -> torch.Tensor:
-            if indices.dim() == 4:
-                indices = indices.squeeze(2)
-            return (
-                indices.reshape(batch * q_len, -1)
-                .to(torch.int32)
-                .contiguous()
-            )
-
-        def token_lens(lengths: Optional[torch.Tensor], width: int) -> torch.Tensor:
-            if lengths is None:
-                return torch.full(
-                    (batch * q_len,), width, dtype=torch.int32, device=q.device
-                )
-            lengths = lengths.to(device=q.device, dtype=torch.int32).reshape(-1)
-            if lengths.numel() == batch:
-                lengths = lengths.repeat_interleave(q_len)
-            if lengths.numel() != batch * q_len:
-                raise ValueError(
-                    f"top-k lengths have {lengths.numel()} entries; "
-                    f"expected {batch * q_len}"
-                )
-            return lengths.contiguous()
-
-        def canonical_topk(
-            indices: torch.Tensor, lengths: Optional[torch.Tensor]
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            """Select a FlashInfer-instantiated width without a graph sync."""
-            width = int(indices.shape[-1])
-            if width == 256:
-                # DSpark graph buffers pad the fixed SWA Top-K=128 to 256.
-                width = 128
-            if width not in (128, 512, 1024):
-                raise RuntimeError(
-                    "SM120 DSV4 sparse attention supports Top-K widths "
-                    f"128/512/1024 (and DSpark padding 256->128), got {width}"
-                )
-            return indices[..., :width].contiguous(), token_lens(lengths, width)
-
-        def pack_logical_workspace(
-            pool: torch.Tensor, indices: torch.Tensor, page_size: int
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            """Gather logical slots, then transiently pack the SM120 page ABI.
-
-            Persistent RTP cache layout (including SWA's 132-entry ring) stays
-            untouched.  The incoming indices already encode ring order, so the
-            gathered rows form exactly the logical attention workspace.
-            """
-            from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
-                gather_k_cache_slots_packed,
-            )
-            from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
-                insert_packed_k_cache_flat,
-            )
-
-            flat_indices = indices.reshape(-1)
-            valid = flat_indices >= 0
-            packed_rows = gather_k_cache_slots_packed(pool, flat_indices)
-            slot_count = int(flat_indices.numel())
-            page_count = max((slot_count + page_size - 1) // page_size, 1)
-            packed = torch.zeros(
-                (page_count, page_size, pool.shape[-1]),
-                dtype=pool.dtype,
-                device=pool.device,
-            )
-            local_slots = torch.arange(slot_count, dtype=torch.int64, device=pool.device)
-            insert_packed_k_cache_flat(packed_rows, packed, local_slots)
-            # FlashInfer masks with the explicit top-k length, but still
-            # vector-loads tail indices. Match vLLM's zero-initialized index
-            # buffers so every speculative load addresses a valid slot.
-            remapped = local_slots.to(torch.int32).masked_fill(~valid, 0)
-            return packed, remapped.view_as(indices)
-
-        swa_indices = flattened_indices(topk_idxs)
-        swa_indices, swa_topk_lens = canonical_topk(swa_indices, topk_length)
-        extra_indices = (
-            flattened_indices(extra_topk_idxs)
-            if extra_topk_idxs is not None
-            else None
+        from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import (
+            canonical_topk,
+            pack_logical_workspace,
+            run,
+            token_lens,
         )
+
+        batch, q_len, heads, dim = q.shape
+        rows = batch * q_len
+        swa_indices = topk_idxs.squeeze(2) if topk_idxs.dim() == 4 else topk_idxs
+        swa_indices, swa_topk_lens = canonical_topk(
+            swa_indices.reshape(rows, -1),
+            topk_length,
+            (128, 512, 1024),
+            trim_dspark_padding=True,
+            pad_to_supported=False,
+        )
+        extra_indices = extra_topk_idxs
+        if extra_indices is not None and extra_indices.dim() == 4:
+            extra_indices = extra_indices.squeeze(2)
+        if extra_indices is not None:
+            extra_indices = extra_indices.reshape(rows, -1).to(torch.int32).contiguous()
 
         swa_decode_cache, swa_indices = pack_logical_workspace(
             kv_cache, swa_indices, page_size=64
@@ -262,26 +190,21 @@ class SparseAttnV4DecodeFp8Op:
 
         flat_q = q.reshape(batch * q_len, heads, dim).contiguous()
         flat_out = torch.empty_like(flat_q)
-        trtllm_batch_decode_sparse_mla_dsv4(
+        run(
             query=flat_q,
-            swa_kv_cache=swa_decode_cache.unsqueeze(-2),
-            workspace_buffer=self._get_sm120_workspace(q.device),
-            sparse_indices=swa_indices,
-            compressed_kv_cache=(
-                extra_decode_cache.unsqueeze(-2)
-                if extra_decode_cache is not None
+            swa_cache=swa_decode_cache,
+            swa_indices=swa_indices,
+            swa_lens=swa_topk_lens,
+            extra_cache=extra_decode_cache,
+            extra_indices=extra_indices,
+            extra_lens=(
+                token_lens(extra_topk_length, rows, extra_indices.shape[-1], q.device)
+                if extra_indices is not None
                 else None
             ),
             out=flat_out,
-            bmm1_scale=self.softmax_scale,
+            scale=self.softmax_scale,
             sinks=attn_sink.float(),
-            kv_layout="NHD",
-            swa_topk_lens=swa_topk_lens,
-            extra_sparse_indices=extra_indices,
-            extra_sparse_topk_lens=(
-                token_lens(extra_topk_length, extra_indices.shape[-1])
-                if extra_indices is not None else None
-            ),
         )
         return flat_out.view_as(q)
 

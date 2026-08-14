@@ -5434,12 +5434,12 @@ class AttentionFP8(nn.Module):
         sm120_cache = None
         sm120_extra_cache = None
         if use_sm120:
-            from flashinfer.decode import trtllm_batch_decode_sparse_mla_dsv4
             from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
                 quantize_and_insert_k_cache,
             )
-            from rtp_llm.models_py.modules.dsv4.fp8.decode.fp8_sparse_attn_decode_op import (
-                SparseAttnV4DecodeFp8Op,
+            from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import (
+                canonical_topk,
+                run as run_sm120_sparse_mla,
             )
 
             # Keep RTP's persistent cache and unified logical workspace unchanged.
@@ -5512,33 +5512,19 @@ class AttentionFP8(nn.Module):
                     )
                     if chunk_indices.dim() == 3:
                         chunk_indices = chunk_indices.squeeze(1)
-                    chunk_indices = chunk_indices.to(torch.int32).contiguous()
                     supported = (
                         (128, 512, 1024)
                         if end - start <= 64
                         else (128, 512, 1024, 2048)
                     )
-                    width = int(chunk_indices.shape[-1])
-                    if width not in supported:
-                        padded_width = next(
-                            (candidate for candidate in supported if candidate >= width),
-                            None,
-                        )
-                        if padded_width is None:
-                            raise RuntimeError(
-                                "SM120 sparse prefill Top-K width "
-                                f"{width} exceeds the largest FlashInfer "
-                                f"instantiation ({supported[-1]}) for a "
-                                f"{end - start}-row chunk"
-                            )
-                        padded = torch.full(
-                            (end - start, padded_width),
-                            -1,
-                            dtype=torch.int32,
-                            device=q.device,
-                        )
-                        padded[:, :width] = chunk_indices
-                        chunk_indices = padded
+                    chunk_lens = (
+                        sm120_swa_lens[start:end]
+                        if dual_cache
+                        else topk_length[start:end]
+                    )
+                    chunk_indices, chunk_lens = canonical_topk(
+                        chunk_indices, chunk_lens, supported
+                    )
                     from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
                         validate_slot_mapping,
                     )
@@ -5555,31 +5541,21 @@ class AttentionFP8(nn.Module):
                     # be a valid cache slot (vLLM zero-initializes this buffer).
                     chunk_indices.clamp_min_(0)
                     o_part = torch.empty_like(q[start:end])
-                    trtllm_batch_decode_sparse_mla_dsv4(
+                    run_sm120_sparse_mla(
                         query=q[start:end].contiguous(),
-                        swa_kv_cache=sm120_cache.unsqueeze(-2),
-                        workspace_buffer=SparseAttnV4DecodeFp8Op._get_sm120_workspace(
-                            q.device
-                        ),
-                        sparse_indices=chunk_indices,
+                        swa_cache=sm120_cache,
+                        swa_indices=chunk_indices,
                         out=o_part,
-                        bmm1_scale=self.softmax_scale,
+                        scale=self.softmax_scale,
                         sinks=self.attn_sink.float(),
-                        kv_layout="NHD",
-                        swa_topk_lens=(
-                            sm120_swa_lens[start:end]
-                            if dual_cache
-                            else topk_length[start:end]
-                        ).to(torch.int32).contiguous(),
-                        compressed_kv_cache=(
-                            sm120_extra_cache.unsqueeze(-2) if dual_cache else None
-                        ),
-                        extra_sparse_indices=(
+                        swa_lens=chunk_lens,
+                        extra_cache=sm120_extra_cache if dual_cache else None,
+                        extra_indices=(
                             sm120_extra_indices[start:end].to(torch.int32).contiguous()
                             if dual_cache
                             else None
                         ),
-                        extra_sparse_topk_lens=(
+                        extra_lens=(
                             sm120_extra_lens[start:end].to(torch.int32).contiguous()
                             if dual_cache
                             else None
