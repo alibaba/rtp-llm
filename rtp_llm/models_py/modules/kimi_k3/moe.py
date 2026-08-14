@@ -397,6 +397,10 @@ class KimiK3LatentMoE(nn.Module):
             raise RuntimeError(
                 f"K3 MegaMoE tokens/rank={token_count} exceeds capacity={capacity}"
             )
+        # The symmetric input buffer is reused by every layer/chunk.  A rank
+        # whose previous MegaMoE kernel finishes early must not overwrite that
+        # buffer while peers are still consuming it, so rendezvous before pack.
+        self._maybe_pre_kernel_barrier(routed_input.device, token_count)
         self._mega_input_packer.pack(
             routed_input,
             routing_weights,
@@ -404,6 +408,9 @@ class KimiK3LatentMoE(nn.Module):
             self._mega_buf,
             token_count,
         )
+        # Packing is rank-local but the peer kernel consumes every rank's
+        # symmetric buffer.  Rendezvous again after pack so no rank launches
+        # against a peer that has not finished publishing its next input.
         self._maybe_pre_kernel_barrier(routed_input.device, token_count)
         output = self._mega_y[:token_count]
         deep_gemm.fp8_fp4_mega_moe(

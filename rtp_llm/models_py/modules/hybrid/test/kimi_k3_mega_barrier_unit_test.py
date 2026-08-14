@@ -62,7 +62,7 @@ class KimiK3MegaBarrierUnitTest(unittest.TestCase):
         ):
             module._maybe_pre_kernel_barrier(torch.device("cuda:0"), 512)
 
-    def test_expert_sum_orders_pack_barrier_before_peer_kernel(self) -> None:
+    def test_expert_sum_guards_symmetric_buffer_reuse_and_peer_kernel(self) -> None:
         module = self._module()
         module._mega_buf = SimpleNamespace(num_max_tokens_per_rank=512)
         module._mega_input_packer = SimpleNamespace(pack=MagicMock())
@@ -98,8 +98,9 @@ class KimiK3MegaBarrierUnitTest(unittest.TestCase):
 
         self.assertEqual(
             [item[0] for item in calls.method_calls],
-            ["pack", "barrier", "peer_kernel"],
+            ["barrier", "pack", "barrier", "peer_kernel"],
         )
+        self.assertEqual(barrier.call_count, 2)
         self.assertEqual(tuple(output.shape), (3, 4))
 
 
