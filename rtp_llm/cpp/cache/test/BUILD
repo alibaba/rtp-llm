@@ -178,9 +178,46 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    deps = block_cache_test_deps,
+    deps = [
+        "//rtp_llm/cpp/cache:block_pool",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
     env = {},
+    # block_pool selects cuda_host_utils (and NVML) in CUDA builds.
     exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "shared_block_cache_block_pool_test",
+    srcs = [
+        "SharedBlockCacheBlockPoolTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:block_pool",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+    # block_pool selects cuda_host_utils (and NVML) in CUDA builds.
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "cache_group_publication_test",
+    srcs = [
+        "CacheGroupPublicationTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:cache_group_type",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
 )
 
 cc_test(

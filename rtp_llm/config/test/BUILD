@@ -1,17 +1,43 @@
-
 py_test(
     name = "server_config_setup_test",
     srcs = [
         "server_config_setup_test.py",
     ],
     data = [
-        "//rtp_llm/test/model_test/fake_test/testdata:testdata",
-        "//rtp_llm:sdk"
+        "//rtp_llm:sdk",
+        "//rtp_llm/test/model_test/fake_test/testdata",
     ],
+    exec_properties = {"gpu": "H20"},
     deps = [
         "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'H20'},
+)
+
+py_library(
+    name = "kv_cache_config_state_layout",
+    srcs = [
+        "kv_cache_config_state_layout.py",
+    ],
+)
+
+py_library(
+    name = "kv_cache_event_test_values",
+    srcs = [
+        "kv_cache_event_test_values.py",
+    ],
+    data = [
+        "kv_cache_event_validation_cases.inc",
+    ],
+    visibility = ["//rtp_llm/server/server_args/test:__pkg__"],
+    deps = [
+        ":kv_cache_config_state_layout",
+    ],
+)
+
+cc_library(
+    name = "kv_cache_event_validation_cases",
+    textual_hdrs = ["kv_cache_event_validation_cases.inc"],
+    visibility = ["//rtp_llm/cpp/cache/events/test:__pkg__"],
 )
 
 py_test(
@@ -24,5 +50,20 @@ py_test(
     ],
     deps = [
         "//rtp_llm:config",
+    ],
+)
+
+py_test(
+    name = "kv_cache_config_pickle_test",
+    srcs = [
+        "kv_cache_config_pickle_test.py",
+    ],
+    data = [
+        "//:th_transformer_config",
+    ],
+    deps = [
+        ":kv_cache_config_state_layout",
+        ":kv_cache_event_test_values",
+        "//rtp_llm:ops",
     ],
 )

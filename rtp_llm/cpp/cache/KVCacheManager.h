@@ -4,6 +4,7 @@
 #include <cassert>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -13,6 +14,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/events/KVCacheEventPublisher.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
@@ -110,6 +112,10 @@ public:
     KVCacheInfo             getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
     void                    refreshKVCacheInfoSnapshot();
     KVCacheInfo             buildKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
+    // Safe after init() completes and before teardown begins. The metrics
+    // thread is joined before teardown mutates the backing publisher members;
+    // any future caller must preserve the same lifetime boundary.
+    PublisherStatus cacheEventPublisherStatus() const;
 
     // 系统资源管理
     void regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
@@ -168,6 +174,9 @@ public:
 
 private:
     void initConnectorCoordinator();
+    void initCacheEventPublisher();
+    void resetCacheEventPublisherToNull(std::optional<PublisherStatus> diagnostic_status = std::nullopt) noexcept;
+    void stopCacheEventPublisher() noexcept;
     void allocateAndSync();
     void reportMetricsLoop();
     void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
@@ -184,6 +193,7 @@ private:
     const PDSepConfig                  pd_sep_config_;
     const CacheStoreConfig             cache_store_config_;
     const bool                         use_cuda_malloc_block_pool_;
+    const bool                         warmup_;
 
     std::shared_ptr<CPSlotMapper>                   cp_slot_mapper_;
     std::unique_ptr<PrefillCacheHitMetricsReporter> prefill_cache_hit_metrics_reporter_;
@@ -195,6 +205,11 @@ private:
 
     mutable std::mutex                 cache_status_snapshot_mutex_;
     std::shared_ptr<const KVCacheInfo> cache_status_snapshot_;
+    KVCacheEventPublisherPtr           cache_event_publisher_;
+    SharedBlockCachePtr                publisher_shared_cache_;
+    // Set only during single-threaded initialization and then read by the
+    // metrics thread. The cache hot path still receives a Null publisher.
+    std::optional<PublisherStatus> cache_event_publisher_diagnostic_status_;
 
     mutable std::mutex          cache_store_mutex_;
     std::shared_ptr<CacheStore> cache_store_;

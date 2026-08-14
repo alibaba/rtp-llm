@@ -4,8 +4,11 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <numeric>
+#include <stdexcept>
+#include <type_traits>
 #include <unordered_set>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -18,6 +21,10 @@
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
+#include "rtp_llm/cpp/cache/events/KVCacheEventMetrics.h"
+#include "rtp_llm/cpp/cache/events/KVCacheEventPublisherAssembly.h"
+#include "rtp_llm/cpp/cache/events/KVCacheEventPublisherConfig.h"
+#include "rtp_llm/cpp/cache/events/KVCacheEventPublisherFactory.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -178,7 +185,8 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     sp_config_(sp_config),
     pd_sep_config_(pd_sep_config),
     cache_store_config_(cache_store_config),
-    use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool) {
+    use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool),
+    warmup_(warmup) {
     if (warmup) {
         config_.finalizeBlockNums(/*global_block_num=*/1, runtime_config_);
     } else {
@@ -218,6 +226,7 @@ KVCacheManager::~KVCacheManager() {
     if (metrics_reporter_thread_.joinable()) {
         metrics_reporter_thread_.join();
     }
+    stopCacheEventPublisher();
     allocator_.reset();
     coordinator_.reset();
 }
@@ -261,12 +270,14 @@ bool KVCacheManager::init() {
     shared_cache->setIndependentGroupEviction(enable_independent_group_eviction,
                                               allocator_->independentEvictionGroupIds());
 
+    initConnectorCoordinator();
+    initCacheEventPublisher();
+    // Start metrics only after the publisher pointer becomes stable. The
+    // destructor joins this thread before stopping/resetting the publisher.
     if (metrics_reporter_) {
         stop_.store(false, std::memory_order_relaxed);
         metrics_reporter_thread_ = std::thread(&KVCacheManager::reportMetricsLoop, this);
     }
-
-    initConnectorCoordinator();
     return true;
 }
 
@@ -567,6 +578,16 @@ KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_c
     return info;
 }
 
+PublisherStatus KVCacheManager::cacheEventPublisherStatus() const {
+    if (cache_event_publisher_diagnostic_status_) {
+        return *cache_event_publisher_diagnostic_status_;
+    }
+    if (!cache_event_publisher_) {
+        return {};
+    }
+    return cache_event_publisher_->status();
+}
+
 // 系统资源管理
 
 void KVCacheManager::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
@@ -638,6 +659,249 @@ void KVCacheManager::initConnectorCoordinator() {
     RTP_LLM_CHECK_WITH_INFO(coordinator_->init(), "connector coordinator init failed");
 }
 
+void KVCacheManager::initCacheEventPublisher() {
+    try {
+        const auto& publisher_type = kv_cache_config_.kv_cache_event_publisher_type;
+        // Resolve all topology-independent gates before querying allocator
+        // groups. A disabled or unsupported optional exporter must not touch
+        // cache topology, allocate vectors, or create a new failure path for
+        // inference startup.
+        if (warmup_ || isInactiveKVCacheEventPublisherType(publisher_type)) {
+            resetCacheEventPublisherToNull();
+            return;
+        }
+        const bool       cp_sharded = cp_slot_mapper_ && cp_slot_mapper_->isSharded();
+        auto             gate       = evaluateKVCacheEventPublisherGate(publisher_type,
+                                                      /*warmup=*/false,
+                                                      parallelism_config_.tp_rank,
+                                                      parallelism_config_.pp_size,
+                                                      cp_sharded,
+                                                      /*has_reuse_group=*/true,
+                                                      /*all_reuse_groups_on_device=*/true);
+        std::vector<int> reuse_group_ids;
+        if (gate == KVCacheEventPublisherGate::ENABLED) {
+            // Completeness set for publication: only groups whose reuse chains
+            // are densely materialized (tail-sparse LINEAR/SWA groups are
+            // excluded). An empty set would mean "READY but never publishes".
+            reuse_group_ids                     = allocator_->reuseParticipatingGroupIds();
+            const auto group_policies           = config_.groupPoliciesSnapshot();
+            const bool device_only_reuse_groups = kvCacheEventGroupsUseDeviceMemory(group_policies, reuse_group_ids);
+            gate                                = evaluateKVCacheEventPublisherGate(publisher_type,
+                                                     /*warmup=*/false,
+                                                     parallelism_config_.tp_rank,
+                                                     parallelism_config_.pp_size,
+                                                     cp_sharded,
+                                                     !reuse_group_ids.empty(),
+                                                     device_only_reuse_groups);
+        }
+        switch (gate) {
+            case KVCacheEventPublisherGate::ENABLED:
+                break;
+            case KVCacheEventPublisherGate::DISABLED_INACTIVE:
+                resetCacheEventPublisherToNull();
+                return;
+            case KVCacheEventPublisherGate::DISABLED_UNKNOWN_TYPE:
+                RTP_LLM_LOG_WARNING("unknown KV cache event publisher type=%s; publisher disabled",
+                                    publisher_type.c_str());
+                resetCacheEventPublisherToNull(publisherGateFailureStatus());
+                return;
+            case KVCacheEventPublisherGate::DISABLED_PIPELINE_PARALLEL:
+                RTP_LLM_LOG_WARNING("KV cache event publisher disabled because pipeline parallelism is unsupported, "
+                                    "type=%s pp_size=%lld tp_rank=%lld dp_rank=%lld",
+                                    publisher_type.c_str(),
+                                    static_cast<long long>(parallelism_config_.pp_size),
+                                    static_cast<long long>(parallelism_config_.tp_rank),
+                                    static_cast<long long>(parallelism_config_.dp_rank));
+                resetCacheEventPublisherToNull(publisherGateFailureStatus());
+                return;
+            case KVCacheEventPublisherGate::DISABLED_CP_SHARDED:
+                RTP_LLM_LOG_WARNING("KV cache event publisher disabled because CP sharded KV cache is unsupported: "
+                                    "per-rank keys use virtual block granularity (%d tokens) that differs from the "
+                                    "published block size (%zu tokens), type=%s tp_rank=%lld dp_rank=%lld",
+                                    cp_slot_mapper_->virtualBlockSize(),
+                                    config_.seq_size_per_block,
+                                    publisher_type.c_str(),
+                                    static_cast<long long>(parallelism_config_.tp_rank),
+                                    static_cast<long long>(parallelism_config_.dp_rank));
+                resetCacheEventPublisherToNull(publisherGateFailureStatus());
+                return;
+            case KVCacheEventPublisherGate::DISABLED_NON_OWNER_RANK:
+                RTP_LLM_LOG_INFO(
+                    "KV cache event publisher disabled on non-owner rank, type=%s tp_rank=%lld dp_rank=%lld",
+                    publisher_type.c_str(),
+                    static_cast<long long>(parallelism_config_.tp_rank),
+                    static_cast<long long>(parallelism_config_.dp_rank));
+                resetCacheEventPublisherToNull();
+                return;
+            case KVCacheEventPublisherGate::DISABLED_NO_REUSE_GROUP:
+                RTP_LLM_LOG_ERROR("KV cache event publisher disabled because no cache group participates in prefix "
+                                  "reuse, type=%s group_nums=%d",
+                                  publisher_type.c_str(),
+                                  config_.groupNums());
+                resetCacheEventPublisherToNull(publisherGateFailureStatus());
+                return;
+            case KVCacheEventPublisherGate::DISABLED_NON_DEVICE_GROUP:
+                RTP_LLM_LOG_WARNING("KV cache event publisher disabled because its HBM location cannot represent "
+                                    "a dense reusable cache group placed on host memory, type=%s",
+                                    publisher_type.c_str());
+                resetCacheEventPublisherToNull(publisherGateFailureStatus());
+                return;
+        }
+
+        if (publisher_type == kKVCacheEventPublisherKVCM && kv_cache_config_.kv_cache_event_instance_group.empty()
+            && kv_cache_config_.reco_instance_group == "default") {
+            RTP_LLM_LOG_WARNING(
+                "KV cache event publisher is using the placeholder reco instance group 'default'; "
+                "configure an explicit event or reco instance group to avoid cross-deployment grouping");
+        }
+        if (publisher_type == kKVCacheEventPublisherKVCM && parallelism_config_.dp_size > 1) {
+            // KVCM scopes reporter state by (instance_id, host_ip_port). A
+            // process cannot prove that another DP process received a
+            // different environment value, so surface the deployment
+            // invariant on every owner instead of guessing from hostname
+            // formatting or silently rewriting a routable endpoint.
+            RTP_LLM_LOG_WARNING("KV cache event publisher with dp_size=%lld requires a unique "
+                                "(instance_id, host_ip_port) owner pair per DP replica; current dp_rank=%lld "
+                                "instance_id=%s host=%s",
+                                static_cast<long long>(parallelism_config_.dp_size),
+                                static_cast<long long>(parallelism_config_.dp_rank),
+                                kv_cache_config_.kv_cache_event_instance_id.c_str(),
+                                kv_cache_config_.kv_cache_event_host_ip_port.c_str());
+        }
+
+        publisher_shared_cache_ = allocator_->sharedBlockCache();
+        if (!publisher_shared_cache_) {
+            RTP_LLM_LOG_WARNING("KV cache event publisher disabled because SharedBlockCache is unavailable");
+            resetCacheEventPublisherToNull(publisherGateFailureStatus());
+            return;
+        }
+
+        const auto publisher_config =
+            deriveKVCacheEventPublisherConfig(makeKVCacheEventPublisherRawSettings(kv_cache_config_));
+        std::vector<int64_t> group_block_size_bytes;
+        group_block_size_bytes.reserve(reuse_group_ids.size());
+        for (const int group_id : reuse_group_ids) {
+            if (group_id < 0 || group_id >= config_.groupNums()) {
+                throw std::runtime_error("invalid reuse-participating KV cache group id");
+            }
+            group_block_size_bytes.push_back(
+                static_cast<int64_t>(config_.blockSizeBytesForGroup(static_cast<size_t>(group_id))));
+        }
+        // Pipeline parallelism is rejected above because a unique PP owner is
+        // not represented in ParallelismConfig yet.
+        const auto spec_size_bytes =
+            aggregateKVCacheEventSpecSizeBytes(group_block_size_bytes, parallelism_config_.tp_size);
+        if (!spec_size_bytes) {
+            throw std::runtime_error("invalid or overflowing KV cache event spec size");
+        }
+        // KVCM derives storage usage from the URI query parameter on every
+        // reported location spec; the registration-only size is not consulted
+        // by ReportEvent.
+        auto context_settings       = makeKVCacheEventPublisherContextSettings(kv_cache_config_);
+        context_settings.model_name = runtime_config_.model_name;
+        context_settings.dtype      = getDataTypeStr(config_.dtype);
+        if (config_.seq_size_per_block > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+            throw std::runtime_error("KV cache event block_size_tokens exceeds int32 range");
+        }
+        context_settings.block_size_tokens = static_cast<int32_t>(config_.seq_size_per_block);
+        context_settings.spec_size_bytes   = *spec_size_bytes;
+        context_settings.tp_size           = checkedKVCacheEventInt32(parallelism_config_.tp_size, "tp_size");
+        context_settings.dp_size           = checkedKVCacheEventInt32(parallelism_config_.dp_size, "dp_size");
+        context_settings.pp_size           = checkedKVCacheEventInt32(parallelism_config_.pp_size, "pp_size");
+        context_settings.dp_rank           = checkedKVCacheEventInt32(parallelism_config_.dp_rank, "dp_rank");
+        context_settings.use_mla           = config_.use_mla;
+        const auto publisher_context       = makeKVCacheEventPublisherContext(context_settings);
+
+        std::weak_ptr<SharedBlockCache> weak_shared_cache = publisher_shared_cache_;
+        auto snapshot_provider = [weak_shared_cache, max_keys = publisher_config.snapshot_max_keys]() {
+            const auto shared_cache = weak_shared_cache.lock();
+            if (!shared_cache) {
+                throw std::runtime_error("SharedBlockCache is no longer available");
+            }
+            auto logical_snapshot = shared_cache->logicalCacheSnapshot(max_keys);
+            if (logical_snapshot.limit_exceeded) {
+                throw std::length_error("SharedBlockCache logical snapshot exceeds configured key limit");
+            }
+            KVCacheSnapshot snapshot;
+            static_assert(std::is_same_v<CacheKeyType, int64_t>);
+            snapshot.block_keys = std::move(logical_snapshot.cache_keys);
+            return snapshot;
+        };
+
+        cache_event_publisher_ =
+            createKVCacheEventPublisher(publisher_config, publisher_context, std::move(snapshot_provider));
+        const bool install_before_start = installKVCacheEventPublisherBeforeStart(publisher_type);
+        if (install_before_start) {
+            publisher_shared_cache_->setEventPublisher(cache_event_publisher_, reuse_group_ids);
+        }
+        if (!cache_event_publisher_->start() || !cache_event_publisher_->enabled()) {
+            const auto diagnostic_status = publisherInitializationFailureStatus(cache_event_publisher_);
+            RTP_LLM_LOG_WARNING("KV cache event publisher failed to start, type=%s; inference remains enabled",
+                                publisher_type.c_str());
+            resetCacheEventPublisherToNull(diagnostic_status);
+            return;
+        }
+        if (!install_before_start) {
+            publisher_shared_cache_->setEventPublisher(cache_event_publisher_, reuse_group_ids);
+        }
+
+        RTP_LLM_LOG_INFO("KV cache event publisher started, type=%s instance_group=%s instance_id=%s host=%s "
+                         "pp_size=%lld tp_rank=%lld dp_rank=%lld",
+                         publisher_type.c_str(),
+                         publisher_context.instance_group.c_str(),
+                         publisher_context.instance_id.c_str(),
+                         publisher_context.host_ip_port.c_str(),
+                         static_cast<long long>(parallelism_config_.pp_size),
+                         static_cast<long long>(parallelism_config_.tp_rank),
+                         static_cast<long long>(parallelism_config_.dp_rank));
+    } catch (const std::exception& e) {
+        resetCacheEventPublisherToNull(publisherInitializationFailureStatus(cache_event_publisher_));
+        RTP_LLM_LOG_WARNING("KV cache event publisher initialization failed; inference remains enabled: %s", e.what());
+    } catch (...) {
+        resetCacheEventPublisherToNull(publisherInitializationFailureStatus(cache_event_publisher_));
+        RTP_LLM_LOG_WARNING(
+            "KV cache event publisher initialization failed with unknown error; inference remains enabled");
+    }
+}
+
+void KVCacheManager::resetCacheEventPublisherToNull(std::optional<PublisherStatus> diagnostic_status) noexcept {
+    stopCacheEventPublisher();
+    cache_event_publisher_diagnostic_status_ = diagnostic_status;
+
+    try {
+        cache_event_publisher_ = createNullKVCacheEventPublisher();
+    } catch (const std::exception& e) {
+        // A null shared_ptr has the same disabled behavior in
+        // cacheEventPublisherStatus(); tolerate even allocation failure.
+        cache_event_publisher_.reset();
+        RTP_LLM_LOG_WARNING("failed to allocate Null KV cache event publisher: %s", e.what());
+    } catch (...) {
+        cache_event_publisher_.reset();
+        RTP_LLM_LOG_WARNING("failed to allocate Null KV cache event publisher with unknown error");
+    }
+}
+
+void KVCacheManager::stopCacheEventPublisher() noexcept {
+    // Move ownership out first so every exit path leaves the manager detached.
+    // A stopped publisher retained by SharedBlockCache is harmless: its
+    // enabled() check removes it from the mutation hot path on the next access.
+    auto shared_cache = std::move(publisher_shared_cache_);
+    auto publisher    = std::move(cache_event_publisher_);
+
+    if (shared_cache) {
+        try {
+            shared_cache->setEventPublisher(nullptr, {});
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("failed to detach KV cache event publisher during teardown: %s", e.what());
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("failed to detach KV cache event publisher during teardown with unknown error");
+        }
+    }
+    if (publisher) {
+        publisher->stop();
+    }
+}
+
 void KVCacheManager::allocateAndSync() {
     RTP_LLM_LOG_INFO("allocateAndSync start, block_num=%d", config_.block_num);
     size_t world_size = parallelism_config_.tp_size * parallelism_config_.dp_size;
@@ -663,8 +927,21 @@ void KVCacheManager::allocateAndSync() {
 void KVCacheManager::reportMetricsLoop() {
     RTP_LLM_PROFILE_FUNCTION();
     kmonitor::MetricsTags tags;
-    constexpr auto        kLogInterval  = std::chrono::minutes(1);
-    auto                  last_log_time = std::chrono::steady_clock::now() - kLogInterval;
+    constexpr auto        kLogInterval               = std::chrono::minutes(1);
+    auto                  last_log_time              = std::chrono::steady_clock::now() - kLogInterval;
+    auto                  next_event_metrics_attempt = std::chrono::steady_clock::time_point::min();
+    uint64_t              event_metrics_error_count  = 0;
+    const auto            warn_event_metrics_failure = [&](const char* detail) noexcept {
+        ++event_metrics_error_count;
+        next_event_metrics_attempt = std::chrono::steady_clock::now() + kLogInterval;
+        // Failed metric-group creation can itself log internally. Retrying at
+        // most once per minute prevents a broken optional group from creating
+        // a one-Hz allocation/log loop on the shared metrics thread.
+        RTP_LLM_LOG_WARNING("KV cache event metrics failed; inference remains active, "
+                                       "failures=%llu retry_in=1m detail=%s",
+                            static_cast<unsigned long long>(event_metrics_error_count),
+                            detail);
+    };
     while (!stop_.load(std::memory_order_relaxed)) {
         if (!metrics_reporter_ || !allocator_) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -673,6 +950,30 @@ void KVCacheManager::reportMetricsLoop() {
 
         auto global_metrics = collectGlobalCacheMetrics(allocator_);
         metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(&tags, &global_metrics.collector);
+
+        // Only the TP owner has a publisher lifecycle. Avoid duplicate
+        // DISABLED series from non-owner ranks that happen to share the same
+        // process-level reporter.
+        if (shouldReportKVCacheEventMetrics(parallelism_config_.tp_rank)
+            && std::chrono::steady_clock::now() >= next_event_metrics_attempt) {
+            try {
+                const auto publisher_status = cacheEventPublisherStatus();
+                const auto shared_cache     = allocator_->sharedBlockCache();
+                const auto rejected_inserts = shared_cache ? shared_cache->capacityRejectedInsertCount() : 0;
+                auto       event_metrics    = makeKVCacheEventMetricsCollector(publisher_status, rejected_inserts);
+                if (!metrics_reporter_->report<RtpLLMKVCacheEventMetrics, RtpLLMKVCacheEventMetricsCollector>(
+                        &tags, &event_metrics)) {
+                    warn_event_metrics_failure("metrics group initialization returned false");
+                }
+            } catch (const std::exception& e) {
+                // KV event export and its observability are optional. In
+                // particular, a kmonitor allocation failure must not escape
+                // this thread and terminate the inference process.
+                warn_event_metrics_failure(e.what());
+            } catch (...) {
+                warn_event_metrics_failure("unknown exception");
+            }
+        }
 
         const auto now        = std::chrono::steady_clock::now();
         const bool should_log = (now - last_log_time) >= kLogInterval;

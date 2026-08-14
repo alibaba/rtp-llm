@@ -493,6 +493,22 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_independent_group_eviction", &KVCacheConfig::enable_independent_group_eviction)
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
+        .def_readwrite("kv_cache_event_publisher_type", &KVCacheConfig::kv_cache_event_publisher_type)
+        .def_readwrite("kv_cache_event_manager_endpoint", &KVCacheConfig::kv_cache_event_manager_endpoint)
+        .def_readwrite("kv_cache_event_instance_group", &KVCacheConfig::kv_cache_event_instance_group)
+        .def_readwrite("kv_cache_event_instance_id", &KVCacheConfig::kv_cache_event_instance_id)
+        .def_readwrite("kv_cache_event_host_ip_port", &KVCacheConfig::kv_cache_event_host_ip_port)
+        .def_readwrite("kv_cache_event_queue_capacity", &KVCacheConfig::kv_cache_event_queue_capacity)
+        .def_readwrite("kv_cache_event_report_batch_size", &KVCacheConfig::kv_cache_event_report_batch_size)
+        .def_readwrite("kv_cache_event_flush_interval_ms", &KVCacheConfig::kv_cache_event_flush_interval_ms)
+        .def_readwrite("kv_cache_event_heartbeat_interval_ms", &KVCacheConfig::kv_cache_event_heartbeat_interval_ms)
+        .def_readwrite("kv_cache_event_request_timeout_ms", &KVCacheConfig::kv_cache_event_request_timeout_ms)
+        .def_readwrite("kv_cache_event_snapshot_timeout_ms", &KVCacheConfig::kv_cache_event_snapshot_timeout_ms)
+        .def_readwrite("kv_cache_event_retry_interval_ms", &KVCacheConfig::kv_cache_event_retry_interval_ms)
+        .def_readwrite("kv_cache_event_snapshot_interval_ms", &KVCacheConfig::kv_cache_event_snapshot_interval_ms)
+        .def_readwrite("kv_cache_event_log_max_keys", &KVCacheConfig::kv_cache_event_log_max_keys)
+        .def_readwrite("kv_cache_event_snapshot_max_keys", &KVCacheConfig::kv_cache_event_snapshot_max_keys)
+        .def_readwrite("kv_cache_event_snapshot_max_bytes", &KVCacheConfig::kv_cache_event_snapshot_max_bytes)
         // Remote connector configuration fields
         .def_readwrite("reco_enable_vipserver", &KVCacheConfig::reco_enable_vipserver)
         .def_readwrite("reco_vipserver_domain", &KVCacheConfig::reco_vipserver_domain)
@@ -571,10 +587,28 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_legacy_memory_connector_fallback,
                                       self.prefix_tree_memory_state_swa_pool_ratio,
                                       self.enable_independent_group_eviction,
-                                      self.load_cache_retry_times);
+                                      self.load_cache_retry_times,
+                                      // This unreleased event-field block follows declaration order.
+                                      // Future fields must be appended after the block.
+                                      self.kv_cache_event_publisher_type,
+                                      self.kv_cache_event_manager_endpoint,
+                                      self.kv_cache_event_instance_group,
+                                      self.kv_cache_event_instance_id,
+                                      self.kv_cache_event_host_ip_port,
+                                      self.kv_cache_event_queue_capacity,
+                                      self.kv_cache_event_report_batch_size,
+                                      self.kv_cache_event_flush_interval_ms,
+                                      self.kv_cache_event_heartbeat_interval_ms,
+                                      self.kv_cache_event_request_timeout_ms,
+                                      self.kv_cache_event_snapshot_timeout_ms,
+                                      self.kv_cache_event_retry_interval_ms,
+                                      self.kv_cache_event_snapshot_interval_ms,
+                                      self.kv_cache_event_log_max_keys,
+                                      self.kv_cache_event_snapshot_max_keys,
+                                      self.kv_cache_event_snapshot_max_bytes);
             },
             [](py::tuple t) {
-                if (t.size() != 43 && t.size() != 54)
+                if (t.size() != 43 && t.size() != 54 && t.size() != 70)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -633,6 +667,26 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.prefix_tree_memory_state_swa_pool_ratio = t[51].cast<int64_t>();
                         c.enable_independent_group_eviction       = t[52].cast<bool>();
                         c.load_cache_retry_times                  = t[53].cast<int>();
+                    }
+                    if (t.size() >= 70) {
+                        // Keep these indices aligned with the event-field declaration order
+                        // in __getstate__; append future fields after this block.
+                        c.kv_cache_event_publisher_type        = t[54].cast<std::string>();
+                        c.kv_cache_event_manager_endpoint      = t[55].cast<std::string>();
+                        c.kv_cache_event_instance_group        = t[56].cast<std::string>();
+                        c.kv_cache_event_instance_id           = t[57].cast<std::string>();
+                        c.kv_cache_event_host_ip_port          = t[58].cast<std::string>();
+                        c.kv_cache_event_queue_capacity        = t[59].cast<int64_t>();
+                        c.kv_cache_event_report_batch_size     = t[60].cast<int64_t>();
+                        c.kv_cache_event_flush_interval_ms     = t[61].cast<int>();
+                        c.kv_cache_event_heartbeat_interval_ms = t[62].cast<int>();
+                        c.kv_cache_event_request_timeout_ms    = t[63].cast<int>();
+                        c.kv_cache_event_snapshot_timeout_ms   = t[64].cast<int>();
+                        c.kv_cache_event_retry_interval_ms     = t[65].cast<int>();
+                        c.kv_cache_event_snapshot_interval_ms  = t[66].cast<int>();
+                        c.kv_cache_event_log_max_keys          = t[67].cast<int64_t>();
+                        c.kv_cache_event_snapshot_max_keys     = t[68].cast<int64_t>();
+                        c.kv_cache_event_snapshot_max_bytes    = t[69].cast<int64_t>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());

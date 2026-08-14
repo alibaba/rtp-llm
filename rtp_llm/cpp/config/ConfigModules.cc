@@ -144,7 +144,23 @@ std::string KVCacheConfig::to_string() const {
         << "prefix_tree_memory_state_swa_pool_ratio: " << prefix_tree_memory_state_swa_pool_ratio << "\n"
         << "enable_independent_group_eviction: " << enable_independent_group_eviction << "\n"
         << "device_cache_min_free_blocks: " << device_cache_min_free_blocks << "\n"
-        << "load_cache_retry_times: " << load_cache_retry_times << "\n";
+        << "load_cache_retry_times: " << load_cache_retry_times << "\n"
+        << "kv_cache_event_publisher_type: " << kv_cache_event_publisher_type << "\n"
+        << "kv_cache_event_manager_endpoint: " << kv_cache_event_manager_endpoint << "\n"
+        << "kv_cache_event_instance_group: " << kv_cache_event_instance_group << "\n"
+        << "kv_cache_event_instance_id: " << kv_cache_event_instance_id << "\n"
+        << "kv_cache_event_host_ip_port: " << kv_cache_event_host_ip_port << "\n"
+        << "kv_cache_event_queue_capacity: " << kv_cache_event_queue_capacity << "\n"
+        << "kv_cache_event_report_batch_size: " << kv_cache_event_report_batch_size << "\n"
+        << "kv_cache_event_flush_interval_ms: " << kv_cache_event_flush_interval_ms << "\n"
+        << "kv_cache_event_heartbeat_interval_ms: " << kv_cache_event_heartbeat_interval_ms << "\n"
+        << "kv_cache_event_request_timeout_ms: " << kv_cache_event_request_timeout_ms << "\n"
+        << "kv_cache_event_snapshot_timeout_ms: " << kv_cache_event_snapshot_timeout_ms << "\n"
+        << "kv_cache_event_retry_interval_ms: " << kv_cache_event_retry_interval_ms << "\n"
+        << "kv_cache_event_snapshot_interval_ms: " << kv_cache_event_snapshot_interval_ms << "\n"
+        << "kv_cache_event_log_max_keys: " << kv_cache_event_log_max_keys << "\n"
+        << "kv_cache_event_snapshot_max_keys: " << kv_cache_event_snapshot_max_keys << "\n"
+        << "kv_cache_event_snapshot_max_bytes: " << kv_cache_event_snapshot_max_bytes << "\n";
     return oss.str();
 }
 

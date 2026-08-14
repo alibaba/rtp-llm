@@ -181,6 +181,27 @@ struct KVCacheConfig {
     int64_t device_cache_min_free_blocks            = 0;
     int     load_cache_retry_times                  = 1;  // Maximum retry attempts for load cache transfer failures
 
+    // HBM cache event publishing. Only tp_rank=0 with pp_size=1 creates an active publisher for each DP replica.
+    // C++ declaration order is not the pickle layout: ConfigInit.cc appends
+    // this block after the legacy 54 fields. Future pickle fields must be
+    // appended to __getstate__ and added to __setstate__ as a new whole layout.
+    std::string kv_cache_event_publisher_type        = "none";  // none | log | kvcm
+    std::string kv_cache_event_manager_endpoint      = "";      // KVCM Meta HTTP endpoint
+    std::string kv_cache_event_instance_group        = "";
+    std::string kv_cache_event_instance_id           = "";
+    std::string kv_cache_event_host_ip_port          = "";
+    int64_t     kv_cache_event_queue_capacity        = 100000;
+    int64_t     kv_cache_event_report_batch_size     = 1000;
+    int         kv_cache_event_flush_interval_ms     = 20;
+    int         kv_cache_event_heartbeat_interval_ms = 1000;
+    int         kv_cache_event_request_timeout_ms    = 1500;
+    int         kv_cache_event_snapshot_timeout_ms   = 30000;
+    int         kv_cache_event_retry_interval_ms     = 500;
+    int         kv_cache_event_snapshot_interval_ms  = 300000;
+    int64_t     kv_cache_event_log_max_keys          = 8;
+    int64_t     kv_cache_event_snapshot_max_keys     = 1000000;
+    int64_t     kv_cache_event_snapshot_max_bytes    = 256 * 1024 * 1024;
+
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;
     std::string reco_vipserver_domain                = "";
@@ -367,7 +388,7 @@ struct FIFOSchedulerConfig {
     //   "N"   -> 1 prefill : N decode (decode-heavy); "1" = strict alternation.
     //   "1/X" -> X prefill : 1 decode (prefill-heavy).
     //   invalid input falls back to "1".
-    std::string decode_prefill_ratio = "1";
+    std::string decode_prefill_ratio        = "1";
     bool        cp_force_single_prefill     = true;
     int64_t     max_inited_kv_cache_streams = 0;
     std::string to_string() const;
@@ -376,9 +397,9 @@ struct FIFOSchedulerConfig {
 struct GrammarConfig {
     bool constrained_json_disable_any_whitespace = false;
     // Service-level xgrammar matcher policy. Requests cannot override it.
-    bool                 terminate_without_stop_token = false;
-    int                  num_workers                  = 8;
-    std::string          tokenizer_info_json;
+    bool        terminate_without_stop_token = false;
+    int         num_workers                  = 8;
+    std::string tokenizer_info_json;
     // Byte cap on xgrammar's internal compiled-grammar cache; <=0 = unlimited.
     int64_t     compiler_cache_bytes = 512 * 1024 * 1024;
     std::string to_string() const;
