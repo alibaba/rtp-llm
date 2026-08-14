@@ -1,5 +1,6 @@
 # Copyright 2025 XunhaoLai. All rights reserved.
 
+import logging
 from typing import Optional
 
 import torch
@@ -7,6 +8,12 @@ import triton
 import triton.language as tl
 
 from ..common.utils import get_cu_seqblocks, robust_allocator
+from .score_chunk import (
+    build_prefill_score_chunks,
+    get_float32_workspace_views,
+    m3_index_score_chunk_enabled,
+    m3_index_score_chunk_rows,
+)
 
 
 _HEUR_flash_attn_fwd_with_block_score_kernel = {
@@ -484,6 +491,165 @@ def _topk_index_kernel(
     tl.store(ti_ptrs, topk_idx.to(ti_ptrs.dtype.element_ty), mask=topk_mask)
 
 
+_INDEX_SCORE_CHUNK_LOGGED = False
+
+
+def _flash_prefill_with_topk_index_chunked(
+    q,
+    k_cache,
+    v_cache,
+    sink,
+    req_to_token,
+    slot_ids,
+    cu_seqlens,
+    seq_lens,
+    prefix_lens,
+    block_size_k,
+    topk,
+    init_blocks,
+    local_blocks,
+    sm_scale,
+    score_type,
+    disable_index_value,
+):
+    total_q, num_heads, qk_head_dim = q.shape
+    max_slots, num_kv_heads, _ = k_cache.shape
+    gqa_group_size = num_heads // num_kv_heads
+    v_head_dim = qk_head_dim if disable_index_value else v_cache.shape[-1]
+    chunk_rows = m3_index_score_chunk_rows()
+    chunks = build_prefill_score_chunks(
+        cu_seqlens,
+        seq_lens,
+        prefix_lens,
+        slot_ids,
+        chunk_rows,
+        block_size_k,
+    )
+    score_capacity = max(
+        num_heads
+        * (chunk.q_end - chunk.q_start)
+        * triton.cdiv(chunk.max_seqlen_k, block_size_k)
+        for chunk in chunks
+    )
+    (score_storage,) = get_float32_workspace_views(q.device, ((score_capacity,),))
+    output = (
+        None
+        if disable_index_value
+        else torch.empty(
+            total_q, num_heads, v_head_dim, dtype=q.dtype, device=q.device
+        )
+    )
+    topk_idx = torch.full(
+        (num_heads, total_q, topk),
+        fill_value=-1,
+        device=q.device,
+        dtype=torch.int32,
+    )
+
+    global _INDEX_SCORE_CHUNK_LOGGED
+    if not _INDEX_SCORE_CHUNK_LOGGED:
+        _INDEX_SCORE_CHUNK_LOGGED = True
+        logging.info(
+            "[M3 index score] chunked legacy path enabled: total_q=%d "
+            "chunk_rows=%d chunks=%d workspace_bytes=%d",
+            total_q,
+            chunk_rows,
+            len(chunks),
+            score_capacity * 4,
+        )
+
+    for chunk in chunks:
+        q_start, q_end = chunk.q_start, chunk.q_end
+        chunk_q = q_end - q_start
+        max_seqblock_k = triton.cdiv(chunk.max_seqlen_k, block_size_k)
+        score_numel = num_heads * chunk_q * max_seqblock_k
+        score = score_storage[:score_numel].view(
+            num_heads, chunk_q, max_seqblock_k
+        )
+        q_chunk = q[q_start:q_end]
+        output_chunk = None if output is None else output[q_start:q_end]
+
+        def grid(meta):
+            return (
+                triton.cdiv(chunk.max_seqlen_q, meta["BLOCK_SIZE_Q"]),
+                (chunk.cu_seqlens.shape[0] - 1) * num_heads,
+            )
+
+        _flash_attn_fwd_with_block_score_kernel[grid](
+            q_chunk,
+            k_cache,
+            v_cache,
+            sink,
+            output_chunk,
+            score,
+            req_to_token,
+            chunk.cu_seqlens,
+            chunk.seq_lens,
+            chunk.prefix_lens,
+            chunk.slot_ids,
+            max_slots,
+            num_heads,
+            gqa_group_size,
+            qk_head_dim,
+            v_head_dim,
+            block_size_k,
+            sm_scale,
+            False,
+            1,
+            q_chunk.stride(0),
+            q_chunk.stride(1),
+            q_chunk.stride(2),
+            k_cache.stride(0),
+            k_cache.stride(1),
+            k_cache.stride(2),
+            v_cache.stride(0) if v_cache is not None else 0,
+            v_cache.stride(1) if v_cache is not None else 0,
+            v_cache.stride(2) if v_cache is not None else 0,
+            sink.stride(0) if sink is not None else 0,
+            sink.stride(1) if sink is not None else 0,
+            output_chunk.stride(0) if output_chunk is not None else 0,
+            output_chunk.stride(1) if output_chunk is not None else 0,
+            output_chunk.stride(2) if output_chunk is not None else 0,
+            score.stride(0),
+            score.stride(1),
+            score.stride(2),
+            req_to_token.stride(0),
+            SCORE_TYPE=score_type,
+            DISABLE_INDEX_VALUE=disable_index_value,
+        )
+
+        cu_seqblocks_q, max_seqblock_q, _, _, _, _ = get_cu_seqblocks(
+            chunk.cu_seqlens,
+            chunk.max_seqlen_q,
+            1,
+            block_size_k,
+        )
+        topk_chunk = topk_idx[:, q_start:q_end, :]
+        _topk_index_kernel[
+            (max_seqblock_q, chunk.cu_seqlens.shape[0] - 1, num_heads)
+        ](
+            score,
+            topk_chunk,
+            1,
+            block_size_k,
+            chunk.cu_seqlens,
+            cu_seqblocks_q,
+            chunk.prefix_lens,
+            topk,
+            init_blocks,
+            local_blocks,
+            score.stride(0),
+            score.stride(1),
+            score.stride(2),
+            topk_chunk.stride(0),
+            topk_chunk.stride(1),
+            topk_chunk.stride(2),
+            MASK_INIT=False,
+            MASK_LOCAL=False,
+        )
+    return output, topk_idx
+
+
 @torch.no_grad()
 def flash_prefill_with_topk_index(
     q: torch.Tensor,
@@ -534,6 +700,25 @@ def flash_prefill_with_topk_index(
     ), "init_blocks + local_blocks must be less than topk"
     if sm_scale is None:
         sm_scale = qk_head_dim**-0.5
+    if m3_index_score_chunk_enabled(total_q, block_size_q):
+        return _flash_prefill_with_topk_index_chunked(
+            q,
+            k_cache,
+            v_cache,
+            sink,
+            req_to_token,
+            slot_ids,
+            cu_seqlens,
+            seq_lens,
+            prefix_lens,
+            block_size_k,
+            topk,
+            init_blocks,
+            local_blocks,
+            sm_scale,
+            score_type,
+            disable_index_value,
+        )
     cu_seqblocks_q, max_seqblock_q, all_seqblock_q, _, _, _ = get_cu_seqblocks(
         cu_seqlens, max_seqlen_q, block_size_q, block_size_k
     )

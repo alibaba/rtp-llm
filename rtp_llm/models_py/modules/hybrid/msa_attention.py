@@ -3269,23 +3269,31 @@ class MSAAttention(nn.Module):
             max_seqlen_q = int(pair_arr.max()) if len(pair_arr) > 0 else 0
             max_seqlen_k = max_kv
 
-            # Build the fmha index-score plan ONCE per forward here (first sparse
-            # layer), reused by every later sparse layer via _cp_shared_meta. The
-            # plan depends only on the segment geometry (cu_seqlens/seq_lens/prefix),
-            # identical across layers -> no per-layer rebuild, no module-global cache.
+            # Build or initialize the fmha index-score plan cache once per forward
+            # here, then reuse it across sparse layers via _cp_shared_meta.
+            from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.score_chunk import (
+                m3_index_score_chunk_enabled,
+            )
             from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.topk_bt_fused import (
                 build_index_score_plan,
                 build_sparse_attn_plan,
             )
 
-            index_score_plan = build_index_score_plan(
-                cu_seqlens,
-                seq_lens_i32,
-                prefix_i32,
-                self.num_idx_heads,
-                1,
-                self.block_size,
-            )
+            if m3_index_score_chunk_enabled(local_tokens):
+                # Chunk plans are built lazily by the first sparse layer and
+                # cached here for the remaining layers. Avoid constructing the
+                # unusable full-Q OnlyScore plan first: its int32 maxscore
+                # geometry can overflow on the long contexts chunking targets.
+                index_score_plan = {}
+            else:
+                index_score_plan = build_index_score_plan(
+                    cu_seqlens,
+                    seq_lens_i32,
+                    prefix_i32,
+                    self.num_idx_heads,
+                    1,
+                    self.block_size,
+                )
             # step3 sparse-attention plan (fmha): GQA num_q_heads/num_kv_heads,
             # kv_block_num=topk. Same per-forward reuse as index_score_plan.
             sparse_attn_plan = build_sparse_attn_plan(
