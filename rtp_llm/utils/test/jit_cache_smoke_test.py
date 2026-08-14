@@ -4,9 +4,7 @@ import contextlib
 import json
 import logging
 import os
-import re
 import shutil
-import tarfile
 import tempfile
 import time
 import unittest
@@ -19,8 +17,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest import mock
 
-import zstandard as zstd
-
 from rtp_llm.utils import jit_cache_manager as jit
 from rtp_llm.utils import jit_cache_store as store
 
@@ -28,18 +24,13 @@ if TYPE_CHECKING:
     from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
 
-# Per-stage caps are clamped to the global Bazel budget.
 GLOBAL_DEADLINE_S = 3300
 REQUEST_TIMEOUT_S = 1800
 WEIGHT_UPDATE_TIMEOUT_S = 600
 PROBE_PUBLISH_TIMEOUT_S = 600
-FAILURE_PATTERN = re.compile(
-    r"FAILED:|error:|Killed|Traceback|out of memory|Cannot allocate|No space left"
-)
 REQUESTS = ((16, 1), (257, 2))
 WEIGHT_NAME = "model.layers.0.input_layernorm.weight"
 State = dict[str, tuple[int, int]]
-# Compiled outputs whose reappearance after a restore signals a recompile.
 BINARY_SUFFIXES = (".so", ".cubin", ".hsaco", ".o")
 
 
@@ -47,9 +38,6 @@ BINARY_SUFFIXES = (".so", ".cubin", ".hsaco", ".o")
 class SmokeConfig:
     model_name: str
     task_info: str
-    # tp_size/world_size here must match gpu_count in the custom_smoke_test
-    # target (utils/test/BUILD); bazel cannot derive it from a custom main.
-    smoke_args: str
     required_components: frozenset[str]
     model_path_env: str | None = None
     cuda_ipc_weight_update: bool = False
@@ -58,11 +46,6 @@ class SmokeConfig:
 CUDA_CONFIG = SmokeConfig(
     model_name="deepseek_v2_lite",
     task_info="rtp_llm/test/smoke/data/model/deepseek_v2/q_r_mla_pymodel.json",
-    smoke_args=(
-        "--warm_up 0 --hack_layer_num 2 --load_method scratch "
-        "--test_block_num 100 --act_type BF16 --quantization FP8_PER_BLOCK "
-        "--seq_size_per_block 64 --tp_size 2 --world_size 2 --reuse_cache 1"
-    ),
     required_components=frozenset({"triton", "torch_extensions"}),
     cuda_ipc_weight_update=True,
 )
@@ -70,11 +53,6 @@ CUDA_CONFIG = SmokeConfig(
 ROCM_CONFIG = SmokeConfig(
     model_name="qwen3_rocm",
     task_info="rtp_llm/test/smoke/data/model/qwen3/q_r_new_model_py.json",
-    smoke_args=(
-        "--warm_up 0 --use_swizzleA 1 --use_asm_pa 1 "
-        "--disable_flashinfer_native 1 --use_aiter_pa 1 --seq_size_per_block 16 "
-        "--act_type BF16 --test_block_num 1000 --reserver_runtime_mem_mb 70000"
-    ),
     required_components=frozenset({"aiter", "triton"}),
     model_path_env="JIT_CACHE_ROCM_MODEL_PATH",
 )
@@ -117,14 +95,6 @@ def _server_env() -> dict[str, str]:
         ),
         "PYTHONPATH": os.pathsep.join(entries),
     }
-
-
-def _snapshot_member_names(snapshot: Path):
-    with zstd.open(snapshot, "rb") as body, tarfile.open(
-        fileobj=body, mode="r|"
-    ) as tar:
-        for member in tar:
-            yield member.name
 
 
 def _state(root: Path) -> State:
@@ -192,7 +162,6 @@ def _send_cuda_ipc_weight_update(
             desc=CudaIpcHelper().build_tensor_meta(tensor).hex(),
             method="cuda_ipc",
         )
-        # MagaServerManager.port is START_PORT; rank-0 RPC uses the next port.
         with grpc.insecure_channel(f"127.0.0.1:{server.port + 1}") as channel:
             RpcServiceStub(channel).UpdateWeights(
                 request, timeout=timeout, wait_for_ready=True
@@ -212,27 +181,13 @@ class JitCacheSmokeTest(unittest.TestCase):
         logging.basicConfig(level=logging.INFO, force=True)
         self.server: "MagaServerManager | None" = None
         self._deadline = time.monotonic() + GLOBAL_DEADLINE_S
-        self.old_work_dir = os.environ.get("MAGA_SERVER_WORK_DIR")
-        # Environment changes are limited to this process and its server child.
-        self.old_component_env = {
-            item.env_name: os.environ.pop(item.env_name, None)
-            for item in jit.COMPONENTS
-        }
-        # Fallback default; _run_lifecycle assigns an isolated per-test local root
-        # so the restore phase can wipe it without touching co-located services.
+        env = mock.patch.dict(os.environ, {})
+        env.start()
+        self.addCleanup(env.stop)
+        self.addCleanup(self._stop_server)
+        for item in jit.COMPONENTS:
+            os.environ.pop(item.env_name, None)
         self.local_root = jit.LOCAL_JIT_ROOT
-
-    def tearDown(self) -> None:
-        self._stop_server()
-        for name, value in self.old_component_env.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
-        if self.old_work_dir is None:
-            os.environ.pop("MAGA_SERVER_WORK_DIR", None)
-        else:
-            os.environ["MAGA_SERVER_WORK_DIR"] = self.old_work_dir
 
     def _budget(self, cap: float) -> float:
         remaining = self._deadline - time.monotonic()
@@ -262,12 +217,13 @@ class JitCacheSmokeTest(unittest.TestCase):
         self.server = MagaServerManager(
             env_args={
                 "REMOTE_JIT_DIR": remote,
-                "RTP_JIT_LOCAL_ROOT": str(local_root),
+                "JIT_CACHE_SETUP_TIMEOUT_S": "180",
+                "TEST_JIT_LOCAL_DIR": str(local_root),
                 **_server_env(),
             },
             port=None,
             process_file_name=f"process_{config.model_name}_{phase}.log",
-            smoke_args_str=config.smoke_args,
+            smoke_args_str=os.environ["SMOKE_ARGS"],
         )
         ready = self.server.start_server(
             model_path,
@@ -280,11 +236,10 @@ class JitCacheSmokeTest(unittest.TestCase):
             with urllib.request.urlopen(
                 f"http://127.0.0.1:{self.server.port}/v1/models", timeout=2
             ) as response:
-                model = json.loads(response.read())["data"][0]["id"]
+                return str(json.loads(response.read())["data"][0]["id"])
         except Exception:
             logging.warning("model probe failed; using %s", model_type, exc_info=True)
-            model = model_type
-        return str(model)
+            return model_type
 
     def _exercise(self, config: SmokeConfig, model_path: str, model: str) -> None:
         if config.cuda_ipc_weight_update:
@@ -315,14 +270,10 @@ class JitCacheSmokeTest(unittest.TestCase):
     def _dump_server_logs(self) -> None:
         for path in self._log_candidates():
             with contextlib.suppress(OSError):
-                flagged, tail = deque(maxlen=100), deque(maxlen=200)
                 with path.open(errors="replace") as stream:
-                    for line in stream:
-                        if len(tail) == 200 and FAILURE_PATTERN.search(tail[0][:400]):
-                            flagged.append(tail[0])
-                        tail.append(line.rstrip("\n"))
-                logging.error("=== %s (%d flagged + tail) ===", path, len(flagged))
-                for line in (*flagged, *tail):
+                    tail = deque(stream, maxlen=200)
+                logging.error("=== %s (tail) ===", path)
+                for line in tail:
                     logging.error("%s", line[:2000])
 
     @staticmethod
@@ -336,18 +287,13 @@ class JitCacheSmokeTest(unittest.TestCase):
             if Path(rel).suffix in BINARY_SUFFIXES and item.should_sync(rel)
         }
 
-    def _server_log_has(self, needle: str) -> bool:
+    def _server_log_lines(self):
         for path in self._log_candidates():
             with contextlib.suppress(OSError):
                 with path.open(errors="replace") as stream:
-                    if any(needle in line for line in stream):
-                        return True
-        return False
+                    yield from stream
 
     def _create_probe(self, config: SmokeConfig) -> tuple[str, bytes]:
-        # The probe must match a real triton sync rule so the production publisher
-        # carries it; with a shared REMOTE_JIT_DIR peers restore it too. Bounded to
-        # one prefixed tiny file per run and rolled off by SNAPSHOT_KEEP.
         triton = next((x for x in self.scope.components if x.name == "triton"), None)
         self.assertIsNotNone(
             triton, "triton dropped from scope: a cache env var was preset"
@@ -376,8 +322,12 @@ class JitCacheSmokeTest(unittest.TestCase):
         self.assertIsNotNone(scope, "scope resolution failed on this host")
         return scope
 
-    def _wait_for_probe_snapshot(
-        self, remote_root: Path, probe_name: str, payload: bytes
+    def _wait_for_snapshot(
+        self,
+        remote_root: Path,
+        previous: set[Path],
+        probe_name: str,
+        payload: bytes,
     ) -> State:
         deadline = time.monotonic() + self._budget(PROBE_PUBLISH_TIMEOUT_S)
         checked: set[Path] = set()
@@ -386,22 +336,19 @@ class JitCacheSmokeTest(unittest.TestCase):
                 remote_root.rglob(f"*{store.SNAPSHOT_SUFFIX}"), reverse=True
             )
             for snapshot in snapshots:
-                if snapshot in checked:
+                if snapshot in previous or snapshot in checked:
                     continue
                 checked.add(snapshot)
-                try:
-                    if all(m != probe_name for m in _snapshot_member_names(snapshot)):
-                        continue
-                except Exception:
-                    logging.warning("unreadable JIT snapshot %s", snapshot)
-                    continue
                 with tempfile.TemporaryDirectory() as tmp:
                     restored = Path(tmp) / "cache"
                     restored.mkdir()
-                    store.extract_zstd_tar(snapshot, restored)
-                    probe = restored / probe_name
-                    if probe.is_file() and probe.read_bytes() == payload:
-                        return _state(restored)
+                    try:
+                        store.extract_zstd_tar(snapshot, restored)
+                        probe = restored / probe_name
+                        if probe.is_file() and probe.read_bytes() == payload:
+                            return _state(restored)
+                    except Exception:
+                        logging.warning("unreadable JIT snapshot %s", snapshot)
             time.sleep(1)
         parent = remote_root.parent
         published = sorted(p.name for p in parent.iterdir()) if parent.is_dir() else []
@@ -418,16 +365,6 @@ class JitCacheSmokeTest(unittest.TestCase):
         self._run_lifecycle(ROCM_CONFIG)
 
     def _run_lifecycle(self, config: SmokeConfig) -> None:
-        # gpu_count in the custom_smoke_test target must track our smoke_args.
-        tokens = config.smoke_args.split()
-        flag = "--world_size" if "--world_size" in tokens else "--tp_size"
-        world = int(tokens[tokens.index(flag) + 1]) if flag in tokens else 1
-        gpu_count = int(os.environ.get("GPU_COUNT", "1"))
-        self.assertEqual(
-            world,
-            gpu_count,
-            f"BUILD gpu_count={gpu_count} != smoke_args world size={world}",
-        )
         model_path, model_type = _model_config(config.task_info, config.model_path_env)
         self.assertTrue(Path(model_path).is_dir(), f"missing model: {model_path}")
         # Isolate the local JIT root so the restore phase can wipe it and force the
@@ -435,17 +372,17 @@ class JitCacheSmokeTest(unittest.TestCase):
         # services use. Both phases share this path so restored artifacts keep
         # resolving the absolute build path baked into them.
         self.local_root = _runtime_dir(f"jit_local_{config.model_name}") / ".jit_cache"
+        remote = os.environ.get("REMOTE_JIT_DIR", "").strip()
+        if not remote:  # an environment gap, not a regression: keep the two apart
+            raise unittest.SkipTest("REMOTE_JIT_DIR unset; CI injects it")
+        try:
+            jit._prepare_shared_root(self.local_root)
+        except OSError as error:
+            raise unittest.SkipTest(f"shared ACL unavailable: {error}") from error
         self.scope = self._resolve_scope()
         local_scope_root = self.scope.root
-        configured_remote = os.environ.get("REMOTE_JIT_DIR", "").strip()
-        if configured_remote:
-            remote = configured_remote
-            remote_source = "REMOTE_JIT_DIR"
-        else:
-            remote = str(_runtime_dir(f"jit_remote_{config.model_name}"))
-            remote_source = "private TEST_TMPDIR fallback"
-        logging.info("JIT smoke remote source=%s path=%s", remote_source, remote)
         remote_scope = Path(remote) / jit.RTP_JIT_VERSION / self.scope.scope_id
+        previous = set(remote_scope.glob(f"*{store.SNAPSHOT_SUFFIX}"))
 
         model = self._start_server(
             config, model_path, model_type, remote, "publish", self.local_root
@@ -453,37 +390,43 @@ class JitCacheSmokeTest(unittest.TestCase):
         try:
             self._exercise(config, model_path, model)
             probe_name, probe_payload = self._create_probe(config)
-            remote_state = self._wait_for_probe_snapshot(
-                remote_scope, probe_name, probe_payload
+            remote_state = self._wait_for_snapshot(
+                remote_scope, previous, probe_name, probe_payload
             )
         finally:
             self._stop_server()
         self.assertTrue(remote_state, "producer published an empty snapshot")
-        components = {name.split("/", 1)[0] for name in remote_state}
+        remote_artifacts = {
+            name: sig
+            for name, sig in remote_state.items()
+            if Path(name).suffix in BINARY_SUFFIXES
+        }
+        components = {name.split("/", 1)[0] for name in remote_artifacts}
         self.assertFalse(
             config.required_components - components,
             "missing remote JIT components: "
             f"{sorted(config.required_components - components)}",
         )
 
-        # Wipe the local scope so the second server cannot reuse a warm tree and
-        # must repopulate from the remote snapshot through the real restore path.
         shutil.rmtree(local_scope_root)
-        self.assertFalse(store.scope_root_usable(local_scope_root))
+        self.assertFalse(local_scope_root.exists())
 
         model = self._start_server(
             config, model_path, model_type, remote, "restore", self.local_root
         )
         try:
             self.assertTrue(
-                self._server_log_has("JIT_CACHE_RESTORED"),
+                any("JIT_CACHE_RESTORED" in line for line in self._server_log_lines()),
                 "second server did not restore from the remote snapshot",
             )
-            warm = self._artifacts(local_scope_root)
-            self.assertTrue(warm, "restore left no compiled artifacts on disk")
+            self.assertLessEqual(
+                set(remote_artifacts.items()),
+                set(self._artifacts(local_scope_root).items()),
+                "restore did not reproduce the published binaries",
+            )
             self._exercise(config, model_path, model)
             recompiled = set(self._artifacts(local_scope_root).items()) - set(
-                warm.items()
+                remote_artifacts.items()
             )
             self.assertFalse(
                 recompiled,

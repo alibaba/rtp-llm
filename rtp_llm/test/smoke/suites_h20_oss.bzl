@@ -478,6 +478,7 @@ def h20_oss_suites():
         ],
     )
 
+
     # H20 Eagle (Qwen2-14B + draft model)
     native.test_suite(
         name = "smoke_h20_eagle",

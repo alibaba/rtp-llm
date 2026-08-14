@@ -7,8 +7,8 @@ import sys
 import time
 import traceback
 from contextlib import suppress
-from multiprocessing import Process
 from multiprocessing.connection import Connection
+from multiprocessing.process import BaseProcess
 from typing import List
 
 import torch
@@ -16,7 +16,6 @@ from setproctitle import setproctitle
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
-
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import (
@@ -150,8 +149,8 @@ def _create_rank_processes(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     ctx,
-    processes: List[Process],
-    rank_pipe_readers: List,
+    processes: List[BaseProcess],
+    rank_pipe_readers: List[Connection],
 ):
     """Create and start rank processes. Each proc is appended before start() so a
     mid-loop abort still leaves every spawned object in the caller's list; teardown
@@ -185,8 +184,8 @@ def _close_readers(readers: List[Connection]) -> None:
 
 
 def _wait_for_ranks_startup(
-    processes: List[Process],
-    rank_pipe_readers: List[multiprocessing.Pipe],
+    processes: List[BaseProcess],
+    rank_pipe_readers: List[Connection],
     local_world_size: int,
 ):
     """
@@ -285,8 +284,8 @@ def multi_rank_start(
         local_world_size = len(processes)
 
         if py_env_configs.distribute_config.fake_gang_env:
-            # Test-only path: returning releases the manager immediately; the
-            # caller-owned ranks keep serving from the local cache (publishing off).
+            # Test-only path: returning releases the manager, which publishes one
+            # last snapshot; the caller-owned ranks keep serving from the local tree.
             _close_readers(rank_pipe_readers)
             return processes
 
@@ -439,7 +438,7 @@ def start_backend_server(
             from rtp_llm.utils.jit_cache_manager import start_from_config
 
             manager = start_from_config(py_env_configs.jit_config)
-        except Exception:
+        except Exception:  # cold start; a signal instead unwinds to the finally
             logging.exception("JIT_CACHE_FAIL_OPEN: setup failed; cold start")
         if torch.cuda.device_count() > 1 and pc.world_size > 1:
             return multi_rank_start(
