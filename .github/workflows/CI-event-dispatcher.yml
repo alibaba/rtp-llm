@@ -28,6 +28,36 @@
 # │                                                                 │
 # │ This workflow must NOT start a parallel workflow_dispatch or     │
 # │ create a separate "build" check/status.                         │
+# │                                                                 │
+# │ FORK LIMITATION (known; not a defect in this workflow)          │
+# │   The default GITHUB_TOKEN cannot reliably rerun a run whose    │
+# │   head_repository is a fork: the rerun POST returns 403         │
+# │   "Resource not accessible by integration". Measured over ~40   │
+# │   dispatcher runs: fork heads failed 9x (2 succeeded), same-repo │
+# │   heads succeeded 7/7 and never failed. Fork status is the      │
+# │   dominant factor but not fully sufficient, and the residual    │
+# │   does not track contributor status or an approval policy; the  │
+# │   sub-mechanism is not isolated. A run whose conclusion is      │
+# │   "action_required" never executed and needs approval, not a    │
+# │   rerun.                                                        │
+# │   Behaviour: the dispatcher explains this in one PR comment     │
+# │   (deduped per HEAD SHA and reason), emits ::warning::, and     │
+# │   exits 0 instead of leaving "build" red with no explanation.   │
+# │   The check keeps its PREVIOUS conclusion, so a fork PR is NOT  │
+# │   verified merely because this job is green -- do not           │
+# │   admin-merge on that basis.                                   │
+# │   Durable fixes, both out of scope here:                       │
+# │     1. (preferred) move the required context off the native     │
+# │        check run onto a commit status. Needs `statuses: write`  │
+# │        added below, a context name that does not collide with  │
+# │        CI-request-trigger.yml's "CI Request Trigger", and a    │
+# │        ruleset change. The App-owned "build" check run would    │
+# │        then stay permanently red and must be de-required.      │
+# │     2. give the trigger workflow a polling resolve-context     │
+# │        loop so no rerun is needed (costs a runner slot).       │
+# │   POST /check-runs is NOT an option: no `checks: write`, and a  │
+# │   check run can only be updated by the App that created it.    │
+# │   rerun-failed-jobs 403s identically.                          │
 # └─────────────────────────────────────────────────────────────────┘
 name: CI Event Dispatcher
 

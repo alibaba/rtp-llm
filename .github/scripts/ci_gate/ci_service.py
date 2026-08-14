@@ -11,7 +11,7 @@ def ci_service_request(payload, security, context, url=CI_STATUS_URL):
     # type: (Dict[str, Any], str, str, str) -> Any
     from .common import http_json
 
-    status, body, raw_body = http_json(
+    status, body, raw_body, _ = http_json(
         url,
         headers={"Authorization": "Basic %s" % security},
         payload=payload,
