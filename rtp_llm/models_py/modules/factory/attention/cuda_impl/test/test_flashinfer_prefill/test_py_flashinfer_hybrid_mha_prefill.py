@@ -98,7 +98,6 @@ class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
 
     def _test_hybrid_prefill_correctness(
         self,
-        batch_size: int,
         prefix_lengths: List[int],
         input_lengths: List[int],
         head_num: int,
@@ -115,7 +114,9 @@ class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
         cache_dtype = self.cache_dtype(config.attn_configs)
 
         attn_inputs = self._create_chunked_prefill_attention_inputs(
-            batch_size, prefix_lengths, input_lengths, page_size
+            input_lengths=input_lengths,
+            prefix_lengths=prefix_lengths,
+            seq_size_per_block=page_size,
         )
         attn_op = PyFlashinferHybridPrefillAttnOp(config.attn_configs, attn_inputs)
         self.assertTrue(attn_op.support(attn_inputs))
@@ -221,10 +222,9 @@ class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
         config.attn_configs.max_seq_len = 128
 
         attn_inputs = self._create_chunked_prefill_attention_inputs(
-            len(prefix_lengths),
-            prefix_lengths,
-            input_lengths,
-            page_size,
+            input_lengths=input_lengths,
+            prefix_lengths=prefix_lengths,
+            seq_size_per_block=page_size,
             dtype=compute_dtype,
         )
 
@@ -390,7 +390,6 @@ class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
 
     def test_chunked_prefill_single_batch(self):
         self._test_hybrid_prefill_correctness(
-            batch_size=1,
             prefix_lengths=[4884],
             input_lengths=[5],
             head_num=40,
@@ -401,7 +400,6 @@ class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
 
     def test_chunked_prefill_multi_batch_varied(self):
         self._test_hybrid_prefill_correctness(
-            batch_size=3,
             prefix_lengths=[32, 96, 160],
             input_lengths=[8, 16, 24],
             head_num=16,
@@ -412,7 +410,6 @@ class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
 
     def test_chunked_prefill_multi_batch_uniform(self):
         self._test_hybrid_prefill_correctness(
-            batch_size=4,
             prefix_lengths=[64, 64, 64, 64],
             input_lengths=[16, 16, 16, 16],
             head_num=32,
@@ -423,7 +420,6 @@ class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
 
     def test_chunked_prefill_small_page_size(self):
         self._test_hybrid_prefill_correctness(
-            batch_size=2,
             prefix_lengths=[128, 256],
             input_lengths=[16, 32],
             head_num=32,
@@ -434,7 +430,6 @@ class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
 
     def test_chunked_prefill_large_page_size(self):
         self._test_hybrid_prefill_correctness(
-            batch_size=2,
             prefix_lengths=[128, 256],
             input_lengths=[16, 32],
             head_num=32,
@@ -445,7 +440,6 @@ class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
 
     def test_chunked_prefill_many_heads(self):
         self._test_hybrid_prefill_correctness(
-            batch_size=2,
             prefix_lengths=[64, 128],
             input_lengths=[16, 32],
             head_num=64,
@@ -456,7 +450,6 @@ class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
 
     def test_chunked_prefill_gqa(self):
         self._test_hybrid_prefill_correctness(
-            batch_size=2,
             prefix_lengths=[64, 128],
             input_lengths=[16, 32],
             head_num=32,
@@ -478,7 +471,9 @@ class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
             seq_size_per_block=page_size,
         )
         attn_inputs = self._create_chunked_prefill_attention_inputs(
-            len(prefix_lengths), prefix_lengths, input_lengths, page_size
+            input_lengths=input_lengths,
+            prefix_lengths=prefix_lengths,
+            seq_size_per_block=page_size,
         )
         block_table_host = attn_inputs.kv_cache_kernel_block_id.clone()
         attn_inputs.kv_cache_kernel_block_id = torch.empty(0, dtype=torch.int32)
