@@ -174,7 +174,8 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     generate_input->input_ids =
         torch::from_blob(const_cast<int*>(input->token_ids().data()), {(int64_t)input->token_ids_size()}, torch::kInt32)
             .clone();
-    RTP_LLM_CHECK_WITH_INFO(generate_input->custom_output_token_position < generate_input->inputLength(),
+    RTP_LLM_CHECK_WITH_INFO(generate_input->custom_output_token_position >= -1
+                                && generate_input->custom_output_token_position < generate_input->inputLength(),
                             "custom_output_token_position %d is outside prompt length %d",
                             generate_input->custom_output_token_position,
                             generate_input->inputLength());
