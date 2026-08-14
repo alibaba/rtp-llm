@@ -499,6 +499,7 @@ class FIFOSchedulerConfig:
     max_inited_kv_cache_streams: int
     max_batch_kv_len: int
     max_batch_tokens_size: int
+    max_batch_tokens_without_cache: int
     max_context_batch_size: int
 
     def __getstate__(self) -> tuple:
@@ -1338,8 +1339,10 @@ class PDSepConfig:
     load_cache_timeout_ms: int
     max_rpc_timeout_ms: int
     prefill_max_wait_timeout_ms: int
+    prefill_prepare_resource_pool_size: int
     prefill_retry_timeout_ms: int
     prefill_retry_times: int
+    prefill_stop_stream_wait_timeout_ms: int
     rdma_connect_retry_times: int
     remote_rpc_server_port: int
     role_type: RoleType

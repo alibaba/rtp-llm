@@ -295,9 +295,11 @@ TEST_F(ChatServiceTest, ChatCompletions) {
 
     EXPECT_CALL(*mock_writer_, WriteDone).WillOnce(Return(true));
 
-    EXPECT_CALL(*mock_metric_reporter_, reportSuccessQpsMetric).WillOnce(Invoke([](const std::string& source) {
-        EXPECT_EQ(source, "test_source");
-    }));
+    EXPECT_CALL(*mock_metric_reporter_, reportSuccessQpsMetric)
+        .WillOnce(Invoke([](const std::string& source, int priority) {
+            EXPECT_EQ(source, "test_source");
+            EXPECT_EQ(priority, 0);
+        }));
     EXPECT_CALL(*mock_metric_reporter_, reportResponseIterateCountMetric).WillOnce(Invoke([](int32_t val) {
         EXPECT_EQ(val, 1);
     }));

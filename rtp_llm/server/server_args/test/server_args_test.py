@@ -29,6 +29,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["DP_SIZE"] = "2"
         os.environ["WORLD_SIZE"] = "8"
         os.environ["CONCURRENCY_LIMIT"] = "64"
+        os.environ["PREFILL_PREPARE_RESOURCE_POOL_SIZE"] = "256"
         os.environ["MAX_CONTEXT_BATCH_SIZE"] = "32"
         os.environ["MAX_BATCH_KV_LEN"] = "6000000"
         os.environ["CP_FORCE_SINGLE_PREFILL"] = "0"
@@ -57,6 +58,16 @@ class ServerArgsSetTest(TestCase):
 
         # Verify concurrency_config
         self.assertEqual(py_env_configs.concurrency_config.concurrency_limit, 64)
+
+        # Verify prefill thread-pool configuration
+        self.assertEqual(
+            py_env_configs.pd_separation_config.prefill_prepare_resource_pool_size,
+            256,
+        )
+        restored_pd_config = pickle.loads(
+            pickle.dumps(py_env_configs.pd_separation_config)
+        )
+        self.assertEqual(restored_pd_config.prefill_prepare_resource_pool_size, 256)
 
         # Verify fifo_scheduler_config
         self.assertEqual(
@@ -103,6 +114,8 @@ class ServerArgsSetTest(TestCase):
             "32",
             "--concurrency_limit",
             "128",
+            "--prefill_prepare_resource_pool_size",
+            "384",
             "--max_context_batch_size",
             "64",
             "--max_batch_kv_len",
@@ -142,6 +155,11 @@ class ServerArgsSetTest(TestCase):
         # Verify concurrency_config
         self.assertEqual(py_env_configs.concurrency_config.concurrency_limit, 128)
 
+        # Verify prefill thread-pool configuration
+        self.assertEqual(
+            py_env_configs.pd_separation_config.prefill_prepare_resource_pool_size,
+            384,
+        )
         # Verify fifo_scheduler_config
         self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.max_context_batch_size,

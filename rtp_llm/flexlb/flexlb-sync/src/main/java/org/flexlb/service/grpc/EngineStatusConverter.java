@@ -2,10 +2,14 @@ package org.flexlb.service.grpc;
 
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
-import org.flexlb.domain.worker.WorkerStatusResponse;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RoleTypeProtoConverter;
+import org.flexlb.enums.TaskPhase;
+import org.flexlb.enums.PriorityPreemptionProgress;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -21,8 +25,10 @@ public class EngineStatusConverter {
     public static WorkerStatusResponse convertToWorkerStatusResponse(EngineRpcService.WorkerStatusPB workerStatusPB) {
         WorkerStatusResponse response = new WorkerStatusResponse();
 
-        // Set role directly as string
-        response.setRole(workerStatusPB.getRole());
+        response.setRole(RoleTypeProtoConverter.fromWorkerStatus(workerStatusPB));
+        // Compatibility only: LocalRpcServer::GetWorkerStatus does not currently
+        // populate this field. Preserve it for protocol compatibility/telemetry,
+        // but do not use it as a scheduling or batching limit.
         response.setAvailableConcurrency(workerStatusPB.getAvailableConcurrency());
         response.setRunningQueryLen(workerStatusPB.getRunningQueryLen());
         response.setWaitingQueryLen(workerStatusPB.getWaitingQueryLen());
@@ -30,19 +36,16 @@ public class EngineStatusConverter {
         response.setIterateCount(workerStatusPB.getIterateCount());
         response.setDpSize(workerStatusPB.getDpSize());
         response.setTpSize(workerStatusPB.getTpSize());
+        response.setDpRank(workerStatusPB.getDpRank());
         response.setStatusVersion(workerStatusPB.getStatusVersion());
         response.setLatestFinishedVersion(workerStatusPB.getLatestFinishedVersion());
         response.setAlive(workerStatusPB.getAlive());
+        response.setAvailableKvCacheTokens(workerStatusPB.getAvailableKvCache());
+        response.setTotalKvCacheTokens(workerStatusPB.getTotalKvCache());
+        response.setMaxSeqLen(workerStatusPB.getMaxSeqLen());
+        response.setMaxBatchTokensSize(workerStatusPB.getMaxBatchTokensSize());
 
-        List<EngineRpcService.TaskInfoPB> srcRunningTaskInfoList = workerStatusPB.getRunningTaskInfoList();
-        List<EngineRpcService.TaskInfoPB> waitingTaskInfoList = srcRunningTaskInfoList.stream().filter(taskInfoPB -> taskInfoPB.getIsWaiting()).toList();
-        List<EngineRpcService.TaskInfoPB> runningTaskInfoList = srcRunningTaskInfoList.stream().filter(taskInfoPB -> !taskInfoPB.getIsWaiting()).toList();
-
-        // Convert waiting task info
-        response.setWaitingTaskInfo(convertToTaskInfoList(waitingTaskInfoList));
-
-        // Convert running task info
-        response.setRunningTaskInfo(convertToTaskInfoList(runningTaskInfoList));
+        response.setRunningTaskInfo(convertToTaskInfoList(workerStatusPB.getRunningTaskInfoList()));
 
         // Convert finished task list
         response.setFinishedTaskInfo(convertToTaskInfoList(workerStatusPB.getFinishedTaskListList()));
@@ -61,7 +64,9 @@ public class EngineStatusConverter {
         cacheStatus.setVersion(cacheStatusPB.getVersion());
 
         Map<Long, Boolean> cacheKeysMap = cacheStatusPB.getCacheKeysMap();
-        Set<Long> cachedKeysSet = cacheKeysMap.keySet();
+        // Copy the keySet: protobuf MapField#keySet() returns a VIEW that keeps
+        // the whole WorkerStatusPB message graph reachable until the next sync.
+        Set<Long> cachedKeysSet = new HashSet<>(cacheKeysMap.keySet());
         cacheStatus.setCachedKeys(cachedKeysSet);
         cacheStatus.setCacheKeySize(cacheKeysMap.size());
         return cacheStatus;
@@ -70,7 +75,8 @@ public class EngineStatusConverter {
     /**
      * Convert list of TaskInfoPB to list of TaskInfo
      */
-    private static Map<String, TaskInfo> convertToTaskInfoList(List<EngineRpcService.TaskInfoPB> taskInfoPBList) {
+    private static Map<String, TaskInfo> convertToTaskInfoList(
+            List<EngineRpcService.TaskInfoPB> taskInfoPBList) {
         if (taskInfoPBList == null) {
             return null;
         }
@@ -85,10 +91,53 @@ public class EngineStatusConverter {
             taskInfo.setIterateCount(taskInfoPB.getIterateCount());
             taskInfo.setEndTimeMs(taskInfoPB.getEndTimeMs());
             taskInfo.setDpRank(taskInfoPB.getDpRank());
+            taskInfo.setBatchId(taskInfoPB.getBatchId());
+            taskInfo.setExecutionTimeMs(taskInfoPB.getExecutionTimeMs());
+            taskInfo.setPhase(resolvePhase(taskInfoPB));
+            taskInfo.setPriorityPreemptionProgress(switch (
+                    taskInfoPB.getPriorityPreemptionProgress()) {
+                case PRIORITY_PREEMPTION_CANCELING -> PriorityPreemptionProgress.CANCELING;
+                case PRIORITY_PREEMPTION_CANCELED -> PriorityPreemptionProgress.CANCELED;
+                case PRIORITY_PREEMPTION_NONE, UNRECOGNIZED ->
+                        PriorityPreemptionProgress.NONE;
+            });
+            if (taskInfoPB.hasErrorInfo() && taskInfoPB.getErrorInfo().getErrorCode() != 0L) {
+                taskInfo.setErrorCode(taskInfoPB.getErrorInfo().getErrorCode());
+                taskInfo.setErrorMessage(taskInfoPB.getErrorInfo().getErrorMessage());
+            }
 
             taskInfoMap.put(String.valueOf(taskInfoPB.getRequestId()), taskInfo);
         }
 
         return taskInfoMap;
+    }
+
+    private static TaskPhase resolvePhase(EngineRpcService.TaskInfoPB task) {
+        if (task.getPhase() != EngineRpcService.TaskPhase.TASK_PHASE_PENDING) {
+            // phase was added after the legacy is_waiting flag and is the
+            // authoritative state whenever it carries a non-default value.
+            // In particular, the immediately preceding e0 wire schema did not
+            // contain field 9, so its RECEIVED/KV_ALLOCATED payloads are read
+            // here with is_waiting=false. Treating that default as an explicit
+            // value rejects valid status snapshots during a rolling upgrade.
+            return convertPhase(task.getPhase());
+        }
+        // dsv4 writers only sent is_waiting. Because old proto3 writers omit
+        // false on the wire, phase=0/is_waiting=false means legacy RUNNING.
+        // New PENDING writers dual-write is_waiting=true.
+        return task.getIsWaiting() ? TaskPhase.PENDING : TaskPhase.RUNNING;
+    }
+
+    private static TaskPhase convertPhase(EngineRpcService.TaskPhase protoPhase) {
+        switch (protoPhase) {
+            case TASK_PHASE_RECEIVED:
+                return TaskPhase.RECEIVED;
+            case TASK_PHASE_KV_ALLOCATED:
+                return TaskPhase.KV_ALLOCATED;
+            case TASK_PHASE_RUNNING:
+                return TaskPhase.RUNNING;
+            default:
+                return TaskPhase.PENDING;
+        }
     }
 }

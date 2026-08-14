@@ -5,10 +5,6 @@ load("//bazel:device_defs.bzl",
 
 cc_test = cc_test_wrapper
 
-test_copts = [
-    "-fno-access-control",
-] + copts()
-
 cc_import(
     name = "cuda13_torch_nvshmem",
     shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
@@ -20,6 +16,10 @@ cuda13_torch_link_deps = select({
     ],
     "//conditions:default": [],
 })
+
+test_copts = [
+    "-fno-access-control",
+] + copts()
 
 py_test (
     name = "model_rpc_client_test",
@@ -45,7 +45,7 @@ test_deps = [
     "@com_google_googletest//:gtest_main",
     "@havenask//aios/autil:base64",
     "@havenask//aios/autil:zlib",
-] + torch_deps() + device_impl_target()
+] + torch_deps() + device_impl_target() + cuda13_torch_link_deps
 
 # cc_test(
 #     name = "model_rpc_server_test",
@@ -114,5 +114,57 @@ cc_test(
         "//rtp_llm/cpp/model_rpc:recent_cache_key_window",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
+    ] + cuda13_torch_link_deps,
+)
+
+cc_test(
+    name = "response_buffer_test",
+    srcs = [
+        "ResponseBufferTest.cc",
     ],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "prefill_batch_rpc_server_test",
+    srcs = [
+        "PrefillBatchRpcServerTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "rpc_writer_cancellation_test",
+    srcs = [
+        "RpcWriterCancellationTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "rpc_server_runtime_meta_test",
+    srcs = [
+        "RpcServerRuntimeMetaTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
 )

@@ -1,49 +1,87 @@
 package org.flexlb.sync.schedule;
 
 import org.apache.commons.collections4.MapUtils;
-import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.enums.FlexMetricType;
-import org.flexlb.enums.FlexPriorityType;
-import org.flexlb.enums.TaskStateEnum;
-import org.flexlb.metric.FlexMetricTags;
-import org.flexlb.metric.FlexMonitor;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
-import org.flexlb.util.Logger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
-import javax.annotation.PostConstruct;
 import java.util.Iterator;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
 
+/**
+ * Periodically evicts workers that have stopped sending WorkerStatus reports
+ * (crash, network partition, OOM kill, etc.) from the routing tables.
+ *
+ * <p>Without this cleaner, the Master would keep routing requests to dead
+ * workers, producing a flood of 8400 / 8513 errors (the "decode death spiral"):
+ * every dispatched request times out on a dead endpoint, the request is
+ * retried onto another stale entry, and the cycle amplifies until the entire
+ * decode fleet appears saturated. This component is the backstop that breaks
+ * the cycle — once a worker's last report is older than {@code workerTimeoutMs}
+ * (default 15 s = 3× the 5 s gRPC sync timeout), the entry is removed from both
+ * {@link EngineWorkerStatus} and {@link EndpointRegistry}, forcing the
+ * scheduler to rediscover live workers on the next sync round.
+ *
+ * <p>Runs every {@code WORKER_CLEAN_INTERVAL_MS} (default 3 s) via Spring
+ * {@link Scheduled}. The timeout is intentionally generous (3× gRPC timeout)
+ * to avoid racing a transient gRPC delay and evicting a still-alive endpoint.
+ */
 @Component
 public class ExpirationCleaner {
 
-    private static final String TASK_REMOVED = "task.removed";
+    private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
-    private final long taskTimeoutUs;
     private final long workerTimeoutUs;
-    private final FlexMonitor monitor;
+    private final EndpointRegistry endpointRegistry;
 
     @Autowired
-    public ExpirationCleaner(FlexMonitor monitor) {
-        this.monitor = monitor;
-        this.taskTimeoutUs = Long.parseLong(System.getenv().getOrDefault("TASK_TIMEOUT_US", "3000000"));  // Default 3s
-        this.workerTimeoutUs = Long.parseLong(System.getenv().getOrDefault("WORKER_TIMEOUT_US", "3000000")); // Default 3s
+    public ExpirationCleaner(EndpointRegistry endpointRegistry, ConfigService configService) {
+        this(endpointRegistry, resolveWorkerTimeoutUs(configService));
     }
 
-    @PostConstruct
-    public void init() {
-        this.monitor.register(TASK_REMOVED, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+    /**
+     * Resolve the worker expiration timeout in microseconds.
+     *
+     * <p>Priority:
+     * <ol>
+     *   <li>Legacy env var {@code WORKER_TIMEOUT_US} (microseconds) — backward compat,
+     *       honored if explicitly set to a valid value.</li>
+     *   <li>FlexlbConfig {@code workerTimeoutMs} (milliseconds, default 15000) —
+     *       converted to microseconds. Overridable via env {@code WORKER_TIMEOUT_MS}.</li>
+     * </ol>
+     * The default 15 s is 3× the gRPC sync timeout (5 s), eliminating the race
+     * where a transient gRPC delay causes the cleaner to evict a still-alive endpoint.
+     */
+    private static long resolveWorkerTimeoutUs(ConfigService configService) {
+        long configMs = configService.loadBalanceConfig().getWorkerTimeoutMs();
+        String legacy = System.getenv("WORKER_TIMEOUT_US");
+        if (legacy != null && !legacy.trim().isEmpty()) {
+            try {
+                long legacyUs = Long.parseLong(legacy.trim());
+                logger.warn("Using legacy WORKER_TIMEOUT_US={}us (override config workerTimeoutMs={}ms)",
+                        legacyUs, configMs);
+                return legacyUs;
+            } catch (NumberFormatException ignored) {
+                logger.warn("Invalid WORKER_TIMEOUT_US='{}', falling back to workerTimeoutMs={}ms", legacy, configMs);
+            }
+        }
+        return configMs * 1000L;
     }
 
-    @Scheduled(fixedRate = 3000)
+    ExpirationCleaner(EndpointRegistry endpointRegistry, long workerTimeoutUs) {
+        this.endpointRegistry = endpointRegistry;
+        this.workerTimeoutUs = workerTimeoutUs;
+    }
+
+    @Scheduled(fixedRateString = "${WORKER_CLEAN_INTERVAL_MS:3000}")
     public void cleanExpiredWorkers() {
         ModelWorkerStatus modelWorkerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
         this.doClean(modelWorkerStatus.getPrefillStatusMap(), RoleType.PREFILL);
@@ -61,60 +99,17 @@ public class ExpirationCleaner {
             Map.Entry<String, WorkerStatus> item = it.next();
             WorkerStatus workerStatus = item.getValue();
 
-            // 1. Check if worker needs cleanup
             long expirationTime = workerStatus.getStatusLastUpdateTime().get() + workerTimeoutUs;
             long currentTime = System.nanoTime() / 1000;
             if (currentTime > expirationTime) {
-                it.remove();
-                continue;
-            }
-
-            // 2. Check if tasks within worker need cleanup: lost tasks and long-timeout tasks
-            ConcurrentHashMap<Long, TaskInfo> localTaskMap = workerStatus.getLocalTaskMap();
-            Iterator<Map.Entry<Long, TaskInfo>> taskIterator = localTaskMap.entrySet().iterator();
-            while (taskIterator.hasNext()) {
-                Map.Entry<Long, TaskInfo> entry = taskIterator.next();
-                Long requestId = entry.getKey();
-                TaskInfo task = entry.getValue();
-
-                boolean shouldRemove = false;
-
-                // Check if task is lost
-                if (task.isLost()) {
-                    Logger.warn("Cleaning lost task: {}, state: {}, role: {}, worker: {}", requestId, task.getTaskState(), role, workerStatus.getIp());
-                    reportTaskRemoved(workerStatus.getRole(), "lost");
-                    task.updateTaskState(TaskStateEnum.CLEANED);
-                    shouldRemove = true;
-                }
-                // Check if task is timed out
-                else if (task.isTimeout(currentTime, taskTimeoutUs)) {
-                    Logger.warn("Removing timeout task: {}, state: {}, age: {}ms, role: {}, worker: {}", requestId, task.getTaskState(),
-                            (currentTime - task.getLastActiveTimeUs()) / 1000, role, workerStatus.getIp());
-                    reportTaskRemoved(workerStatus.getRole(), "timeout");
-                    task.updateTaskState(TaskStateEnum.CLEANED);
-                    shouldRemove = true;
-                }
-
-                if (shouldRemove) {
-                    decrementQueueTime(workerStatus.getRunningQueueTime(), task, workerStatus.getRole());
-                    taskIterator.remove();
+                workerStatus.setAlive(false);
+                boolean statusRemoved = workerStatusMap.remove(item.getKey(), workerStatus);
+                boolean endpointRemoved = endpointRegistry.remove(role, item.getKey(), workerStatus);
+                if (statusRemoved || endpointRemoved) {
+                    logger.warn("Removed expired worker: {}, role: {}, statusRemoved={}, endpointRemoved={}",
+                            item.getKey(), role, statusRemoved, endpointRemoved);
                 }
             }
-        }
-    }
-
-    private void reportTaskRemoved(String role, String type) {
-        FlexMetricTags tags = FlexMetricTags.of(
-            "role", role,
-            "type", type
-        );
-        monitor.report(TASK_REMOVED, tags, 1);
-    }
-
-    private static void decrementQueueTime(AtomicLong runningQueueTime, TaskInfo task, String role) {
-        if (RoleType.PREFILL.matches(role) || RoleType.PDFUSION.matches(role)) {
-            long delta = task.estimatePrefillTime();
-            WorkerStatus.safeDecrementQueueTime(runningQueueTime, delta);
         }
     }
 }

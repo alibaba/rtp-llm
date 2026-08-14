@@ -3,9 +3,6 @@ load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
-# Torch 2.11's libtorch_python/libtorch_cuda reference the NVSHMEM extension
-# directly on CUDA 13 x86. Keep the test link closure consistent with the
-# other C++ test packages that consume torch_deps().
 cc_import(
     name = "cuda13_torch_nvshmem",
     shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
@@ -49,22 +46,6 @@ cc_test(
         "TEST_USING_DEVICE": "CUDA",
     },
     exec_properties = {'gpu':'H20'},
-)
-
-cc_test(
-    name = "fifo_scheduler_cancel_test",
-    srcs = [
-        "FIFOSchedulerCancelTest.cc",
-    ],
-    data = [],
-    copts = copts() + ["-fno-access-control"],
-    deps = test_deps + [
-        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
-    ],
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-    },
-    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(

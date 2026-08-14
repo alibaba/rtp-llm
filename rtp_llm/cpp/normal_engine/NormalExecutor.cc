@@ -390,6 +390,10 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     // the next iteration can overlap forward prep with worker D2H/update work.
     // Prefill gets no overlap benefit and would only add worker startup cost.
     const bool is_decode_only = stream_groups.totalContextBatchSize() == 0 && stream_groups.totalDecodeBatchSize() > 0;
+    StreamGroups::TokenCountsByPriority token_counts_by_priority;
+    if (metrics_reporter_ && tp_rank_ == 0) {
+        token_counts_by_priority = stream_groups.tokenCountsByPriority();
+    }
     if (useStreamAsync() && is_decode_only) {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output(stream_async)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -411,7 +415,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         stream_groups.addFrontendContextExecuteMetrics(tps_execute_time_us);
         stream_groups.addFrontendGenerateExecuteMetrics(tps_execute_time_us,
                                                         static_cast<int64_t>(stream_groups.totalDecodeBatchSize()));
-        reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us);
+        reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us, token_counts_by_priority);
 
         // REBASE CONFLICT CONTEXT(704f3c147): source branch closed the profiler
         // before async dispatch to avoid thread-affine Kineto callbacks. New
@@ -442,7 +446,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         publishNormalDeviceState(stream_groups, merge_outputs.sampler_output);
         auto result                           = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us);
+        reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us, token_counts_by_priority);
 
         if (profile_step_finish_) {
             profile_step_finish_();
@@ -451,10 +455,11 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     }
 }
 
-void NormalExecutor::reportMetrics(const StreamGroups&             stream_groups,
-                                   RtpLLMExecutorMetricsCollector& executor_collector,
-                                   RtpLLMTokenPSMetricsCollector&  tps_collector,
-                                   int64_t                         tps_execute_time_us) {
+void NormalExecutor::reportMetrics(const StreamGroups&                        stream_groups,
+                                   RtpLLMExecutorMetricsCollector&            executor_collector,
+                                   RtpLLMTokenPSMetricsCollector&             tps_collector,
+                                   int64_t                                    tps_execute_time_us,
+                                   const StreamGroups::TokenCountsByPriority& token_counts_by_priority) {
     if (tp_rank_ > 0) {
         return;
     }
@@ -476,6 +481,7 @@ void NormalExecutor::reportMetrics(const StreamGroups&             stream_groups
                                    stream_groups.totalDecodeBatchSize(),
                                    stream_groups.modelExecuteTokenSize(),
                                    tps_execute_time_us);
+        tps_collector.addTokenSizeByPriority(token_counts_by_priority, tps_execute_time_us);
         tps_reporter_.report(&tps_collector);
         wall_tps_reporter_.report(&tps_collector);
     }

@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -12,6 +13,14 @@ namespace rtp_llm {
 
 struct StreamGroups {
 public:
+    struct TokenCounts {
+        int64_t context            = 0;
+        int64_t context_with_cache = 0;
+        int64_t generate           = 0;
+        int64_t total              = 0;
+    };
+    using TokenCountsByPriority = std::map<int32_t, TokenCounts>;
+
     StreamGroups(const std::list<GenerateStreamPtr>& streams) {
         for (auto& stream : streams) {
             auto cur_batch_size  = stream->currentBatchSize();
@@ -103,6 +112,26 @@ public:
     }
     size_t contextExecuteTokenSizeWithCache() const {
         return context_execute_token_size_with_cache_;
+    }
+
+    TokenCountsByPriority tokenCountsByPriority() const {
+        TokenCountsByPriority token_counts;
+        for (const auto& stream : context_streams_) {
+            auto& counts             = token_counts[stream->priority()];
+            auto  execute_token_size = stream->currentExecuteTokenSize();
+            counts.context += execute_token_size;
+            counts.context_with_cache += execute_token_size;
+            counts.total += execute_token_size;
+            if (stream->reuseLength() > 0) {
+                counts.context_with_cache += static_cast<int64_t>(stream->reuseLength()) * stream->currentBatchSize();
+            }
+        }
+        for (const auto& stream : decode_streams_) {
+            auto& counts = token_counts[stream->priority()];
+            counts.generate += stream->currentBatchSize();
+            counts.total += stream->currentExecuteTokenSize();
+        }
+        return token_counts;
     }
     size_t maxSeqLen() const {
         return max_seq_len_;

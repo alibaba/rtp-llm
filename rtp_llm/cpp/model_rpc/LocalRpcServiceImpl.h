@@ -44,6 +44,33 @@ public:
         return local_server_->GenerateStreamCall(context, request, writer);
     }
 
+    grpc::Status EnqueueBatch(grpc::ServerContext*         context,
+                              const EnqueueBatchRequestPB* request,
+                              EnqueueBatchResponsePB*      response) override {
+        (void)context;
+        (void)request;
+        (void)response;
+        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "EnqueueBatch not implemented on this role");
+    }
+
+    grpc::Status EnqueueGroup(grpc::ServerContext*         context,
+                              const EnqueueGroupRequestPB* request,
+                              EnqueueBatchResponsePB*      response) override {
+        (void)context;
+        (void)request;
+        (void)response;
+        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "EnqueueGroup not implemented on this role");
+    }
+
+    grpc::Status FetchResponse(grpc::ServerContext*                   context,
+                               const FetchRequestPB*                  request,
+                               grpc::ServerWriter<GenerateOutputsPB>* writer) override {
+        (void)context;
+        (void)request;
+        (void)writer;
+        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "FetchResponse not implemented on this role");
+    }
+
     ::grpc::Status
     GetWorkerStatus(::grpc::ServerContext* context, const StatusVersionPB* request, WorkerStatusPB* response) override {
         if (!readyForRegularRpc()) {
@@ -156,6 +183,9 @@ public:
     virtual size_t onflightRequestNum() {
         return local_server_->onflightRequestNum();
     }
+
+    virtual void beginShutdown() {}
+    virtual void cancelPendingRequests() {}
 
     virtual int64_t completedSteps() const {
         return local_server_ ? local_server_->completedSteps() : -1;

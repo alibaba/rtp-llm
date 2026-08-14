@@ -1,18 +1,17 @@
 #pragma once
 
-#include <queue>
-#include <tuple>
+#include <atomic>
+#include <list>
+#include <string>
 #include <thread>
 #include <vector>
-#include <atomic>
-#include <unordered_map>
-#include <unordered_set>
-#include "rtp_llm/cpp/cache/KVCacheManager.h"
-#include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
-#include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
+
 #include "kmonitor/client/MetricsReporter.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 
 namespace rtp_llm {
 
@@ -29,15 +28,9 @@ public:
 
     ~FIFOScheduler() override;
 
-    // Enqueue a single stream. Returns OkStatus on success, InvalidArgumentError if checkInputLength fails.
-    // On failure, the stream's error is reported via reportError() but the stream is NOT queued.
-    // Caller must check the return status to know whether the stream was actually enqueued.
     absl::Status enqueue(const GenerateStreamPtr& stream) override;
-
-    // Enqueue multiple streams. Silently filters out streams that fail checkInputLength (their errors
-    // are reported via reportError()). Returns only the streams that were successfully enqueued.
-    // Caller should compare the returned vector size with the input size to detect dropped streams.
-    std::vector<std::shared_ptr<GenerateStream>> batchEnqueue(const std::vector<GenerateStreamPtr>& streams) override;
+    std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+                                                 enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override;
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
     absl::Status                                 stop() override;
     bool                                         empty() override;
@@ -54,16 +47,54 @@ public:
     int64_t                                            onflightStreams() override;
 
 private:
+    using StreamGroup      = std::list<GenerateStreamPtr>;
+    using StreamGroupQueue = std::list<StreamGroup>;
+
+    enum class AdmissionLane {
+        NONE,
+        NORMAL,
+        GROUP,
+    };
+
+    struct ScheduleRuntime {
+        size_t admitted_running_stream_count             = 0;
+        size_t admitted_prefill_token_size_with_cache    = 0;
+        size_t admitted_prefill_max_seq_len_with_cache   = 0;
+        size_t admitted_prefill_sequence_count           = 0;
+        size_t admitted_prefill_token_size_without_cache = 0;
+        size_t newly_inited_kv_streams                   = 0;
+    };
+
     int64_t lastScheduleTime() override;
+    bool    fitsPrefillTokenLimits(size_t                   admitted_stream_count,
+                                   size_t                   admitted_tokens,
+                                   size_t                   admitted_tokens_without_cache,
+                                   size_t                   admitted_max_seq_len,
+                                   size_t                   admitted_sequence_count,
+                                   const GenerateStreamPtr& candidate) const;
+    bool    evaluateRunningBatch(const ScheduleRuntime& schedule_runtime, const GenerateStreamPtr& new_stream) const;
     bool   evaluateRunningBatch(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
+    size_t prefillTokenCostWithoutCache(const GenerateStreamPtr& stream) const;
+    size_t prefillSeqLenWithCache(const GenerateStreamPtr& stream) const;
+    size_t prefillTokenCostWithCache(const GenerateStreamPtr& stream) const;
     size_t countInitedKVCacheStreams() const;
+    size_t groupQueueStreamsSize(const StreamGroupQueue& group_queue) const;
     void   accountBatchMetrics(const GenerateStreamPtr& new_stream);
     bool   waitPredicate();
     void   cachePrepareLoop();
     void   addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
-    void   evaluateWaitingStreams(std::list<GenerateStreamPtr>& streams);
-    void   cancelStreams(std::list<GenerateStreamPtr>& streams);
     bool   checkInputLength(const GenerateStreamPtr& stream);
+    void   evaluateWaitingStreams(std::list<GenerateStreamPtr>&       streams,
+                                  const std::list<GenerateStreamPtr>& already_admitted_streams);
+    void   evaluateWaitingGroupQueue();
+    void   evaluateLoadingCacheGroupQueue();
+    bool   loadingGroupReady() const;
+    void   advanceLoadingGroup(StreamGroup& group);
+    void   moveGroupToNewStreams(StreamGroup& group);
+    void   moveGroupToAllocatingGroup(StreamGroup& group);
+    void   dispatchPreparedGroup(StreamGroup& group);
+    void   cancelStreams(std::list<GenerateStreamPtr>& streams);
+    void   cancelGroups(StreamGroupQueue& group_queue);
 
 protected:
     bool evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
@@ -76,27 +107,34 @@ protected:
     std::list<GenerateStreamPtr>    loading_cache_streams_;
     std::list<GenerateStreamPtr>    running_streams_;
     std::list<GenerateStreamPtr>    new_streams_;
+    StreamGroupQueue                waiting_group_queue_;
+    StreamGroupQueue                loading_cache_group_queue_;
     std::shared_ptr<KVCacheManager> cache_manager_;
-    std::atomic<int64_t>            last_schedule_time_          = autil::TimeUtility::currentTimeInMilliSeconds();
-    size_t                          max_seq_len_                 = 0;
-    size_t                          max_batch_tokens_size_       = 0;
-    size_t                          max_batch_kv_len_            = 0;
-    size_t                          max_generate_batch_size_     = 1;
-    size_t                          max_inited_kv_cache_streams_ = 0;
-    const bool                      need_fill_fake_stream_       = false;
-    // Optional guard for Context-Parallel prefill: when enabled, force prefill
-    // to one stream per round. This remains the conservative default while
-    // newer dsv4 CP paths can opt in to batched prefill through runtime config.
-    const bool                   cp_force_single_prefill_        = false;
-    const bool                   worker_status_snapshot_enabled_ = false;
-    std::atomic<bool>            stop_                           = false;
-    bool                         schedule_trigger_               = false;
-    bool                         async_cache_prepare_enabled_    = false;
-    std::thread                  cache_prepare_thread_;
-    GenerateStreamPtr            cache_prepare_blocked_stream_;
-    std::mutex                   lock_;
-    std::condition_variable      cond_;
-    kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
+    std::atomic<int64_t>            last_schedule_time_             = autil::TimeUtility::currentTimeInMilliSeconds();
+    size_t                          max_seq_len_                    = 0;
+    size_t                          max_batch_tokens_size_          = 0;
+    size_t                          max_batch_tokens_without_cache_ = 0;
+    size_t                          max_batch_kv_len_               = 0;
+    size_t                          max_generate_batch_size_        = 1;
+    size_t                          max_inited_kv_cache_streams_    = 0;
+    const bool                      need_fill_fake_stream_          = false;
+    const size_t                    prefill_cp_size_                = 1;
+    const bool                      cp_force_single_prefill_        = false;
+    const bool                      worker_status_snapshot_enabled_ = false;
+    std::atomic<bool>               stop_                           = false;
+    bool                            schedule_trigger_               = false;
+    bool                            async_cache_prepare_enabled_    = false;
+    std::thread                     cache_prepare_thread_;
+    GenerateStreamPtr               cache_prepare_blocked_stream_;
+    std::mutex                      lock_;
+    std::condition_variable         cond_;
+    kmonitor::MetricsReporterPtr    metrics_reporter_                 = nullptr;
+    int64_t                         last_admitted_context_batch_size_ = 0;
+    int64_t                         last_admitted_context_token_size_ = 0;
+    int64_t                         last_waiting_oldest_age_us_       = 0;
+    std::atomic<int64_t>            pending_group_fallback_count_     = 0;
+    AdmissionLane                   active_admission_lane_            = AdmissionLane::NONE;
+    bool                            prefer_group_next_                = false;
 
     std::vector<EngineScheduleInfo::TaskInfo>          waiting_task_list_;
     std::vector<EngineScheduleInfo::TaskInfo>          running_task_list_;

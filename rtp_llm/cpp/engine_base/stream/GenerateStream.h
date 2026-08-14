@@ -352,6 +352,12 @@ public:
 
     void    resetBeginTime(int64_t begin_time_us);
     void    recordWaitTime();
+    void    recordWaitLatency();
+    void    recordSchedulerEnqueueTime(int64_t time_us);
+    void    recordCanRunTime();
+    void    recordLoadingCacheStartTime();
+    void    recordLoadingCacheDoneTime();
+    void    recordRunningTime();
     int64_t beginTimeUs() const {
         return begin_time_us_;
     }
@@ -515,19 +521,25 @@ public:
         return generate_input_->generate_config->trace_id;
     }
 
-    int batchGroupSize() const {
-        return generate_input_->batch_group_size;
+    int groupSize() const {
+        return generate_input_->group_size;
     }
 
-    int batchGroupTimeout() const {
-        return generate_input_->generate_config->batch_group_timeout.value_or(100);
+    // Auto-TPM QoS priority (task40): 0 = not set; TPS metrics tagging only.
+    int32_t priority() const {
+        return generate_input_->priority;
     }
 
-    bool forceBatch() const {
-        return generate_input_->generate_config->force_batch;
+    int groupTimeout() const {
+        return generate_input_->generate_config->group_timeout.value_or(100);
     }
-    int64_t batchGroupId() const {
-        return generate_input_->batch_group_id;
+
+    bool isGroup() const {
+        return generate_input_->group_id != -1;
+    }
+
+    int64_t groupId() const {
+        return generate_input_->group_id;
     }
 
     int64_t enqueueTime() const {
@@ -794,26 +806,31 @@ protected:
     std::shared_ptr<GenerateInput>        generate_input_;
     std::shared_ptr<GenerateStateMachine> generate_status_;
     std::vector<StreamState>              sub_generate_status_;
-    // Non-beam return sequences can finish at different steps. Keep the
-    // terminal length before finished rows are padded with EOS while the
-    // remaining rows continue decoding.
-    std::vector<int64_t>                 sub_generate_output_lengths_;
-    int                                  max_seq_len_;
-    int64_t                              vocab_size_;
-    std::shared_ptr<CompleteTokenIds>    complete_token_ids_;
-    int64_t                              begin_time_us_;
-    int64_t                              wait_time_us_       = 0;
-    bool                                 wait_time_recorded_ = false;
-    std::shared_ptr<StreamCacheResource> stream_cache_resource_;
-    std::shared_ptr<bool>                is_context_stream_;
-    size_t                               iter_count_                         = 0;
-    size_t                               sp_iter_count_                      = 0;
-    int64_t                              speculative_verify_rounds_          = 0;
-    int64_t                              speculative_accepted_token_num_     = 0;
-    int64_t                              speculative_proposed_draft_tokens_  = 0;
-    int64_t                              context_execute_time_us_            = 0;
-    int64_t                              context_execute_time_with_cache_us_ = 0;
-    int64_t                              generate_execute_time_us_           = 0;
+    std::vector<int64_t>                  sub_generate_output_lengths_;
+    int                                   max_seq_len_;
+    int64_t                               vocab_size_;
+    std::shared_ptr<CompleteTokenIds>     complete_token_ids_;
+    int64_t                               begin_time_us_;
+    int64_t                               wait_time_us_                       = 0;
+    bool                                  wait_time_recorded_                 = false;
+    int64_t                               speculative_verify_rounds_          = 0;
+    int64_t                               speculative_accepted_token_num_     = 0;
+    int64_t                               speculative_proposed_draft_tokens_  = 0;
+    int64_t                               context_execute_time_us_            = 0;
+    int64_t                               context_execute_time_with_cache_us_ = 0;
+    int64_t                               generate_execute_time_us_           = 0;
+    bool                                  metrics_reported_                   = false;
+    int64_t                               scheduler_enqueue_time_us_          = 0;
+    int64_t                               can_run_time_us_                    = 0;
+    int64_t                               loading_cache_start_time_us_        = 0;
+    int64_t                               loading_cache_done_time_us_         = 0;
+    int64_t                               first_running_time_us_              = 0;
+    int64_t                               loading_cache_latency_us_           = 0;
+    int64_t                               load_done_to_running_us_            = 0;
+    std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
+    std::shared_ptr<bool>                 is_context_stream_;
+    size_t                                iter_count_    = 0;
+    size_t                                sp_iter_count_ = 0;
     // Private cumulative contributions used only by the frontend TPS side
     // channel. One stream owns each complete engine step, so token/time pairs
     // cannot be split by unordered RPC delivery or a heartbeat boundary.

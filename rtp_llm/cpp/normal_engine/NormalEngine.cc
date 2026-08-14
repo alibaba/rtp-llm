@@ -846,9 +846,9 @@ std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<Gene
     return stream;
 }
 
-std::vector<std::shared_ptr<GenerateStream>>
-NormalEngine::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& inputs) {
-    std::vector<std::shared_ptr<GenerateStream>> streams;
+std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) {
+    std::vector<GenerateStreamPtr> streams;
     streams.reserve(inputs.size());
     for (auto& inp : inputs) {
         auto stream = std::make_shared<NormalGenerateStream>(
@@ -856,7 +856,7 @@ NormalEngine::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& in
         stream->setReserveStep(reserve_step_);
         streams.push_back(stream);
     }
-    return scheduler_->batchEnqueue(streams);
+    return scheduler_->enqueueGroup(streams);
 }
 
 void NormalEngine::maybeRefreshCacheStatusSnapshot(const std::list<GenerateStreamPtr>& streams) {

@@ -52,12 +52,12 @@ struct KVPartitionBytes {
 };
 
 struct MallocInfo {
-    BatchKVCacheResourcePtr       batch_kv_cache_resource;
-    CompleteTokenIdsPtr           complete_token_ids;
-    int64_t                       request_id          = 0;
-    bool                          verbose             = true;  // for failed log
-    bool                          reuse_cache         = true;
-    bool                          enable_device_cache = true;
+    BatchKVCacheResourcePtr batch_kv_cache_resource;
+    CompleteTokenIdsPtr     complete_token_ids;
+    int64_t                 request_id          = 0;
+    bool                    verbose             = true;  // for failed log
+    bool                    reuse_cache         = true;
+    bool                    enable_device_cache = true;
     // Sparse tail-group cleanup is only valid for incremental allocation.
     // Prefill init keeps reused prefix slots intact because model-path kernels
     // still read them by prefix_length.
@@ -71,11 +71,32 @@ struct MallocInfo {
     int incrSeqLen() const;
 };
 
-struct MallocResult {
-    bool success;
-    int  reuse_len;
+enum class MallocStatus : uint8_t {
+    NONE = 0,
+    RETRYABLE_RESOURCE_EXHAUSTED,
+    PERMANENT_RESOURCE_EXHAUSTED,
+    INTERNAL_ERROR,
+};
 
-    int64_t match_cost_time_us = 0;
+struct MallocResult {
+    MallocResult() = default;
+
+    constexpr MallocResult(bool         success,
+                           int          reuse_len,
+                           int64_t      match_cost_time_us = 0,
+                           MallocStatus status             = MallocStatus::NONE):
+        success(success),
+        reuse_len(reuse_len),
+        match_cost_time_us(match_cost_time_us),
+        status(success                      ? MallocStatus::NONE :
+               status == MallocStatus::NONE ? MallocStatus::INTERNAL_ERROR :
+                                              status) {}
+
+    bool success   = false;
+    int  reuse_len = 0;
+
+    int64_t      match_cost_time_us = 0;
+    MallocStatus status             = MallocStatus::INTERNAL_ERROR;
 };
 
 struct FreeInfo {
@@ -86,9 +107,9 @@ struct FreeInfo {
 };
 
 struct InsertInfo {
-    BatchKVCacheResourcePtr       batch_kv_cache_resource;
-    CompleteTokenIdsPtr           complete_token_ids;
-    bool                          is_resident;
+    BatchKVCacheResourcePtr batch_kv_cache_resource;
+    CompleteTokenIdsPtr     complete_token_ids;
+    bool                    is_resident;
 };
 
 }  // namespace rtp_llm

@@ -114,6 +114,7 @@ class FrontendWorker:
         )
         self.backend_rpc_server_visitor = self.pipeline.backend_rpc_server_visitor
         self.generate_env_config = py_env_configs.generate_env_config
+        self.server_config = py_env_configs.server_config
 
         logging.info("frontend worker start done.")
 
@@ -179,9 +180,9 @@ class FrontendWorker:
             num_return_sequences = request.generate_configs[0].num_return_sequences
             generators: List[AsyncGenerator[Dict[str, Any], None]] = []
             # TODO temp fix sp with batch infer, will change request_id to str later
-            batch_group_size = len(input_texts)
-            # Use request.request_id as batch_group_id for all streams in the same batch
-            batch_group_id = request.request_id
+            group_size = len(request.input_texts)
+            # Use request.request_id as group_id for all streams in the same batch
+            group_id = request.request_id
             for i, (text, urls, generate_config) in enumerate(
                 zip(input_texts, request.input_urls, request.generate_configs)
             ):
@@ -193,9 +194,9 @@ class FrontendWorker:
                         text,
                         urls,
                         generate_config=generate_config,
-                        batch_group_size=batch_group_size,
-                        batch_group_id=batch_group_id,
-                        **unit_kwargs,
+                        group_size=group_size,
+                        group_id=group_id,
+                        **kwargs,
                     )
                 )
             return self._parallel_batch_async_generators(
@@ -215,7 +216,9 @@ class FrontendWorker:
             )
 
     def _format_response(
-        self, gen_responses: GenerateResponse, generate_config: GenerateConfig
+        self,
+        gen_responses: GenerateResponse,
+        generate_config: GenerateConfig,
     ) -> Dict[str, Any]:
         generate_texts = gen_responses.generate_texts
         finished = gen_responses.generate_outputs.generate_outputs[0].finished
@@ -263,16 +266,18 @@ class FrontendWorker:
         return response
 
     def _format_response_new(
-        self, gen_responses: GenerateResponse, generate_config: GenerateConfig
+        self,
+        gen_responses: GenerateResponse,
+        generate_config: GenerateConfig,
     ) -> Dict[str, Any]:
         generate_texts = gen_responses.generate_texts
         if generate_config.num_return_sequences > 0:
             aux_info = []
             if generate_config.aux_info:
-                aux_info = [
-                    asdict(seq.aux_info)
-                    for seq in gen_responses.generate_outputs.generate_outputs
-                ]
+                aux_info = []
+                for seq in gen_responses.generate_outputs.generate_outputs:
+                    info = asdict(seq.aux_info)
+                    aux_info.append(info)
             sequences_pipeline_response = MultiSequencesPipelineResponse(
                 response=generate_texts,
                 finished=all(
@@ -293,8 +298,8 @@ class FrontendWorker:
         text: str,
         urls: List[str],
         generate_config: GenerateConfig,
-        batch_group_size: int = 1,
-        batch_group_id: int = -1,
+        group_size: int = 1,
+        group_id: int = -1,
         **kwargs: Any,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         stream = self.pipeline.pipeline_async(
@@ -303,8 +308,8 @@ class FrontendWorker:
             urls=urls,
             generate_config=generate_config,
             generate_env_config=self.generate_env_config,
-            batch_group_size=batch_group_size,
-            batch_group_id=batch_group_id,
+            group_size=group_size,
+            group_id=group_id,
             **kwargs,
         )
         async for generate_response in stream:

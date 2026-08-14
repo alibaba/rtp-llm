@@ -64,13 +64,27 @@ void GenerateStateMachine::handleWaiting() {
     // original FIFO admission path publishes it only after the current GPU
     // round has completed; no allocator or connector work remains there.
     if (events_.has(StreamEvents::CachePrepared)) {
+        if (auto* stream = stream_cache_resource_->stream(); stream != nullptr) {
+            stream->recordWaitLatency();
+            stream->recordRunningTime();
+        }
         status.store(StreamState::RUNNING, std::memory_order_release);
         return;
     }
     // LoadInitiated 未设置时，必须先执行 initKVBlock 和 asyncLoadCache
     if (!events_.has(StreamEvents::LoadInitiated)) {
+        auto* stream = stream_cache_resource_->stream();
+        if (stream != nullptr) {
+            stream->recordWaitLatency();
+        }
         auto result = stream_cache_resource_->initKVBlock(reserve_step_);
         if (!result.ok()) {
+            const auto role_type              = stream_cache_resource_->resourceContext().role_type;
+            const bool retryable_prefill_init = (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL)
+                                                && stream_cache_resource_->isContextStream();
+            if (absl::IsUnavailable(result) && retryable_prefill_init) {
+                return;
+            }
             error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
             status.store(StreamState::FINISHED, std::memory_order_release);
             releaseResource();
@@ -80,10 +94,16 @@ void GenerateStateMachine::handleWaiting() {
         // 设置 LoadInitiated 标志，表示已尝试asyncLoadCache. 当前实现即便asyncLoadCache失败也不再重试
         reportEvent(StreamEvents::LoadInitiated);
         if (ret) {
+            if (stream != nullptr) {
+                stream->recordLoadingCacheStartTime();
+            }
             status.store(StreamState::LOADING_CACHE, std::memory_order_release);
         } else if (stream_cache_resource_->resourceContext().role_type != RoleType::DECODE) {
             // Loading cache 失败或不需要loading，直接触发重计算
             // 当前decodeRpcServer会调用moveToNext，判断role type避免decodeRpcServer在enqueue前提早走到running状态
+            if (stream != nullptr) {
+                stream->recordRunningTime();
+            }
             status.store(StreamState::RUNNING, std::memory_order_release);
         }
         return;
@@ -96,6 +116,9 @@ void GenerateStateMachine::handleWaiting() {
     // exactly like a decode stream.
     if (stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL
         && stream_cache_resource_->isContextStream()) {
+        if (auto* stream = stream_cache_resource_->stream(); stream != nullptr) {
+            stream->recordRunningTime();
+        }
         status.store(StreamState::RUNNING, std::memory_order_release);
         return;
     }
@@ -109,12 +132,18 @@ void GenerateStateMachine::handleWaiting() {
         releaseResource();
         return;
     }
+    if (auto* stream = stream_cache_resource_->stream(); stream != nullptr) {
+        stream->recordRunningTime();
+    }
     status.store(StreamState::RUNNING, std::memory_order_release);
     return;
 }
 
 void GenerateStateMachine::handleLoading() {
     if (stream_cache_resource_->loadCacheDone()) {
+        if (auto* stream = stream_cache_resource_->stream(); stream != nullptr) {
+            stream->recordLoadingCacheDoneTime();
+        }
         status.store(StreamState::WAITING, std::memory_order_release);
     }
 }

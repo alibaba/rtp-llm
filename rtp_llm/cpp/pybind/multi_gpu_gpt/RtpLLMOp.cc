@@ -329,8 +329,11 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
         }
     }
     grpc::ServerBuilder builder;
-    const GrpcConfig&   grpc_config   = maga_init_params.grpc_config;
-    auto                server_config = grpc_config.get_server_config();
+    // Set large message limits as C++-level defaults (overridable via server_config from grpc_group_args.py)
+    builder.AddChannelArgument(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH, 1024 * 1024 * 1024);
+    builder.AddChannelArgument(GRPC_ARG_MAX_SEND_MESSAGE_LENGTH, 1024 * 1024 * 1024);
+    const GrpcConfig& grpc_config   = maga_init_params.grpc_config;
+    auto              server_config = grpc_config.get_server_config();
     for (auto it = server_config.begin(); it != server_config.end(); ++it) {
         RTP_LLM_LOG_INFO("grpc server add channel argument %s: %d", it->first.c_str(), it->second);
         builder.AddChannelArgument(it->first, it->second);
@@ -454,7 +457,13 @@ void RtpLLMOp::prepareStop(bool coordinated, int64_t target_step) {
 void RtpLLMOp::stop() {
     bool expected = false;
     if (is_server_shutdown_.compare_exchange_strong(expected, true)) {
+        if (model_rpc_service_) {
+            model_rpc_service_->beginShutdown();
+        }
         if (grpc_server_) {
+            if (model_rpc_service_) {
+                model_rpc_service_->cancelPendingRequests();
+            }
             // In a DP/EP deployment this count is rank-local. Waiting here lets
             // idle fake-stream ranks tear down their engine while a real rank is
             // still executing collectives. BackendManager performs the drain and

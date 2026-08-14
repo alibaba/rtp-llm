@@ -17,7 +17,12 @@ from rtp_llm.utils.time_util import Timer
 class GrpcClientWrapper:
     """Wrapper for direct gRPC calls to replace async_request_server"""
 
-    def __init__(self, server_port: int, dp_addresses: Optional[List[str]] = None):
+    def __init__(
+        self,
+        server_port: int,
+        dp_addresses: Optional[List[str]] = None,
+        client_config: Optional[Dict[str, int]] = None,
+    ):
         self.server_port = server_port
         self.address = f"localhost:{server_port}"
         self.channel = None
@@ -26,15 +31,14 @@ class GrpcClientWrapper:
         self.dp_addresses = dp_addresses if dp_addresses else [self.address]
         self._dp_channels: Dict[str, Any] = {}
         self._dp_stubs: Dict[str, Any] = {}
+        self._client_config = client_config or {}
 
     async def _ensure_connection(self):
         """Ensure gRPC channel and stub are created"""
         if self.channel is None or self.stub is None:
             self.channel = grpc.aio.insecure_channel(
                 self.address,
-                options=[
-                    ("grpc.max_metadata_size", 1024 * 1024 * 1024),
-                ],
+                options=[(k, v) for k, v in self._client_config.items()],
             )
             self.stub = RpcServiceStub(self.channel)
 
@@ -43,9 +47,7 @@ class GrpcClientWrapper:
         if address not in self._dp_channels or self._dp_stubs.get(address) is None:
             self._dp_channels[address] = grpc.aio.insecure_channel(
                 address,
-                options=[
-                    ("grpc.max_metadata_size", 1024 * 1024 * 1024),
-                ],
+                options=[(k, v) for k, v in self._client_config.items()],
             )
             self._dp_stubs[address] = RpcServiceStub(self._dp_channels[address])
 

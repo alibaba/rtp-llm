@@ -45,6 +45,14 @@ public:
         RTP_LLM_LOG_INFO("GatherBatchScheduler update batch size to %d", gather_batch_size_);
     }
 
+    std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+    enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override {
+        for (const auto& stream : streams) {
+            stream->reportError(ErrorCode::UNKNOWN_ERROR, "GatherBatchScheduler::enqueueGroup is not supported");
+        }
+        return {std::vector<bool>(streams.size(), false), streams};
+    }
+
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
         cond_.wait_for(lock, std::chrono::seconds(30), [this] {

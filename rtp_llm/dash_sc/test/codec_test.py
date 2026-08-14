@@ -15,10 +15,15 @@ from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.codec import (
     _PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV,
-    FINISH_REASON_USE_PARAMETER_STATUS,
+    DASH_ERROR_ABORT,
+    DASH_ERROR_CAPACITY,
+    DASH_ERROR_TIMEOUT,
+    DashErrorSpec,
     DashScParameterError,
+    LLMFinishReason,
     OtherParams,
     SamplingParams,
+    build_dash_error_response,
     build_error_response,
     build_stream_response_from_generate_outputs,
     parse_dash_sc_grpc_request,
@@ -1662,13 +1667,64 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         }
         generated = next(out for out in infer.outputs if out.name == "generated_ids")
         self.assertEqual(list(generated.shape), [1, 0])
-        # Empty INT32 tensors carry one filler element to keep raw_output_contents
-        # aligned; consumers must trust the declared shape.
-        self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [0])
+        # The declared zero-length shape is represented by an empty raw payload.
+        self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [])
         self.assertEqual(
             _unpack_int64_le(by_name["finish_reason"]),
-            [FINISH_REASON_USE_PARAMETER_STATUS],
+            [LLMFinishReason.USE_PARAMETER_STATUS],
         )
+
+    def test_capacity_error_uses_use_parameter_status(self) -> None:
+        """DASH_ERROR_CAPACITY must use finish_reason=USE_PARAMETER_STATUS so
+        the DashScope api-server passes the explicit status_code=503 through
+        verbatim instead of re-deriving HTTP from the finish_reason code."""
+        self.assertEqual(
+            DASH_ERROR_CAPACITY.finish_reason, LLMFinishReason.USE_PARAMETER_STATUS
+        )
+        self.assertEqual(DASH_ERROR_CAPACITY.status_code, 503)
+        self.assertEqual(DASH_ERROR_CAPACITY.error_no, LLMFinishReason.TASK_LIST_FULL)
+        self.assertEqual(DASH_ERROR_CAPACITY.status_name, "ServiceUnavailable")
+
+        resp = build_dash_error_response(
+            "req-cap",
+            "mdl",
+            error_spec=DASH_ERROR_CAPACITY,
+            status_message="engine task list full",
+        )
+        infer = resp.infer_response
+        self.assertEqual(infer.parameters["error_no"].int64_param, 5)
+        payload = json.loads(infer.parameters["error_msg"].string_param)
+        self.assertEqual(payload["status_code"], 503)
+        self.assertEqual(payload["status_name"], "ServiceUnavailable")
+        self.assertEqual(infer.parameters["status_code"].int64_param, 503)
+        self.assertEqual(
+            infer.parameters["status_name"].string_param, "ServiceUnavailable"
+        )
+        self.assertEqual(
+            infer.parameters["status_message"].string_param,
+            "engine task list full",
+        )
+        by_name = {
+            infer.outputs[i].name: infer.raw_output_contents[i]
+            for i in range(len(infer.outputs))
+        }
+        self.assertEqual(
+            _unpack_int64_le(by_name["finish_reason"]),
+            [LLMFinishReason.USE_PARAMETER_STATUS],
+        )
+
+    def test_timeout_and_abort_specs_use_use_parameter_status(self) -> None:
+        """DASH_ERROR_TIMEOUT and DASH_ERROR_ABORT must also use
+        USE_PARAMETER_STATUS so their 504/499 codes survive the api-server."""
+        for spec, expected_code in (
+            (DASH_ERROR_TIMEOUT, 504),
+            (DASH_ERROR_ABORT, 499),
+        ):
+            with self.subTest(spec=spec):
+                self.assertEqual(
+                    spec.finish_reason, LLMFinishReason.USE_PARAMETER_STATUS
+                )
+                self.assertEqual(spec.status_code, expected_code)
 
     def test_finish_reason_length_override_repro_p1(self) -> None:
         """P1 repro: when generation finishes because ``max_new_tokens`` was
@@ -1805,9 +1861,7 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
     def test_missing_output_ids_empty_generated(self) -> None:
         out = GenerateOutput(output_ids=None, finished=False, aux_info=AuxInfo())
         go = GenerateOutputs(generate_outputs=[out])
-        with patch.dict(
-            os.environ, {_PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV: "0"}
-        ):
+        with patch.dict(os.environ, {_PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV: "0"}):
             resp = build_stream_response_from_generate_outputs(
                 dash_sc_request_id="r",
                 model_name="m",
@@ -1824,9 +1878,7 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
 
     def test_terminal_empty_generated_uses_eos_when_enabled(self) -> None:
         out = GenerateOutput(output_ids=None, finished=True, aux_info=AuxInfo())
-        with patch.dict(
-            os.environ, {_PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV: "1"}
-        ):
+        with patch.dict(os.environ, {_PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV: "1"}):
             resp = build_stream_response_from_generate_outputs(
                 dash_sc_request_id="r",
                 model_name="glm-5",
@@ -1836,7 +1888,9 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             )
         infer = resp.infer_response
         generated_idx = next(
-            i for i, output in enumerate(infer.outputs) if output.name == "generated_ids"
+            i
+            for i, output in enumerate(infer.outputs)
+            if output.name == "generated_ids"
         )
 
         self.assertEqual(list(infer.outputs[generated_idx].shape), [1, 1])
@@ -1846,9 +1900,7 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
 
     def test_streaming_empty_generated_stays_empty_when_enabled(self) -> None:
         out = GenerateOutput(output_ids=None, finished=False, aux_info=AuxInfo())
-        with patch.dict(
-            os.environ, {_PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV: "1"}
-        ):
+        with patch.dict(os.environ, {_PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV: "1"}):
             resp = build_stream_response_from_generate_outputs(
                 dash_sc_request_id="r",
                 model_name="glm-5",
@@ -1858,7 +1910,9 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             )
         infer = resp.infer_response
         generated_idx = next(
-            i for i, output in enumerate(infer.outputs) if output.name == "generated_ids"
+            i
+            for i, output in enumerate(infer.outputs)
+            if output.name == "generated_ids"
         )
 
         self.assertEqual(list(infer.outputs[generated_idx].shape), [1, 0])

@@ -16,8 +16,7 @@ from fastapi import Request as RawRequest
 from fastapi import status
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import ORJSONResponse
-from fastapi.responses import StreamingResponse
+from fastapi.responses import ORJSONResponse, StreamingResponse
 from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
@@ -34,6 +33,8 @@ from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.frontend.shutdown_manager import FrontendShutdownManager
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
+from rtp_llm.server.misc import format_exception
+from rtp_llm.utils.concurrency_controller import ConcurrencyException
 from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
 from rtp_llm.utils.util import async_request_server
 from rtp_llm.utils.version_info import VersionInfo
@@ -257,8 +258,11 @@ class FrontendApp(object):
             world_info=world_info,
             parallelism_config=engine_config.parallelism_config,
         )
+        client_config = self.py_env_configs.grpc_config.get_client_config()
         self.grpc_client = GrpcClientWrapper(
-            self.server_config.rpc_server_port, dp_addresses=dp_addresses
+            self.server_config.rpc_server_port,
+            dp_addresses=dp_addresses,
+            client_config=client_config,
         )
 
         logging.info(
@@ -395,6 +399,9 @@ class FrontendApp(object):
                     )
                     should_finish = False
                 return response
+            except ConcurrencyException as e:
+                # Safety net: never let concurrency-limit overflow surface as 500.
+                return ORJSONResponse(format_exception(e), status_code=429)
             finally:
                 if should_finish:
                     self.shutdown_manager.finish_request()

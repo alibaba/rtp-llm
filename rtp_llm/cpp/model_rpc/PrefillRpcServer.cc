@@ -10,9 +10,15 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <ctime>
 #include <cstring>
+#include <memory>
+#include <string>
+#include <vector>
 #include <strings.h>
 #include <fstream>
 #include <iomanip>
@@ -435,6 +441,8 @@ const bool kHasRemoteRpcServerIp = []() {
 
 }  // namespace
 
+PrefillRpcServer::~PrefillRpcServer() = default;
+
 #define CLIENT_GRPC_RET_IF_ERROR(prefill_context, state, error_code_value)                                             \
     if (!(state)) {                                                                                                    \
         auto   new_error_code = error_code_value;                                                                      \
@@ -623,17 +631,23 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
 void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote allocate resource", prefill_context.request_id);
-    prefill_context.client_context.reset(new ClientContext());
+    auto    client_context     = std::make_shared<ClientContext>();
     auto    request_timeout_ms = prefill_context.request_timeout_ms;
     auto    max_rpc_timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
     int64_t final_timeout_ms   = request_timeout_ms > 0 ? request_timeout_ms : max_rpc_timeout_ms;
     if (final_timeout_ms > 0) {
         auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(final_timeout_ms);
-        prefill_context.client_context->set_deadline(deadline);
+        client_context->set_deadline(deadline);
+    }
+    std::atomic_store(&prefill_context.client_context, client_context);
+    // Close the publish-before-cancel window: either requestPriorityPreempt()
+    // observes this ClientContext, or this check observes its cancel latch.
+    if (prefill_context.cancel_state->load(std::memory_order_seq_cst)) {
+        client_context->TryCancel();
     }
     // final_timeout_ms <= 0: skip set_deadline; gRPC treats it as no deadline.
     prefill_context.client_stream =
-        std::move(prefill_context.grpc_connection.stub->RemoteGenerate(prefill_context.client_context.get()));
+        std::move(prefill_context.grpc_connection.stub->RemoteGenerate(client_context.get()));
     auto&             client_stream = prefill_context.client_stream;
     GenerateRequestPB alloc_request;
     alloc_request.set_stage(RemoteStage::ALLOCATE);
@@ -641,6 +655,9 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     alloc_request.set_request_id(prefill_context.request_id);
     // TODO(xinfei.sxf) reduce copy
     GenerateInputPB* new_request = new GenerateInputPB(*prefill_context.rpc_context.request);
+    new_request->clear_group_size();
+    new_request->clear_group_id();
+    new_request->mutable_generate_config()->clear_group_timeout();
     alloc_request.set_allocated_input(new_request);
     for (auto& addrs : prefill_context.prefill_worker_cache_store_addrs) {
         alloc_request.add_peer_addrs(addrs);
@@ -681,7 +698,9 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
 void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache", prefill_context.request_id);
+    auto start_time_us         = currentTimeUs();
     prefill_context.error_info = waitStreamBeforeRun(prefill_context.getStream());
+    prefill_context.stat_info.remote_load_cache_wait_stream_rt_us += currentTimeUs() - start_time_us;
     if (prefill_context.error_info.hasError()) {
         prefill_context.error_status =
             serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);
@@ -693,8 +712,10 @@ void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_cont
     load_request.set_client_id(process_id_);
     load_request.set_request_id(prefill_context.request_id);
     load_request.set_start_time(currentTimeUs());
+    start_time_us = currentTimeUs();
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, prefill_context.client_stream->Write(load_request), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
+    prefill_context.stat_info.remote_load_cache_write_request_rt_us += currentTimeUs() - start_time_us;
 }
 
 void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) {
@@ -735,7 +756,7 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
     CLIENT_GRPC_RET_IF_ERROR(prefill_context, error_code == ErrorCode::NONE_ERROR, error_code);
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache done", prefill_context.request_id);
 
-    meta_->dequeue(prefill_context.request_id, prefill_context.getStream());
+    prefill_context.dequeueStreamFromRuntimeMeta();
     if (!prefill_context.getStream()->hasEvent(StreamEvents::NeedRemoteGenerate)) {
         RTP_LLM_LOG_DEBUG("request [%ld] pd-sep prefill finished locally without remote generate, "
                           "skipping remote generate stages",
@@ -806,7 +827,7 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     auto prefill_context_execute_time_with_cache_us   = prefill_context.getStream()->contextExecuteTimeWithCacheUs();
     auto first_token_rt_us                            = prefill_context.getStream()->getTimeInfo().first_token_rt_us;
     while (prefill_context.client_stream->Read(&response)) {
-        if (prefill_context.server_context->IsCancelled()) {
+        if (prefill_context.isRequestCancelled()) {
             RTP_LLM_LOG_WARNING("request [%ld] cancel by user", request_id);
             prefill_context.error_status = grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled");
             return;
@@ -855,12 +876,16 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
         }
         if (!prefill_context.rpc_context.writer->Write(response)) {
             RTP_LLM_LOG_WARNING("request [%ld] write outputs pb failed", request_id);
-            prefill_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
+            // Both the synchronous gRPC writer and ResponseBufferWriter return false when their downstream
+            // consumer is closed or cancelled. Treat this as cancellation so closeGrpcStream() calls TryCancel().
+            prefill_context.error_status = grpc::Status(grpc::StatusCode::CANCELLED, "request output consumer closed");
             return;
         }
     }
-    CLIENT_GRPC_RET_IF_ERROR(
-        prefill_context, prefill_context.closeGrpcStream().ok(), ErrorCode::REMOTE_GENERATE_FAILED);
+    auto status = prefill_context.closeGrpcStream();
+    if (!status.ok() && status.error_code() != grpc::StatusCode::CANCELLED) {
+        CLIENT_GRPC_RET_IF_ERROR(prefill_context, false, ErrorCode::REMOTE_GENERATE_FAILED);
+    }
 }
 
 grpc::Status PrefillRpcServer::prepareAllocateResource(PrefillGenerateContext& prefill_context) {
@@ -930,6 +955,48 @@ void PrefillRpcServer::reportPrefillRecentCacheKeyMetricsOnce(PrefillGenerateCon
                          cacheKeyPreview(cache_keys).c_str());
     }
 }
+grpc::Status PrefillRpcServer::syncPrefix(PrefillGenerateContext& prefill_context) {
+    auto max_retry_times      = maga_init_params_.pd_sep_config.prefill_retry_times;
+    auto max_retry_timeout_ms = maga_init_params_.pd_sep_config.prefill_retry_timeout_ms;
+    int  retry_interval_ms    = 1;
+
+    EXECUTE_WITH_RETRY(
+        prepareAllocateResource, prefill_context, max_retry_times, max_retry_timeout_ms, retry_interval_ms);
+    if (prefill_context.hasError()) {
+        logPrefillFailureTrace("prepare_allocate_failed", prefill_context);
+        RTP_LLM_LOG_WARNING(
+            "request [%ld] prepare allocate resource failed after retry [%d] times, cost time ms [%ld], "
+            "max retry time [%ld], max retry timeout ms [%ld]",
+            prefill_context.request_id,
+            prefill_context.retry_times,
+            prefill_context.retry_cost_time_ms,
+            max_retry_times + 1,
+            max_retry_timeout_ms);
+        return prefill_context.error_status;
+    }
+    EXECUTE_STAGE_FUNC(enqueueRequest, prefill_context);
+    return grpc::Status::OK;
+}
+
+grpc::Status PrefillRpcServer::finishStream(PrefillGenerateContext& prefill_context) {
+    EXECUTE_STAGE_FUNC(remoteLoadCacheStart, prefill_context);
+    EXECUTE_STAGE_FUNC(pollLocalOutput, prefill_context);
+    EXECUTE_STAGE_FUNC(remoteLoadCacheEnd, prefill_context);
+    EXECUTE_STAGE_FUNC(remoteGenerate, prefill_context);
+    EXECUTE_STAGE_FUNC(pollRemoteOutput, prefill_context);
+    prefill_context.stat_info.nextStage();
+    return grpc::Status::OK;
+}
+
+grpc::Status PrefillRpcServer::preferPriorityPreemption(PrefillGenerateContext& prefill_context,
+                                                        const grpc::Status&     fallback) {
+    if (!prefill_context.isPriorityPreempted()) {
+        return fallback;
+    }
+    return serializeErrorMsg(prefill_context.request_key,
+                             prefill_context.request_info,
+                             ErrorInfo(ErrorCode::PRIORITY_PREEMPTED, "preempted by a higher-priority request"));
+}
 
 grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*                   server_context,
                                                   const GenerateInputPB*                 request,
@@ -969,36 +1036,20 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                                                   request->generate_config().timeout_ms(),
                                                   server_context,
                                                   metrics_reporter_,
-                                                  meta_);
+                                                  meta_,
+                                                  maga_init_params_.pd_sep_config.prefill_stop_stream_wait_timeout_ms);
     prefill_context.onflight_requests      = onflight_requests_;
     prefill_context.loading_cache_requests = loading_cache_requests_;
 
-    auto max_retry_times      = maga_init_params_.pd_sep_config.prefill_retry_times;
-    auto max_retry_timeout_ms = maga_init_params_.pd_sep_config.prefill_retry_timeout_ms;
-    int  retry_interval_ms    = 1;
-
     try {
-        EXECUTE_WITH_RETRY(
-            prepareAllocateResource, prefill_context, max_retry_times, max_retry_timeout_ms, retry_interval_ms);
-        if (prefill_context.hasError()) {
-            logPrefillFailureTrace("prepare_allocate_failed", prefill_context);
-            RTP_LLM_LOG_WARNING(
-                "request [%ld] prepare allocate resource failed after retry [%d] times, cost time ms [%ld], "
-                "max retry time [%ld], max retry timeout ms [%ld]",
-                prefill_context.request_id,
-                prefill_context.retry_times,
-                prefill_context.retry_cost_time_ms,
-                max_retry_times + 1,
-                max_retry_timeout_ms);
-            return prefill_context.error_status;
+        auto status = syncPrefix(prefill_context);
+        if (!status.ok()) {
+            return status;
         }
-        EXECUTE_STAGE_FUNC(enqueueRequest, prefill_context);
-        EXECUTE_STAGE_FUNC(remoteLoadCacheStart, prefill_context);
-        EXECUTE_STAGE_FUNC(pollLocalOutput, prefill_context);
-        EXECUTE_STAGE_FUNC(remoteLoadCacheEnd, prefill_context);
-        EXECUTE_STAGE_FUNC(remoteGenerate, prefill_context);
-        EXECUTE_STAGE_FUNC(pollRemoteOutput, prefill_context);
-        prefill_context.stat_info.nextStage();
+        status = finishStream(prefill_context);
+        if (!status.ok()) {
+            return status;
+        }
     } catch (const std::exception& e) {
         auto error_msg = "request [" + prefill_context.request_key + "] catch exception [" + e.what() + "]";
         prefill_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
@@ -1026,6 +1077,30 @@ PrefillRpcServer::RemoteFinish(grpc::ServerContext* context, const RemoteFinishR
     RTP_LLM_PROFILE_FUNCTION();
     auto request_id = request->request_id();
     resource_.cache_store->markRequestEnd(std::to_string(request_id));
+    return grpc::Status::OK;
+}
+
+grpc::Status
+PrefillRpcServer::Cancel(grpc::ServerContext* /*context*/, const CancelRequestPB* request, CancelResponsePB* response) {
+    RTP_LLM_PROFILE_FUNCTION();
+    if (request == nullptr || request->request_id() <= 0) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "cancel request missing request_id");
+    }
+    const auto result = onCancelRequest(request->request_id());
+    switch (result) {
+        case PriorityCancelResult::ACCEPTED:
+            response->set_status(CancelStatusPB::CANCEL_STATUS_ACCEPTED);
+            RTP_LLM_LOG_DEBUG("request [%ld] priority-preemption cancel accepted", request->request_id());
+            break;
+        case PriorityCancelResult::TOMBSTONED:
+            response->set_status(CancelStatusPB::CANCEL_STATUS_TOMBSTONED);
+            RTP_LLM_LOG_DEBUG("request [%ld] priority-preemption cancel tombstoned", request->request_id());
+            break;
+        case PriorityCancelResult::NOT_FOUND:
+            response->set_status(CancelStatusPB::CANCEL_STATUS_NOT_FOUND);
+            RTP_LLM_LOG_DEBUG("request [%ld] priority-preemption cancel not found", request->request_id());
+            break;
+    }
     return grpc::Status::OK;
 }
 

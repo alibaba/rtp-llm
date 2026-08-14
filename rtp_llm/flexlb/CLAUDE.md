@@ -52,7 +52,7 @@ Core load balancing logic, scheduling strategies, and worker status synchronizat
 
 Key concepts:
 - **Router pattern**: `Router` interface + `DefaultRouter` implementation for multi-role request routing
-- **LoadBalancer pattern**: Strategy interface for worker selection (Random, WeightedCache, ShortestTTFT)
+- **LoadBalanceStrategy pattern**: Strategy interface for worker selection (Random, WeightedCache, ShortestTTFT)
 - **Queue-based scheduling**: `QueueManager` + `RequestScheduler` for async request processing
 - **Dynamic resource management**: `DynamicWorkerManager` for adaptive capacity control
 - **Worker synchronization**: Periodic gRPC-based status sync (`GrpcWorkerStatusRunner`)
@@ -166,14 +166,19 @@ The `DefaultRouter` orchestrates routing across these stages. If a later stage f
 
 ### Load Balancing Strategies
 
-Four strategies are available (registered with `LoadBalanceStrategyFactory`):
+Four baseline strategies are available (registered with `LoadBalanceStrategyFactory`):
 
 - **RANDOM**: Random worker selection
-- **SHORTEST_TTFT**: Select worker with shortest Time-To-First-Token
-- **CACHE_AFFINITY_FIRST**: Prefer the global cache leader within a bounded additional prefill-work budget; otherwise preserve the ShortestTTFT baseline
-- **WEIGHTED_CACHE**: Cache-aware selection prioritizing workers with matching KV cache blocks
+- **COST_BASED_PREFILL**: Select worker with lowest cost for prefill requests
+- **COST_BASED_DECODE**: Select worker with lowest cost for decode requests
+- **SHORTEST_TTFT**: Select worker with lowest predicted TTFT (prefill time + queue time) using candidate pool mechanism (RATIO/FIXED modes) with CAS fairness
 
-Each `RoleType` can use a different strategy. See `LoadBalanceStrategyEnum` in flexlb-common.
+Each `RoleType` can use a different compatible strategy. `SHORTEST_TTFT` and
+`COST_BASED_PREFILL` are intended for PREFILL/PDFUSION endpoints, not DECODE or VIT. See
+`LoadBalanceStrategyEnum` in flexlb-common. Both prefill strategies can enable the same bounded
+cache-affinity policy with `cacheAffinityEnabled: true`; configure
+`cacheAffinityMaxExtraTtftMs` and `cacheAffinityMinHitRate` for its cost and hit-rate gates.
+The feature defaults to disabled; threshold defaults are `0` ms and `5` percent.
 
 ### Queue-Based Request Scheduling
 
@@ -337,11 +342,11 @@ ZooKeeper connection configuration for distributed coordination.
 
 ## Important Implementation Details
 
-### LoadBalancer Registration
-All `LoadBalancer` implementations must register with `LoadBalanceStrategyFactory` during Spring initialization. Use `@DependsOn` annotation to ensure proper initialization order (see `DefaultRouter`).
+### LoadBalanceStrategy Registration
+All `LoadBalanceStrategy` implementations must register with `LoadBalanceStrategyFactory` during Spring initialization. Use `@DependsOn` annotation to ensure proper initialization order (see `DefaultRouter`).
 
 ### Rollback Mechanism
-When multi-stage routing partially fails, the system must rollback local state updates. See `DefaultRouter.roolBackRoutingFailure()` which calls `LoadBalancer.rollBack()` for each successfully routed stage.
+When multi-stage routing partially fails, the system must rollback local state updates. See `DefaultRouter.roolBackRoutingFailure()` which calls `LoadBalanceStrategy.rollBack()` for each successfully routed stage.
 
 ### Concurrent Data Access
 `EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP` is shared between routing threads (reading) and sync threads (writing). Updates are performed atomically using proper synchronization.
@@ -420,7 +425,7 @@ Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`
 Examples:
 - `feat(router): add cache-aware routing strategy`
 - `fix(grpc): handle connection timeout gracefully`
-- `refactor(LoadBalancer): rename method getLoadBalanceStrategy to getLoadBalancer`
+- `refactor(LoadBalanceStrategy): rename method getLoadBalanceStrategy to getLoadBalancer`
 
 ## Java Version and Dependencies
 

@@ -757,11 +757,6 @@ class GrpcMetricsTest(TestCase):
         self.assertEqual(self.tags["method"], "ModelStreamInfer")
         self.assertEqual(grpc_metrics._metric_tags(None, None)["rank_id"], "")
 
-    def test_arrival_fires_qps_with_base_tags(self) -> None:
-        grpc_metrics.report_arrival(rank_id=self.rank_id, server_id=self.server_id)
-        self.assertEqual(self._metrics().count(AccMetrics.QPS_METRIC), 1)
-        self.assertEqual(self._for(AccMetrics.QPS_METRIC)[0][2], self.tags)
-
     def test_chunk_first_vs_iter(self) -> None:
         rec = _make_record()
         grpc_metrics.report_chunk(
@@ -781,6 +776,7 @@ class GrpcMetricsTest(TestCase):
             rec, rank_id=self.rank_id, server_id=self.server_id, status="OK"
         )
         metrics = self._metrics()
+        # Single-report: tagged with priority.
         self.assertEqual(metrics.count(AccMetrics.SUCCESS_QPS_METRIC), 1)
         self.assertEqual(metrics.count(AccMetrics.ERROR_QPS_METRIC), 0)
         self.assertEqual(self._for(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC)[0][1], 3)
@@ -794,9 +790,12 @@ class GrpcMetricsTest(TestCase):
             server_id=self.server_id,
             status="CANCELLED",
         )
-        self.assertEqual(len(self._for(AccMetrics.CANCEL_QPS_METRIC)), 1)
+        cancel = self._for(AccMetrics.CANCEL_QPS_METRIC)
+        # Single-report: tagged with priority.
+        self.assertEqual(len(cancel), 1)
         self.assertEqual(len(self._for(AccMetrics.ERROR_QPS_METRIC)), 0)
-        self.assertNotIn("error_code", self._for(AccMetrics.CANCEL_QPS_METRIC)[0][2])
+        self.assertNotIn("error_code", cancel[0][2])
+        self.assertEqual(cancel[0][2]["priority"], "0")
 
     def test_done_error_tags_error_code(self) -> None:
         grpc_metrics.report_frontend_rpc_done(
@@ -806,8 +805,10 @@ class GrpcMetricsTest(TestCase):
             status="UNAVAILABLE",
         )
         error = self._for(AccMetrics.ERROR_QPS_METRIC)
+        # Single-report: tagged with priority, carries the error_code tag.
         self.assertEqual(len(error), 1)
         self.assertEqual(error[0][2]["error_code"], "UNAVAILABLE")
+        self.assertEqual(error[0][2]["priority"], "0")
         # The shared dict must not be mutated by the cold error branch.
         self.assertNotIn("error_code", self.tags)
 
@@ -862,6 +863,92 @@ class GrpcMetricsTest(TestCase):
         self.assertEqual(metrics.count(GaugeMetrics.TOOL_CALL_LOOP_CHECK_RT_METRIC), 1)
         loop = self._for(AccMetrics.TOOL_CALL_LOOP_QPS_METRIC)[0]
         self.assertEqual(loop[2]["action"], "metric")
+
+    # -- priority tag ----------------------------------------------------
+
+    def test_arrival_priority_reports_true_qos_value_once(self) -> None:
+        rec = _make_record(generate_config={"qos_priority": 7})
+        grpc_metrics.report_arrival_priority(
+            rec, rank_id=self.rank_id, server_id=self.server_id
+        )
+        # Idempotent: a second call must not double-count.
+        grpc_metrics.report_arrival_priority(
+            rec, rank_id=self.rank_id, server_id=self.server_id
+        )
+        arrival = self._for(AccMetrics.QPS_METRIC)
+        self.assertEqual(len(arrival), 1)
+        self.assertEqual(arrival[0][2]["priority"], "7")
+        self.assertEqual(arrival[0][2]["protocol"], "grpc")
+        self.assertTrue(rec.priority_arrival_reported)
+
+    def test_done_fallback_arrival_reports_zero_bucket(self) -> None:
+        # RPC that never reached the first frame parse (frame-less / parse
+        # error): the done tail reports the tagged arrival in the "0" bucket.
+        rec = _make_record()
+        grpc_metrics.report_frontend_rpc_done(
+            rec, rank_id=self.rank_id, server_id=self.server_id, status="OK"
+        )
+        arrival = self._for(AccMetrics.QPS_METRIC)
+        self.assertEqual(len(arrival), 1)
+        self.assertEqual(arrival[0][2]["priority"], "0")
+
+    def test_done_after_arrival_priority_emits_exactly_one_tagged_arrival(
+        self,
+    ) -> None:
+        # Normal flow: servicer reports the true value on first frame parse,
+        # the done-tail fallback must be a no-op — conservation of the tagged
+        # arrival series against the untagged one.
+        rec = _make_record(generate_config={"qos_priority": 3})
+        grpc_metrics.report_arrival_priority(
+            rec, rank_id=self.rank_id, server_id=self.server_id
+        )
+        grpc_metrics.report_frontend_rpc_done(
+            rec, rank_id=self.rank_id, server_id=self.server_id, status="OK"
+        )
+        arrival = self._for(AccMetrics.QPS_METRIC)
+        self.assertEqual(len(arrival), 1)
+        self.assertEqual(arrival[0][2]["priority"], "3")
+
+    def test_done_success_carries_qos_value(self) -> None:
+        rec = _make_record(generate_config={"qos_priority": 42})
+        grpc_metrics.report_frontend_rpc_done(
+            rec, rank_id=self.rank_id, server_id=self.server_id, status="OK"
+        )
+        success = self._for(AccMetrics.SUCCESS_QPS_METRIC)
+        self.assertEqual(len(success), 1)
+        self.assertEqual(success[0][2]["priority"], "42")
+
+    def test_priority_merge_does_not_pollute_memoized_tags(self) -> None:
+        rec = _make_record(generate_config={"qos_priority": 9})
+        grpc_metrics.report_arrival_priority(
+            rec, rank_id=self.rank_id, server_id=self.server_id
+        )
+        grpc_metrics.report_frontend_rpc_done(
+            rec, rank_id=self.rank_id, server_id=self.server_id, status="OK"
+        )
+        # The memoized base dict shared by all report calls must stay clean.
+        self.assertNotIn("priority", self.tags)
+        self.assertNotIn(
+            "priority", grpc_metrics._metric_tags(self.rank_id, self.server_id)
+        )
+
+    def test_priority_tag_handles_malformed_and_missing_qos(self) -> None:
+        self.assertEqual(grpc_metrics._priority_tag(_make_record()), "0")
+        self.assertEqual(
+            grpc_metrics._priority_tag(_make_record(generate_config={})), "0"
+        )
+        self.assertEqual(
+            grpc_metrics._priority_tag(
+                _make_record(generate_config={"qos_priority": "abc"})
+            ),
+            "0",
+        )
+        self.assertEqual(
+            grpc_metrics._priority_tag(
+                _make_record(generate_config={"qos_priority": " 5 "})
+            ),
+            "5",
+        )
 
 
 if __name__ == "__main__":

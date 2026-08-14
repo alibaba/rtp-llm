@@ -291,17 +291,13 @@ TEST_F(GenerateStreamStateTest, testLoadInitiatedPreventsDuplicateInitKVBlock) {
     auto stream = createStream();
     ASSERT_EQ(stream->getStatus(), StreamState::WAITING);
 
-    // Simulate DecodeRpcServer: call initKVBlock directly and set LoadInitiated
     auto& resource = stream->streamCacheResource();
     ASSERT_TRUE(resource.initKVBlock().ok());
     stream->reportEvent(StreamEvents::LoadInitiated);
 
-    // FIFOScheduler calls moveToNext, should skip initKVBlock and asyncLoadCache
     auto new_state = stream->moveToNext();
-    // Should stay in WAITING because CanRun is not set yet
     ASSERT_EQ(new_state, StreamState::WAITING);
 
-    // Now simulate FIFOScheduler setting CanRun
     stream->reportEvent(StreamEvents::CanRun);
     new_state = stream->moveToNext();
     ASSERT_EQ(new_state, StreamState::RUNNING);
@@ -311,20 +307,14 @@ TEST_F(GenerateStreamStateTest, testLoadInitiatedSkipsAsyncLoadCache) {
     auto stream = createStream();
     ASSERT_EQ(stream->getStatus(), StreamState::WAITING);
 
-    // Simulate DecodeRpcServer: only initKVBlock, no asyncLoadCache
     auto& resource = stream->streamCacheResource();
     ASSERT_TRUE(resource.initKVBlock().ok());
     stream->reportEvent(StreamEvents::LoadInitiated);
-
-    // Verify load_cache_context_ is null (no asyncLoadCache was called)
     ASSERT_FALSE(resource.load_cache_context_);
 
-    // moveToNext should not trigger asyncLoadCache because LoadInitiated is set
     stream->reportEvent(StreamEvents::CanRun);
     auto new_state = stream->moveToNext();
     ASSERT_EQ(new_state, StreamState::RUNNING);
-
-    // Still no asyncLoadCache context
     ASSERT_FALSE(resource.load_cache_context_);
 }
 
@@ -336,9 +326,6 @@ TEST_F(GenerateStreamStateTest, testPrefillFallbackDecodeGrowsBlocksAfterContext
     ASSERT_TRUE(stream->isContextStream());
     ASSERT_EQ(stream->curBlocksNum(), 1u);
 
-    // PD fallback can continue decoding in the PREFILL role. The next decode
-    // token is at absolute position 2, which crosses the 2-token test block
-    // boundary and therefore requires a second block-table column.
     stream->setIsContextStream(false);
     stream->setSeqLength(3);
 
@@ -347,15 +334,10 @@ TEST_F(GenerateStreamStateTest, testPrefillFallbackDecodeGrowsBlocksAfterContext
 }
 
 TEST_F(GenerateStreamStateTest, testNormalPathTriggersAsyncLoadCache) {
-    // Create stream with reuse_cache enabled to trigger asyncLoadCache
     auto stream = createStream({1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true);
     ASSERT_EQ(stream->getStatus(), StreamState::WAITING);
 
-    // Normal path: moveToNext should trigger initKVBlock + asyncLoadCache
     auto new_state = stream->moveToNext();
-
-    // Should transition to LOADING_CACHE if asyncLoadCache was initiated
-    // or stay in WAITING if no connectors are available
     ASSERT_TRUE(new_state == StreamState::LOADING_CACHE || new_state == StreamState::WAITING);
 }
 

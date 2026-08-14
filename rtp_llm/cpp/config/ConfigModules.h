@@ -376,11 +376,12 @@ struct BatchDecodeSchedulerConfig {
 };
 
 struct FIFOSchedulerConfig {
-    int64_t     max_context_batch_size      = 1;
-    int64_t     max_batch_tokens_size       = 0;
-    int64_t     max_batch_kv_len            = 0;
-    bool        cp_force_single_prefill     = true;
-    int64_t     max_inited_kv_cache_streams = 0;
+    int64_t     max_context_batch_size         = 1;
+    int64_t     max_batch_tokens_size          = 0;
+    int64_t     max_batch_tokens_without_cache = 0;
+    int64_t     max_batch_kv_len               = 0;
+    bool        cp_force_single_prefill        = true;
+    int64_t     max_inited_kv_cache_streams    = 0;
     std::string to_string() const;
 };
 
@@ -439,6 +440,13 @@ struct PDSepConfig {
     int64_t  max_rpc_timeout_ms              = 2 * 3600 * 1000;  // 2h default
     int64_t  worker_port_offset              = 0;
     bool     decode_entrance                 = false;
+    // ========== Prefill Thread Pool Configuration ==========
+    // prepare-resource pool size. 0 = concurrency_limit * 2; effective minimum is 128.
+    int64_t prefill_prepare_resource_pool_size = 0;
+    // Max wait time in stopStream() for Engine Loop to call finish_internal().
+    // When GenerateDone is set and stream has no error, stopStream() waits up to
+    // this many ms for Engine Loop's advance() to detect GenerateDone and set FINISHED.
+    int64_t prefill_stop_stream_wait_timeout_ms = 2000;
 
     std::string to_string() const;
 };
