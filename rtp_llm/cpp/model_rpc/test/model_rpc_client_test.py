@@ -174,7 +174,7 @@ class ModelRpcClientTest(TestCase):
         with unittest.mock.patch.dict(
             os.environ,
             {"CUSTOM_OUTPUT_TOKEN_POSITION": "-2"},
-            clear=False,
+            clear=True,
         ):
             input_pb = trans_input(input_py)
 
@@ -194,7 +194,7 @@ class ModelRpcClientTest(TestCase):
         with unittest.mock.patch.dict(
             os.environ,
             {"CUSTOM_OUTPUT_TOKEN_POSITION": "-2"},
-            clear=False,
+            clear=True,
         ):
             input_pb = trans_input(input_py)
 
@@ -211,7 +211,7 @@ class ModelRpcClientTest(TestCase):
         with unittest.mock.patch.dict(
             os.environ,
             {"CUSTOM_OUTPUT_TOKEN_POSITION": "-5"},
-            clear=False,
+            clear=True,
         ):
             with self.assertRaisesRegex(ValueError, "outside prompt length 4"):
                 trans_input(input_py)
@@ -231,9 +231,61 @@ class ModelRpcClientTest(TestCase):
         with unittest.mock.patch.dict(
             os.environ,
             {"CUSTOM_OUTPUT_TOKEN_POSITION": "0"},
-            clear=False,
+            clear=True,
         ):
             with self.assertRaisesRegex(ValueError, "must be negative"):
+                trans_input(input_py)
+
+    def test_trans_input_tracks_last_matching_token(self):
+        input_py = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([7, 42, 8, 42, 9]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+        )
+
+        with unittest.mock.patch.dict(
+            os.environ,
+            {"CUSTOM_OUTPUT_TRACKED_TOKEN_ID": "42"},
+            clear=True,
+        ):
+            input_pb = trans_input(input_py)
+
+        self.assertEqual(input_pb.custom_output_token_position.value, 3)
+
+    def test_trans_input_rejects_missing_tracked_token(self):
+        input_py = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([7, 8, 9]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+        )
+
+        with unittest.mock.patch.dict(
+            os.environ,
+            {"CUSTOM_OUTPUT_TRACKED_TOKEN_ID": "42"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "was not found in the prompt"):
+                trans_input(input_py)
+
+    def test_trans_input_rejects_multiple_deployment_selectors(self):
+        input_py = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([7, 42, 9]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+        )
+
+        with unittest.mock.patch.dict(
+            os.environ,
+            {
+                "CUSTOM_OUTPUT_TOKEN_POSITION": "-2",
+                "CUSTOM_OUTPUT_TRACKED_TOKEN_ID": "42",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "mutually exclusive"):
                 trans_input(input_py)
 
     @staticmethod
