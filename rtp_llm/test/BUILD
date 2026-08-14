@@ -321,6 +321,16 @@ py_test(
 )
 
 py_test(
+    name="mtp_tool_call_segmentation_test",
+    srcs=[
+        "mtp_tool_call_segmentation_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+)
+
+py_test(
     name="frontend_streaming_utf8_replay_test",
     srcs=[
         "frontend_streaming_utf8_replay_test.py",
