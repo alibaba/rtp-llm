@@ -47,6 +47,16 @@ py_library(
 )
 
 py_library(
+    name = "zigzag_permute",
+    srcs = ["zigzag_permute.py"],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:triton",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "triton_kernels",
     deps = [
         ":fla",
@@ -56,6 +66,7 @@ py_library(
         ":sparse_mla",
         ":autotune_cache",
         ":kimi_kda",
+        ":zigzag_permute",
     ],
     visibility = ["//visibility:public"]
 )
