@@ -323,6 +323,7 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     model_input.input_lengths         = torch::empty({(int64_t)total_batch_size}, pinned_i32);
     model_input.sequence_lengths      = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
     model_input.prefix_lengths        = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
+    model_input.custom_output_indexes = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
     model_input.request_id            = torch::empty({(int64_t)total_context_batch_size}, pinned_i64);
     model_input.request_pd_separation = torch::empty({(int64_t)total_context_batch_size}, pinned_bool);
 
@@ -490,6 +491,14 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             const auto prefill_batch_idx = ctx.batch_idx - ctx.total_decode_batch_size;
             model_input.trace_ids.push_back(stream->traceId());
             auto input_tokens = stream->currentExecuteTokens(i);
+            const int target_position = stream->generateInput()->custom_output_token_position;
+            RTP_LLM_CHECK_WITH_INFO(target_position < 0 || target_position >= stream->reuseLength(),
+                                    "custom output token at position %d was consumed by prefix cache (reuse=%d)",
+                                    target_position,
+                                    stream->reuseLength());
+            model_input.custom_output_indexes.data_ptr<int32_t>()[prefill_batch_idx] =
+                target_position < 0 ? ctx.token_idx + input_tokens.size() - 1 :
+                                      ctx.token_idx + target_position - stream->reuseLength();
             auto input_masks  = stream->textTokensMask();
             memcpy(ctx.merged_tokens + ctx.token_idx, input_tokens.data(), input_tokens.size() * sizeof(int));
 

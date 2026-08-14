@@ -154,6 +154,9 @@ RequestInfo QueryConverter::transRequestInfo(const RequestInfoPB& request_info_p
 std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB* input) {
     std::shared_ptr<GenerateInput> generate_input = std::make_shared<GenerateInput>();
     generate_input->request_id                    = input->request_id();
+    generate_input->custom_output_token_position = input->has_custom_output_token_position()
+                                                       ? input->custom_output_token_position().value()
+                                                       : -1;
     generate_input->request_info                  = transRequestInfo(input->request_info());
     generate_input->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
     if (input->has_generate_config()) {
@@ -171,6 +174,10 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     generate_input->input_ids =
         torch::from_blob(const_cast<int*>(input->token_ids().data()), {(int64_t)input->token_ids_size()}, torch::kInt32)
             .clone();
+    RTP_LLM_CHECK_WITH_INFO(generate_input->custom_output_token_position < generate_input->inputLength(),
+                            "custom_output_token_position %d is outside prompt length %d",
+                            generate_input->custom_output_token_position,
+                            generate_input->inputLength());
     if (input->multimodal_inputs_size() > 0) {
         std::vector<MultimodalInput> mm_inputs;
         for (int i = 0; i < input->multimodal_inputs_size(); i++) {

@@ -13,6 +13,7 @@ static const char* names[] = {
     "moe_gating",
 
     "last_hidden_states",
+    "selected_hidden_states",
 };
 
 static_assert(sizeof(names) / sizeof(names[0]) == NUM_ARG_TYPES,
