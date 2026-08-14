@@ -27,6 +27,7 @@ from rtp_llm.ops import (
     MoeConfig,
     ParallelismConfig,
     ProfilingDebugLoggingConfig,
+    RoleType,
     VitSeparation,
 )
 from rtp_llm.utils.database import CkptDatabase
@@ -164,6 +165,26 @@ class BaseModel(object):
 
     def support_cuda_graph(self) -> bool:
         return False
+
+    @classmethod
+    def prefill_cp_segment_size_alignment(cls) -> int:
+        """Token alignment required by one context-parallel zigzag segment."""
+        return 1
+
+    @classmethod
+    def prefill_cp_cache_block_size_alignment(cls) -> int:
+        """KV cache block alignment required by context-parallel prefill."""
+        return 1
+
+    @classmethod
+    def validate_prefill_cp_topology(
+        cls,
+        parallelism_config: ParallelismConfig,
+        role_type: RoleType,
+        ffn_disaggregate_enabled: bool,
+    ) -> None:
+        """Reject unsupported model-specific CP topologies before startup."""
+        pass
 
     def _load(self, device: str):
         # set empty weights for attention service

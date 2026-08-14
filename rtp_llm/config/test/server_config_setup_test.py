@@ -4,13 +4,162 @@ from unittest.mock import patch
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import (
+    _configure_model_prefill_cp,
     set_parallelism_config,
     setup_and_configure_server,
 )
+from rtp_llm.model_factory_register import ModelDict
+from rtp_llm.models.base_model import BaseModel
+from rtp_llm.ops import CPRotateMethod, RoleType
 from rtp_llm.server.server_args.server_args import setup_args
 
 
 class GenerateConfigTest(TestCase):
+
+    def test_model_cp_alignment_is_applied_automatically(self):
+        class _LinearAttentionModel(BaseModel):
+            @classmethod
+            def prefill_cp_segment_size_alignment(cls):
+                return 64
+
+            @classmethod
+            def prefill_cp_cache_block_size_alignment(cls):
+                return 64
+
+        py_env_configs = PyEnvConfigs()
+        py_env_configs.model_args.model_type = "qwen35_moe"
+        py_env_configs.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
+        py_env_configs.kv_cache_config.seq_size_per_block = 256
+
+        with patch.object(
+            ModelDict, "get_model_cls", return_value=_LinearAttentionModel
+        ):
+            _configure_model_prefill_cp(py_env_configs)
+
+        self.assertEqual(py_env_configs.prefill_cp_config.segment_size_alignment, 64)
+
+    def test_incompatible_model_cp_alignment_is_rejected(self):
+        class _LinearAttentionModel(BaseModel):
+            @classmethod
+            def prefill_cp_segment_size_alignment(cls):
+                return 64
+
+        py_env_configs = PyEnvConfigs()
+        py_env_configs.model_args.model_type = "qwen35_moe"
+        py_env_configs.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
+        py_env_configs.prefill_cp_config.segment_size_alignment = 32
+
+        with patch.object(
+            ModelDict, "get_model_cls", return_value=_LinearAttentionModel
+        ), self.assertRaisesRegex(ValueError, "requires a multiple of 64"):
+            _configure_model_prefill_cp(py_env_configs)
+
+    def test_incompatible_model_cp_cache_block_size_is_rejected(self):
+        class _LinearAttentionModel(BaseModel):
+            @classmethod
+            def prefill_cp_segment_size_alignment(cls):
+                return 64
+
+            @classmethod
+            def prefill_cp_cache_block_size_alignment(cls):
+                return 64
+
+        py_env_configs = PyEnvConfigs()
+        py_env_configs.model_args.model_type = "qwen35_moe"
+        py_env_configs.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
+        py_env_configs.kv_cache_config.seq_size_per_block = 96
+
+        with patch.object(
+            ModelDict, "get_model_cls", return_value=_LinearAttentionModel
+        ), self.assertRaisesRegex(ValueError, "KV cache block size 96"):
+            _configure_model_prefill_cp(py_env_configs)
+
+    def test_cp_with_layer_micro_batch_is_rejected(self):
+        py_env_configs = PyEnvConfigs()
+        py_env_configs.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
+        py_env_configs.device_resource_config.enable_layer_micro_batch = 1
+
+        with self.assertRaisesRegex(ValueError, "layer micro-batching"):
+            _configure_model_prefill_cp(py_env_configs)
+
+    def test_non_positive_cp_alignment_is_rejected(self):
+        py_env_configs = PyEnvConfigs()
+        py_env_configs.prefill_cp_config.segment_size_alignment = 0
+
+        with self.assertRaisesRegex(ValueError, "must be greater than 0"):
+            set_parallelism_config(
+                py_env_configs.parallelism_config,
+                py_prefill_cp_config=py_env_configs.prefill_cp_config,
+            )
+
+    def test_unknown_cp_model_is_rejected(self):
+        py_env_configs = PyEnvConfigs()
+        py_env_configs.model_args.model_type = "unregistered_model"
+        py_env_configs.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
+
+        with patch.object(
+            ModelDict, "get_model_cls", return_value=None
+        ), self.assertRaisesRegex(ValueError, "unknown model_type"):
+            _configure_model_prefill_cp(py_env_configs)
+
+    def test_qwen35_cp_supported_topology_is_accepted(self):
+        from rtp_llm.models.qwen3_next.qwen3_next import Qwen3NextBase
+
+        py_env_configs = self._qwen35_cp_configs()
+        with patch.object(ModelDict, "get_model_cls", return_value=Qwen3NextBase):
+            _configure_model_prefill_cp(py_env_configs)
+
+        self.assertEqual(py_env_configs.prefill_cp_config.segment_size_alignment, 64)
+
+    def test_qwen35_cp_unsupported_topologies_are_rejected(self):
+        from rtp_llm.models.qwen3_next.qwen3_next import Qwen3NextBase
+
+        invalid_configs = (
+            ("tp_size", 1),
+            ("world_size", 8),
+            ("dp_size", 2),
+            ("ep_size", 0),
+            ("ep_size", 4),
+            ("pp_size", 2),
+            ("ffn_sp_size", 2),
+        )
+        for field, value in invalid_configs:
+            with self.subTest(field=field, value=value):
+                py_env_configs = self._qwen35_cp_configs()
+                setattr(py_env_configs.parallelism_config, field, value)
+                with patch.object(
+                    ModelDict, "get_model_cls", return_value=Qwen3NextBase
+                ), self.assertRaisesRegex(ValueError, "Qwen3-Next/Qwen3.5"):
+                    _configure_model_prefill_cp(py_env_configs)
+
+        py_env_configs = self._qwen35_cp_configs()
+        py_env_configs.role_config.role_type = RoleType.PREFILL
+        with patch.object(
+            ModelDict, "get_model_cls", return_value=Qwen3NextBase
+        ), self.assertRaisesRegex(ValueError, "Qwen3-Next/Qwen3.5"):
+            _configure_model_prefill_cp(py_env_configs)
+
+        py_env_configs = self._qwen35_cp_configs()
+        py_env_configs.ffn_disaggregate_config.enable_ffn_disaggregate = True
+        with patch.object(
+            ModelDict, "get_model_cls", return_value=Qwen3NextBase
+        ), self.assertRaisesRegex(ValueError, "Qwen3-Next/Qwen3.5"):
+            _configure_model_prefill_cp(py_env_configs)
+
+    @staticmethod
+    def _qwen35_cp_configs() -> PyEnvConfigs:
+        py_env_configs = PyEnvConfigs()
+        py_env_configs.model_args.model_type = "qwen35_dense"
+        py_env_configs.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
+        py_env_configs.kv_cache_config.seq_size_per_block = 256
+        py_env_configs.parallelism_config.tp_size = 4
+        py_env_configs.parallelism_config.world_size = 4
+        py_env_configs.parallelism_config.dp_size = 1
+        py_env_configs.parallelism_config.ep_size = 1
+        py_env_configs.parallelism_config.pp_size = 1
+        py_env_configs.parallelism_config.ffn_sp_size = 1
+        py_env_configs.role_config.role_type = RoleType.PDFUSION
+        return py_env_configs
 
     # EnvArgumentParser in setup_args() reads these env vars (START_PORT, TP_SIZE, etc.)
     # and binds them to py_env_configs; server_port = start_port + rank_id * worker_info_port_num (rank_id=0 here).

@@ -30,6 +30,18 @@ py_test(
 )
 
 py_test(
+    name = "test_linear_attn_utils",
+    srcs = ["test_linear_attn_utils.py"],
+    deps = py_test_deps,
+)
+
+py_test(
+    name = "test_attn_factory_cp_selection",
+    srcs = ["test_attn_factory_cp_selection.py"],
+    deps = py_test_deps,
+)
+
+py_test(
     name = "test_allgather_cp_impl",
     srcs = ["test_allgather_cp_impl.py"],
     deps = py_test_deps + [":cp_test_utils"] + select({
@@ -73,6 +85,6 @@ py_test(
         "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
-    tags = ["manual"],
+    tags = ["H20"],
     exec_properties = {'gpu': 'H20'},
 )

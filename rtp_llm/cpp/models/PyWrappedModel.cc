@@ -412,6 +412,11 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
     return callForwardPostLayers(hidden_states, inputs, false);
 }
 
+bool PyWrappedModel::shouldUseContextParallel(const GptModelInputs& inputs, bool enable_prefill_cp) {
+    return enable_prefill_cp && inputs.input_lengths.size(0) > 0 && inputs.sequence_lengths.size(0) == 0
+           && !inputs.is_target_verify && !inputs.last_hidden_states.defined();
+}
+
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.forward");
     d2d_copies_.clear();
@@ -427,28 +432,35 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             return forwardMicroBatched(inputs);
         }
         PyContextParallelParams cp_params;
-        if (device_props_.enable_prefill_cp) {
-            context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
+        GptModelInputs          cp_model_inputs;
+        const GptModelInputs*   forward_inputs = &inputs;
+        // Only a pure initial-prompt prefill enters CP. Decode, mixed batches,
+        // target verification, and MTP draft forwards stay on the regular path.
+        const bool use_context_parallel = shouldUseContextParallel(inputs, device_props_.enable_prefill_cp);
+        if (use_context_parallel) {
+            cp_model_inputs = inputs;
+            context_parallel_processor_->handleInputs(cp_model_inputs, cp_params);
+            forward_inputs = &cp_model_inputs;
         }
 
         torch::Tensor token_ids;
-        token_ids = tensorHoldHostAndToCuda(inputs.combo_tokens);
+        token_ids = tensorHoldHostAndToCuda(forward_inputs->combo_tokens);
 
         torch::Tensor input_hiddens =
-            inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
+            forward_inputs->last_hidden_states.defined() ? forward_inputs->last_hidden_states : torch::empty({0});
 
-        auto attention_inputs      = buildPyAttentionInputs(inputs);
-        auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
+        auto attention_inputs      = buildPyAttentionInputs(*forward_inputs);
+        auto bert_embedding_inputs = buildBertEmbeddingInputs(*forward_inputs);
 
-        if (device_props_.enable_prefill_cp) {
+        if (use_context_parallel) {
             attention_inputs.context_parallel_info = cp_params;
         }
 
         if (!inputs.warmup && inputs.pd_separation) {
-            attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
+            attention_inputs.cache_store_inputs = prepareWriteCacheParams(*forward_inputs);
             cache_store_async_writer_->init();
         }
-        setupKVCacheForAttentionInputs(attention_inputs, inputs);
+        setupKVCacheForAttentionInputs(attention_inputs, *forward_inputs);
 
         calculatePaddingOffset(attention_inputs);
         attention_inputs.padding_offset = tensorHoldHostAndToCuda(attention_inputs.padding_offset);
@@ -494,8 +506,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
-        if (device_props_.enable_prefill_cp) {
-            size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
+        if (use_context_parallel) {
+            size_t num_valid_tokens =
+                context_parallel_processor_->handleOutputs(hidden_states, *forward_inputs, cp_params);
             return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
         }
         return callForwardPostLayers(hidden_states, inputs, true);
@@ -631,7 +644,11 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
 
         auto logits = torch::mm(last_hidden.to(lm_head->kernel.dtype()), lm_head->kernel.t()).to(torch::kFloat32);
         printTorchTensorData(logits, "logits");
-        if (device_props_.tp_size > 1) {
+        // Prefill CP reuses the physical TP group for sequence partitioning,
+        // while each rank keeps a full-vocabulary lm_head. Gathering those
+        // logits would duplicate the vocabulary once per CP rank. Real TP
+        // still shards lm_head and therefore retains the all-gather below.
+        if (device_props_.tp_size > 1 && !device_props_.enable_prefill_cp) {
             logits = tpSyncEmbeddingOrLogits(logits);
         }
         if (check_nan_) {
