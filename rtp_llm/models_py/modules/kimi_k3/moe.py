@@ -11,14 +11,9 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from rtp_llm.models.kimi_k3.kimi_k3_weight import (
-    KimiK3WeightNames as K3W,
-    shared_expert_weight_shard_enabled,
-)
-from rtp_llm.models_py.distributed.collective_torch import (
-    Group,
-    all_gather,
-)
+from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
+from rtp_llm.models.kimi_k3.kimi_k3_weight import shared_expert_weight_shard_enabled
+from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.base import GroupTopK, RMSNorm
 from rtp_llm.models_py.triton_kernels.common.activation import situ_and_mul
 from rtp_llm.ops import ParallelismConfig
@@ -27,6 +22,7 @@ if TYPE_CHECKING:
     from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
 
 _DEEPGEMM_MEGA_LOGGED_DEVICES: set[int] = set()
+_K3_MEGA_PRE_KERNEL_BARRIER_ENV = "DSV4_MEGA_MOE_PRE_KERNEL_BARRIER"
 
 
 def _transient_full_native_column_weight(
@@ -406,6 +402,10 @@ class KimiK3LatentMoE(nn.Module):
             raise RuntimeError(
                 f"K3 MegaMoE tokens/rank={token_count} exceeds capacity={capacity}"
             )
+        # The symmetric input buffer is reused by every layer/chunk.  A rank
+        # whose previous MegaMoE kernel finishes early must not overwrite that
+        # buffer while peers are still consuming it, so rendezvous before pack.
+        self._maybe_pre_kernel_barrier(routed_input.device, token_count)
         self._mega_input_packer.pack(
             routed_input,
             routing_weights,
@@ -413,6 +413,10 @@ class KimiK3LatentMoE(nn.Module):
             self._mega_buf,
             token_count,
         )
+        # Packing is rank-local but the peer kernel consumes every rank's
+        # symmetric buffer.  Rendezvous again after pack so no rank launches
+        # against a peer that has not finished publishing its next input.
+        self._maybe_pre_kernel_barrier(routed_input.device, token_count)
         output = self._mega_y[:token_count]
         deep_gemm.fp8_fp4_mega_moe(
             output,
@@ -429,6 +433,42 @@ class KimiK3LatentMoE(nn.Module):
             fast_math=True,
         )
         return output
+
+    def _maybe_pre_kernel_barrier(
+        self,
+        device: torch.device,
+        token_count: int,
+    ) -> None:
+        """Rendezvous K3 ranks before entering the peer-symmetric MegaMoE kernel."""
+
+        if os.environ.get(_K3_MEGA_PRE_KERNEL_BARRIER_ENV, "0") != "1":
+            return
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                f"{_K3_MEGA_PRE_KERNEL_BARRIER_ENV}=1 is incompatible with "
+                "CUDA graph capture"
+            )
+
+        import torch.distributed as dist
+
+        if not dist.is_initialized():
+            raise RuntimeError(
+                f"{_K3_MEGA_PRE_KERNEL_BARRIER_ENV}=1 requires "
+                "torch.distributed initialization"
+            )
+        group = self._mega_group
+        if device.type == "cuda":
+            with torch.cuda.device(device):
+                torch.cuda.current_stream().synchronize()
+                try:
+                    dist.barrier(
+                        group=group,
+                        device_ids=[torch.cuda.current_device()],
+                    )
+                except TypeError:
+                    dist.barrier(group=group)
+        else:
+            dist.barrier(group=group)
 
     def _route(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         correction_bias = self.weights[K3W.MOE_CORRECTION_BIAS].float()
@@ -593,9 +633,7 @@ class KimiK3LatentMoE(nn.Module):
                 # zero weights and the output clear below keep them inert.
                 expert_ids[valid_token_count:] = 0
                 routing_weights[valid_token_count:] = 0
-        routed_input = torch.matmul(
-            hidden_states, self.weights[K3W.MOE_ROUTED_DOWN]
-        )
+        routed_input = torch.matmul(hidden_states, self.weights[K3W.MOE_ROUTED_DOWN])
         routed_output = self._mega_expert_sum(
             routed_input,
             expert_ids,
@@ -604,15 +642,14 @@ class KimiK3LatentMoE(nn.Module):
         )
         if self.routed_norm is not None:
             routed_output = self.routed_norm(routed_output.contiguous())
-        routed_output = torch.matmul(
-            routed_output, self.weights[K3W.MOE_ROUTED_UP]
-        )
+        routed_output = torch.matmul(routed_output, self.weights[K3W.MOE_ROUTED_UP])
         shared_output = self._shared_expert_forward(hidden_states)
         output = routed_output + shared_output
         if valid_token_count is not None and valid_token_count < hidden_states.shape[0]:
             output = output.clone()
             output[valid_token_count:] = 0
         return output
+
 
 __all__ = [
     "KimiK3LatentMoE",
