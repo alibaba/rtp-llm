@@ -1,4 +1,7 @@
-from typing import Any, Optional
+import logging
+from enum import Enum, auto
+from threading import Lock
+from typing import Any, NamedTuple, Optional
 
 import torch
 from flashinfer.cascade import merge_state_in_place
@@ -30,8 +33,36 @@ from rtp_llm.ops.compute_ops import (
     rtp_llm_ops,
 )
 
+logger = logging.getLogger(__name__)
+
 # Constants
 DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = 128
+
+
+class _DecodePlanMode(Enum):
+    CUDA_CORE_EAGER = auto()
+    CUDA_CORE_GRAPH = auto()
+    TENSOR_CORE = auto()
+
+
+_decode_host_d2h_warning_lock = Lock()
+_decode_host_d2h_warning_emitted = False
+
+
+def _warn_decode_host_d2h_fallback(*, fields: list[str], batch_size: int) -> None:
+    global _decode_host_d2h_warning_emitted
+    with _decode_host_d2h_warning_lock:
+        if _decode_host_d2h_warning_emitted:
+            return
+        _decode_host_d2h_warning_emitted = True
+    logger.warning(
+        "FlashInfer decode planning is synchronously copying metadata from CUDA "
+        "to host; fields=%s, batch_size=%d; production CUDA graph replay should "
+        "supply pinned host mirrors",
+        ",".join(fields),
+        batch_size,
+    )
+
 
 # FP8 KV cache uses a unit quantization scale: K/V are cast
 # directly to float8_e4m3fn and FA3 FP8 kernels run with scale_q/k/v = 1.0.
@@ -72,7 +103,7 @@ def quantize_to_fp8_if_needed(
 
 # Global workspace buffer pool
 _g_py_flashinfer_workspace_pool: list[torch.Tensor] = []
-_g_py_flashinfer_pool_lock = __import__("threading").Lock()
+_g_py_flashinfer_pool_lock = Lock()
 
 
 def get_py_flashinfer_workspace_buffer(device: str = "cuda") -> torch.Tensor:
@@ -109,11 +140,13 @@ def _host_i32(t):
 def _device_or(device_tensor, host_tensor):
     """Prefer the *_device mirror; fall back to the base field.
 
+    A defined device mirror is authoritative even when it is empty; optional
+    metadata such as prefix lengths uses an empty tensor as a valid value.
     Unit tests (and some callers) construct PyAttentionInputs with only the
     base fields populated (possibly already CUDA-resident), so the device
     mirror may be missing.
     """
-    if device_tensor is not None and device_tensor.numel() >= 0:
+    if device_tensor is not None:
         return device_tensor
     return host_tensor
 
@@ -137,6 +170,150 @@ def attn_q_dtype(attn_configs: AttentionConfigs) -> torch.dtype:
     ):
         return torch.float8_e4m3fn
     return attn_configs.dtype
+
+
+class _DecodeHostFillInputs(NamedTuple):
+    prefix_lengths: Optional[torch.Tensor]
+    sequence_lengths: torch.Tensor
+    input_lengths: torch.Tensor
+    kv_cache_block_id_host: Optional[torch.Tensor]
+
+
+def _decode_host_fill_inputs(
+    attn_inputs: PyAttentionInputs,
+    seq_size_per_block: int,
+    *,
+    is_cuda_graph: bool,
+) -> _DecodeHostFillInputs:
+    """Return validated host metadata for FlashInfer decode planning.
+
+    CudaGraphRunner normally supplies complete pinned host mirrors, including
+    padding slots. The synchronous device fallback is only for compatibility
+    callers outside graph capture; production replay must supply pinned host
+    mirrors describing the graph's full fixed batch.
+    """
+    prefix_lengths_source = attn_inputs.prefix_lengths
+    input_lengths_source = attn_inputs.input_lengths
+    prefix_lengths = _host_i32(prefix_lengths_source)
+    input_lengths = _host_i32(input_lengths_source)
+    if input_lengths is None:
+        raise ValueError("FlashInfer decode requires input lengths")
+    if input_lengths.dim() != 1:
+        raise ValueError(
+            "FlashInfer decode input_lengths must be 1-D, "
+            f"got {input_lengths.dim()}-D"
+        )
+    batch_size = input_lengths.size(0)
+    has_prefix_lengths = prefix_lengths is not None and prefix_lengths.numel() > 0
+    if has_prefix_lengths and prefix_lengths.dim() != 1:
+        raise ValueError(
+            "FlashInfer decode prefix_lengths must be 1-D, "
+            f"got {prefix_lengths.dim()}-D"
+        )
+
+    sequence_lengths = torch.empty(0, dtype=torch.int32)
+    sequence_source = "sequence_lengths"
+    if not has_prefix_lengths:
+        sequence_lengths = attn_inputs.sequence_lengths
+        if sequence_lengths is None or sequence_lengths.numel() == 0:
+            if is_cuda_graph:
+                raise ValueError(
+                    "FlashInfer CUDA graph decode requires host sequence_lengths "
+                    "including padding slots"
+                )
+            sequence_lengths_plus_1 = attn_inputs.sequence_lengths_plus_1_device
+            if sequence_lengths_plus_1 is None or sequence_lengths_plus_1.numel() == 0:
+                raise ValueError("FlashInfer decode requires sequence lengths")
+            sequence_source = "sequence_lengths_plus_1_device"
+            sequence_lengths = sequence_lengths_plus_1
+
+    block_id = attn_inputs.kv_cache_kernel_block_id
+    block_id_source = "kv_cache_kernel_block_id"
+    if block_id is None or block_id.numel() == 0:
+        block_id = attn_inputs.kv_cache_kernel_block_id_device
+        block_id_source = "kv_cache_kernel_block_id_device"
+    cuda_metadata_fields = []
+    if is_cuda_graph:
+        metadata_sources = [
+            ("input_lengths", input_lengths_source),
+            (block_id_source, block_id),
+        ]
+        if has_prefix_lengths:
+            metadata_sources.insert(0, ("prefix_lengths", prefix_lengths_source))
+        else:
+            metadata_sources.insert(0, (sequence_source, sequence_lengths))
+        cuda_metadata_fields = [
+            field_name
+            for field_name, tensor in metadata_sources
+            if tensor is not None and tensor.numel() > 0 and tensor.is_cuda
+        ]
+
+    if not has_prefix_lengths:
+        if sequence_source == "sequence_lengths_plus_1_device":
+            sequence_lengths = sequence_lengths.to(device="cpu", dtype=torch.int32) - 1
+        else:
+            sequence_lengths = _host_i32(sequence_lengths)
+        if sequence_lengths.dim() != 1:
+            raise ValueError(
+                f"FlashInfer decode {sequence_source} must be 1-D, "
+                f"got {sequence_lengths.dim()}-D"
+            )
+        if batch_size != sequence_lengths.size(0):
+            raise ValueError(
+                "FlashInfer decode metadata batch size mismatch: "
+                f"input_lengths={batch_size}, "
+                f"{sequence_source}={sequence_lengths.size(0)}"
+            )
+    if cuda_metadata_fields:
+        _warn_decode_host_d2h_fallback(
+            fields=cuda_metadata_fields,
+            batch_size=batch_size,
+        )
+    if has_prefix_lengths:
+        if prefix_lengths.size(0) != batch_size:
+            raise ValueError(
+                "FlashInfer decode metadata batch size mismatch: "
+                f"input_lengths={batch_size}, "
+                f"prefix_lengths={prefix_lengths.size(0)}"
+            )
+        logical_sequence_lengths = prefix_lengths + input_lengths
+    else:
+        logical_sequence_lengths = sequence_lengths + 1
+
+    block_id = _host_i32(block_id)
+    if block_id is not None and block_id.numel() > 0:
+        if block_id.dim() != 2:
+            raise ValueError(
+                "FlashInfer decode KV cache block table must be 2-D, "
+                f"got {block_id.dim()}-D"
+            )
+        if block_id.size(0) < batch_size:
+            raise ValueError(
+                "FlashInfer decode KV cache block table has fewer rows than "
+                f"the batch: rows={block_id.size(0)}, "
+                f"input_lengths={batch_size}"
+            )
+        max_logical_length = (
+            int(logical_sequence_lengths.max().item())
+            if logical_sequence_lengths.numel() > 0
+            else 0
+        )
+        required_columns = (
+            max_logical_length + seq_size_per_block - 1
+        ) // seq_size_per_block
+        if block_id.size(1) < required_columns:
+            raise ValueError(
+                "FlashInfer decode KV cache block table has fewer columns than "
+                "required by the longest sequence: "
+                f"columns={block_id.size(1)}, required={required_columns}"
+            )
+
+    return _DecodeHostFillInputs(
+        prefix_lengths=prefix_lengths,
+        sequence_lengths=sequence_lengths,
+        input_lengths=input_lengths,
+        kv_cache_block_id_host=block_id,
+    )
 
 
 class PyFlashinferPrefillPagedAttnOp(object):
@@ -1029,23 +1206,106 @@ class PyFlashinferDecodeAttnOp(object):
             attn_q_dtype(attn_configs) if self.use_tensor_core else self.dtype
         )
         self.enable_cuda_graph = attn_inputs.is_cuda_graph
+        if self.use_tensor_core:
+            self._decode_plan_mode = _DecodePlanMode.TENSOR_CORE
+        elif self.enable_cuda_graph:
+            self._decode_plan_mode = _DecodePlanMode.CUDA_CORE_GRAPH
+        else:
+            self._decode_plan_mode = _DecodePlanMode.CUDA_CORE_EAGER
+        # Snapshot of the page indptr used by the last CUDA-core graph plan.
+        # Dtype, head counts, and page size are fixed for this op's lifetime.
+        self._cuda_core_plan_page_indptr_h: Optional[torch.Tensor] = None
+        self._graph_buffers_bound = False
+        self._graph_batch_size: Optional[int] = None
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
 
     def __del__(self):
         release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
 
     def set_params(self, params: rtp_llm_ops.FlashInferMlaAttnParams) -> None:
-        """Set the params object to be used by this op."""
+        """Set params before prepare() binds their buffers to the wrapper."""
+        if self._graph_buffers_bound:
+            raise RuntimeError(
+                "FlashInfer CUDA graph params must be set before prepare()"
+            )
+        self._cuda_core_plan_page_indptr_h = None
         self.fmha_params = params
 
-    def _requires_tensor_core_cuda_graph_replan(self) -> bool:
-        # Tensor-core decode refreshes replay-time plan metadata.
-        return self.use_tensor_core
+    def _uses_cuda_core_graph_plan_cache(self) -> bool:
+        return self._decode_plan_mode is _DecodePlanMode.CUDA_CORE_GRAPH
 
-    def _plan_decode_wrapper(self, attn_inputs: PyAttentionInputs) -> None:
-        if self._requires_tensor_core_cuda_graph_replan():
+    def _cuda_graph_replay_needs_replan(self) -> bool:
+        if self._decode_plan_mode is _DecodePlanMode.TENSOR_CORE:
+            # FlashInfer BatchDecode routes tensor-core decode through
+            # BatchPrefill, whose plan derives KV lengths from both page indptr
+            # and last-page lengths.
+            return True
+        if self._decode_plan_mode is _DecodePlanMode.CUDA_CORE_EAGER:
+            return False
+        current_page_indptr = self.fmha_params.decode_page_indptr_h
+        return self._cuda_core_plan_page_indptr_h is None or not torch.equal(
+            self._cuda_core_plan_page_indptr_h,
+            current_page_indptr,
+        )
+
+    def _validate_cuda_graph_buffer_binding(self) -> None:
+        if not self._graph_buffers_bound or self._graph_batch_size is None:
+            raise RuntimeError(
+                "FlashInfer CUDA graph replay requires prepare() to bind buffers"
+            )
+        if self.decode_wrapper._fixed_batch_size != self._graph_batch_size:
+            raise RuntimeError(
+                "FlashInfer CUDA graph wrapper fixed batch size changed after "
+                "buffer binding"
+            )
+        buffer_pairs = (
+            (
+                "page indptr",
+                self.decode_wrapper._paged_kv_indptr_buf,
+                self.fmha_params.decode_page_indptr_d,
+            ),
+            (
+                "page indices",
+                self.decode_wrapper._paged_kv_indices_buf,
+                self.fmha_params.page_indice_d,
+            ),
+            (
+                "last-page lengths",
+                self.decode_wrapper._paged_kv_last_page_len_buf,
+                self.fmha_params.paged_kv_last_page_len_d,
+            ),
+        )
+        for name, wrapper_buffer, params_buffer in buffer_pairs:
+            if wrapper_buffer.data_ptr() != params_buffer.data_ptr():
+                raise RuntimeError(
+                    f"FlashInfer CUDA graph {name} buffer no longer aliases "
+                    "the bound params buffer"
+                )
+
+    def _plan_decode_wrapper(self) -> None:
+        uses_cuda_core_graph_plan_cache = self._uses_cuda_core_graph_plan_cache()
+        if uses_cuda_core_graph_plan_cache:
+            # A failed plan must not leave a stale topology marked as reusable.
+            self._cuda_core_plan_page_indptr_h = None
+        if self._decode_plan_mode is _DecodePlanMode.TENSOR_CORE:
+            # Tensor-core decode plans from host mirrors in both eager and graph
+            # modes; only replay decides whether another plan call is required.
             page_indptr = self.fmha_params.decode_page_indptr_h
             page_indice = self.fmha_params.page_indice_h
+            last_page_len = self.fmha_params.paged_kv_last_page_len_h
+            plan_kwargs = {"non_blocking": True}
+        elif self._decode_plan_mode is _DecodePlanMode.CUDA_CORE_GRAPH:
+            # The repository-pinned FlashInfer CUDA-core BatchDecode derives
+            # its work partition from page indptr. The last-page-length values
+            # are read by the kernel at runtime; their tensor length still
+            # matches the graph's fixed batch size. Keep both metadata tensors
+            # on host to avoid a D2H copy. Indices stay on device and alias the
+            # graph-bound buffer refreshed by fill_params() before each replay.
+            # It is the same tensor as the wrapper's indices buffer, so the
+            # plan-internal copy is a no-op; forbid_realloc=True guarantees
+            # that its capture-time capacity remains valid during replay.
+            page_indptr = self.fmha_params.decode_page_indptr_h
+            page_indice = self.fmha_params.page_indice_d
             last_page_len = self.fmha_params.paged_kv_last_page_len_h
             plan_kwargs = {"non_blocking": True}
         else:
@@ -1067,6 +1327,12 @@ class PyFlashinferDecodeAttnOp(object):
             o_data_type=self.dtype,
             **plan_kwargs,
         )
+        if self.enable_cuda_graph:
+            self._validate_cuda_graph_buffer_binding()
+        if uses_cuda_core_graph_plan_cache:
+            self._cuda_core_plan_page_indptr_h = (
+                self.fmha_params.decode_page_indptr_h.clone()
+            )
 
     def prepare(
         self,
@@ -1076,14 +1342,26 @@ class PyFlashinferDecodeAttnOp(object):
         """
         Prepare the decode wrapper with paged KV cache parameters.
 
-        forbid_realloc: True only when called from prepare_cuda_graph (replay); forbids buffer realloc.
+        forbid_realloc is retained for the shared attention-op signature. Graph
+        replay uses prepare_for_cuda_graph_replay() instead of prepare().
         """
-        # Tensor-core decode plans from the HOST mirrors
-        # (decode_page_indptr_h etc. in _plan_decode_wrapper); the device fill
-        # only populates the device buffers and leaves the host mirrors at
+        if self._graph_buffers_bound:
+            raise RuntimeError(
+                "FlashInfer CUDA graph prepare() cannot be called after buffers "
+                "are bound; use prepare_for_cuda_graph_replay()"
+            )
+        # Graph planning uses HOST mirrors for tensor-core decode and for the
+        # CUDA-core topology cache. The device fill leaves those mirrors at
         # their stale capacity sizes (MIN_CACHE_BATCH_SIZE), which corrupts
-        # plan's batch size. Route tensor-core through the host fill.
-        if attn_inputs.input_lengths.is_cuda and not self.use_tensor_core:
+        # the plan's batch size, so both graph backends use the host fill.
+        # CudaGraphRunner supplies pinned host mirrors before graph capture.
+        # Compatibility callers outside capture may pass CUDA-resident base
+        # tensors and pay a synchronous D2H in _host_i32() on this path.
+        if (
+            attn_inputs.input_lengths is not None
+            and attn_inputs.input_lengths.is_cuda
+            and self._decode_plan_mode is _DecodePlanMode.CUDA_CORE_EAGER
+        ):
             self.fmha_params.fill_params_mha_device(
                 _device_or(
                     attn_inputs.prefix_lengths_device, attn_inputs.prefix_lengths
@@ -1098,15 +1376,17 @@ class PyFlashinferDecodeAttnOp(object):
                 forbid_realloc=forbid_realloc,
             )
         else:
-            block_id_host = attn_inputs.kv_cache_kernel_block_id
-            if block_id_host is None or block_id_host.numel() == 0:
-                block_id_host = attn_inputs.kv_cache_kernel_block_id_device
-            self.fmha_params.fill_params(
-                _host_i32(attn_inputs.prefix_lengths),
-                _host_i32(attn_inputs.sequence_lengths),
-                _host_i32(attn_inputs.input_lengths),
-                _host_i32(block_id_host),
+            fill_inputs = _decode_host_fill_inputs(
+                attn_inputs,
                 self.seq_size_per_block,
+                is_cuda_graph=self.enable_cuda_graph,
+            )
+            self.fmha_params.fill_params(
+                prefix_lengths=fill_inputs.prefix_lengths,
+                sequence_lengths=fill_inputs.sequence_lengths,
+                input_lengths=fill_inputs.input_lengths,
+                kv_cache_block_id_host=fill_inputs.kv_cache_block_id_host,
+                seq_size_per_block=self.seq_size_per_block,
                 forbid_realloc=forbid_realloc,
             )
 
@@ -1123,6 +1403,8 @@ class PyFlashinferDecodeAttnOp(object):
             )
             self.decode_wrapper._paged_kv_indices_buf = self.fmha_params.page_indice_d
             self.decode_wrapper._fixed_batch_size = batch_size
+            self._graph_batch_size = batch_size
+            self._graph_buffers_bound = True
             if self.use_tensor_core:
                 self.decode_wrapper._qo_indptr_buf = torch.arange(
                     batch_size + 1,
@@ -1130,44 +1412,44 @@ class PyFlashinferDecodeAttnOp(object):
                     device=self.g_workspace_buffer.device,
                 )
 
-        self._plan_decode_wrapper(attn_inputs)
+        self._plan_decode_wrapper()
         return self.fmha_params
 
     def prepare_for_cuda_graph_replay(self, attn_inputs: PyAttentionInputs) -> None:
         """Refresh FlashInfer runtime buffers before replaying the captured graph."""
-        if not attn_inputs.sequence_lengths.is_cuda:
-            # Host pipeline: refresh host metadata. Tensor-core decode must
-            # re-plan from these mirrors because its plan uses host metadata.
-            block_id_host = attn_inputs.kv_cache_kernel_block_id
-            if block_id_host is None or block_id_host.numel() == 0:
-                block_id_host = attn_inputs.kv_cache_kernel_block_id_device
-            self.fmha_params.fill_params(
-                _host_i32(attn_inputs.prefix_lengths),
-                _host_i32(attn_inputs.sequence_lengths),
-                _host_i32(attn_inputs.input_lengths),
-                _host_i32(block_id_host),
-                self.seq_size_per_block,
-                forbid_realloc=True,
+        if not self.enable_cuda_graph:
+            raise RuntimeError(
+                "FlashInfer CUDA graph replay cannot run on an eager decode op"
             )
-            if self._requires_tensor_core_cuda_graph_replan():
-                self._plan_decode_wrapper(attn_inputs)
-            return
-
-        # Device pipeline: update the device-resident buffers in place.
-        seq_plus_1 = attn_inputs.sequence_lengths_plus_1_device
-        if seq_plus_1 is None or not seq_plus_1.is_cuda:
-            seq_plus_1 = (attn_inputs.sequence_lengths.to(torch.int32) + 1).cuda()
-        block_id = _device_or(
-            attn_inputs.kv_cache_kernel_block_id_device,
-            attn_inputs.kv_cache_kernel_block_id,
-        )
-        if block_id is not None and not block_id.is_cuda:
-            block_id = block_id.cuda()
-        self.fmha_params.fill_decode_cuda_graph_params(
-            seq_plus_1,
-            block_id,
+        if not self._graph_buffers_bound:
+            raise RuntimeError(
+                "FlashInfer CUDA graph replay requires prepare() to bind buffers"
+            )
+        # Planning consumes host mirrors for both graph backends. Keep replay
+        # on the same fill path even when a compatibility caller supplies
+        # CUDA-resident base tensors, then apply one shared replan policy.
+        fill_inputs = _decode_host_fill_inputs(
+            attn_inputs,
             self.seq_size_per_block,
+            is_cuda_graph=self.enable_cuda_graph,
         )
+        replay_batch_size = fill_inputs.input_lengths.size(0)
+        if replay_batch_size != self._graph_batch_size:
+            raise RuntimeError(
+                "FlashInfer CUDA graph replay batch size must match the bound "
+                f"graph batch: replay={replay_batch_size}, "
+                f"bound={self._graph_batch_size}"
+            )
+        self.fmha_params.fill_params(
+            prefix_lengths=fill_inputs.prefix_lengths,
+            sequence_lengths=fill_inputs.sequence_lengths,
+            input_lengths=fill_inputs.input_lengths,
+            kv_cache_block_id_host=fill_inputs.kv_cache_block_id_host,
+            seq_size_per_block=self.seq_size_per_block,
+            forbid_realloc=True,
+        )
+        if self._cuda_graph_replay_needs_replan():
+            self._plan_decode_wrapper()
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True
