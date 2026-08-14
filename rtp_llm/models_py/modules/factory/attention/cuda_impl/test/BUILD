@@ -286,9 +286,9 @@ py_test(
 )
 
 py_test(
-    name = "test_py_flash_attn_v4_mtp",
+    name = "test_py_flash_attn_v4_spec_decode",
     srcs = [
-        "test_py_flash_attn_v4_mtp.py",
+        "test_py_flash_attn_v4_spec_decode.py",
         "atten_test_util.py",
         "attention_ref.py",
         "base_attention_test.py",

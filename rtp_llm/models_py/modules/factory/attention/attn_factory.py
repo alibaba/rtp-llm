@@ -123,6 +123,9 @@ def _is_fmha_impl_disabled(
     # FlashInfer TRT-LLM Gen implementations (SM100)
     elif impl_class_name in FLASHINFER_TRTLLM_GEN_IMPLS:
         return not fmha_config.enable_flashinfer_trtllm_gen
+    # FA4 spec-decode paged attention (SM90 target verify / draft prefill)
+    elif impl_class_name == "FlashAttn4SpecDecodeImpl":
+        return not fmha_config.enable_fa4_spec_decode
     # FlashInfer native Hybrid Prefill
     elif impl_class_name == "PyFlashinferHybridPrefillImpl":
         return (

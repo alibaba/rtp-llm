@@ -100,6 +100,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["MM_VIDEO_MAX_FILE_SIZE_KB"] = "4096"
         os.environ["THINK_MODE"] = "adaptive"
         os.environ["DISABLE_FLASHINFER_HYBRID_PREFILL"] = "1"
+        os.environ["ENABLE_FA4_SPEC_DECODE"] = "0"
 
         sys.argv = ["prog"]
 
@@ -188,6 +189,8 @@ class ServerArgsSetTest(TestCase):
 
         # Verify disable_flashinfer_hybrid_prefill
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)
+        # ENABLE_FA4_SPEC_DECODE=0 turns off the default-on FA4 spec-decode path.
+        self.assertFalse(py_env_configs.fmha_config.enable_fa4_spec_decode)
 
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""
@@ -233,6 +236,8 @@ class ServerArgsSetTest(TestCase):
             "true",
             "--disable_flashinfer_hybrid_prefill",
             "true",
+            "--enable_fa4_spec_decode",
+            "false",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
         ]
@@ -302,6 +307,7 @@ class ServerArgsSetTest(TestCase):
         self.assertFalse(py_env_configs.fmha_config.enable_paged_flashinfer_trt_fmha_v2)
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_native)
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)
+        self.assertFalse(py_env_configs.fmha_config.enable_fa4_spec_decode)
 
     def test_model_warm_up_env_and_global_master(self):
         os.environ["WARM_UP"] = "0"
@@ -352,6 +358,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["TP_SIZE"] = "4"
         os.environ["CONCURRENCY_LIMIT"] = "32"
         os.environ["DISABLE_FLASHINFER_HYBRID_PREFILL"] = "1"
+        os.environ["ENABLE_FA4_SPEC_DECODE"] = "1"
 
         # Set command line arguments (should override env vars)
         sys.argv = [
@@ -367,6 +374,8 @@ class ServerArgsSetTest(TestCase):
             "--concurrency_limit",
             "64",
             "--disable_flashinfer_hybrid_prefill",
+            "false",
+            "--enable_fa4_spec_decode",
             "false",
         ]
 
@@ -388,6 +397,9 @@ class ServerArgsSetTest(TestCase):
         )  # Overridden
         self.assertFalse(
             py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill
+        )  # Overridden
+        self.assertFalse(
+            py_env_configs.fmha_config.enable_fa4_spec_decode
         )  # Overridden
 
     def test_mixed_env_and_cmd_args(self):
@@ -435,6 +447,7 @@ class ServerArgsSetTest(TestCase):
 
         # Not set via env or cmd args: verify the default value
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)
+        self.assertTrue(py_env_configs.fmha_config.enable_fa4_spec_decode)
 
     def test_batch_decode_scheduler_config(self):
         """Test that batch_decode_scheduler_config is correctly set."""

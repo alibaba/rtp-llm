@@ -15,7 +15,8 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha imp
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import (
     check_attention_inputs,
 )
-from rtp_llm.ops import AttentionConfigs, ParallelismConfig, RopeStyle
+from rtp_llm.models_py.utils.arch import is_sm90
+from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ParallelismConfig, RopeStyle
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, rtp_llm_ops
 
 _FA4_TILE_M = 64
@@ -72,7 +73,7 @@ def _load_fa_forward() -> Optional[Callable[..., Any]]:
         return None
 
 
-class FlashAttn4MTPParams(NamedTuple):
+class FlashAttn4SpecDecodeParams(NamedTuple):
     batch_size: int
     query_len: int
     num_splits: int
@@ -82,8 +83,8 @@ class FlashAttn4MTPParams(NamedTuple):
     page_table: torch.Tensor
 
 
-class FlashAttn4MTPOp:
-    """SM90 paged attention for fixed-width MTP target verify and draft prefill forwards."""
+class FlashAttn4SpecDecodeOp:
+    """SM90 paged attention for fixed-width spec-decode verify and draft prefill."""
 
     def __init__(
         self, attn_configs: AttentionConfigs, _attn_inputs: PyAttentionInputs
@@ -94,15 +95,18 @@ class FlashAttn4MTPOp:
         self.page_size = attn_configs.kernel_tokens_per_block
         self.max_kv_len = attn_configs.max_seq_len
         self.query_len = attn_configs.gen_num_per_cycle + 1
+        self.is_causal = attn_configs.is_causal
         if self.query_len <= 1:
-            raise ValueError("FlashAttn4MTPOp requires multi-token MTP inputs")
+            raise ValueError(
+                "FlashAttn4SpecDecodeOp requires multi-token spec-decode inputs"
+            )
         self.softmax_scale = (
             attn_configs.softmax_extra_scale
             / attn_configs.q_scaling
             * self.head_dim**-0.5
         )
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
-        self.mtp_params: FlashAttn4MTPParams | None = None
+        self.spec_params: FlashAttn4SpecDecodeParams | None = None
         fa_forward = _load_fa_forward()
         if fa_forward is None:
             raise RuntimeError("FA4 is unavailable in the current runtime package")
@@ -117,25 +121,26 @@ class FlashAttn4MTPOp:
         total_tokens = int(attn_inputs.total_tokens)
         if total_tokens <= 0 or total_tokens % self.query_len != 0:
             raise ValueError(
-                "FlashAttn4MTPOp requires dense MTP tokens divisible by query_len"
+                "FlashAttn4SpecDecodeOp requires dense spec-decode tokens"
+                " divisible by query_len"
             )
         batch_size = total_tokens // self.query_len
         page_table_capacity = attn_inputs.kv_cache_kernel_block_id_device
         if page_table_capacity is None:
-            raise ValueError("FlashAttn4MTPOp requires a device page table")
+            raise ValueError("FlashAttn4SpecDecodeOp requires a device page table")
         if page_table_capacity.shape[0] < batch_size:
             raise ValueError(
-                "FlashAttn4MTPOp page table does not cover the dense batch"
+                "FlashAttn4SpecDecodeOp page table does not cover the dense batch"
             )
         page_table = page_table_capacity[:batch_size]
         prefix_lengths_capacity = attn_inputs.prefix_lengths_device
         if prefix_lengths_capacity is None:
             prefix_lengths_capacity = attn_inputs.prefix_lengths
         if prefix_lengths_capacity is None:
-            raise ValueError("FlashAttn4MTPOp requires device prefix lengths")
+            raise ValueError("FlashAttn4SpecDecodeOp requires device prefix lengths")
         if prefix_lengths_capacity.shape[0] < batch_size:
             raise ValueError(
-                "FlashAttn4MTPOp prefix lengths do not cover the dense batch"
+                "FlashAttn4SpecDecodeOp prefix lengths do not cover the dense batch"
             )
         prefix_lengths = prefix_lengths_capacity[:batch_size]
         kv_lengths = torch.empty_like(prefix_lengths)
@@ -151,7 +156,7 @@ class FlashAttn4MTPOp:
             num_kv_heads=self.kv_head_num,
             max_kv_len=self.max_kv_len,
         )
-        self.mtp_params = FlashAttn4MTPParams(
+        self.spec_params = FlashAttn4SpecDecodeParams(
             batch_size=batch_size,
             query_len=self.query_len,
             num_splits=num_splits,
@@ -162,24 +167,24 @@ class FlashAttn4MTPOp:
         )
 
         torch.add(
-            self.mtp_params.prefix_lengths,
+            self.spec_params.prefix_lengths,
             self.query_len,
-            out=self.mtp_params.kv_lengths,
+            out=self.spec_params.kv_lengths,
         )
         self.fmha_params.fill_params_mha_device(
-            self.mtp_params.prefix_lengths,
-            self.mtp_params.kv_lengths,
-            self.mtp_params.input_lengths,
-            self.mtp_params.page_table,
+            self.spec_params.prefix_lengths,
+            self.spec_params.kv_lengths,
+            self.spec_params.input_lengths,
+            self.spec_params.page_table,
             self.page_size,
             False,
         )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
         check_attention_inputs(attn_inputs)
-        if self.mtp_params is None:
+        if self.spec_params is None:
             raise RuntimeError(
-                "FA4 MTP metadata must be initialized before graph replay"
+                "FA4 spec-decode metadata must be initialized before graph replay"
             )
 
         page_table_capacity = attn_inputs.kv_cache_kernel_block_id_device
@@ -187,34 +192,36 @@ class FlashAttn4MTPOp:
         if prefix_lengths_capacity is None:
             prefix_lengths_capacity = attn_inputs.prefix_lengths
         if page_table_capacity is None or prefix_lengths_capacity is None:
-            raise RuntimeError("FA4 MTP graph replay requires device metadata buffers")
-        page_table = page_table_capacity[: self.mtp_params.batch_size]
-        prefix_lengths = prefix_lengths_capacity[: self.mtp_params.batch_size]
+            raise RuntimeError(
+                "FA4 spec-decode graph replay requires device metadata buffers"
+            )
+        page_table = page_table_capacity[: self.spec_params.batch_size]
+        prefix_lengths = prefix_lengths_capacity[: self.spec_params.batch_size]
         if (
-            page_table.shape != self.mtp_params.page_table.shape
-            or prefix_lengths.shape != self.mtp_params.prefix_lengths.shape
+            page_table.shape != self.spec_params.page_table.shape
+            or prefix_lengths.shape != self.spec_params.prefix_lengths.shape
         ):
             raise RuntimeError(
-                "FA4 MTP metadata shape cannot change during graph replay"
+                "FA4 spec-decode metadata shape cannot change during graph replay"
             )
         if (
-            page_table.data_ptr() != self.mtp_params.page_table.data_ptr()
-            or prefix_lengths.data_ptr() != self.mtp_params.prefix_lengths.data_ptr()
+            page_table.data_ptr() != self.spec_params.page_table.data_ptr()
+            or prefix_lengths.data_ptr() != self.spec_params.prefix_lengths.data_ptr()
         ):
             raise RuntimeError(
-                "FA4 MTP metadata buffers cannot change during graph replay"
+                "FA4 spec-decode metadata buffers cannot change during graph replay"
             )
 
         torch.add(
-            self.mtp_params.prefix_lengths,
+            self.spec_params.prefix_lengths,
             self.query_len,
-            out=self.mtp_params.kv_lengths,
+            out=self.spec_params.kv_lengths,
         )
         self.fmha_params.fill_params_mha_device(
-            self.mtp_params.prefix_lengths,
-            self.mtp_params.kv_lengths,
-            self.mtp_params.input_lengths,
-            self.mtp_params.page_table,
+            self.spec_params.prefix_lengths,
+            self.spec_params.kv_lengths,
+            self.spec_params.input_lengths,
+            self.spec_params.page_table,
             self.page_size,
             True,
         )
@@ -222,8 +229,10 @@ class FlashAttn4MTPOp:
     def forward(
         self, query: torch.Tensor, kv_cache: Optional[LayerKVCache]
     ) -> torch.Tensor:
-        if kv_cache is None or self.mtp_params is None:
-            raise ValueError("FlashAttn4MTPOp requires prepared paged KV cache inputs")
+        if kv_cache is None or self.spec_params is None:
+            raise ValueError(
+                "FlashAttn4SpecDecodeOp requires prepared paged KV cache inputs"
+            )
         paged_kv_cache = common.reshape_paged_kv_cache(
             kv_cache.kv_cache_base,
             self.kv_head_num,
@@ -231,16 +240,16 @@ class FlashAttn4MTPOp:
             self.head_dim,
         )
         original_shape = query.shape
-        expected_tokens = self.mtp_params.batch_size * self.mtp_params.query_len
+        expected_tokens = self.spec_params.batch_size * self.spec_params.query_len
         if query.shape != (expected_tokens, self.head_num, self.head_dim):
             raise ValueError(
-                "FA4 MTP query must contain every token in the fixed graph bucket"
+                "FA4 spec-decode query must contain every token in the bucket"
             )
         if query.dtype != torch.bfloat16 or paged_kv_cache.dtype != query.dtype:
-            raise TypeError("FA4 MTP requires matching BF16 query and KV cache")
+            raise TypeError("FA4 spec-decode requires matching BF16 query and KV cache")
         dense_query = query.reshape(
-            self.mtp_params.batch_size,
-            self.mtp_params.query_len,
+            self.spec_params.batch_size,
+            self.spec_params.query_len,
             self.head_num,
             self.head_dim,
         )
@@ -250,24 +259,24 @@ class FlashAttn4MTPOp:
             dense_query,
             key_cache,
             value_cache,
-            seqused_k=self.mtp_params.kv_lengths,
-            max_seqlen_q=self.mtp_params.query_len,
+            seqused_k=self.spec_params.kv_lengths,
+            max_seqlen_q=self.spec_params.query_len,
             max_seqlen_k=self.max_kv_len,
-            page_table=self.mtp_params.page_table,
+            page_table=self.spec_params.page_table,
             softmax_scale=self.softmax_scale,
-            causal=True,
+            causal=self.is_causal,
             tile_mn=(_FA4_TILE_M, _FA4_TILE_N),
             mma_pv_is_rs=True,
             intra_wg_overlap=True,
             num_threads=256,
-            num_splits=self.mtp_params.num_splits,
+            num_splits=self.spec_params.num_splits,
             pack_gqa=True,
         )[0]
         return output.reshape(original_shape)
 
 
-class FlashAttn4MTPImpl(PyFlashinferPrefillImplBase):
-    """MTP attention with separate FlashInfer RoPE and KV cache write ops."""
+class FlashAttn4SpecDecodeImpl(PyFlashinferPrefillImplBase):
+    """Spec-decode attention with separate FlashInfer RoPE and cache-write ops."""
 
     def __init__(
         self,
@@ -280,7 +289,7 @@ class FlashAttn4MTPImpl(PyFlashinferPrefillImplBase):
     def _create_fmha_impl(
         self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> Any:
-        return FlashAttn4MTPOp(attn_configs, attn_inputs)
+        return FlashAttn4SpecDecodeOp(attn_configs, attn_inputs)
 
     def _create_rope_impl(self, attn_configs: AttentionConfigs) -> Any:
         if attn_configs.rope_config.style == RopeStyle.No:
@@ -292,7 +301,25 @@ class FlashAttn4MTPImpl(PyFlashinferPrefillImplBase):
 
     @staticmethod
     def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
-        return False
+        # Paged KV uses TMA when page size matches tile N and supports 8-element
+        # head-dim alignment. Its cp.async fallback requires 16-element alignment.
+        return (
+            is_sm90()
+            and attn_configs.dtype == torch.bfloat16
+            and attn_configs.kv_cache_dtype == KvCacheDataType.BASE
+            and not attn_configs.use_mla
+            and attn_configs.rope_config.style != RopeStyle.Mrope
+            and attn_configs.head_num % attn_configs.kv_head_num == 0
+            and 8 <= attn_configs.size_per_head <= 512
+            and attn_configs.size_per_head % 8 == 0
+            and (
+                attn_configs.kernel_tokens_per_block == _FA4_TILE_N
+                or attn_configs.size_per_head % 16 == 0
+            )
+            and attn_configs.kernel_tokens_per_block > 0
+            and (attn_inputs.is_target_verify or attn_inputs.is_spec_draft_prefill)
+            and _load_fa_forward() is not None
+        )
 
     def support_cuda_graph(self) -> bool:
         return True

@@ -1659,19 +1659,20 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
     const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
     // AsyncRunner value-captures model_input on its own stream/thread, so later
     // main-stream mutations cannot affect draft prefill prepare.
-    auto* draft_prefill_model = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
-    auto  model_input_copy    = model_input;
+    auto* prefill_model    = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
+    auto  model_input_copy = model_input;
+    model_input_copy.is_spec_draft_prefill = true;
     model_input_copy.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
     model_input_copy.kv_scale_stride_bytes = mtp_cache_cfg.kv_scale_stride_bytes;
     ensureModelInputsOnCuda(model_input_copy, "decode.draft_prefill_prepare");
     auto input_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     input_ready_event->record(cuda_graph::graphGetCurrentStream());
     draft_prefill_prepare_runner_.launch(
-        [this, draft_prefill_model, input_ready_event, model_input_copy = std::move(model_input_copy)]() mutable {
+        [this, prefill_model, input_ready_event, model_input_copy = std::move(model_input_copy)]() mutable {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_draft_prefill_input)");
             input_ready_event->block(cuda_graph::graphGetCurrentStream());
             checkModelInputsOnCuda(model_input_copy, "decode.draft_prefill_prepare.forwarded");
-            draft_prefill_model->prepareAttentionInputs(model_input_copy);
+            prefill_model->prepareAttentionInputs(model_input_copy);
         });
 }
 
@@ -1961,10 +1962,15 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
     maybePrintModelInput(model_input, "decode post draft model");
     ensureModelInputsOnCuda(model_input, "decode.draft_prefill_forward");
     // Use sp_prefill_draft_model_ if CUDA graph is enabled, otherwise use draft_model_.
-    auto* draft_prefill_model        = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
-    auto  draft_prefill_model_output = draft_prefill_model->forward(model_input);
+    auto* prefill_model       = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
+    auto  draft_prefill_input = model_input;
+    draft_prefill_input.is_spec_draft_prefill = true;
+    maybePrintModelInput(draft_prefill_input, "decode post draft model");
+    ensureModelInputsOnCuda(draft_prefill_input, "decode.draft_prefill_forward");
+    GptModelOutputs draft_prefill_model_output =
+    forwardModel(prefill_model, draft_prefill_input, ModelInputsModelRole::DRAFT_PREFILL);
     // Ordinary MTP chains this output into the next autoregressive draft step.
-    maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *draft_prefill_model);
+    maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *prefill_model);
     return draft_prefill_model_output;
 }
 
