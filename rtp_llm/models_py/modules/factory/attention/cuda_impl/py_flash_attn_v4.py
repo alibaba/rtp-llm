@@ -1,6 +1,7 @@
 import functools
 import importlib
 import logging
+import math
 from typing import Any, Callable, NamedTuple, Optional
 
 import torch
@@ -37,19 +38,37 @@ def _get_num_splits(
     num_kv_heads: int,
     max_kv_len: int,
 ) -> int:
+    # Reuse the FA2 SplitKV heuristic for the current dense spec-decode layout.
+    # TODO(yuhong): Add FA4 dynamic SplitKV with packed accepted lengths instead of
+    # relying on the dense layout.
     packed_q_rows = query_len * (num_q_heads // num_kv_heads)
     total_m_blocks = batch_size * num_kv_heads * _ceil_div(packed_q_rows, _FA4_TILE_M)
     num_n_blocks = _ceil_div(max_kv_len, _FA4_TILE_N)
-    if num_n_blocks <= 4 or total_m_blocks == 0:
+    if total_m_blocks >= 0.8 * sm_count or total_m_blocks == 0:
         return 1
-    return max(
-        1,
-        min(
-            num_n_blocks,
-            sm_count // total_m_blocks,
-            _FA4_MAX_SPLITS,
-        ),
-    )
+
+    max_splits = min(_FA4_MAX_SPLITS, sm_count, num_n_blocks)
+
+    def is_split_eligible(num_splits: int) -> bool:
+        return num_splits == 1 or _ceil_div(num_n_blocks, num_splits) != _ceil_div(
+            num_n_blocks, num_splits - 1
+        )
+
+    efficiencies = []
+    max_efficiency = 0.0
+    for num_splits in range(1, max_splits + 1):
+        if not is_split_eligible(num_splits):
+            efficiencies.append(0.0)
+            continue
+        num_waves = total_m_blocks * num_splits / sm_count
+        efficiency = num_waves / math.ceil(num_waves)
+        efficiencies.append(efficiency)
+        max_efficiency = max(max_efficiency, efficiency)
+
+    for num_splits, efficiency in enumerate(efficiencies, start=1):
+        if is_split_eligible(num_splits) and efficiency >= 0.85 * max_efficiency:
+            return num_splits
+    return 1
 
 
 @functools.cache
