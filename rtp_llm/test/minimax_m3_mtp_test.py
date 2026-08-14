@@ -105,6 +105,7 @@ class MiniMaxM3MTPConfigTest(unittest.TestCase):
         self.assertEqual(config.msa_sparse_config["disable_value_layer_ids"], [0])
         self.assertEqual(config.attn_config.indexer_head_dim, 4)
         self.assertTrue(config.is_mtp)
+        self.assertEqual(config.physical_mtp_module_num, 1)
         self.assertFalse(config.index_share_for_mtp_iteration)
 
     def test_rejects_multiple_physical_modules(self):
@@ -202,58 +203,86 @@ class MiniMaxM3MTPAttentionTest(unittest.TestCase):
         attention.page_size = 128
         return attention
 
-    def test_initial_cp_prefill_discards_single_layer_mtp_meta(self):
+    def test_initial_cp_prefill_delegates_without_model_specific_cache_mutation(self):
         layer = object.__new__(MiniMaxM3MTPDecoderLayer)
         inputs = SimpleNamespace(
             is_prefill=True,
             context_parallel_info=object(),
             is_mtp_draft_prefill=False,
         )
+        sentinel = {"owner": inputs, "layer_idx": 0}
 
         def forward(*_args, **_kwargs):
-            MSAAttention._cp_shared_meta = {"layer_idx": 0}
+            MSAAttention._cp_shared_meta = sentinel
             return "hidden", None
 
-        with patch.object(
+        with patch.object(MSAAttention, "_cp_shared_meta", None), patch.object(
             MiniMaxM3DecoderLayer, "_forward_attention", side_effect=forward
         ):
             actual = layer._forward_attention(
                 torch.empty(1, 8), None, None, None, False, inputs
             )
 
+            self.assertIs(MSAAttention._cp_shared_meta, sentinel)
+
         self.assertEqual(actual, ("hidden", None))
-        self.assertIsNone(MSAAttention._cp_shared_meta)
 
-    def test_initial_cp_prefill_discards_mtp_meta_on_error(self):
-        layer = object.__new__(MiniMaxM3MTPDecoderLayer)
-        inputs = SimpleNamespace(
-            is_prefill=True,
-            context_parallel_info=object(),
-            is_mtp_draft_prefill=False,
+    def test_raw_mxfp8_fused_projection_is_used_with_fp8_draft_kv(self):
+        attention = self._attention()
+        attention.head_num = 2
+        attention.head_dim = 4
+        attention.idx_head_dim = 4
+        attention.block_size = 4
+        attention.topk_blocks = 2
+        attention.init_blocks = 1
+        attention.local_blocks = 1
+        attention.score_type = "dot"
+        attention.disable_index_value = False
+        attention.tp_size = 1
+        attention.o_proj = nn.Identity()
+
+        block_table = torch.zeros((1, 1), dtype=torch.int32)
+        paged_kv = torch.empty((1, 2, 1, 128, 4), dtype=torch.float8_e4m3fn)
+        # The idx_K side region is byte-backed and reinterpreted as BF16.
+        kv_cache = SimpleNamespace(
+            kv_cache_base=paged_kv,
+            kv_scale_base=torch.empty((1, 1024), dtype=torch.uint8),
         )
-
-        def forward(*_args, **_kwargs):
-            MSAAttention._cp_shared_meta = {"layer_idx": 0}
-            raise RuntimeError("forward failed")
+        q = torch.zeros((1, 2, 4), dtype=torch.bfloat16)
+        idx_q = torch.zeros((1, 1, 4), dtype=torch.bfloat16)
+        o = torch.ones((1, 2, 4), dtype=torch.bfloat16)
 
         with patch.object(
-            MiniMaxM3DecoderLayer, "_forward_attention", side_effect=forward
+            attention,
+            "_paged_decode_addressing",
+            return_value=(
+                torch.tensor([1], dtype=torch.int64),
+                torch.tensor([1], dtype=torch.int32),
+                torch.tensor([0], dtype=torch.int32),
+                block_table,
+            ),
+        ), patch.object(
+            attention, "_should_use_mxfp8_fused_qkv_idx_decode", return_value=True
+        ), patch.object(
+            attention, "_paged_kv_base_view", return_value=paged_kv
+        ), patch.object(
+            attention, "_decode_project_fused_qkv_idx", return_value=(q, idx_q)
+        ) as fused_project, patch.object(
+            attention, "_paged_decode_max_kv", return_value=1
+        ), patch(
+            "rtp_llm.models_py.triton_kernels.sparse_msa.minimax_sparse.minimax_paged_sparse_decode",
+            return_value=(torch.empty(0), o),
         ):
-            with self.assertRaisesRegex(RuntimeError, "forward failed"):
-                layer._forward_attention(
-                    torch.empty(1, 8), None, None, None, False, inputs
-                )
+            actual = attention._forward_paged_decode(
+                torch.zeros((1, 8), dtype=torch.bfloat16),
+                SimpleNamespace(),
+                kv_cache,
+                x_fp8=torch.empty((1, 1), dtype=torch.uint8),
+                x_scale=torch.ones((1, 1), dtype=torch.float32),
+            )
 
-        self.assertIsNone(MSAAttention._cp_shared_meta)
-
-    def test_draft_refresh_does_not_own_initial_cp_meta_lifecycle(self):
-        inputs = SimpleNamespace(
-            is_prefill=True,
-            context_parallel_info=object(),
-            is_mtp_draft_prefill=True,
-        )
-
-        self.assertFalse(MiniMaxM3MTPDecoderLayer._is_initial_cp_prefill(inputs))
+        fused_project.assert_called_once()
+        torch.testing.assert_close(actual, o.reshape(1, -1))
 
     def test_regular_eager_decode_keeps_exact_live_max(self):
         attention = self._attention()

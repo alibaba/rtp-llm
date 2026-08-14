@@ -583,6 +583,39 @@ class PagedDecodeAddressingCacheTest(unittest.TestCase):
             next_forward[2], torch.tensor([11, 21], dtype=torch.int32)
         )
 
+    def test_does_not_reuse_across_attention_input_owners(self):
+        first_layer = object.__new__(MSAAttention)
+        first_layer.layer_idx = 2
+        first_layer.page_size = first_layer.physical_page_size = 128
+        later_layer = object.__new__(MSAAttention)
+        later_layer.layer_idx = 5
+        later_layer.page_size = later_layer.physical_page_size = 128
+        first_table = torch.tensor([[1, 2]], dtype=torch.int32)
+        second_table = torch.tensor([[3, 4]], dtype=torch.int32)
+        first_inputs = SimpleNamespace(
+            sequence_lengths=torch.tensor([10], dtype=torch.int32),
+            kv_cache_layer_to_group=None,
+            kv_cache_kernel_block_id_device_by_group=[first_table],
+            kv_cache_block_id_device=None,
+            kv_cache_kernel_block_id_device=first_table,
+        )
+        second_inputs = SimpleNamespace(
+            sequence_lengths=torch.tensor([20], dtype=torch.int32),
+            kv_cache_layer_to_group=None,
+            kv_cache_kernel_block_id_device_by_group=[second_table],
+            kv_cache_block_id_device=None,
+            kv_cache_kernel_block_id_device=second_table,
+        )
+
+        first = first_layer._paged_decode_addressing(first_inputs, torch.device("cpu"))
+        second = later_layer._paged_decode_addressing(
+            second_inputs, torch.device("cpu")
+        )
+
+        self.assertTrue(all(lhs is not rhs for lhs, rhs in zip(first, second)))
+        torch.testing.assert_close(second[0], torch.tensor([21], dtype=torch.int64))
+        self.assertIs(second[3], second_table)
+
 
 class TargetVerifyTokenMetadataTest(unittest.TestCase):
     def setUp(self):

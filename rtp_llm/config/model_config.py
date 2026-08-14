@@ -141,6 +141,7 @@ class ModelConfig(CppModelConfig):
         "input_vocab_size",
         "type_vocab_size",
         "gen_num_per_cycle",
+        "physical_mtp_module_num",
         "embedding_size",
         "moe_normalize_expert_scale",
         "scoring_func",

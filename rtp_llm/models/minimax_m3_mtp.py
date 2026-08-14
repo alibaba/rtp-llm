@@ -161,6 +161,7 @@ class MiniMaxM3MTP(MiniMaxM3):
             config.msa_sparse_config["idx_head_dim"]
         )
         config.is_mtp = True
+        config.physical_mtp_module_num = 1
         config.index_share_for_mtp_iteration = False
         config.model_type = "minimax_m3_mtp"
         config.enable_fp32_lm_head = False

@@ -229,7 +229,13 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     int num_mtp_modules = 1;
     if (is_mtp) {
         const bool uses_recurrent_draft_model = sp_config.type == SP_TYPE_EAGLE || sp_config.type == SP_TYPE_EAGLE3;
-        num_mtp_modules                       = uses_recurrent_draft_model ? 1 : sp_config.gen_num_per_cycle;
+        num_mtp_modules                       = propose_model_config.physical_mtp_module_num > 0 ?
+                                                    static_cast<int>(propose_model_config.physical_mtp_module_num) :
+                                                    (uses_recurrent_draft_model ? 1 : sp_config.gen_num_per_cycle);
+        RTP_LLM_CHECK_WITH_INFO(num_mtp_modules > 0 && num_mtp_modules <= sp_config.gen_num_per_cycle,
+                                "physical MTP module count must be in [1, gen_num_per_cycle]: modules=%d steps=%d",
+                                num_mtp_modules,
+                                sp_config.gen_num_per_cycle);
     }
 
     // DSV4 fixed-pool residency toggle (mirror createConfig) must precede

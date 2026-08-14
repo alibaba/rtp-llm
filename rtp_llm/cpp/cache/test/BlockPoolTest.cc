@@ -322,6 +322,38 @@ TEST_F(BlockPoolTest, Eagle3UsesSingleRecurrentDraftCache) {
     EXPECT_EQ(pool_cfg.memory_layouts.size(), 2u);
 }
 
+TEST_F(BlockPoolTest, NativeMtpPhysicalModuleCapabilityUsesSingleDraftCache) {
+    auto score_model_config                      = makeTestModelConfig(/*num_layers=*/2);
+    auto propose_model_config                    = makeTestModelConfig(/*num_layers=*/1);
+    propose_model_config.physical_mtp_module_num = 1;
+
+    rtp_llm::ParallelismConfig parallelism_config;
+    parallelism_config.tp_size = 1;
+    rtp_llm::RuntimeConfig runtime_config;
+
+    rtp_llm::KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num = 4;
+
+    rtp_llm::SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_MTP;
+    sp_config.gen_num_per_cycle = 4;
+
+    auto cache_cfg = rtp_llm::CacheConfigCreator::createSpConfig(score_model_config,
+                                                                 propose_model_config,
+                                                                 parallelism_config,
+                                                                 runtime_config,
+                                                                 kv_cache_config,
+                                                                 sp_config,
+                                                                 /*warm_up_result=*/std::nullopt,
+                                                                 /*is_mtp=*/true);
+
+    EXPECT_EQ(cache_cfg.layer_all_num, score_model_config.num_layers + propose_model_config.num_layers);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 1u);
+
+    auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
+    EXPECT_EQ(pool_cfg.memory_layouts.size(), 2u);
+}
+
 // Allocation Test
 TEST_F(BlockPoolTest, AllocSingleBlock) {
     auto config = createTestConfig();

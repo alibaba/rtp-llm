@@ -1962,7 +1962,11 @@ class MSAAttention(nn.Module):
     ):
         # Sparse layers execute in increasing layer order within one decode step.
         cache = MSAAttention._paged_decode_shared_meta
-        if cache is not None and cache["layer_idx"] < self.layer_idx:
+        if (
+            cache is not None
+            and cache.get("owner") is attn_inputs
+            and cache["layer_idx"] < self.layer_idx
+        ):
             cache["layer_idx"] = self.layer_idx
             return cache["addressing"]
 
@@ -1974,6 +1978,7 @@ class MSAAttention(nn.Module):
         positions = prefix_i64.to(torch.int32)
         addressing = (kv_lens, seq_lens, positions, phys_block_table)
         MSAAttention._paged_decode_shared_meta = {
+            "owner": attn_inputs,
             "layer_idx": self.layer_idx,
             "addressing": addressing,
         }
@@ -3113,7 +3118,11 @@ class MSAAttention(nn.Module):
         local_tokens = hidden_states.shape[0]
 
         cache = MSAAttention._cp_shared_meta
-        if cache is not None and cache.get("layer_idx", -1) < self.layer_idx:
+        if (
+            cache is not None
+            and cache.get("owner") is attn_inputs
+            and cache.get("layer_idx", -1) < self.layer_idx
+        ):
             local_positions = cache["local_positions"]
             unpad_indices = cache["unpad_indices"]
             segment_req_ids_t = cache["segment_req_ids_t"]
@@ -3290,6 +3299,7 @@ class MSAAttention(nn.Module):
             )
 
             MSAAttention._cp_shared_meta = {
+                "owner": attn_inputs,
                 "layer_idx": self.layer_idx,
                 "local_positions": local_positions,
                 "unpad_indices": unpad_indices,
@@ -3564,17 +3574,11 @@ class MSAAttention(nn.Module):
             attn_inputs, device
         )
 
-        # The MXFP8 fused QKV+idx decode projection writes bf16 straight into the
-        # paged pool and hard-requires a bf16 pool; for an FP8 (e4m3) pool fall
-        # back to the standard project + Triton auto-cast write path instead.
-        pool_is_fp8 = (
-            kv_cache.kv_cache_base is not None
-            and kv_cache.kv_cache_base.dtype == torch.float8_e4m3fn
-        )
-        if (
-            self._should_use_mxfp8_fused_qkv_idx_decode(x_fp8, x_scale)
-            and not pool_is_fp8
-        ):
+        # The fused write kernel casts K/V to the paged-pool dtype, so this path
+        # is valid for both BF16 and FP8 KV cache. Keep draft decode aligned with
+        # target verify instead of silently disabling M3_MSA_RAW_IDX_MXFP8 for
+        # the production FP8 configuration.
+        if self._should_use_mxfp8_fused_qkv_idx_decode(x_fp8, x_scale):
             paged_kv_base = self._paged_kv_base_view(kv_cache)
             scale = kv_cache.kv_scale_base
             paged_idx_k = scale.view(torch.bfloat16).view(
@@ -3633,7 +3637,7 @@ class MSAAttention(nn.Module):
             )
         if paged_decode_views is None:
             raise RuntimeError(
-                "MSA paged decode requires a BF16 5-D paged KV cache and "
+                "MSA paged decode requires a BF16 or FP8 5-D paged KV cache and "
                 "a BF16-compatible idx_K scale region. The original forward "
                 "decode path is selected automatically when static paged KV "
                 "conditions are not satisfied."

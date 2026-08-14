@@ -79,8 +79,13 @@ public:
     bool use_norm_input_residual    = false;
     bool use_norm_attn_out_residual = false;
 
-    int64_t max_seq_len                = 0;
-    int64_t gen_num_per_cycle          = 0;  // speculative decoding: tokens per cycle
+    int64_t max_seq_len       = 0;
+    int64_t gen_num_per_cycle = 0;  // speculative decoding: tokens per cycle
+    // Number of physical MTP modules in the draft checkpoint. Zero preserves
+    // the legacy policy that derives the count from the speculative method and
+    // gen_num_per_cycle. Recurrent native MTP models set this to one even when
+    // one module is reused for several proposal steps.
+    int64_t physical_mtp_module_num    = 0;
     int64_t vocab_size                 = 0;
     int64_t input_vocab_size           = 0;  // 0 if not set
     int64_t type_vocab_size            = 0;

@@ -26,15 +26,6 @@ class _MiniMaxM3MTPRefreshContext:
 class MiniMaxM3MTPDecoderLayer(MiniMaxM3DecoderLayer):
     """MiniMax-M3 MTP layer with an explicit paged draft-refresh entry."""
 
-    @staticmethod
-    def _is_initial_cp_prefill(attn_inputs: Optional[Any]) -> bool:
-        return bool(
-            attn_inputs is not None
-            and getattr(attn_inputs, "is_prefill", False)
-            and getattr(attn_inputs, "context_parallel_info", None) is not None
-            and not getattr(attn_inputs, "is_mtp_draft_prefill", False)
-        )
-
     def _forward_attention(
         self,
         hidden_states: torch.Tensor,
@@ -64,25 +55,16 @@ class MiniMaxM3MTPDecoderLayer(MiniMaxM3DecoderLayer):
             )
             return hidden_states, None
 
-        clear_cp_meta = self._is_initial_cp_prefill(attn_inputs)
-        try:
-            return super()._forward_attention(
-                hidden_states,
-                fmha_impl,
-                kv_cache,
-                prev_topk_indices,
-                force_reuse_topk_indices,
-                attn_inputs,
-                x_fp8,
-                x_scale,
-            )
-        finally:
-            # This checkpoint has one recurrent physical MTP layer, so its CP
-            # metadata has no later draft layer to serve. Keep it available
-            # during this layer, then prevent it from reaching the next target
-            # request through MSAAttention's process-wide cross-layer cache.
-            if clear_cp_meta:
-                MSAAttention._cp_shared_meta = None
+        return super()._forward_attention(
+            hidden_states,
+            fmha_impl,
+            kv_cache,
+            prev_topk_indices,
+            force_reuse_topk_indices,
+            attn_inputs,
+            x_fp8,
+            x_scale,
+        )
 
 
 class MiniMaxM3MTPModel(GenericMoeMTPModel):
