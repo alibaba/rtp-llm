@@ -49,6 +49,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.kv_cache_update_mapping.defined() ? inputs.kv_cache_update_mapping.size(0) : 0;
     shape_hints_ptr[GptModelInputIndex::lmOutputIndexes] =
         inputs.lm_output_indexes.defined() ? inputs.lm_output_indexes.numel() : 0;
+    shape_hints_ptr[GptModelInputIndex::customOutputIndexes] =
+        inputs.custom_output_indexes.defined() ? inputs.custom_output_indexes.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::comboPositionIds] =
         inputs.combo_position_ids.defined() ? inputs.combo_position_ids.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::textTokensMask] =
@@ -104,6 +106,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
         if (inputs.lm_output_indexes.defined() && inputs.lm_output_indexes.is_cuda()) {
             device_bits |= GptModelInputDeviceBit::kDeviceBitLmOutputIndexes;
+        }
+        if (inputs.custom_output_indexes.defined() && inputs.custom_output_indexes.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitCustomOutputIndexes;
         }
         if (inputs.kv_cache_kernel_block_id.defined() && inputs.kv_cache_kernel_block_id.is_cuda()) {
             device_bits |= GptModelInputDeviceBit::kDeviceBitKernelBlockId;
@@ -240,6 +245,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.lm_output_indexes     = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                                 {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputIndexes]},
                                             pickAlloc(GptModelInputDeviceBit::kDeviceBitLmOutputIndexes));
+        inputs.custom_output_indexes = allocBuf(
+            rtp_llm::DataType::TYPE_INT32,
+            {(size_t)shape_hints_ptr[GptModelInputIndex::customOutputIndexes]},
+            pickAlloc(GptModelInputDeviceBit::kDeviceBitCustomOutputIndexes));
         if (combo_position_ids_size) {
             inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)combo_position_ids_size});
         }
@@ -309,6 +318,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     collect(inputs.request_id);
     collect(inputs.request_pd_separation);
     collect(inputs.lm_output_indexes);
+    collect(inputs.custom_output_indexes);
     if (combo_position_ids_size) {
         collect(inputs.combo_position_ids);
     }

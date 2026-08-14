@@ -97,6 +97,8 @@ public:
     std::optional<std::vector<int32_t>>       input_embeddings_locs;
 
     int     prefix_length = 0;
+    // Absolute, zero-based position in input_ids; -1 means legacy last token.
+    int     custom_output_token_position = -1;
     int64_t begin_time_us = 0;
 
     // Batch grouping params

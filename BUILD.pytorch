@@ -8,6 +8,13 @@ config_setting(
     values = {"define": "using_rocm=true"},
 )
 
+# Torch 2.11+cu130 builds libtorch_python with NVSHMEM extension symbols.
+# Keep both DSOs in the CUDA 13 C++ link/runfiles closure.
+cc_import(
+    name = "cuda13_nvshmem_host",
+    shared_library = "@pip_gpu_cuda13_torch_nvidia_nvshmem_cu13//:site-packages/nvidia/nvshmem/lib/libnvshmem_host.so.3",
+)
+
 cc_library(
     name = "torch",
     srcs = [
@@ -47,6 +54,9 @@ cc_library(
             # "torch/lib/lib*amd*.so*",
         ]),
         "//conditions:default": [],
+    }) + select({
+        "@//:using_cuda13_x86": ["torch/lib/libtorch_nvshmem.so"],
+        "//conditions:default": [],
     }),
     hdrs = glob([
         "torch/include/*.h",
@@ -57,7 +67,10 @@ cc_library(
     deps = [
         "@local_config_python//:python_headers",
         "@local_config_python//:python_lib",
-    ],
+    ] + select({
+        "@//:using_cuda13_x86": [":cuda13_nvshmem_host"],
+        "//conditions:default": [],
+    }),
     strip_include_prefix = "torch/include",
     visibility = ["//visibility:public"],
 )

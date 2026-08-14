@@ -1,6 +1,7 @@
 import functools
 import json
 import logging
+import os
 from typing import Any, AsyncGenerator, Callable, Dict, Optional, Union
 
 import grpc
@@ -93,8 +94,28 @@ def _trans_jsonable_options(
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
-    input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
+    token_ids = input_py.token_ids.reshape(-1).tolist()
+    input_pb.token_ids.extend(token_ids)
+    # Resolve the protocol token once at the request boundary. This piggybacks
+    # on the list conversion already required by protobuf and keeps token scans
+    # out of the scheduler/model hot path.
+    if input_py.custom_output_token_position < 0:
+        configured_id = os.environ.get("CUSTOM_OUTPUT_TRACKED_TOKEN_ID")
+        if configured_id is not None:
+            tracked_id = int(configured_id)
+            max_suffix = int(os.environ.get("CUSTOM_OUTPUT_TRACKED_TOKEN_MAX_SUFFIX", "64"))
+            begin = max(0, len(token_ids) - max_suffix)
+            input_py.custom_output_token_position = next(
+                (i for i in range(len(token_ids) - 1, begin - 1, -1) if token_ids[i] == tracked_id),
+                -1,
+            )
+            if input_py.custom_output_token_position < 0:
+                raise ValueError(
+                    f"tracked custom-output token id {tracked_id} not found in the last {max_suffix} prompt tokens"
+                )
     input_pb.batch_group_size = input_py.batch_group_size
+    if input_py.custom_output_token_position >= 0:
+        input_pb.custom_output_token_position.value = input_py.custom_output_token_position
     if input_py.batch_group_id != -1:
         input_pb.batch_group_id.value = input_py.batch_group_id
 

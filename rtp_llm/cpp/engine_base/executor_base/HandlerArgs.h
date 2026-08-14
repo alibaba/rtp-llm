@@ -23,6 +23,7 @@ enum class Arg : uint32_t {
 
     // Assembled by PostLayersProcessor on the generate path.
     LAST_HIDDEN_STATES,
+    SELECTED_HIDDEN_STATES,
 
     // reserve as number marker
     NUM_ARG_TYPES

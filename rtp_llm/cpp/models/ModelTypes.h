@@ -69,6 +69,7 @@ enum GptModelInputIndex : size_t {
     kvCacheGroupTypesLen,
     kvCacheUpdateCopyNum,
     lmOutputIndexes,
+    customOutputIndexes,
     comboPositionIds,
     textTokensMask,
     mmFeaturesLocs,
@@ -105,6 +106,7 @@ enum GptModelInputDeviceBit : uint32_t {
     kDeviceBitPrefixLengths   = 1u << 3,
     kDeviceBitLmOutputIndexes = 1u << 4,
     kDeviceBitKernelBlockId   = 1u << 5,
+    kDeviceBitCustomOutputIndexes = 1u << 6,
 };
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);

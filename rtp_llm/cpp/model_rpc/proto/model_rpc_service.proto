@@ -200,6 +200,7 @@ message GenerateInputPB {
     google.protobuf.Int64Value batch_group_id = 8;
     RequestInfoPB request_info = 9;
     InputEmbeddingsPB input_embeddings = 10;
+    google.protobuf.Int32Value custom_output_token_position = 11;
 }
 
 message AuxInfoPB {

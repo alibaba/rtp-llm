@@ -8,6 +8,7 @@
 #include <torch/csrc/inductor/aoti_package/model_package_loader.h>
 #include <string>
 #include <vector>
+#include <cstdlib>
 
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -52,10 +53,20 @@ void PostLayersProcessor::setHandler(py::object handler) {
     // path cannot provide must fail startup, not fail every step.
     for (size_t i = 0; i < HandlerArgs::NUM_ARG_TYPES; ++i) {
         const auto arg = static_cast<HandlerArgs::Arg>(i);
-        if (HandlerArgs::has_arg(handler_args_, arg) && arg != HandlerArgs::Arg::LAST_HIDDEN_STATES) {
+        if (HandlerArgs::has_arg(handler_args_, arg) && arg != HandlerArgs::Arg::LAST_HIDDEN_STATES
+            && arg != HandlerArgs::Arg::SELECTED_HIDDEN_STATES) {
             throw std::runtime_error(std::string("post-layers handler arg \"") + HandlerArgs::get_name(arg)
                                      + "\" is not available on the generate path");
         }
+    }
+    if (HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::LAST_HIDDEN_STATES)
+        && HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::SELECTED_HIDDEN_STATES)) {
+        throw std::runtime_error("post-layers handler must request exactly one hidden-state argument");
+    }
+    if (HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::SELECTED_HIDDEN_STATES)
+        && std::getenv("CUSTOM_OUTPUT_TRACKED_TOKEN_ID") == nullptr) {
+        throw std::runtime_error(
+            "selected_hidden_states requires CUSTOM_OUTPUT_TRACKED_TOKEN_ID to be configured");
     }
 
     const auto trigger = py::cast<std::string>(handler_.attr("trigger_mode")());
@@ -99,6 +110,9 @@ torch::Tensor PostLayersProcessor::invokeHandler(const torch::Tensor& context_ro
         py::dict               kwargs;
         if (HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::LAST_HIDDEN_STATES)) {
             kwargs[HandlerArgs::get_name(HandlerArgs::Arg::LAST_HIDDEN_STATES)] = context_rows;
+        }
+        if (HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::SELECTED_HIDDEN_STATES)) {
+            kwargs[HandlerArgs::get_name(HandlerArgs::Arg::SELECTED_HIDDEN_STATES)] = context_rows;
         }
         output = handler_.attr("extend_forward")(**kwargs).cast<torch::Tensor>();
     }
