@@ -284,3 +284,23 @@ py_test(
         'gpu_count': '1',
     },
 )
+
+py_test(
+    name = "test_py_flash_attn_v4_mtp",
+    srcs = [
+        "test_py_flash_attn_v4_mtp.py",
+        "atten_test_util.py",
+        "attention_ref.py",
+        "base_attention_test.py",
+    ],
+    deps = py_test_deps + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps + [
+            "//3rdparty/vllm_flash_attention:fa4_cute",
+        ],
+        "//conditions:default": [],
+    }),
+    tags = ["H20", "cuda12_9"],
+    exec_properties = {
+        "gpu": "H20",
+    },
+)

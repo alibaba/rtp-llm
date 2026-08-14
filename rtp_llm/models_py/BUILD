@@ -80,7 +80,9 @@ py_library(
         # cuda12_arm (kept from main) has no branch here: its lock ships none of these.
         "@//:using_cuda13_x86": ["flash-mla"],
         "@//:using_cuda13_arm": ["flash-mla", "tilelang"],
-        "@//:using_cuda12_9_x86": flashmla,
+        "@//:using_cuda12_9_x86": flashmla + [
+            "//3rdparty/vllm_flash_attention:fa4_cute",
+        ],
         "//conditions:default": [],
     }) + select({
         "@//:using_cuda13_x86": rtp_kernel,

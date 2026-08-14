@@ -9,11 +9,13 @@ import unittest
 
 import torch
 
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.attention_ref import (
+    apply_base_rope_to_qkv_reference,
+)
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.trt_tests.test_trt_base import (
     TRTLLMFMHAv2TestBase,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.trt_tests.trt_test_utils import (
-    apply_base_rope_to_qkv_reference,
     compute_pytorch_prefill_reference,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.trt import (

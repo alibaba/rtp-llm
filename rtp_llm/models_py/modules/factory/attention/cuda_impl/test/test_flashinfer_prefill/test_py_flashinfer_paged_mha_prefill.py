@@ -282,7 +282,6 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
         print("  Expected: Q[i] attends to KV[0:4884+i+1]")
         print("=" * 70)
 
-        batch_size = 1
         prefix_lengths = [4884]
         input_lengths = [5]
         page_size = 64
@@ -299,7 +298,9 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
 
         # Create chunked prefill attention inputs
         attn_inputs = self._create_chunked_prefill_attention_inputs(
-            batch_size, prefix_lengths, input_lengths, config.seq_size_per_block
+            input_lengths=input_lengths,
+            prefix_lengths=prefix_lengths,
+            seq_size_per_block=config.seq_size_per_block,
         )
 
         # Create PyFlashinferPrefillPagedAttnOp instance
