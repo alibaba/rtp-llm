@@ -464,6 +464,10 @@ class KimiK3Eagle3(KimiK3):
         config.has_lm_head = True
         config.tie_word_embeddings = bool(raw.get("tie_word_embeddings", False))
         config.config_dtype = raw.get("torch_dtype", "bfloat16")
+        # The draft checkpoint stores the full K3 vocabulary head in BF16.
+        # Converting it to FP32 adds roughly 4.4 GiB per rank during startup
+        # and can exhaust B300 memory after the target model is loaded.
+        config.enable_fp32_lm_head = False
         config.has_positional_encoding = False
         config.position_ids_style = 0
         config.qk_norm = False

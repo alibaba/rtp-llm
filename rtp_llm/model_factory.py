@@ -221,6 +221,25 @@ class ModelFactory:
         logging.info(f"create model finish")
 
         # Create propose model if provided
+        # Loading and transforming the target model can leave large inactive
+        # CUDA allocator blocks behind.  Release those cached blocks before
+        # materializing the speculative model so its weights do not compete
+        # with memory that is no longer live.
+        if (
+            propose_model_config is not None
+            and engine_config.sp_config.type != SpeculativeType.NONE
+            and torch.cuda.is_available()
+        ):
+            allocated_before = torch.cuda.memory_allocated()
+            reserved_before = torch.cuda.memory_reserved()
+            torch.cuda.empty_cache()
+            logging.info(
+                "Released CUDA allocator cache before loading propose model: "
+                "allocated=%.2f GiB, reserved=%.2f GiB -> %.2f GiB",
+                allocated_before / 1024**3,
+                reserved_before / 1024**3,
+                torch.cuda.memory_reserved() / 1024**3,
+            )
         propose_model = ModelFactory.get_sp_model(
             model_config=model_config,
             propose_model_config=propose_model_config,
