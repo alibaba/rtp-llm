@@ -13,10 +13,12 @@ Usage:
 
 Environment Variables:
     RTP_LLM_TRITON_DEBUG=1  Enable detailed debug logging
+    RTP_LLM_TRITON_COMPILE_PHASE_FILE  File containing the current startup phase
+    RTP_LLM_TRITON_COMPILE_EVENT_FILE  JSONL compile event output shared by ranks
 
 Log Output:
     - INFO level: Basic compilation information (always output)
-      Example: Compiled _causal_conv1d_fwd_kernel: 600.15ms
+      Example: Compiled _causal_conv1d_fwd_kernel: 600.15ms phase=WARMUP
 
     - INFO level (DEBUG mode only): Detailed information in JSON format (prevents log interleaving in multi-process scenarios)
       Includes: kernel_name, compile_time_ms, module, triton_ops, target, options,
@@ -36,6 +38,43 @@ class TritonCompileMonitor:
 
     def __init__(self):
         self.debug_mode = os.environ.get("RTP_LLM_TRITON_DEBUG", "0") == "1"
+
+    def _current_phase(self) -> str:
+        phase_file = os.environ.get("RTP_LLM_TRITON_COMPILE_PHASE_FILE", "").strip()
+        if not phase_file:
+            return "UNKNOWN"
+        try:
+            with open(phase_file, encoding="utf-8") as stream:
+                return stream.read().strip() or "UNKNOWN"
+        except OSError:
+            return "UNKNOWN"
+
+    def _record_compile_event(
+        self, kernel_name: str, compile_time_ms: float, timestamp: str, phase: str
+    ) -> None:
+        event_file = os.environ.get("RTP_LLM_TRITON_COMPILE_EVENT_FILE", "").strip()
+        if not event_file:
+            return
+        try:
+            parent = os.path.dirname(event_file)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            record = json.dumps(
+                {
+                    "kernel_name": kernel_name,
+                    "compile_time_ms": compile_time_ms,
+                    "phase": phase,
+                    "timestamp": timestamp,
+                },
+                sort_keys=True,
+            )
+            fd = os.open(event_file, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
+            try:
+                os.write(fd, (record + "\n").encode("utf-8"))
+            finally:
+                os.close(fd)
+        except OSError as error:
+            logging.warning("Failed to record Triton compile event: %s", error)
 
     def __call__(self, original_compile):
         """
@@ -62,7 +101,10 @@ class TritonCompileMonitor:
             compile_time = time.perf_counter() - start_time
             compile_time_ms = round(compile_time * 1000, 2)
             timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-            logging.info(f"Compiled {kernel_name}: {compile_time_ms}ms")
+            phase = self._current_phase()
+            log_compile = logging.warning if phase == "SERVING" else logging.info
+            log_compile(f"Compiled {kernel_name}: {compile_time_ms}ms phase={phase}")
+            self._record_compile_event(kernel_name, compile_time_ms, timestamp, phase)
 
             if self.debug_mode:
                 self._log_detailed_info(
@@ -240,3 +282,9 @@ def enable_compile_monitor():
 
     except ImportError as e:
         print(f"[RTP-LLM TRITON COMPILE MONITOR] failed to import triton: {e}")
+
+
+def maybe_enable_compile_monitor() -> None:
+    """Enable the monitor only for deployments that explicitly request it."""
+    if os.environ.get("RTP_LLM_TRITON_COMPILE_MONITOR", "0") == "1":
+        enable_compile_monitor()

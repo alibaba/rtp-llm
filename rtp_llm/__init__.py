@@ -1,6 +1,14 @@
 import importlib
 from typing import Any
 
+from rtp_llm.utils.triton_compile_patch import maybe_enable_compile_monitor
+
+# Opt-in and side-effect free unless RTP_LLM_TRITON_COMPILE_MONITOR is set, so it
+# stays outside the lazy __getattr__ below: the monitor has to be installed before
+# anything triggers a Triton compile, and importing this module is the only point
+# guaranteed to run first. It patches nothing when the variable is unset.
+maybe_enable_compile_monitor()
+
 
 def __getattr__(name: str) -> Any:
     """Preserve old top-level access without importing C++ ops eagerly."""
