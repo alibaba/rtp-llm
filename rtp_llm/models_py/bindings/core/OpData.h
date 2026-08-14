@@ -113,6 +113,14 @@ struct GptModelOutputs {
     // and this step had context requests). Rows follow the context-stream
     // order, i.e. the tail of the lm_output rows.
     torch::Tensor custom_output;
+    // Bool [context_batch]. A false row means the selected prompt position
+    // was not part of this chunk, so the dispatcher must preserve any custom
+    // output produced by an earlier chunk for that stream.
+    torch::Tensor custom_output_valid_mask;
+    // Non-empty when the custom handler failed for the context batch. The
+    // dispatcher converts this into per-stream EXECUTION_EXCEPTION errors so
+    // a user extension cannot terminate the engine loop.
+    std::string custom_output_error;
 
     std::vector<torch::Tensor> moe_gating;
 };

@@ -27,9 +27,11 @@ from unittest import TestCase, main
 import torch
 
 from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
+    CustomOutputSelector,
     ModelRpcClient,
     StreamState,
     trans_input,
@@ -211,7 +213,7 @@ class ModelRpcClientTest(TestCase):
             {"CUSTOM_OUTPUT_TOKEN_POSITION": "-5"},
             clear=True,
         ):
-            with self.assertRaisesRegex(ValueError, "outside prompt length 4"):
+            with self.assertRaisesRegex(FtRuntimeException, "outside prompt length 4"):
                 trans_input(input_py)
 
     def test_trans_input_rejects_invalid_request_and_configured_positions(self):
@@ -231,7 +233,7 @@ class ModelRpcClientTest(TestCase):
             {"CUSTOM_OUTPUT_TOKEN_POSITION": "0"},
             clear=True,
         ):
-            with self.assertRaisesRegex(ValueError, "must be negative"):
+            with self.assertRaisesRegex(ValueError, "must be between"):
                 trans_input(input_py)
 
     def test_trans_input_tracks_last_matching_token(self):
@@ -264,7 +266,7 @@ class ModelRpcClientTest(TestCase):
             {"CUSTOM_OUTPUT_TRACKED_TOKEN_ID": "42"},
             clear=True,
         ):
-            with self.assertRaisesRegex(ValueError, "was not found in the prompt"):
+            with self.assertRaisesRegex(FtRuntimeException, "was not found in the prompt"):
                 trans_input(input_py)
 
     def test_trans_input_rejects_multiple_deployment_selectors(self):
@@ -285,6 +287,20 @@ class ModelRpcClientTest(TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "mutually exclusive"):
                 trans_input(input_py)
+
+    def test_custom_output_selector_validates_environment_at_construction(self):
+        invalid_cases = [
+            ({"CUSTOM_OUTPUT_TOKEN_POSITION": "not-an-int"}, "must be an integer"),
+            ({"CUSTOM_OUTPUT_TOKEN_POSITION": "0"}, "must be between"),
+            ({"CUSTOM_OUTPUT_TOKEN_POSITION": "-2147483649"}, "must be between"),
+            ({"CUSTOM_OUTPUT_TRACKED_TOKEN_ID": "not-an-int"}, "must be an integer"),
+            ({"CUSTOM_OUTPUT_TRACKED_TOKEN_ID": "-1"}, "must be between"),
+        ]
+        for environment, message in invalid_cases:
+            with self.subTest(environment=environment):
+                with unittest.mock.patch.dict(os.environ, environment, clear=True):
+                    with self.assertRaisesRegex(ValueError, message):
+                        CustomOutputSelector.from_env()
 
     @staticmethod
     def _make_generate_input(generate_config: GenerateConfig) -> GenerateInput:

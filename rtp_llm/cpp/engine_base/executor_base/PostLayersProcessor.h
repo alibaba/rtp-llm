@@ -50,8 +50,9 @@ public:
     // lm_rows: [total_batch, hidden] lm_output rows of this step, decode rows
     // first, context rows at the tail. Runs the handler over the context rows
     // (one GIL acquire, one batched extend_forward call; the slice is a view).
-    // Returns [context_batch, ...] or an undefined tensor; handler failures
-    // are logged and yield undefined — generation is never affected.
+    // Returns [context_batch, ...] or an undefined tensor. Handler failures
+    // propagate to PyWrappedModel, which records them in the model output for
+    // per-stream error dispatch without terminating the engine loop.
     torch::Tensor runOnContext(const torch::Tensor& lm_rows, int64_t decode_batch_size) const;
 
     // Runs the handler over dummy [batch, hidden_size] inputs so lazy

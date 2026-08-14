@@ -547,7 +547,8 @@ TEST_F(NormalBatchStreamProcessorTest, testCustomOutputDispatch) {
     NormalBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
     StreamGroups stream_groups(streams);
-    auto         merge_input_status = processor.gatherModelInput(stream_groups);
+    TensorHolder holder;
+    auto         merge_input_status = processor.gatherModelInput(stream_groups, holder);
     EXPECT_TRUE(merge_input_status.ok());
 
     MergedOutput merge_outputs;
@@ -564,6 +565,18 @@ TEST_F(NormalBatchStreamProcessorTest, testCustomOutputDispatch) {
     auto out2 = stream2->getCustomOutput();
     ASSERT_TRUE(out2.defined());
     EXPECT_EQ(toVec<float>(out2), (std::vector<float>{3.0f, 4.0f}));
+
+    // On a later chunk only stream2 contains its selected position. A false
+    // validity row must preserve stream1's earlier output instead of
+    // overwriting it with the placeholder row.
+    merge_outputs.model_output.custom_output =
+        torch::tensor({9.0f, 9.0f, 5.0f, 6.0f}).reshape({2, 2}).to(torch::kCUDA);
+    merge_outputs.model_output.custom_output_valid_mask =
+        torch::tensor({false, true}, torch::TensorOptions(torch::kBool).device(torch::kCUDA));
+    status = processor.dispatch(stream_groups, merge_outputs);
+    EXPECT_TRUE(status.ok());
+    EXPECT_EQ(toVec<float>(stream1->getCustomOutput()), (std::vector<float>{1.0f, 2.0f}));
+    EXPECT_EQ(toVec<float>(stream2->getCustomOutput()), (std::vector<float>{5.0f, 6.0f}));
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testCustomOutputSkipsDecodeRows) {
@@ -616,7 +629,8 @@ TEST_F(NormalBatchStreamProcessorTest, testCustomOutputSkipsDecodeRows) {
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
     StreamGroups stream_groups(streams);
     EXPECT_EQ(1u, stream_groups.totalDecodeBatchSize());
-    auto merge_input_status = processor.gatherModelInput(stream_groups);
+    TensorHolder holder;
+    auto         merge_input_status = processor.gatherModelInput(stream_groups, holder);
     EXPECT_TRUE(merge_input_status.ok());
 
     MergedOutput merge_outputs;
