@@ -488,7 +488,19 @@ void RtpLLMOp::stop() {
 }
 
 RtpLLMOp::~RtpLLMOp() {
-    stop();
+    // stop() now deliberately propagates engine-stop failures (prepareStop
+    // rethrows the captured exception_ptr so the Python layer can see them).
+    // Letting that escape a destructor is std::terminate, which would both kill
+    // the process during teardown and bury the original error under a
+    // destructor stack. Log and swallow here; the error was already reported to
+    // whoever called stop() explicitly.
+    try {
+        stop();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("RtpLLMOp::stop() failed during destruction: %s", e.what());
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("RtpLLMOp::stop() failed during destruction with an unknown exception");
+    }
 }
 
 void RtpLLMOp::pause() {

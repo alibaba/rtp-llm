@@ -216,7 +216,26 @@ class BackendManager(object):
                     logging.exception("backend shutdown rendezvous failed")
             try:
                 self.engine = None
-                logging.info("stopping backend engine loop at a collective boundary")
+                if coordinated_stop:
+                    logging.info(
+                        "stopping backend engine loop at coordinated step %d",
+                        target_step,
+                    )
+                else:
+                    # The only remaining way back into the original crash: this
+                    # rank leaves the engine loop on its own schedule while peers
+                    # may still be executing the DP/EP MegaMoE collective, so a
+                    # rank can be stranded in a barrier with no participants.
+                    # The bounded fallback is intentional (a peer has already
+                    # failed and the supervisor needs shutdown to finish), but it
+                    # must be visible in the logs, otherwise a split-collective
+                    # shutdown is indistinguishable from a clean one afterwards.
+                    logging.warning(
+                        "stopping backend engine loop WITHOUT rank coordination "
+                        "(drain_error=%s); peers may still be inside a collective, "
+                        "so this shutdown can strand a rank",
+                        drain_error,
+                    )
                 engine.prepare_stop(
                     coordinated=coordinated_stop, target_step=target_step
                 )
