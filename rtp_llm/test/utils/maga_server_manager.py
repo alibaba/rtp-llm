@@ -36,6 +36,7 @@ class MagaServerManager(object):
         role_name: str = "main",
         process_file_name: str = "process.log",
         smoke_args_str: str = "",
+        health_check_path: str = "/health",
     ):
         self._username = os.getenv("USER")
         self._env_args = env_args
@@ -47,6 +48,7 @@ class MagaServerManager(object):
         self._process_file_name = process_file_name
         self._port = port
         self._smoke_args_str = smoke_args_str
+        self._health_check_path = health_check_path
         self._exit_code: Optional[int] = None
         self._state_lock = threading.Lock()
         self._stop_requested = False
@@ -105,7 +107,9 @@ class MagaServerManager(object):
         from rtp_llm.utils.util import wait_sever_done
 
         # Health check uses START_PORT (self._port); when VIT_SEPARATION==1 we return True above
-        result = wait_sever_done(self._server_process, int(self._port), timeout)
+        result = wait_sever_done(
+            self._server_process, int(self._port), timeout, self._health_check_path
+        )
         if not result:
             rc = self._server_process.poll() if self._server_process else None
             self._exit_code = rc
@@ -218,6 +222,11 @@ class MagaServerManager(object):
                 "failed to disable core dumps for server subprocesses: %s", e
             )
 
+        logging.info(
+            "[%s] CUDA_VISIBLE_DEVICES for subprocess: %s",
+            self._role_name,
+            current_env.get("CUDA_VISIBLE_DEVICES", "<not set>"),
+        )
         p = subprocess.Popen(
             ["/opt/conda310/bin/python", "-m", "rtp_llm.start_server"] + parsed_args,
             env=current_env,

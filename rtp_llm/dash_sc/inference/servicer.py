@@ -22,21 +22,36 @@ from typing import Any, AsyncIterator, Callable, Iterator, Optional
 
 import torch
 
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.exceptions import (
+    AdmissionRejectReason,
+    ExceptionCategory,
+    ExceptionType,
+    FtRuntimeException,
+)
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
 from rtp_llm.dash_sc.codec import (
-    FINISH_REASON_ABORT,
+    DASH_ERROR_ABORT,
+    DASH_ERROR_ADMISSION_OVERLOADED,
+    DASH_ERROR_AUTO_TPM_PREEMPTED,
+    DASH_ERROR_BAD_REQUEST,
+    DASH_ERROR_CAPACITY,
+    DASH_ERROR_INTERNAL,
+    DASH_ERROR_INVALID_OUTPUT,
+    DASH_ERROR_RESOURCE_EXHAUSTED,
+    DASH_ERROR_TIMEOUT,
+    DASH_ERROR_TOO_LONG,
+    DASH_ERROR_UNSUPPORTED,
     FINISH_REASON_LENGTH,
-    FINISH_REASON_STOP_ENGINE_PARAM,
-    FINISH_REASON_STOP_TIMEOUT,
     FINISH_REASON_USE_PARAMETER_STATUS,
+    DashErrorSpec,
+    DashScInputIdsError,
     DashScParameterError,
     OtherParams,
     SamplingParams,
     _token_ids_list_from_generate_output,
-    build_finish_reason_done_response,
+    build_dash_error_response,
     build_parameter_error_response,
     build_stream_response_from_generate_outputs,
     iter_fake_model_stream_infer,
@@ -45,7 +60,7 @@ from rtp_llm.dash_sc.codec import (
     unpack_int_tensor_flat,
 )
 from rtp_llm.dash_sc.grpc_metrics import (
-    report_arrival,
+    report_arrival_priority,
     report_chunk,
     report_frontend_rpc_done,
 )
@@ -97,6 +112,22 @@ def _set_access_backend_error_code(access_agg: Any, e: BaseException) -> None:
         access_agg.backend_error_code = _exception_metric_code(raw_code)
     except (TypeError, ValueError):
         access_agg.backend_error_code = str(raw_code)
+
+
+def _capture_access_exception(access_agg: Any, e: BaseException) -> None:
+    if access_agg is None:
+        return
+    aux_info = getattr(e, "aux_info", None)
+    record_aux_info = getattr(access_agg, "record_aux_info", None)
+    if callable(record_aux_info):
+        record_aux_info(aux_info, overwrite=False)
+    else:
+        record_frontend_aux_info = getattr(
+            access_agg, "record_frontend_backend_aux_info", None
+        )
+        if callable(record_frontend_aux_info):
+            record_frontend_aux_info(aux_info)
+    _set_access_backend_error_code(access_agg, e)
 
 
 def _log_dashsc_grpc_egress_logprobs(
@@ -166,6 +197,178 @@ def _log_dashsc_grpc_egress_logprobs(
             request_log_tag,
             type(error).__name__,
         )
+
+
+def _dash_error_spec_for_ft_exception(exc: FtRuntimeException) -> DashErrorSpec:
+    return _dash_error_mapping_for_ft_exception(exc).error_spec
+
+
+@dataclass(frozen=True)
+class _DashFtErrorMapping:
+    error_spec: DashErrorSpec
+    public_message: Optional[str] = None
+    protocol_error: bool = False
+    priority_attribution_unavailable: bool = False
+
+
+@dataclass(frozen=True)
+class _AutoTpmPublicContract:
+    allowed_reasons: frozenset[AdmissionRejectReason]
+    without_qos: _DashFtErrorMapping
+    low_qos: _DashFtErrorMapping
+    high_qos: _DashFtErrorMapping
+
+
+_SERVICE_UNAVAILABLE_MAPPING = _DashFtErrorMapping(
+    DASH_ERROR_CAPACITY,
+    "Service unavailable.",
+)
+_PRIORITY_ATTRIBUTION_UNAVAILABLE_MAPPING = _DashFtErrorMapping(
+    DASH_ERROR_CAPACITY,
+    "Service unavailable.",
+    priority_attribution_unavailable=True,
+)
+_INVALID_AUTO_TPM_PROTOCOL_MAPPING = _DashFtErrorMapping(
+    DASH_ERROR_CAPACITY,
+    "Service unavailable.",
+    protocol_error=True,
+)
+_PREEMPTED_WITH_QOS_MAPPING = _DashFtErrorMapping(
+    DASH_ERROR_AUTO_TPM_PREEMPTED,
+    "Too many requests.",
+)
+_LOW_QOS_REJECTION_MAPPING = _DashFtErrorMapping(
+    DASH_ERROR_ADMISSION_OVERLOADED,
+    "Too many requests.",
+)
+_HIGH_QOS_REJECTION_MAPPING = _DashFtErrorMapping(
+    DASH_ERROR_RESOURCE_EXHAUSTED,
+    "Too many requests.",
+)
+
+# This is the single public-status contract for typed Auto-TPM outcomes.  Each
+# row owns both protocol validation and all three externally visible QoS cases.
+_AUTO_TPM_PUBLIC_CONTRACT = {
+    ExceptionType.PRIORITY_PREEMPTED: _AutoTpmPublicContract(
+        allowed_reasons=frozenset((AdmissionRejectReason.UNSPECIFIED,)),
+        without_qos=_SERVICE_UNAVAILABLE_MAPPING,
+        low_qos=_PREEMPTED_WITH_QOS_MAPPING,
+        high_qos=_PREEMPTED_WITH_QOS_MAPPING,
+    ),
+    ExceptionType.PRIORITY_ADMISSION_REJECTED: _AutoTpmPublicContract(
+        allowed_reasons=frozenset(
+            (
+                AdmissionRejectReason.HIGHER_PRIORITY_AHEAD,
+                AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+            )
+        ),
+        without_qos=_SERVICE_UNAVAILABLE_MAPPING,
+        low_qos=_LOW_QOS_REJECTION_MAPPING,
+        high_qos=_HIGH_QOS_REJECTION_MAPPING,
+    ),
+    ExceptionType.RESOURCE_EXHAUSTED: _AutoTpmPublicContract(
+        allowed_reasons=frozenset((AdmissionRejectReason.RESOURCE_EXHAUSTED,)),
+        without_qos=_SERVICE_UNAVAILABLE_MAPPING,
+        low_qos=_LOW_QOS_REJECTION_MAPPING,
+        high_qos=_HIGH_QOS_REJECTION_MAPPING,
+    ),
+    ExceptionType.ADMISSION_UNAVAILABLE: _AutoTpmPublicContract(
+        allowed_reasons=frozenset((AdmissionRejectReason.UNSPECIFIED,)),
+        without_qos=_PRIORITY_ATTRIBUTION_UNAVAILABLE_MAPPING,
+        low_qos=_PRIORITY_ATTRIBUTION_UNAVAILABLE_MAPPING,
+        high_qos=_PRIORITY_ATTRIBUTION_UNAVAILABLE_MAPPING,
+    ),
+}
+
+
+def _auto_tpm_public_mapping(
+    exception_type: ExceptionType,
+    raw_reason: Any,
+    qos_level: Optional[int],
+) -> Optional[_DashFtErrorMapping]:
+    contract = _AUTO_TPM_PUBLIC_CONTRACT.get(exception_type)
+    if contract is None:
+        return None
+
+    try:
+        reason = AdmissionRejectReason(raw_reason)
+    except (TypeError, ValueError):
+        return _INVALID_AUTO_TPM_PROTOCOL_MAPPING
+    if reason not in contract.allowed_reasons:
+        return _INVALID_AUTO_TPM_PROTOCOL_MAPPING
+
+    if qos_level is None:
+        return contract.without_qos
+    return contract.low_qos if qos_level < 50 else contract.high_qos
+
+
+def _dash_error_mapping_for_ft_exception(
+    exc: FtRuntimeException,
+    qos_level: Optional[int] = None,
+) -> _DashFtErrorMapping:
+    """Map an internal failure to the public Dash contract.
+
+    Scheduler diagnostics in ``str(exc)`` are deliberately excluded.  For an
+    admission rejection, an explicitly supplied DashScope QoS header selects
+    the public high/low-priority 429 contract.  Without a valid explicit QoS
+    header, admission failures retain the historical 503 contract: a default
+    scheduling priority is not evidence that the caller opted into QoS-tiered
+    throttling.
+    """
+
+    exception_type = exc.exception_type
+    raw_reason = getattr(
+        exc,
+        "admission_reject_reason",
+        AdmissionRejectReason.UNSPECIFIED,
+    )
+    typed_mapping = _auto_tpm_public_mapping(
+        exception_type,
+        raw_reason,
+        qos_level,
+    )
+    if typed_mapping is not None:
+        return typed_mapping
+
+    return _DashFtErrorMapping(
+        _DASH_ERROR_SPEC_BY_EXCEPTION_CATEGORY[exception_type.category]
+    )
+
+
+def _parse_valid_qos_level(value: Any) -> Optional[int]:
+    qos_level = to_optional_int(value)
+    if qos_level is None or not 1 <= qos_level <= 100:
+        return None
+    return qos_level
+
+
+def _request_qos_level(
+    other: OtherParams,
+    invocation_metadata: Optional[Any],
+) -> Optional[int]:
+    """Return valid metadata QoS, otherwise valid parsed request-header QoS."""
+    metadata_value = _headers_from_invocation_metadata(invocation_metadata).get(
+        "x-dashscope-inner-qos-level"
+    )
+    metadata_qos = _parse_valid_qos_level(metadata_value)
+    if metadata_qos is not None:
+        return metadata_qos
+    request_headers = {
+        str(key).lower(): value for key, value in other.request_headers.items()
+    }
+    return _parse_valid_qos_level(request_headers.get("x-dashscope-inner-qos-level"))
+
+
+_DASH_ERROR_SPEC_BY_EXCEPTION_CATEGORY = {
+    ExceptionCategory.BAD_REQUEST: DASH_ERROR_BAD_REQUEST,
+    ExceptionCategory.TOO_LONG: DASH_ERROR_TOO_LONG,
+    ExceptionCategory.UNSUPPORTED: DASH_ERROR_UNSUPPORTED,
+    ExceptionCategory.CAPACITY: DASH_ERROR_CAPACITY,
+    ExceptionCategory.TIMEOUT: DASH_ERROR_TIMEOUT,
+    ExceptionCategory.INVALID_OUTPUT: DASH_ERROR_INVALID_OUTPUT,
+    ExceptionCategory.CANCELLED: DASH_ERROR_ABORT,
+    ExceptionCategory.INTERNAL: DASH_ERROR_INTERNAL,
+}
 
 
 def stream_log_tag(
@@ -674,6 +877,17 @@ def _apply_request_overrides(
         generate_config.ttft_timeout_ms = engine_timeout_ms
     if other.traffic_reject_priority is not None:
         generate_config.traffic_reject_priority = int(other.traffic_reject_priority)
+    # Auto-TPM QoS priority from x-dashscope-inner-qos-level. Mirrors
+    # openai_endpoint.py which sets qos_priority from the HTTP header so
+    # it survives IPC to the dash_sc enqueue loop where
+    # GenerateInput.headers may be absent. Do NOT confuse with
+    # traffic_reject_priority (x-ds-request-priority) above.
+    qos_level = other.request_headers.get("x-dashscope-inner-qos-level")
+    if qos_level is not None:
+        try:
+            generate_config.qos_priority = int(str(qos_level).strip())
+        except (TypeError, ValueError):
+            pass
     if other.reasoning_effort is not None:
         kwargs = dict(getattr(generate_config, "chat_template_kwargs", None) or {})
         kwargs["reasoning_effort"] = other.reasoning_effort
@@ -1450,68 +1664,47 @@ async def iter_real_model_stream_infer(
                     phase2_pending = []
                     phase2_seen_close = True
     except FtRuntimeException as e:
-        if e.exception_type == ExceptionType.GENERATE_TIMEOUT:
-            logging.warning("[DashScGrpc] [%s] generate timeout: %s", tag, e)
-            response = build_finish_reason_done_response(
-                str(request.id),
-                request.model_name,
-                FINISH_REASON_STOP_TIMEOUT,
-            )
-            stats = (
-                0,
-                True,
-                FINISH_REASON_STOP_TIMEOUT,
-                len(input_ids_list),
-                0,
-                (),
-            )
-            yield (response, stats) if yield_access_stats else response
-        elif e.exception_type in (
-            ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-            ExceptionType.NO_PROMPT_ERROR,
-            ExceptionType.EMPTY_PROMPT_ERROR,
-            ExceptionType.INVALID_PARAMS,
-        ):
-            logging.warning("[DashScGrpc] [%s] parameter error: %s", tag, e)
-            response = build_finish_reason_done_response(
-                str(request.id),
-                request.model_name,
-                FINISH_REASON_STOP_ENGINE_PARAM,
-            )
-            stats = (
-                0,
-                True,
-                FINISH_REASON_STOP_ENGINE_PARAM,
-                len(input_ids_list),
-                0,
-                (),
-            )
-            yield (response, stats) if yield_access_stats else response
-        elif e.exception_type == ExceptionType.CANCELLED_ERROR:
-            logging.info("[DashScGrpc] [%s] engine cancelled: %s", tag, e)
-            response = build_finish_reason_done_response(
-                str(request.id),
-                request.model_name,
-                FINISH_REASON_ABORT,
-            )
-            stats = (0, True, FINISH_REASON_ABORT, len(input_ids_list), 0, ())
-            yield (response, stats) if yield_access_stats else response
-        else:
-            _set_access_backend_error_code(access_agg, e)
-            logging.exception("[DashScGrpc] [%s] engine error: %s", tag, e)
-            response = predict_v2_pb2.ModelStreamInferResponse(
-                error_message=f"{type(e).__name__}: {e}"
-            )
-            stats = (0, None, None, len(input_ids_list), 0, ())
-            yield (response, stats) if yield_access_stats else response
-    except Exception as e:
-        logging.exception("[DashScGrpc] [%s] enqueue failed: %s", tag, e)
-        # Prefix with exception class name so status.classify_error_message
-        # maps it to a bounded error_code tag (e.g. BACKEND_RuntimeError).
-        response = predict_v2_pb2.ModelStreamInferResponse(
-            error_message=f"{type(e).__name__}: {e}"
+        _capture_access_exception(access_agg, e)
+        error_mapping = _dash_error_mapping_for_ft_exception(
+            e,
+            qos_level=_request_qos_level(other, invocation_metadata),
         )
-        stats = (0, None, None, len(input_ids_list), 0, ())
+        error_spec = error_mapping.error_spec
+        status_message = error_mapping.public_message or str(e)
+        if error_mapping.protocol_error:
+            logging.error(
+                "[DashScGrpc] [%s] invalid admission code/reason pair: "
+                "code=%s reason=%s",
+                tag,
+                int(e.exception_type),
+                getattr(e, "admission_reject_reason", None),
+            )
+        if error_spec.status_code == 500:
+            logging.exception("[DashScGrpc] [%s] engine error: %s", tag, e)
+        elif error_spec.status_code == 499:
+            logging.info("[DashScGrpc] [%s] engine cancelled: %s", tag, e)
+        else:
+            logging.warning("[DashScGrpc] [%s] engine rejected request: %s", tag, e)
+        response = build_dash_error_response(
+            str(request.id),
+            request.model_name,
+            error_spec=error_spec,
+            status_message=status_message,
+        )
+        stats = (0, True, error_spec.finish_reason, len(input_ids_list), 0, ())
+        yield (response, stats) if yield_access_stats else response
+    except Exception as e:
+        _capture_access_exception(access_agg, e)
+        logging.exception("[DashScGrpc] [%s] enqueue failed: %s", tag, e)
+        error_spec = DASH_ERROR_INTERNAL
+        fallback_status_message = f"{type(e).__name__}: {e}"
+        response = build_dash_error_response(
+            str(request.id),
+            request.model_name,
+            error_spec=error_spec,
+            status_message=fallback_status_message,
+        )
+        stats = (0, True, error_spec.finish_reason, len(input_ids_list), 0, ())
         yield (response, stats) if yield_access_stats else response
 
 
@@ -1568,6 +1761,11 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             think_runtime if think_runtime is not None else _ThinkRuntime()
         )
         self._seq_counter = AtomicCounter()
+        set_request_id_factory = getattr(
+            self._backend_visitor, "set_request_id_factory", None
+        )
+        if set_request_id_factory is not None:
+            set_request_id_factory(self._next_rtp_llm_request_id)
         # Access-log identity, injected at construction (``DashScApp`` /
         # ``__main__`` own the rank/server identity). The two ids are the only
         # state the log + metric projections need; ``server_id`` arrives as the
@@ -1717,7 +1915,6 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             speculative_steps=self._speculative_steps,
         )
         emit_query_log(record, rank_id=self._rank_id, server_id=self._server_id)
-        report_arrival(rank_id=self._rank_id, server_id=self._server_id)
         exc: Optional[BaseException] = None
         try:
             try:
@@ -1781,6 +1978,14 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         other=other,
                     )
                     record.mark_request_done("eof")
+                    # Priority-tagged twin of the entry-point arrival: deferred
+                    # to here because the qos priority only becomes known once
+                    # the first frame is parsed. RPCs that never get here are
+                    # back-filled with priority="0" by the done metrics in the
+                    # ``finally`` below.
+                    report_arrival_priority(
+                        record, rank_id=self._rank_id, server_id=self._server_id
+                    )
                     first_request = False
                 if (
                     not partial_metadata_sent

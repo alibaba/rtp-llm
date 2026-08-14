@@ -279,7 +279,7 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdates
     auto fused_match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
 
     auto kv_resource = std::make_shared<KVCacheResource>();
-    kv_resource->setDeviceReuseBlockNum(2);
+    kv_resource->setDeviceReuseBlockNum(1);
     kv_resource->setMemoryReuseBlockNum(1);
 
     std::shared_ptr<Meta> meta;
@@ -302,7 +302,7 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdates
     EXPECT_TRUE(captured_ctx->meta()->enableMemoryCache());
 
     // seq_size_per_block = 2 in init_config()
-    const int expected_total_reuse_len  = (2 + 1) * resource.seqSizePerBlock();
+    const int expected_total_reuse_len  = (1 + 1) * resource.seqSizePerBlock();
     const int expected_memory_reuse_len = 1 * resource.seqSizePerBlock();
     EXPECT_EQ(stream_->initialReuseLength(), expected_total_reuse_len);
     EXPECT_EQ(stream_->reuseLength(), expected_total_reuse_len);
@@ -679,8 +679,8 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_ThenLoadCacheDone_UpdatesReus
     auto fused_match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
 
     auto kv_resource = std::make_shared<KVCacheResource>();
-    kv_resource->setDeviceReuseBlockNum(2);
-    kv_resource->setMemoryReuseBlockNum(3);
+    kv_resource->setDeviceReuseBlockNum(1);
+    kv_resource->setMemoryReuseBlockNum(1);
 
     std::shared_ptr<Meta> meta;
     auto                  load_ctx = std::make_shared<FusedAsyncReadContext>(fused_match, kv_resource, meta);
@@ -695,8 +695,8 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_ThenLoadCacheDone_UpdatesReus
 
     // Verify reuse lengths are updated
     // seq_size_per_block = 2 (from init_config)
-    const int total_reuse_len  = (2 + 3) * resource.seqSizePerBlock();
-    const int memory_reuse_len = 3 * resource.seqSizePerBlock();
+    const int total_reuse_len  = (1 + 1) * resource.seqSizePerBlock();
+    const int memory_reuse_len = 1 * resource.seqSizePerBlock();
     EXPECT_EQ(stream_->initialReuseLength(), total_reuse_len);
     EXPECT_EQ(stream_->reuseLength(), total_reuse_len);
     EXPECT_EQ(stream_->memoryReuseLength(), memory_reuse_len);
@@ -708,8 +708,8 @@ TEST_F(StreamCacheResourceTest, testP2PSideChannelRestoresZeroFirstTokenAndMtpSt
     auto& resource       = stream_->streamCacheResource();
 
     auto kv_resource = std::make_shared<KVCacheResource>();
-    kv_resource->setDeviceReuseBlockNum(1);
-    kv_resource->setMemoryReuseBlockNum(1);
+    // Reuse accounting in this case comes from the P2P side-channel payload.
+    // Keep connector-local counters at zero so they do not preempt that payload.
 
     auto server_call_result                                  = std::make_shared<PrefillLoadCaller::Result>();
     server_call_result->side_channel_payload.has_data        = true;
@@ -773,7 +773,7 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseL
     auto fused_match1 = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child1});
 
     auto kv_resource1 = std::make_shared<KVCacheResource>();
-    kv_resource1->setDeviceReuseBlockNum(2);
+    kv_resource1->setDeviceReuseBlockNum(1);
     kv_resource1->setMemoryReuseBlockNum(1);
 
     std::shared_ptr<Meta> meta1;
@@ -791,7 +791,7 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseL
     ASSERT_TRUE(resource.asyncLoadCache());
     ASSERT_TRUE(resource.loadCacheDone());
 
-    const int expected_total_reuse_len  = (2 + 1) * resource.seqSizePerBlock();
+    const int expected_total_reuse_len  = (1 + 1) * resource.seqSizePerBlock();
     const int expected_memory_reuse_len = 1 * resource.seqSizePerBlock();
     EXPECT_EQ(stream_->reuseLength(), expected_total_reuse_len);
     EXPECT_EQ(stream_->memoryReuseLength(), expected_memory_reuse_len);
@@ -816,12 +816,12 @@ TEST_F(StreamCacheResourceTest, testWaitLoadCacheDone_ZeroReuseLen_DoesNotOverwr
     auto& resource = stream_->streamCacheResource();
 
     // Pre-set reuse lengths on the stream (simulating a prior successful loadCacheSync)
-    stream_->setReuseLength(100);
-    stream_->setInitialReuseLength(100);
-    stream_->setLocalReuseLength(80);
-    stream_->setMemoryReuseLength(40);
-    stream_->setRemoteReuseLength(20);
-    stream_->setMtpTokenIndex(100);
+    stream_->setReuseLength(4);
+    stream_->setInitialReuseLength(4);
+    stream_->setLocalReuseLength(3);
+    stream_->setMemoryReuseLength(1);
+    stream_->setRemoteReuseLength(1);
+    stream_->setMtpTokenIndex(4);
 
     // Build a FusedAsyncReadContext with 0 reuse blocks
     auto match_child = std::make_shared<testing::NiceMock<MockAsyncContext>>();
@@ -838,13 +838,13 @@ TEST_F(StreamCacheResourceTest, testWaitLoadCacheDone_ZeroReuseLen_DoesNotOverwr
     resource.waitLoadCacheDone(load_ctx);
 
     // All values should be preserved — not overwritten with 0
-    EXPECT_EQ(stream_->reuseLength(), 100);
-    EXPECT_EQ(stream_->initialReuseLength(), 100);
-    EXPECT_EQ(stream_->localReuseLength(), 80);
-    EXPECT_EQ(stream_->deviceReuseLength(), 40);
-    EXPECT_EQ(stream_->memoryReuseLength(), 40);
-    EXPECT_EQ(stream_->remoteReuseLength(), 20);
-    EXPECT_EQ(stream_->getMtpTokenIndex(), 100);
+    EXPECT_EQ(stream_->reuseLength(), 4);
+    EXPECT_EQ(stream_->initialReuseLength(), 4);
+    EXPECT_EQ(stream_->localReuseLength(), 3);
+    EXPECT_EQ(stream_->deviceReuseLength(), 2);
+    EXPECT_EQ(stream_->memoryReuseLength(), 1);
+    EXPECT_EQ(stream_->remoteReuseLength(), 1);
+    EXPECT_EQ(stream_->getMtpTokenIndex(), 4);
 }
 
 }  // namespace rtp_llm

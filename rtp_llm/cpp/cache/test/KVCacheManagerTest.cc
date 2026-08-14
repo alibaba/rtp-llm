@@ -186,7 +186,6 @@ static void expectDsv4SwaAllocatedBlocks(const CacheConfig&      config,
         }
     }
 }
-
 // Creates an intentionally tight DSV4 config for eviction stress tests: FULL
 // groups use a large paged pool, while SWA groups use a small fixed pool.
 static CacheConfig makeDSV4ConfigWithConcurrencyPool(uint32_t full_block_num, uint32_t swa_batch_size) {
@@ -780,9 +779,14 @@ TEST_F(KVCacheManagerTest, DSV4InitReuseKeepsSWAPrefixTailBlock) {
         const auto& blocks = second_resource->blocks(0, gid);
         ASSERT_EQ(blocks.size(), 24u) << "second SWA group " << gid;
         EXPECT_TRUE(isNullBlockIdx(blocks[2])) << "SWA reuse prefix penultimate block is NULL (no prev lookup)";
-        EXPECT_EQ(blocks[3], first_swa_tail_blocks[static_cast<size_t>(gid)])
-            << "SWA reuse prefix tail block must stay readable";
-        EXPECT_FALSE(isNullBlockIdx(blocks[22])) << "second SWA group " << gid << " fresh tail block 22";
+        if (isHcaStateGroup(manager_config, gid)) {
+            EXPECT_TRUE(isNullBlockIdx(blocks[3])) << "HCA_STATE skips prefix reuse";
+            EXPECT_TRUE(isNullBlockIdx(blocks[22])) << "HCA_STATE keeps a one-block active tail";
+        } else {
+            EXPECT_EQ(blocks[3], first_swa_tail_blocks[static_cast<size_t>(gid)])
+                << "SWA reuse prefix tail block must stay readable";
+            EXPECT_FALSE(isNullBlockIdx(blocks[22])) << "second SWA group " << gid << " fresh tail block 22";
+        }
         EXPECT_FALSE(isNullBlockIdx(blocks[23])) << "second SWA group " << gid << " fresh tail block 23";
     }
 
@@ -1352,9 +1356,9 @@ TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBloc
     manager->insertIntoCache(InsertInfo{seed_res, seed_tokens, /*is_resident=*/false});
     manager->free(FreeInfo{seed_res, seed_tokens});
 
-    // Same prefix, one more block.  This hits one cached fixed-pool block and
-    // must still have room for the two fresh tail blocks.  The matched block is
-    // then skipped out of the active SWA tail by the decode allocation path.
+    // Same prefix, one more block. This hits one cached fixed-pool block and must still
+    // have room for the active tail window (two blocks for SWA, one for HCA_STATE).
+    // The matched block is then skipped out of the active SWA tail by the decode allocation path.
     auto       reuse_res    = makeDSV4BatchResource(manager_config);
     auto       reuse_tokens = makeTokens(3 * spb);
     MallocInfo reuse_malloc{reuse_res, reuse_tokens};
@@ -1370,9 +1374,7 @@ TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBloc
         }
         const auto& blocks = reuse_res->blocks(0, gid);
         ASSERT_EQ(blocks.size(), 3u) << "reuse group " << gid;
-        EXPECT_TRUE(isNullBlockIdx(blocks[0])) << "reuse group " << gid << " skipped reused prefix";
-        EXPECT_FALSE(isNullBlockIdx(blocks[1])) << "reuse group " << gid << " tail block 1";
-        EXPECT_FALSE(isNullBlockIdx(blocks[2])) << "reuse group " << gid << " tail block 2";
+        expectDsv4SwaAllocatedBlocks(manager_config, blocks, gid, "reuse group");
     }
 
     manager->free(FreeInfo{reuse_res, reuse_tokens});

@@ -422,7 +422,22 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {
         malloc_failed_times_++;
-        return absl::InternalError("malloc failed");
+        switch (result.status) {
+            case MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED:
+                return absl::UnavailableError("kv cache is temporarily unavailable");
+            case MallocStatus::PERMANENT_RESOURCE_EXHAUSTED:
+                return absl::ResourceExhaustedError("request exceeds usable kv cache capacity");
+            case MallocStatus::INTERNAL_ERROR:
+                return absl::InternalError("malloc failed");
+            case MallocStatus::NONE:
+                RTP_LLM_LOG_ERROR("malloc returned failure without an error status, request_id=%ld",
+                                  malloc_info.request_id);
+                return absl::InternalError("malloc failed without an error status");
+        }
+        RTP_LLM_LOG_ERROR("malloc returned failure with unknown status=%d, request_id=%ld",
+                          static_cast<int>(result.status),
+                          malloc_info.request_id);
+        return absl::InternalError("malloc failed with unknown status");
     }
 
     if (result.reuse_len > 0) {
@@ -632,6 +647,8 @@ int StreamCacheResource::mallocFailedTimes() const {
 }
 
 bool StreamCacheResource::reuseCache() const {
+    // AND logic: global REUSE_CACHE=1 AND per-request reuse_cache both must be true.
+    // Per-request field flows frontend → FlexLB → engine via protobuf.
     return resource_context_.reuse_cache && stream_->reuseCache();
 }
 

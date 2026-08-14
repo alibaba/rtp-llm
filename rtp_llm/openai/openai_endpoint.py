@@ -604,6 +604,17 @@ class OpenaiEndpoint(object):
             else None
         )
 
+        # Extract QoS priority from HTTP headers and store on generate_config
+        # so it survives IPC to the dash_sc enqueue loop, where
+        # GenerateInput.headers may be absent.
+        request_headers = extract_request_headers(raw_request.headers)
+        qos_level = request_headers.get("x-dashscope-inner-qos-level")
+        if qos_level is not None:
+            try:
+                generate_config.qos_priority = int(str(qos_level).strip())
+            except (TypeError, ValueError):
+                pass
+
         choice_generator = renderer.generate_choice(
             request_id,
             rendered_input.input_ids,
@@ -611,7 +622,7 @@ class OpenaiEndpoint(object):
             generate_config,
             self.backend_rpc_server_visitor,
             chat_request,
-            headers=extract_request_headers(raw_request.headers),
+            headers=request_headers,
             frontend_metric_tags=frontend_metric_tags,
             frontend_metric_observer=frontend_metric_observer,
         )

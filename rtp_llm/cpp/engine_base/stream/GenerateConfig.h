@@ -96,8 +96,7 @@ public:
     bool               enable_memory_cache = true;
     bool               enable_remote_cache = true;
     std::string        trace_id;
-    bool               force_batch = false;  // If true, streams with same batch_group_id must be scheduled together
-    std::optional<int> batch_group_timeout;
+    std::optional<int> group_timeout;
     std::string        unique_key;
 
     bool top1() {
@@ -160,8 +159,7 @@ public:
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
                      << ", reuse_cache: " << reuse_cache << ", enable_device_cache: " << enable_device_cache
                      << ", enable_memory_cache: " << enable_memory_cache
-                     << ", enable_remote_cache: " << enable_remote_cache << ", force_batch: " << force_batch
-                     << ", unique_key: " << unique_key << "}";
+                     << ", enable_remote_cache: " << enable_remote_cache << ", unique_key: " << unique_key << "}";
         return debug_string.str();
     }
 
@@ -250,9 +248,8 @@ public:
         JSONIZE(enable_device_cache);
         JSONIZE(enable_memory_cache);
         JSONIZE(enable_remote_cache);
-        JSONIZE(force_batch);
         JSONIZE(aux_info);
-        JSONIZE_OPTIONAL(batch_group_timeout);
+        JSONIZE_OPTIONAL(group_timeout);
         JSONIZE(unique_key);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL

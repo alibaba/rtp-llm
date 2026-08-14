@@ -15,7 +15,8 @@ import os
 import struct
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any
+from enum import IntEnum
+from typing import Any, NamedTuple
 
 import torch
 
@@ -30,9 +31,7 @@ from rtp_llm.utils.base_model_datatypes import GenerateOutputs
 
 _DEFAULT_MAX_THINKING_TOKENS = 131072
 _DEFAULT_MAX_NEW_TOKENS = 131072
-_PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV = (
-    "DASH_SC_PACK_EOS_FOR_EMPTY_GENERATED_IDS"
-)
+_PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV = "DASH_SC_PACK_EOS_FOR_EMPTY_GENERATED_IDS"
 _TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 
 
@@ -42,15 +41,143 @@ def _pack_eos_for_empty_generated_ids() -> bool:
         in _TRUE_ENV_VALUES
     )
 
-FINISH_REASON_LENGTH = 1
-FINISH_REASON_STOP_ENGINE_PARAM = 8
-FINISH_REASON_ABORT = 10
-FINISH_REASON_STOP_TIMEOUT = 13
-FINISH_REASON_USE_PARAMETER_STATUS = 1000
+
+class LLMFinishReason(IntEnum):
+    """Mirrors dashllm.core.enums.enums.LLMFinishReason values."""
+
+    STOP = 0
+    LENGTH = 1
+    STREAMING = 2
+    STOP_WORDS_LIST = 3
+    STOP_FORCE = 4
+    TASK_LIST_FULL = 5
+    TIME_OUT_FOR_FIRST_TOKEN = 6
+    STOP_FROM_ENGINE = 7
+    STOP_ENGINE_PARAM = 8
+    STOP_ENGINE_ERROR = 9
+    ABORT = 10
+    PREFILL_RETRY = 11
+    DECODE_RETRY = 12
+    STOP_TIMEOUT = 13
+    INNER_ENGINE_STUCK = 501
+    INNER_ENGINE_ERROR = 502
+    INNER_GENERATE_EXIT = 503
+    STOP_ENGINE_INVALID_OUTPUT = 504
+    USE_PARAMETER_STATUS = 1000
+
+
+# Backward-compatible names retained for the current branch's response
+# builders and callers while keeping the enum as the single value source.
+FINISH_REASON_LENGTH = LLMFinishReason.LENGTH
+FINISH_REASON_STOP_ENGINE_PARAM = LLMFinishReason.STOP_ENGINE_PARAM
+FINISH_REASON_ABORT = LLMFinishReason.ABORT
+FINISH_REASON_STOP_TIMEOUT = LLMFinishReason.STOP_TIMEOUT
+FINISH_REASON_USE_PARAMETER_STATUS = LLMFinishReason.USE_PARAMETER_STATUS
+
+
+class DashErrorSpec(NamedTuple):
+    error_no: int
+    finish_reason: int
+    status_code: int
+    status_name: str
+
+
+DASHSERVING_INNER_ENGINE_ERROR_NO = 19
+
+DASH_ERROR_BAD_REQUEST = DashErrorSpec(
+    error_no=LLMFinishReason.STOP_ENGINE_PARAM,
+    # USE_PARAMETER_STATUS tells DashScope api-server to use the explicit
+    # status_* response parameters instead of mapping STOP_ENGINE_PARAM to a
+    # generic 500 EngineAbort. Keep error_no=8 for compatibility and metrics.
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
+    status_code=400,
+    status_name="InvalidParameter",
+)
+DASH_ERROR_TOO_LONG = DashErrorSpec(
+    error_no=LLMFinishReason.STOP_ENGINE_PARAM,
+    finish_reason=LLMFinishReason.STOP_ENGINE_PARAM,
+    status_code=413,
+    status_name="InvalidParameter",
+)
+DASH_ERROR_UNSUPPORTED = DashErrorSpec(
+    error_no=LLMFinishReason.STOP_ENGINE_PARAM,
+    finish_reason=LLMFinishReason.STOP_ENGINE_PARAM,
+    status_code=422,
+    status_name="InvalidParameter",
+)
+# NOTE: finish_reason must be USE_PARAMETER_STATUS for any spec whose
+# status_code differs from what the DashScope api-server would derive via
+# LlmFinishReasonUtils.finishReasonToStatusCode().  The api-server only
+# passes the explicit status_code (from the error_msg JSON) through verbatim
+# when finish_reason == USE_PARAMETER_STATUS (1000); otherwise it re-derives
+# HTTP from the finish_reason code, which maps most non-trivial codes to
+# InternalError.EngineAbort/500.  error_no is kept at the semantic value for
+# downstream metric/labelling; only finish_reason is remapped.
+# Mirrors the STOP_ENGINE_PARAM→USE_PARAMETER_STATUS translation that
+# dashllm's processor.py (L1438-1442) applies at the wire boundary.
+DASH_ERROR_CAPACITY = DashErrorSpec(
+    error_no=LLMFinishReason.TASK_LIST_FULL,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
+    status_code=503,
+    status_name="ServiceUnavailable",
+)
+# Auto-TPM victim preemption (Master 8429 PRIORITY_PREEMPTED): the request was
+# already dispatched and then cancelled as a victim of a strictly
+# higher-priority request.  Distinct from generic capacity backpressure
+# (DASH_ERROR_CAPACITY): error_no carries ABORT(10) for downstream
+# metric/labelling, status_name is Throttling.Aborted, and finish_reason is
+# USE_PARAMETER_STATUS so the api-server passes the explicit 429 through
+# verbatim (same wire convention as the specs above).
+DASH_ERROR_AUTO_TPM_PREEMPTED = DashErrorSpec(
+    error_no=LLMFinishReason.ABORT,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
+    status_code=429,
+    status_name="Throttling.Aborted",
+)
+DASH_ERROR_ADMISSION_OVERLOADED = DashErrorSpec(
+    error_no=LLMFinishReason.TASK_LIST_FULL,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
+    status_code=429,
+    status_name="Throttling.ServiceOverloaded",
+)
+DASH_ERROR_RESOURCE_EXHAUSTED = DashErrorSpec(
+    error_no=LLMFinishReason.TASK_LIST_FULL,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
+    status_code=429,
+    status_name="Throttling.ResourceExhausted",
+)
+DASH_ERROR_TIMEOUT = DashErrorSpec(
+    error_no=LLMFinishReason.STOP_TIMEOUT,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
+    status_code=504,
+    status_name="GatewayTimeout",
+)
+DASH_ERROR_INVALID_OUTPUT = DashErrorSpec(
+    error_no=LLMFinishReason.STOP_ENGINE_INVALID_OUTPUT,
+    finish_reason=LLMFinishReason.STOP_ENGINE_INVALID_OUTPUT,
+    status_code=500,
+    status_name="InternalError",
+)
+DASH_ERROR_ABORT = DashErrorSpec(
+    error_no=LLMFinishReason.ABORT,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
+    status_code=499,
+    status_name="ClientClosedRequest",
+)
+DASH_ERROR_INTERNAL = DashErrorSpec(
+    error_no=DASHSERVING_INNER_ENGINE_ERROR_NO,
+    finish_reason=LLMFinishReason.INNER_ENGINE_ERROR,
+    status_code=500,
+    status_name="InternalError",
+)
 
 
 class DashScParameterError(ValueError):
     """Explicit user-parameter parse/validation error for dash-sc gRPC."""
+
+
+class DashScInputIdsError(RuntimeError):
+    """Input IDs cannot be represented by the engine's INT32 tensor."""
 
 
 # ----------------------------------------------------------------------------
@@ -1061,7 +1188,11 @@ def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> Other
         )
 
     request_headers: dict[str, str] = {}
-    for header_name in ("user_id", "x-dashscope-apikeyid"):
+    for header_name in (
+        "user_id",
+        "x-dashscope-apikeyid",
+        "x-dashscope-inner-qos-level",
+    ):
         value = _normalize_non_empty_str(ds_attrs.get(header_name))
         if value is not None:
             request_headers[header_name] = value
@@ -2134,6 +2265,44 @@ def build_finish_reason_done_response(
     _append_finished_output(infer, finished=True)
     infer.parameters["incremental_output"].int64_param = 1
     return stream_resp
+
+
+def build_dash_error_response(
+    request_id: str,
+    model_name: str,
+    *,
+    error_spec: DashErrorSpec,
+    status_message: str,
+) -> predict_v2_pb2.ModelStreamInferResponse:
+    """Build a Dash-compatible terminal business error frame."""
+    error_msg = json.dumps(
+        {
+            "service_id": "",
+            "status_code": int(error_spec.status_code),
+            "status_name": error_spec.status_name,
+            "status_message": status_message,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+    resp = predict_v2_pb2.ModelStreamInferResponse()
+    infer = resp.infer_response
+    infer.id = str(request_id)
+    infer.model_name = model_name
+    _append_finish_reason_output(
+        infer,
+        finished=True,
+        finish_reason_override=int(error_spec.finish_reason),
+    )
+    _append_finished_output(infer, finished=True)
+    infer.parameters["incremental_output"].int64_param = 1
+    infer.parameters["error_no"].int64_param = int(error_spec.error_no)
+    infer.parameters["error_msg"].string_param = error_msg
+    infer.parameters["status_code"].int64_param = int(error_spec.status_code)
+    infer.parameters["status_name"].string_param = error_spec.status_name
+    infer.parameters["status_message"].string_param = status_message
+    return resp
 
 
 def build_error_response(

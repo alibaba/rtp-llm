@@ -44,10 +44,9 @@ class GenerateInput:
     tokenizer: Any = None  # TODO: remove this
     prefix_length: int = 0
     token_type_ids: List[int] = field(default_factory=list)
-    batch_group_size: int = 1
-    batch_group_id: int = (
-        -1
-    )  # Batch group ID for force batch grouping, -1 means not set
+    group_size: int = 1
+    group_id: int = -1  # Batch group ID for force batch grouping, -1 means not set
+    enqueued_by_master: bool = False
     headers: Dict[str, str] = field(default_factory=dict, repr=False)
     frontend_metric_tags: Dict[str, str] = field(default_factory=dict, repr=False)
     frontend_metric_observer: Optional[Callable[[Any, int], None]] = field(

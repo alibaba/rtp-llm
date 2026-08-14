@@ -46,8 +46,8 @@ public:
     size_t                  maxAvailableTokensNum() const override;
     KVCacheTokenCapacity    tokenCapacity(size_t default_seq_size_per_block) const override;
     std::vector<KVCachePoolMetricsSnapshot> poolMetricsSnapshots() const override;
-    void                    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr) override;
-    int64_t                 getMrCostTimeMs() const override;
+    void    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr) override;
+    int64_t getMrCostTimeMs() const override;
 
     // Per-pool access for diagnostics / per-pool metrics reporting.
     const std::vector<BlockPoolPtr>& groupBlockPools() const {
@@ -57,12 +57,15 @@ public:
 private:
     bool doInit() override;
 
+    MallocStatus
+    evaluateInitCapacity(const MallocInfo& malloc_info, size_t reserve_blocks, InitCapacityMode mode) const override;
+
     void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) const override;
     void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) override;
     bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const override;
 
-    int groupIdForLayerRegion(int layer_id, KVCacheRegionName region_name) const;
-    int defaultGroupIdForLayer(int layer_id) const;
+    int    groupIdForLayerRegion(int layer_id, KVCacheRegionName region_name) const;
+    int    defaultGroupIdForLayer(int layer_id) const;
     size_t minTokenCapacity(bool use_available_blocks, bool full_groups_only) const;
 
     std::vector<BlockPoolPtr> group_block_pools_;

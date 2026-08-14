@@ -1053,10 +1053,29 @@ MtpExecutor::AcceptLenMetricsSnapshot MtpExecutor::consumePendingAcceptLenMetric
     snapshot.total_accept_len        = metrics_accept_len_sum_cpu_.item<int64_t>();
     snapshot.total_stream_num        = metrics_accept_len_stream_num_;
     snapshot.total_propose_token_num = metrics_accept_len_propose_token_num_;
-    snapshot.valid                   = true;
+    if (metrics_accept_len_rows_cpu_.defined() && metrics_accept_len_rows_cpu_.numel() > 0) {
+        // Rebuild priority buckets from the staged per-stream rows. Every row is
+        // attributed to a bucket, so the bucket sums always equal the scalar
+        // total_accept_len computed from the same tensor.
+        const auto*   rows     = metrics_accept_len_rows_cpu_.data_ptr<int64_t>();
+        const int64_t num_rows = metrics_accept_len_rows_cpu_.numel();
+        for (int64_t i = 0; i < num_rows; ++i) {
+            int32_t priority = 0;
+            if (i < static_cast<int64_t>(metrics_accept_len_row_priorities_.size())) {
+                priority = metrics_accept_len_row_priorities_[i];
+            } else if (!metrics_accept_len_row_priorities_.empty()) {
+                priority = metrics_accept_len_row_priorities_.back();
+            }
+            snapshot.accept_len_by_priority[priority] += rows[i];
+        }
+    }
+    snapshot.valid = true;
 
-    metrics_accept_len_sum_gpu_ = torch::Tensor();
-    metrics_accept_len_sum_cpu_ = torch::Tensor();
+    metrics_accept_len_sum_gpu_  = torch::Tensor();
+    metrics_accept_len_sum_cpu_  = torch::Tensor();
+    metrics_accept_len_rows_gpu_ = torch::Tensor();
+    metrics_accept_len_rows_cpu_ = torch::Tensor();
+    metrics_accept_len_row_priorities_.clear();
     metrics_accept_len_ready_event_.reset();
     metrics_accept_len_stream_num_        = 0;
     metrics_accept_len_propose_token_num_ = 0;
@@ -1065,7 +1084,8 @@ MtpExecutor::AcceptLenMetricsSnapshot MtpExecutor::consumePendingAcceptLenMetric
 
 void MtpExecutor::stageAcceptLenMetrics(const torch::Tensor& accept_len,
                                         torch::Event&        accept_len_ready_event,
-                                        size_t               stream_count) {
+                                        size_t               stream_count,
+                                        std::vector<int32_t> row_priorities) {
     if (!accept_len.defined()) {
         return;
     }
@@ -1073,10 +1093,13 @@ void MtpExecutor::stageAcceptLenMetrics(const torch::Tensor& accept_len,
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(stage_accept_len_metrics)");
     metrics_accept_len_stream_num_        = static_cast<int64_t>(stream_count);
     metrics_accept_len_propose_token_num_ = static_cast<int64_t>(stream_count * propose_step_);
+    metrics_accept_len_row_priorities_    = std::move(row_priorities);
 
     if (!accept_len.is_cuda()) {
-        metrics_accept_len_sum_gpu_ = torch::Tensor();
-        metrics_accept_len_sum_cpu_ = accept_len.to(torch::kInt64).sum().reshape({1}).pin_memory();
+        metrics_accept_len_sum_gpu_  = torch::Tensor();
+        metrics_accept_len_sum_cpu_  = accept_len.to(torch::kInt64).sum().reshape({1}).pin_memory();
+        metrics_accept_len_rows_gpu_ = torch::Tensor();
+        metrics_accept_len_rows_cpu_ = accept_len.to(torch::kInt64).flatten().contiguous();
         metrics_accept_len_ready_event_.reset();
         return;
     }
@@ -1087,6 +1110,13 @@ void MtpExecutor::stageAcceptLenMetrics(const torch::Tensor& accept_len,
     metrics_accept_len_sum_cpu_ =
         torch::empty({1}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU).pinned_memory(true));
     metrics_accept_len_sum_cpu_.copy_(metrics_accept_len_sum_gpu_, /*non_blocking=*/true);
+    // Stage the per-stream rows in the same tiny D2H window; consume-side
+    // priority bucketing keeps tagged TPS sums equal to the untagged total.
+    metrics_accept_len_rows_gpu_ = accept_len.to(torch::kInt64).flatten().contiguous();
+    metrics_accept_len_rows_cpu_ =
+        torch::empty({metrics_accept_len_rows_gpu_.numel()},
+                     torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU).pinned_memory(true));
+    metrics_accept_len_rows_cpu_.copy_(metrics_accept_len_rows_gpu_, /*non_blocking=*/true);
     metrics_accept_len_ready_event_ = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     metrics_accept_len_ready_event_->record(collect_metrics_stream_);
 }
@@ -1821,6 +1851,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                                    0,
                                    stream_groups.modelExecuteTokenSize(),
                                    tps_execute_time_us);
+        // Prefill step has no decode streams, so tokenCountsByPriority() follows
+        // the same context/total accounting as the untagged addTokenSize above.
+        tps_collector.addTokenSizeByPriority(stream_groups.tokenCountsByPriority(), tps_execute_time_us);
     }
 
     // dispatch
@@ -2930,7 +2963,17 @@ void MtpExecutor::collectDecodeMetrics(const StreamGroups&                      
     auto& sp_engine_collector = metrics_collector.sp_engine_collector;
 
     const auto accept_len_metrics = consumePendingAcceptLenMetrics();
-    stageAcceptLenMetrics(speculative_sampler_output.accept_len, accept_len_ready_event, stream_groups.size());
+    // Capture per-stream priorities in batch order so the staged accept_len
+    // rows can be bucketed by priority when they are consumed next step.
+    std::vector<int32_t> accept_len_row_priorities;
+    accept_len_row_priorities.reserve(stream_groups.size());
+    for (const auto& stream : stream_groups.allStreams()) {
+        accept_len_row_priorities.push_back(stream->priority());
+    }
+    stageAcceptLenMetrics(speculative_sampler_output.accept_len,
+                          accept_len_ready_event,
+                          stream_groups.size(),
+                          std::move(accept_len_row_priorities));
     const int64_t total_accept_len         = accept_len_metrics.total_accept_len;
     executor_collector.generate_batch_size = stream_groups.totalModelBatchSize();
     executor_collector.execute_token_size += total_accept_len;
@@ -2940,10 +2983,11 @@ void MtpExecutor::collectDecodeMetrics(const StreamGroups&                      
     executor_collector.execute_token_size_when_has_context = executor_collector.execute_token_size;
     executor_collector.max_seq_len_when_has_context        = executor_collector.max_seq_len;
 
-    sp_engine_collector.total_accepted_token_num = total_accept_len;
-    sp_engine_collector.total_stream_num         = accept_len_metrics.total_stream_num;
-    sp_engine_collector.total_propose_token_num  = accept_len_metrics.total_propose_token_num;
-    sp_engine_collector.spec_steps               = propose_step_;
+    sp_engine_collector.total_accepted_token_num     = total_accept_len;
+    sp_engine_collector.total_stream_num             = accept_len_metrics.total_stream_num;
+    sp_engine_collector.total_propose_token_num      = accept_len_metrics.total_propose_token_num;
+    sp_engine_collector.spec_steps                   = propose_step_;
+    metrics_collector.accepted_token_num_by_priority = accept_len_metrics.accept_len_by_priority;
 }
 
 std::shared_ptr<MtpTargetLogprobs> MtpExecutor::launchEarlyMtpTargetLogprobsFinalize(
@@ -3156,6 +3200,19 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
                                        sp_engine_collector.total_accepted_token_num,
                                        sp_engine_collector.total_accepted_token_num,
                                        metrics_collector.generate_execute_time_us);
+            // Bucket the same accepted tokens by priority; bucket sums equal
+            // total_accepted_token_num since both come from the staged rows.
+            StreamGroups::TokenCountsByPriority accepted_counts_by_priority;
+            for (const auto& [priority, accepted_token_num] : metrics_collector.accepted_token_num_by_priority) {
+                if (accepted_token_num <= 0) {
+                    continue;
+                }
+                auto& counts    = accepted_counts_by_priority[priority];
+                counts.generate = accepted_token_num;
+                counts.total    = accepted_token_num;
+            }
+            tps_collector.addTokenSizeByPriority(accepted_counts_by_priority,
+                                                 metrics_collector.generate_execute_time_us);
         }
 
         RTP_LLM_PROFILE_SCOPE("executor.mtp.process(report_metrics)");

@@ -16,5 +16,6 @@ py_library(
     deps = [
         ":request_headers",
         "//rtp_llm:vipserver",
+        "//rtp_llm/cpp/model_rpc/proto:flexlb_schedule_service_py_proto",
     ]
 )

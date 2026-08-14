@@ -136,16 +136,66 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 }
 
 void GenerateStream::resetBeginTime(int64_t begin_time_us) {
-    begin_time_us_ = begin_time_us;
+    begin_time_us_               = begin_time_us;
+    wait_time_us_                = 0;
+    wait_time_recorded_          = false;
+    scheduler_enqueue_time_us_   = 0;
+    can_run_time_us_             = 0;
+    loading_cache_start_time_us_ = 0;
+    loading_cache_done_time_us_  = 0;
+    first_running_time_us_       = 0;
+    loading_cache_latency_us_    = 0;
+    load_done_to_running_us_     = 0;
 }
 
 void GenerateStream::recordWaitTime() {
     std::lock_guard<std::mutex> lock(*mutex_);
+    recordWaitLatency();
+}
+
+void GenerateStream::recordWaitLatency() {
     if (wait_time_recorded_) {
         return;
     }
     wait_time_us_       = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
     wait_time_recorded_ = true;
+}
+
+void GenerateStream::recordSchedulerEnqueueTime(int64_t time_us) {
+    if (scheduler_enqueue_time_us_ == 0) {
+        scheduler_enqueue_time_us_ = time_us;
+    }
+}
+
+void GenerateStream::recordCanRunTime() {
+    if (can_run_time_us_ == 0) {
+        can_run_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+    }
+}
+
+void GenerateStream::recordLoadingCacheStartTime() {
+    if (loading_cache_start_time_us_ == 0) {
+        loading_cache_start_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+    }
+}
+
+void GenerateStream::recordLoadingCacheDoneTime() {
+    if (loading_cache_done_time_us_ == 0) {
+        loading_cache_done_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+        if (loading_cache_start_time_us_ > 0) {
+            loading_cache_latency_us_ = loading_cache_done_time_us_ - loading_cache_start_time_us_;
+        }
+    }
+}
+
+void GenerateStream::recordRunningTime() {
+    if (first_running_time_us_ != 0) {
+        return;
+    }
+    first_running_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+    if (loading_cache_done_time_us_ > 0) {
+        load_done_to_running_us_ = first_running_time_us_ - loading_cache_done_time_us_;
+    }
 }
 
 bool GenerateStream::hasCacheKeys() const {
@@ -723,6 +773,9 @@ void GenerateStream::checkTimeout() {
 // 外部线程调用时自动加锁保护 error_info 和 events_ 的一致性。
 void GenerateStream::reportEvent(StreamEvents::EventType event, ErrorCode error_code, const std::string& error_msg) {
     std::lock_guard<std::mutex> lock(*mutex_);
+    if (event == StreamEvents::CanRun) {
+        recordCanRunTime();
+    }
     generate_status_->reportEvent(event, error_code, error_msg);
 }
 
@@ -730,6 +783,9 @@ void GenerateStream::reportEvent(StreamEvents::EventType event, ErrorCode error_
 void GenerateStream::reportEventWithoutLock(StreamEvents::EventType event,
                                             ErrorCode               error_code,
                                             const std::string&      error_msg) {
+    if (event == StreamEvents::CanRun) {
+        recordCanRunTime();
+    }
     generate_status_->reportEvent(event, error_code, error_msg);
 }
 
@@ -786,7 +842,7 @@ CachePrepareResult GenerateStream::prepareCache() {
     if (!generate_status_->hasEvent(StreamEvents::LoadInitiated)) {
         auto status = stream_cache_resource_->initKVBlock(reserve_step_);
         if (!status.ok()) {
-            if (status.message() == "malloc failed") {
+            if (absl::IsUnavailable(status)) {
                 return CachePrepareResult::LACK_MEM;
             }
             generate_status_->reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "LACK MEM");
@@ -796,6 +852,7 @@ CachePrepareResult GenerateStream::prepareCache() {
         const bool loading = stream_cache_resource_->asyncLoadCache();
         generate_status_->reportEvent(StreamEvents::LoadInitiated);
         if (loading) {
+            recordLoadingCacheStartTime();
             return CachePrepareResult::WAIT;
         }
         // Match the synchronous first WAITING transition: when no connector
@@ -806,6 +863,7 @@ CachePrepareResult GenerateStream::prepareCache() {
     } else if (!stream_cache_resource_->loadCacheDone()) {
         return CachePrepareResult::WAIT;
     }
+    recordLoadingCacheDoneTime();
 
     if (generate_status_->error_info.hasError()) {
         generate_status_->reportEvent(StreamEvents::CachePrepared);
@@ -1516,7 +1574,15 @@ void GenerateStream::reportStreamMetrics() {
             collector.first_token_latency_us = complete_token_ids_->firstTokenLatencyUs();
             RTP_LLM_LOG_DEBUG(
                 "stream [%s] report first latency us = %ld", streamLogTag().c_str(), collector.first_token_latency_us);
-            collector.wait_latency_us          = wait_time_us_;
+            collector.wait_latency_us = wait_time_us_;
+            if (scheduler_enqueue_time_us_ > 0 && can_run_time_us_ > scheduler_enqueue_time_us_) {
+                collector.enqueue_to_canrun_us = can_run_time_us_ - scheduler_enqueue_time_us_;
+            }
+            if (can_run_time_us_ > 0 && first_running_time_us_ > can_run_time_us_) {
+                collector.canrun_to_running_us = first_running_time_us_ - can_run_time_us_;
+            }
+            collector.loading_cache_latency_us = loading_cache_latency_us_;
+            collector.load_done_to_running_us  = load_done_to_running_us_;
             collector.batch_with_prefill_times = batch_with_prefill_times_;
             collector.batch_with_prefill_len   = batch_with_prefill_len_;
             collector.malloc_failed_times      = stream_cache_resource_->mallocFailedTimes();
