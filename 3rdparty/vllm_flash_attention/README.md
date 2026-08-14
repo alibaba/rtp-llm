@@ -92,10 +92,10 @@ exists. The upstream snapshot remains unchanged.
 8. Verify that generated sources contain no remaining `flash_attn.cute`
    imports, build the RTP-LLM wheel, and inspect the wheel for
    `vllm_flash_attention/cute/*.py` without the repository path prefix.
-9. Run the FA4 MTP unit test on SM90/CUDA 12.9:
+9. Run the FA4 spec-decode unit test on SM90/CUDA 12.9:
 
    ```text
-   //rtp_llm/models_py/modules/factory/attention/cuda_impl/test:test_py_flash_attn_v4_mtp
+   //rtp_llm/models_py/modules/factory/attention/cuda_impl/test:test_py_flash_attn_v4_spec_decode
    ```
 
 10. Confirm target-verify, draft-forward, CUDA graph replay, and numerical

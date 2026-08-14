@@ -891,9 +891,10 @@ int CudaGraphRunner::getCurrentRealGraphBs(const CudaGraphState& state) const {
 }
 
 void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs) {
-    inputs.attention_inputs.is_target_verify = is_target_verify_;
-    inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || is_target_verify_;
-    inputs.attention_inputs.total_tokens     = max_num_token_;
+    inputs.attention_inputs.is_target_verify      = is_target_verify_;
+    inputs.attention_inputs.is_spec_draft_prefill = isSpecDraftPrefillCudaGraph();
+    inputs.attention_inputs.is_prefill            = is_prefill_cuda_graph_mode_ || is_target_verify_;
+    inputs.attention_inputs.total_tokens          = max_num_token_;
 
     // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
     inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
@@ -938,7 +939,7 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     } else if (is_prefill_cuda_graph_mode_) {
         // ROCm needs prefix>0 here for AiterPrefillImplPaged.support(); CUDA keeps prefix=0.
 #if USING_ROCM
-        const int prefix_init = isMtpDraftPrefillCudaGraph() ? max_seq_len_ : 0;
+        const int prefix_init = isSpecDraftPrefillCudaGraph() ? max_seq_len_ : 0;
 #else
         const int prefix_init = 0;
 #endif
@@ -1118,8 +1119,8 @@ void CudaGraphRunner::initCapture() {
         logCudaGraphPoolMemory("before_capture");
 
         if (is_prefill_cuda_graph_mode_) {
-            RTP_LLM_CHECK_WITH_INFO(isEmbeddingStylePrefillCudaGraph() || isMtpDraftPrefillCudaGraph(),
-                                    "prefill cuda graph: expected embedding-style or MTP draft layout");
+            RTP_LLM_CHECK_WITH_INFO(isEmbeddingStylePrefillCudaGraph() || isSpecDraftPrefillCudaGraph(),
+                                    "prefill cuda graph: expected embedding-style or speculative draft layout");
             capturePrefill();
         } else {
             captureDecode();
@@ -1210,12 +1211,13 @@ void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
 
 void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens) {
     // Common slice operations for input_ids and padding_offset
-    inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || is_target_verify_;
-    inputs.attention_inputs.is_target_verify = is_target_verify_;
-    // HC-shaped MTP draft prefill executes a fixed-capacity Python path. Other
-    // MTP models must slice to the current graph key so FlashInfer's batch
-    // indices length remains equal to the query nnz.
-    const bool fixed_capacity_draft_prefill = usesFixedCapacityMtpDraftPrefillCudaGraph();
+    inputs.attention_inputs.is_prefill            = is_prefill_cuda_graph_mode_ || is_target_verify_;
+    inputs.attention_inputs.is_target_verify      = is_target_verify_;
+    inputs.attention_inputs.is_spec_draft_prefill = isSpecDraftPrefillCudaGraph();
+    // HC-shaped speculative draft prefill executes a fixed-capacity Python path.
+    // Other speculative models must slice to the current graph key so FlashInfer's
+    // batch indices length remains equal to the query nnz.
+    const bool fixed_capacity_draft_prefill = usesFixedCapacitySpecDraftPrefillCudaGraph();
     const int  token_slice_len = fixed_capacity_draft_prefill ? max_bs_ * num_tokens_per_bs_ : seq_len_or_tokens;
     inputs.input_ids           = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);
     inputs.input_hiddens       = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, token_slice_len);
