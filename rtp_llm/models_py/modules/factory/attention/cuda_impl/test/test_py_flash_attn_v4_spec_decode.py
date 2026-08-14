@@ -183,10 +183,11 @@ class TestFlashAttn4SpecDecodeSupportEnvelope(unittest.TestCase):
 
 
 class TestFlashAttn4SpecDecodeContract(unittest.TestCase):
-    def test_num_splits_matches_upstream_resource_limits(self) -> None:
-        # Upstream uses min(SM capacity, N tiles, 128). Its heuristic returns
-        # zero to disable SplitKV when no extra split fits; this explicit
-        # num_splits API represents the same non-split execution with one.
+    def test_num_splits_follows_fa2_wave_efficiency(self) -> None:
+        # This is the FA2 wave-efficiency heuristic:
+        # it over-schedules splits to fill idle SMs.
+        # Two M blocks on 132 SMs leaves the GPU almost empty,
+        # so all four N tiles get their own split.
         self.assertEqual(
             _get_num_splits(
                 sm_count=132,
@@ -196,7 +197,7 @@ class TestFlashAttn4SpecDecodeContract(unittest.TestCase):
                 num_kv_heads=NUM_KV_HEADS,
                 max_kv_len=4 * 32,
             ),
-            1,
+            4,
         )
         self.assertEqual(
             _get_num_splits(
