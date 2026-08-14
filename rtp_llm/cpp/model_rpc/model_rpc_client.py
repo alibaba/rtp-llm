@@ -95,14 +95,18 @@ def trans_input(input_py: GenerateInput):
     input_pb.request_id = input_py.request_id
     token_ids = input_py.token_ids.reshape(-1).tolist()
     input_pb.token_ids.extend(token_ids)
-    # Resolve a deployment-level relative position once at the request
-    # boundary. This is O(1), and keeps selector work out of the
-    # scheduler/model hot path.
+    # Resolve the deployment-level selector once at the request boundary,
+    # keeping selector work out of the scheduler/model hot path.
     custom_output_token_position = input_py.custom_output_token_position
     if custom_output_token_position < -1:
         raise ValueError("custom_output_token_position must be -1 or non-negative")
+    configured_position = os.environ.get("CUSTOM_OUTPUT_TOKEN_POSITION")
+    configured_token_id = os.environ.get("CUSTOM_OUTPUT_TRACKED_TOKEN_ID")
+    if configured_position is not None and configured_token_id is not None:
+        raise ValueError(
+            "CUSTOM_OUTPUT_TOKEN_POSITION and CUSTOM_OUTPUT_TRACKED_TOKEN_ID are mutually exclusive"
+        )
     if custom_output_token_position < 0:
-        configured_position = os.environ.get("CUSTOM_OUTPUT_TOKEN_POSITION")
         if configured_position is not None:
             relative_position = int(configured_position)
             if relative_position >= 0:
@@ -111,6 +115,20 @@ def trans_input(input_py: GenerateInput):
             if custom_output_token_position < 0:
                 raise ValueError(
                     f"CUSTOM_OUTPUT_TOKEN_POSITION {relative_position} is outside prompt length {len(token_ids)}"
+                )
+        elif configured_token_id is not None:
+            tracked_token_id = int(configured_token_id)
+            custom_output_token_position = next(
+                (
+                    position
+                    for position in range(len(token_ids) - 1, -1, -1)
+                    if token_ids[position] == tracked_token_id
+                ),
+                -1,
+            )
+            if custom_output_token_position < 0:
+                raise ValueError(
+                    f"CUSTOM_OUTPUT_TRACKED_TOKEN_ID {tracked_token_id} was not found in the prompt"
                 )
     input_pb.batch_group_size = input_py.batch_group_size
     if custom_output_token_position >= 0:

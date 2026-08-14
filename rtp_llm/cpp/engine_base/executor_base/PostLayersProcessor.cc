@@ -63,10 +63,14 @@ void PostLayersProcessor::setHandler(py::object handler) {
         && HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::SELECTED_HIDDEN_STATES)) {
         throw std::runtime_error("post-layers handler must request exactly one hidden-state argument");
     }
-    if (HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::SELECTED_HIDDEN_STATES)
-        && std::getenv("CUSTOM_OUTPUT_TOKEN_POSITION") == nullptr) {
-        throw std::runtime_error(
-            "selected_hidden_states requires CUSTOM_OUTPUT_TOKEN_POSITION to be configured");
+    if (HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::SELECTED_HIDDEN_STATES)) {
+        const bool has_position = std::getenv("CUSTOM_OUTPUT_TOKEN_POSITION") != nullptr;
+        const bool has_token_id = std::getenv("CUSTOM_OUTPUT_TRACKED_TOKEN_ID") != nullptr;
+        if (has_position == has_token_id) {
+            throw std::runtime_error(
+                "selected_hidden_states requires exactly one of CUSTOM_OUTPUT_TOKEN_POSITION or "
+                "CUSTOM_OUTPUT_TRACKED_TOKEN_ID");
+        }
     }
 
     const auto trigger = py::cast<std::string>(handler_.attr("trigger_mode")());
