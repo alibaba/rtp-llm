@@ -357,6 +357,24 @@ class KimiK3LatentMoE(nn.Module):
         )
         del w13, s13, w2, s2
 
+        # The transform inputs keep their expandable allocator segments live
+        # until this point.  Cleaning immediately after dropping them prevents
+        # one partially occupied segment from accumulating for every MoE layer.
+        allocated_before = torch.cuda.memory_allocated(device)
+        reserved_before = torch.cuda.memory_reserved(device)
+        torch.cuda.empty_cache()
+        reserved_after = torch.cuda.memory_reserved(device)
+        if reserved_after < reserved_before:
+            logging.info(
+                "[KimiK3 DeepGEMM MegaMoE] layer=%d released CUDA allocator "
+                "cache after weight transform: allocated=%.2f GiB, "
+                "reserved=%.2f GiB -> %.2f GiB",
+                self.layer_idx,
+                allocated_before / 1024**3,
+                reserved_before / 1024**3,
+                reserved_after / 1024**3,
+            )
+
         self._mega_group = dist.group.WORLD
         self._mega_buf = _get_or_create_mega_buf(
             group=self._mega_group,
