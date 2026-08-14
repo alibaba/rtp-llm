@@ -48,6 +48,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         checker.check(resolver.is_ep_enabled(config))
         checker.check(not resolver.use_low_latency(config))
         checker.check(DeepEPWrapper.supported())
+        checker.check(not config.enable_cuda_graph)
 
     def __init__(
         self,

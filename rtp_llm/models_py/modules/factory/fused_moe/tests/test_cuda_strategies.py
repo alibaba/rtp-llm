@@ -21,6 +21,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import (
 from rtp_llm.models_py.modules.factory.fused_moe.impl.common.strategy.batched_triton_strategy import (
     BatchedTritonStrategy,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router import (
+    DeepepNormalRouterBase,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy import (
     CudaFp8PerBlockEpNormalStrategy,
     CudaFp8PerBlockNoDPMaskedStrategy,
@@ -305,6 +308,38 @@ class TestCudaFp8PerBlockNoDPMaskedStrategy(unittest.TestCase):
 
 class TestCudaFp8PerBlockEpNormalStrategy(unittest.TestCase):
     """Test CUDA FP8 PerBlock EP Normal strategy"""
+
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router.get_sm",
+        return_value=(9, 0),
+    )
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router.DeepEPWrapper.supported",
+        return_value=True,
+    )
+    def test_router_rejects_cuda_graph(
+        self, mock_supported: Any, mock_get_sm: Any
+    ) -> None:
+        config = create_moe_config_adapter(
+            model_config=create_model_config_with_fp8_block_quant(),
+            parallelism_config=create_parallelism_config(
+                ep_size=2, tp_size=1, dp_size=1
+            ),
+            moe_config=create_moe_config(use_deepep_low_latency=False),
+            enable_cuda_graph=True,
+        )
+        checker = MagicMock()
+
+        DeepepNormalRouterBase.check_conditions(checker, config)
+
+        results = [call.args[0] for call in checker.check.call_args_list]
+        self.assertIn(False, results)
+
+        config.enable_cuda_graph = False
+        checker.reset_mock()
+        DeepepNormalRouterBase.check_conditions(checker, config)
+        results = [call.args[0] for call in checker.check.call_args_list]
+        self.assertTrue(all(results))
 
     @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
     @patch("rtp_llm.models_py.utils.arch.get_sm")

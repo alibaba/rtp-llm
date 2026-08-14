@@ -6,11 +6,35 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_and_configure_server,
+    validate_deepep_cuda_graph_compatibility,
 )
 from rtp_llm.server.server_args.server_args import setup_args
 
 
 class GenerateConfigTest(TestCase):
+
+    def test_normal_deepep_rejects_cuda_graph(self):
+        moe_config = PyEnvConfigs().moe_config
+        moe_config.use_deepep_moe = True
+        moe_config.use_deepep_low_latency = False
+
+        with self.assertRaisesRegex(
+            ValueError, "DeepEP normal mode is incompatible with CUDA Graph"
+        ):
+            validate_deepep_cuda_graph_compatibility(
+                moe_config, enable_cuda_graph=True, expert_num=256
+            )
+
+        validate_deepep_cuda_graph_compatibility(
+            moe_config, enable_cuda_graph=True, expert_num=0
+        )
+        validate_deepep_cuda_graph_compatibility(
+            moe_config, enable_cuda_graph=False, expert_num=256
+        )
+        moe_config.use_deepep_low_latency = True
+        validate_deepep_cuda_graph_compatibility(
+            moe_config, enable_cuda_graph=True, expert_num=256
+        )
 
     # EnvArgumentParser in setup_args() reads these env vars (START_PORT, TP_SIZE, etc.)
     # and binds them to py_env_configs; server_port = start_port + rank_id * worker_info_port_num (rank_id=0 here).

@@ -10,6 +10,7 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.model_factory_register import ModelDict
 from rtp_llm.ops import (
     FfnDisAggregateConfig,
+    MoeConfig,
     ParallelismConfig,
     PrefillCPConfig,
     RoleType,
@@ -244,6 +245,21 @@ def _apply_auto_deepep_config(
         f"  USE_DEEPEP_LOW_LATENCY: {use_deepep_low_latency}\n"
         f"  USE_DEEPEP_INTERNODE: {use_deepep_internode}"
     )
+
+
+def validate_deepep_cuda_graph_compatibility(
+    moe_config: MoeConfig, enable_cuda_graph: bool, expert_num: int
+) -> None:
+    if (
+        expert_num > 0
+        and moe_config.use_deepep_moe
+        and enable_cuda_graph
+        and not moe_config.use_deepep_low_latency
+    ):
+        raise ValueError(
+            "DeepEP normal mode is incompatible with CUDA Graph; "
+            "disable CUDA Graph or enable DeepEP low-latency mode"
+        )
 
 
 def set_parallelism_config(
