@@ -472,6 +472,73 @@ TEST(PinnedHostKVWriteStressTest, InvalidPinModeFailsFast) {
     ASSERT_EQ(::unsetenv("RTP_LLM_HOST_BLOCK_POOL_PIN_MODE"), 0);
 }
 
+TEST(PinnedHostKVWriteStressTest, InvalidPrefaultThreadsFailsFast) {
+    ASSERT_EQ(::setenv("RTP_LLM_HOST_BLOCK_POOL_PREFAULT_THREADS", "abc", 1), 0);
+
+    auto pool_config = BlockPoolConfigHelper::createConfig(1, 2, 4 * kMiB, rtp_llm::TYPE_INT8);
+    try {
+        BlockPool pool(pool_config, AllocationType::HOST);
+        EXPECT_THROW(pool.init(), std::invalid_argument);
+    } catch (...) {
+        (void)::unsetenv("RTP_LLM_HOST_BLOCK_POOL_PREFAULT_THREADS");
+        throw;
+    }
+
+    ASSERT_EQ(::unsetenv("RTP_LLM_HOST_BLOCK_POOL_PREFAULT_THREADS"), 0);
+}
+
+// Prefaulting the arena from several threads must leave exactly the same pinned,
+// fully registered backing as the historical single-threaded path, including the
+// tail slice that absorbs the remainder of the alignment.
+TEST(PinnedHostKVWriteStressTest, PrefaultedArenaIsFullyRegistered) {
+    constexpr uint32_t kBlockNum   = 16;
+    constexpr uint64_t kBlockBytes = 4 * kMiB;
+    constexpr size_t   kPoolBytes  = kBlockNum * kBlockBytes;
+
+    ASSERT_EQ(::setenv("RTP_LLM_HOST_BLOCK_POOL_PREFAULT_THREADS", "8", 1), 0);
+    auto pool_config = BlockPoolConfigHelper::createConfig(1, kBlockNum, kBlockBytes, rtp_llm::TYPE_INT8);
+    ASSERT_EQ(pool_config.total_size_bytes, kPoolBytes);
+
+    {
+        BlockPool pool(pool_config, AllocationType::HOST);
+        bool      initialized = false;
+        try {
+            initialized = pool.init();
+        } catch (...) {
+            (void)::unsetenv("RTP_LLM_HOST_BLOCK_POOL_PREFAULT_THREADS");
+            throw;
+        }
+        (void)::unsetenv("RTP_LLM_HOST_BLOCK_POOL_PREFAULT_THREADS");
+        ASSERT_TRUE(initialized);
+
+        EXPECT_EQ(pool.where(), MemoryType::MEMORY_CPU_PINNED);
+
+        auto* base = static_cast<uint8_t*>(pool.getBaseAddress());
+        ASSERT_NE(base, nullptr);
+
+        // Every offset must resolve to CUDA-visible host memory, otherwise a chunk
+        // of the arena was left unregistered.
+        for (size_t offset = 0; offset < kPoolBytes; offset += kMiB) {
+            cudaPointerAttributes attributes{};
+            ASSERT_EQ(cudaPointerGetAttributes(&attributes, base + offset), cudaSuccess)
+                << "offset=" << offset << " is not registered";
+            EXPECT_EQ(attributes.type, cudaMemoryTypeHost) << "offset=" << offset << " is not host memory";
+        }
+        cudaPointerAttributes last_byte_attributes{};
+        ASSERT_EQ(cudaPointerGetAttributes(&last_byte_attributes, base + kPoolBytes - 1), cudaSuccess);
+        EXPECT_EQ(last_byte_attributes.type, cudaMemoryTypeHost);
+
+        for (size_t offset = 0; offset < kPoolBytes; offset += kMiB) {
+            base[offset] = static_cast<uint8_t>((offset / kMiB) % 251 + 1);
+        }
+        for (size_t offset = 0; offset < kPoolBytes; offset += kMiB) {
+            ASSERT_EQ(base[offset], static_cast<uint8_t>((offset / kMiB) % 251 + 1)) << "offset=" << offset;
+        }
+    }
+
+    ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+}
+
 TEST(PinnedHostKVWriteStressTest, MultiRankPinnedAllocationWriteAndTeardown) {
     const StressConfig config  = readStressConfig();
     const char*        pin_env = std::getenv("RTP_LLM_PIN_HOST_BLOCK_POOL");
