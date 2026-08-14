@@ -96,27 +96,22 @@ def trans_input(input_py: GenerateInput):
     input_pb.request_id = input_py.request_id
     token_ids = input_py.token_ids.reshape(-1).tolist()
     input_pb.token_ids.extend(token_ids)
-    # Resolve the protocol token once at the request boundary. This piggybacks
-    # on the list conversion already required by protobuf and keeps token scans
-    # out of the scheduler/model hot path.
+    # Resolve a deployment-level relative position once at the request
+    # boundary. This is O(1), and keeps selector work out of the
+    # scheduler/model hot path.
     custom_output_token_position = input_py.custom_output_token_position
     if custom_output_token_position < -1:
         raise ValueError("custom_output_token_position must be -1 or non-negative")
     if custom_output_token_position < 0:
-        configured_id = os.environ.get("CUSTOM_OUTPUT_TRACKED_TOKEN_ID")
-        if configured_id is not None:
-            tracked_id = int(configured_id)
-            max_suffix = int(os.environ.get("CUSTOM_OUTPUT_TRACKED_TOKEN_MAX_SUFFIX", "64"))
-            if max_suffix <= 0:
-                raise ValueError("CUSTOM_OUTPUT_TRACKED_TOKEN_MAX_SUFFIX must be positive")
-            begin = max(0, len(token_ids) - max_suffix)
-            custom_output_token_position = next(
-                (i for i in range(len(token_ids) - 1, begin - 1, -1) if token_ids[i] == tracked_id),
-                -1,
-            )
+        configured_position = os.environ.get("CUSTOM_OUTPUT_TOKEN_POSITION")
+        if configured_position is not None:
+            relative_position = int(configured_position)
+            if relative_position >= 0:
+                raise ValueError("CUSTOM_OUTPUT_TOKEN_POSITION must be negative")
+            custom_output_token_position = len(token_ids) + relative_position
             if custom_output_token_position < 0:
                 raise ValueError(
-                    f"tracked custom-output token id {tracked_id} not found in the last {max_suffix} prompt tokens"
+                    f"CUSTOM_OUTPUT_TOKEN_POSITION {relative_position} is outside prompt length {len(token_ids)}"
                 )
     input_pb.batch_group_size = input_py.batch_group_size
     if custom_output_token_position >= 0:
