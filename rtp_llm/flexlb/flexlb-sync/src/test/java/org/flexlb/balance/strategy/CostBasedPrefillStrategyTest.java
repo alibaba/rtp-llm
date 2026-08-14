@@ -13,8 +13,11 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -206,6 +209,50 @@ class CostBasedPrefillStrategyTest {
 
         assertTrue(result.isSuccess());
         assertNotEquals("10.0.0.1", result.getServerIp());
+    }
+
+    @Test
+    void engineOnlyBacklogOverridesCacheHitAdvantageAtResourceFilter() {
+        Map<String, WorkerStatus> prefillMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        for (int i = 1; i <= 4; i++) {
+            String ip = "10.0.0." + i;
+            prefillMap.put(ip + ":8080", createWorker(ip, 0));
+        }
+
+        PrefillEndpoint hot = (PrefillEndpoint) endpointRegistry.get(
+                RoleType.PREFILL, "10.0.0.1:8080");
+        Map<String, TaskInfo> engineOnlyTasks = new HashMap<>();
+        for (long requestId = 1_000; requestId < 1_100; requestId++) {
+            TaskInfo task = new TaskInfo();
+            task.setRequestId(requestId);
+            task.setBatchId(requestId);
+            task.setPhase(TaskPhase.RUNNING);
+            engineOnlyTasks.put(String.valueOf(requestId), task);
+        }
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setFinishedTaskInfo(Map.of());
+        response.setRunningTaskInfo(engineOnlyTasks);
+        hot.onWorkerStatusUpdate(hot.getStatus(), response);
+
+        FlexlbConfig resourceConfig = new FlexlbConfig();
+        resourceConfig.setPrefillQueueSizeThreshold(64);
+        ConfigService resourceConfigService = Mockito.mock(ConfigService.class);
+        Mockito.when(resourceConfigService.loadBalanceConfig()).thenReturn(resourceConfig);
+        PrefillResourceMeasure actualMeasure = new PrefillResourceMeasure(resourceConfigService);
+        Mockito.when(resourceMeasureFactory.getMeasure(any())).thenReturn(actualMeasure);
+
+        Map<String, Integer> cacheResults = new HashMap<>();
+        cacheResults.put("10.0.0.1:8080", 3);
+        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any()))
+                .thenReturn(cacheResults);
+
+        ServerStatus result = strategy.select(
+                buildContext(1_000, 61L), RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertNotEquals("10.0.0.1", result.getServerIp(),
+                "Engine-only active tasks must make the hot worker unavailable even with a cache advantage");
     }
 
     @Test

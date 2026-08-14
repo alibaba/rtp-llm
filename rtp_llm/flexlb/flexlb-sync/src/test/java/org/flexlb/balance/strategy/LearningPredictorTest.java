@@ -8,7 +8,14 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -64,6 +71,38 @@ class LearningPredictorTest {
         for (int i = 0; i < 4; i++) {
             assertDoesNotThrow(() -> p.learn(batchItems, 300, 400));
         }
+    }
+
+    @Test
+    @DisplayName("concurrent completion learning serializes Adam state")
+    void concurrentLearnSerializesOptimizerState() throws Exception {
+        LearningPredictor p = new LearningPredictor();
+        PrefillBatchFeatures features = PrefillBatchFeatures.from(List.of(
+                batchItem(500, 200), batchItem(1000, 500)));
+        int sampleCount = 64;
+        ExecutorService executor = Executors.newFixedThreadPool(8);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<?>> futures = new ArrayList<>();
+        try {
+            for (int i = 0; i < sampleCount; i++) {
+                futures.add(executor.submit(() -> {
+                    start.await();
+                    p.learn(features, 300, 400);
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (Future<?> future : futures) {
+                future.get(5, TimeUnit.SECONDS);
+            }
+        } finally {
+            executor.shutdownNow();
+        }
+
+        Field step = LearningPredictor.class.getDeclaredField("t");
+        step.setAccessible(true);
+        assertEquals(1 + sampleCount / 4, step.getLong(p),
+                "every four samples must produce exactly one serialized Adam update");
     }
 
     private static BatchItem batchItem(long seqLen, long hitCacheLen) {

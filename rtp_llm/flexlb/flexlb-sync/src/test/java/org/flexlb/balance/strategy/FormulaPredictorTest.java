@@ -374,7 +374,7 @@ class FormulaPredictorTest {
                 batchItem(100, 20),
                 batchItem(200, 50)
         );
-        p.learn(items, 150, 300);  // should not throw
+        p.learn(items, 150, 300);  // legacy callback remains source-compatible
     }
 
     // ---- param() learnable parameters ----

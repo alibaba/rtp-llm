@@ -1,7 +1,8 @@
 package org.flexlb.balance.strategy;
 
-import org.flexlb.balance.scheduler.BatchItem;
 import java.util.List;
+
+import org.flexlb.balance.scheduler.BatchItem;
 
 /**
  * Prefill-time predictor contract.
@@ -55,4 +56,14 @@ public interface PrefillTimePredictor {
      * @param actualMs    the engine-reported actual execution time
      */
     void learn(List<BatchItem> items, long predictedMs, long actualMs);
+
+    /**
+     * Payload-free learning entry point used by long-lived inflight accounting.
+     *
+     * <p>The default adapter preserves source and binary compatibility for
+     * predictors implementing the original {@code List<BatchItem>} callback.
+     */
+    default void learn(PrefillBatchFeatures features, long predictedMs, long actualMs) {
+        learn(features == null ? List.of() : features.toBatchItems(), predictedMs, actualMs);
+    }
 }

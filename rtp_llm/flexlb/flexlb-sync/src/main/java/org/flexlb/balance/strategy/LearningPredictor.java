@@ -24,7 +24,7 @@ import java.util.stream.Collectors;
  * online gradient descent on completed batches.
  */
 public class LearningPredictor implements PrefillTimePredictor {
-    private record BatchUpdateItem(List<BatchItem> items, long actualMs) {
+    private record BatchUpdateItem(PrefillBatchFeatures features, long actualMs) {
     }
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
@@ -131,11 +131,15 @@ public class LearningPredictor implements PrefillTimePredictor {
     }
 
     private double[] collectInput(List<BatchItem> items) {
+        return collectInput(PrefillBatchFeatures.from(items));
+    }
+
+    private double[] collectInput(PrefillBatchFeatures features) {
         double reuse = 0.0;
         double compute = 0.0;
         double compute_square = 0.0;
         double reuse_mul_compute = 0.0;
-        for (BatchItem item : items) {
+        for (PrefillBatchFeatures.Item item : features.items()) {
             long seq = Math.max(0L, item.seqLen());
             long hit = Math.max(0L, Math.min(item.hitCache(), seq));
             double thisReuse = hit / 1024.0;
@@ -147,7 +151,7 @@ public class LearningPredictor implements PrefillTimePredictor {
         }
         double[] inputs = new double[this.linear_param_count];
         inputs[0] = 1.0;
-        inputs[1] = (double) items.size();
+        inputs[1] = (double) features.batchSize();
         inputs[2] = reuse;
         inputs[3] = compute;
         inputs[4] = compute_square;
@@ -156,8 +160,13 @@ public class LearningPredictor implements PrefillTimePredictor {
     }
 
     @Override
-    public void learn(List<BatchItem> items, long predictedMs, long actualMs) {
-        this.itemBatch.add(new BatchUpdateItem(items, actualMs));
+    public synchronized void learn(List<BatchItem> items, long predictedMs, long actualMs) {
+        learn(PrefillBatchFeatures.from(items), predictedMs, actualMs);
+    }
+
+    @Override
+    public synchronized void learn(PrefillBatchFeatures features, long predictedMs, long actualMs) {
+        this.itemBatch.add(new BatchUpdateItem(features, actualMs));
         if (this.itemBatch.size() < this.batchSize) {
             return;
         }
@@ -165,7 +174,7 @@ public class LearningPredictor implements PrefillTimePredictor {
             double[] gradient = new double[this.total_param_count];
             for (BatchUpdateItem batchItem : this.itemBatch) {
                 double[] thisGradient = new double[this.total_param_count];
-                double[] inputs = this.collectInput(batchItem.items());
+                double[] inputs = this.collectInput(batchItem.features());
                 double linear = calcLinear(inputs, oldWeights);
                 double[] nonLinearOutput = new double[5];
                 calcNonLinear(oldWeights, linear, nonLinearOutput);

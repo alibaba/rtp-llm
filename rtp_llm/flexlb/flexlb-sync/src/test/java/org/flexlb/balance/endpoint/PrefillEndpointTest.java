@@ -41,6 +41,7 @@ class PrefillEndpointTest {
 
     private PrefillEndpoint endpoint;
     private FlexlbConfig config;
+    private BatchSchedulerReporter endpointReporter;
 
     @BeforeEach
     void setUp() {
@@ -55,7 +56,8 @@ class PrefillEndpointTest {
         config.setFlexlbBatchFixedWaitMs(300);
         config.setCostFormula("10 + 0.1*sum(computeTokens) + 5*batchSize");
 
-        endpoint = new PrefillEndpoint(status, config, noopHandler(), mock(BatchSchedulerReporter.class));
+        endpointReporter = mock(BatchSchedulerReporter.class);
+        endpoint = new PrefillEndpoint(status, config, noopHandler(), endpointReporter);
     }
 
     @AfterEach
@@ -163,6 +165,212 @@ class PrefillEndpointTest {
 
         assertEquals(1, endpoint.getInflightBatchCount());
         assertEquals(1, endpoint.realPendingCount());
+    }
+
+    @Test
+    void calibrateKeepsBatchInflightUntilEveryMemberFinishes() {
+        BatchItem shortItem = createBatchItem(1L, 500, 200);
+        BatchItem longItem = createBatchItem(2L, 10_000, 0);
+        endpoint.commitBatch(1L, 2_000, List.of(shortItem, longItem));
+
+        TaskInfo finishedShort = taskInfo(1L, 1L, null, 0, 40);
+        TaskInfo runningLong = taskInfo(2L, 1L, TaskPhase.RUNNING, 0, 0);
+        calibrate(Map.of("1", finishedShort), Map.of("2", runningLong));
+
+        assertEquals(1, endpoint.getInflightBatchCount(),
+                "one finished member must not release the whole batch");
+        assertEquals(1, endpoint.realPendingCount(),
+                "the still-running long member must remain in Master accounting");
+
+        TaskInfo finishedLong = taskInfo(2L, 1L, null, 0, 1_900);
+        calibrate(Map.of("2", finishedLong), Map.of());
+
+        assertEquals(0, endpoint.getInflightBatchCount());
+        assertEquals(0, endpoint.realPendingCount());
+    }
+
+    @Test
+    void calibrateMixedTerminalMembersKeepsOnlyRunningSurvivor() {
+        BatchItem succeeded = createBatchItem(1L, 500, 200);
+        BatchItem failed = createBatchItem(2L, 300, 100);
+        BatchItem running = createBatchItem(3L, 10_000, 0);
+        endpoint.commitBatch(1L, 2_000, List.of(succeeded, failed, running));
+
+        TaskInfo success = taskInfo(1L, 1L, null, 0, 40);
+        TaskInfo failure = taskInfo(2L, 1L, null, 500, 50);
+        TaskInfo runningTask = taskInfo(3L, 1L, TaskPhase.RUNNING, 0, 0);
+        calibrate(Map.of("1", success, "2", failure), Map.of("3", runningTask));
+
+        assertEquals(1, endpoint.getInflightBatchCount());
+        assertEquals(1, endpoint.realPendingCount());
+
+        // WorkerStatus may repeat a terminal observation in adjacent snapshots.
+        // Repeating it must not decrement the survivor count again.
+        calibrate(Map.of("1", success), Map.of("3", runningTask));
+        assertEquals(1, endpoint.getInflightBatchCount());
+        assertEquals(1, endpoint.realPendingCount());
+    }
+
+    @Test
+    void calibrateAllFailuresClearsBatchIdempotentlyWithoutCompletionMetrics() {
+        endpoint.commitBatch(1L, 2_000, List.of(
+                createBatchItem(1L, 500, 200),
+                createBatchItem(2L, 10_000, 0)));
+
+        TaskInfo firstFailure = taskInfo(1L, 1L, null, 500, 40);
+        TaskInfo secondFailure = taskInfo(2L, 1L, null, 501, 50);
+        calibrate(Map.of("1", firstFailure, "2", secondFailure), Map.of());
+
+        assertEquals(0, endpoint.getInflightBatchCount());
+        assertEquals(0, endpoint.realPendingCount());
+        verify(endpointReporter, never()).reportBatchPredictedTimeMs(
+                anyString(), anyString(), org.mockito.ArgumentMatchers.anyLong());
+
+        calibrate(Map.of("1", firstFailure, "2", secondFailure), Map.of());
+        assertEquals(0, endpoint.getInflightBatchCount());
+        assertEquals(0, endpoint.realPendingCount(),
+                "repeated failure deltas must not decrement the ledger twice");
+    }
+
+    @Test
+    void repeatedSuccessfulTerminalReportsCompletionExactlyOnce() {
+        endpoint.commitBatch(1L, 100, List.of(createBatchItem(1L, 500, 200)));
+        TaskInfo success = taskInfo(1L, 1L, null, 0, 40);
+
+        calibrate(Map.of("1", success), Map.of());
+        calibrate(Map.of("1", success), Map.of());
+
+        assertEquals(0, endpoint.realPendingCount());
+        verify(endpointReporter).reportBatchPredictedTimeMs(
+                anyString(), anyString(), org.mockito.ArgumentMatchers.anyLong());
+        verify(endpointReporter).reportBatchActualTimeMs(
+                anyString(), anyString(), org.mockito.ArgumentMatchers.anyLong());
+        verify(endpointReporter).reportBatchPredictGapMs(
+                anyString(), anyString(), org.mockito.ArgumentMatchers.anyLong());
+    }
+
+    @Test
+    void batchInflightReanchorsAcrossRunningQueuedRunning() {
+        BatchInflight batch = new BatchInflight(5_000,
+                List.of(createBatchItem(1L, 500, 0)));
+        long baseMs = batch.progressBaseMs();
+
+        batch.markRunning(baseMs + 10);
+        assertEquals(baseMs + 10, batch.progressBaseMs());
+        batch.markQueued(baseMs + 20);
+        assertEquals(baseMs + 20, batch.progressBaseMs());
+        batch.markRunning(baseMs + 30);
+        assertEquals(baseMs + 30, batch.progressBaseMs());
+    }
+
+    @Test
+    void batchInflightKeepsCreationAgeSeparateFromActivity() {
+        BatchInflight batch = new BatchInflight(5_000,
+                List.of(createBatchItem(1L, 500, 0)));
+        long createdAtMs = batch.createdAtMs();
+
+        batch.touch(createdAtMs + 1_000);
+
+        assertEquals(createdAtMs, batch.createdAtMs());
+        assertEquals(createdAtMs + 1_000, batch.lastObservedAtMs());
+    }
+
+    @Test
+    void inflightMaxAgeMetricUsesCreationTimeNotLatestActivity() throws InterruptedException {
+        endpoint.commitBatch(1L, 5_000, List.of(createBatchItem(1L, 500, 0)));
+        Thread.sleep(30);
+        calibrate(Map.of(), Map.of(
+                "1", taskInfo(1L, 1L, TaskPhase.RUNNING, 0, 0)));
+
+        endpoint.reportBatchMetrics(endpointReporter);
+
+        verify(endpointReporter).reportInflightMaxAgeMs(
+                anyString(), anyString(), org.mockito.ArgumentMatchers.longThat(age -> age >= 20));
+    }
+
+    @Test
+    void runningObservationRefreshesBatchInactivityTtl() throws InterruptedException {
+        BatchItem longItem = createBatchItem(1L, 10_000, 0);
+        endpoint.commitBatch(1L, 2_000, List.of(longItem));
+
+        Thread.sleep(150);
+        TaskInfo running = taskInfo(1L, 1L, TaskPhase.RUNNING, 0, 0);
+        calibrate(Map.of(), Map.of("1", running));
+
+        assertEquals(0, endpoint.evictExpiredBatches(100),
+                "an actively observed long-running batch must not be evicted by creation age");
+        assertEquals(1, endpoint.getInflightBatchCount());
+    }
+
+    @Test
+    void foreignRunningObservationDoesNotRefreshBatchInactivityTtl()
+            throws InterruptedException {
+        endpoint.commitBatch(1L, 2_000, List.of(createBatchItem(1L, 10_000, 0)));
+        Thread.sleep(10);
+
+        TaskInfo foreign = taskInfo(999L, 1L, TaskPhase.RUNNING, 0, 0);
+        calibrate(Map.of(), Map.of("999", foreign));
+
+        assertEquals(1, endpoint.evictExpiredBatches(1));
+        assertEquals(0, endpoint.getInflightBatchCount());
+    }
+
+    @Test
+    void partialCompletionKeepsFixedWindowMaxInflightGateClosed() throws Exception {
+        FlexlbConfig limitedConfig = new FlexlbConfig();
+        limitedConfig.setFlexlbBatchQueueMaxSize(100);
+        limitedConfig.setFlexlbBatchAlgorithm("fixed_window");
+        limitedConfig.setFlexlbBatchSizeMax(1);
+        limitedConfig.setFlexlbBatchFixedWaitMs(0);
+        limitedConfig.setFlexlbBatchFixedMaxInflightBatches(1);
+        limitedConfig.setCostFormula("10 + 0.1*sum(computeTokens) + 5*batchSize");
+
+        WorkerStatus status = new WorkerStatus();
+        status.setIp("127.0.0.3");
+        status.setPort(8080);
+        status.setGrpcPort(8090);
+        status.setRole(RoleType.PREFILL);
+
+        CountDownLatch dispatched = new CountDownLatch(1);
+        BatchDecisionHandler handler = new BatchDecisionHandler() {
+            @Override public void onExpired(BatchItem head) {}
+            @Override public void onBatchReady(List<BatchItem> items, DispatchMeta meta) {
+                dispatched.countDown();
+            }
+            @Override public void onOfferFailure(BatchItem item, Throwable error) {}
+        };
+        PrefillEndpoint limited = new PrefillEndpoint(
+                status, limitedConfig, handler, mock(BatchSchedulerReporter.class));
+        try {
+            limited.commitBatch(700L, 2_000, List.of(
+                    createBatchItem(limited, 101L, 500, 200),
+                    createBatchItem(limited, 102L, 10_000, 0)));
+            limited.getBatcher().offer(createBatchItem(limited, 103L, 500, 0));
+
+            assertFalse(dispatched.await(50, TimeUnit.MILLISECONDS));
+
+            WorkerStatusResponse partial = new WorkerStatusResponse();
+            partial.setFinishedTaskInfo(Map.of(
+                    "101", taskInfo(101L, 700L, null, 0, 40)));
+            partial.setRunningTaskInfo(Map.of(
+                    "102", taskInfo(102L, 700L, TaskPhase.RUNNING, 0, 0)));
+            limited.onWorkerStatusUpdate(limited.getStatus(), partial);
+
+            assertEquals(1, limited.getInflightBatchCount());
+            assertFalse(dispatched.await(100, TimeUnit.MILLISECONDS),
+                    "a short member finishing must not reopen maxInflight=1 while its long sibling runs");
+
+            WorkerStatusResponse complete = new WorkerStatusResponse();
+            complete.setFinishedTaskInfo(Map.of(
+                    "102", taskInfo(102L, 700L, null, 0, 1_900)));
+            complete.setRunningTaskInfo(Map.of());
+            limited.onWorkerStatusUpdate(limited.getStatus(), complete);
+
+            assertTrue(dispatched.await(2, TimeUnit.SECONDS),
+                    "the next batch should dispatch after the final member completes");
+        } finally {
+            limited.close();
+        }
     }
 
     @Test
@@ -281,7 +489,6 @@ class PrefillEndpointTest {
         assertEquals(1, endpoint.realPendingCount());
 
         endpoint.endDispatchReconciliation(700L, 101L);
-        calibrate(Map.of("101", canceled), Map.of());
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0, endpoint.realPendingCount());
     }
@@ -313,8 +520,9 @@ class PrefillEndpointTest {
         PrefillEndpoint limited = new PrefillEndpoint(
                 status, limitedConfig, handler, mock(BatchSchedulerReporter.class));
         try {
-            limited.commitBatch(700L, 100, List.of(createBatchItem(101L, 500, 200)));
-            limited.getBatcher().offer(createBatchItem(102L, 300, 100));
+            limited.commitBatch(700L, 100,
+                    List.of(createBatchItem(limited, 101L, 500, 200)));
+            limited.getBatcher().offer(createBatchItem(limited, 102L, 300, 100));
 
             assertFalse(dispatched.await(50, TimeUnit.MILLISECONDS),
                     "maxInflight=1 must hold the next batch while the ledger is occupied");
@@ -395,8 +603,31 @@ class PrefillEndpointTest {
         assertEquals(1, endpoint.realPendingCount());
 
         endpoint.endDispatchReconciliation(7L, 101L);
-        calibrate(Map.of("101", ambiguousMemberSuccess), Map.of());
         assertEquals(0, endpoint.getInflightBatchCount());
+        assertEquals(0, endpoint.realPendingCount());
+    }
+
+    @Test
+    void protectedAndSiblingFailuresSettleFromOneWorkerSnapshot() {
+        endpoint.commitBatch(7L, 100, List.of(
+                createBatchItem(101L, 500, 200),
+                createBatchItem(102L, 300, 100)));
+        endpoint.beginDispatchReconciliation(7L, 101L);
+
+        TaskInfo protectedFailure = taskInfo(101L, 7L, null, 500, 40);
+        TaskInfo siblingFailure = taskInfo(102L, 7L, null, 501, 50);
+        calibrate(Map.of("101", protectedFailure, "102", siblingFailure), Map.of());
+
+        assertEquals(1, endpoint.getInflightBatchCount());
+        assertEquals(1, endpoint.realPendingCount());
+
+        endpoint.endDispatchReconciliation(7L, 101L);
+        assertEquals(0, endpoint.getInflightBatchCount());
+        assertEquals(0, endpoint.realPendingCount());
+        verify(endpointReporter, never()).reportBatchPredictedTimeMs(
+                anyString(), anyString(), org.mockito.ArgumentMatchers.anyLong());
+
+        endpoint.endDispatchReconciliation(7L, 101L);
         assertEquals(0, endpoint.realPendingCount());
     }
 
@@ -478,11 +709,75 @@ class PrefillEndpointTest {
         assertEquals(1, endpoint.getInflightBatchCount());
 
         endpoint.endDispatchReconciliation(1L, item.requestId());
+        assertEquals(0, endpoint.evictExpiredBatches(1),
+                "authoritative reconciliation settlement refreshes batch activity");
+        Thread.sleep(10);
         assertEquals(1, endpoint.evictExpiredBatches(1));
         assertEquals(0, endpoint.getInflightBatchCount());
     }
 
     // ---- realPendingCount ----
+
+    @Test
+    void realPendingCountUnionsEngineTasksWithLocalLedger() {
+        endpoint.commitBatch(1L, 100, List.of(
+                createBatchItem(101L, 500, 0),
+                createBatchItem(102L, 500, 0)));
+
+        TaskInfo overlapping = taskInfo(102L, 1L, TaskPhase.RUNNING, 0, 0);
+        TaskInfo untrackedOne = taskInfo(900L, 90L, TaskPhase.RUNNING, 0, 0);
+        TaskInfo untrackedTwo = taskInfo(901L, 91L, TaskPhase.RECEIVED, 0, 0);
+        TaskInfo duplicateUntracked = taskInfo(900L, 92L, TaskPhase.RUNNING, 0, 0);
+        TaskInfo overlayOnly = taskInfo(999L, 99L, TaskPhase.PENDING, 0, 0);
+        overlayOnly.setPriorityPreemptionProgress(PriorityPreemptionProgress.CANCELING);
+
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setFinishedTaskInfo(Map.of());
+        response.setRunningTaskInfo(Map.of(
+                "102", overlapping,
+                "900a", untrackedOne,
+                "901", untrackedTwo,
+                "900b", duplicateUntracked,
+                "999", overlayOnly));
+        endpoint.onWorkerStatusUpdate(endpoint.getStatus(), response);
+
+        assertEquals(4, endpoint.realPendingCount(),
+                "two local requests plus two unique Engine-only tasks");
+
+        response.setRunningTaskInfo(Map.of());
+        endpoint.onWorkerStatusUpdate(endpoint.getStatus(), response);
+        assertEquals(2, endpoint.realPendingCount());
+    }
+
+    @Test
+    void realPendingCountFallsBackToEngineQueryLengthScalars() {
+        endpoint.commitBatch(1L, 100, List.of(createBatchItem(101L, 500, 0)));
+
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setFinishedTaskInfo(Map.of());
+        response.setRunningTaskInfo(Map.of());
+        response.setWaitingQueryLen(3);
+        response.setRunningQueryLen(2);
+        endpoint.onWorkerStatusUpdate(endpoint.getStatus(), response);
+
+        assertEquals(5, endpoint.realPendingCount());
+    }
+
+    @Test
+    void realPendingCountUsesConservativeScalarBoundForPartialTaskDetails() {
+        endpoint.commitBatch(1L, 100, List.of(createBatchItem(101L, 500, 0)));
+
+        TaskInfo overlapping = taskInfo(101L, 1L, TaskPhase.RUNNING, 0, 0);
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setFinishedTaskInfo(Map.of());
+        response.setRunningTaskInfo(Map.of("101", overlapping));
+        response.setWaitingQueryLen(3);
+        response.setRunningQueryLen(2);
+        endpoint.onWorkerStatusUpdate(endpoint.getStatus(), response);
+
+        assertEquals(5, endpoint.realPendingCount(),
+                "scalar active count must cover a partial detail list without double-counting local tasks");
+    }
 
     @Test
     void realPendingCountIncludesBatcherQueue() throws InterruptedException {
@@ -601,6 +896,13 @@ class PrefillEndpointTest {
     }
 
     private BatchItem createBatchItem(long requestId, long seqLen, long hitCacheLen) {
+        return createBatchItem(endpoint, requestId, seqLen, hitCacheLen);
+    }
+
+    private static BatchItem createBatchItem(PrefillEndpoint owner,
+                                             long requestId,
+                                             long seqLen,
+                                             long hitCacheLen) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
@@ -617,7 +919,7 @@ class PrefillEndpointTest {
         debugInfo.setHitCacheLen(hitCacheLen);
         prefill.setDebugInfo(debugInfo);
 
-        return new BatchItem(ctx, null, null, prefill, null, endpoint, null, System.currentTimeMillis());
+        return new BatchItem(ctx, null, null, prefill, null, owner, null, System.currentTimeMillis());
     }
 
     private static TaskInfo priorityCanceledTask(long requestId, long batchId) {
@@ -627,6 +929,20 @@ class PrefillEndpointTest {
         task.setErrorCode(8429);
         task.setErrorMessage("priority preempted");
         task.setPriorityPreemptionProgress(PriorityPreemptionProgress.CANCELED);
+        return task;
+    }
+
+    private static TaskInfo taskInfo(long requestId,
+                                     long batchId,
+                                     TaskPhase phase,
+                                     int errorCode,
+                                     long executionTimeMs) {
+        TaskInfo task = new TaskInfo();
+        task.setRequestId(requestId);
+        task.setBatchId(batchId);
+        task.setPhase(phase);
+        task.setErrorCode(errorCode);
+        task.setExecutionTimeMs(executionTimeMs);
         return task;
     }
 
