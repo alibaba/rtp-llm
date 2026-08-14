@@ -163,6 +163,85 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(request_info_pb.trace_id, "header-trace")
         self.assertEqual(request_info_pb.request_id, "header-request-id")
 
+    def test_trans_input_tracks_last_matching_token_without_mutating_request(self):
+        input_py = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([7, 42, 8, 42, 9]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+        )
+
+        with unittest.mock.patch.dict(
+            os.environ,
+            {"CUSTOM_OUTPUT_TRACKED_TOKEN_ID": "42"},
+            clear=False,
+        ):
+            input_pb = trans_input(input_py)
+
+        self.assertTrue(input_pb.HasField("custom_output_token_position"))
+        self.assertEqual(input_pb.custom_output_token_position.value, 3)
+        self.assertEqual(input_py.custom_output_token_position, -1)
+
+    def test_trans_input_respects_explicit_position(self):
+        input_py = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([42, 8, 9]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+            custom_output_token_position=1,
+        )
+
+        with unittest.mock.patch.dict(
+            os.environ,
+            {"CUSTOM_OUTPUT_TRACKED_TOKEN_ID": "42"},
+            clear=False,
+        ):
+            input_pb = trans_input(input_py)
+
+        self.assertEqual(input_pb.custom_output_token_position.value, 1)
+
+    def test_trans_input_rejects_token_outside_bounded_suffix(self):
+        input_py = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([42, 1, 2, 3]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+        )
+
+        with unittest.mock.patch.dict(
+            os.environ,
+            {
+                "CUSTOM_OUTPUT_TRACKED_TOKEN_ID": "42",
+                "CUSTOM_OUTPUT_TRACKED_TOKEN_MAX_SUFFIX": "3",
+            },
+            clear=False,
+        ):
+            with self.assertRaisesRegex(ValueError, "not found in the last 3"):
+                trans_input(input_py)
+
+    def test_trans_input_rejects_invalid_position_and_suffix(self):
+        input_py = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([42]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+            custom_output_token_position=-2,
+        )
+        with self.assertRaisesRegex(ValueError, "must be -1 or non-negative"):
+            trans_input(input_py)
+
+        input_py.custom_output_token_position = -1
+        with unittest.mock.patch.dict(
+            os.environ,
+            {
+                "CUSTOM_OUTPUT_TRACKED_TOKEN_ID": "42",
+                "CUSTOM_OUTPUT_TRACKED_TOKEN_MAX_SUFFIX": "0",
+            },
+            clear=False,
+        ):
+            with self.assertRaisesRegex(ValueError, "must be positive"):
+                trans_input(input_py)
+
     @staticmethod
     def _make_generate_input(generate_config: GenerateConfig) -> GenerateInput:
         return GenerateInput(

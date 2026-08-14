@@ -99,23 +99,28 @@ def trans_input(input_py: GenerateInput):
     # Resolve the protocol token once at the request boundary. This piggybacks
     # on the list conversion already required by protobuf and keeps token scans
     # out of the scheduler/model hot path.
-    if input_py.custom_output_token_position < 0:
+    custom_output_token_position = input_py.custom_output_token_position
+    if custom_output_token_position < -1:
+        raise ValueError("custom_output_token_position must be -1 or non-negative")
+    if custom_output_token_position < 0:
         configured_id = os.environ.get("CUSTOM_OUTPUT_TRACKED_TOKEN_ID")
         if configured_id is not None:
             tracked_id = int(configured_id)
             max_suffix = int(os.environ.get("CUSTOM_OUTPUT_TRACKED_TOKEN_MAX_SUFFIX", "64"))
+            if max_suffix <= 0:
+                raise ValueError("CUSTOM_OUTPUT_TRACKED_TOKEN_MAX_SUFFIX must be positive")
             begin = max(0, len(token_ids) - max_suffix)
-            input_py.custom_output_token_position = next(
+            custom_output_token_position = next(
                 (i for i in range(len(token_ids) - 1, begin - 1, -1) if token_ids[i] == tracked_id),
                 -1,
             )
-            if input_py.custom_output_token_position < 0:
+            if custom_output_token_position < 0:
                 raise ValueError(
                     f"tracked custom-output token id {tracked_id} not found in the last {max_suffix} prompt tokens"
                 )
     input_pb.batch_group_size = input_py.batch_group_size
-    if input_py.custom_output_token_position >= 0:
-        input_pb.custom_output_token_position.value = input_py.custom_output_token_position
+    if custom_output_token_position >= 0:
+        input_pb.custom_output_token_position.value = custom_output_token_position
     if input_py.batch_group_id != -1:
         input_pb.batch_group_id.value = input_py.batch_group_id
 

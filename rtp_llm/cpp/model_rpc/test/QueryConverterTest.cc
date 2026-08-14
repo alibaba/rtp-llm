@@ -75,6 +75,7 @@ TEST_F(QueryConverterTest, testTransInput) {
     generate_config_pb->set_calculate_loss(1);
     generate_config_pb->set_return_hidden_states(true);
     generate_config_pb->set_thinking_mode(GenerateConfigPB::THINKING_MODE_ADAPTIVE);
+    input.mutable_custom_output_token_position()->set_value(0);
     for (int i = 0; i < 2; ++i) {
         auto* stop_words = generate_config_pb->mutable_stop_words_list()->add_rows();
         for (int j = 0; j < 3; ++j) {
@@ -104,6 +105,7 @@ TEST_F(QueryConverterTest, testTransInput) {
     ASSERT_EQ(generate_config->task_id.value(), "8");
     ASSERT_EQ(generate_config->calculate_loss, 1);
     ASSERT_TRUE(generate_config->return_hidden_states);
+    ASSERT_EQ(generate_input->custom_output_token_position, 0);
     ASSERT_FALSE(generate_config->return_logits);
     ASSERT_EQ(generate_config->thinking_mode, ThinkingMode::ADAPTIVE);
     ASSERT_EQ(generate_config->stop_words_list.size(), 2);
