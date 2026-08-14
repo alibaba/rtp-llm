@@ -8,6 +8,8 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
+#include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <cerrno>
 #include <cstdint>
@@ -15,10 +17,18 @@
 #include <exception>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
+#include <vector>
 
 #include <sys/mman.h>
 #include <unistd.h>
+
+// MADV_POPULATE_WRITE arrived in Linux 5.14 and may be missing from older UAPI
+// headers; the runtime still rejects it gracefully on older kernels.
+#ifndef MADV_POPULATE_WRITE
+#define MADV_POPULATE_WRITE 23
+#endif
 
 #if USING_CUDA
 #include <cuda_runtime.h>
@@ -106,7 +116,137 @@ bool shouldInterleaveRegisteredHostBlockPool() {
                                 + "', expected 'interleave' or 'none'");
 }
 
-torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes, bool interleave_numa_nodes) {
+// Number of threads used to fault in the host block pool arena while it is
+// being registered. 1 (the default) disables prefaulting and keeps the historical
+// code path, where cudaHostRegister faults every page itself, single threaded.
+//
+// Measured on this 2-socket/256-CPU/4TiB host with 4 ranks x 48GiB, slowest rank,
+// mmap+prefault+cudaHostRegister (see artifacts/host_register_bench.cu):
+//   1 thread, no prefault (default):        19.2s   <- historical path
+//   8 threads, prefault then register:      15.6s
+//   8 threads, prefault during register:    10.6s
+//   32 threads, prefault during register:    7.4s
+// Registering the arena in parallel chunks was measured too and gave no gain
+// (22.0s): the driver serializes cudaHostRegister within a process. The useful
+// value therefore depends on how many cores can fault pages faster than the
+// driver pins them, so it has to be tuned per host.
+size_t hostBlockPoolPrefaultThreads() {
+    const char* value = std::getenv("RTP_LLM_HOST_BLOCK_POOL_PREFAULT_THREADS");
+    if (value == nullptr) {
+        return 1;
+    }
+    size_t threads = 0;
+    try {
+        size_t            parsed_chars = 0;
+        const std::string flag(value);
+        const long long   parsed = std::stoll(flag, &parsed_chars);
+        if (parsed_chars != flag.size() || parsed <= 0) {
+            throw std::invalid_argument("out of range");
+        }
+        threads = static_cast<size_t>(parsed);
+    } catch (const std::exception&) {
+        throw std::invalid_argument(std::string("invalid RTP_LLM_HOST_BLOCK_POOL_PREFAULT_THREADS='") + value
+                                    + "', expected a positive integer");
+    }
+    const size_t hardware_threads = static_cast<size_t>(std::thread::hardware_concurrency());
+    if (hardware_threads > 0 && threads > hardware_threads) {
+        threads = hardware_threads;
+    }
+    return threads;
+}
+
+// Faults the arena in from several threads while cudaHostRegister pins it.
+//
+// The driver walks the range sequentially and, whenever a page is not resident
+// yet, faults it inline on that one thread. Chunks are handed out from a single
+// shared cursor, so residency advances strictly front-to-back and, with enough
+// threads, stays ahead of the driver's cursor; the driver then only pays for
+// pinning. Nothing about the result changes: MADV_POPULATE_WRITE allocates
+// exactly the zero pages the driver would have allocated anyway, page placement
+// stays offset-determined under MPOL_INTERLEAVE, and the registered range is
+// still the single full arena.
+//
+// The threads must be joined before the arena may be unmapped, so ownership is
+// RAII: the destructor joins, which also covers the cudaHostRegister error path.
+class HostArenaPrefaulter {
+public:
+    HostArenaPrefaulter(void* base, size_t size_bytes, size_t threads):
+        base_(static_cast<char*>(base)), size_bytes_(size_bytes), thread_num_(threads) {
+        if (thread_num_ <= 1 || size_bytes_ == 0) {
+            return;
+        }
+        chunk_num_ = (size_bytes_ + kChunkBytes - 1) / kChunkBytes;
+        begin_us_  = currentTimeUs();
+        workers_.reserve(thread_num_);
+        for (size_t i = 0; i < thread_num_; ++i) {
+            workers_.emplace_back([this]() { populateChunks(); });
+        }
+    }
+
+    ~HostArenaPrefaulter() {
+        join();
+    }
+
+    HostArenaPrefaulter(const HostArenaPrefaulter&)            = delete;
+    HostArenaPrefaulter& operator=(const HostArenaPrefaulter&) = delete;
+
+    void join() {
+        if (workers_.empty()) {
+            return;
+        }
+        for (auto& worker : workers_) {
+            worker.join();
+        }
+        workers_.clear();
+        // prefault_ms is when the arena became fully resident; window_ms also
+        // contains the cudaHostRegister that ran concurrently with it.
+        RTP_LLM_LOG_INFO("host block pool prefaulted: threads=%zu chunk_bytes=%zu total_size=%zu "
+                         "madvise_fallbacks=%zu prefault_ms=%.3f window_ms=%.3f",
+                         thread_num_,
+                         kChunkBytes,
+                         size_bytes_,
+                         madvise_fallbacks_.load(),
+                         static_cast<double>(populate_end_us_.load() - begin_us_) / 1000.0,
+                         static_cast<double>(currentTimeUs() - begin_us_) / 1000.0);
+    }
+
+private:
+    void populateChunks() {
+        for (;;) {
+            const size_t idx = cursor_.fetch_add(1, std::memory_order_relaxed);
+            if (idx >= chunk_num_) {
+                // The arena is fully resident once the last worker gets here.
+                const int64_t now      = currentTimeUs();
+                int64_t       previous = populate_end_us_.load(std::memory_order_relaxed);
+                while (previous < now && !populate_end_us_.compare_exchange_weak(previous, now)) {}
+                return;
+            }
+            const size_t offset = idx * kChunkBytes;
+            const size_t bytes  = std::min(kChunkBytes, size_bytes_ - offset);
+            // MADV_POPULATE_WRITE needs Linux 5.14+. Writing the pages by hand has
+            // the same effect at roughly half the throughput, so an older kernel
+            // only gets the slower variant instead of an error.
+            if (madvise(base_ + offset, bytes, MADV_POPULATE_WRITE) != 0) {
+                madvise_fallbacks_.fetch_add(1, std::memory_order_relaxed);
+                std::memset(base_ + offset, 0, bytes);
+            }
+        }
+    }
+
+    static constexpr size_t kChunkBytes = 2UL * 1024 * 1024;
+
+    char*                    base_       = nullptr;
+    size_t                   size_bytes_ = 0;
+    size_t                   thread_num_ = 0;
+    size_t                   chunk_num_  = 0;
+    int64_t                  begin_us_   = 0;
+    std::atomic<size_t>      cursor_{0};
+    std::atomic<size_t>      madvise_fallbacks_{0};
+    std::atomic<int64_t>     populate_end_us_{0};
+    std::vector<std::thread> workers_;
+};
+
+torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes, bool interleave_numa_nodes, size_t prefault_threads) {
 #if USING_CUDA
     void* ptr = mmap(nullptr, size_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (ptr == MAP_FAILED) {
@@ -140,7 +280,13 @@ torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes, bool interleave_num
                              size_bytes);
         }
     }
-    const auto err = cudaHostRegister(ptr, size_bytes, cudaHostRegisterDefault);
+    cudaError_t err = cudaSuccess;
+    {
+        // Prefaulting runs concurrently with the registration below; the scope
+        // guarantees the threads are joined before any munmap of the arena.
+        HostArenaPrefaulter prefaulter(ptr, size_bytes, prefault_threads);
+        err = cudaHostRegister(ptr, size_bytes, cudaHostRegisterDefault);
+    }
     if (err != cudaSuccess) {
         (void)munmap(ptr, size_bytes);
         throw std::runtime_error(std::string("cudaHostRegister failed: ") + cudaGetErrorString(err));
@@ -239,10 +385,11 @@ void BlockPool::initializeCacheBuffer() {
             // must fail fast instead of silently changing pinned memory to pageable.
             const bool use_registered_host   = shouldRegisterHostBlockPool();
             const bool interleave_numa_nodes = use_registered_host ? shouldInterleaveRegisteredHostBlockPool() : false;
+            const size_t prefault_threads    = use_registered_host ? hostBlockPoolPrefaultThreads() : 1;
             try {
                 if (use_registered_host) {
                     cache_aligned_buffer_ =
-                        allocateRegisteredCpuTensor(config_.total_size_bytes, interleave_numa_nodes);
+                        allocateRegisteredCpuTensor(config_.total_size_bytes, interleave_numa_nodes, prefault_threads);
                     cache_buffer_registered_host_ = true;
                 } else {
                     cache_aligned_buffer_ =
