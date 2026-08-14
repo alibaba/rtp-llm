@@ -23,6 +23,7 @@ from typing import Any, AsyncIterator, Callable, Optional
 import torch
 
 from rtp_llm.config.exceptions import (
+    AdmissionRejectReason,
     ExceptionCategory,
     ExceptionType,
     FtRuntimeException,
@@ -32,10 +33,13 @@ from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
 from rtp_llm.dash_sc.codec import (
     DASH_ERROR_ABORT,
+    DASH_ERROR_ADMISSION_OVERLOADED,
+    DASH_ERROR_AUTO_TPM_PREEMPTED,
     DASH_ERROR_BAD_REQUEST,
     DASH_ERROR_CAPACITY,
     DASH_ERROR_INTERNAL,
     DASH_ERROR_INVALID_OUTPUT,
+    DASH_ERROR_RESOURCE_EXHAUSTED,
     DASH_ERROR_TIMEOUT,
     DASH_ERROR_TOO_LONG,
     DASH_ERROR_UNSUPPORTED,
@@ -54,16 +58,16 @@ from rtp_llm.dash_sc.codec import (
     prepend_to_generated_ids_tensor,
 )
 from rtp_llm.dash_sc.grpc_metrics import (
-    report_arrival,
+    report_arrival_priority,
     report_chunk,
     report_frontend_rpc_done,
 )
-from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.inference.grammar_validator import (
     GrammarCheckUnavailable,
     GrammarCompilationError,
     GrammarValidator,
 )
+from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.repetition_monitor import RequestRepetitionMonitorConfig
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, kmonitor
@@ -108,7 +112,163 @@ def _capture_access_exception(access_agg: Any, e: BaseException) -> None:
 
 
 def _dash_error_spec_for_ft_exception(exc: FtRuntimeException) -> DashErrorSpec:
-    return _DASH_ERROR_SPEC_BY_EXCEPTION_CATEGORY[exc.exception_type.category]
+    return _dash_error_mapping_for_ft_exception(exc).error_spec
+
+
+@dataclass(frozen=True)
+class _DashFtErrorMapping:
+    error_spec: DashErrorSpec
+    public_message: Optional[str] = None
+    protocol_error: bool = False
+    priority_attribution_unavailable: bool = False
+
+
+@dataclass(frozen=True)
+class _AutoTpmPublicContract:
+    allowed_reasons: frozenset[AdmissionRejectReason]
+    without_qos: _DashFtErrorMapping
+    low_qos: _DashFtErrorMapping
+    high_qos: _DashFtErrorMapping
+
+
+_SERVICE_UNAVAILABLE_MAPPING = _DashFtErrorMapping(
+    DASH_ERROR_CAPACITY,
+    "Service unavailable.",
+)
+_PRIORITY_ATTRIBUTION_UNAVAILABLE_MAPPING = _DashFtErrorMapping(
+    DASH_ERROR_CAPACITY,
+    "Service unavailable.",
+    priority_attribution_unavailable=True,
+)
+_INVALID_AUTO_TPM_PROTOCOL_MAPPING = _DashFtErrorMapping(
+    DASH_ERROR_CAPACITY,
+    "Service unavailable.",
+    protocol_error=True,
+)
+_PREEMPTED_WITH_QOS_MAPPING = _DashFtErrorMapping(
+    DASH_ERROR_AUTO_TPM_PREEMPTED,
+    "Too many requests.",
+)
+_LOW_QOS_REJECTION_MAPPING = _DashFtErrorMapping(
+    DASH_ERROR_ADMISSION_OVERLOADED,
+    "Too many requests.",
+)
+_HIGH_QOS_REJECTION_MAPPING = _DashFtErrorMapping(
+    DASH_ERROR_RESOURCE_EXHAUSTED,
+    "Too many requests.",
+)
+
+# This is the single public-status contract for typed Auto-TPM outcomes.  Each
+# row owns both protocol validation and all three externally visible QoS cases.
+_AUTO_TPM_PUBLIC_CONTRACT = {
+    ExceptionType.PRIORITY_PREEMPTED: _AutoTpmPublicContract(
+        allowed_reasons=frozenset((AdmissionRejectReason.UNSPECIFIED,)),
+        without_qos=_SERVICE_UNAVAILABLE_MAPPING,
+        low_qos=_PREEMPTED_WITH_QOS_MAPPING,
+        high_qos=_PREEMPTED_WITH_QOS_MAPPING,
+    ),
+    ExceptionType.PRIORITY_ADMISSION_REJECTED: _AutoTpmPublicContract(
+        allowed_reasons=frozenset(
+            (
+                AdmissionRejectReason.HIGHER_PRIORITY_AHEAD,
+                AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+            )
+        ),
+        without_qos=_SERVICE_UNAVAILABLE_MAPPING,
+        low_qos=_LOW_QOS_REJECTION_MAPPING,
+        high_qos=_HIGH_QOS_REJECTION_MAPPING,
+    ),
+    ExceptionType.RESOURCE_EXHAUSTED: _AutoTpmPublicContract(
+        allowed_reasons=frozenset((AdmissionRejectReason.RESOURCE_EXHAUSTED,)),
+        without_qos=_SERVICE_UNAVAILABLE_MAPPING,
+        low_qos=_LOW_QOS_REJECTION_MAPPING,
+        high_qos=_HIGH_QOS_REJECTION_MAPPING,
+    ),
+    ExceptionType.ADMISSION_UNAVAILABLE: _AutoTpmPublicContract(
+        allowed_reasons=frozenset((AdmissionRejectReason.UNSPECIFIED,)),
+        without_qos=_PRIORITY_ATTRIBUTION_UNAVAILABLE_MAPPING,
+        low_qos=_PRIORITY_ATTRIBUTION_UNAVAILABLE_MAPPING,
+        high_qos=_PRIORITY_ATTRIBUTION_UNAVAILABLE_MAPPING,
+    ),
+}
+
+
+def _auto_tpm_public_mapping(
+    exception_type: ExceptionType,
+    raw_reason: Any,
+    qos_level: Optional[int],
+) -> Optional[_DashFtErrorMapping]:
+    contract = _AUTO_TPM_PUBLIC_CONTRACT.get(exception_type)
+    if contract is None:
+        return None
+
+    try:
+        reason = AdmissionRejectReason(raw_reason)
+    except (TypeError, ValueError):
+        return _INVALID_AUTO_TPM_PROTOCOL_MAPPING
+    if reason not in contract.allowed_reasons:
+        return _INVALID_AUTO_TPM_PROTOCOL_MAPPING
+
+    if qos_level is None:
+        return contract.without_qos
+    return contract.low_qos if qos_level < 50 else contract.high_qos
+
+
+def _dash_error_mapping_for_ft_exception(
+    exc: FtRuntimeException,
+    qos_level: Optional[int] = None,
+) -> _DashFtErrorMapping:
+    """Map an internal failure to the public Dash contract.
+
+    Scheduler diagnostics in ``str(exc)`` are deliberately excluded.  For an
+    admission rejection, an explicitly supplied DashScope QoS header selects
+    the public high/low-priority 429 contract.  Without a valid explicit QoS
+    header, admission failures retain the historical 503 contract: a default
+    scheduling priority is not evidence that the caller opted into QoS-tiered
+    throttling.
+    """
+
+    exception_type = exc.exception_type
+    raw_reason = getattr(
+        exc,
+        "admission_reject_reason",
+        AdmissionRejectReason.UNSPECIFIED,
+    )
+    typed_mapping = _auto_tpm_public_mapping(
+        exception_type,
+        raw_reason,
+        qos_level,
+    )
+    if typed_mapping is not None:
+        return typed_mapping
+
+    return _DashFtErrorMapping(
+        _DASH_ERROR_SPEC_BY_EXCEPTION_CATEGORY[exception_type.category]
+    )
+
+
+def _parse_valid_qos_level(value: Any) -> Optional[int]:
+    qos_level = to_optional_int(value)
+    if qos_level is None or not 1 <= qos_level <= 100:
+        return None
+    return qos_level
+
+
+def _request_qos_level(
+    other: OtherParams,
+    invocation_metadata: Optional[Any],
+) -> Optional[int]:
+    """Return valid metadata QoS, otherwise valid parsed request-header QoS."""
+    metadata_value = _headers_from_invocation_metadata(invocation_metadata).get(
+        "x-dashscope-inner-qos-level"
+    )
+    metadata_qos = _parse_valid_qos_level(metadata_value)
+    if metadata_qos is not None:
+        return metadata_qos
+    request_headers = {
+        str(key).lower(): value for key, value in other.request_headers.items()
+    }
+    return _parse_valid_qos_level(request_headers.get("x-dashscope-inner-qos-level"))
 
 
 _DASH_ERROR_SPEC_BY_EXCEPTION_CATEGORY = {
@@ -440,6 +600,17 @@ def _apply_request_overrides(
         generate_config.ttft_timeout_ms = engine_timeout_ms
     if other.traffic_reject_priority is not None:
         generate_config.traffic_reject_priority = int(other.traffic_reject_priority)
+    # Auto-TPM QoS priority from x-dashscope-inner-qos-level. Mirrors
+    # openai_endpoint.py which sets qos_priority from the HTTP header so
+    # it survives IPC to the dash_sc enqueue loop where
+    # GenerateInput.headers may be absent. Do NOT confuse with
+    # traffic_reject_priority (x-ds-request-priority) above.
+    qos_level = other.request_headers.get("x-dashscope-inner-qos-level")
+    if qos_level is not None:
+        try:
+            generate_config.qos_priority = int(str(qos_level).strip())
+        except (TypeError, ValueError):
+            pass
     if other.reasoning_effort is not None:
         kwargs = dict(getattr(generate_config, "chat_template_kwargs", None) or {})
         kwargs["reasoning_effort"] = other.reasoning_effort
@@ -947,8 +1118,20 @@ async def iter_real_model_stream_infer(
                 yield (resp, stats) if yield_access_stats else resp
     except FtRuntimeException as e:
         _capture_access_exception(access_agg, e)
-        error_spec = _dash_error_spec_for_ft_exception(e)
-        status_message = str(e)
+        error_mapping = _dash_error_mapping_for_ft_exception(
+            e,
+            qos_level=_request_qos_level(other, invocation_metadata),
+        )
+        error_spec = error_mapping.error_spec
+        status_message = error_mapping.public_message or str(e)
+        if error_mapping.protocol_error:
+            logging.error(
+                "[DashScGrpc] [%s] invalid admission code/reason pair: "
+                "code=%s reason=%s",
+                tag,
+                int(e.exception_type),
+                getattr(e, "admission_reject_reason", None),
+            )
         if error_spec.status_code == 500:
             logging.exception("[DashScGrpc] [%s] engine error: %s", tag, e)
         elif error_spec.status_code == 499:
@@ -967,11 +1150,12 @@ async def iter_real_model_stream_infer(
         _capture_access_exception(access_agg, e)
         logging.exception("[DashScGrpc] [%s] enqueue failed: %s", tag, e)
         error_spec = DASH_ERROR_INTERNAL
+        fallback_status_message = f"{type(e).__name__}: {e}"
         response = build_dash_error_response(
             str(request.id),
             request.model_name,
             error_spec=error_spec,
-            status_message=f"{type(e).__name__}: {e}",
+            status_message=fallback_status_message,
         )
         stats = (0, True, error_spec.finish_reason, len(input_ids_list), 0, ())
         yield (response, stats) if yield_access_stats else response
@@ -1027,6 +1211,11 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             think_runtime if think_runtime is not None else _ThinkRuntime()
         )
         self._seq_counter = AtomicCounter()
+        set_request_id_factory = getattr(
+            self._backend_visitor, "set_request_id_factory", None
+        )
+        if set_request_id_factory is not None:
+            set_request_id_factory(self._next_rtp_llm_request_id)
         # Access-log identity, injected at construction (``DashScApp`` /
         # ``__main__`` own the rank/server identity). The two ids are the only
         # state the log + metric projections need; ``server_id`` arrives as the
@@ -1166,7 +1355,6 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             repetition_monitor_config=self._rep_cfg,
         )
         emit_query_log(record, rank_id=self._rank_id, server_id=self._server_id)
-        report_arrival(rank_id=self._rank_id, server_id=self._server_id)
         exc: Optional[BaseException] = None
         try:
             try:
@@ -1241,6 +1429,14 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         other=other,
                     )
                     record.mark_request_done("eof")
+                    # Priority-tagged twin of the entry-point arrival: deferred
+                    # to here because the qos priority only becomes known once
+                    # the first frame is parsed. RPCs that never get here are
+                    # back-filled with priority="0" by the done metrics in the
+                    # ``finally`` below.
+                    report_arrival_priority(
+                        record, rank_id=self._rank_id, server_id=self._server_id
+                    )
                     first_request = False
                 if (
                     not partial_metadata_sent

@@ -10,6 +10,9 @@ import torch
 
 from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.codec import (
+    DASH_ERROR_ABORT,
+    DASH_ERROR_CAPACITY,
+    DASH_ERROR_TIMEOUT,
     DashErrorSpec,
     DashScInputIdsError,
     DashScParameterError,
@@ -999,6 +1002,11 @@ class StreamResponseBuilderTest(TestCase):
         self.assertIsInstance(payload["status_code"], int)
         self.assertEqual(payload["status_name"], "InvalidParameter")
         self.assertIn("max_new_tokens", payload["status_message"])
+        self.assertEqual(infer.parameters["status_code"].int64_param, 400)
+        self.assertEqual(
+            infer.parameters["status_name"].string_param, "InvalidParameter"
+        )
+        self.assertIn("max_new_tokens", infer.parameters["status_message"].string_param)
         by_name = {
             infer.outputs[i].name: infer.raw_output_contents[i]
             for i in range(len(infer.outputs))
@@ -1030,6 +1038,58 @@ class StreamResponseBuilderTest(TestCase):
                 self.assertIn(f'"status_code":{status_code}', error_msg)
                 self.assertNotIn(f'"status_code":"{status_code}"', error_msg)
                 self.assertEqual(json.loads(error_msg)["status_code"], status_code)
+
+    def test_capacity_error_uses_use_parameter_status(self) -> None:
+        """DASH_ERROR_CAPACITY must use finish_reason=USE_PARAMETER_STATUS so
+        the DashScope api-server passes the explicit status_code=503 through
+        verbatim instead of re-deriving HTTP from the finish_reason code."""
+        self.assertEqual(
+            DASH_ERROR_CAPACITY.finish_reason, LLMFinishReason.USE_PARAMETER_STATUS
+        )
+        self.assertEqual(DASH_ERROR_CAPACITY.status_code, 503)
+        self.assertEqual(DASH_ERROR_CAPACITY.error_no, LLMFinishReason.TASK_LIST_FULL)
+        self.assertEqual(DASH_ERROR_CAPACITY.status_name, "ServiceUnavailable")
+
+        resp = build_dash_error_response(
+            "req-cap",
+            "mdl",
+            error_spec=DASH_ERROR_CAPACITY,
+            status_message="engine task list full",
+        )
+        infer = resp.infer_response
+        self.assertEqual(infer.parameters["error_no"].int64_param, 5)
+        payload = json.loads(infer.parameters["error_msg"].string_param)
+        self.assertEqual(payload["status_code"], 503)
+        self.assertEqual(payload["status_name"], "ServiceUnavailable")
+        self.assertEqual(infer.parameters["status_code"].int64_param, 503)
+        self.assertEqual(
+            infer.parameters["status_name"].string_param, "ServiceUnavailable"
+        )
+        self.assertEqual(
+            infer.parameters["status_message"].string_param,
+            "engine task list full",
+        )
+        by_name = {
+            infer.outputs[i].name: infer.raw_output_contents[i]
+            for i in range(len(infer.outputs))
+        }
+        self.assertEqual(
+            _unpack_int64_le(by_name["finish_reason"]),
+            [LLMFinishReason.USE_PARAMETER_STATUS],
+        )
+
+    def test_timeout_and_abort_specs_use_use_parameter_status(self) -> None:
+        """DASH_ERROR_TIMEOUT and DASH_ERROR_ABORT must also use
+        USE_PARAMETER_STATUS so their 504/499 codes survive the api-server."""
+        for spec, expected_code in (
+            (DASH_ERROR_TIMEOUT, 504),
+            (DASH_ERROR_ABORT, 499),
+        ):
+            with self.subTest(spec=spec):
+                self.assertEqual(
+                    spec.finish_reason, LLMFinishReason.USE_PARAMETER_STATUS
+                )
+                self.assertEqual(spec.status_code, expected_code)
 
     def test_finish_reason_length_override_repro_p1(self) -> None:
         """P1 repro: when generation finishes because ``max_new_tokens`` was

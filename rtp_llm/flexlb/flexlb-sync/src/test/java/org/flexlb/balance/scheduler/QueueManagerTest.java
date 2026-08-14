@@ -71,7 +71,7 @@ class QueueManagerTest {
 
     @Test
     void takeRequest_shouldReturnNullWhenEmpty() {
-        BalanceContext result = queueManager.takeRequest(false, 0);
+        BalanceContext result = queueManager.takeRequest(0);
         assertNull(result);
     }
 
@@ -80,23 +80,9 @@ class QueueManagerTest {
         BalanceContext ctx = createContext(1L);
         queueManager.tryRouteAsync(ctx);
 
-        BalanceContext taken = queueManager.takeRequest(false, 0);
+        BalanceContext taken = queueManager.takeRequest(0);
         assertNotNull(taken);
         assertEquals(1L, taken.getRequestId());
-    }
-
-    @Test
-    void takeRequest_shouldSkipCancelledRequests() {
-        BalanceContext cancelled = createContext(1L);
-        queueManager.tryRouteAsync(cancelled);
-        cancelled.cancel();
-
-        BalanceContext valid = createContext(2L);
-        queueManager.tryRouteAsync(valid);
-
-        BalanceContext taken = queueManager.takeRequest(false, 0);
-        assertNotNull(taken);
-        assertEquals(2L, taken.getRequestId());
     }
 
     @Test
@@ -109,7 +95,7 @@ class QueueManagerTest {
         retried.setEnqueueTime(System.currentTimeMillis());
         queueManager.offerToHead(retried);
 
-        BalanceContext taken = queueManager.takeRequest(false, 0);
+        BalanceContext taken = queueManager.takeRequest(0);
         assertNotNull(taken);
         assertEquals(2L, taken.getRequestId());
     }

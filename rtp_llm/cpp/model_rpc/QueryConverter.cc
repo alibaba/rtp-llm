@@ -1,4 +1,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
+#include "rtp_llm/cpp/config/RoleTypes.h"
+
+#include <optional>
 
 #include "RPCPool.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -10,6 +13,66 @@ namespace rtp_llm {
     if (config_proto->has_##name()) {                                                                                  \
         generate_config->name = config_proto->name().value();                                                          \
     }
+
+namespace {
+
+RoleType checkedRoleType(int value, const char* field_name) {
+    RTP_LLM_CHECK_WITH_INFO(value >= static_cast<int>(RoleType::PDFUSION)
+                                && value <= static_cast<int>(RoleType::FRONTEND),
+                            "unknown RoleAddrPB %s value: %d",
+                            field_name,
+                            value);
+    return static_cast<RoleType>(value);
+}
+
+RoleType checkedRoleString(const std::string& value) {
+    std::string role = value;
+    const std::string prefix = "RoleType.";
+    if (role.rfind(prefix, 0) == 0) {
+        role = role.substr(prefix.size());
+    }
+    if (role == "PDFUSION") {
+        return RoleType::PDFUSION;
+    }
+    if (role == "PREFILL") {
+        return RoleType::PREFILL;
+    }
+    if (role == "DECODE") {
+        return RoleType::DECODE;
+    }
+    if (role == "VIT") {
+        return RoleType::VIT;
+    }
+    if (role == "FRONTEND") {
+        return RoleType::FRONTEND;
+    }
+    RTP_LLM_FAIL("unknown RoleAddrPB role_str: %s", value.c_str());
+}
+
+RoleType transRoleAddrType(const RoleAddrPB& role_addr) {
+    std::optional<RoleType> resolved;
+    auto merge = [&resolved](RoleType candidate, const char* source) {
+        RTP_LLM_CHECK_WITH_INFO(!resolved.has_value() || *resolved == candidate,
+                                "conflicting RoleAddrPB role from %s: resolved=%d candidate=%d",
+                                source,
+                                resolved.has_value() ? static_cast<int>(*resolved) : -1,
+                                static_cast<int>(candidate));
+        resolved = candidate;
+    };
+
+    if (!role_addr.role_str().empty()) {
+        merge(checkedRoleString(role_addr.role_str()), "role_str");
+    }
+    if (role_addr.role() != RoleAddrPB::PDFUSION) {
+        merge(checkedRoleType(static_cast<int>(role_addr.role()), "role"), "role");
+    }
+
+    // In the original proto3 schema PDFUSION was enum value zero. Its field is
+    // omitted on the wire, so an empty role encoding must retain that default.
+    return resolved.value_or(RoleType::PDFUSION);
+}
+
+}  // namespace
 
 std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const GenerateConfigPB* config_proto) {
     std::shared_ptr<GenerateConfig> generate_config = std::make_shared<GenerateConfig>();
@@ -88,7 +151,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
 
     for (const auto& role_addr : config_proto->role_addrs()) {
         generate_config->role_addrs.emplace_back(
-            RoleType(role_addr.role()), role_addr.ip(), role_addr.http_port(), role_addr.grpc_port());
+            transRoleAddrType(role_addr), role_addr.ip(), role_addr.http_port(), role_addr.grpc_port());
     }
 
     generate_config->reuse_cache         = config_proto->reuse_cache();
@@ -96,8 +159,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->enable_memory_cache = config_proto->enable_memory_cache();
     generate_config->enable_remote_cache = config_proto->enable_remote_cache();
     TRANS_OPTIONAL(trace_id);
-    TRANS_OPTIONAL(batch_group_timeout);
-    TRANS_OPTIONAL(force_batch);
+    TRANS_OPTIONAL(group_timeout);
 
     return generate_config;
 }
@@ -116,6 +178,7 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     std::shared_ptr<GenerateInput> generate_input = std::make_shared<GenerateInput>();
     generate_input->request_id                    = input->request_id();
     generate_input->request_info                  = transRequestInfo(input->request_info());
+    generate_input->global_start_time_us          = input->start_time();
     generate_input->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
     if (input->has_generate_config()) {
         generate_input->generate_config = transGenerateConfig(&(input->generate_config()));
@@ -150,10 +213,12 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
         }
         generate_input->multimodal_inputs = std::move(mm_inputs);
     }
-    generate_input->batch_group_size = input->batch_group_size() > 0 ? input->batch_group_size() : 1;
-    if (input->has_batch_group_id()) {
-        generate_input->batch_group_id = input->batch_group_id().value();
+    generate_input->group_size = input->group_size() > 0 ? input->group_size() : 1;
+    if (input->has_group_id()) {
+        generate_input->group_id = input->group_id().value();
     }
+    // Auto-TPM QoS priority (task40): 0 = not set; TPS metrics tagging only.
+    generate_input->priority = input->priority();
 
     return generate_input;
 }
@@ -162,7 +227,7 @@ std::vector<RoleAddr> QueryConverter::getRoleAddrs(const GenerateConfigPB* confi
     std::vector<RoleAddr> role_addrs;
     for (const auto& role_addr : config_proto->role_addrs()) {
         role_addrs.emplace_back(
-            RoleType(role_addr.role()), role_addr.ip(), role_addr.http_port(), role_addr.grpc_port());
+            transRoleAddrType(role_addr), role_addr.ip(), role_addr.http_port(), role_addr.grpc_port());
     }
     return role_addrs;
 }

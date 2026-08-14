@@ -58,6 +58,29 @@ from rtp_llm.dash_sc.status import (
 )
 
 DASH_SC_GRPC_PROTOCOL = "grpc"
+
+# Auto-TPM QoS priority header conveyed by the DashScope gateway. Defined
+# locally (the literal also appears in ``codec.py`` / ``request_headers.py``)
+# rather than imported from ``rtp_llm.metrics`` so this module keeps its
+# no-kmonitor-dependency contract.
+QOS_PRIORITY_HEADER = "x-dashscope-inner-qos-level"
+
+
+def _parse_qos_priority(value: Any) -> Optional[int]:
+    """Parse the ``x-dashscope-inner-qos-level`` header into its integer value.
+
+    Mirrors the servicer's ``generate_config.qos_priority`` parse: ``None`` for
+    an absent or unparseable value. The metrics layer maps ``None`` onto the
+    ``"0"`` (no-qos) priority bucket.
+    """
+    if value is None:
+        return None
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 _AUX_INFO_ADAPTER = TypeAdapter(Any)
 
 _MAX_CONTROL_STRING_LEN = 4096
@@ -417,6 +440,11 @@ class GrpcAccessRecord:
     backend_rpc_detail: Optional[str] = None
     backend_resp_count: int = 0
     buffered_stage: Optional[str] = None
+    # Set by ``grpc_metrics.report_arrival_priority`` once the priority-tagged
+    # twin of the arrival QPS series has been emitted for this RPC (true value
+    # after the first frame parse, or the "0" fallback at the finally tail) —
+    # guarantees exactly one tagged arrival per RPC.
+    priority_arrival_reported: bool = False
     # Tool-call loop observability. The monitor owns detection and the flat
     # access-log fields; this record only feeds it request markers + the
     # generated token stream and reads back the result.
@@ -596,6 +624,12 @@ class GrpcAccessRecord:
                 self.generate_config["timeout_ms"] = other.timeout_ms
                 self.generate_config["traffic_reject_priority"] = (
                     other.traffic_reject_priority
+                )
+                # Auto-TPM QoS priority (x-dashscope-inner-qos-level) — the
+                # value FlexLB schedules by; grpc_metrics projects it onto the
+                # ``priority`` tag of the QPS metric family.
+                self.generate_config["qos_priority"] = _parse_qos_priority(
+                    other.request_headers.get(QOS_PRIORITY_HEADER)
                 )
             except Exception:
                 self.generate_config = None

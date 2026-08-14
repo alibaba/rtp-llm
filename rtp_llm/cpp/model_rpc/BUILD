@@ -72,7 +72,6 @@ cc_library(
         "//rtp_llm/cpp/normal_engine",
         "//rtp_llm/cpp/utils:atomic_util",
         "//rtp_llm/cpp/utils:kv_cache_utils",
-        "//rtp_llm/cpp/utils:hash_util",
         "//rtp_llm/cpp/utils:profiling_scope",
     ],
 )

@@ -1,8 +1,31 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from rtp_llm.config.generate_config import RoleType
+
+_ROLE_TYPE_NAMES = ("PDFUSION", "PREFILL", "DECODE", "VIT", "FRONTEND")
+_ROLE_TYPES_BY_NAME = {name: getattr(RoleType, name) for name in _ROLE_TYPE_NAMES}
+_ROLE_TYPES_BY_VALUE = {int(role): role for role in _ROLE_TYPES_BY_NAME.values()}
+
+
+def _coerce_role_type(value: Union[int, str, RoleType]) -> RoleType:
+    if isinstance(value, RoleType):
+        role = _ROLE_TYPES_BY_VALUE.get(int(value))
+        if role is not None:
+            return role
+    elif isinstance(value, str):
+        role_name = value.strip().rsplit(".", 1)[-1].upper()
+        if role_name.startswith("ROLE_TYPE_"):
+            role_name = role_name[len("ROLE_TYPE_") :]
+        role = _ROLE_TYPES_BY_NAME.get(role_name)
+        if role is not None:
+            return role
+    elif isinstance(value, int) and not isinstance(value, bool):
+        role = _ROLE_TYPES_BY_VALUE.get(value)
+        if role is not None:
+            return role
+    raise ValueError(f"Invalid role: {value!r}, expected int, str, or RoleType")
 
 
 class WorkerStatusRequest(BaseModel):
@@ -33,7 +56,9 @@ class ProfileMeta(BaseModel):
 
 
 class WorkStatus(BaseModel):
-    role: str  # prefill, decode, vit
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    role: RoleType  # prefill, decode, vit
     server_port: Optional[int] = None
     http_port: Optional[int] = None
     grpc_port: Optional[int] = None
@@ -49,6 +74,11 @@ class WorkStatus(BaseModel):
     latest_finished_version: Optional[int] = -1  # 最新完成任务的版本
 
     profile_meta: Optional[ProfileMeta] = None  # 统计的处理数据
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def validate_role(cls, v):
+        return _coerce_role_type(v)
 
 
 class DebugInfo(BaseModel):
@@ -70,14 +100,10 @@ class ServerStatus(BaseModel):
     grpc_port: int
     debug_info: Optional[DebugInfo] = None
 
-    @model_validator(mode="before")
-    def validate_role(cls, values: Dict[str, Any]):
-        role = values.get("role")
-        if isinstance(role, str):
-            values["role"] = getattr(RoleType, role)
-        else:
-            raise ValueError(f"Invalid role: {role}, expected str")
-        return values
+    @field_validator("role", mode="before")
+    @classmethod
+    def validate_role(cls, v):
+        return _coerce_role_type(v)
 
 
 class ScheduleMeta(BaseModel):
@@ -87,3 +113,4 @@ class ScheduleMeta(BaseModel):
     error_message: Optional[str] = None
     success: Optional[bool] = True
     real_master_host: Optional[str] = None
+    enqueued_by_master: bool = False

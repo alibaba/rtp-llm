@@ -1332,8 +1332,10 @@ class PDSepConfig:
     load_cache_timeout_ms: int
     max_rpc_timeout_ms: int
     prefill_max_wait_timeout_ms: int
+    prefill_prepare_resource_pool_size: int
     prefill_retry_timeout_ms: int
     prefill_retry_times: int
+    prefill_stop_stream_wait_timeout_ms: int
     rdma_connect_retry_times: int
     remote_rpc_server_port: int
     role_type: RoleType
