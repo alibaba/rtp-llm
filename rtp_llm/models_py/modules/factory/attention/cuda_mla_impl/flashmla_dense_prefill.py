@@ -24,6 +24,7 @@ _FLASHMLA_LOGGED_DEVICES: set[int] = set()
 # target verification grows them every iteration while reusing the same plan
 # shape, so including them turns this guard into a per-step INFO log.
 _FLASHMLA_LOGGED_CONFIGS: set[tuple[int, int, tuple[int, ...], bool]] = set()
+_K3_PACKED_KV_HEAD_SPLITS = (128, 64, 128)
 
 
 def _workspace(device: torch.device) -> torch.Tensor:
@@ -204,8 +205,35 @@ class MlaFlashMLAPrefillOp:
             None,
             self.quant_config,
         )
+        head_splits = (
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
+            self.v_head_dim,
+        )
+        packed_projection = getattr(kv_b_proj, "forward_skip_head_mid", None)
+        num_tokens = compressed_kv.shape[0]
+        if (
+            head_splits == _K3_PACKED_KV_HEAD_SPLITS
+            and callable(packed_projection)
+            and compressed_kv.is_cuda
+            and compressed_kv.dtype == torch.bfloat16
+            and getattr(kv_b_proj, "bias", None) is None
+            and torch.cuda.get_device_capability(compressed_kv.device)[0] == 10
+        ):
+            packed_kv = packed_projection(compressed_kv, head_splits).view(
+                num_tokens, self.num_heads, sum(head_splits)
+            )
+            packed_kv[..., self.qk_nope_head_dim : -self.v_head_dim].copy_(
+                k_pe.view(num_tokens, 1, self.qk_rope_head_dim)
+            )
+            k = packed_kv[..., : -self.v_head_dim]
+            value_states = packed_kv[..., -self.v_head_dim :]
+            return k, value_states
+
         expanded_dim = self.qk_nope_head_dim + self.v_head_dim
-        kv = kv_b_proj(compressed_kv).view(-1, self.num_heads, expanded_dim)
+        kv = kv_b_proj(compressed_kv).view(
+            num_tokens, self.num_heads, expanded_dim
+        )
         k_nope = kv[..., : self.qk_nope_head_dim]
         value_states = kv[..., self.qk_nope_head_dim :]
 
@@ -216,7 +244,7 @@ class MlaFlashMLAPrefillOp:
         )
         k[..., : self.qk_nope_head_dim].copy_(k_nope)
         k[..., self.qk_nope_head_dim :].copy_(
-            k_pe.view(-1, 1, self.qk_rope_head_dim)
+            k_pe.view(num_tokens, 1, self.qk_rope_head_dim)
         )
         return k, value_states
 

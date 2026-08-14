@@ -51,3 +51,11 @@ py_test(
     tags = ["SM100_ARM"],
     exec_properties = {'gpu':'SM100_ARM'},
 )
+
+py_test(
+    name = "f16_linear_skip_head_mid_test",
+    srcs = ["f16_linear_skip_head_mid_test.py"],
+    deps = py_test_deps,
+    tags = ["manual", "SM100"],
+    exec_properties = {'gpu':'SM100'},
+)

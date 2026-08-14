@@ -13,6 +13,7 @@ __all__ = [
     "m_grouped_fp8_gemm_nt_contiguous",
     "m_grouped_fp8_gemm_nt_masked",
     "bf16_gemm_nt",
+    "bf16_gemm_nt_skip_head_mid",
     "m_grouped_bf16_gemm_nt_contiguous",
     "m_grouped_bf16_gemm_nt_masked",
     "fp8_fp4_gemm_nt",
@@ -34,6 +35,7 @@ _deep_gemm_impl_new_map = {
     "m_grouped_fp8_gemm_nt_contiguous": "m_grouped_fp8_gemm_nt_contiguous",
     "m_grouped_fp8_gemm_nt_masked": "m_grouped_fp8_gemm_nt_masked",
     "bf16_gemm_nt": "bf16_gemm_nt",
+    "bf16_gemm_nt_skip_head_mid": "bf16_gemm_nt_skip_head_mid",
     "m_grouped_bf16_gemm_nt_contiguous": "m_grouped_bf16_gemm_nt_contiguous",
     "m_grouped_bf16_gemm_nt_masked": "m_grouped_bf16_gemm_nt_masked",
     "fp8_fp4_gemm_nt": "fp8_fp4_gemm_nt",
@@ -51,6 +53,7 @@ _deep_gemm_impl_old_map = {
     "m_grouped_fp8_gemm_nt_contiguous": "m_grouped_fp8_gemm_nt_contiguous",
     "m_grouped_fp8_gemm_nt_masked": "fp8_m_grouped_gemm_nt_masked",
     "bf16_gemm_nt": "bf16_gemm_nt",
+    "bf16_gemm_nt_skip_head_mid": "bf16_gemm_nt_skip_head_mid",
     "m_grouped_bf16_gemm_nt_contiguous": "m_grouped_bf16_gemm_nt_contiguous",
     "m_grouped_bf16_gemm_nt_masked": "m_grouped_bf16_gemm_nt_masked",
     "fp8_fp4_gemm_nt": "fp8_fp4_gemm_nt",
@@ -68,6 +71,7 @@ _fp8_gemm_nt_impl: Callable[..., Any] | None = None
 _m_grouped_fp8_gemm_nt_contiguous_impl: Callable[..., Any] | None = None
 _m_grouped_fp8_gemm_nt_masked_impl: Callable[..., Any] | None = None
 _bf16_gemm_nt_impl: Callable[..., Any] | None = None
+_bf16_gemm_nt_skip_head_mid_impl: Callable[..., Any] | None = None
 _m_grouped_bf16_gemm_nt_contiguous_impl: Callable[..., Any] | None = None
 _m_grouped_bf16_gemm_nt_masked_impl: Callable[..., Any] | None = None
 _fp8_fp4_gemm_nt_impl: Callable[..., Any] | None = None
@@ -121,7 +125,8 @@ def _missing_deep_gemm() -> NoReturn:
 def _lazy_init_deep_gemm(symbols: List[str]) -> None:
     """Import deep_gemm and resolve symbols on first use."""
     global _fp8_gemm_nt_impl, _m_grouped_fp8_gemm_nt_contiguous_impl, _m_grouped_fp8_gemm_nt_masked_impl
-    global _bf16_gemm_nt_impl, _m_grouped_bf16_gemm_nt_contiguous_impl, _m_grouped_bf16_gemm_nt_masked_impl
+    global _bf16_gemm_nt_impl, _bf16_gemm_nt_skip_head_mid_impl
+    global _m_grouped_bf16_gemm_nt_contiguous_impl, _m_grouped_bf16_gemm_nt_masked_impl
     global _fp8_fp4_gemm_nt_impl, _m_grouped_fp8_fp4_gemm_nt_contiguous_impl, _m_grouped_fp8_fp4_gemm_nt_masked_impl
     global _fp8_fp4_paged_mqa_logits_impl, _per_token_cast_to_fp4_impl
     global _cast_back_from_fp4_impl, _transpose_packed_fp4_impl
@@ -166,6 +171,7 @@ def _lazy_init_deep_gemm_once():
             "m_grouped_fp8_gemm_nt_contiguous",
             "m_grouped_fp8_gemm_nt_masked",
             "bf16_gemm_nt",
+            "bf16_gemm_nt_skip_head_mid",
             "m_grouped_bf16_gemm_nt_contiguous",
             "m_grouped_bf16_gemm_nt_masked",
             "fp8_fp4_gemm_nt",
@@ -574,6 +580,31 @@ def bf16_gemm_nt(
     if _bf16_gemm_nt_impl is None:
         return _missing_deep_gemm()
     _bf16_gemm_nt_impl(a, b, output, c, compiled_dims)
+
+
+def bf16_gemm_nt_skip_head_mid(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    output: torch.Tensor,
+    head_splits: Tuple[int, int, int],
+    compiled_dims: str = "nk",
+) -> None:
+    """Execute BF16 GEMM while leaving a gap inside every output head.
+
+    The logical GEMM output for each head is ``[left | right]``. The physical
+    output is ``[left | untouched mid | right]`` so a caller can fill the mid
+    region without materializing and copying the left region.
+    """
+    global _bf16_gemm_nt_skip_head_mid_impl
+    if _bf16_gemm_nt_skip_head_mid_impl is None:
+        raise RuntimeError(
+            "The installed DeepGEMM package does not provide "
+            "bf16_gemm_nt_skip_head_mid"
+        )
+
+    _bf16_gemm_nt_skip_head_mid_impl(
+        a, b, output, head_splits, compiled_dims=compiled_dims
+    )
 
 
 def m_grouped_bf16_gemm_nt_contiguous(

@@ -59,3 +59,23 @@ py_test(
     tags = ["manual"],
     exec_properties = {'gpu': 'SM100'},
 )
+
+py_test(
+    name = "flashmla_dense_prefill_packed_kv_test",
+    srcs = ["flashmla_dense_prefill_packed_kv_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    tags = ["manual", "SM100"],
+    exec_properties = {'gpu': 'SM100'},
+)
+
+py_binary(
+    name = "flashmla_dense_prefill_packed_kv_benchmark",
+    srcs = ["flashmla_dense_prefill_packed_kv_benchmark.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    tags = ["manual", "SM100"],
+    exec_properties = {'gpu': 'SM100'},
+)
