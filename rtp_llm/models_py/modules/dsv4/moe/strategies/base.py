@@ -13,8 +13,9 @@ Strategies (priority high→low for ``forced=None``):
     ep_size  env / kernel                 → strategy
     --------------------------------------------------------
     >1       DSV4_USE_MEGA_MOE_SE=1        MegaMoEStrategySE (strict)
-    >1       mega available + dist-init    MegaMoEStrategy
-    >1       mega unavailable/disabled     RuntimeError
+    >1       mega available + SM100        MegaMoEStrategy
+    >1       otherwise + DeepEP available  DeepEPStrategy
+    >1       no distributed strategy       RuntimeError
     1        grouped FP4 kernel available  GroupedFP4Strategy
     1        grouped unavailable           LocalLoopStrategy
 
@@ -293,9 +294,10 @@ def select_strategy(
                         "mega",
                         "mega_fused",
                         "mega_se",
+                        "deepep",
                     ):
                         raise RuntimeError(
-                            "DSV4 EP MoE requires MegaMoEStrategy. "
+                            "DSV4 EP MoE requires a distributed strategy. "
                             f"Requested strategy {forced!r} would bypass Mega "
                             f"(layer_id={cfg.layer_id}, ep_size={cfg.ep_size})."
                         )
@@ -314,21 +316,20 @@ def select_strategy(
 
     if cfg.ep_size > 1:
         mega_cls = next((c for c in _STRATEGY_PRIORITY if c.name == "mega"), None)
-        if mega_cls is None:
-            raise RuntimeError(
-                "DSV4 EP MoE requires MegaMoEStrategy, but it is not registered."
-            )
-        if mega_cls.can_handle(cfg):
+        if mega_cls is not None and mega_cls.can_handle(cfg):
             return mega_cls
-        from rtp_llm.models_py.modules.dsv4.moe.mega_buf import (
-            _mega_moe_disabled_or_unavailable_reason,
-        )
+
+        # MegaMoE is the SM100/NVLink path. SM120 RTX cards have no NVLink,
+        # so fall back to explicit token dispatch/combine and local expert
+        # shard execution instead of selecting an incompatible kernel.
+        deepep_cls = next((c for c in _STRATEGY_PRIORITY if c.name == "deepep"), None)
+        if deepep_cls is not None and deepep_cls.can_handle(cfg):
+            return deepep_cls
 
         raise RuntimeError(
-            "DSV4 EP MoE requires MegaMoEStrategy by default; fallback to "
-            "DeepEP/LocalLoop is disabled. "
+            "DSV4 EP MoE requires either MegaMoE or DeepEP dispatch/combine. "
             f"layer_id={cfg.layer_id}, ep_size={cfg.ep_size}. "
-            f"Reason: {_mega_moe_disabled_or_unavailable_reason()}."
+            "Neither distributed strategy is available in this runtime."
         )
 
     for cls in _STRATEGY_PRIORITY:

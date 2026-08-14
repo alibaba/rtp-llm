@@ -72,6 +72,49 @@ def validate_slot_mapping(
     )
 
 
+def validate_topk_lens(site: str, topk_lens, *, width: int) -> None:
+    if not invalid_kv_access_validation_enabled():
+        return
+
+    lens = topk_lens.detach().reshape(-1).long()
+    invalid = (lens < 0) | (lens > int(width))
+    if not bool(invalid.any().item()):
+        return
+
+    limit = invalid_kv_access_dump_limit()
+    bad = invalid.nonzero(as_tuple=False).flatten()[:limit]
+    raise RuntimeError(
+        f"DSV4 invalid Top-K length precheck failed at {site}: "
+        f"width={width} lens_shape={tuple(topk_lens.shape)} "
+        f"sample_indices={bad.detach().cpu().tolist()} "
+        f"sample_lens={lens[bad].detach().cpu().tolist()}"
+    )
+
+
+def validate_topk_prefix(site: str, indices, topk_lens) -> None:
+    if not invalid_kv_access_validation_enabled():
+        return
+
+    idx = indices.detach()
+    if idx.dim() == 3:
+        idx = idx.squeeze(1)
+    lens = topk_lens.detach().reshape(-1).long()
+    cols = __import__("torch").arange(idx.shape[-1], device=idx.device).unsqueeze(0)
+    invalid = (cols < lens.unsqueeze(1)) & (idx < 0)
+    if not bool(invalid.any().item()):
+        return
+
+    limit = invalid_kv_access_dump_limit()
+    bad = invalid.nonzero(as_tuple=False)[:limit]
+    raise RuntimeError(
+        f"DSV4 invalid Top-K prefix precheck failed at {site}: "
+        f"indices_shape={tuple(indices.shape)} lens_shape={tuple(topk_lens.shape)} "
+        f"sample_rows={bad[:, 0].detach().cpu().tolist()} "
+        f"sample_cols={bad[:, 1].detach().cpu().tolist()} "
+        f"sample_lens={lens[bad[:, 0]].detach().cpu().tolist()}"
+    )
+
+
 def validate_block_table_lookup(
     site: str,
     block_table,

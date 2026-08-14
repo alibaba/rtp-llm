@@ -87,8 +87,17 @@ def _topk_v3_enabled() -> bool:
     return os.environ.get("DSV4_TOPK_V3", "1") != "0"
 
 
-def _fp8_prefill_fast_topk_enabled() -> bool:
+def _fp8_prefill_fast_topk_enabled(logits: torch.Tensor | None = None) -> bool:
     if not _FAST_PREFILL_TOPK_OK:
+        return False
+    if (
+        logits is not None
+        and logits.is_cuda
+        and torch.cuda.get_device_capability(logits.device)[0] == 12
+    ):
+        # fast_topk_v2_variable uses an invalid launch configuration on SM120.
+        # The vLLM-vendored per-row radix/insertion kernel below is native CUDA
+        # and has full SM120 coverage, so select it rather than Torch Top-K.
         return False
     return os.environ.get("DSV4_PREFILL_FAST_TOPK", "1") != "0"
 
@@ -97,10 +106,19 @@ def _fp8_prefill_topk_force_radix_sort() -> bool:
     return os.environ.get("DSV4_PREFILL_TOPK_FORCE_RADIX", "1") != "0"
 
 
-def _fp8_prefill_topk_use_torch() -> bool:
-    return (
-        os.environ.get("DSV4_INDEXER_TOPK_BACKEND", "auto").strip().lower() == "torch"
-    )
+def _fp8_prefill_topk_use_torch(logits: torch.Tensor | None = None) -> bool:
+    backend = os.environ.get("DSV4_INDEXER_TOPK_BACKEND", "auto").strip().lower()
+    if backend == "torch":
+        return True
+    if backend not in ("auto", "cuda"):
+        raise ValueError(
+            "DSV4_INDEXER_TOPK_BACKEND must be one of auto|cuda|torch, "
+            f"got {backend!r}"
+        )
+    # The prefill Top-K implementation is vendored from vLLM and compiled for
+    # the active CUDA architecture.  SM120 is supported by that kernel; do not
+    # route workstation Blackwell GPUs through the dense Torch mask/topk path.
+    return False
 
 
 def _fp8_prefill_topk_canonicalize() -> bool:
@@ -109,6 +127,18 @@ def _fp8_prefill_topk_canonicalize() -> bool:
         "true",
         "yes",
         "on",
+    )
+
+
+def _canonicalize_prefill_topk_out(out: torch.Tensor) -> None:
+    """Sort valid cache offsets while preserving the ``valid..., -1...`` ABI."""
+    sentinel = torch.iinfo(torch.int32).max
+    sortable = torch.where(out >= 0, out, torch.full_like(out, sentinel))
+    sorted_idx = torch.sort(sortable, dim=-1).values
+    out.copy_(
+        torch.where(
+            sorted_idx == sentinel, torch.full_like(sorted_idx, -1), sorted_idx
+        )
     )
 
 
@@ -132,14 +162,7 @@ def _run_prefill_topk_torch(
     lengths = (row_ends - row_starts).unsqueeze(1)
     indices = torch.where(indices < lengths, indices, torch.full_like(indices, -1))
     if _fp8_prefill_topk_canonicalize():
-        sentinel = torch.iinfo(torch.int32).max
-        sortable = torch.where(
-            indices >= 0, indices, torch.full_like(indices, sentinel)
-        )
-        sorted_idx = torch.sort(sortable, dim=-1).values
-        indices = torch.where(
-            sorted_idx == sentinel, torch.full_like(sorted_idx, -1), sorted_idx
-        )
+        _canonicalize_prefill_topk_out(indices)
     out[:, :k_eff].copy_(indices)
 
 
@@ -151,7 +174,7 @@ def _run_prefill_topk(
     topk: int,
     compress_ratio: int,
 ) -> None:
-    if _fp8_prefill_topk_use_torch():
+    if _fp8_prefill_topk_use_torch(logits):
         _run_prefill_topk_torch(logits, row_starts, row_ends, out, topk)
         return
 
@@ -159,7 +182,7 @@ def _run_prefill_topk(
     # length so the 16k policy matches the user-visible prefill length.
     estimated_input_tokens = int(logits.size(1)) * int(compress_ratio)
     if (
-        _fp8_prefill_fast_topk_enabled()
+        _fp8_prefill_fast_topk_enabled(logits)
         and int(topk) in (512, 1024, 2048)
         and estimated_input_tokens <= _FAST_PREFILL_TOPK_MAX_INPUT_TOKENS
     ):
@@ -167,6 +190,8 @@ def _run_prefill_topk(
         rtp_llm_ops.fast_topk_v2_variable(
             logits, out, lengths, row_starts.contiguous(), int(topk)
         )
+        if _fp8_prefill_topk_canonicalize():
+            _canonicalize_prefill_topk_out(out)
         return
 
     rtp_llm_ops.dsv4_top_k_per_row_prefill(
@@ -180,6 +205,8 @@ def _run_prefill_topk(
         int(topk),
         _fp8_prefill_topk_force_radix_sort(),
     )
+    if _fp8_prefill_topk_canonicalize():
+        _canonicalize_prefill_topk_out(out)
 
 
 def _fp8_prefill_score_chunk_rows() -> int:

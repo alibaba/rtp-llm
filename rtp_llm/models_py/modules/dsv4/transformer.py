@@ -248,6 +248,35 @@ class V4Transformer(nn.Module):
         # the no-auxiliary-tensor default for ordinary inference and MTP.
         self.capture_aux_hidden_layer_ids: tuple[int, ...] = ()
 
+    def embed_full(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Return the full hidden embedding on every TP rank.
+
+        RTP's DSV4 checkpoint loader shards the embedding hidden dimension for
+        tensor parallelism. mHC is defined over the full model dimension, so
+        reconstruct the last dimension before expanding the HC streams.
+        """
+        h = self.embed(input_ids)
+        if h.size(-1) == self.args.dim:
+            return h
+        if self.args.dim % h.size(-1) != 0:
+            raise ValueError(
+                "DSV4 TP embedding shard has incompatible hidden size: "
+                f"local={h.size(-1)} dim={self.args.dim}"
+            )
+        shard_count = self.args.dim // h.size(-1)
+        from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+
+        leading = h.shape[:-1]
+        local_dim = h.size(-1)
+        flat = h.reshape(-1, local_dim).contiguous()
+        gathered = all_gather(flat, group=Group.TP)
+        return (
+            gathered.view(shard_count, flat.size(0), local_dim)
+            .transpose(0, 1)
+            .contiguous()
+            .view(*leading, self.args.dim)
+        )
+
     def set_aux_hidden_capture_layer_ids(self, layer_ids: Sequence[int]) -> None:
         """Configure target residual-stream layers exported to DSpARK.
 
@@ -455,7 +484,7 @@ class V4Transformer(nn.Module):
             input_ids_2d = input_ids.view(B, q_len)
         else:
             input_ids_2d = input_ids
-        h = self.embed(input_ids_2d)  # [B, q_len, dim]
+        h = self.embed_full(input_ids_2d)  # [B, q_len, dim]
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, q_len, hc, dim]
         for layer in self.layers:
             h = layer.forward_decode(h, attn_metadata, input_ids_2d, kv_cache=kv_cache)
@@ -544,7 +573,7 @@ class V4Transformer(nn.Module):
             # begin() may suppress this forward (MOEDBG_MAX_SEQ); honour it.
             if _rt._get_buf() is None:
                 _rt_on = False
-        h = self.embed(input_ids)  # [B, S, d]
+        h = self.embed_full(input_ids)  # [B, S, d]
         if _rt_on:
             _rt.record("embed_out", h)
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, S, hc, d]

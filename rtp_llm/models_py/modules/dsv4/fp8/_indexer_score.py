@@ -95,6 +95,11 @@ def fp8_paged_indexer_score(
     downstream topk needs ``-inf`` there; default False to save the
     extra mask).
     """
+    if q_fp8.is_cuda and torch.cuda.get_device_capability(q_fp8.device)[0] == 12:
+        return _fp8_paged_indexer_score_sm120(
+            q_fp8, w_fold, kv_pool_uint8, block_table, context_lens,
+            block_size, max_ctx_len,
+        )
     assert _HAS_DEEP_GEMM, "deep_gemm.fp8_paged_mqa_logits not available"
     assert q_fp8.dtype == torch.float8_e4m3fn, f"q_fp8 dtype={q_fp8.dtype}"
     assert q_fp8.dim() == 4 and q_fp8.shape[-1] == INDEXER_HEAD_DIM
@@ -126,6 +131,73 @@ def fp8_paged_indexer_score(
         schedule,
         max_ctx_len,
     )
+
+
+def _fp8_paged_indexer_score_sm120(
+    q_fp8: torch.Tensor,
+    w_fold: torch.Tensor,
+    kv_pool_uint8: torch.Tensor,
+    block_table: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_size: int,
+    max_ctx_len: int,
+) -> torch.Tensor:
+    """Correctness implementation for DeepGEMM paged MQA on SM120."""
+    B, next_n, H, D = q_fp8.shape
+    rows = B * next_n
+    out = torch.full(
+        (rows, max_ctx_len), float("-inf"), dtype=torch.float32,
+        device=q_fp8.device,
+    )
+    q = q_fp8.float().view(rows, H, D)
+    weights = w_fold.float().view(rows, H)
+    byte_pool = kv_pool_uint8.reshape(-1, INDEXER_ENTRY_BYTES)
+    capturing = torch.cuda.is_current_stream_capturing()
+    for b in range(B):
+        for n in range(next_n):
+            row = b * next_n + n
+            if capturing:
+                pos = torch.arange(
+                    max_ctx_len, device=q_fp8.device, dtype=torch.long
+                )
+                valid = pos < context_lens[b, n]
+                block_ids = (
+                    block_table[b]
+                    .long()
+                    .index_select(0, pos // block_size)
+                    .clamp_min_(0)
+                )
+                slots = block_ids * block_size + pos.remainder(block_size)
+                packed = byte_pool.index_select(0, slots)
+                k_fp8 = (
+                    packed[:, :D].contiguous().view(torch.float8_e4m3fn).float()
+                )
+                k_scale = (
+                    packed[:, D : D + 4]
+                    .contiguous()
+                    .view(torch.float32)
+                    .view(-1)
+                )
+                k = k_fp8 * k_scale[:, None]
+                per_head = torch.einsum("hd,td->ht", q[row], k).relu_()
+                score = torch.einsum("h,ht->t", weights[row], per_head)
+                out[row] = torch.where(valid, score, out[row])
+                continue
+            length = min(int(context_lens[b, n].item()), max_ctx_len)
+            if length <= 0:
+                continue
+            pos = torch.arange(length, device=q_fp8.device, dtype=torch.long)
+            block_ids = block_table[b].long().index_select(0, pos // block_size)
+            slots = block_ids * block_size + pos.remainder(block_size)
+            packed = byte_pool.index_select(0, slots)
+            k_fp8 = packed[:, :D].contiguous().view(torch.float8_e4m3fn).float()
+            k_scale = packed[:, D:D + 4].contiguous().view(torch.float32).view(-1)
+            k = k_fp8 * k_scale[:, None]
+            per_head = torch.einsum("hd,td->ht", q[row], k).relu_()
+            out[row, :length] = torch.einsum(
+                "h,ht->t", weights[row], per_head
+            )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +238,29 @@ def fp8_mqa_indexer_score(
     ``cu_seqlen_ke[m]`` are left untouched; the topk-with-causal-mask path
     in :class:`Indexer.forward` re-applies its own ``q_pos`` causal cap.
     """
+    if q_fp8.is_cuda and torch.cuda.get_device_capability(q_fp8.device)[0] == 12:
+        # DeepGEMM's attention API rejects SM120.  Keep FP8 cache storage and
+        # reproduce the indexer score math in bounded chunks for correctness.
+        q = q_fp8.float()
+        k = k_quant.float() * k_scale.float().unsqueeze(-1)
+        rows, _, _ = q.shape
+        cols = k.shape[0]
+        out = torch.empty(rows, cols, dtype=torch.float32, device=q.device)
+        chunk_rows = 32
+        for start in range(0, rows, chunk_rows):
+            end = min(start + chunk_rows, rows)
+            per_head = torch.einsum("mhd,nd->mhn", q[start:end], k).relu_()
+            out[start:end] = torch.einsum(
+                "mh,mhn->mn", w_fold[start:end].float(), per_head
+            )
+        if clean_logits:
+            positions = torch.arange(cols, device=q.device).unsqueeze(0)
+            valid = (positions >= cu_seqlen_ks.long().unsqueeze(1)) & (
+                positions < cu_seqlen_ke.long().unsqueeze(1)
+            )
+            out.masked_fill_(~valid, float("-inf"))
+        return out
+
     assert _HAS_DEEP_GEMM_MQA, "deep_gemm.fp8_mqa_logits not available"
     assert q_fp8.dtype == torch.float8_e4m3fn and q_fp8.dim() == 3
     assert q_fp8.shape[-1] == INDEXER_HEAD_DIM

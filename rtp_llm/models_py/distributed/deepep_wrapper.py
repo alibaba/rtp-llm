@@ -79,7 +79,12 @@ __all__ = [
 def use_accl_ep() -> bool:
     """Check if ACCL EP should be used based on device type."""
     device_type = get_device_type()
-    return not device_type == DeviceType.ROCm
+    # ACCL-EP is shipped as an architecture-specific prebuilt and currently has
+    # no SM120 device symbols.  Use the source-built DeepEP backend on Blackwell
+    # workstation GPUs instead.
+    if device_type == DeviceType.ROCm:
+        return False
+    return torch.cuda.get_device_capability()[0] != 12
 
 
 def allow_mnnvl() -> bool:

@@ -155,6 +155,15 @@ class _FakeLargeBlockKvCache:
     kernel_seq_size_per_block = 128
 
 
+class _FakeCp4SwaKvCache:
+    """CP4 fixed/SWA block-table rows cover 4 * 256 raw tokens."""
+
+    group_region_names = [SWA_KV]
+    group_seq_size_per_block = [1024]
+    seq_size_per_block = 256
+    kernel_seq_size_per_block = 128
+
+
 def _flat_positions(
     prefix_lengths: list[int], input_lengths: list[int], device
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -337,6 +346,33 @@ class GetWindowTopkIdxsVarlenTest(unittest.TestCase):
 # -------------------------------------------------------------------------
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for triton kernels")
 class BuildSwaPrefillMetaVarlenTest(unittest.TestCase):
+    def test_suffix_pool_mapping_rebases_compact_reuse_block_table(self):
+        seq_lens = torch.tensor([2048], dtype=torch.int32)
+        gather_lens = torch.tensor([127], dtype=torch.int32)
+        compact_bt = torch.tensor([[41, 42, 43]], dtype=torch.int32)
+        actual = _build_suffix_pool_slot_mapping(
+            block_table=compact_bt,
+            seq_lens=seq_lens,
+            gather_lens=gather_lens,
+            entries_per_block=132,
+            tokens_per_block_for_block_table=256,
+            ring_entries=132,
+        )
+        positions = torch.arange(1921, 2048, dtype=torch.long)
+        expected = 41 * 132 + positions.remainder(132)
+        torch.testing.assert_close(actual[0], expected)
+
+        full_bt = torch.arange(34, 42, dtype=torch.int32).view(1, -1)
+        full_actual = _build_suffix_pool_slot_mapping(
+            block_table=full_bt,
+            seq_lens=seq_lens,
+            gather_lens=gather_lens,
+            entries_per_block=132,
+            tokens_per_block_for_block_table=256,
+            ring_entries=132,
+        )
+        torch.testing.assert_close(full_actual[0], expected)
+
 
     def setUp(self) -> None:
         self.device = torch.device("cuda")
@@ -790,6 +826,31 @@ class BuildSwaPrefillMetaVarlenTest(unittest.TestCase):
                 self.assertEqual(int((sm >= 0).sum().item()), 17)
                 self.assertEqual(int(sm[0].item()), 1 * ring + (sp % ring))
                 self.assertEqual(int(sm[-1].item()), 1 * ring + ((sp + 16) % ring))
+
+    def test_cp4_group_stride_preserves_long_prompt_tail(self) -> None:
+        """Use the SWA group row size, not scalar seq_size_per_block.
+
+        A 2378-token CP4 prompt has three 1024-token SWA table rows.  The
+        final row must retain positions 2251..2377 in its 132-entry ring.
+        Regresses the production failure where scalar 256 indexed absent
+        columns and left the entire request tail mapped to -1.
+        """
+        ring = 132
+        stub = self._build_stub(
+            win=128,
+            compress_ratio=0,
+            n_reqs=1,
+            blocks_per_req=3,
+            eb=ring,
+            kv_cache=_FakeCp4SwaKvCache(),
+        )
+        meta = self._build_meta_varlen(stub, [0], [2378])
+        self.assertIsNotNone(meta.slot_mapping)
+        sm = meta.slot_mapping
+        self.assertTrue(torch.all(sm[2246:2378] >= 0))
+        self.assertEqual(int(sm[2245].item()), -1)
+        self.assertEqual(int(sm[2251].item()), 3 * ring + (2251 % ring))
+        self.assertEqual(int(sm[2377].item()), 3 * ring + (2377 % ring))
 
     # ----- Warmup (no kv_cache) -------------------------------------------
     def test_warmup_no_kv_cache_topk_length_only(self) -> None:
