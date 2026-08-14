@@ -54,3 +54,12 @@ py_test(
         ":test_util",
     ],
 )
+
+py_test(
+    name = "numeric_util_test",
+    srcs = ["numeric_util_test.py"],
+    deps = [
+        ":test_util",
+        ":torch",
+    ],
+)
