@@ -23,6 +23,38 @@ except Exception as e:
     rope = None
 
 
+def _resolve_paged_indexer_inputs(
+    query_count: int, fmha_params: Any, attention_inputs: Any
+) -> tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+    """Resolve per-query metadata for decode and target verification."""
+    if getattr(attention_inputs, "is_target_verify", False):
+        context_lens = fmha_params.expanded_seq_lens
+        request_indices = fmha_params.batch_indice_d
+        cu_seqlens_q = torch.arange(
+            query_count + 1,
+            dtype=torch.int32,
+            device=context_lens.device,
+        )
+    else:
+        context_lens = fmha_params.kvlen_d
+        request_indices = None
+        cu_seqlens_q = attention_inputs.decode_cu_seqlens_d
+
+    if context_lens.ndim != 1 or context_lens.numel() != query_count:
+        raise ValueError(
+            "paged indexer requires one context length per query row, got "
+            f"{tuple(context_lens.shape)} for {query_count} rows"
+        )
+    if request_indices is not None and (
+        request_indices.ndim != 1 or request_indices.numel() != query_count
+    ):
+        raise ValueError(
+            "target verification requires one request index per query row, got "
+            f"{tuple(request_indices.shape)} for {query_count} rows"
+        )
+    return context_lens, request_indices, cu_seqlens_q
+
+
 def _unpack_ue8m0_scale(sf_packed: torch.Tensor) -> torch.Tensor:
     """
     Unpack UE8M0 scale format.
@@ -381,12 +413,18 @@ class IndexerOp(nn.Module):
             kv_cache_fp8.shape[0], self.blocksize, num_heads_kv, head_dim_with_sf
         ).view(dtype=torch.uint8)
 
-        max_seq_len = (
-            attention_inputs.kv_cache_kernel_block_id_device.shape[1] * self.blocksize
+        block_tables = attention_inputs.kv_cache_kernel_block_id_device
+        max_seq_len = block_tables.shape[1] * self.blocksize
+        context_lens, request_indices, cu_seqlens_q = _resolve_paged_indexer_inputs(
+            q_fp8.shape[0], fmha_params, attention_inputs
         )
+        if request_indices is not None:
+            block_tables = torch.index_select(
+                block_tables, 0, request_indices.to(dtype=torch.int64)
+            )
 
         schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
-            fmha_params.kvlen_d,
+            context_lens,
             self.blocksize,
             deep_gemm.get_num_sms(),
         )
@@ -395,24 +433,27 @@ class IndexerOp(nn.Module):
             q_fp8.unsqueeze(1),
             kv_cache_fp8.view(dtype=torch.uint8),
             weights,
-            fmha_params.kvlen_d,
-            attention_inputs.kv_cache_kernel_block_id_device,
+            context_lens,
+            block_tables,
             schedule_metadata,
             max_seq_len,
             clean_logits=False,
         )
 
         assert (
-            fmha_params.expanded_seq_lens.device == logits.device
-        ), "expanded_seq_lens must be on the same device as logits"
+            context_lens.device == logits.device
+        ), "context_lens must be on the same device as logits"
         assert (
-            attention_inputs.decode_cu_seqlens_d.device == logits.device
-        ), "cu_seqlens must be on the same device as logits"
+            cu_seqlens_q.device == logits.device
+        ), "cu_seqlens_q must be on the same device as logits"
+        assert (
+            block_tables.device == logits.device
+        ), "block_tables must be on the same device as logits"
 
         topk_result = fast_topk_transform_fused(
             score=logits,
-            lengths=fmha_params.expanded_seq_lens,  # expanded_seq_lens
-            cu_seqlens_q=attention_inputs.decode_cu_seqlens_d,  # bs + 1
+            lengths=context_lens,
+            cu_seqlens_q=cu_seqlens_q,
             topk=self.index_topk,
             row_starts=None,
         )
