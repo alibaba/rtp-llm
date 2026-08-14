@@ -404,6 +404,10 @@ class KimiK3(BaseModel):
     def _create_python_model(self):
         from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3Model
 
+        # Release inactive blocks left by checkpoint loading before the expert
+        # weight transform allocates its large temporary buffer.
+        torch.cuda.empty_cache()
+
         self.py_model = KimiK3Model(
             self.model_config,
             self.parallelism_config,
@@ -413,6 +417,9 @@ class KimiK3(BaseModel):
             py_hw_kernel_config=self.hw_kernel_config,
             device_resource_config=self.device_resource_config,
         )
+        # Release rank-dependent inactive blocks before the native engine
+        # allocates KV cache and workspaces.
+        torch.cuda.empty_cache()
         return self.py_model
 
     @staticmethod
