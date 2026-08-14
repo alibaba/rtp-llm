@@ -3,15 +3,21 @@
 load("@rules_python//python:defs.bzl", "py_test")
 
 def sm120_dsv4_prefill_perf(name, parallel_size, use_cp):
+    # TP4 is memory-bound on the 71 GiB RTX PRO 5000: 64K reaches the
+    # attention/compressor workspace with less than one 64 MiB allocation
+    # free.  TP8 shards enough model state to retain the 64K coverage.
+    input_len = "32768" if not use_cp and parallel_size == 4 else "65536"
+    max_seq_len = "32770" if input_len == "32768" else "65538"
+    fixed_pool_blocks = "128" if not use_cp and parallel_size == 4 else "256"
     engine_args = [
         "--model_type", "deepseek_v4",
         "--checkpoint_path", "/home/tanboyu.tby/models/DeepSeek-V4-Flash-0731",
         "--tokenizer_path", "/home/tanboyu.tby/models/DeepSeek-V4-Flash-0731",
-        "--batch_size", "1", "--input_len", "65536", "--partial", "2",
+        "--batch_size", "1", "--input_len", input_len, "--partial", "2",
         "--decode_test_length", "2", "--seq_size_per_block", "256",
         "--kernel_seq_size_per_block", "128", "--tp_size", str(parallel_size),
         "--dp_size", "1", "--ep_size", str(parallel_size),
-        "--world_size", str(parallel_size), "--max_seq_len", "65538",
+        "--world_size", str(parallel_size), "--max_seq_len", max_seq_len,
         "--use_deepep_moe", "1", "--use_deepep_low_latency", "0",
         "--act_type", "BF16", "--fp8_kv_cache", "1",
         "--load_method", "fastsafetensors", "--concurrency_limit", "1",
@@ -21,14 +27,14 @@ def sm120_dsv4_prefill_perf(name, parallel_size, use_cp):
     if use_cp:
         engine_args += ["--cp_rotate_method", "ALL_GATHER"]
     target_env = {
-        "WORLD_SIZE": str(parallel_size), "DSV4_FIXED_POOL_BLOCKS": "256",
+        "WORLD_SIZE": str(parallel_size), "DSV4_FIXED_POOL_BLOCKS": fixed_pool_blocks,
+        "DSV4_CHUNK_TOKENS": "4096",
         "DSV4_MOE_CHUNK_TOKENS": "4096", "DSV4_SM120_FLASHINFER_PAGE64": "1",
         "DSV4_BF16_VLLM": "0", "DSV4_FUSED_PREPARE": "1",
         "ENABLE_FP32_LM_HEAD": "0", "PERF_GRID_WARMUP_RUNS": "1",
         "PERF_FORMAL_WARMUP_RUNS": "1", "PERF_MEASURE_RUNS": "3",
         "PERF_PROFILE_RUNS": "1", "PERF_PROFILE_FLUSH_SLEEP": "120",
-        "GEN_TIMELINE_SYNC": "1", "NCCL_P2P_DISABLE": "1",
-        "NCCL_IB_DISABLE": "1",
+        "GEN_TIMELINE_SYNC": "1",
     }
     if use_cp:
         target_env["PREFILL_CP_KV_CACHE_SHARDED"] = "1"
