@@ -227,11 +227,10 @@ TEST_F(NormalCacheStoreLoadAdmissionTest, PositiveSubmillisecondBudgetRoundsUp) 
     const auto now = std::chrono::steady_clock::time_point(std::chrono::seconds(1));
     uint32_t   remaining_timeout_ms = 0;
 
-    EXPECT_TRUE(cache_store_->getRemainingTimeoutMs(now + std::chrono::nanoseconds(1),
-                                                    now,
-                                                    remaining_timeout_ms));
+    EXPECT_TRUE(getCacheStoreLoadRemainingTimeoutMs(
+        now + std::chrono::nanoseconds(1), now, remaining_timeout_ms));
     EXPECT_EQ(1, remaining_timeout_ms);
-    EXPECT_FALSE(cache_store_->getRemainingTimeoutMs(now, now, remaining_timeout_ms));
+    EXPECT_FALSE(getCacheStoreLoadRemainingTimeoutMs(now, now, remaining_timeout_ms));
     EXPECT_EQ(0, remaining_timeout_ms);
 }
 
