@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <cstdlib>
 #include <string>
 
@@ -13,6 +14,21 @@ namespace {
 bool asyncDebugEnabled() {
     const char* env = std::getenv("RTP_LLM_ASYNC_DEBUG");
     return env != nullptr && std::string(env) == "1";
+}
+
+bool pdStateTraceLogEnabled() {
+    const char* env = std::getenv("KIMI_K3_PD_TRACE_LOG_ENABLE");
+    return env != nullptr && std::string(env) == "1";
+}
+
+void logWaitingOperation(const char* event, GenerateStream* stream, int64_t cost_time_us = 0) {
+    if (!pdStateTraceLogEnabled()) {
+        return;
+    }
+    RTP_LLM_LOG_INFO("PD state trace: event=%s request_id=%ld cost_us=%ld",
+                     event,
+                     stream != nullptr ? stream->streamId() : int64_t{-1},
+                     cost_time_us);
 }
 
 }  // namespace
@@ -62,14 +78,20 @@ void GenerateStateMachine::handleWaiting() {
         if (stream != nullptr) {
             stream->recordWaitLatency();
         }
+        auto operation_begin_us = currentTimeUs();
+        logWaitingOperation("init_kv_block_begin", stream);
         auto result = stream_cache_resource_->initKVBlock(reserve_step_);
+        logWaitingOperation("init_kv_block_end", stream, currentTimeUs() - operation_begin_us);
         if (!result.ok()) {
             error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
             status.store(StreamState::FINISHED, std::memory_order_release);
             releaseResource();
             return;
         }
+        operation_begin_us = currentTimeUs();
+        logWaitingOperation("async_load_cache_begin", stream);
         bool ret = stream_cache_resource_->asyncLoadCache();
+        logWaitingOperation("async_load_cache_end", stream, currentTimeUs() - operation_begin_us);
         // 设置 LoadInitiated 标志，表示已尝试asyncLoadCache. 当前实现即便asyncLoadCache失败也不再重试
         reportEvent(StreamEvents::LoadInitiated);
         if (ret) {
@@ -151,7 +173,7 @@ void GenerateStateMachine::handleRunning() {
         if (normal_override > 0) {
             seq_len_override = normal_override;
         } else {
-            const auto& mtp_state = stream->getMtpAsyncDeviceState();
+            const auto& mtp_state    = stream->getMtpAsyncDeviceState();
             const int   mtp_override = mtp_state.next_real_seq_len;
             if (mtp_override > 0) {
                 seq_len_override = mtp_override;

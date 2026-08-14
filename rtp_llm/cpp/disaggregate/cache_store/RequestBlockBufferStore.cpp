@@ -194,7 +194,9 @@ std::shared_ptr<BlockBuffer> RequestBlockBufferStore::makeValidBlock(const std::
     if (!copyBlock(new_block, block)) {
         return nullptr;
     }
-    if (kimiK3PdTraceLogEnabled() && block->key.rfind("kv_model_id_", 0) == 0) {
+    const bool is_k3_cache_key =
+        block->key.rfind("kv_model_id_", 0) == 0 || block->key.rfind("linear_segment_", 0) == 0;
+    if (kimiK3PdTraceLogEnabled() && is_k3_cache_key) {
         size_t         hashed_size = 0;
         const uint64_t hash        = fnv1aPrefix(new_block->addr.get(), new_block->len, &hashed_size);
         RTP_LLM_LOG_INFO("[K3_PD_TRACE] event=cache_store_host_copy key=%s bytes=%u prefix_bytes=%zu "

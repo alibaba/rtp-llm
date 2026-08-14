@@ -67,6 +67,30 @@ bool hasSegmentedLinearCacheGroup(const CacheConfig& cache_config) {
     });
 }
 
+bool k3PdTraceLogEnabled() {
+    const char* value = std::getenv("KIMI_K3_PD_TRACE_LOG_ENABLE");
+    return value != nullptr && std::string(value) == "1";
+}
+
+void logDecodeStageTrace(const char* event, DecodeGenerateContext& decode_context) {
+    if (!k3PdTraceLogEnabled()) {
+        return;
+    }
+    const auto stream       = decode_context.getStream();
+    const auto stream_error = stream ? stream->statusInfo().hasError() : false;
+    RTP_LLM_LOG_INFO("Decode request trace: event=%s request_id=%ld request_key=%s stage=%d "
+                     "stream_status=%s stream_error=%d context_error=%d context_error_code=%d peers=%zu",
+                     event,
+                     decode_context.request_id,
+                     decode_context.request_key.c_str(),
+                     static_cast<int>(decode_context.stat_info.stage),
+                     stream ? StreamStateToString(stream->getStatus()).c_str() : "NO_STREAM",
+                     stream_error,
+                     decode_context.error_info.hasError(),
+                     static_cast<int>(decode_context.error_info.code()),
+                     decode_context.peer_addrs.size());
+}
+
 }  // namespace
 
 grpc::Status DecodeRpcServer::init(const EngineInitParams&                                maga_init_params,
@@ -114,6 +138,7 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
     for (auto& addr : allocate_request.peer_addrs()) {
         decode_context.peer_addrs.push_back(addr);
     }
+    logDecodeStageTrace("allocate_received", decode_context);
     decode_context.prefill_cp_size                   = std::max(1, allocate_request.prefill_cp_size());
     decode_context.prefill_seq_size_per_block        = allocate_request.prefill_seq_size_per_block();
     decode_context.prefill_kernel_seq_size_per_block = allocate_request.prefill_kernel_seq_size_per_block();
@@ -250,8 +275,8 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
         }
         error_msg = "request: [" + decode_context.request_key + "] " + error_msg;
         RTP_LLM_LOG_ERROR(error_msg);
-        decode_context.error_status = serializeErrorMsg(decode_context.request_key,
-                                                        ErrorInfo(stream_error.code(), error_msg));
+        decode_context.error_status =
+            serializeErrorMsg(decode_context.request_key, ErrorInfo(stream_error.code(), error_msg));
         return;
     }
 
@@ -259,6 +284,8 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
                       decode_context.rpc_context.grpc_stream->Write(GenerateOutputsPB()),
                       grpc::StatusCode::INTERNAL,
                       "failed to write allocate output");
+
+    logDecodeStageTrace("allocate_done", decode_context);
 
     RTP_LLM_LOG_DEBUG("request [%s] allocate resource done", decode_context.request_key.c_str());
 }
@@ -271,9 +298,30 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
     GenerateRequestPB load_request;
     GRPC_RET_IF_ERROR(
         decode_context, grpc_stream->Read(&load_request), grpc::StatusCode::INTERNAL, "failed to get loadReqeust");
+    const auto load_stage = load_request.stage();
+    GRPC_RET_IF_ERROR(decode_context,
+                      load_stage == RemoteStage::LOAD || load_stage == RemoteStage::ALLOCATE,
+                      grpc::StatusCode::INTERNAL,
+                      "message second status is neither RemoteStage::LOAD nor legacy ALLOCATE");
+    if (k3PdTraceLogEnabled() && load_stage == RemoteStage::ALLOCATE) {
+        RTP_LLM_LOG_WARNING("Decode request trace: event=legacy_load_stage request_id=%ld request_key=%s",
+                            decode_context.request_id,
+                            decode_context.request_key.c_str());
+    }
+    if (k3PdTraceLogEnabled()) {
+        RTP_LLM_LOG_INFO("Decode request trace: event=load_received request_id=%ld request_key=%s stage=%d",
+                         decode_context.request_id,
+                         decode_context.request_key.c_str(),
+                         static_cast<int>(load_request.stage()));
+    }
     decode_context.time_info.updateLoadBeginTime();
+    logDecodeStageTrace("load_fanout_begin", decode_context);
     auto error_info = loadCacheForAllRank(decode_context);
     decode_context.time_info.updateLoadEndTime();
+    if (!error_info.ok()) {
+        decode_context.error_info = error_info;
+    }
+    logDecodeStageTrace("load_fanout_end", decode_context);
     if (!error_info.ok()) {
         RTP_LLM_LOG_WARNING("request [%s] load kv cache failed, error code [%s], cost time [%ld] ms",
                             decode_context.request_key.c_str(),
@@ -285,9 +333,7 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
     load_response.mutable_error_info()->set_error_code(transErrorCodeToRPC(error_info.code()));
     GRPC_RET_IF_ERROR(
         decode_context, grpc_stream->Write(load_response), grpc::StatusCode::INTERNAL, "send load response failed");
-    if (!error_info.ok()) {
-        decode_context.error_info = error_info;
-    }
+    logDecodeStageTrace("load_response_done", decode_context);
     GRPC_RET_IF_ERROR(decode_context, error_info.ok(), grpc::StatusCode::INTERNAL, error_info.ToString().c_str());
     RTP_LLM_LOG_DEBUG("request [%s] load cache from prefill done", decode_context.request_key.c_str());
 }
@@ -306,6 +352,16 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                       generate_request.stage() == RemoteStage::GENERATE,
                       grpc::StatusCode::INTERNAL,
                       "message first status != RemoteStage::GENERATE");
+    if (k3PdTraceLogEnabled()) {
+        RTP_LLM_LOG_INFO("Decode request trace: event=generate_received request_id=%ld request_key=%s "
+                         "propose_tokens=%d propose_probs_bytes=%zu propose_hidden_bytes=%zu position_ids=%d",
+                         decode_context.request_id,
+                         decode_context.request_key.c_str(),
+                         generate_request.propose_token_ids_size(),
+                         generate_request.propose_probs().ByteSizeLong(),
+                         generate_request.propose_hidden().ByteSizeLong(),
+                         generate_request.position_ids_size());
+    }
     decode_context.time_info.updateGenerateBeginTime();
     generate_stream->setIsContextStream(false);
     generate_stream->step();
@@ -373,6 +429,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     RTP_LLM_LOG_DEBUG(
         "decode init stream[%s]: %s", generate_stream->streamLogTag().c_str(), generate_stream->debugString().c_str());
     engine_->enqueue(generate_stream);
+    logDecodeStageTrace("generate_enqueued", decode_context);
     RTP_LLM_LOG_DEBUG("request [%s] enqueue success", decode_context.request_key.c_str());
     decode_context.error_status =
         pollStreamOutput(decode_context.server_context,
@@ -380,6 +437,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                          dynamic_cast<grpc::internal::WriterInterface<GenerateOutputsPB>*>(grpc_stream),
                          generate_stream);
     decode_context.time_info.updateGenerateEndTime();
+    logDecodeStageTrace("generate_poll_done", decode_context);
     meta_->dequeue(decode_context.request_id, decode_context.getStream());
 
     RTP_LLM_LOG_DEBUG("request [%s] local generate done", decode_context.request_key.c_str());
@@ -1331,6 +1389,18 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                          const BroadcastLoadRequestPB* request,
                                          BroadcastLoadResponsePB*      response) {
     RTP_LLM_PROFILE_FUNCTION();
+    const auto trace_begin_time_us = currentTimeUs();
+    if (k3PdTraceLogEnabled()) {
+        RTP_LLM_LOG_INFO("Decode request trace: event=rank_load_begin request_id=%ld request_key=%s rank=%ld "
+                         "peers=%d cache_keys=%d groups=%d timeout_ms=%ld",
+                         request->request_id(),
+                         request->request_key().c_str(),
+                         maga_init_params_.parallelism_config.tp_rank,
+                         request->peer_addrs_size(),
+                         request->cache_keys_size(),
+                         request->group_block_ids_size(),
+                         request->timeout_ms());
+    }
     if (request->dp_rank() != maga_init_params_.parallelism_config.dp_rank) {
         RTP_LLM_LOG_WARNING("only load when in dp group, skip load for dp rank %d", request->dp_rank());
         return grpc::Status::OK;
@@ -1364,6 +1434,16 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     response->mutable_error_info()->set_error_code(transErrorCodeToRPC(error_info.code()));
     response->mutable_error_info()->set_error_message(error_info.ToString());
     response->set_done_time_us(currentTimeUs());
+    if (k3PdTraceLogEnabled()) {
+        RTP_LLM_LOG_INFO("Decode request trace: event=rank_load_end request_id=%ld request_key=%s rank=%ld "
+                         "cost_ms=%ld error_code=%d error_message=%s",
+                         request->request_id(),
+                         request->request_key().c_str(),
+                         maga_init_params_.parallelism_config.tp_rank,
+                         (currentTimeUs() - trace_begin_time_us) / 1000,
+                         static_cast<int>(error_info.code()),
+                         error_info.ToString().c_str());
+    }
     RTP_LLM_LOG_DEBUG("request: %s, remote load cache grpc done", request->request_key().c_str());
     return grpc::Status::OK;
 }

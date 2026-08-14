@@ -7,12 +7,43 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <unordered_set>
 
 using namespace std;
 namespace rtp_llm {
+
+namespace {
+
+bool pdScheduleTraceLogEnabled() {
+    const char* value = std::getenv("KIMI_K3_PD_TRACE_LOG_ENABLE");
+    return value != nullptr && std::string(value) == "1";
+}
+
+void logScheduleTransition(const char*              event,
+                           const GenerateStreamPtr& stream,
+                           StreamState              old_state,
+                           StreamState              new_state,
+                           size_t                   waiting_size,
+                           size_t                   loading_size,
+                           size_t                   running_size) {
+    if (!pdScheduleTraceLogEnabled()) {
+        return;
+    }
+    RTP_LLM_LOG_INFO("PD scheduler trace: event=%s request_id=%ld old_state=%s new_state=%s "
+                     "waiting=%zu loading=%zu running=%zu",
+                     event,
+                     stream->streamId(),
+                     StreamStateToString(old_state).c_str(),
+                     StreamStateToString(new_state).c_str(),
+                     waiting_size,
+                     loading_size,
+                     running_size);
+}
+
+}  // namespace
 
 FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_config,
                              const ModelConfig&                     model_config,
@@ -84,13 +115,13 @@ bool FIFOScheduler::checkInputLength(const GenerateStreamPtr& stream) {
     const auto reserve_step = stream->reserveStep();
     if (reserve_step > 0 && !(input_length <= max_seq_len_ && reserve_step <= max_seq_len_ - input_length)) {
         const auto allowed_input_length = reserve_step <= max_seq_len_ ? max_seq_len_ - reserve_step : 0;
-        auto       error_info           = autil::StringUtil::formatString(
-            "input len %zu with speculative reserve_step %zu exceeds max seq len %zu, "
-            "allowed max input len for speculative decoding is %zu",
-            input_length,
-            reserve_step,
-            max_seq_len_,
-            allowed_input_length);
+        auto       error_info =
+            autil::StringUtil::formatString("input len %zu with speculative reserve_step %zu exceeds max seq len %zu, "
+                                            "allowed max input len for speculative decoding is %zu",
+                                            input_length,
+                                            reserve_step,
+                                            max_seq_len_,
+                                            allowed_input_length);
         stream->reportError(ErrorCode::LONG_PROMPT_ERROR, error_info);
         return false;
     }
@@ -122,6 +153,13 @@ absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
         stream->recordSchedulerEnqueueTime(autil::TimeUtility::currentTimeInMicroSeconds());
         waiting_streams_.emplace_back(stream);
         schedule_trigger_ = true;
+        logScheduleTransition("enqueue",
+                              stream,
+                              stream->getStatus(),
+                              stream->getStatus(),
+                              waiting_streams_.size(),
+                              loading_cache_streams_.size(),
+                              running_streams_.size());
     }
     cond_.notify_all();
     return absl::OkStatus();
@@ -137,7 +175,7 @@ std::vector<std::shared_ptr<GenerateStream>> FIFOScheduler::batchEnqueue(const v
     }
     {
         std::lock_guard<std::mutex> lock(lock_);
-        const auto enqueue_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        const auto                  enqueue_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         for (auto& stream : stream_enqueued) {
             stream->recordSchedulerEnqueueTime(enqueue_time_us);
         }
@@ -149,7 +187,7 @@ std::vector<std::shared_ptr<GenerateStream>> FIFOScheduler::batchEnqueue(const v
 }
 
 bool FIFOScheduler::evaluateRunningBatch(const list<GenerateStreamPtr>& streams,
-                                          const GenerateStreamPtr&       new_stream) const {
+                                         const GenerateStreamPtr&       new_stream) const {
     RTP_LLM_PROFILE_FUNCTION();
     // Prefill produces different model outputs for speculative and target-only
     // requests: Eagle3 requests carry auxiliary hidden states, while
@@ -227,9 +265,23 @@ bool FIFOScheduler::waitPredicate() {
 void FIFOScheduler::evaluateAndUpdateStreams(list<GenerateStreamPtr>& streams) {
     RTP_LLM_PROFILE_FUNCTION();
     for (auto it = streams.begin(); it != streams.end();) {
-        auto state     = (*it)->getStatus();
+        auto state = (*it)->getStatus();
+        logScheduleTransition("advance_begin",
+                              *it,
+                              state,
+                              state,
+                              waiting_streams_.size(),
+                              loading_cache_streams_.size(),
+                              running_streams_.size());
         auto new_state = (*it)->moveToNext();
         if (new_state != state) {
+            logScheduleTransition("advance",
+                                  *it,
+                                  state,
+                                  new_state,
+                                  waiting_streams_.size(),
+                                  loading_cache_streams_.size(),
+                                  running_streams_.size());
             addStreamToNewState(*it, new_state);
             it = streams.erase(it);
         } else {
@@ -246,19 +298,15 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
     last_admitted_context_token_size_ = 0;
     last_waiting_oldest_age_us_       = 0;
     if (!waiting_streams.empty()) {
-        auto oldest_enqueue_time_us = (*std::min_element(waiting_streams.begin(),
-                                                         waiting_streams.end(),
-                                                         [](const auto& lhs, const auto& rhs) {
-                                                             return lhs->schedulerEnqueueTimeUs()
-                                                                    < rhs->schedulerEnqueueTimeUs();
-                                                         }))
-                                          ->schedulerEnqueueTimeUs();
+        auto oldest_enqueue_time_us =
+            (*std::min_element(waiting_streams.begin(), waiting_streams.end(), [](const auto& lhs, const auto& rhs) {
+                return lhs->schedulerEnqueueTimeUs() < rhs->schedulerEnqueueTimeUs();
+            }))->schedulerEnqueueTimeUs();
         last_waiting_oldest_age_us_ =
             std::max<int64_t>(0, autil::TimeUtility::currentTimeInMicroSeconds() - oldest_enqueue_time_us);
     }
-    const size_t inited_kv_streams =
-        max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
-    size_t                              admitted_new_init_streams = 0;
+    const size_t inited_kv_streams         = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
+    size_t       admitted_new_init_streams = 0;
 
     // Batch group scheduling support:
     // 1. Group completeness: force_batch streams with same batch_group_id are scheduled together
@@ -368,9 +416,23 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
             it++;
             continue;
         }
-        auto state     = stream->getStatus();
+        auto state = stream->getStatus();
+        logScheduleTransition("admit_begin",
+                              stream,
+                              state,
+                              state,
+                              waiting_streams_.size(),
+                              loading_cache_streams_.size(),
+                              running_streams_.size());
         auto new_state = stream->moveToNext();
         if (new_state != state) {
+            logScheduleTransition("admit",
+                                  stream,
+                                  state,
+                                  new_state,
+                                  waiting_streams_.size(),
+                                  loading_cache_streams_.size(),
+                                  running_streams_.size());
             addStreamToNewState(stream, new_state);
             it = waiting_streams.erase(it);
         } else {
@@ -481,9 +543,9 @@ std::vector<EngineScheduleInfo::TaskInfo> FIFOScheduler::runningTaskList() {
 void FIFOScheduler::reportMetrics() {
     if (metrics_reporter_) {
         RtpLLMSchedulerMetricsCollector collector;
-        collector.wait_stream_size          = waiting_streams_.size();
-        collector.running_stream_size       = running_streams_.size();
-        collector.loading_cache_stream_size = loading_cache_streams_.size();
+        collector.wait_stream_size            = waiting_streams_.size();
+        collector.running_stream_size         = running_streams_.size();
+        collector.loading_cache_stream_size   = loading_cache_streams_.size();
         collector.admitted_context_batch_size = last_admitted_context_batch_size_;
         collector.admitted_context_token_size = last_admitted_context_token_size_;
         collector.waiting_oldest_age_us       = last_waiting_oldest_age_us_;

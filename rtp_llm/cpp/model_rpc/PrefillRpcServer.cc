@@ -92,6 +92,24 @@ void logPrefillFailureTrace(const char* event, PrefillGenerateContext& prefill_c
                         prefill_context.error_info.ToString().c_str());
 }
 
+void logPrefillStageTrace(const char* event, PrefillGenerateContext& prefill_context) {
+    if (!prefillTraceLogEnabled()) {
+        return;
+    }
+    const auto stream       = prefill_context.getStream();
+    const auto stream_error = stream ? stream->statusInfo().hasError() : false;
+    RTP_LLM_LOG_INFO("Prefill request trace: event=%s request_id=%ld request_key=%s stage=%s "
+                     "stream_status=%s stream_error=%d execute_time_ms=%ld decode_addr=%s",
+                     event,
+                     prefill_context.request_id,
+                     prefill_context.request_key.c_str(),
+                     prefillStageName(prefill_context.stat_info.stage),
+                     stream ? StreamStateToString(stream->getStatus()).c_str() : "NO_STREAM",
+                     stream_error,
+                     prefill_context.executeTimeMs(),
+                     prefill_context.decode_addr.c_str());
+}
+
 }  // namespace
 
 #define CLIENT_GRPC_RET_IF_ERROR(prefill_context, state, error_code_value)                                             \
@@ -171,12 +189,22 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
 }
 
 ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream) {
-    static int max_wait_timeout_us = maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms * 1000;
-    auto       begin_time_us       = currentTimeUs();
+    const int64_t max_wait_timeout_us = maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms * int64_t{1000};
+    auto          begin_time_us       = currentTimeUs();
+    auto          next_trace_time_us  = begin_time_us + 5 * 1000 * 1000;
     while (!stream->hasError() && stream->getStatus() == StreamState::WAITING) {
         usleep(100);
         auto current_time_us = currentTimeUs();
         auto cost_time_us    = current_time_us - begin_time_us;
+        if (prefillTraceLogEnabled() && current_time_us >= next_trace_time_us) {
+            RTP_LLM_LOG_INFO("Prefill request trace: event=wait_stream_heartbeat request_id=%ld "
+                             "stream_status=%s waited_ms=%ld timeout_ms=%ld",
+                             stream->streamId(),
+                             StreamStateToString(stream->getStatus()).c_str(),
+                             cost_time_us / 1000,
+                             max_wait_timeout_us / 1000);
+            next_trace_time_us = current_time_us + 5 * 1000 * 1000;
+        }
         if (cost_time_us > max_wait_timeout_us) {
             string new_error_msg = "wait to run timeout, timeout is " + std::to_string(max_wait_timeout_us) + " us";
             stream->reportEvent(StreamEvents::Error, ErrorCode::WAIT_TO_RUN_TIMEOUT, new_error_msg);
@@ -341,6 +369,7 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     GenerateOutputsPB allocate_response;
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, client_stream->Read(&allocate_response), ErrorCode::REMOTE_ALLOCATE_RESOURCE_READ_FAILED);
+    logPrefillStageTrace("remote_allocate_done", prefill_context);
     if (prefillTraceLogEnabled() && allocate_response.has_error_info()
         && allocate_response.error_info().error_code() != 0) {
         RTP_LLM_LOG_WARNING("Prefill request trace: event=remote_allocate_response_error request_id=%ld "
@@ -359,15 +388,18 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", prefill_context.request_id);
     auto stream = engine_->enqueue(prefill_context.generate_input);
     prefill_context.setStream(stream);
+    logPrefillStageTrace("enqueued", prefill_context);
     RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", prefill_context.request_id);
 }
 
 void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache", prefill_context.request_id);
+    logPrefillStageTrace("wait_stream_begin", prefill_context);
     auto start_time_us         = currentTimeUs();
     prefill_context.error_info = waitStreamBeforeRun(prefill_context.getStream());
     prefill_context.stat_info.remote_load_cache_wait_stream_rt_us += currentTimeUs() - start_time_us;
+    logPrefillStageTrace("wait_stream_end", prefill_context);
     if (prefill_context.error_info.hasError()) {
         prefill_context.error_status =
             serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);
@@ -376,6 +408,7 @@ void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_cont
     }
     AtomicGuard       request_guard(loading_cache_requests_);
     GenerateRequestPB load_request;
+    load_request.set_stage(RemoteStage::LOAD);
     load_request.set_client_id(process_id_);
     load_request.set_request_id(prefill_context.request_id);
     load_request.set_start_time(currentTimeUs());
@@ -383,6 +416,7 @@ void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_cont
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, prefill_context.client_stream->Write(load_request), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
     prefill_context.stat_info.remote_load_cache_write_request_rt_us += currentTimeUs() - start_time_us;
+    logPrefillStageTrace("load_write_done", prefill_context);
 }
 
 void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) {
@@ -412,6 +446,7 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
     GenerateOutputsPB load_response;
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, prefill_context.client_stream->Read(&load_response), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
+    logPrefillStageTrace("load_response_received", prefill_context);
     auto error_code = transRPCErrorCode(load_response.error_info().error_code());
 
     // Decode has finished loading cache, now safe to release KV cache blocks.
@@ -480,8 +515,18 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
 
     generate_request.set_stage(RemoteStage::GENERATE);
 
+    if (prefillTraceLogEnabled()) {
+        RTP_LLM_LOG_INFO("Prefill request trace: event=generate_write_begin request_id=%ld propose_tokens=%d "
+                         "propose_probs_bytes=%zu propose_hidden_bytes=%zu",
+                         prefill_context.request_id,
+                         generate_request.propose_token_ids_size(),
+                         generate_request.propose_probs().ByteSizeLong(),
+                         generate_request.propose_hidden().ByteSizeLong());
+    }
+
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, prefill_context.client_stream->Write(generate_request), ErrorCode::REMOTE_GENERATE_FAILED);
+    logPrefillStageTrace("generate_write_done", prefill_context);
 }
 
 void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context) {
