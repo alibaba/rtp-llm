@@ -100,8 +100,18 @@ class Indexer(nn.Module):
     def _get_logits_head_gate(
         self, x: torch.Tensor, q_scale: torch.Tensor
     ) -> torch.Tensor:
-        x = x.float()
-        weights = self.weights_proj(x)
+        projection_weight = self.weights_proj.weight
+        if (
+            x.is_cuda
+            and getattr(torch.version, "hip", None) is None
+            and x.dtype == projection_weight.dtype
+            and x.dtype in (torch.float16, torch.bfloat16)
+        ):
+            weights = torch.mm(
+                x, projection_weight.t(), out_dtype=torch.float32
+            )
+        else:
+            weights = self.weights_proj(x.to(projection_weight.dtype)).float()
         scale = self.softmax_scale * self.weights_scale
         weights = weights.unsqueeze(-1) * q_scale * scale
         return weights
