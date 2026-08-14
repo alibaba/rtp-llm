@@ -78,6 +78,10 @@ enum class ErrorCode {
     // load balance error
     GET_PART_NODE_STATUS_FAILED = 8400,
     GET_ALL_NODE_STATUS_FAILED  = 8401,
+
+    // AutoTPM Cancel: victim of priority preemption.
+    // Maps to HTTP 429 / gRPC RESOURCE_EXHAUSTED upstream.
+    PRIORITY_PREEMPTED = 8429,
 };
 
 inline std::string ErrorCodeToString(ErrorCode code) {
@@ -206,6 +210,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "GET_PART_NODE_STATUS_FAILED";
         case ErrorCode::GET_ALL_NODE_STATUS_FAILED:
             return "GET_ALL_NODE_STATUS_FAILED";
+        case ErrorCode::PRIORITY_PREEMPTED:
+            return "PRIORITY_PREEMPTED";
         default:
             return "Error: Unrecognized ErrorCode";
     }

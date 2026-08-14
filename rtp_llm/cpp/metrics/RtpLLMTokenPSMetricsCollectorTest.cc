@@ -2,6 +2,9 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
+#include <map>
+
 namespace rtp_llm {
 
 TEST(RtpLLMTokenPSMetricsCollectorTest, ReportsLongPrefillByExecutionTime) {
@@ -51,6 +54,26 @@ TEST(RtpLLMTokenPSMetricsCollectorTest, MergeKeepsTimeWeightedTps) {
     EXPECT_NEAR(merged.contextTPS(), 10000.0, 1e-6);
     EXPECT_NEAR(merged.contextTPSWithCache(), 10000.0, 1e-6);
     EXPECT_NEAR(merged.totalTPS(), 10000.0, 1e-6);
+}
+
+TEST(RtpLLMTokenPSMetricsCollectorTest, MergeKeepsPriorityMetrics) {
+    RtpLLMTokenPSMetricsCollector first;
+    RtpLLMTokenPSMetricsCollector second;
+    RtpLLMTokenPSMetricsCollector merged;
+
+    first.addTokenSize(400, 600, 4, 404, 40 * 1000);
+    first.addPriorityTokenSize(30, 400, 600, 4, 404, 40 * 1000);
+    second.addTokenSize(600, 900, 6, 606, 60 * 1000);
+    second.addPriorityTokenSize(50, 600, 900, 6, 606, 60 * 1000);
+    merged.merge(&first);
+    merged.merge(&second);
+
+    auto priority_collectors = merged.priorityCollectorsForReport();
+    ASSERT_EQ(priority_collectors.size(), 2);
+    EXPECT_NEAR(priority_collectors.at(30).contextTPS(), 4000.0, 1e-6);
+    EXPECT_NEAR(priority_collectors.at(50).contextTPS(), 6000.0, 1e-6);
+    EXPECT_NEAR(priority_collectors.at(30).totalTPS(), 404.0, 1e-6);
+    EXPECT_NEAR(priority_collectors.at(50).totalTPS(), 606.0, 1e-6);
 }
 
 TEST(RtpLLMTokenPSMetricsCollectorTest, KeepsGenerateAndTotalAsTokenCounts) {
@@ -147,6 +170,72 @@ TEST(RtpLLMTokenPSMetricsCollectorTest, WallTpsUsesMergedTokens) {
 
     EXPECT_NEAR(merged.contextWallTPS(), 4000.0, 1e-6);
     EXPECT_NEAR(merged.contextWallTPSWithCache(), 6000.0, 1e-6);
+}
+
+TEST(RtpLLMTokenPSMetricsCollectorTest, KeepsGlobalAndPriorityMetrics) {
+    RtpLLMTokenPSMetricsCollector collector;
+    collector.addTokenSize(1000, 1500, 10, 1010, 100 * 1000);
+    collector.addPriorityTokenSize(30, 400, 600, 4, 404, 100 * 1000);
+    collector.addPriorityTokenSize(50, 600, 900, 6, 606, 100 * 1000);
+    collector.setReportWindowUs(200 * 1000);
+
+    auto priority_collectors = collector.priorityCollectorsForReport();
+    ASSERT_EQ(priority_collectors.size(), 2);
+    EXPECT_NEAR(priority_collectors.at(30).contextTPS(), 4000.0, 1e-6);
+    EXPECT_NEAR(priority_collectors.at(50).contextTPS(), 6000.0, 1e-6);
+    EXPECT_NEAR(priority_collectors.at(30).contextWallTPS(), 2000.0, 1e-6);
+    EXPECT_NEAR(priority_collectors.at(50).contextWallTPS(), 3000.0, 1e-6);
+    EXPECT_NEAR(priority_collectors.at(30).generateTPS(), 4.0, 1e-6);
+    EXPECT_NEAR(priority_collectors.at(50).generateTPS(), 6.0, 1e-6);
+
+    EXPECT_NEAR(priority_collectors.at(30).contextTPS() + priority_collectors.at(50).contextTPS(),
+                collector.contextTPS(),
+                1e-6);
+    EXPECT_NEAR(priority_collectors.at(30).contextWallTPS() + priority_collectors.at(50).contextWallTPS(),
+                collector.contextWallTPS(),
+                1e-6);
+    EXPECT_NEAR(priority_collectors.at(30).generateTPS() + priority_collectors.at(50).generateTPS(),
+                collector.generateTPS(),
+                1e-6);
+
+    MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter(nullptr);
+    tps_reporter.report(&collector);
+
+    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter(
+        nullptr);
+    wall_tps_reporter.report(&collector);
+}
+
+TEST(RtpLLMTokenPSMetricsCollectorTest, AddTokenSizeByPriorityMatchesUntaggedTotals) {
+    struct TokenCounts {
+        int64_t context            = 0;
+        int64_t context_with_cache = 0;
+        int64_t generate           = 0;
+        int64_t total              = 0;
+    };
+    // Mirrors the MTP decode path: accepted tokens bucketed per priority with
+    // generate == total and no context contribution; bucket sums must equal
+    // the untagged totals reported through addTokenSize.
+    std::map<int32_t, TokenCounts> counts_by_priority;
+    counts_by_priority[30] = {0, 0, 7, 7};
+    counts_by_priority[50] = {0, 0, 3, 3};
+
+    RtpLLMTokenPSMetricsCollector collector;
+    const int64_t                 total_accepted = 10;
+    collector.addTokenSize(0, 0, total_accepted, total_accepted, 100 * 1000);
+    collector.addTokenSizeByPriority(counts_by_priority, 100 * 1000);
+
+    auto priority_collectors = collector.priorityCollectorsForReport();
+    ASSERT_EQ(priority_collectors.size(), 2);
+    EXPECT_NEAR(priority_collectors.at(30).generateTPS(), 7.0, 1e-6);
+    EXPECT_NEAR(priority_collectors.at(50).generateTPS(), 3.0, 1e-6);
+    EXPECT_NEAR(priority_collectors.at(30).generateTPS() + priority_collectors.at(50).generateTPS(),
+                collector.generateTPS(),
+                1e-6);
+    EXPECT_NEAR(
+        priority_collectors.at(30).totalTPS() + priority_collectors.at(50).totalTPS(), collector.totalTPS(), 1e-6);
+    EXPECT_FALSE(priority_collectors.at(30).hasContextTPS());
+    EXPECT_FALSE(priority_collectors.at(50).hasContextTPS());
 }
 
 }  // namespace rtp_llm

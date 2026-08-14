@@ -46,6 +46,8 @@ class FakeFrontendWorker(object):
 
 
 class FakeRawRequest(object):
+    headers = {}
+
     async def is_disconnected(self):
         return False
 

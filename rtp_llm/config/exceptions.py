@@ -12,6 +12,21 @@ class ExceptionCategory(Enum):
     INTERNAL = "internal"
 
 
+class AdmissionRejectReason(IntEnum):
+    """Typed cause attached to a failed FlexLB admission decision.
+
+    Wire values 0..3 intentionally match ``ScheduleFailureReasonPB``.  INVALID
+    is a local-only sentinel used to preserve an unknown wire enum until the
+    single Dash public-status contract rejects it safely.
+    """
+
+    UNSPECIFIED = 0
+    HIGHER_PRIORITY_AHEAD = 1
+    SAME_PRIORITY_AHEAD = 2
+    RESOURCE_EXHAUSTED = 3
+    INVALID = -1
+
+
 class ExceptionType(IntEnum):
     def __new__(
         cls,
@@ -41,7 +56,8 @@ class ExceptionType(IntEnum):
     EXECUTION_EXCEPTION = 606
     EXCEEDS_KV_CACHE_MAX_LEN = 607, ExceptionCategory.TOO_LONG
 
-    # Error codes starting from 8000 can be retried
+    # Internal error-code range. Retryability is decided by the owning
+    # subsystem; terminal admission decisions in this range are not retried.
     CANCELLED = 8100, ExceptionCategory.CANCELLED
     OUT_OF_VOCAB_RANGE = 8101, ExceptionCategory.INVALID_OUTPUT
     OUTPUT_QUEUE_FULL = 8102, ExceptionCategory.CAPACITY
@@ -99,9 +115,32 @@ class ExceptionType(IntEnum):
 
     # master error
     MASTER_NO_AVAILABLE_WORKER = 8400, ExceptionCategory.CAPACITY
+    MASTER_NO_PREFILL_WORKER = 8402, ExceptionCategory.CAPACITY
+    MASTER_NO_DECODE_WORKER = 8403, ExceptionCategory.CAPACITY
+    MASTER_NO_PDFUSION_WORKER = 8404, ExceptionCategory.CAPACITY
+    MASTER_NO_VIT_WORKER = 8405, ExceptionCategory.CAPACITY
+    MASTER_INVALID_REQUEST = 8406, ExceptionCategory.BAD_REQUEST
+    PRIORITY_PREEMPTED = 8429, ExceptionCategory.CAPACITY
+    PRIORITY_ADMISSION_REJECTED = 8430, ExceptionCategory.CAPACITY
+    RESOURCE_EXHAUSTED = 8431, ExceptionCategory.CAPACITY
+    # Priority attribution is unavailable because relevant occupancy has no
+    # trustworthy priority provenance. Dash surfaces this as 503, never as a
+    # QoS-tiered 429 resource rejection.
+    ADMISSION_UNAVAILABLE = 8432, ExceptionCategory.CAPACITY
 
     # route error
     ROUTE_ERROR = 8500, ExceptionCategory.CAPACITY
+    ROUTER_QUEUE_FULL = 8502, ExceptionCategory.CAPACITY
+    ROUTER_QUEUE_TIMEOUT = 8503, ExceptionCategory.TIMEOUT
+    ROUTER_REQUEST_CANCELLED = 8504, ExceptionCategory.CANCELLED
+
+    # batch dispatch error
+    BATCH_DISPATCH_FAILED = 8510, ExceptionCategory.CAPACITY
+    BATCH_SLO_EXPIRED = 8511, ExceptionCategory.CAPACITY
+    BATCH_BUILD_FAILED = 8512, ExceptionCategory.CAPACITY
+    WORKER_EXECUTION_FAILED = 8513, ExceptionCategory.CAPACITY
+    BATCH_TOKEN_CAPACITY_EXCEEDED = 8514, ExceptionCategory.CAPACITY
+    SCHEDULER_PLAN_CONFLICT = 8515, ExceptionCategory.CAPACITY
 
     # multimodal error
     MM_LONG_PROMPT_ERROR = 901, ExceptionCategory.TOO_LONG
@@ -125,7 +164,15 @@ class ExceptionType(IntEnum):
 
 
 class FtRuntimeException(Exception):
-    def __init__(self, exception_type: ExceptionType, message: str):
+    def __init__(
+        self,
+        exception_type: ExceptionType,
+        message: str,
+        admission_reject_reason: AdmissionRejectReason = (
+            AdmissionRejectReason.UNSPECIFIED
+        ),
+    ):
         self.exception_type = exception_type
         self.message = message
+        self.admission_reject_reason = AdmissionRejectReason(admission_reject_reason)
         super().__init__(self.message)

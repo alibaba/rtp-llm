@@ -102,6 +102,8 @@ build_code() {
     fi
     (ln -sf ../../../../bazel-out/${bazel_subdir}/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2_grpc.py rtp_llm/cpp/model_rpc/proto/) || exit 1;
     (ln -sf ../../../../bazel-out/${bazel_subdir}/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2.py rtp_llm/cpp/model_rpc/proto/) || exit 1;
+    (ln -sf ../../../../bazel-out/${bazel_subdir}/bin/rtp_llm/cpp/model_rpc/proto/flexlb_schedule_service_pb2_grpc.py rtp_llm/cpp/model_rpc/proto/) || exit 1;
+    (ln -sf ../../../../bazel-out/${bazel_subdir}/bin/rtp_llm/cpp/model_rpc/proto/flexlb_schedule_service_pb2.py rtp_llm/cpp/model_rpc/proto/) || exit 1;
     (ln -sf ../../../../bazel-out/${bazel_subdir}/bin/rtp_llm/cpp/cuda/deep_gemm/cutlass_hdr rtp_llm/cpp/cuda/deep_gemm/cutlass_hdr) || exit 1;
     (/opt/conda310/bin/python -m pip install bazel-bin/rtp_llm/rtp_llm_deep_gemm-0.2.0-py3-none-any.whl ) || exit 1;
   fi

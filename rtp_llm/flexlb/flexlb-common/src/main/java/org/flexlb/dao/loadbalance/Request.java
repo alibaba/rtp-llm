@@ -37,4 +37,25 @@ public class Request {
     @JsonAlias({"apikey", "apiKey"})
     @ToString.Exclude
     private String apiKey;
+
+    @JsonProperty("max_new_tokens")
+    private int maxNewTokens = 1;
+
+    @JsonProperty("num_beams")
+    private int numBeams = 1;
+
+    @JsonProperty("force_disable_sp_run")
+    private boolean forceDisableSpRun = false;
+
+    @JsonProperty("model")
+    private String model = "";
+
+    /**
+     * Auto-TPM QoS priority. Valid range: 1-100 (higher = more important).
+     * Set by {@code PriorityNormalizer.normalize()} upstream — always 1-100
+     * in production; the proto3 default 0 only appears before normalization.
+     * See {@code PriorityNormalizer}.
+     */
+    @JsonProperty("priority")
+    private int priority = 0;
 }

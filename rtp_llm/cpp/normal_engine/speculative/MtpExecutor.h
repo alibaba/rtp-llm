@@ -1,6 +1,7 @@
 #pragma once
 
 #include <list>
+#include <map>
 #include <memory>
 #include <vector>
 #include "kmonitor/client/MetricsReporter.h"
@@ -26,6 +27,10 @@ struct MtpMetricsCollector {
     RtpLLMExecutorMetricsCollector          executor_collector;
     RtpLLMTokenPSMetricsCollector           tps_collector;
     RtpLLMSpeculativeEngineMetricsCollector sp_engine_collector;
+
+    // Accepted decode tokens bucketed by stream priority; the bucket sums add
+    // up exactly to sp_engine_collector.total_accepted_token_num.
+    std::map<int32_t, int64_t> accepted_token_num_by_priority;
 
     bool not_skip = false;
 };
@@ -88,6 +93,10 @@ protected:
         int64_t total_accept_len        = 0;
         int64_t total_stream_num        = 0;
         int64_t total_propose_token_num = 0;
+        // Per-priority accept counts derived from the same staged accept_len
+        // rows as total_accept_len, so the bucket sums match it exactly.
+        std::map<int32_t, int64_t> accept_len_by_priority;
+        bool                       valid = false;
     };
 
     bool isTpRank0() const;
@@ -140,8 +149,10 @@ protected:
     void checkModelInputsOnCuda(const GptModelInputs& model_input, const char* tag) const;
 
     AcceptLenMetricsSnapshot consumePendingAcceptLenMetrics();
-    void
-    stageAcceptLenMetrics(const torch::Tensor& accept_len, torch::Event& accept_len_ready_event, size_t stream_count);
+    void                     stageAcceptLenMetrics(const torch::Tensor& accept_len,
+                                                   torch::Event&        accept_len_ready_event,
+                                                   size_t               stream_count,
+                                                   std::vector<int32_t> row_priorities);
 
     void prepareStreams(const std::list<GenerateStreamPtr>& streams,
                         std::list<GenerateStreamPtr>&       prefill_streams,
@@ -233,9 +244,14 @@ private:
 
     torch::Tensor d2t_map_;
 
-    torch::Stream                 collect_metrics_stream_;
-    torch::Tensor                 metrics_accept_len_sum_gpu_;
-    torch::Tensor                 metrics_accept_len_sum_cpu_;
+    torch::Stream collect_metrics_stream_;
+    torch::Tensor metrics_accept_len_sum_gpu_;
+    torch::Tensor metrics_accept_len_sum_cpu_;
+    // Per-stream accept_len rows staged next to the scalar sum so priority
+    // buckets can be rebuilt on consume without an extra sync.
+    torch::Tensor                 metrics_accept_len_rows_gpu_;
+    torch::Tensor                 metrics_accept_len_rows_cpu_;
+    std::vector<int32_t>          metrics_accept_len_row_priorities_;
     std::shared_ptr<torch::Event> metrics_accept_len_ready_event_;
     int64_t                       metrics_accept_len_stream_num_        = 0;
     int64_t                       metrics_accept_len_propose_token_num_ = 0;

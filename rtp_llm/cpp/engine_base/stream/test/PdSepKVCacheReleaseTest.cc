@@ -186,6 +186,10 @@ uint8_t dsv4PdPattern(int layer_id, int gid, size_t block_pos) {
     return static_cast<uint8_t>(17 + layer_id * 19 + gid * 11 + block_pos);
 }
 
+bool isHcaStateInactiveTail(KVCacheRegionName region_name, size_t block_pos, size_t block_num) {
+    return region_name == KVCacheRegionName::HCA_STATE && block_pos + 1 < block_num;
+}
+
 torch::Tensor blockIdsTensor(const BatchKVCacheResourcePtr& resource, int gid) {
     const auto& blocks = resource->blocks(0, gid);
     return torch::from_blob(const_cast<int*>(blocks.data()), {1, static_cast<int64_t>(blocks.size())}, torch::kInt32)
@@ -592,7 +596,11 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDevi
             EXPECT_FALSE(isNullBlockIdx(blocks[0])) << "paged group " << gid;
         } else {
             EXPECT_TRUE(isNullBlockIdx(blocks[0])) << "tail group " << gid << " should keep only tail blocks";
-            EXPECT_FALSE(isNullBlockIdx(blocks[2])) << "tail group " << gid;
+            if (config.group_region_names[gid] == KVCacheRegionName::HCA_STATE) {
+                EXPECT_TRUE(isNullBlockIdx(blocks[2])) << "HCA_STATE keeps only its final active tail block";
+            } else {
+                EXPECT_FALSE(isNullBlockIdx(blocks[2])) << "tail group " << gid;
+            }
             EXPECT_FALSE(isNullBlockIdx(blocks[3])) << "tail group " << gid;
         }
     }
@@ -744,6 +752,11 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
             for (auto block_pos : positions) {
                 auto prefill_block_id = prefill_resource->blocks(0, gid)[block_pos];
                 auto decode_block_id  = decode_resource->blocks(0, gid)[block_pos];
+                if (isHcaStateInactiveTail(region_name, block_pos, block_num)) {
+                    EXPECT_TRUE(isNullBlockIdx(prefill_block_id));
+                    EXPECT_TRUE(isNullBlockIdx(decode_block_id));
+                    continue;
+                }
                 ASSERT_FALSE(isNullBlockIdx(prefill_block_id)) << "prefill gid=" << gid << " pos=" << block_pos;
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id)) << "decode gid=" << gid << " pos=" << block_pos;
                 fillDsv4RegionBytes(
@@ -813,7 +826,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
         }
     }
     ASSERT_EQ(cache_store->store_request_keys_.size(), 10u);
-    ASSERT_EQ(cache_store->stored_blocks_.size(), 26u);
+    ASSERT_EQ(cache_store->stored_blocks_.size(), 25u);
 
     EngineInitParams params;
     params.model_id                 = model_id;
@@ -850,6 +863,10 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
                 block_num, /*reuse_block_size=*/0, true, config.group_types[gid], /*hybrid_full_from_begin=*/true);
             for (auto block_pos : positions) {
                 auto decode_block_id = decode_resource->blocks(0, gid)[block_pos];
+                if (isHcaStateInactiveTail(region_name, block_pos, block_num)) {
+                    EXPECT_TRUE(isNullBlockIdx(decode_block_id));
+                    continue;
+                }
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id));
                 expectDsv4RegionBytes(
                     decode_manager, decode_block_id, layer_id, region_name, dsv4PdPattern(layer_id, gid, block_pos));
@@ -917,6 +934,11 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
             for (auto block_pos : positions) {
                 auto prefill_block_id = prefill_resource->blocks(0, gid)[block_pos];
                 auto decode_block_id  = decode_resource->blocks(0, gid)[block_pos];
+                if (isHcaStateInactiveTail(region_name, block_pos, block_num)) {
+                    EXPECT_TRUE(isNullBlockIdx(prefill_block_id));
+                    EXPECT_TRUE(isNullBlockIdx(decode_block_id));
+                    continue;
+                }
                 ASSERT_FALSE(isNullBlockIdx(prefill_block_id)) << "prefill gid=" << gid << " pos=" << block_pos;
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id)) << "decode gid=" << gid << " pos=" << block_pos;
                 fillDsv4RegionBytes(
@@ -1033,6 +1055,10 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
                 block_num, /*reuse_block_size=*/0, true, config.group_types[gid], /*hybrid_full_from_begin=*/true);
             for (auto block_pos : positions) {
                 auto decode_block_id = decode_resource->blocks(0, gid)[block_pos];
+                if (isHcaStateInactiveTail(region_name, block_pos, block_num)) {
+                    EXPECT_TRUE(isNullBlockIdx(decode_block_id));
+                    continue;
+                }
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id));
                 expectDsv4RegionBytes(
                     decode_manager, decode_block_id, layer_id, region_name, dsv4PdPattern(layer_id, gid, block_pos));
@@ -1100,6 +1126,11 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
             for (auto block_pos : positions) {
                 auto prefill_block_id = prefill_resource->blocks(0, gid)[block_pos];
                 auto decode_block_id  = decode_resource->blocks(0, gid)[block_pos];
+                if (isHcaStateInactiveTail(region_name, block_pos, block_num)) {
+                    EXPECT_TRUE(isNullBlockIdx(prefill_block_id));
+                    EXPECT_TRUE(isNullBlockIdx(decode_block_id));
+                    continue;
+                }
                 ASSERT_FALSE(isNullBlockIdx(prefill_block_id)) << "prefill gid=" << gid << " pos=" << block_pos;
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id)) << "decode gid=" << gid << " pos=" << block_pos;
                 fillDsv4RegionBytes(
@@ -1169,7 +1200,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
         }
     }
     ASSERT_EQ(cache_store->store_request_keys_.size(), 10u);
-    ASSERT_EQ(cache_store->stored_blocks_.size(), 26u);
+    ASSERT_EQ(cache_store->stored_blocks_.size(), 25u);
 
     EngineInitParams params;
     params.model_id                 = model_id;
@@ -1206,6 +1237,10 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
                 block_num, reuse_num, true, config.group_types[gid], /*hybrid_full_from_begin=*/true);
             for (auto block_pos : positions) {
                 auto decode_block_id = decode_resource->blocks(0, gid)[block_pos];
+                if (isHcaStateInactiveTail(region_name, block_pos, block_num)) {
+                    EXPECT_TRUE(isNullBlockIdx(decode_block_id));
+                    continue;
+                }
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id));
                 expectDsv4RegionBytes(
                     decode_manager, decode_block_id, layer_id, region_name, dsv4PdPattern(layer_id, gid, block_pos));
