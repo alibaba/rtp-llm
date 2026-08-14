@@ -4,13 +4,12 @@ This module provides the KV cache writing operation specifically for MLA archite
 which uses a compressed KV cache layout.
 """
 
-from typing import Optional
+from typing import Any, Optional
 
-import flashinfer.page as page
 import torch
 
 from rtp_llm.ops import KvCacheDataType, compute_ops
-from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
+from rtp_llm.ops.compute_ops import LayerKVCache
 
 
 class MlaKVCacheWriteOp:
@@ -29,8 +28,11 @@ class MlaKVCacheWriteOp:
         self.kv_cache_type = (
             "fp8_ds_mla" if kv_cache_dtype == KvCacheDataType.FP8 else "auto"
         )
-        # Scale tensor is required for concat_and_cache_mla even in non-FP8 mode
-        self.scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
+        # Scale tensor is required for concat_and_cache_mla even in non-FP8 mode.
+        # Initialize it directly on the device: torch.tensor(1.0, device="cuda")
+        # stages the Python scalar through pageable host memory and synchronizes
+        # the current stream on every transient MLA implementation build.
+        self.scale = torch.ones((), dtype=torch.float32, device="cuda")
         self.clear_page_on_boundary = clear_page_on_boundary
 
     def forward(
@@ -38,8 +40,9 @@ class MlaKVCacheWriteOp:
         append_ckv_t: torch.Tensor,
         key_pe: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
-        fmha_params: rtp_llm_ops.SparseMlaParams,
+        fmha_params: Any,
         total_global_ids: torch.Tensor = None,
+        slot_mapping_override: Optional[torch.Tensor] = None,
     ) -> None:
         """Write compressed KV and position-encoded key to MLA cache.
 
@@ -49,7 +52,11 @@ class MlaKVCacheWriteOp:
             kv_cache: MLA KV cache with compressed layout
         """
         if kv_cache is not None:
-            slot_mapping = fmha_params.slot_mapping
+            slot_mapping = (
+                slot_mapping_override
+                if slot_mapping_override is not None
+                else fmha_params.slot_mapping
+            )
             compute_ops.concat_and_cache_mla(
                 append_ckv_t,
                 key_pe,

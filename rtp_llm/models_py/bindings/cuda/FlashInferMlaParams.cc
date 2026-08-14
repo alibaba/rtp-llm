@@ -394,13 +394,13 @@ void FlashInferMlaAttnParams::fillParamsInternal(torch::Tensor t_prefix_lengths,
 
 void FlashInferMlaAttnParams::refreshBuffer(
     int batch_size, int input_token_num, int page_num, int reuse_page_num, int batch_reuse_info_size) {
-    // Get current CUDA stream
-    cudaStream_t stream = GET_CURRENT_STREAM();
-
-    // Single async copy from HOST to DEVICE for the entire buffer
-    // Since all tensors are in continuous memory, we can copy the entire buffer at once
-    size_t total_bytes = buf_h.numel() * sizeof(int32_t);
-    cudaMemcpyAsync(buf_d.data_ptr(), buf_h.data_ptr(), total_bytes, cudaMemcpyHostToDevice, stream);
+    // Keep this allocator-aware.  A normal Python-model forward replaces the
+    // previous FlashInfer params object before queued GPU work necessarily
+    // completes.  Tensor::copy_(non_blocking=true) records the pinned source
+    // with PyTorch's caching host allocator, preventing buf_h from being
+    // recycled while this H2D is still in flight.  A raw cudaMemcpyAsync does
+    // not establish that lifetime relationship.
+    buf_d.copy_(buf_h, /*non_blocking=*/true);
 
     // Update tensor shapes (without reallocating memory)
     // Use vector<int64_t> which can be implicitly converted to c10::IntArrayRef
@@ -534,10 +534,11 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
             slot_mapping_ptr[i]        = static_cast<int64_t>(block_number) * seq_size_per_block + block_offset;
         }
 
-        cudaStream_t stream      = GET_CURRENT_STREAM();
-        size_t       total_bytes = static_cast<size_t>(input_token_num) * sizeof(int64_t);
-        cudaMemcpyAsync(
-            slot_mapping_d_.data_ptr(), slot_mapping_h_.data_ptr(), total_bytes, cudaMemcpyHostToDevice, stream);
+        // Copy through the owning full-size buffers so this remains valid when
+        // slot_mapping_d_ still carries the previous invocation's narrowed
+        // logical shape.  The allocator-aware nonblocking copy also keeps the
+        // pinned source alive after held_attn_pyobj_ is replaced.
+        buf_d_i64_.slice(0, 0, input_token_num).copy_(buf_h_i64_.slice(0, 0, input_token_num), /*non_blocking=*/true);
 
         slot_mapping_d_.unsafeGetTensorImpl()->set_sizes_contiguous({input_token_num});
         slot_mapping = slot_mapping_d_;

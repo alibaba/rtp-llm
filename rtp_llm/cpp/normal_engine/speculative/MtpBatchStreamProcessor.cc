@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
@@ -9,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
+#include <limits>
 #include <numeric>
 #include <string>
 #include <unordered_set>
@@ -739,36 +741,40 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(GptModelInputs&  
     model_input.last_hidden_states = model_output.all_hidden_states;
     const auto& new_all_token_ids  = sampler_output.token_ids;
 
-    // set model_input.combo_tokens
-    const size_t batch_size   = new_all_token_ids.size(0);
-    const size_t token_stride = new_all_token_ids.size(1);
-    // TODO(async): data_ptr iteration below is CPU-only; keep all .cpu()
-    // conversions explicit, then republish model-bound tensors to CUDA.
-    const torch::Tensor new_all_token_ids_cpu =
-        new_all_token_ids.is_cuda() ? new_all_token_ids.cpu() : new_all_token_ids;
-    torch::Tensor input_lengths_cpu =
-        model_input.input_lengths.is_cuda() ? model_input.input_lengths.cpu().pin_memory() : model_input.input_lengths;
-    torch::Tensor combo_tokens_cpu =
-        model_input.combo_tokens.is_cuda() ? model_input.combo_tokens.cpu().pin_memory() : model_input.combo_tokens;
-
-    int* input_lengths = input_lengths_cpu.data_ptr<int>();
-    int* combo_tokens  = combo_tokens_cpu.data_ptr<int>();
-
-    int offset = 0;
-    for (int i = 0; i < batch_size; i++) {
-        // should shift one token for combo_tokens
-        int input_length = input_lengths[i];
-        memcpy(combo_tokens + offset, combo_tokens + offset + 1, (input_length - 1) * sizeof(int));
-
-        // set new token id
-        int new_token_id = new_all_token_ids_cpu.data_ptr<int>()[i * token_stride + token_stride - 1];
-        combo_tokens[offset + input_length - 1] = new_token_id;
-
-        offset += input_length;
+    // Keep the prefill shift+append entirely on the current CUDA stream. The
+    // former host loop copied token IDs, lengths and packed tokens D2H, then
+    // copied lengths and packed tokens H2D before every draft-model forward.
+    const int64_t token_stride = new_all_token_ids.size(1);
+    RTP_LLM_CHECK_WITH_INFO(token_stride > 0 && token_stride <= std::numeric_limits<int32_t>::max(),
+                            "invalid MTP sampler token stride: %ld",
+                            token_stride);
+    auto input_lengths_d = toCudaInt32(model_input.input_lengths, host_holder);
+    auto combo_tokens_d  = toCudaInt32(model_input.combo_tokens, host_holder);
+    auto new_all_token_ids_d =
+        new_all_token_ids.is_cuda() ? new_all_token_ids : toCudaInt32(new_all_token_ids, host_holder);
+    if (new_all_token_ids_d.scalar_type() != torch::kInt32) {
+        new_all_token_ids_d = new_all_token_ids_d.to(torch::kInt32);
+    }
+    if (!new_all_token_ids_d.is_contiguous()) {
+        new_all_token_ids_d = new_all_token_ids_d.contiguous();
     }
 
-    model_input.input_lengths = toCudaInt32(input_lengths_cpu, host_holder);
-    model_input.combo_tokens  = toCudaInt32(combo_tokens_cpu, host_holder);
+    auto batch_offsets_d  = input_lengths_d.cumsum(0).to(torch::kInt32);
+    auto combo_tokens_out = torch::empty_like(combo_tokens_d);
+#if USING_CUDA
+    invokeMtpPrefillShiftAppend(combo_tokens_d,
+                                input_lengths_d,
+                                batch_offsets_d,
+                                new_all_token_ids_d,
+                                combo_tokens_out,
+                                static_cast<int32_t>(token_stride),
+                                cuda_graph::graphGetCurrentStream().stream());
+#else
+    RTP_LLM_CHECK_WITH_INFO(false, "updatePrefillPostDraftModelInput requires CUDA");
+#endif
+
+    model_input.input_lengths = input_lengths_d;
+    model_input.combo_tokens  = combo_tokens_out;
 }
 
 void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(

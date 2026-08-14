@@ -1484,6 +1484,39 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                 sampler_input, sampler_output, speculative_sampler_output, batch_size, propose_step_);
         }
 
+        // Synchronous dispatch keeps host stream state current. With
+        // DROP_BROAD_SYNC, the rejection sampler joins the previous
+        // async-bookkeeping worker above before reading the same state. In
+        // either case the streams contain the exact sequence lengths used to derive
+        // spec_prefix_lengths before draftModelDecode. The model-input contract
+        // stores that prefix as sequence_length - 1. Publish that already
+        // available CPU metadata as the draft-prefill prefix mirror instead of
+        // making FlashInfer copy the one-element device tensor back to host.
+        // Do not use MtpAsyncDeviceState::next_real_seq_len here: it is a KV
+        // allocation bound, not the accepted sequence length.
+        // Async prepare has already value-captured model_input at this point;
+        // its prepared attention view cannot observe a newly attached mirror.
+        const bool exact_host_prefix_available = (!useStreamAsync() || useDropBroadSync()) && !useAsyncPrepare();
+        if (exact_host_prefix_available && !model_input.is_fake_stream && model_input.prefix_lengths.numel() > 0) {
+            const auto all_streams = stream_groups.allStreams();
+            RTP_LLM_CHECK_WITH_INFO(all_streams.size() == static_cast<size_t>(model_input.prefix_lengths.numel()),
+                                    "draft prefill prefix host mirror batch mismatch: streams=%zu, prefix=%ld",
+                                    all_streams.size(),
+                                    model_input.prefix_lengths.numel());
+            const auto pinned_i32          = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+            auto       prefix_lengths_host = torch::empty({static_cast<int64_t>(all_streams.size())}, pinned_i32);
+            auto*      prefix_ptr          = prefix_lengths_host.data_ptr<int32_t>();
+            size_t     prefix_idx          = 0;
+            for (const auto& stream : all_streams) {
+                RTP_LLM_CHECK_WITH_INFO(stream->seqLength() > 0,
+                                        "draft prefill requires a positive sequence length for stream %ld",
+                                        stream->streamId());
+                prefix_ptr[prefix_idx++] = static_cast<int32_t>(stream->seqLength() - 1);
+            }
+            model_input.prefix_lengths_host_for_log = std::move(prefix_lengths_host);
+            buffer_holder_.hold_host(model_input.prefix_lengths_host_for_log);
+        }
+
         batch_stream_processor_->updateDecodePostDraftModelInput(
             model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, buffer_holder_);
         if (metrics_reporter_) {
@@ -1856,6 +1889,22 @@ void MtpExecutor::broadcastPostRejectionInputs(GptModelInputs& model_input) {
         execBroadcast({{model_input.combo_tokens}, 0});
         execBroadcast({{model_input.last_hidden_states}, 0});
         execBroadcast({{model_input.lm_output_indexes}, 0});
+
+        const int64_t prefix_count                = model_input.prefix_lengths.numel();
+        const bool    exact_host_prefix_available = (!useStreamAsync() || useDropBroadSync()) && !useAsyncPrepare();
+        if (exact_host_prefix_available && prefix_count > 0 && !model_input.is_fake_stream) {
+            const auto pinned_i32 = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+            if (!isTpRank0()) {
+                model_input.prefix_lengths_host_for_log = torch::empty({prefix_count}, pinned_i32);
+            }
+            RTP_LLM_CHECK_WITH_INFO(model_input.prefix_lengths_host_for_log.defined()
+                                        && model_input.prefix_lengths_host_for_log.numel() == prefix_count
+                                        && !model_input.prefix_lengths_host_for_log.is_cuda(),
+                                    "draft prefill prefix host mirror is invalid on tp rank %d",
+                                    tp_rank_);
+            execBroadcastCpu({{model_input.prefix_lengths_host_for_log}, 0});
+            buffer_holder_.hold_host(model_input.prefix_lengths_host_for_log);
+        }
     }
     model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
     model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
