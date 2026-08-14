@@ -29,8 +29,11 @@ class MlaKVCacheWriteOp:
         self.kv_cache_type = (
             "fp8_ds_mla" if kv_cache_dtype == KvCacheDataType.FP8 else "auto"
         )
-        # Scale tensor is required for concat_and_cache_mla even in non-FP8 mode
-        self.scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
+        # Scale tensor is required for concat_and_cache_mla even in non-FP8 mode.
+        # Initialize it directly on the device: torch.tensor(1.0, device="cuda")
+        # stages the Python scalar through pageable host memory and synchronizes
+        # the current stream on every transient MLA implementation build.
+        self.scale = torch.ones((), dtype=torch.float32, device="cuda")
         self.clear_page_on_boundary = clear_page_on_boundary
 
     def forward(
