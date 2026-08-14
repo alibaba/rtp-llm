@@ -87,12 +87,13 @@ void LoadAsyncContext::startBackendMatch() {
     RTP_LLM_CHECK(need_backend_match_ && match_callback_ && !backend_started_);
     backend_started_                     = true;
     std::weak_ptr<LoadAsyncContext> weak = weak_from_this();
-    storage_backend_->match(storage_request_,
-                            [weak](size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta) {
-                                if (auto context = weak.lock()) {
-                                    context->onBackendMatch(matched_blocks_num, std::move(match_meta));
-                                }
-                            });
+    storage_backend_->match(
+        storage_request_,
+        [weak](size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success) {
+            if (auto context = weak.lock()) {
+                context->onBackendMatch(matched_blocks_num, std::move(match_meta), success);
+            }
+        });
 }
 
 void LoadAsyncContext::setTargetBlocks(size_t desc_index, std::vector<BlockIdxType> target_blocks) {
@@ -115,7 +116,9 @@ const std::vector<std::vector<StorageBlockHandle>>& LoadAsyncContext::backendHan
     return storage_request_.handles;
 }
 
-void LoadAsyncContext::onBackendMatch(size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta) {
+void LoadAsyncContext::onBackendMatch(size_t                                   matched_blocks_num,
+                                      std::shared_ptr<StorageBackendMatchMeta> match_meta,
+                                      bool                                     success) {
     if (!coordinator_->beginActiveCallback()) {
         return;
     }
@@ -134,6 +137,10 @@ void LoadAsyncContext::onBackendMatch(size_t matched_blocks_num, std::shared_ptr
         return;
     }
     block_tree_cache_detail::ScopeRollback match_callback_guard([this] { finishMatchCallback(); });
+    if (!success) {
+        failBeforeCommit();
+        return;
+    }
     RTP_LLM_CHECK(storage_request_.keys && storage_request_.keys->size() == storage_request_.handles.size()
                   && storage_request_.local_matched_blocks_num == local_matched_blocks_
                   && matched_blocks_num >= local_matched_blocks_
@@ -158,18 +165,22 @@ void LoadAsyncContext::onBackendMatch(size_t matched_blocks_num, std::shared_ptr
                                      }),
                       handles.end());
     }
-    if (!match_callback_(*this, matched_blocks_num)) {
+    bool match_callback_success = false;
+    try {
+        match_callback_success = match_callback_(*this, matched_blocks_num);
+    } catch (...) {}
+    if (!match_callback_success) {
         failBeforeCommit();
         return;
     }
     if (storage_request_.empty()) {
-        onBackendRead();
+        onBackendRead(/*success=*/true);
         return;
     }
     std::weak_ptr<LoadAsyncContext> weak = weak_from_this();
-    storage_backend_->read(std::move(storage_request_), std::move(match_meta), [weak] {
+    storage_backend_->read(std::move(storage_request_), std::move(match_meta), [weak](bool success) {
         if (auto context = weak.lock()) {
-            context->onBackendRead();
+            context->onBackendRead(success);
         }
     });
 }
@@ -182,7 +193,11 @@ void LoadAsyncContext::finishMatchCallback() {
     match_callback_cv_.notify_all();
 }
 
-void LoadAsyncContext::onBackendRead() {
+void LoadAsyncContext::onBackendRead(bool success) {
+    if (!success) {
+        onTaskFail();
+        return;
+    }
     bool notify = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);

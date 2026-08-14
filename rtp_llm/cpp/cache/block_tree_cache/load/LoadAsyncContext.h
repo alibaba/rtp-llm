@@ -69,8 +69,8 @@ public:
 private:
     void markAborted();
     void rebuildMatchedBlocksByTier();
-    void onBackendMatch(size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta);
-    void onBackendRead();
+    void onBackendMatch(size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success);
+    void onBackendRead(bool success);
     void failBeforeCommit();
     void finishIfReadyLocked(bool& notify);
     void finishMatchCallback();

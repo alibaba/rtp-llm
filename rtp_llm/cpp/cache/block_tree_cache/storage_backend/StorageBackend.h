@@ -1,7 +1,9 @@
 #pragma once
 
+#include <condition_variable>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
@@ -9,6 +11,7 @@
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/IBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackendExecutor.h"
 
 namespace rtp_llm {
 
@@ -19,6 +22,11 @@ struct StorageBlockHandle {
 
 struct StorageBackendMatchMeta {
     virtual ~StorageBackendMatchMeta() = default;
+};
+
+struct StorageMatchResult {
+    size_t                                   matched_blocks_num{0};
+    std::shared_ptr<StorageBackendMatchMeta> match_meta;
 };
 
 struct StorageRequest {
@@ -40,8 +48,9 @@ struct StorageRequest {
 };
 
 namespace storage_backend_detail {
+struct ReleaseGate;
 struct StorageTaskState;
-}
+}  // namespace storage_backend_detail
 
 class StorageWriteTask {
 public:
@@ -62,17 +71,18 @@ private:
     friend class StorageBackend;
 };
 
-// Derived backends own their executor. Every operation completes once, and
-// shutdown() drains completions before adapter state is destroyed.
+// Asynchronous facade for synchronous derived I/O. Owners must call shutdown
+// before derived backend state starts destruction.
 class StorageBackend {
 public:
-    using MatchDone =
-        std::function<void(size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta)>;
-    using Done            = std::function<void()>;
+    using MatchDone       = std::function<void(
+        size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success)>;
+    using Done            = std::function<void(bool success)>;
     using ReleaseCallback = std::function<void(const std::vector<BlockReleaseReceipt>&)>;
     using BufferResolver  = std::function<std::vector<BlockInfo>(int layer_id, int group_id, int block_id)>;
 
-    virtual ~StorageBackend() = default;
+    explicit StorageBackend(std::shared_ptr<StorageBackendExecutor> executor = nullptr);
+    virtual ~StorageBackend();
 
     bool             init(std::shared_ptr<const CacheTopology>     topology,
                           std::vector<std::shared_ptr<IBlockPool>> device_pools,
@@ -82,7 +92,8 @@ public:
     void             read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done);
     StorageWriteTask prepareWrite(StorageRequest request);
     void             write(StorageWriteTask task);
-    virtual void     shutdown() = 0;
+    // Must not be called from backend I/O, release, or completion callbacks.
+    void shutdown();
 
 protected:
     const CacheTopology&   topology() const;
@@ -92,18 +103,36 @@ protected:
     // before allocating read targets.
     bool isHandleRequired(size_t key_index, size_t matched_key_count, size_t group_id) const;
 
-    virtual bool initImpl()                                                                                       = 0;
-    virtual void matchImpl(StorageRequest request, MatchDone done)                                                = 0;
-    virtual void readImpl(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done) = 0;
-    virtual void writeImpl(StorageRequest request, Done done)                                                     = 0;
+    virtual bool               initImpl()                                                           = 0;
+    virtual StorageMatchResult matchImpl(const StorageRequest& request)                             = 0;
+    virtual void               readImpl(const StorageRequest&                           request,
+                                        const std::shared_ptr<StorageBackendMatchMeta>& match_meta) = 0;
+    virtual void               writeImpl(const StorageRequest& request)                             = 0;
 
 private:
+    enum class Lifecycle {
+        CREATED,
+        ACCEPTING,
+        STOPPING,
+        FINALIZING,
+        STOPPED
+    };
+    using Operation = std::function<void(Lifecycle outcome)>;
+
     std::shared_ptr<storage_backend_detail::StorageTaskState> prepare(StorageRequest request);
+    void                                                      dispatch(Operation operation);
+    void                                                      taskFinished();
     std::shared_ptr<const CacheTopology>                      topology_;
     std::vector<std::shared_ptr<IBlockPool>>                  device_pools_;
     BufferResolver                                            buffer_resolver_;
-    ReleaseCallback                                           release_callback_;
+    std::shared_ptr<storage_backend_detail::ReleaseGate>      release_gate_;
+    std::shared_ptr<StorageBackendExecutor>                   executor_;
     bool                                                      initialized_{false};
+
+    std::mutex              lifecycle_mutex_;
+    std::condition_variable lifecycle_cv_;
+    Lifecycle               lifecycle_{Lifecycle::CREATED};
+    size_t                  in_flight_{0};
 
     friend class LoadAsyncContext;
 };

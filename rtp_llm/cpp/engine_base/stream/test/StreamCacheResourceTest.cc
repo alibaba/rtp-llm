@@ -13,7 +13,6 @@
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
@@ -91,7 +90,7 @@ std::shared_ptr<LoadAsyncContext> makeAllocatorLoadContext(size_t matched_blocks
     descriptors.reserve(source_tiers.size());
     for (size_t path_index = 0; path_index < source_tiers.size(); ++path_index) {
         descriptors.emplace_back(
-            nullptr, /*group_set_id=*/0, path_index, source_tiers[path_index], BlockIndicesType{1});
+            nullptr, /*group_set_id=*/0, path_index, source_tiers[path_index], Tier::DEVICE, BlockIndicesType{1});
     }
     auto context = coordinator->create(std::move(descriptors),
                                        std::vector<bool>(source_tiers.size(), false),
@@ -107,7 +106,6 @@ class StreamReadStorageBackend: public StorageBackend {
 public:
     ~StreamReadStorageBackend() override {
         shutdown();
-        io_pool_.shutdown();
     }
 
     void blockMatches() {
@@ -147,41 +145,26 @@ public:
         return match_calls_;
     }
 
-    void shutdown() override {
-        releaseMatches();
-        releaseReads();
-        io_pool_.waitForIdle();
-    }
-
 protected:
     bool initImpl() override {
-        return io_pool_.start();
+        return true;
     }
-    void matchImpl(StorageRequest request, MatchDone done) override {
-        RTP_LLM_CHECK(io_pool_.submit([this, request = std::move(request), done = std::move(done)]() mutable {
-            std::unique_lock<std::mutex> lock(mutex_);
-            ++match_calls_;
-            cv_.notify_all();
-            cv_.wait(lock, [&] { return release_matches_; });
-            lock.unlock();
-            done(request.handles.size(), nullptr);
-        }));
+    StorageMatchResult matchImpl(const StorageRequest& request) override {
+        std::unique_lock<std::mutex> lock(mutex_);
+        ++match_calls_;
+        cv_.notify_all();
+        cv_.wait(lock, [&] { return release_matches_; });
+        return {request.handles.size(), nullptr};
     }
 
-    void readImpl(StorageRequest, std::shared_ptr<StorageBackendMatchMeta>, Done done) override {
-        RTP_LLM_CHECK(io_pool_.submit([this, done = std::move(done)]() mutable {
-            std::unique_lock<std::mutex> lock(mutex_);
-            ++read_calls_;
-            cv_.notify_all();
-            cv_.wait(lock, [&] { return release_reads_; });
-            lock.unlock();
-            done();
-        }));
+    void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {
+        std::unique_lock<std::mutex> lock(mutex_);
+        ++read_calls_;
+        cv_.notify_all();
+        cv_.wait(lock, [&] { return release_reads_; });
     }
 
-    void writeImpl(StorageRequest, Done done) override {
-        RTP_LLM_CHECK(io_pool_.submit([done = std::move(done)]() mutable { done(); }));
-    }
+    void writeImpl(const StorageRequest&) override {}
 
 private:
     mutable std::mutex      mutex_;
@@ -190,7 +173,6 @@ private:
     bool                    release_reads_{true};
     size_t                  match_calls_{0};
     size_t                  read_calls_{0};
-    BlockTreeTaskPool       io_pool_{1, 128, "stream_storage_io"};
 };
 
 class StreamCacheResourceTest: public DeviceTestBase {

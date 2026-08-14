@@ -435,32 +435,43 @@ void expectDevicePattern(const void* address, size_t bytes, uint8_t pattern) {
 
 class BlockTreeCacheFactoryTest: public DeviceTestBase {};
 
+class InlineFactoryExecutor: public StorageBackendExecutor {
+public:
+    bool start() override {
+        return true;
+    }
+    bool submit(Task task) override {
+        task();
+        return true;
+    }
+    void shutdown() noexcept override {}
+};
+
 class ShutdownCountingStorageBackend: public StorageBackend {
 public:
     ShutdownCountingStorageBackend(std::shared_ptr<size_t> shutdown_count, std::shared_ptr<size_t> resolved_count):
-        shutdown_count_(std::move(shutdown_count)), resolved_count_(std::move(resolved_count)) {}
+        StorageBackend(std::make_shared<InlineFactoryExecutor>()),
+        shutdown_count_(std::move(shutdown_count)),
+        resolved_count_(std::move(resolved_count)) {}
 
-    void shutdown() override {
+    ~ShutdownCountingStorageBackend() override {
         const auto buffers = convertIndexToBuffer(/*layer_id=*/0, /*group_id=*/0, /*block_id=*/0);
         if (!buffers.empty() && buffers.front().addr != nullptr) {
             ++*resolved_count_;
         }
         ++*shutdown_count_;
+        shutdown();
     }
 
 protected:
     bool initImpl() override {
         return true;
     }
-    void matchImpl(StorageRequest request, MatchDone done) override {
-        done(request.handles.size(), nullptr);
+    StorageMatchResult matchImpl(const StorageRequest& request) override {
+        return {request.handles.size(), nullptr};
     }
-    void readImpl(StorageRequest, std::shared_ptr<StorageBackendMatchMeta>, Done done) override {
-        done();
-    }
-    void writeImpl(StorageRequest, Done done) override {
-        done();
-    }
+    void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {}
+    void writeImpl(const StorageRequest&) override {}
 
 private:
     std::shared_ptr<size_t> shutdown_count_;
@@ -469,6 +480,10 @@ private:
 
 class CountingStorageBackend: public StorageBackend {
 public:
+    CountingStorageBackend(): StorageBackend(std::make_shared<InlineFactoryExecutor>()) {}
+    ~CountingStorageBackend() override {
+        shutdown();
+    }
     size_t matchCalls() const {
         return match_calls_;
     }
@@ -481,13 +496,12 @@ public:
     const std::vector<size_t>& matchHandleCounts() const {
         return match_handle_counts_;
     }
-    void shutdown() override {}
 
 protected:
     bool initImpl() override {
         return true;
     }
-    void matchImpl(StorageRequest request, MatchDone done) override {
+    StorageMatchResult matchImpl(const StorageRequest& request) override {
         ++match_calls_;
         match_keys_           = *request.keys;
         local_matched_blocks_ = request.local_matched_blocks_num;
@@ -495,14 +509,10 @@ protected:
         for (const auto& handles : request.handles) {
             match_handle_counts_.push_back(handles.size());
         }
-        done(local_matched_blocks_, nullptr);
+        return {local_matched_blocks_, nullptr};
     }
-    void readImpl(StorageRequest, std::shared_ptr<StorageBackendMatchMeta>, Done done) override {
-        done();
-    }
-    void writeImpl(StorageRequest, Done done) override {
-        done();
-    }
+    void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {}
+    void writeImpl(const StorageRequest&) override {}
 
 private:
     size_t              match_calls_{0};
@@ -516,16 +526,17 @@ public:
     size_t initCalls() const {
         return init_calls_;
     }
-    void shutdown() override {}
 
 protected:
     bool initImpl() override {
         ++init_calls_;
         return false;
     }
-    void matchImpl(StorageRequest, MatchDone) override {}
-    void readImpl(StorageRequest, std::shared_ptr<StorageBackendMatchMeta>, Done) override {}
-    void writeImpl(StorageRequest, Done) override {}
+    StorageMatchResult matchImpl(const StorageRequest&) override {
+        return {};
+    }
+    void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {}
+    void writeImpl(const StorageRequest&) override {}
 
 private:
     size_t init_calls_{0};

@@ -2,9 +2,11 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <future>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <utility>
 
 #include <gtest/gtest.h>
@@ -37,18 +39,72 @@ private:
     }
 };
 
+class ManualExecutor: public StorageBackendExecutor {
+public:
+    bool start() override {
+        return true;
+    }
+    bool submit(Task task) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        tasks_.push_back(std::move(task));
+        return true;
+    }
+    void shutdown() noexcept override {
+        runAll();
+    }
+
+    size_t pendingCount() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return tasks_.size();
+    }
+
+    void runOne() {
+        Task task;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (tasks_.empty()) {
+                return;
+            }
+            task = std::move(tasks_.front());
+            tasks_.pop_front();
+        }
+        task();
+    }
+
+private:
+    void runAll() {
+        while (pendingCount() != 0) {
+            runOne();
+        }
+    }
+
+    std::mutex       mutex_;
+    std::deque<Task> tasks_;
+};
+
 class ManualBackend: public StorageBackend {
 public:
+    ManualBackend(): ManualBackend(std::make_shared<ManualExecutor>()) {}
+
+    ~ManualBackend() override {
+        shutdown();
+    }
+
     void completeMatch(size_t keys, std::shared_ptr<StorageBackendMatchMeta> match_meta = nullptr) {
-        auto done = std::move(match_done_);
-        done(keys, std::move(match_meta));
+        pending_match_ = {keys, std::move(match_meta)};
+        executor_->runOne();
     }
     void completeRead() {
-        auto done = std::move(read_done_);
-        done();
+        executor_->runOne();
+    }
+    void failNextMatch() {
+        fail_match_ = true;
+    }
+    void failNextRead() {
+        fail_read_ = true;
     }
     bool readPending() const {
-        return static_cast<bool>(read_done_);
+        return executor_->pendingCount() != 0;
     }
     const CacheKeysType& readKeys() const {
         return read_keys_;
@@ -68,20 +124,27 @@ public:
     const std::shared_ptr<TestMatchMeta>& readMatchMeta() const {
         return read_match_meta_;
     }
-    void shutdown() override {}
 
 protected:
     bool initImpl() override {
         return true;
     }
-    void matchImpl(StorageRequest request, MatchDone done) override {
+    StorageMatchResult matchImpl(const StorageRequest& request) override {
+        if (fail_match_) {
+            fail_match_ = false;
+            throw std::runtime_error("match failed");
+        }
         match_keys_         = *request.keys;
         match_local_blocks_ = request.local_matched_blocks_num;
-        match_done_ = std::move(done);
+        return pending_match_;
     }
-    void readImpl(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done) override {
+    void readImpl(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>& match_meta) override {
+        if (fail_read_) {
+            fail_read_ = false;
+            throw std::runtime_error("read failed");
+        }
         read_match_meta_ = std::dynamic_pointer_cast<TestMatchMeta>(match_meta);
-        read_keys_ = *request.keys;
+        read_keys_       = *request.keys;
         for (const auto& key_handles : request.handles) {
             read_handle_counts_.push_back(key_handles.size());
             std::vector<size_t> group_ids;
@@ -90,33 +153,35 @@ protected:
             }
             read_group_ids_.push_back(std::move(group_ids));
         }
-        read_done_ = std::move(done);
     }
-    void writeImpl(StorageRequest, Done done) override {
-        done();
-    }
+    void writeImpl(const StorageRequest&) override {}
 
 private:
-    MatchDone match_done_;
-    Done      read_done_;
-    CacheKeysType       read_keys_;
-    CacheKeysType       match_keys_;
-    size_t              match_local_blocks_{0};
-    std::vector<size_t> read_handle_counts_;
+    explicit ManualBackend(std::shared_ptr<ManualExecutor> executor):
+        StorageBackend(executor), executor_(std::move(executor)) {}
+
+    std::shared_ptr<ManualExecutor>  executor_;
+    StorageMatchResult               pending_match_;
+    CacheKeysType                    read_keys_;
+    CacheKeysType                    match_keys_;
+    size_t                           match_local_blocks_{0};
+    std::vector<size_t>              read_handle_counts_;
     std::vector<std::vector<size_t>> read_group_ids_;
-    std::shared_ptr<TestMatchMeta> read_match_meta_;
+    std::shared_ptr<TestMatchMeta>   read_match_meta_;
+    bool                             fail_match_{false};
+    bool                             fail_read_{false};
 };
 
 std::shared_ptr<const CacheTopology> makeTopology(std::vector<CacheGroupType> types = {CacheGroupType::FULL}) {
-    std::vector<GroupBase>  groups;
+    std::vector<GroupBase>   groups;
     std::vector<std::string> tags;
     for (size_t group_id = 0; group_id < types.size(); ++group_id) {
         auto spec = std::make_shared<MHAKVCacheSpec>();
         spec->tag = "group_" + std::to_string(group_id);
         GroupBase group;
-        group.tag                       = spec->tag;
-        group.spec                      = std::move(spec);
-        group.policy                    = defaultCacheGroupPolicy(types[group_id]);
+        group.tag                        = spec->tag;
+        group.spec                       = std::move(spec);
+        group.policy                     = defaultCacheGroupPolicy(types[group_id]);
         group.policy.enable_prefix_reuse = true;
         if (types[group_id] == CacheGroupType::SWA) {
             group.policy.sliding_window_size = 2;
@@ -138,10 +203,8 @@ void initBackend(ManualBackend& backend, const std::shared_ptr<IBlockPool>& pool
 void initBackend(ManualBackend&                                  backend,
                  std::shared_ptr<const CacheTopology>            topology,
                  const std::vector<std::shared_ptr<IBlockPool>>& pools) {
-    RTP_LLM_CHECK(backend.init(std::move(topology),
-                               pools,
-                               [](int, int, int) { return std::vector<BlockInfo>{}; },
-                               [](const auto&) {}));
+    RTP_LLM_CHECK(backend.init(
+        std::move(topology), pools, [](int, int, int) { return std::vector<BlockInfo>{}; }, [](const auto&) {}));
 }
 
 StorageRequest makeRequest(size_t key_count) {
@@ -172,7 +235,7 @@ TEST(LoadAsyncContextTest, EmptyStorageMatchStillRunsDeferredAllocationAndCommit
     auto   backend     = std::make_shared<ManualBackend>();
     auto   pool        = std::make_shared<TestBlockPool>();
     initBackend(*backend, pool);
-    auto   context     = coordinator->create({}, {}, 0, backend, makeRequest(1));
+    auto context = coordinator->create({}, {}, 0, backend, makeRequest(1));
     ASSERT_TRUE(coordinator->registerContext(context));
     size_t callbacks = 0;
     context->setMatchCallback([&](LoadAsyncContext& current, size_t matched) {
@@ -192,18 +255,99 @@ TEST(LoadAsyncContextTest, EmptyStorageMatchStillRunsDeferredAllocationAndCommit
     coordinator->shutdown();
 }
 
+TEST(LoadAsyncContextTest, BackendMatchFailureAbortsWithoutRunningAllocatorCallback) {
+    size_t commits     = 0;
+    size_t aborts      = 0;
+    auto   coordinator = makeCoordinator(commits, aborts);
+    auto   backend     = std::make_shared<ManualBackend>();
+    auto   pool        = std::make_shared<TestBlockPool>();
+    initBackend(*backend, pool);
+    auto context = coordinator->create({}, {}, 0, backend, makeRequest(1));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    size_t callbacks = 0;
+    context->setMatchCallback([&](LoadAsyncContext&, size_t) {
+        ++callbacks;
+        return true;
+    });
+
+    backend->failNextMatch();
+    context->startBackendMatch();
+    backend->completeMatch(1);
+
+    EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(callbacks, 0u);
+    EXPECT_EQ(commits, 0u);
+    EXPECT_EQ(aborts, 1u);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, AllocatorCallbackExceptionAbortsContext) {
+    size_t commits     = 0;
+    size_t aborts      = 0;
+    auto   coordinator = makeCoordinator(commits, aborts);
+    auto   backend     = std::make_shared<ManualBackend>();
+    auto   pool        = std::make_shared<TestBlockPool>();
+    initBackend(*backend, pool);
+    auto context = coordinator->create({}, {}, 0, backend, makeRequest(1));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->setMatchCallback(
+        [](LoadAsyncContext&, size_t) -> bool { throw std::runtime_error("allocator callback failed"); });
+
+    context->startBackendMatch();
+    backend->completeMatch(1);
+
+    EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(commits, 0u);
+    EXPECT_EQ(aborts, 1u);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, BackendReadFailureMarksCommittedContextFailedAndReleasesPin) {
+    size_t commits     = 0;
+    size_t aborts      = 0;
+    auto   coordinator = makeCoordinator(commits, aborts);
+    auto   backend     = std::make_shared<ManualBackend>();
+    auto   pool        = std::make_shared<TestBlockPool>();
+    auto   block       = pool->malloc().value();
+    pool->incRef(block, BlockRefType::REQUEST);
+    initBackend(*backend, pool);
+    auto context = coordinator->create({}, {}, 0, backend, makeRequest(1));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->setMatchCallback([&](LoadAsyncContext& current, size_t) {
+        current.setBackendTargetBlock(0, 0, block);
+        return current.commit();
+    });
+
+    context->startBackendMatch();
+    backend->completeMatch(1);
+    ASSERT_TRUE(backend->readPending());
+    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 1u);
+    backend->failNextRead();
+    backend->completeRead();
+
+    EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(commits, 1u);
+    EXPECT_EQ(aborts, 0u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 0u);
+    pool->decRef(block, BlockRefType::REQUEST);
+    coordinator->shutdown();
+}
+
 TEST(LoadAsyncContextTest, MatchedKeyExposesAllOfItsHandles) {
     size_t commits     = 0;
     size_t aborts      = 0;
     auto   coordinator = makeCoordinator(commits, aborts);
     auto   backend     = std::make_shared<ManualBackend>();
-    auto pool  = std::make_shared<TestBlockPool>();
-    auto block = pool->malloc().value();
+    auto   pool        = std::make_shared<TestBlockPool>();
+    auto   block       = pool->malloc().value();
     pool->incRef(block, BlockRefType::REQUEST);
     initBackend(*backend, pool);
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1, 2}),
                            {{{0, NULL_BLOCK_IDX}, {0, NULL_BLOCK_IDX}}, {{0, NULL_BLOCK_IDX}}}};
-    auto context = coordinator->create({}, {}, 0, backend, std::move(request));
+    auto           context = coordinator->create({}, {}, 0, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
     context->setMatchCallback([&](LoadAsyncContext& current, size_t matched) {
         EXPECT_EQ(matched, 1u);
@@ -217,9 +361,9 @@ TEST(LoadAsyncContextTest, MatchedKeyExposesAllOfItsHandles) {
     context->startBackendMatch();
     backend->completeMatch(1);
     ASSERT_TRUE(backend->readPending());
+    backend->completeRead();
     EXPECT_EQ(backend->readKeys(), (CacheKeysType{1}));
     EXPECT_EQ(backend->readHandleCounts(), (std::vector<size_t>{2}));
-    backend->completeRead();
     EXPECT_TRUE(context->success());
     EXPECT_EQ(commits, 1u);
     EXPECT_EQ(aborts, 0u);
@@ -228,10 +372,10 @@ TEST(LoadAsyncContextTest, MatchedKeyExposesAllOfItsHandles) {
 }
 
 TEST(LoadAsyncContextTest, MatchedKeysKeepReuseShapeAndForwardDerivedMatchMeta) {
-    size_t commits     = 0;
-    size_t aborts      = 0;
-    auto   coordinator = makeCoordinator(commits, aborts);
-    auto   backend     = std::make_shared<ManualBackend>();
+    size_t                                      commits     = 0;
+    size_t                                      aborts      = 0;
+    auto                                        coordinator = makeCoordinator(commits, aborts);
+    auto                                        backend     = std::make_shared<ManualBackend>();
     std::vector<std::shared_ptr<TestBlockPool>> pools;
     std::vector<std::shared_ptr<IBlockPool>>    bound_pools;
     std::vector<BlockIdxType>                   blocks;
@@ -243,9 +387,8 @@ TEST(LoadAsyncContextTest, MatchedKeysKeepReuseShapeAndForwardDerivedMatchMeta) 
         bound_pools.push_back(pool);
         blocks.push_back(block);
     }
-    initBackend(*backend,
-                makeTopology({CacheGroupType::FULL, CacheGroupType::LINEAR, CacheGroupType::SWA}),
-                bound_pools);
+    initBackend(
+        *backend, makeTopology({CacheGroupType::FULL, CacheGroupType::LINEAR, CacheGroupType::SWA}), bound_pools);
 
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1, 2, 3, 4}),
                            std::vector<std::vector<StorageBlockHandle>>(4)};
@@ -276,12 +419,11 @@ TEST(LoadAsyncContextTest, MatchedKeysKeepReuseShapeAndForwardDerivedMatchMeta) 
     match_meta->remote_version = 17;
     backend->completeMatch(4, match_meta);
     ASSERT_TRUE(backend->readPending());
+    backend->completeRead();
     ASSERT_EQ(backend->readMatchMeta(), match_meta);
     EXPECT_EQ(backend->readMatchMeta()->remote_version, 17u);
     EXPECT_EQ(backend->readHandleCounts(), (std::vector<size_t>{1, 1, 2, 3}));
-    EXPECT_EQ(backend->readGroupIds(),
-              (std::vector<std::vector<size_t>>{{0}, {0}, {0, 2}, {0, 1, 2}}));
-    backend->completeRead();
+    EXPECT_EQ(backend->readGroupIds(), (std::vector<std::vector<size_t>>{{0}, {0}, {0, 2}, {0, 1, 2}}));
     EXPECT_TRUE(context->success());
     EXPECT_EQ(commits, 1u);
     EXPECT_EQ(aborts, 0u);
@@ -296,9 +438,9 @@ TEST(LoadAsyncContextTest, FullKeyMatchKeepsLocalPrefixVisibleAndReadsOnlyRemote
     size_t aborts      = 0;
     auto   coordinator = makeCoordinator(commits, aborts);
     auto   backend     = std::make_shared<ManualBackend>();
-    auto pool  = std::make_shared<TestBlockPool>();
-    auto first = pool->malloc().value();
-    auto second = pool->malloc().value();
+    auto   pool        = std::make_shared<TestBlockPool>();
+    auto   first       = pool->malloc().value();
+    auto   second      = pool->malloc().value();
     pool->incRef(first, BlockRefType::REQUEST);
     pool->incRef(second, BlockRefType::REQUEST);
     initBackend(*backend, pool);
@@ -306,7 +448,7 @@ TEST(LoadAsyncContextTest, FullKeyMatchKeepsLocalPrefixVisibleAndReadsOnlyRemote
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{10, 20, 30, 40}),
                            std::vector<std::vector<StorageBlockHandle>>(4, {{0, NULL_BLOCK_IDX}}),
                            /*local_matched_blocks_num=*/2};
-    auto context = coordinator->create({}, {}, 2, backend, std::move(request));
+    auto           context = coordinator->create({}, {}, 2, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
     context->setMatchCallback([&](LoadAsyncContext& current, size_t matched) {
         EXPECT_EQ(matched, 4u);
@@ -322,13 +464,13 @@ TEST(LoadAsyncContextTest, FullKeyMatchKeepsLocalPrefixVisibleAndReadsOnlyRemote
     });
 
     context->startBackendMatch();
+    backend->completeMatch(4);
     EXPECT_EQ(backend->matchKeys(), (CacheKeysType{10, 20, 30, 40}));
     EXPECT_EQ(backend->matchLocalBlocks(), 2u);
-    backend->completeMatch(4);
     ASSERT_TRUE(backend->readPending());
+    backend->completeRead();
     EXPECT_EQ(backend->readKeys(), (CacheKeysType{10, 20, 30, 40}));
     EXPECT_EQ(backend->readHandleCounts(), (std::vector<size_t>{0, 0, 1, 1}));
-    backend->completeRead();
     EXPECT_TRUE(context->success());
     EXPECT_EQ(context->matchedBlocks(), 4u);
     EXPECT_EQ(commits, 1u);
@@ -343,8 +485,8 @@ TEST(LoadAsyncContextTest, LocalAndStorageReadsMustBothComplete) {
     size_t aborts      = 0;
     auto   coordinator = makeCoordinator(commits, aborts);
     auto   backend     = std::make_shared<ManualBackend>();
-    auto pool  = std::make_shared<TestBlockPool>();
-    auto block = pool->malloc().value();
+    auto   pool        = std::make_shared<TestBlockPool>();
+    auto   block       = pool->malloc().value();
     pool->incRef(block, BlockRefType::REQUEST);
     initBackend(*backend, pool);
 
@@ -394,7 +536,7 @@ TEST(LoadAsyncContextTest, CancelWaitsForDeferredAllocatorCallback) {
     auto   backend     = std::make_shared<ManualBackend>();
     auto   pool        = std::make_shared<TestBlockPool>();
     initBackend(*backend, pool);
-    auto   context     = coordinator->create({}, {}, 0, backend, makeRequest(1));
+    auto context = coordinator->create({}, {}, 0, backend, makeRequest(1));
     ASSERT_TRUE(coordinator->registerContext(context));
 
     std::mutex              mutex;
@@ -438,7 +580,7 @@ TEST(LoadAsyncContextTest, CoordinatorShutdownWaitsForDeferredAllocatorCallback)
     auto   backend     = std::make_shared<ManualBackend>();
     auto   pool        = std::make_shared<TestBlockPool>();
     initBackend(*backend, pool);
-    auto   context     = coordinator->create({}, {}, 0, backend, makeRequest(1));
+    auto context = coordinator->create({}, {}, 0, backend, makeRequest(1));
     ASSERT_TRUE(coordinator->registerContext(context));
 
     std::mutex              mutex;

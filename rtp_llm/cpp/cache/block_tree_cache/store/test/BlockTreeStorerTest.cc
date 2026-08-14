@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -45,11 +46,11 @@ struct StoreEnvironment {
 
 constexpr size_t kStoreDeviceBlocks = 4;
 
-StoreEnvironment makeStoreEnvironment(const std::string&         name,
-                                      bool                       device_cache_on,
-                                      bool                       host_cache_on,
-                                      bool                       disk_cache_on,
-                                      const std::vector<size_t>& lower_tier_blocks = {2},
+StoreEnvironment makeStoreEnvironment(const std::string&              name,
+                                      bool                            device_cache_on,
+                                      bool                            host_cache_on,
+                                      bool                            disk_cache_on,
+                                      const std::vector<size_t>&      lower_tier_blocks = {2},
                                       int                             task_pool_size    = 4,
                                       std::shared_ptr<StorageBackend> storage_backend   = nullptr) {
     StoreEnvironment env;
@@ -77,23 +78,46 @@ StoreEnvironment makeStoreEnvironment(const std::string&         name,
     return env;
 }
 
+class PendingWriteExecutor: public StorageBackendExecutor {
+public:
+    bool start() override {
+        return true;
+    }
+    bool submit(Task task) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        tasks_.push_back(std::move(task));
+        return true;
+    }
+    void shutdown() noexcept override {
+        runAll();
+    }
+    void runAll() {
+        std::deque<Task> tasks;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            tasks.swap(tasks_);
+        }
+        for (auto& task : tasks) {
+            task();
+        }
+    }
+
+private:
+    std::mutex       mutex_;
+    std::deque<Task> tasks_;
+};
+
 class PendingWriteBackend: public StorageBackend {
 public:
+    PendingWriteBackend(): PendingWriteBackend(std::make_shared<PendingWriteExecutor>()) {}
+    ~PendingWriteBackend() override {
+        shutdown();
+    }
     void setCache(BlockTreeCache* cache) {
         cache_ = cache;
     }
     void finishWrite() {
-        Done done;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            done = std::move(done_);
-        }
-        if (done) {
-            done();
-        }
-    }
-    void shutdown() override {
-        finishWrite();
+        executor_->runAll();
     }
     std::vector<BlockIdxType> blocks() const {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -119,13 +143,11 @@ protected:
     bool initImpl() override {
         return true;
     }
-    void matchImpl(StorageRequest request, MatchDone done) override {
-        done(request.handles.size(), nullptr);
+    StorageMatchResult matchImpl(const StorageRequest& request) override {
+        return {request.handles.size(), nullptr};
     }
-    void readImpl(StorageRequest, std::shared_ptr<StorageBackendMatchMeta>, Done done) override {
-        done();
-    }
-    void writeImpl(StorageRequest request, Done done) override {
+    void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {}
+    void writeImpl(const StorageRequest& request) override {
         submitted_outside_tree_lock_ = cache_ != nullptr && cache_->mutex_.try_lock();
         if (submitted_outside_tree_lock_) {
             cache_->mutex_.unlock();
@@ -141,18 +163,20 @@ protected:
                 addresses_.push_back(buffers.front().addr);
             }
         }
-        done_ = std::move(done);
     }
 
 private:
-    BlockTreeCache*           cache_{nullptr};
-    mutable std::mutex        mutex_;
-    std::vector<BlockIdxType> blocks_;
-    std::vector<std::string>  group_tags_;
-    std::vector<size_t>       key_handle_counts_;
-    std::vector<void*>        addresses_;
-    Done                      done_;
-    bool                      submitted_outside_tree_lock_{false};
+    explicit PendingWriteBackend(std::shared_ptr<PendingWriteExecutor> executor):
+        StorageBackend(executor), executor_(std::move(executor)) {}
+
+    std::shared_ptr<PendingWriteExecutor> executor_;
+    BlockTreeCache*                       cache_{nullptr};
+    mutable std::mutex                    mutex_;
+    std::vector<BlockIdxType>             blocks_;
+    std::vector<std::string>              group_tags_;
+    std::vector<size_t>                   key_handle_counts_;
+    std::vector<void*>                    addresses_;
+    bool                                  submitted_outside_tree_lock_{false};
 };
 
 std::shared_ptr<ControlledPerRankBlockTransferEngine> installStoreTransferEngine(
@@ -250,11 +274,11 @@ TEST(BlockTreeStorerTest, DeviceInsertSubmitsAllBlocksOutsideTreeLockAndPinsUnti
     resources[1][0].device_blocks = holder[1];
 
     env.cache->insert({100, 101}, resources, Tier::DEVICE);
+    EXPECT_EQ(env.device_pools[0]->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 2u);
+    backend->finishWrite();
     EXPECT_TRUE(backend->submittedOutsideTreeLock());
     EXPECT_EQ(backend->keyHandleCounts(), (std::vector<size_t>{1, 1}));
     EXPECT_EQ(backend->blocks(), (std::vector<BlockIdxType>{holder[0][0], holder[1][0]}));
-    EXPECT_EQ(env.device_pools[0]->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 2u);
-    backend->finishWrite();
     EXPECT_EQ(env.device_pools[0]->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 0u);
 
     releaseDeviceBlocksAndNotify(*env.cache, env.device_pools[0], holder[0], BlockRefType::REQUEST);
@@ -291,14 +315,13 @@ TEST(BlockTreeStorerTest, StorageHandlesUseTopologyGroupsAndResolveGpuBuffers) {
     MultiNodeBlocks holder = allocateDeviceBlocksForTest(*group_set, 1, BlockRefType::REQUEST);
     ASSERT_EQ(holder.size(), 1u);
     cache->insert({100}, deviceSourceResources({holder.front()}), Tier::DEVICE);
+    backend->finishWrite();
     EXPECT_EQ(backend->keyHandleCounts(), (std::vector<size_t>{2}));
     EXPECT_EQ(backend->groupTags(), (std::vector<std::string>{"z_group", "a_group"}));
     EXPECT_EQ(backend->blocks(), (std::vector<BlockIdxType>{holder[0][0], holder[0][1]}));
     EXPECT_EQ(backend->addresses(),
               (std::vector<void*>{pool_z->convertIndexToBuffer(0, holder[0][0]).front().addr,
                                   pool_a->convertIndexToBuffer(0, holder[0][1]).front().addr}));
-
-    backend->finishWrite();
     releaseDeviceBlocksAndNotify(*cache, pool_z, {holder[0][0]}, BlockRefType::REQUEST);
     releaseDeviceBlocksAndNotify(*cache, pool_a, {holder[0][1]}, BlockRefType::REQUEST);
 }

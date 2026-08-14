@@ -93,8 +93,7 @@ static CacheConfig makeTinySwaMultiPoolHybridConfig(uint32_t linear_block_num = 
     return makeTinyMultiPoolHybridConfig(linear_block_num, swa_block_num, CacheGroupType::SWA);
 }
 
-static CacheConfig makeTinyFullSwaMultiPoolHybridConfig(uint32_t full_block_num = 12,
-                                                        uint32_t swa_block_num  = 12) {
+static CacheConfig makeTinyFullSwaMultiPoolHybridConfig(uint32_t full_block_num = 12, uint32_t swa_block_num = 12) {
     CacheConfig config;
     config.dtype                       = DataType::TYPE_FP16;
     config.layer_num                   = 4;
@@ -106,38 +105,54 @@ static CacheConfig makeTinyFullSwaMultiPoolHybridConfig(uint32_t full_block_num 
     config.group_layer_num             = 2;
     config.use_independent_block_pools = true;
 
-    auto full_spec = makeResolvedMhaSpec(config.dtype, 1, 1, 4, "full");
-    auto swa_spec  = makeResolvedMhaSpec(config.dtype, 1, 1, 4, "swa");
-    auto full_policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    auto swa_policy                 = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    swa_policy.enable_prefix_reuse  = true;
-    swa_policy.sliding_window_size  = 8;
+    auto full_spec                 = makeResolvedMhaSpec(config.dtype, 1, 1, 4, "full");
+    auto swa_spec                  = makeResolvedMhaSpec(config.dtype, 1, 1, 4, "swa");
+    auto full_policy               = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    auto swa_policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    swa_policy.enable_prefix_reuse = true;
+    swa_policy.sliding_window_size = 8;
     config.fromGroupedSpecs({full_spec, swa_spec},
                             {{0, 1}, {2, 3}},
                             {CacheGroupType::FULL, CacheGroupType::SWA},
                             {"full", "swa"},
                             {full_policy, swa_policy});
 
-    const size_t full_stride       = full_spec->block_size_bytes();
-    const size_t swa_stride        = swa_spec->block_size_bytes();
-    config.kv_block_stride_bytes   = std::max(full_stride, swa_stride);
-    config.kv_block_size_bytes     = 2 * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes   = 0;
-    config.kv_scale_size_bytes     = 0;
-    config.block_size_bytes        = config.kv_block_size_bytes;
+    const size_t full_stride     = full_spec->block_size_bytes();
+    const size_t swa_stride      = swa_spec->block_size_bytes();
+    config.kv_block_stride_bytes = std::max(full_stride, swa_stride);
+    config.kv_block_size_bytes   = 2 * config.kv_block_stride_bytes;
+    config.kv_scale_stride_bytes = 0;
+    config.kv_scale_size_bytes   = 0;
+    config.block_size_bytes      = config.kv_block_size_bytes;
     config.layer_to_block_stride_bytes.assign(4, static_cast<int>(config.kv_block_stride_bytes));
     config.setGroupBlockLayout({full_block_num, swa_block_num}, {full_stride, swa_stride}, {0, 0});
     return config;
 }
 
 struct MemoryStorageState {
-    std::mutex                                             mutex;
+    std::mutex                                                   mutex;
     std::unordered_map<CacheKeyType, std::unordered_set<size_t>> groups_by_key;
+};
+
+class InlineStorageBackendExecutor: public StorageBackendExecutor {
+public:
+    bool start() override {
+        return true;
+    }
+    bool submit(Task task) override {
+        task();
+        return true;
+    }
+    void shutdown() noexcept override {}
 };
 
 class PolicyMemoryStorageBackend: public StorageBackend {
 public:
-    explicit PolicyMemoryStorageBackend(std::shared_ptr<MemoryStorageState> state): state_(std::move(state)) {}
+    explicit PolicyMemoryStorageBackend(std::shared_ptr<MemoryStorageState> state):
+        StorageBackend(std::make_shared<InlineStorageBackendExecutor>()), state_(std::move(state)) {}
+    ~PolicyMemoryStorageBackend() override {
+        shutdown();
+    }
 
     size_t matchedKeys() const {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -151,21 +166,19 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return read_group_ids_;
     }
-    void shutdown() override {}
 
 protected:
     bool initImpl() override {
         return true;
     }
-    void matchImpl(StorageRequest request, MatchDone done) override {
+    StorageMatchResult matchImpl(const StorageRequest& request) override {
         size_t matched = request.local_matched_blocks_num;
         {
             std::lock_guard<std::mutex> storage_lock(state_->mutex);
             for (size_t candidate = request.local_matched_blocks_num + 1; candidate <= request.handles.size();
                  ++candidate) {
                 bool found = true;
-                for (size_t key_index = request.local_matched_blocks_num; found && key_index < candidate;
-                     ++key_index) {
+                for (size_t key_index = request.local_matched_blocks_num; found && key_index < candidate; ++key_index) {
                     const auto stored = state_->groups_by_key.find((*request.keys)[key_index]);
                     for (const auto& handle : request.handles[key_index]) {
                         if (isHandleRequired(key_index, candidate, handle.group_id)
@@ -184,10 +197,10 @@ protected:
             std::lock_guard<std::mutex> lock(mutex_);
             matched_keys_ = matched;
         }
-        done(matched, nullptr);
+        return {matched, nullptr};
     }
 
-    void readImpl(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta>, Done done) override {
+    void readImpl(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>&) override {
         std::vector<std::vector<size_t>> group_ids;
         for (const auto& handles : request.handles) {
             group_ids.emplace_back();
@@ -199,10 +212,9 @@ protected:
             std::lock_guard<std::mutex> lock(mutex_);
             read_group_ids_ = std::move(group_ids);
         }
-        done();
     }
 
-    void writeImpl(StorageRequest request, Done done) override {
+    void writeImpl(const StorageRequest& request) override {
         std::vector<std::vector<size_t>> group_ids(request.handles.size());
         {
             std::lock_guard<std::mutex> storage_lock(state_->mutex);
@@ -218,15 +230,14 @@ protected:
             std::lock_guard<std::mutex> lock(mutex_);
             write_group_ids_ = std::move(group_ids);
         }
-        done();
     }
 
 private:
     std::shared_ptr<MemoryStorageState> state_;
-    mutable std::mutex                 mutex_;
-    size_t                             matched_keys_{0};
-    std::vector<std::vector<size_t>>   write_group_ids_;
-    std::vector<std::vector<size_t>>   read_group_ids_;
+    mutable std::mutex                  mutex_;
+    size_t                              matched_keys_{0};
+    std::vector<std::vector<size_t>>    write_group_ids_;
+    std::vector<std::vector<size_t>>    read_group_ids_;
 };
 
 static ModelConfig makeTinyDSV4ModelConfig() {
@@ -516,17 +527,17 @@ protected:
     }
 };
 
-static void runStorageRoundTrip(const CacheConfig&                       config,
-                                const CacheKeysType&                     writer_keys,
-                                int                                      writer_seq_len,
-                                const CacheKeysType&                     reader_keys,
-                                int                                      reader_seq_len,
-                                const std::shared_ptr<CPSlotMapper>&     cp_mapper,
+static void runStorageRoundTrip(const CacheConfig&                      config,
+                                const CacheKeysType&                    writer_keys,
+                                int                                     writer_seq_len,
+                                const CacheKeysType&                    reader_keys,
+                                int                                     reader_seq_len,
+                                const std::shared_ptr<CPSlotMapper>&    cp_mapper,
                                 const std::vector<std::vector<size_t>>& expected_write_groups,
                                 const std::vector<std::vector<size_t>>& expected_read_groups) {
-    auto state          = std::make_shared<MemoryStorageState>();
-    auto writer_backend = std::make_shared<PolicyMemoryStorageBackend>(state);
-    auto writer         = makeAllocator(config);
+    auto          state          = std::make_shared<MemoryStorageState>();
+    auto          writer_backend = std::make_shared<PolicyMemoryStorageBackend>(state);
+    auto          writer         = makeAllocator(config);
     KVCacheConfig remote_config;
     remote_config.enable_remote_cache = true;
     writer->setBlockTreeCacheConfigForTest(remote_config);
@@ -536,7 +547,7 @@ static void runStorageRoundTrip(const CacheConfig&                       config,
 
     auto writer_resource = makeBatchResource(/*batch_size=*/1, config);
     writer_resource->setBatchCacheKeys(0, writer_keys);
-    auto writer_tokens = makeCompleteTokenIds(/*batch_size=*/1, writer_seq_len, config.seq_size_per_block);
+    auto       writer_tokens = makeCompleteTokenIds(/*batch_size=*/1, writer_seq_len, config.seq_size_per_block);
     MallocInfo writer_malloc{writer_resource, writer_tokens};
     writer_malloc.enable_cache_lookup          = false;
     writer_malloc.reuse_cache                  = true;
@@ -554,12 +565,12 @@ static void runStorageRoundTrip(const CacheConfig&                       config,
 
     auto reader_resource = makeBatchResource(/*batch_size=*/1, config);
     reader_resource->setBatchCacheKeys(0, reader_keys);
-    auto reader_tokens = makeCompleteTokenIds(/*batch_size=*/1, reader_seq_len, config.seq_size_per_block);
+    auto       reader_tokens = makeCompleteTokenIds(/*batch_size=*/1, reader_seq_len, config.seq_size_per_block);
     MallocInfo reader_malloc{reader_resource, reader_tokens};
     reader_malloc.enable_cache_lookup          = true;
     reader_malloc.reuse_cache                  = true;
     reader_malloc.enable_remove_skipped_blocks = false;
-    auto result = reader->malloc(reader_malloc);
+    auto result                                = reader->malloc(reader_malloc);
     ASSERT_TRUE(result.success);
     ASSERT_NE(result.async_context, nullptr);
     result.async_context->waitDone();
@@ -572,7 +583,7 @@ static void runStorageRoundTrip(const CacheConfig&                       config,
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, StorageRoundTripUsesSparseFullLinearShape) {
-    const auto config      = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/12, /*full_block_num=*/12);
+    const auto          config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/12, /*full_block_num=*/12);
     const CacheKeysType stored_keys{100, 101, 102, 103};
     const CacheKeysType request_keys{100, 101, 102, 103, 104, 105};
     runStorageRoundTrip(config,
@@ -586,7 +597,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, StorageRoundTripUsesSparseFullLinearShape
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, StorageRoundTripUsesFullSwaWindowShape) {
-    const auto config      = makeTinyFullSwaMultiPoolHybridConfig();
+    const auto          config = makeTinyFullSwaMultiPoolHybridConfig();
     const CacheKeysType stored_keys{200, 201, 202, 203};
     const CacheKeysType request_keys{200, 201, 202, 203, 204, 205};
     runStorageRoundTrip(config,
@@ -600,10 +611,10 @@ TEST_F(HybridPoolKVCacheAllocatorTest, StorageRoundTripUsesFullSwaWindowShape) {
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, StorageRoundTripMapsCpCanonicalFullLinearTargets) {
-    const auto config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/16, /*full_block_num=*/16);
+    const auto          config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/16, /*full_block_num=*/16);
     const CacheKeysType stored_keys{300, 301, 302, 303, 304, 305, 306, 307};
     const CacheKeysType request_keys{300, 301, 302, 303, 304, 305, 306, 307, 308, 309};
-    auto cp_mapper = std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4);
+    auto                cp_mapper = std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4);
     runStorageRoundTrip(config,
                         stored_keys,
                         /*writer_seq_len=*/32,
@@ -1009,8 +1020,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesLowerTierBackfi
     const auto& cache = allocator->blockTreeCacheOwner();
     ASSERT_NE(cache, nullptr);
 
-    const CacheKeysType                        cached_keys{100, 101};
-    std::vector<std::vector<GroupSetResource>> slots(cached_keys.size(),
+    const CacheKeysType                               cached_keys{100, 101};
+    std::vector<std::vector<GroupSetResource>>        slots(cached_keys.size(),
                                                      std::vector<GroupSetResource>(cache->groupSets().size()));
     std::vector<std::pair<GroupSetPtr, BlockIdxType>> host_sources;
     for (const GroupSetPtr& group_set : cache->groupSets()) {
