@@ -134,7 +134,9 @@ class EnvArgumentGroup:
         self,
         *args,
         env_name: Optional[str] = None,
-        bind_to: Optional[Union[Tuple[Any, str], str]] = None,
+        bind_to: Optional[
+            Union[Tuple[Any, str], str, List[Union[Tuple[Any, str], str]]]
+        ] = None,
         **kwargs,
     ) -> argparse.Action:
         """
@@ -143,7 +145,8 @@ class EnvArgumentGroup:
         Args:
             *args: 标准 argparse add_argument 参数
             env_name: 环境变量名称（保留用于兼容，但不再自动更新到 os.environ）
-            bind_to: 配置绑定目标，可以是 (config_obj, 'attr_name') 或 'path.to.attr' 字符串
+            bind_to: 配置绑定目标，可以是 (config_obj, 'attr_name')、
+                'path.to.attr' 字符串或这些目标的列表
             **kwargs: 其他 argparse add_argument 参数
         """
         if "metavar" not in kwargs and "type" in kwargs:
@@ -187,7 +190,9 @@ class EnvArgumentParser(argparse.ArgumentParser):
         self._root_config = root_config
 
     def _register_config_binding(
-        self, action: argparse.Action, bind_to: Union[Tuple[Any, str], str]
+        self,
+        action: argparse.Action,
+        bind_to: Union[Tuple[Any, str], str, List[Union[Tuple[Any, str], str]]],
     ) -> None:
         """注册参数到配置对象的绑定关系"""
         binding = ConfigBinding(action, bind_to)
@@ -353,6 +358,8 @@ class EnvArgumentParser(argparse.ArgumentParser):
                                 try:
                                     converted_value = action.type(env_value)
                                     setattr(parsed_args, dest, converted_value)
+                                except argparse.ArgumentTypeError as error:
+                                    self.error(f"{env_name} ({dest}): {error}")
                                 except (ValueError, TypeError):
                                     # If conversion fails, skip this value
                                     pass
@@ -452,11 +459,7 @@ def init_all_group_args(
     init_fmha_group_args(parser, py_env_configs.fmha_config)
     init_gang_group_args(parser, py_env_configs.distribute_config)
     init_generate_group_args(parser, py_env_configs.generate_env_config)
-    init_grammar_group_args(
-        parser,
-        py_env_configs.grammar_config,
-        py_env_configs.grammar_admission_config,
-    )
+    init_grammar_group_args(parser, py_env_configs.grammar_config)
     init_hw_kernel_group_args(parser, py_env_configs.py_hw_kernel_config)
     init_kv_cache_group_args(parser, py_env_configs.kv_cache_config)
     init_load_group_args(parser, py_env_configs.load_config, py_env_configs.model_args)
@@ -488,7 +491,11 @@ def init_all_group_args(
     init_role_group_args(parser, py_env_configs.role_config)
     init_rpc_discovery_group_args(parser)
     init_scheduler_group_args(parser, py_env_configs.runtime_config)
-    init_server_group_args(parser, py_env_configs.server_config)
+    init_server_group_args(
+        parser,
+        py_env_configs.server_config,
+        py_env_configs.distribute_config,
+    )
     init_speculative_decoding_group_args(parser, py_env_configs.sp_config)
     init_vit_group_args(parser, py_env_configs.vit_config)
     init_jit_group_args(parser, py_env_configs.jit_config)
@@ -497,7 +504,14 @@ def init_all_group_args(
     init_dash_sc_grpc_group_args(parser, py_env_configs.dash_sc_grpc_config)
 
 
-def setup_args() -> PyEnvConfigs:
+def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
+    """Parse engine arguments into the canonical ``PyEnvConfigs`` object.
+
+    ``args=None`` preserves the server entry point behavior (parse ``sys.argv``).
+    Supplying an explicit sequence lets in-process tools, such as the offline
+    capacity estimator, reuse the exact same parser and config bindings without
+    temporarily replacing global process arguments.
+    """
     parser = EnvArgumentParser(description="RTP LLM")
 
     # 先创建配置对象
@@ -510,6 +524,6 @@ def setup_args() -> PyEnvConfigs:
     init_all_group_args(parser, py_env_configs)
 
     # 解析参数（会自动应用所有配置绑定）
-    parsed_args = parser.parse_args()
+    parser.parse_args(args)
 
     return py_env_configs

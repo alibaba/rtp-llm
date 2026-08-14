@@ -183,13 +183,26 @@ def copy_gemm_config():
 
 
 def torch_abi_fingerprint() -> Optional[tuple[str, int]]:
+    # Prefix included: cached ninja files and RPATHs embed torch's absolute paths.
+    torch = _torch_module()
     abi = getattr(torch._C, "_GLIBCXX_USE_CXX11_ABI", None)
-    return (torch.__version__, int(abi)) if isinstance(abi, bool) else None
+    build = f"{torch.__version__}@{Path(torch.__file__).parent}"
+    return (build, int(abi)) if isinstance(abi, bool) else None
 
 
 # Env vars that change compiled binaries without changing any package version;
 # consumed by jit_cache_manager.resolve_scope and tipc.ffi build signatures.
-COMPILE_FLAG_ENVS = ("TORCH_CUDA_ARCH_LIST", "NVCC_APPEND_FLAGS", "CXXFLAGS", "CFLAGS")
+COMPILE_FLAG_ENVS = (
+    "TORCH_CUDA_ARCH_LIST",
+    "NVCC_APPEND_FLAGS",
+    "NVCC_PREPEND_FLAGS",
+    "CUDAHOSTCXX",
+    "CXXFLAGS",
+    "CFLAGS",
+    "CXX",
+    "CC",
+    "PYTORCH_NVCC",
+)
 
 
 def get_dtype_size(dtype: torch.dtype) -> int:

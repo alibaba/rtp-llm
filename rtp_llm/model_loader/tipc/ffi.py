@@ -10,7 +10,7 @@ PROGRAM_NAME = "tipc"
 
 
 def _source_signature(root: Path, build_args: list) -> str:
-    digest = hashlib.sha256(repr(build_args).encode())
+    digest = hashlib.sha256(repr((str(root.resolve()), build_args)).encode())
     for path in sorted(root.rglob("*")):
         if path.is_file():
             digest.update(path.relative_to(root).as_posix().encode() + b"\0")
@@ -20,7 +20,7 @@ def _source_signature(root: Path, build_args: list) -> str:
 
 class __CompileHelper__:
     def __init__(self) -> None:
-        self.__CUDA_EXTENTION__ = None
+        self.__CUDA_EXTENSION__ = None
 
     def compile(self):
         """Compile (or warm-load) the CUDA extension; needs C++17 + CUDA."""
@@ -43,7 +43,7 @@ class __CompileHelper__:
             *map(str, fingerprint),
             # These envs change the binary without touching sources (e.g. load()
             # derives -gencode from TORCH_CUDA_ARCH_LIST).
-            *filter(None, (os.environ.get(name, "") for name in COMPILE_FLAG_ENVS)),
+            *(f"{name}={os.environ.get(name, '')}" for name in COMPILE_FLAG_ENVS),
         ]
         build_dir = (
             Path(
@@ -55,10 +55,13 @@ class __CompileHelper__:
         )
         build_dir.mkdir(parents=True, exist_ok=True)
         # Serialize load() and clear a stale FileBaton left by a killed builder.
-        with (build_dir / ".load.lock").open("w") as lock:
+        lock_path = build_dir / ".load.lock"
+        with os.fdopen(
+            os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o666), "r+"
+        ) as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             (build_dir / "lock").unlink(missing_ok=True)
-            self.__CUDA_EXTENTION__ = load(
+            self.__CUDA_EXTENSION__ = load(
                 PROGRAM_NAME,
                 sources,
                 build_directory=str(build_dir),
@@ -67,7 +70,7 @@ class __CompileHelper__:
                 extra_cuda_cflags=cuda_cflags,
                 extra_cflags=cflags,
             )
-        return self.__CUDA_EXTENTION__
+        return self.__CUDA_EXTENSION__
 
     def _find_all_source_files(self, directory: Path) -> list[str]:
         return sorted(
@@ -78,9 +81,9 @@ class __CompileHelper__:
 
     @property
     def CUDA_EXTENSION(self):
-        if self.__CUDA_EXTENTION__ is None:
+        if self.__CUDA_EXTENSION__ is None:
             self.compile()
-        return self.__CUDA_EXTENTION__
+        return self.__CUDA_EXTENSION__
 
 
 CompileHelper = __CompileHelper__()
