@@ -169,17 +169,17 @@ ValidatedSpeculativeSamplerInputs validateSpeculativeSamplerInputs(size_t       
 }
 
 FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int top_k) {
+    RTP_LLM_CHECK_WITH_INFO(top_k == 1,
+                            "greedy speculative proposal sampling requires top_k == 1, got %d",
+                            top_k);
+
     FastTopKSamplerOutput output;
     output.all_probs = torch::softmax(logits, -1);
-
-    std::tuple<torch::Tensor, torch::Tensor> sample_res;
-    if (top_k == 1) {
-        sample_res = torch::max(output.all_probs, -1, true);
-    } else {
-        sample_res = torch::topk(output.all_probs, top_k, -1);
-    }
-
+    const auto sample_res = torch::max(output.all_probs, -1, true);
     output.token_ids = std::get<1>(sample_res);
+
+    // Rejection sampling must receive the distribution that actually selected the proposal token.
+    output.all_probs.zero_().scatter_(-1, output.token_ids, 1.0);
 
     return output;
 }
