@@ -28,6 +28,10 @@ def sm120_dsv4_prefill_perf(name, parallel_size, use_cp):
         engine_args += ["--cp_rotate_method", "ALL_GATHER"]
     target_env = {
         "WORLD_SIZE": str(parallel_size), "DSV4_FIXED_POOL_BLOCKS": fixed_pool_blocks,
+        # RTX PRO 5000 is a single-node PCIe topology.  With all 8 GPUs NCCL
+        # otherwise probes the host mlx5 bonds and fails ibv_modify_qp before
+        # the engine starts, even though no inter-node transport is required.
+        "NCCL_IB_DISABLE": "1",
         "DSV4_CHUNK_TOKENS": "4096",
         "DSV4_MOE_CHUNK_TOKENS": "4096", "DSV4_SM120_FLASHINFER_PAGE64": "1",
         "DSV4_BF16_VLLM": "0", "DSV4_FUSED_PREPARE": "1",
