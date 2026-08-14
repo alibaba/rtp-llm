@@ -1264,25 +1264,6 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
     environment->expectFullyReclaimed();
 }
 
-TEST_F(BlockTreeCacheIntegrationTest, EvictionRejectsNonCanonicalTargetBeforeCopy) {
-    if (!cudaAvailable()) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-
-    FullSWAEnvironmentOptions options;
-    options.path_length = 1;
-    auto environment    = FullSWAEnvironment::create(options);
-    ASSERT_NE(environment, nullptr);
-    environment->insertRequestPath();
-    environment->releaseRequestRefs();
-
-    environment->scripted_per_rank_transfer_engine->clear();
-    EXPECT_FALSE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment->cache, 1, Tier::DEVICE, Tier::DISK));
-    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
-    EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
-    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 0u);
-}
-
 TEST_F(BlockTreeCacheIntegrationTest, EvictionExplicitNoneCascadesAtLeafWithoutCopy) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
@@ -1296,7 +1277,8 @@ TEST_F(BlockTreeCacheIntegrationTest, EvictionExplicitNoneCascadesAtLeafWithoutC
     environment->releaseRequestRefs();
 
     environment->scripted_per_rank_transfer_engine->clear();
-    EXPECT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment->cache, 1, Tier::DEVICE, Tier::NONE));
+    EXPECT_TRUE(
+        BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment->cache, 1, Tier::DEVICE, /*force_drop=*/true));
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
     auto result = environment->cache->tree()->findNode(environment->keys);
     EXPECT_TRUE(result.empty());

@@ -613,7 +613,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadUsesSingleDirectStage)
     }
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionSuccessCommitsPlan) {
+TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionSuccessCommitsTask) {
     std::shared_ptr<MultiRankBlockTransferRpcState>    state   = std::make_shared<MultiRankBlockTransferRpcState>();
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
         {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state},
@@ -785,7 +785,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastD2DiskFailureRollsBackDeviceSo
     }
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionFailureRollsBackPlan) {
+TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionFailureRollsBackTask) {
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
         {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
         {true, MemoryOperationResponsePB::FAILED, grpc::Status::OK},
@@ -835,7 +835,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionFailureRollsBackPlan) 
     EXPECT_EQ(cache->getStats().disk_heap_total_size, 0u);
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, BuildEvictionTransferRequestIncludesPrimaryAndCascades) {
+TEST_F(MultiRankBlockTransferEngineTest, EncodeEvictionTransferRequestIncludesPrimaryAndCascades) {
     std::shared_ptr<HostBlockPool>          host_pool = makeHostPool(256, 8);
     std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
     std::shared_ptr<FullGroupSet> primary_group       = makeBroadcastGroup("broadcast_primary", host_pool, disk_pool);
@@ -845,12 +845,12 @@ TEST_F(MultiRankBlockTransferEngineTest, BuildEvictionTransferRequestIncludesPri
     std::unique_ptr<BlockTreeCache> cache  = makeBlockTreeCacheForTest(std::move(groups));
     ASSERT_NE(cache, nullptr);
 
-    BlockTreeEvictor::EvictionPlan plan;
-    plan.primary_desc.group_set_id  = 0;
-    plan.primary_desc.source_tier   = Tier::HOST;
-    plan.primary_desc.target_tier   = Tier::DISK;
-    plan.primary_desc.source_blocks = {3};
-    plan.primary_desc.target_blocks = {4};
+    EvictionTask task;
+    task.primary_desc.group_set_id  = 0;
+    task.primary_desc.source_tier   = Tier::HOST;
+    task.primary_desc.target_tier   = Tier::DISK;
+    task.primary_desc.source_blocks = {3};
+    task.primary_desc.target_blocks = {4};
 
     TransferDescriptor cascade_desc;
     cascade_desc.group_set_id  = 1;
@@ -858,10 +858,9 @@ TEST_F(MultiRankBlockTransferEngineTest, BuildEvictionTransferRequestIncludesPri
     cascade_desc.target_tier   = Tier::DISK;
     cascade_desc.source_blocks = {5};
     cascade_desc.target_blocks = {6};
-    plan.cascade_descs.push_back(cascade_desc);
+    task.cascade_descs.push_back(cascade_desc);
 
-    std::vector<TransferDescriptor> descriptors;
-    ASSERT_TRUE(cache->evictor_.task_runner_->buildTransferBatch(plan, descriptors));
+    std::vector<TransferDescriptor> descriptors{task.primary_desc, task.cascade_descs.front()};
     MemoryOperationRequestPB request;
     ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(request, descriptors, cache->groupSets()));
     ASSERT_EQ(request.copy_items_size(), 2);

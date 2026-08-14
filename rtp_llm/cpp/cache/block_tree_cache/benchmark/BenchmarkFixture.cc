@@ -223,7 +223,7 @@ std::unique_ptr<BlockTreeCache> BenchmarkFixture::createCache(std::vector<GroupS
     auto dispatcher = std::make_unique<BlockTransferDispatcher>(engine);
     // Watermark eviction submits one async demote task per victim in a burst
     // (a single insert commit can exceed the watermark by thousands of nodes);
-    // the queue must absorb that burst or submitLocked blocks while holding the
+    // the queue must absorb that burst or task submission blocks while holding the
     // cache mutex, deadlocking against task completion.
     auto task_pool =
         std::make_unique<BlockTreeTaskPool>(config.task_pool_size, 1000000, "BlockTreeCacheBenchmarkTaskPool");

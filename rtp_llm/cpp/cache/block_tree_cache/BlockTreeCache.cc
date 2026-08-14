@@ -161,12 +161,7 @@ int BlockTreeCache::evictForGroup(size_t group_id, size_t num_blocks) {
     const size_t initial_free = device_pool->freeBlocksNum();
     size_t       reclaimed    = 0;
     while (reclaimed < num_blocks) {
-        auto eviction_desc = evictor_.chooseVictim(location->group_set_id, Tier::DEVICE);
-        if (!eviction_desc.has_value()) {
-            break;
-        }
-        eviction_desc->target_tier = Tier::NONE;
-        if (!evictor_.submitLocked(*eviction_desc)) {
+        if (!evictor_.evictLocked(location->group_set_id, Tier::DEVICE, /*force_drop=*/true)) {
             break;
         }
         const size_t current_free = device_pool->freeBlocksNum();

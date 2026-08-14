@@ -1,56 +1,34 @@
 #pragma once
 
-#include <functional>
 #include <memory>
-#include <mutex>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTask.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 
 namespace rtp_llm {
 
 class BlockTransferDispatcher;
-class BlockTreeCacheMetricsReporter;
-class BlockTreeTaskPool;
-
 class EvictionTaskRunner {
 public:
-    using IsTierEnabledFn   = BlockTreeEvictor::IsTierEnabledFn;
-    using SettledFn         = BlockTreeEvictor::SettledFn;
-
     EvictionTaskRunner(const std::vector<GroupSetPtr>& group_sets,
-                       const BlockTransferDispatcher* transfer_dispatcher,
-                       BlockTreeTaskPool*             task_pool,
-                       BlockTreeCacheMetricsReporter& metrics_reporter,
-                       std::mutex&                    mutex,
-                       int                            memory_timeout_ms,
-                       int                            disk_timeout_ms,
-                       IsTierEnabledFn                is_tier_enabled,
-                       SettledFn                      settled);
-    bool submitLocked(BlockTreeEvictor& evictor, TransferDescriptor& eviction_desc);
+                       const BlockTransferDispatcher*  transfer_dispatcher,
+                       int                             memory_timeout_ms,
+                       int                             disk_timeout_ms);
 
-    BlockTreeEvictor::CopyResultSet performCopy(const BlockTreeEvictor::EvictionPlan& plan) const;
-    BlockTreeEvictor::CopyResultSet runTransfer(const BlockTreeEvictor::EvictionPlan& plan) const;
-    static bool                     buildTransferBatch(const BlockTreeEvictor::EvictionPlan& plan,
-                                                       std::vector<TransferDescriptor>&      descriptors);
+    EvictionTaskResult runTransfer(const EvictionTask& task) const;
 
 private:
-    void runTask(BlockTreeEvictor& evictor, const BlockTreeEvictor::EvictionPlan& plan);
-    Tier normalizeTargetTier(Tier source_tier) const;
+    EvictionTaskResult runPerRankTransfer(const EvictionTask& task) const;
+    static bool        buildTransferDescriptors(const EvictionTask& task, std::vector<TransferDescriptor>& descriptors);
     std::vector<std::vector<TransferDescriptor>>
-    partitionTransferBatch(const std::vector<TransferDescriptor>& descriptors) const;
-    static int
-    transferTimeoutMs(const BlockTreeEvictor::EvictionPlan& plan, int memory_timeout_ms, int disk_timeout_ms);
+               partitionTransferDescriptors(const std::vector<TransferDescriptor>& descriptors) const;
+    static int selectTransferTimeoutMs(const EvictionTask& task, int memory_timeout_ms, int disk_timeout_ms);
 
     const std::vector<GroupSetPtr>& group_sets_;
-    const BlockTransferDispatcher* transfer_dispatcher_{nullptr};
-    BlockTreeTaskPool*             task_pool_{nullptr};
-    BlockTreeCacheMetricsReporter* metrics_reporter_{nullptr};
-    std::mutex*                    mutex_{nullptr};
+    const BlockTransferDispatcher*  transfer_dispatcher_{nullptr};
     int                            memory_timeout_ms_{0};
-    int                            disk_timeout_ms_{0};
-    IsTierEnabledFn                is_tier_enabled_;
-    SettledFn                      settled_;
+    int                             disk_timeout_ms_{0};
 };
 
 }  // namespace rtp_llm

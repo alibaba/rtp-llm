@@ -1,64 +1,46 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
-#include <string>
+#include <vector>
+
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
 namespace rtp_llm {
 
-// EvictionTask state machine for tracking async eviction lifecycle.
-// Phase 3: PENDING -> RUNNING -> COMPLETED/FAILED
-// On FAILED: rollback restores source tier heap and frees target block.
-enum class EvictionTaskState : int8_t {
-    PENDING   = 0,  // Task created, not yet started
-    RUNNING   = 1,  // Copy in progress (no lock held)
-    COMPLETED = 2,  // Copy succeeded, onEvictionComplete done
-    FAILED    = 3,  // Copy failed, rollback executed
+struct EvictionTimingSnapshot {
+    int64_t tier_enter_time_us{0};
+    int64_t insert_time_us{0};
+    int64_t last_access_time_us{0};
+    int64_t selected_time_us{0};
 };
 
-inline const char* evictionTaskStateName(EvictionTaskState state) {
-    switch (state) {
-        case EvictionTaskState::PENDING:
-            return "PENDING";
-        case EvictionTaskState::RUNNING:
-            return "RUNNING";
-        case EvictionTaskState::COMPLETED:
-            return "COMPLETED";
-        case EvictionTaskState::FAILED:
-            return "FAILED";
-    }
-    return "UNKNOWN";
-}
-
 struct EvictionTask {
-    EvictionTaskState state{EvictionTaskState::PENDING};
-    std::string       error_message;
+    TransferDescriptor                  primary_desc;
+    EvictionTimingSnapshot              primary_timing;
+    std::vector<TransferDescriptor>     cascade_descs;
+    std::vector<EvictionTimingSnapshot> cascade_timings;
+    // FULL prune closure only. Every dependent descriptor targets NONE,
+    // and nodes stay valid because task activation is synchronous.
+    std::vector<TransferDescriptor>     dependent_prune_descs;
+    std::vector<EvictionTimingSnapshot> dependent_prune_timings;
+    std::vector<TreeNode*>              full_prune_nodes_bottom_up;
 
-    // State transition validation
-    bool canTransition(EvictionTaskState from, EvictionTaskState to) const {
-        switch (from) {
-            case EvictionTaskState::PENDING:
-                return to == EvictionTaskState::RUNNING;
-            case EvictionTaskState::RUNNING:
-                return to == EvictionTaskState::COMPLETED || to == EvictionTaskState::FAILED;
-            case EvictionTaskState::FAILED:
-                return to == EvictionTaskState::PENDING;  // retry
-            case EvictionTaskState::COMPLETED:
-                return false;  // terminal state
-        }
-        return false;
+    bool needsCopy() const {
+        return primary_desc.target_tier != Tier::NONE
+               || std::any_of(cascade_descs.begin(), cascade_descs.end(), [](const TransferDescriptor& cascade_desc) {
+                      return cascade_desc.target_tier != Tier::NONE;
+                  });
     }
 
-    // Transition with validation
-    bool transition(EvictionTaskState new_state) {
-        if (!canTransition(state, new_state))
-            return false;
-        state = new_state;
-        return true;
+    bool hasFullPrune() const {
+        return !full_prune_nodes_bottom_up.empty();
     }
+};
 
-    bool isTerminal() const {
-        return state == EvictionTaskState::COMPLETED || state == EvictionTaskState::FAILED;
-    }
+struct EvictionTaskResult {
+    bool              primary_success{false};
+    std::vector<bool> cascade_success;
 };
 
 }  // namespace rtp_llm

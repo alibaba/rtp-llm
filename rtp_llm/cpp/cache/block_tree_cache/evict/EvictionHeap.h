@@ -25,7 +25,7 @@ struct EvictionEntry {
 
 // Exact-update eviction heap backed by std::set + node->iterator index.
 // At most one entry per node; physical size equals the current ready-candidate
-// count. upsert/erase/takeBest/contains are all O(log N) with no stale entries.
+// count. upsert/erase/contains are all O(log N) with no stale entries.
 class EvictionHeap {
 public:
     explicit EvictionHeap(EvictionPolicy policy);
@@ -34,8 +34,8 @@ public:
     void upsert(TreeNode* node, const CandidateMeta& meta);
     // Remove a node's entry if present. Idempotent.
     void erase(TreeNode* node);
-    // Pop the best victim (smallest key); removes it from both containers.
-    std::optional<EvictionEntry> takeBest();
+    // Read the best victim without changing heap membership.
+    std::optional<EvictionEntry> best() const;
 
     // Collect all current nodes. Used for read-only capacity queries.
     std::vector<TreeNode*> nodes() const {
@@ -47,15 +47,8 @@ public:
         return out;
     }
 
-    bool contains(TreeNode* node) const;
-    bool empty() const {
-        return ordered_.empty();
-    }
+    bool   contains(TreeNode* node) const;
     size_t size() const;
-
-    EvictionPolicy policy() const {
-        return policy_;
-    }
 
 private:
     struct EntryLess {

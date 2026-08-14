@@ -504,22 +504,15 @@ void BlockTreeCacheTestPeer::beginStoreShutdownForTest(BlockTreeCache& cache) {
     cache.storer_.stopAdmissionLocked();
 }
 
-bool BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(BlockTreeCache&     cache,
-                                                         size_t              group_set_id,
-                                                         Tier                tier,
-                                                         std::optional<Tier> target_override) {
+bool BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(BlockTreeCache& cache,
+                                                         size_t          group_set_id,
+                                                         Tier            tier,
+                                                         bool            force_drop) {
     std::lock_guard<std::mutex> lock(cache.mutex_);
     if (!cache.config_.isTierEnabled(tier)) {
         return false;
     }
-    auto eviction_desc = cache.evictor_.chooseVictim(group_set_id, tier);
-    if (!eviction_desc.has_value()) {
-        return false;
-    }
-    if (target_override.has_value()) {
-        eviction_desc->target_tier = *target_override;
-    }
-    return cache.evictor_.submitLocked(*eviction_desc);
+    return cache.evictor_.evictLocked(group_set_id, tier, force_drop);
 }
 
 int BlockTreeCacheTestPeer::reclaimBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier) {
@@ -530,23 +523,17 @@ int BlockTreeCacheTestPeer::reclaimBlocksForTest(BlockTreeCache& cache, size_t n
 
     int total_evicted = 0;
     for (size_t attempt = 0; attempt < num_blocks; ++attempt) {
-        std::optional<TransferDescriptor> eviction_desc;
+        bool evicted = false;
         for (const GroupSetPtr& group_set : cache.tree_->groupSets()) {
-            eviction_desc = cache.evictor_.chooseVictim(group_set->groupSetId(), tier);
-            if (eviction_desc.has_value()) {
+            if (cache.evictor_.evictLocked(group_set->groupSetId(), tier, /*force_drop=*/true)) {
+                evicted = true;
                 break;
             }
         }
-        if (!eviction_desc.has_value()) {
+        if (!evicted) {
             break;
         }
-        eviction_desc->target_tier = Tier::NONE;
-
-        // Tests use this entry to trigger eviction state transitions without
-        // exposing a direct-reclaim operation on the production cache API.
-        if (cache.evictor_.submitLocked(*eviction_desc)) {
-            ++total_evicted;
-        }
+        ++total_evicted;
     }
     return total_evicted;
 }
@@ -603,10 +590,10 @@ bool BlockTreeCacheTestPeer::restoreQueueAfterRejectionForTest(BlockTreeCache& c
             cache.task_pool_.reset();
             return false;
         }
-        cache.task_pool_                        = std::move(replacement);
-        cache.evictor_.task_runner_->task_pool_ = cache.task_pool_.get();
-        cache.loader_.task_pool_                = cache.task_pool_.get();
-        cache.storer_.task_pool_                = cache.task_pool_.get();
+        cache.task_pool_          = std::move(replacement);
+        cache.evictor_.task_pool_ = cache.task_pool_.get();
+        cache.loader_.task_pool_  = cache.task_pool_.get();
+        cache.storer_.task_pool_  = cache.task_pool_.get();
         return true;
     } catch (const std::exception& error) {
         ADD_FAILURE() << "queue-rejection guard failed to restore thread pool: " << error.what();

@@ -96,9 +96,9 @@ public:
     std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>
          collectCacheReuseTimeMetrics(const std::vector<BlockTreeCacheReuseTimeSample>& samples) const;
     void reportCacheReuseTimeMetrics(const std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>& snapshots) const;
-    void reportEvictionFinished(const BlockTreeEvictor::EvictionPlan&  plan,
-                                const BlockTreeEvictor::CopyResultSet& results,
-                                const std::vector<GroupSetPtr>&        group_sets) const;
+    void reportEvictionFinished(const EvictionTask&             task,
+                                const EvictionTaskResult&       task_result,
+                                const std::vector<GroupSetPtr>& group_sets) const;
 
     int64_t reportTransferStarted(CacheTransferOperation operation, Tier source_tier, Tier target_tier);
     void    reportTransferFinished(CacheTransferOperation        operation,
@@ -121,11 +121,11 @@ private:
     static constexpr size_t kDirectionCount = 5;
 
     static int transferDirectionIndex(Tier source_tier, Tier target_tier);
-    void       reportEvictionTransfer(const TransferDescriptor& desc,
-                                      const BlockTreeEvictor::EvictionTimingSnapshot& timing,
+    void       reportEvictionTransfer(const TransferDescriptor&       desc,
+                                      const EvictionTimingSnapshot&   timing,
                                       const std::vector<GroupSetPtr>& group_sets,
-                                      int64_t finish_time_us,
-                                      bool report_candidate_times) const;
+                                      int64_t                         finish_time_us,
+                                      bool                            report_candidate_times) const;
     void       reportStoreBlocks(Tier target_tier, const char* outcome, size_t block_count) const;
 
     std::shared_ptr<kmonitor::MetricsReporter>                                     metrics_reporter_;

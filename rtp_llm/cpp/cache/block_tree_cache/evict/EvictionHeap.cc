@@ -63,14 +63,10 @@ void EvictionHeap::erase(TreeNode* node) {
     index_.erase(it);
 }
 
-std::optional<EvictionEntry> EvictionHeap::takeBest() {
+std::optional<EvictionEntry> EvictionHeap::best() const {
     if (ordered_.empty())
         return std::nullopt;
-    auto          best  = ordered_.begin();
-    EvictionEntry entry = *best;
-    index_.erase(entry.node);
-    ordered_.erase(best);
-    return entry;
+    return *ordered_.begin();
 }
 
 bool EvictionHeap::contains(TreeNode* node) const {

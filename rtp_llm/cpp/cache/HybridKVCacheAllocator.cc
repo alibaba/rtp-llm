@@ -127,10 +127,10 @@ std::shared_ptr<LoadAsyncContext> HybridKVCacheAllocator::prepareKVCache(const C
     if (load_context != nullptr) {
         for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {
             const auto& desc   = load_context->loadDescs()[desc_index];
-            const bool  joined = load_context->joinedLoads()[desc_index];
-            if (desc.source_tier == Tier::DEVICE || joined) {
-                set_group_set_blocks(
-                    desc.group_set_id, desc.path_index, joined ? desc.target_blocks : desc.source_blocks);
+            if (desc.source_tier == Tier::DEVICE) {
+                set_group_set_blocks(desc.group_set_id, desc.path_index, desc.source_blocks);
+            } else if (load_context->joinedLoads()[desc_index]) {
+                set_group_set_blocks(desc.group_set_id, desc.path_index, desc.target_blocks);
             }
         }
     }
