@@ -225,6 +225,16 @@ def h20_oss_suites():
                 smoke_args="--disable_flashinfer_native 1 --act_type BF16 --reserver_runtime_mem_mb 8192 --tp_size 2 --warm_up 0",
                 gpu_type=["H20"],
             ),
+            # Copy dense_fp8_prequant_tp2's model, requests, and TP2 launch shape;
+            # select Native FlashInfer CUDA Graph and disable competing backends.
+            # The 497-token prompt reaches the 512-token page boundary during decode;
+            # GQA ratio 2 selects CUDA-core and capture size 2 adds padding.
+            smoke_test(
+                name="dense_fp8_prequant_flashinfer_cudagraph",
+                task_info="data/model/qwen3/q_r_block_fp8_flashinfer_decode.json",
+                smoke_args="--disable_flashinfer_native 0 --act_type BF16 --reserver_runtime_mem_mb 8192 --tp_size 2 --warm_up 0 --seq_size_per_block 64 --enable_xqa 0 --enable_flashinfer_trtllm_gen 0 --enable_flashinfer_trt_fmha_v2 0 --enable_paged_flashinfer_trt_fmha_v2 0 --enable_cuda_graph 1 --decode_capture_config '2'",
+                gpu_type=["H20"],
+            ),
             smoke_test(
                 name="dense_fp8pb_dynamic",
                 task_info="data/model/qwen3/q_r_h20.json",
