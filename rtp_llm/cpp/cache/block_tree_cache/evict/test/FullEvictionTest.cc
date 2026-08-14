@@ -1,7 +1,5 @@
 #include <gtest/gtest.h>
 
-#include <algorithm>
-
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
@@ -12,32 +10,12 @@ namespace {
 using block_tree_cache_test::BlockTreeCacheTestPeer;
 using block_tree_cache_test::makeBlockTreeCacheForTest;
 
-// Test double that records which resources FullGroupSet::isEvictable is
-// asked about while recording is enabled, then forwards to the base class.
-// During a no-eviction insert, refreshCandidate is the only caller of
-// isEvictable, so recording these evaluations lets a test verify exactly
-// which resources the evictor re-evaluates -- without any production-side hook.
-class CountingFullGroupSet: public FullGroupSet {
-public:
-    using FullGroupSet::FullGroupSet;
-    bool isEvictable(const GroupSetResource& resource, Tier tier) const override {
-        if (recording_) {
-            checked_resources_.push_back(&resource);
-        }
-        return FullGroupSet::isEvictable(resource, tier);
-    }
-
-    mutable bool                                 recording_{false};
-    mutable std::vector<const GroupSetResource*> checked_resources_;
-};
-
 // Helper: build a BlockTreeCache with a single Full(REUSABLE) group.
 class FullEvictionTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        auto full = std::make_shared<CountingFullGroupSet>(
+        auto full = std::make_shared<FullGroupSet>(
             std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
-        counting_full_                  = full.get();
         std::vector<GroupSetPtr> groups = {full};
         cache_ = makeBlockTreeCacheForTest(std::move(groups), BlockTreeCacheConfig{.task_pool_size = 2});
     }
@@ -52,7 +30,6 @@ protected:
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
-    CountingFullGroupSet*           counting_full_{nullptr};
 };
 
 struct TieredFullCache {
@@ -145,37 +122,13 @@ TEST_F(FullEvictionTest, ExtendingExistingLeafRefreshesDirectParent) {
     for (size_t index = 0; index + 1 < before.size(); ++index) {
         ancestor_meta_before.push_back(before[index]->group_set_resources[0].candidate_meta);
     }
-    const std::vector<TreeNode*> path_before               = before;
-    const TreeNode* const        direct_parent             = before.back();
-    const CandidateMeta          direct_parent_meta_before = direct_parent->group_set_resources[0].candidate_meta;
-
-    // Record every isEvictable evaluation during the extending insert.
-    // Metadata alone cannot distinguish "refresh only the direct parent" from
-    // "scan every ancestor": refreshCandidate does not mutate CandidateMeta and
-    // interior FULL nodes are heap-ineligible anyway, so a regression that
-    // re-walks the whole prefix would keep the other assertions green. With no
-    // eviction pressure, refreshCandidate is the sole caller of isEvictable,
-    // so the counting double captures exactly the re-evaluated nodes.
-    counting_full_->checked_resources_.clear();
-    counting_full_->recording_ = true;
+    const CandidateMeta direct_parent_meta_before = before.back()->group_set_resources[0].candidate_meta;
     insertPath({100, 200, 300, 400, 500}, 20);
-    counting_full_->recording_ = false;
 
     EXPECT_EQ(cache_->getStats().tree_node_count, 5u);
     EXPECT_EQ(cache_->getStats().device_heap_total_size, 1u);  // only the new [500] leaf
     const auto after = cache_->tree()->findNode({100, 200, 300, 400, 500});
     ASSERT_EQ(after.size(), 5u);
-
-    const auto refresh_count = [this](const TreeNode* node) {
-        return std::count(counting_full_->checked_resources_.begin(),
-                          counting_full_->checked_resources_.end(),
-                          &node->group_set_resources[0]);
-    };
-    EXPECT_EQ(refresh_count(direct_parent), 1) << "direct parent must be re-evaluated exactly once";
-    EXPECT_EQ(refresh_count(after.back()), 1) << "new leaf is admitted exactly once";
-    for (size_t index = 0; index + 1 < path_before.size(); ++index) {
-        EXPECT_EQ(refresh_count(path_before[index]), 0) << "ancestor=" << index << " must not be re-scanned";
-    }
 
     EXPECT_EQ(after[3]->group_set_resources[0].candidate_meta.last_access_seq,
               direct_parent_meta_before.last_access_seq);
@@ -187,6 +140,54 @@ TEST_F(FullEvictionTest, ExtendingExistingLeafRefreshesDirectParent) {
         EXPECT_EQ(after_meta.admission_seq, ancestor_meta_before[index].admission_seq) << "ancestor=" << index;
         EXPECT_EQ(after_meta.hit_count, ancestor_meta_before[index].hit_count) << "ancestor=" << index;
     }
+}
+
+TEST(FullEvictionRegressionTest, ExtendingExistingLeafDoesNotRescanAncestors) {
+    auto full = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+    auto swa = std::make_shared<SWAGroupSet>(
+        128,
+        64,
+        std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(1)},
+        nullptr,
+        nullptr);
+    auto cache = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full, swa});
+    ASSERT_NE(cache, nullptr);
+
+    std::vector<std::vector<GroupSetResource>> initial_resources(4, std::vector<GroupSetResource>(2));
+    for (size_t index = 0; index < initial_resources.size(); ++index) {
+        initial_resources[index][0].device_blocks = {static_cast<BlockIdxType>(10 + index)};
+        initial_resources[index][1].device_blocks = {static_cast<BlockIdxType>(20 + index)};
+    }
+    ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(
+        *cache, {100, 200, 300, 400}, initial_resources));
+
+    const auto before = cache->tree()->findNode({100, 200, 300, 400});
+    ASSERT_EQ(before.size(), 4u);
+    EvictionHeap* swa_heap = cache->evictor_.heapFor(/*group_set_id=*/1, Tier::DEVICE);
+    ASSERT_NE(swa_heap, nullptr);
+    for (TreeNode* node : before) {
+        swa_heap->erase(node);
+    }
+    ASSERT_EQ(cache->evictor_.candidateCount(/*group_set_id=*/1, Tier::DEVICE), 0u);
+
+    std::vector<std::vector<GroupSetResource>> extended_resources(5, std::vector<GroupSetResource>(2));
+    for (size_t index = 0; index < extended_resources.size(); ++index) {
+        extended_resources[index][0].device_blocks = {static_cast<BlockIdxType>(30 + index)};
+        extended_resources[index][1].device_blocks = {static_cast<BlockIdxType>(40 + index)};
+    }
+    ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(
+        *cache, {100, 200, 300, 400, 500}, extended_resources));
+
+    const auto after = cache->tree()->findNode({100, 200, 300, 400, 500});
+    ASSERT_EQ(after.size(), 5u);
+    EXPECT_EQ(cache->evictor_.candidateCount(/*group_set_id=*/0, Tier::DEVICE), 1u);
+    EXPECT_EQ(cache->evictor_.candidateCount(/*group_set_id=*/1, Tier::DEVICE), 2u);
+    for (size_t index = 0; index < 3; ++index) {
+        EXPECT_FALSE(swa_heap->contains(after[index])) << "ancestor=" << index << " must not be re-scanned";
+    }
+    EXPECT_TRUE(swa_heap->contains(after[3]));
+    EXPECT_TRUE(swa_heap->contains(after[4]));
 }
 
 // ---------------------------------------------------------------------------

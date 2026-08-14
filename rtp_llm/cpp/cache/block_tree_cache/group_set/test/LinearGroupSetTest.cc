@@ -52,23 +52,6 @@ protected:
     std::shared_ptr<LinearGroupSet>  group_;
 };
 
-TEST_F(LinearGroupSetTest, AnyNodeWithDataIsEvictable) {
-    auto* a          = makeNode(100);
-    auto* b          = makeNode(200);
-    a->children[200] = b;
-    b->parent        = a;
-
-    setDeviceBlock(a, 0);
-    setDeviceBlock(b, 0);
-
-    // LINEAR has no leaf/topology requirement; both nodes are eligible.
-    EXPECT_TRUE(group_->isEvictable(a->group_set_resources[0], Tier::DEVICE));
-    EXPECT_TRUE(group_->isEvictable(b->group_set_resources[0], Tier::DEVICE));
-
-    delete a;
-    delete b;
-}
-
 TEST_F(LinearGroupSetTest, EvictFromTierDevice) {
     auto* node = makeNode(100);
     setDeviceBlock(node, 0);
@@ -125,13 +108,6 @@ TEST_F(LinearGroupSetTest, MatchValidatorAllowsLoadingResource) {
 
     EXPECT_TRUE(validator->validate(node->group_set_resources[0]));
 
-    delete node;
-}
-
-TEST_F(LinearGroupSetTest, EmptyResourceIsNotEvictable) {
-    auto* node = makeNode(100);
-    EXPECT_FALSE(group_->isEvictable(node->group_set_resources[0], Tier::DEVICE));
-    EXPECT_FALSE(group_->isEvictable(node->group_set_resources[0], Tier::HOST));
     delete node;
 }
 

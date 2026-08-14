@@ -49,12 +49,13 @@ struct TransferDescriptor {
                        size_t                    group_set_id,
                        size_t                    path_index,
                        Tier                      source_tier,
+                       Tier                      target_tier,
                        std::vector<BlockIdxType> source_blocks):
         node(node),
         group_set_id(group_set_id),
         path_index(path_index),
         source_tier(source_tier),
-        target_tier(Tier::DEVICE),
+        target_tier(target_tier),
         source_blocks(std::move(source_blocks)) {}
 
     static TransferDescriptor

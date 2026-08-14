@@ -127,25 +127,6 @@ TEST_F(FullGroupSetTest, DeviceLeafAfterChildEviction) {
     delete b;
 }
 
-TEST_F(FullGroupSetTest, DeviceCandidateEligibility) {
-    // FULL: only a leaf holding device data is candidate-eligible; a parent whose
-    // child still holds device data is not (evicting it would break the prefix).
-    auto* a          = makeNode(100);
-    auto* b          = makeNode(200);
-    a->children[200] = b;
-    b->parent        = a;
-    setDeviceBlock(a, 0);
-    setDeviceBlock(b, 0);
-
-    EXPECT_TRUE(group_->isEvictable(b->group_set_resources[0], Tier::DEVICE)
-                && tree_->isLeafAtTier(b, 0, Tier::DEVICE));
-    EXPECT_FALSE(group_->isEvictable(a->group_set_resources[0], Tier::DEVICE)
-                 && tree_->isLeafAtTier(a, 0, Tier::DEVICE));
-
-    delete a;
-    delete b;
-}
-
 TEST_F(FullGroupSetTest, EvictFromTierDevice) {
     auto* a = makeNode(100);
     setDeviceBlock(a, 0);
@@ -264,44 +245,6 @@ TEST_F(FullGroupSetTest, HostLeafDetection) {
 
     delete a;
     delete b;
-}
-
-TEST_F(FullGroupSetTest, HostCandidateEligibility) {
-    auto* a = makeNode(100);
-    // Evicted from device, has host data
-    setHostBlock(a, 0);
-
-    // A host-leaf holding host data is candidate-eligible.
-    EXPECT_TRUE(group_->isEvictable(a->group_set_resources[0], Tier::HOST)
-                && tree_->isLeafAtTier(a, 0, Tier::HOST));
-
-    delete a;
-}
-
-TEST_F(FullGroupSetTest, HostCandidateNotEligibleWhenNonLeaf) {
-    auto* a          = makeNode(100);
-    auto* b          = makeNode(200);
-    a->children[200] = b;
-    b->parent        = a;
-    setHostBlock(a, 0);
-    setHostBlock(b, 0);
-
-    // A has a child still holding host data, so it is not a host-leaf.
-    EXPECT_FALSE(group_->isEvictable(a->group_set_resources[0], Tier::HOST)
-                 && tree_->isLeafAtTier(a, 0, Tier::HOST));
-    EXPECT_TRUE(group_->isEvictable(b->group_set_resources[0], Tier::HOST)
-                && tree_->isLeafAtTier(b, 0, Tier::HOST));
-
-    delete a;
-    delete b;
-}
-
-TEST_F(FullGroupSetTest, NoDataNotEligible) {
-    auto* a = makeNode(100);
-    // No data at any tier -> not a leaf at that tier -> not eligible.
-    EXPECT_FALSE(group_->isEvictable(a->group_set_resources[0], Tier::DEVICE)
-                 && tree_->isLeafAtTier(a, 0, Tier::DEVICE));
-    delete a;
 }
 
 TEST_F(FullGroupSetTest, CompleteDeviceValueRequiresDeviceTierAndNoNullBlocks) {

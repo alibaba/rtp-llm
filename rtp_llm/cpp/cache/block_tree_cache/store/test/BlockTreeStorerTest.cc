@@ -414,7 +414,7 @@ TEST(BlockTreeStorerTest, StoreCopyFailureLeavesTreeAndPoolsUntouched) {
             env.cache->insert({100}, deviceSourceResources({request_holder[0]}), target_tier);
             block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
 
-            EXPECT_EQ(engine->submitCount(), 1u);
+            EXPECT_EQ(engine->submittedBatchCount(), 1u);
             EXPECT_TRUE(env.cache->tree()->findNode({100}).empty());
             EXPECT_EQ(env.poolFor(target_tier).freeBlocksNum(), target_free_before);
             EXPECT_EQ(env.storeRefCount(), 0u);
@@ -472,7 +472,7 @@ TEST(BlockTreeStorerTest, StoreRejectionRollsBackEveryTemporaryHolderExactlyOnce
         env.cache->insert({100}, deviceSourceResources(sources), Tier::HOST);
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
 
-        EXPECT_EQ(engine->submitCount(), 0u) << "a rejected store must never copy";
+        EXPECT_EQ(engine->submittedBatchCount(), 0u) << "a rejected store must never copy";
         EXPECT_TRUE(env.cache->tree()->findNode({100}).empty());
         EXPECT_EQ(env.storeRefCount(), 0u);
         for (size_t group_set_id = 0; group_set_id < env.groups.size(); ++group_set_id) {
@@ -511,7 +511,7 @@ TEST(BlockTreeStorerTest, DuplicateStoreForSameKeyReleasesLoserBlock) {
     env.cache->insert({100}, deviceSourceResources({first_holder[0]}), Tier::HOST);
     env.cache->insert({100}, deviceSourceResources({second_holder[0]}), Tier::HOST);
     barrier->waitUntilEntered(2);
-    EXPECT_EQ(engine->submitCount(), 2u);
+    EXPECT_EQ(engine->submittedBatchCount(), 2u);
     barrier->release();
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
 

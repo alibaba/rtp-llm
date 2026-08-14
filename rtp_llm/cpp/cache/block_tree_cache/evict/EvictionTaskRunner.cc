@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 
 namespace rtp_llm {
@@ -15,50 +16,57 @@ EvictionTaskRunner::EvictionTaskRunner(const std::vector<GroupSetPtr>& group_set
     memory_timeout_ms_(memory_timeout_ms),
     disk_timeout_ms_(disk_timeout_ms) {}
 
-EvictionTaskResult EvictionTaskRunner::runPerRankTransfer(const EvictionTask& task) const {
-    EvictionTaskResult              task_result;
-    std::vector<TransferDescriptor> descriptors;
-    bool                            transfer_success = buildTransferDescriptors(task, descriptors);
-    const auto                      batches =
-        transfer_success ? partitionTransferDescriptors(descriptors) : std::vector<std::vector<TransferDescriptor>>{};
-
-    std::vector<std::shared_ptr<AsyncContext>> contexts;
-    contexts.reserve(batches.size());
-    for (const auto& batch : batches) {
-        contexts.push_back(transfer_dispatcher_->executePerRank(batch));
-    }
-    FusedAsyncContext context(contexts);
-    context.waitDone();
-    transfer_success = transfer_success && context.success();
-    task_result.primary_success = transfer_success;
-    task_result.cascade_success.assign(task.cascade_descs.size(), transfer_success);
-    return task_result;
-}
-
-EvictionTaskResult EvictionTaskRunner::runTransfer(const EvictionTask& task) const {
-    if (!transfer_dispatcher_->hasMultiRankEngine()) {
-        return runPerRankTransfer(task);
-    }
-
-    EvictionTaskResult              task_result;
-    std::vector<TransferDescriptor> descriptors;
-    const bool                      batch_ready      = buildTransferDescriptors(task, descriptors);
-    bool transfer_success = false;
-    if (batch_ready) {
-        const auto                                 batches = partitionTransferDescriptors(descriptors);
-        std::vector<std::shared_ptr<AsyncContext>> contexts;
-        contexts.reserve(batches.size());
-        for (const auto& batch : batches) {
-            contexts.push_back(transfer_dispatcher_->executeMultiRank(
-                batch, selectTransferTimeoutMs(task, memory_timeout_ms_, disk_timeout_ms_)));
+EvictionTaskResult EvictionTaskRunner::runTransfer(const EvictionTask&            task,
+                                                   BlockTreeCacheMetricsReporter& metrics_reporter) const {
+    EvictionTaskResult     task_result;
+    BlockTreeTransferBytes transfer_bytes;
+    int64_t                transfer_begin_time_us = 0;
+    bool                   transfer_started       = false;
+    const auto             finish_metrics         = [&]() {
+        if (!transfer_started) {
+            return;
         }
-        FusedAsyncContext context(contexts);
-        context.waitDone();
-        transfer_success = context.success();
+        transfer_started = false;
+        metrics_reporter.reportTransferFinished(CacheTransferOperation::EVICT,
+                                                task.primary_desc.source_tier,
+                                                task.primary_desc.target_tier,
+                                                task.cascade_descs.size() + 1,
+                                                transfer_begin_time_us,
+                                                task_result.primary_success,
+                                                transfer_bytes);
+    };
+
+    try {
+        transfer_begin_time_us = metrics_reporter.reportTransferStarted(
+            CacheTransferOperation::EVICT, task.primary_desc.source_tier, task.primary_desc.target_tier);
+        transfer_started = true;
+
+        std::vector<TransferDescriptor> descriptors;
+        const bool                      batch_ready      = buildTransferDescriptors(task, descriptors);
+        bool                            transfer_success = false;
+        if (batch_ready) {
+            const auto                                 batches = partitionTransferDescriptors(descriptors);
+            std::vector<std::shared_ptr<AsyncContext>> contexts;
+            contexts.reserve(batches.size());
+            for (const auto& batch : batches) {
+                contexts.push_back(transfer_dispatcher_->executeMultiRank(
+                    batch, selectTransferTimeoutMs(task, memory_timeout_ms_, disk_timeout_ms_)));
+            }
+            FusedAsyncContext context(contexts);
+            context.waitDone();
+            transfer_success = context.success();
+        }
+        if (transfer_success) {
+            metrics_reporter.accumulateTransferBytes(descriptors, group_sets_, transfer_bytes);
+        }
+        task_result.primary_success = transfer_success;
+        task_result.cascade_success.assign(task.cascade_descs.size(), transfer_success);
+        finish_metrics();
+        return task_result;
+    } catch (...) {
+        finish_metrics();
+        throw;
     }
-    task_result.primary_success = transfer_success;
-    task_result.cascade_success.assign(task.cascade_descs.size(), transfer_success);
-    return task_result;
 }
 
 std::vector<std::vector<TransferDescriptor>>

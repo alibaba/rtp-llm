@@ -1,18 +1,40 @@
 #include <gtest/gtest.h>
 
+#include <functional>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "kmonitor/client/MetricsReporter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 namespace {
 
 using ScriptedTransferEngine = block_tree_cache_test::ScriptedPerRankBlockTransferEngine;
+
+TEST(EvictionTimingSnapshotTest, CapturesCandidateMetadataAtSelectionTime) {
+    CandidateMeta candidate_meta;
+    candidate_meta.tier_enter_time_us  = 10;
+    candidate_meta.insert_time_us      = 20;
+    candidate_meta.last_access_time_us = 30;
+
+    const int64_t                before = currentTimeUs();
+    const EvictionTimingSnapshot timing(candidate_meta);
+    const int64_t                after = currentTimeUs();
+
+    EXPECT_EQ(timing.tier_enter_time_us, 10);
+    EXPECT_EQ(timing.insert_time_us, 20);
+    EXPECT_EQ(timing.last_access_time_us, 30);
+    EXPECT_GE(timing.selected_time_us, before);
+    EXPECT_LE(timing.selected_time_us, after);
+}
 
 GroupSetPtr makeRunnerTestGroupSet(size_t                       group_set_id,
                                    const std::string&           pool_name,
@@ -43,6 +65,9 @@ public:
     using ScriptedTransferEngine::ScriptedTransferEngine;
 
     std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
+        if (on_submit_) {
+            on_submit_();
+        }
         ++batch_count_;
         return ScriptedTransferEngine::submit(descriptors);
     }
@@ -51,8 +76,13 @@ public:
         return batch_count_;
     }
 
+    void setOnSubmit(std::function<void()> on_submit) {
+        on_submit_ = std::move(on_submit);
+    }
+
 private:
-    size_t batch_count_{0};
+    size_t                batch_count_{0};
+    std::function<void()> on_submit_;
 };
 
 class EvictionTaskRunnerTest: public ::testing::Test {
@@ -70,9 +100,22 @@ protected:
         return EvictionTaskRunner(group_sets_, transfer_dispatcher_.get(), 0, 0);
     }
 
-    std::vector<GroupSetPtr>                 group_sets_;
+    void enableMetrics() {
+        kmonitor::MetricsTags tags;
+        metrics_reporter_.setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", tags));
+    }
+
+    int64_t evictionInFlight(Tier source_tier, Tier target_tier) const {
+        const size_t operation_index = static_cast<size_t>(CacheTransferOperation::EVICT);
+        const size_t direction_index =
+            static_cast<size_t>(BlockTreeCacheMetricsReporter::transferDirectionIndex(source_tier, target_tier));
+        return metrics_reporter_.transfer_in_flight_[operation_index][direction_index].load();
+    }
+
+    std::vector<GroupSetPtr>                     group_sets_;
     std::shared_ptr<BatchCountingTransferEngine> transfer_engine_;
     std::unique_ptr<BlockTransferDispatcher>     transfer_dispatcher_;
+    BlockTreeCacheMetricsReporter                metrics_reporter_;
 };
 
 EvictionTask makeCopyTask() {
@@ -98,7 +141,7 @@ TEST_F(EvictionTaskRunnerTest, RunTransferSubmitsTaskAsDirectionBatches) {
     auto task   = makeCopyTask();
     task.cascade_descs.push_back(TransferDescriptor::hostToDisk(2, 6, 7));
 
-    const auto task_result = runner.runTransfer(task);
+    const auto task_result = runner.runTransfer(task, metrics_reporter_);
     const auto descriptors = transfer_engine_->descriptors();
 
     EXPECT_TRUE(task_result.primary_success);
@@ -113,6 +156,64 @@ TEST_F(EvictionTaskRunnerTest, RunTransferSubmitsTaskAsDirectionBatches) {
     EXPECT_EQ(descriptors[2].target_tier, Tier::DISK);
 }
 
+TEST_F(EvictionTaskRunnerTest, RunTransferOwnsTransferMetricsLifetime) {
+    enableMetrics();
+    bool observed_in_flight = false;
+    transfer_engine_->setOnSubmit([&]() { observed_in_flight = evictionInFlight(Tier::DEVICE, Tier::HOST) == 1; });
+
+    auto runner = makeRunner();
+    auto task   = makeCopyTask();
+
+    const EvictionTaskResult result = runner.runTransfer(task, metrics_reporter_);
+
+    EXPECT_TRUE(result.primary_success);
+    EXPECT_TRUE(observed_in_flight);
+    EXPECT_EQ(evictionInFlight(Tier::DEVICE, Tier::HOST), 0);
+}
+
+TEST_F(EvictionTaskRunnerTest, BatchFailureFinishesTransferMetrics) {
+    enableMetrics();
+    transfer_engine_->enqueue(false);
+    bool observed_in_flight = false;
+    transfer_engine_->setOnSubmit([&]() { observed_in_flight = evictionInFlight(Tier::DEVICE, Tier::HOST) == 1; });
+
+    auto runner = makeRunner();
+
+    const EvictionTaskResult result = runner.runTransfer(makeCopyTask(), metrics_reporter_);
+
+    EXPECT_FALSE(result.primary_success);
+    EXPECT_TRUE(observed_in_flight);
+    EXPECT_EQ(evictionInFlight(Tier::DEVICE, Tier::HOST), 0);
+}
+
+TEST_F(EvictionTaskRunnerTest, MalformedDescriptorFinishesTransferMetrics) {
+    enableMetrics();
+    auto runner = makeRunner();
+    auto task   = makeCopyTask();
+    task.primary_desc.source_blocks.clear();
+
+    const EvictionTaskResult result = runner.runTransfer(task, metrics_reporter_);
+
+    EXPECT_FALSE(result.primary_success);
+    EXPECT_EQ(transfer_engine_->batchCount(), 0u);
+    EXPECT_EQ(evictionInFlight(Tier::DEVICE, Tier::HOST), 0);
+}
+
+TEST_F(EvictionTaskRunnerTest, SubmitExceptionFinishesTransferMetrics) {
+    enableMetrics();
+    bool observed_in_flight = false;
+    transfer_engine_->setOnSubmit([&]() {
+        observed_in_flight = evictionInFlight(Tier::DEVICE, Tier::HOST) == 1;
+        throw std::runtime_error("injected submit failure");
+    });
+
+    auto runner = makeRunner();
+
+    EXPECT_THROW((void)runner.runTransfer(makeCopyTask(), metrics_reporter_), std::runtime_error);
+    EXPECT_TRUE(observed_in_flight);
+    EXPECT_EQ(evictionInFlight(Tier::DEVICE, Tier::HOST), 0);
+}
+
 TEST_F(EvictionTaskRunnerTest, HostDiskBatchesAreSplitByDiskPool) {
     group_sets_ = {makeRunnerTestGroupSet(0, "eviction_runner_0", makeRunnerTestDiskPool("eviction_runner_0_disk")),
                    makeRunnerTestGroupSet(1, "eviction_runner_1", makeRunnerTestDiskPool("eviction_runner_1_disk"))};
@@ -121,7 +222,7 @@ TEST_F(EvictionTaskRunnerTest, HostDiskBatchesAreSplitByDiskPool) {
     task.primary_desc  = TransferDescriptor::hostToDisk(0, 1, 2);
     task.cascade_descs = {TransferDescriptor::hostToDisk(0, 3, 4), TransferDescriptor::hostToDisk(1, 5, 6)};
 
-    const auto task_result = runner.runTransfer(task);
+    const auto task_result = runner.runTransfer(task, metrics_reporter_);
 
     EXPECT_TRUE(task_result.primary_success);
     EXPECT_EQ(task_result.cascade_success, (std::vector<bool>{true, true}));
@@ -133,7 +234,7 @@ TEST_F(EvictionTaskRunnerTest, DirectionBatchFailureFailsTheWholeTask) {
     transfer_engine_->enqueue(false);
     auto runner = makeRunner();
 
-    const auto task_result = runner.runTransfer(makeCopyTask());
+    const auto task_result = runner.runTransfer(makeCopyTask(), metrics_reporter_);
 
     EXPECT_FALSE(task_result.primary_success);
     EXPECT_EQ(task_result.cascade_success, (std::vector<bool>{false}));
@@ -145,7 +246,7 @@ TEST_F(EvictionTaskRunnerTest, RunTransferRejectsMalformedDescriptors) {
         auto task = makeCopyTask();
         mutate(task);
         auto                     runner = makeRunner();
-        const EvictionTaskResult result = runner.runTransfer(task);
+        const EvictionTaskResult result = runner.runTransfer(task, metrics_reporter_);
         EXPECT_FALSE(result.primary_success);
         EXPECT_EQ(result.cascade_success, (std::vector<bool>{false}));
     };
@@ -182,7 +283,7 @@ TEST_F(EvictionTaskRunnerTest, RunTransferSupportsDeviceToDisk) {
     task.primary_desc.source_blocks = {1, 2};
     task.primary_desc.target_blocks = {3};
 
-    const auto task_result = runner.runTransfer(task);
+    const auto task_result = runner.runTransfer(task, metrics_reporter_);
     ASSERT_TRUE(task_result.primary_success);
     const auto descriptors = transfer_engine_->descriptors();
     ASSERT_EQ(descriptors.size(), 1u);

@@ -29,8 +29,4 @@ BlockTransferDispatcher::executeMultiRank(const std::vector<TransferDescriptor>&
     return executePerRank(descriptors);
 }
 
-bool BlockTransferDispatcher::hasMultiRankEngine() const {
-    return multi_rank_engine_ != nullptr;
-}
-
 }  // namespace rtp_llm

@@ -31,8 +31,12 @@ namespace rtp_llm {
 std::shared_ptr<LoadAsyncContext> makeControlledAllocatorContext() {
     auto coordinator = std::make_shared<LoadContextCoordinator>(
         [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
-    std::vector<TransferDescriptor> descriptors{
-        TransferDescriptor{nullptr, /*group_set_id=*/0, /*path_index=*/0, Tier::HOST, BlockIndicesType{1}}};
+    std::vector<TransferDescriptor> descriptors{TransferDescriptor{nullptr,
+                                                                   /*group_set_id=*/0,
+                                                                   /*path_index=*/0,
+                                                                   Tier::HOST,
+                                                                   Tier::DEVICE,
+                                                                   BlockIndicesType{1}}};
     auto context = coordinator->create(std::move(descriptors), {false}, /*matched_blocks=*/1);
     EXPECT_TRUE(coordinator->registerContext(context));
     return context;

@@ -212,7 +212,8 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
              ++i) {
             GroupSetResource&  resource    = path[i]->group_set_resources[group_set_id];
             const Tier         source_tier = resource.getTopTier();
-            TransferDescriptor desc{path[i], group_set_id, i, source_tier, resource.getBlocks(source_tier)};
+            TransferDescriptor desc{
+                path[i], group_set_id, i, source_tier, Tier::DEVICE, resource.getBlocks(source_tier)};
             const bool         is_joined = resource.transfer_state == GroupSetTransferState::LOADING;
             if (!is_joined) {
                 group_set->referenceBlocks(

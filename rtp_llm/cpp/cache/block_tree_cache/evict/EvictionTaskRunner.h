@@ -9,6 +9,7 @@
 namespace rtp_llm {
 
 class BlockTransferDispatcher;
+class BlockTreeCacheMetricsReporter;
 class EvictionTaskRunner {
 public:
     EvictionTaskRunner(const std::vector<GroupSetPtr>& group_sets,
@@ -16,10 +17,9 @@ public:
                        int                             memory_timeout_ms,
                        int                             disk_timeout_ms);
 
-    EvictionTaskResult runTransfer(const EvictionTask& task) const;
+    EvictionTaskResult runTransfer(const EvictionTask& task, BlockTreeCacheMetricsReporter& metrics_reporter) const;
 
 private:
-    EvictionTaskResult runPerRankTransfer(const EvictionTask& task) const;
     static bool        buildTransferDescriptors(const EvictionTask& task, std::vector<TransferDescriptor>& descriptors);
     std::vector<std::vector<TransferDescriptor>>
                partitionTransferDescriptors(const std::vector<TransferDescriptor>& descriptors) const;

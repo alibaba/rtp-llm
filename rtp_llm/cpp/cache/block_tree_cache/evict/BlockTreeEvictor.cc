@@ -6,7 +6,6 @@
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -74,8 +73,40 @@ EvictionHeap* BlockTreeEvictor::heapFor(size_t group_set_id, Tier tier) const {
 bool BlockTreeEvictor::isEvictable(const GroupSet& group_set, const TreeNode* node, Tier tier) const {
     const size_t            group_set_id = group_set.groupSetId();
     const GroupSetResource& resource     = node->group_set_resources[group_set_id];
-    return group_set.isEvictable(resource, tier)
-           && (group_set.groupType() != CacheGroupType::FULL || tree_->isLeafAtTier(node, group_set_id, tier));
+    if (resource.transfer_state != GroupSetTransferState::IDLE) {
+        return false;
+    }
+
+    auto pool_evictable = [](const auto& pool, BlockIdxType block) {
+        return pool->isAllocated(block) && pool->refCount(block) == 1;
+    };
+
+    switch (tier) {
+        case Tier::DEVICE:
+            if (!resource.hasCompleteDeviceValue()) {
+                return false;
+            }
+            for (size_t i = 0; i < resource.device_blocks.size(); ++i) {
+                if (!pool_evictable(group_set.devicePools()[i], resource.device_blocks[i])) {
+                    return false;
+                }
+            }
+            break;
+        case Tier::HOST:
+            if (!resource.hasTier(Tier::HOST) || !pool_evictable(group_set.hostPool(), resource.host_block)) {
+                return false;
+            }
+            break;
+        case Tier::DISK:
+            if (!resource.hasTier(Tier::DISK) || !pool_evictable(group_set.diskPool(), resource.disk_slot)) {
+                return false;
+            }
+            break;
+        default:
+            return false;
+    }
+
+    return group_set.groupType() != CacheGroupType::FULL || tree_->isLeafAtTier(node, group_set_id, tier);
 }
 
 // ---- Candidate eligibility gate (design section 4.3) ----
@@ -83,10 +114,10 @@ void BlockTreeEvictor::refreshCandidate(GroupSet& group_set, TreeNode* node, Tie
     if (tier == Tier::NONE) {
         return;
     }
-    const size_t group_set_id = group_set.groupSetId();
-    EvictionHeap* heap = heapFor(group_set_id, tier);
-    auto& resource = node->group_set_resources[group_set_id];
-    if (resource.transfer_state != GroupSetTransferState::IDLE || !isEvictable(group_set, node, tier)) {
+    const size_t  group_set_id = group_set.groupSetId();
+    EvictionHeap* heap         = heapFor(group_set_id, tier);
+    auto&         resource     = node->group_set_resources[group_set_id];
+    if (!isEvictable(group_set, node, tier)) {
         heap->erase(node);
         return;
     }
@@ -94,14 +125,14 @@ void BlockTreeEvictor::refreshCandidate(GroupSet& group_set, TreeNode* node, Tie
 }
 
 void BlockTreeEvictor::refreshCandidate(TreeNode* node, size_t group_set_id) {
-    const GroupSetPtr& group_set = tree_->groupSets()[group_set_id];
-    GroupSetResource&  resource  = node->group_set_resources[group_set_id];
+    const GroupSetPtr& group_set      = tree_->groupSets()[group_set_id];
+    GroupSetResource&  resource       = node->group_set_resources[group_set_id];
     bool               found_top_tier = false;
     for (Tier tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
         EvictionHeap* heap = heapFor(group_set_id, tier);
         if (!found_top_tier && resource.hasTier(tier)) {
             found_top_tier = true;
-            if (resource.transfer_state == GroupSetTransferState::IDLE && isEvictable(*group_set, node, tier)) {
+            if (isEvictable(*group_set, node, tier)) {
                 heap->upsert(node, resource.candidate_meta);
                 continue;
             }
@@ -247,10 +278,10 @@ bool BlockTreeEvictor::evictLocked(size_t group_set_id, Tier source_tier, bool f
     }
 
     auto task_ptr = std::make_shared<EvictionTask>(std::move(*task));
-    reservePendingReleases(*task_ptr);
+    updatePendingReleases(*task_ptr, true);
     const bool submitted = task_pool_->submit([this, task_ptr]() { runEvictionTask(*task_ptr); });
     if (!submitted) {
-        settlePendingReleases(*task_ptr);
+        updatePendingReleases(*task_ptr, false);
         abortEvictionLocked(*task_ptr);
         return false;
     }
@@ -258,89 +289,25 @@ bool BlockTreeEvictor::evictLocked(size_t group_set_id, Tier source_tier, bool f
 }
 
 void BlockTreeEvictor::runEvictionTask(const EvictionTask& task) {
-    const int64_t transfer_begin_time_us = metrics_reporter_->reportTransferStarted(
-        CacheTransferOperation::EVICT, task.primary_desc.source_tier, task.primary_desc.target_tier);
     EvictionTaskResult task_result;
     task_result.primary_success = false;
     task_result.cascade_success.assign(task.cascade_descs.size(), false);
-
-    block_tree_cache_detail::ScopeRollback settle_guard([this, &task, &task_result, transfer_begin_time_us]() noexcept {
-        settleEviction(task, task_result, transfer_begin_time_us);
-    });
-
     try {
-        task_result = task_runner_->runTransfer(task);
+        task_result = task_runner_->runTransfer(task, *metrics_reporter_);
     } catch (const std::exception& error) {
         RTP_LLM_LOG_ERROR("eviction copy failed with exception: %s", error.what());
     } catch (...) {
         RTP_LLM_LOG_ERROR("eviction copy failed with unknown exception");
     }
-}
-
-void BlockTreeEvictor::settleEviction(const EvictionTask&       task,
-                                      const EvictionTaskResult& task_result,
-                                      int64_t                   transfer_begin_time_us) noexcept {
-    const Tier   source_tier          = task.primary_desc.source_tier;
-    const Tier   target_tier          = task.primary_desc.target_tier;
-    const size_t transfer_block_count = task.cascade_descs.size() + 1;
-    const bool   transfer_success     = task_result.primary_success
-                                  && std::all_of(task_result.cascade_success.begin(),
-                                                 task_result.cascade_success.end(),
-                                                 [](bool success) { return success; });
-    BlockTreeTransferBytes transfer_bytes;
-    if (task_result.primary_success) {
-        metrics_reporter_->accumulateTransferBytes(
-            task.primary_desc, tree_->groupSets()[task.primary_desc.group_set_id], transfer_bytes);
-    }
-    for (size_t desc_index = 0; desc_index < task.cascade_descs.size(); ++desc_index) {
-        if (task_result.cascade_success[desc_index]) {
-            const TransferDescriptor& desc = task.cascade_descs[desc_index];
-            metrics_reporter_->accumulateTransferBytes(desc, tree_->groupSets()[desc.group_set_id], transfer_bytes);
-        }
-    }
-    metrics_reporter_->reportTransferFinished(CacheTransferOperation::EVICT,
-                                              source_tier,
-                                              target_tier,
-                                              transfer_block_count,
-                                              transfer_begin_time_us,
-                                              transfer_success,
-                                              transfer_bytes);
-
-    auto pending_release_settlement_action = [this, &task]() noexcept { settlePendingReleases(task); };
-    block_tree_cache_detail::ScopeRollback<decltype(pending_release_settlement_action)>
-        pending_release_settlement_guard(std::move(pending_release_settlement_action));
-
-    bool completion_succeeded = false;
-    bool task_succeeded       = false;
-    try {
+    {
         std::lock_guard<std::mutex> lock(*mutex_);
-        try {
-            settleEvictionLocked(task, task_result);
-            completion_succeeded = true;
-        } catch (const std::exception& error) {
-            RTP_LLM_LOG_ERROR("eviction settlement failed; aborting prepared task: %s", error.what());
-            abortEvictionLocked(task);
-        } catch (...) {
-            RTP_LLM_LOG_ERROR("eviction settlement failed with unknown exception; aborting prepared task");
-            abortEvictionLocked(task);
-        }
-
-        pending_release_settlement_guard.run();
-
-        const bool mutated = completion_succeeded
-                             && (task_result.primary_success
-                                 || std::any_of(task_result.cascade_success.begin(),
-                                                task_result.cascade_success.end(),
-                                                [](bool success) { return success; }));
-        task_succeeded = completion_succeeded && task_result.primary_success
-                         && std::all_of(task_result.cascade_success.begin(),
-                                        task_result.cascade_success.end(),
-                                        [](bool success) { return success; });
-        settled_(mutated, task_succeeded);
-    } catch (const std::exception& error) {
-        RTP_LLM_LOG_ERROR("eviction terminalization lock/follow-up failed: %s", error.what());
-    } catch (...) {
-        RTP_LLM_LOG_ERROR("eviction terminalization lock/follow-up failed with unknown exception");
+        settleEvictionLocked(task, task_result);
+        updatePendingReleases(task, false);
+        settled_(task_result.primary_success,
+                 task_result.primary_success
+                     && std::all_of(task_result.cascade_success.begin(),
+                                    task_result.cascade_success.end(),
+                                    [](bool success) { return success; }));
     }
     metrics_reporter_->reportEvictionFinished(task, task_result, tree_->groupSets());
 }
@@ -361,7 +328,7 @@ std::optional<TransferDescriptor> BlockTreeEvictor::chooseVictim(size_t group_se
             return std::nullopt;
         }
         GroupSetResource& resource = entry->node->group_set_resources[group_set_id];
-        if (resource.transfer_state != GroupSetTransferState::IDLE || !isEvictable(group_set, entry->node, tier)) {
+        if (!isEvictable(group_set, entry->node, tier)) {
             heap->erase(entry->node);
             continue;  // dropped from heap; will be refreshed on release
         }
@@ -373,7 +340,12 @@ std::optional<TransferDescriptor> BlockTreeEvictor::chooseVictim(size_t group_se
                 target_tier = Tier::DISK;
             }
         }
-        return makeDesc(entry->node, group_set_id, tier, target_tier);
+        return TransferDescriptor(entry->node,
+                                  group_set_id,
+                                  /*path_index=*/0,
+                                  tier,
+                                  target_tier,
+                                  resource.getBlocks(tier));
     }
 }
 
@@ -389,14 +361,6 @@ void BlockTreeEvictor::scheduleWatermarkEvictionsLocked(Tier tier, double waterm
     }
 }
 
-void BlockTreeEvictor::reservePendingReleases(const EvictionTask& task) {
-    updatePendingReleases(task, true);
-}
-
-void BlockTreeEvictor::settlePendingReleases(const EvictionTask& task) {
-    updatePendingReleases(task, false);
-}
-
 void BlockTreeEvictor::updatePendingReleases(const EvictionTask& task, bool reserve) {
     std::lock_guard<std::mutex> lock(pending_release_mutex_);
     auto update_block = [this, reserve](IBlockPool* pool, BlockIdxType block) {
@@ -404,14 +368,13 @@ void BlockTreeEvictor::updatePendingReleases(const EvictionTask& task, bool rese
             ++pending_release_counts_[pool];
             return;
         }
-        const auto   it            = pending_release_counts_.find(pool);
-        const size_t pending_count = it == pending_release_counts_.end() ? 0 : it->second;
-        RTP_LLM_CHECK_WITH_INFO(pool != nullptr && pending_count > 0,
+        const auto it = pending_release_counts_.find(pool);
+        RTP_LLM_CHECK_WITH_INFO(pool != nullptr && it != pending_release_counts_.end() && it->second > 0,
                                 "invalid pending eviction release settlement: pool=%s address=%p block=%d pending=%zu",
                                 pool ? pool->poolName().c_str() : "<null>",
                                 static_cast<void*>(pool),
                                 block,
-                                pending_count);
+                                it == pending_release_counts_.end() ? 0 : it->second);
         --it->second;
     };
     auto update_desc = [this, &update_block](const TransferDescriptor& desc) {
@@ -468,7 +431,12 @@ bool BlockTreeEvictor::collectFullPrune(const TransferDescriptor&               
             if (source_tier == Tier::NONE) {
                 continue;
             }
-            task.dependent_prune_descs.push_back(makeDesc(node, group_set_id, source_tier, Tier::NONE));
+            task.dependent_prune_descs.emplace_back(node,
+                                                    group_set_id,
+                                                    /*path_index=*/0,
+                                                    source_tier,
+                                                    Tier::NONE,
+                                                    resource.getBlocks(source_tier));
         }
     }
     std::reverse(task.full_prune_nodes_bottom_up.begin(), task.full_prune_nodes_bottom_up.end());
@@ -477,7 +445,8 @@ bool BlockTreeEvictor::collectFullPrune(const TransferDescriptor&               
 
 std::optional<EvictionTask> BlockTreeEvictor::prepareEvictionLocked(TransferDescriptor eviction_desc) {
     EvictionTask task;
-    task.primary_timing = makeTimingSnapshot(eviction_desc);
+    task.primary_timing =
+        EvictionTimingSnapshot(eviction_desc.node->group_set_resources[eviction_desc.group_set_id].candidate_meta);
     std::vector<std::pair<TreeNode*, size_t>> detached_resources;
     size_t                                    full_prune_group_set_id = eviction_desc.group_set_id;
     collectFullPrune(eviction_desc, task, detached_resources);
@@ -494,15 +463,20 @@ std::optional<EvictionTask> BlockTreeEvictor::prepareEvictionLocked(TransferDesc
     }
     task.primary_desc = std::move(eviction_desc);
 
-    std::vector<std::pair<size_t, bool>> cascade_group_sets =
-        selectCascadeGroupSets(task.primary_desc.node, task.primary_desc.group_set_id, task.primary_desc.source_tier);
-    task.cascade_descs.reserve(cascade_group_sets.size());
-    for (auto& [cascade_group_set_id, should_cascade] : cascade_group_sets) {
+    std::vector<std::pair<size_t, bool>> cascades =
+        selectCascades(task.primary_desc.node, task.primary_desc.group_set_id, task.primary_desc.source_tier);
+    task.cascade_descs.reserve(cascades.size());
+    for (auto& [cascade_group_set_id, should_cascade] : cascades) {
         if (!should_cascade) {
             continue;
         }
-        TransferDescriptor cascade_desc = makeDesc(
-            task.primary_desc.node, cascade_group_set_id, task.primary_desc.source_tier, task.primary_desc.target_tier);
+        const GroupSetResource& cascade_resource = task.primary_desc.node->group_set_resources[cascade_group_set_id];
+        TransferDescriptor      cascade_desc(task.primary_desc.node,
+                                        cascade_group_set_id,
+                                        /*path_index=*/0,
+                                        task.primary_desc.source_tier,
+                                        task.primary_desc.target_tier,
+                                        cascade_resource.getBlocks(task.primary_desc.source_tier));
         if (collectFullPrune(cascade_desc, task, detached_resources)) {
             full_prune_group_set_id = cascade_desc.group_set_id;
         }
@@ -511,19 +485,18 @@ std::optional<EvictionTask> BlockTreeEvictor::prepareEvictionLocked(TransferDesc
 
     task.cascade_timings.resize(task.cascade_descs.size());
     task.dependent_prune_timings.resize(task.dependent_prune_descs.size());
-    if (!allocateTargets(task, cascade_group_sets)) {
+    if (!allocateTargets(task, cascades)) {
         return std::nullopt;
     }
 
-    activateTaskLocked(
-        task, detached_resources, preexisting_root_transfer_ids, cascade_group_sets, full_prune_group_set_id);
+    activateTaskLocked(task, detached_resources, preexisting_root_transfer_ids, cascades, full_prune_group_set_id);
     if (!task.needsCopy()) {
         EvictionTaskResult task_result;
         task_result.primary_success = true;
         task_result.cascade_success.assign(task.cascade_descs.size(), true);
         settleEvictionLocked(task, task_result);
-        metrics_reporter_->reportEvictionFinished(task, task_result, tree_->groupSets());
         settled_(true, false);
+        metrics_reporter_->reportEvictionFinished(task, task_result, tree_->groupSets());
     }
     return task;
 }
@@ -535,64 +508,47 @@ void BlockTreeEvictor::settleEvictionLocked(const EvictionTask& task, const Evic
     }
 
     for (const TransferDescriptor& dependent_desc : task.dependent_prune_descs) {
-        const GroupSetPtr& group_set = tree_->groupSets()[dependent_desc.group_set_id];
-        applyDescCompletion(group_set, dependent_desc);
+        completeEvict(dependent_desc);
     }
-
-    auto& primary_group_set = tree_->groupSets()[task.primary_desc.group_set_id];
-    RTP_LLM_LOG_DEBUG("primary group_set[%zu] node_key=%ld source=%s target=%s",
-                      task.primary_desc.group_set_id,
-                      task.primary_desc.node->cache_key,
-                      tierName(task.primary_desc.source_tier),
-                      tierName(task.primary_desc.target_tier));
-    applyDescCompletion(primary_group_set, task.primary_desc);
-
+    completeEvict(task.primary_desc);
     for (size_t i = 0; i < task.cascade_descs.size(); ++i) {
-        const auto& cascade_desc = task.cascade_descs[i];
-        const bool  ok           = task_result.cascade_success[i];
-        if (!ok) {
-            releaseTargetBlocks(cascade_desc);
-            restoreSource(cascade_desc);
+        if (!task_result.cascade_success[i]) {
+            releaseTargetBlocks(task.cascade_descs[i]);
+            restoreSource(task.cascade_descs[i]);
             continue;
         }
-
-        auto& group_set = tree_->groupSets()[cascade_desc.group_set_id];
-        RTP_LLM_LOG_DEBUG("cascade group_set[%zu] node_key=%ld source=%s target=%s",
-                          cascade_desc.group_set_id,
-                          cascade_desc.node->cache_key,
-                          tierName(cascade_desc.source_tier),
-                          tierName(cascade_desc.target_tier));
-        applyDescCompletion(group_set, cascade_desc);
+        completeEvict(task.cascade_descs[i]);
     }
 
     if (task.hasFullPrune()) {
-        finalizeFullPrune(task);
+        settleFullPrune(task);
     } else {
-        finalizeEviction(task.primary_desc.node);
+        settleSingleEviction(task.primary_desc.node);
     }
 }
 
 // Move source blocks out of the resource, install target blocks (if demoting), clear
 // the transfer state, and re-admit the node at its new tier. Source blocks were
 // held only by cache.
-void BlockTreeEvictor::applyDescCompletion(const GroupSetPtr& group_set, const TransferDescriptor& eviction_desc) {
-    auto& resource = eviction_desc.node->group_set_resources[eviction_desc.group_set_id];
+void BlockTreeEvictor::completeEvict(const TransferDescriptor& desc) {
+    const GroupSetPtr& group_set = tree_->groupSets()[desc.group_set_id];
+    auto&              resource  = desc.node->group_set_resources[desc.group_set_id];
     if (resource.transfer_detached) {
-        releaseTargetBlocks(eviction_desc);
-        discardDetachedTransfer(eviction_desc);
+        releaseTargetBlocks(desc);
+        discardDetachedTransfer(desc);
         return;
     }
     if (resource.transfer_state != GroupSetTransferState::DEMOTING) {
-        RTP_LLM_LOG_WARNING("state mismatch, group_set=%zu node_key=%ld", eviction_desc.group_set_id, eviction_desc.node->cache_key);
-        releaseTargetBlocks(eviction_desc);
+        RTP_LLM_LOG_WARNING("state mismatch, group_set=%zu node_key=%ld", desc.group_set_id, desc.node->cache_key);
+        releaseTargetBlocks(desc);
         return;
     }
 
-    if (eviction_desc.target_tier != Tier::NONE) {
+    if (desc.target_tier != Tier::NONE) {
         MultiNodeResource target_holder{
-            eviction_desc.group_set_id, eviction_desc.target_tier, {{eviction_desc.node, eviction_desc.target_blocks}}};
-        resource.setBlocks(eviction_desc.target_tier, eviction_desc.target_blocks);
-        if (eviction_desc.target_tier == Tier::DEVICE) {
+            desc.group_set_id, desc.target_tier, {{desc.node, desc.target_blocks}}};
+        resource.setBlocks(desc.target_tier, desc.target_blocks);
+        if (desc.target_tier == Tier::DEVICE) {
             group_set->mapDeviceBlocksToTreeNode(target_holder);
         }
         group_set->referenceBlocks(target_holder, BlockRefType::BLOCK_CACHE);
@@ -603,25 +559,25 @@ void BlockTreeEvictor::applyDescCompletion(const GroupSetPtr& group_set, const T
     // cache hold before clearing the corresponding resource tier. The target is
     // installed while the state is still non-IDLE, then IDLE is published last.
     const MultiNodeResource source_holder{
-        eviction_desc.group_set_id,
-        eviction_desc.source_tier,
-        {{eviction_desc.node, eviction_desc.source_blocks}}};
-    if (eviction_desc.source_tier == Tier::DEVICE) {
+        desc.group_set_id,
+        desc.source_tier,
+        {{desc.node, desc.source_blocks}}};
+    if (desc.source_tier == Tier::DEVICE) {
         group_set->unmapDeviceBlocksFromTreeNode(source_holder);
     }
     group_set->unreferenceBlocks(source_holder, BlockRefType::BLOCK_CACHE);
-    resource.evictFromTier(eviction_desc.source_tier);
+    resource.evictFromTier(desc.source_tier);
     resource.transfer_state = GroupSetTransferState::IDLE;
     RTP_LLM_CHECK_WITH_INFO(!resource.hasTier(Tier::DEVICE) || resource.hasCompleteDeviceValue(),
                             "eviction settlement produced invalid steady state: group_set_id=%zu node_key=%ld",
-                            eviction_desc.group_set_id,
-                            eviction_desc.node->cache_key);
+                            desc.group_set_id,
+                            desc.node->cache_key);
 
-    if (eviction_desc.target_tier != Tier::NONE) {
+    if (desc.target_tier != Tier::NONE) {
         // Section 7.5: keep last_access_seq / hit_count, refresh the admission clock.
         resource.candidate_meta.admission_seq      = ++admission_seq_;
         resource.candidate_meta.tier_enter_time_us = currentTimeUs();
-        refreshCandidate(*group_set, eviction_desc.node, eviction_desc.target_tier);
+        refreshCandidate(*group_set, desc.node, desc.target_tier);
     }
 }
 
@@ -642,31 +598,11 @@ void BlockTreeEvictor::abortEvictionLocked(const EvictionTask& task) {
         restoreSource(dependent_desc);
     }
     if (detached) {
-        finalizeEviction(task.primary_desc.node);
+        settleSingleEviction(task.primary_desc.node);
     }
 }
 
-TransferDescriptor
-BlockTreeEvictor::makeDesc(TreeNode* node, size_t group_set_id, Tier source_tier, Tier target_tier) const {
-    TransferDescriptor eviction_desc;
-    eviction_desc.node         = node;
-    eviction_desc.group_set_id = group_set_id;
-    eviction_desc.source_tier  = source_tier;
-    eviction_desc.target_tier   = target_tier;
-    eviction_desc.source_blocks = node->group_set_resources[group_set_id].getBlocks(source_tier);
-    return eviction_desc;
-}
-
-EvictionTimingSnapshot BlockTreeEvictor::makeTimingSnapshot(const TransferDescriptor& eviction_desc) const {
-    const CandidateMeta& candidate_meta =
-        eviction_desc.node->group_set_resources[eviction_desc.group_set_id].candidate_meta;
-    return {candidate_meta.tier_enter_time_us,
-            candidate_meta.insert_time_us,
-            candidate_meta.last_access_time_us,
-            currentTimeUs()};
-}
-
-bool BlockTreeEvictor::allocateTargets(EvictionTask& task, std::vector<std::pair<size_t, bool>>& cascade_group_sets) {
+bool BlockTreeEvictor::allocateTargets(EvictionTask& task, std::vector<std::pair<size_t, bool>>& cascades) {
     auto prepare_target = [](TransferDescriptor& desc) {
         if (desc.target_tier != Tier::NONE) {
             desc.target_blocks.resize(1, NULL_BLOCK_IDX);
@@ -694,12 +630,14 @@ bool BlockTreeEvictor::allocateTargets(EvictionTask& task, std::vector<std::pair
         return false;
     }
     for (size_t i = 0; i < task.dependent_prune_descs.size(); ++i) {
-        task.dependent_prune_timings[i] = makeTimingSnapshot(task.dependent_prune_descs[i]);
+        const TransferDescriptor& desc = task.dependent_prune_descs[i];
+        task.dependent_prune_timings[i] =
+            EvictionTimingSnapshot(desc.node->group_set_resources[desc.group_set_id].candidate_meta);
     }
 
     size_t retained_cascades  = 0;
     size_t cascade_desc_index = 0;
-    for (auto& [_, should_cascade] : cascade_group_sets) {
+    for (auto& [_, should_cascade] : cascades) {
         if (!should_cascade) {
             continue;
         }
@@ -712,7 +650,9 @@ bool BlockTreeEvictor::allocateTargets(EvictionTask& task, std::vector<std::pair
         if (retained_cascades != cascade_desc_index) {
             task.cascade_descs[retained_cascades] = std::move(cascade_desc);
         }
-        task.cascade_timings[retained_cascades] = makeTimingSnapshot(task.cascade_descs[retained_cascades]);
+        const TransferDescriptor& desc = task.cascade_descs[retained_cascades];
+        task.cascade_timings[retained_cascades] =
+            EvictionTimingSnapshot(desc.node->group_set_resources[desc.group_set_id].candidate_meta);
         ++retained_cascades;
         ++cascade_desc_index;
     }
@@ -724,7 +664,7 @@ bool BlockTreeEvictor::allocateTargets(EvictionTask& task, std::vector<std::pair
 void BlockTreeEvictor::activateTaskLocked(const EvictionTask&                              task,
                                           const std::vector<std::pair<TreeNode*, size_t>>& detached_resources,
                                           const std::vector<size_t>&                  preexisting_root_transfer_ids,
-                                          const std::vector<std::pair<size_t, bool>>& cascade_group_sets,
+                                          const std::vector<std::pair<size_t, bool>>& cascades,
                                           size_t                                      full_prune_group_set_id) {
     reserveSource(task.primary_desc);
     for (const TransferDescriptor& cascade_desc : task.cascade_descs) {
@@ -733,7 +673,7 @@ void BlockTreeEvictor::activateTaskLocked(const EvictionTask&                   
     for (const TransferDescriptor& dependent_desc : task.dependent_prune_descs) {
         reserveSource(dependent_desc);
     }
-    for (const auto& [group_set_id, should_cascade] : cascade_group_sets) {
+    for (const auto& [group_set_id, should_cascade] : cascades) {
         if (!should_cascade) {
             refreshCandidate(task.primary_desc.node, group_set_id);
         }
@@ -814,7 +754,7 @@ void BlockTreeEvictor::releaseTargetBlocks(const TransferDescriptor& eviction_de
     }
 }
 
-void BlockTreeEvictor::finalizeEviction(TreeNode* node) {
+void BlockTreeEvictor::settleSingleEviction(TreeNode* node) {
     if (tree_->isRemovable(node)) {
         RTP_LLM_LOG_DEBUG("deleting empty node key=%ld", node->cache_key);
         eraseNodeFromAllHeaps(node);
@@ -835,9 +775,8 @@ void BlockTreeEvictor::eraseNodeFromAllHeaps(TreeNode* node) {
     }
 }
 
-void BlockTreeEvictor::finalizeFullPrune(const EvictionTask& task) {
+void BlockTreeEvictor::settleFullPrune(const EvictionTask& task) {
     TreeNode* const boundary_node = task.primary_desc.node->parent;
-
     for (TreeNode* node : task.full_prune_nodes_bottom_up) {
         if (tree_->isRemovable(node)) {
             eraseNodeFromAllHeaps(node);
@@ -846,7 +785,6 @@ void BlockTreeEvictor::finalizeFullPrune(const EvictionTask& task) {
             onTopologyChanged(node);
         }
     }
-
     TreeNode* survivor = tree_->removeNodeAndEmptyAncestors(boundary_node);
     if (survivor != tree_->root()) {
         onTopologyChanged(survivor);
@@ -854,20 +792,12 @@ void BlockTreeEvictor::finalizeFullPrune(const EvictionTask& task) {
 }
 
 std::vector<std::pair<size_t, bool>>
-BlockTreeEvictor::selectCascadeGroupSets(const TreeNode* node, size_t source_group_set_id, Tier tier) const {
+BlockTreeEvictor::selectCascades(const TreeNode* node, size_t source_group_set_id, Tier tier) const {
     std::vector<std::pair<size_t, bool>> result;
-    auto                                 append_group_set = [this, node, tier, &result](const GroupSetPtr& group_set) {
-        const size_t            group_set_id = group_set->groupSetId();
-        const GroupSetResource& resource     = node->group_set_resources[group_set_id];
-        result.emplace_back(group_set_id,
-                            resource.transfer_state == GroupSetTransferState::IDLE
-                                && isEvictable(*group_set, node, tier));
-    };
-
     if (tree_->isLeafAtTier(node, source_group_set_id, tier)) {
         for (const auto& group_set : tree_->groupSets()) {
             if (group_set->groupSetId() != source_group_set_id) {
-                append_group_set(group_set);
+                result.emplace_back(group_set->groupSetId(), isEvictable(*group_set, node, tier));
             }
         }
         return result;
@@ -891,7 +821,7 @@ BlockTreeEvictor::selectCascadeGroupSets(const TreeNode* node, size_t source_gro
                 break;
         }
         if (below) {
-            append_group_set(group_set);
+            result.emplace_back(group_set->groupSetId(), isEvictable(*group_set, node, tier));
         }
     }
     return result;

@@ -149,29 +149,4 @@ void GroupSet::releaseSingleBlock(Tier tier, BlockIdxType block, BlockRefType re
     }
 }
 
-bool GroupSet::isEvictable(const GroupSetResource& resource, Tier tier) const {
-    auto pool_evictable = [](const auto& pool, BlockIdxType block) {
-        return pool->isAllocated(block) && pool->refCount(block) == 1;
-    };
-
-    switch (tier) {
-        case Tier::DEVICE:
-            if (!resource.hasCompleteDeviceValue()) {
-                return false;
-            }
-            for (size_t i = 0; i < resource.device_blocks.size(); ++i) {
-                if (!pool_evictable(device_pools_[i], resource.device_blocks[i])) {
-                    return false;
-                }
-            }
-            return true;
-        case Tier::HOST:
-            return resource.hasTier(Tier::HOST) && pool_evictable(host_pool_, resource.host_block);
-        case Tier::DISK:
-            return resource.hasTier(Tier::DISK) && pool_evictable(disk_pool_, resource.disk_slot);
-        default:
-            return false;
-    }
-}
-
 }  // namespace rtp_llm

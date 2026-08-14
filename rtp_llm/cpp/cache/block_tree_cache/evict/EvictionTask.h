@@ -5,10 +5,18 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 
 struct EvictionTimingSnapshot {
+    EvictionTimingSnapshot() = default;
+    explicit EvictionTimingSnapshot(const CandidateMeta& candidate_meta):
+        tier_enter_time_us(candidate_meta.tier_enter_time_us),
+        insert_time_us(candidate_meta.insert_time_us),
+        last_access_time_us(candidate_meta.last_access_time_us),
+        selected_time_us(currentTimeUs()) {}
+
     int64_t tier_enter_time_us{0};
     int64_t insert_time_us{0};
     int64_t last_access_time_us{0};

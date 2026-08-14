@@ -19,7 +19,6 @@ public:
     std::shared_ptr<AsyncContext> executePerRank(const std::vector<TransferDescriptor>& descriptors) const;
     std::shared_ptr<AsyncContext> executeMultiRank(const std::vector<TransferDescriptor>& descriptors,
                                                    int                                    timeout_ms) const;
-    bool hasMultiRankEngine() const;
 
 private:
     std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine_;

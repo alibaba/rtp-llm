@@ -103,11 +103,6 @@ std::vector<TreeNode*> BlockTree::findNode(const CacheKeysType& cache_keys) cons
 }
 
 bool BlockTree::isLeafAtTier(const TreeNode* node, size_t group_set_id, Tier tier) const {
-    const GroupSetResource& resource = node->group_set_resources[group_set_id];
-    if (!(tier == Tier::DEVICE ? resource.hasCompleteDeviceValue() : resource.hasTier(tier))) {
-        return false;
-    }
-
     for (const auto& [_, child] : node->children) {
         if (child->group_set_resources[group_set_id].hasTier(tier)) {
             return false;

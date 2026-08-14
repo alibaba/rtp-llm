@@ -68,24 +68,6 @@ protected:
     std::shared_ptr<SWAGroupSet>     group_;
 };
 
-TEST_F(SWAGroupSetTest, AnyNodeWithDataIsEvictable) {
-    // SWA allows any node holding data at the tier to be a candidate (not just leaves).
-    auto* a          = makeNode(100);
-    auto* b          = makeNode(200);
-    a->children[200] = b;
-    b->parent        = a;
-
-    setDeviceBlock(a, 0);
-    setDeviceBlock(b, 0);
-
-    // Both A and B are candidate-eligible even though A has a child holding data.
-    EXPECT_TRUE(group_->isEvictable(a->group_set_resources[0], Tier::DEVICE));
-    EXPECT_TRUE(group_->isEvictable(b->group_set_resources[0], Tier::DEVICE));
-
-    delete a;
-    delete b;
-}
-
 TEST_F(SWAGroupSetTest, WindowValidatorConnectedPath) {
     auto  validator     = group_->createMatchValidator();
     auto* swa_validator = dynamic_cast<SWAMatchValidator*>(validator.get());
@@ -235,21 +217,6 @@ TEST_F(SWAGroupSetTest, IndependentEvictionDoesNotAffectFull) {
     EXPECT_EQ(node->group_set_resources[0].device_blocks[0], full_block);
 
     delete node;
-}
-
-TEST_F(SWAGroupSetTest, EvictabilityRequiresTierDataButNotLeafTopology) {
-    auto* a          = makeNode(100);
-    auto* b          = makeNode(200);
-    a->children[200] = b;
-    b->parent        = a;
-    setDeviceBlock(a, 0);
-
-    EXPECT_TRUE(group_->isEvictable(a->group_set_resources[0], Tier::DEVICE));
-    EXPECT_FALSE(group_->isEvictable(a->group_set_resources[0], Tier::HOST));
-    EXPECT_FALSE(group_->isEvictable(b->group_set_resources[0], Tier::DEVICE));
-
-    delete a;
-    delete b;
 }
 
 TEST_F(SWAGroupSetTest, SlidingWindowConfig) {
