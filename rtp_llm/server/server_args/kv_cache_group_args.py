@@ -1,7 +1,178 @@
-from rtp_llm.server.server_args.util import str2bool
+import logging
+from ipaddress import IPv6Address
+
+from rtp_llm.server.server_args.util import (
+    bounded_int,
+    non_negative_int64,
+    positive_int32,
+    str2bool,
+)
+
+KV_CACHE_EVENT_MAX_QUEUE_CAPACITY = 2**20
+KV_CACHE_EVENT_MAX_REPORT_BATCH_SIZE = 2**14
+KV_CACHE_EVENT_MAX_SNAPSHOT_KEYS = 1_000_000
+KV_CACHE_EVENT_MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024
+
+
+def _valid_port(port: str) -> bool:
+    # std::from_chars in the C++ validator accepts ASCII decimal digits only.
+    # Keep Python startup validation identical so configuration cannot pass one
+    # entry point and fail after the engine starts through another.
+    return port.isascii() and port.isdigit() and 1 <= int(port) <= 65535
+
+
+def _valid_authority(authority: str, *, allow_bracketed_ipv6: bool) -> bool:
+    if not authority or any(
+        ord(char) <= 0x20 or ord(char) == 0x7F or char in "/?#@\\%"
+        for char in authority
+    ):
+        return False
+
+    if authority.startswith("["):
+        close = authority.find("]")
+        if (
+            not allow_bracketed_ipv6
+            or close <= 1
+            or "[" in authority[1:]
+            or "]" in authority[close + 1 :]
+        ):
+            return False
+        host = authority[1:close]
+        try:
+            IPv6Address(host)
+        except ValueError:
+            return False
+        suffix = authority[close + 1 :]
+        return not suffix or (suffix.startswith(":") and _valid_port(suffix[1:]))
+
+    if "[" in authority or "]" in authority or authority.count(":") > 1:
+        return False
+    if ":" in authority:
+        host, port = authority.rsplit(":", 1)
+        if not _valid_port(port):
+            return False
+    else:
+        host = authority
+    return bool(host) and not (
+        host.startswith(".") or host.endswith(".") or ".." in host
+    )
+
+
+def _has_valid_percent_encoding(value: str) -> bool:
+    """Reject malformed escapes before libcurl gets a different URL."""
+
+    index = 0
+    while index < len(value):
+        if value[index] != "%":
+            index += 1
+            continue
+        if index + 2 >= len(value) or any(
+            char not in "0123456789abcdefABCDEF"
+            for char in value[index + 1 : index + 3]
+        ):
+            return False
+        index += 3
+    return True
+
+
+def _valid_manager_endpoint(endpoint: str) -> bool:
+    # Must remain equivalent to detail::isValidKVCacheEventEndpoint(). Both
+    # sides consume config/test/kv_cache_event_validation_cases.inc in tests.
+    if any(ord(char) <= 0x20 or ord(char) >= 0x7F for char in endpoint):
+        return False
+    for scheme in ("http://", "https://"):
+        if endpoint.startswith(scheme):
+            remainder = endpoint[len(scheme) :]
+            authority = remainder.split("/", 1)[0]
+            return (
+                _valid_authority(authority, allow_bracketed_ipv6=True)
+                and not any(char in "?#\\" for char in remainder)
+                and _has_valid_percent_encoding(remainder)
+            )
+    return False
+
+
+def _valid_host_ip_port(host_ip_port: str) -> bool:
+    # Must remain equivalent to detail::isValidKVCacheEventHostIpPort().
+    # Keep this stricter than KVCM's current "non-empty and no #" check. The
+    # value is embedded in both a path component and URI authority, where
+    # non-ASCII, percent escapes, and delimiters would otherwise be ambiguous.
+    return (
+        _valid_authority(host_ip_port, allow_bracketed_ipv6=False)
+        and host_ip_port.isascii()
+        and "%" not in host_ip_port
+    )
+
+
+def _valid_kvcm_identity(identity: str) -> bool:
+    """Match detail::isValidKVCacheEventIdentity()."""
+
+    return (
+        bool(identity)
+        and identity.isascii()
+        and all(0x20 < ord(char) < 0x7F for char in identity)
+    )
+
+
+def validate_kv_cache_event_config(parser, kv_cache_config) -> None:
+    if kv_cache_config.kv_cache_event_publisher_type != "kvcm":
+        return
+    required = {
+        "KV_CACHE_EVENT_MANAGER_ENDPOINT": (
+            kv_cache_config.kv_cache_event_manager_endpoint
+        ),
+        "KV_CACHE_EVENT_INSTANCE_GROUP or RECO_INSTANCE_GROUP": (
+            kv_cache_config.kv_cache_event_instance_group
+            or kv_cache_config.reco_instance_group
+        ),
+        "KV_CACHE_EVENT_INSTANCE_ID": kv_cache_config.kv_cache_event_instance_id,
+        "KV_CACHE_EVENT_HOST_IP_PORT": kv_cache_config.kv_cache_event_host_ip_port,
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        parser.error("kvcm KV cache event publisher requires: " + ", ".join(missing))
+    if not _valid_manager_endpoint(kv_cache_config.kv_cache_event_manager_endpoint):
+        parser.error(
+            "KV_CACHE_EVENT_MANAGER_ENDPOINT must be an http(s) URL with a "
+            "valid authority and no credentials, query, fragment, or whitespace"
+        )
+    if not _valid_host_ip_port(kv_cache_config.kv_cache_event_host_ip_port):
+        parser.error(
+            "KV_CACHE_EVENT_HOST_IP_PORT must be a hostname or IPv4 address "
+            "with an optional port in the range 1..65535; IPv6 is unsupported"
+        )
+    effective_group = (
+        kv_cache_config.kv_cache_event_instance_group
+        or kv_cache_config.reco_instance_group
+    )
+    if not _valid_kvcm_identity(effective_group):
+        parser.error(
+            "KV_CACHE_EVENT_INSTANCE_GROUP or RECO_INSTANCE_GROUP must be "
+            "non-empty printable ASCII without whitespace"
+        )
+    if not _valid_kvcm_identity(kv_cache_config.kv_cache_event_instance_id):
+        parser.error(
+            "KV_CACHE_EVENT_INSTANCE_ID must be non-empty printable ASCII "
+            "without whitespace"
+        )
+    if (
+        not kv_cache_config.kv_cache_event_instance_group
+        and kv_cache_config.reco_instance_group == "default"
+    ):
+        logging.warning(
+            "KV cache event publisher is using the placeholder reco instance "
+            "group 'default'; set KV_CACHE_EVENT_INSTANCE_GROUP or "
+            "RECO_INSTANCE_GROUP explicitly to avoid cross-deployment grouping"
+        )
 
 
 def init_kv_cache_group_args(parser, kv_cache_config):
+    # Validation belongs to the parser lifecycle rather than only setup_args(),
+    # so every caller that installs this argument group gets the same contract.
+    parser.register_post_parse_validator(
+        lambda: validate_kv_cache_event_config(parser, kv_cache_config)
+    )
+
     ##############################################################################################################
     # KV Cache 相关配置
     ##############################################################################################################
@@ -37,6 +208,180 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=str2bool,
         default=False,
         help="控制是否启用Remote Cache的机制。设置为 True 启用 , False 关闭",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_publisher_type",
+        env_name="KV_CACHE_EVENT_PUBLISHER_TYPE",
+        bind_to=(kv_cache_config, "kv_cache_event_publisher_type"),
+        strict_config_binding=True,
+        type=str,
+        choices=["none", "log", "kvcm"],
+        default="none",
+        empty_env_as_unset=True,
+        strict_env_choice=True,
+        emit_string_from_env=True,
+        help=(
+            "HBM KV cache 事件输出：none 关闭，log 输出验证日志，kvcm 直连 KVCM。"
+            "kvcm 模式必须同时配置 manager endpoint、instance id 和 host ip:port，"
+            "instance group 可从 reco_instance_group 继承。"
+        ),
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_manager_endpoint",
+        env_name="KV_CACHE_EVENT_MANAGER_ENDPOINT",
+        bind_to=(kv_cache_config, "kv_cache_event_manager_endpoint"),
+        strict_config_binding=True,
+        type=str,
+        default="",
+        empty_env_as_unset=True,
+        emit_string_from_env=True,
+        help="KVCM Meta HTTP endpoint，例如 http://127.0.0.1:56020。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_instance_group",
+        env_name="KV_CACHE_EVENT_INSTANCE_GROUP",
+        bind_to=(kv_cache_config, "kv_cache_event_instance_group"),
+        strict_config_binding=True,
+        type=str,
+        default="",
+        empty_env_as_unset=True,
+        emit_string_from_env=True,
+        help="KVCM instance group；为空时复用 reco_instance_group。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_instance_id",
+        env_name="KV_CACHE_EVENT_INSTANCE_ID",
+        bind_to=(kv_cache_config, "kv_cache_event_instance_id"),
+        strict_config_binding=True,
+        type=str,
+        default="",
+        empty_env_as_unset=True,
+        emit_string_from_env=True,
+        help="稳定的 KVCM instance id，不能使用进程 PID。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_host_ip_port",
+        env_name="KV_CACHE_EVENT_HOST_IP_PORT",
+        bind_to=(kv_cache_config, "kv_cache_event_host_ip_port"),
+        strict_config_binding=True,
+        type=str,
+        default="",
+        empty_env_as_unset=True,
+        emit_string_from_env=True,
+        help="当前 DP replica 的 tp_rank=0 Cache 协调端点；pp_size>1 时该功能禁用。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_queue_capacity",
+        env_name="KV_CACHE_EVENT_QUEUE_CAPACITY",
+        bind_to=(kv_cache_config, "kv_cache_event_queue_capacity"),
+        strict_config_binding=True,
+        type=bounded_int(1, KV_CACHE_EVENT_MAX_QUEUE_CAPACITY),
+        default=100000,
+        empty_env_as_unset=True,
+        help=(
+            "Publisher 非阻塞有界队列容量，范围 1..1048576；"
+            "资源上限防止可选事件导出器耗尽进程内存。"
+        ),
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_report_batch_size",
+        env_name="KV_CACHE_EVENT_REPORT_BATCH_SIZE",
+        bind_to=(kv_cache_config, "kv_cache_event_report_batch_size"),
+        strict_config_binding=True,
+        type=bounded_int(1, KV_CACHE_EVENT_MAX_REPORT_BATCH_SIZE),
+        default=1000,
+        empty_env_as_unset=True,
+        help="单次 ReportEvent 的最大增量事件数，范围 1..16384。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_flush_interval_ms",
+        env_name="KV_CACHE_EVENT_FLUSH_INTERVAL_MS",
+        bind_to=(kv_cache_config, "kv_cache_event_flush_interval_ms"),
+        strict_config_binding=True,
+        type=positive_int32,
+        default=20,
+        empty_env_as_unset=True,
+        help="增量 batch 最长等待时间，必须大于 0 ms。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_heartbeat_interval_ms",
+        env_name="KV_CACHE_EVENT_HEARTBEAT_INTERVAL_MS",
+        bind_to=(kv_cache_config, "kv_cache_event_heartbeat_interval_ms"),
+        strict_config_binding=True,
+        type=positive_int32,
+        default=1000,
+        empty_env_as_unset=True,
+        help="KVCM 节点心跳周期，必须大于 0 ms。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_request_timeout_ms",
+        env_name="KV_CACHE_EVENT_REQUEST_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "kv_cache_event_request_timeout_ms"),
+        strict_config_binding=True,
+        type=positive_int32,
+        default=1500,
+        empty_env_as_unset=True,
+        help="KVCM 注册、心跳和增量 HTTP 请求超时，必须大于 0 ms。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_snapshot_timeout_ms",
+        env_name="KV_CACHE_EVENT_SNAPSHOT_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "kv_cache_event_snapshot_timeout_ms"),
+        strict_config_binding=True,
+        type=positive_int32,
+        default=30000,
+        empty_env_as_unset=True,
+        help="KVCM 全量 snapshot HTTP 请求超时，必须大于 0 ms；全量请求可能包含大量 key。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_retry_interval_ms",
+        env_name="KV_CACHE_EVENT_RETRY_INTERVAL_MS",
+        bind_to=(kv_cache_config, "kv_cache_event_retry_interval_ms"),
+        strict_config_binding=True,
+        type=positive_int32,
+        default=500,
+        empty_env_as_unset=True,
+        help="注册或发送失败后的重试间隔，必须大于 0 ms。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_snapshot_interval_ms",
+        env_name="KV_CACHE_EVENT_SNAPSHOT_INTERVAL_MS",
+        bind_to=(kv_cache_config, "kv_cache_event_snapshot_interval_ms"),
+        strict_config_binding=True,
+        type=positive_int32,
+        default=300000,
+        empty_env_as_unset=True,
+        help="HBM 全量 snapshot 周期，必须大于 0 ms；瞬态异常和服务端 advisory 会触发 snapshot。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_log_max_keys",
+        env_name="KV_CACHE_EVENT_LOG_MAX_KEYS",
+        bind_to=(kv_cache_config, "kv_cache_event_log_max_keys"),
+        strict_config_binding=True,
+        type=non_negative_int64,
+        default=8,
+        empty_env_as_unset=True,
+        help="LogPublisher 每个 batch 最多输出的 key 样本数，必须大于等于 0；0 表示不输出样本 key。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_snapshot_max_keys",
+        env_name="KV_CACHE_EVENT_SNAPSHOT_MAX_KEYS",
+        bind_to=(kv_cache_config, "kv_cache_event_snapshot_max_keys"),
+        strict_config_binding=True,
+        type=bounded_int(1, KV_CACHE_EVENT_MAX_SNAPSHOT_KEYS),
+        default=1000000,
+        empty_env_as_unset=True,
+        help="发布器内存镜像允许的最大逻辑 key 数，范围 1..1000000；超限时熔断事件导出。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_snapshot_max_bytes",
+        env_name="KV_CACHE_EVENT_SNAPSHOT_MAX_BYTES",
+        bind_to=(kv_cache_config, "kv_cache_event_snapshot_max_bytes"),
+        strict_config_binding=True,
+        type=bounded_int(1, KV_CACHE_EVENT_MAX_SNAPSHOT_BYTES),
+        default=256 * 1024 * 1024,
+        empty_env_as_unset=True,
+        help="单个 KVCM 全量 snapshot JSON 的最大字节数，范围 1..268435456；超限时熔断事件导出。",
     )
     kv_cache_group.add_argument(
         "--multi_task_prompt",
@@ -270,6 +615,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "reco_instance_group"),
         type=str,
         default="default",
+        emit_string_from_env=True,
         help="instance_group名称",
     )
     kv_cache_group.add_argument(

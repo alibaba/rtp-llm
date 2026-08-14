@@ -728,6 +728,22 @@ class KVCacheConfig:
     enable_independent_group_eviction: bool
     device_cache_min_free_blocks: int
     load_cache_retry_times: int
+    kv_cache_event_publisher_type: str
+    kv_cache_event_manager_endpoint: str
+    kv_cache_event_instance_group: str
+    kv_cache_event_instance_id: str
+    kv_cache_event_host_ip_port: str
+    kv_cache_event_queue_capacity: int
+    kv_cache_event_report_batch_size: int
+    kv_cache_event_flush_interval_ms: int
+    kv_cache_event_heartbeat_interval_ms: int
+    kv_cache_event_request_timeout_ms: int
+    kv_cache_event_snapshot_timeout_ms: int
+    kv_cache_event_retry_interval_ms: int
+    kv_cache_event_snapshot_interval_ms: int
+    kv_cache_event_log_max_keys: int
+    kv_cache_event_snapshot_max_keys: int
+    kv_cache_event_snapshot_max_bytes: int
     ssm_state_dtype: str
     test_block_num: int
     use_block_cache: int

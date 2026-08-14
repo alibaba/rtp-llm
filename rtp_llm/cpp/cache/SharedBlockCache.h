@@ -1,7 +1,9 @@
 #pragma once
 
-#include <mutex>
+#include <atomic>
 #include <memory>
+#include <limits>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <unordered_map>
@@ -12,10 +14,14 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/events/KVCacheEventPublisher.h"
 
 namespace rtp_llm {
 
 class SharedBlockCache {
+private:
+    static const size_t kCacheMaxCapacity = 10000000;
+
 public:
     using NamespaceId = uint32_t;
 
@@ -65,15 +71,21 @@ public:
         std::vector<BlockIdxType> group_block_ids;
     };
 
+    struct LogicalCacheSnapshot {
+        std::vector<CacheKeyType> cache_keys;
+        bool                      limit_exceeded = false;
+    };
+
     using LRUCacheType = LRUCache<CacheKeyType, UnifiedCacheItem>;
 
 public:
-    explicit SharedBlockCache(): lru_cache_(kCacheMaxCapacity) {}
+    explicit SharedBlockCache(size_t max_capacity = kCacheMaxCapacity):
+        lru_cache_(max_capacity == 0 ? 1 : max_capacity) {}
 
     void init(int group_num, const std::vector<BlockPoolPtr>& group_pools);
 
-    void put(CacheKeyType cache_key, const std::vector<BlockIdxType>& group_block_ids, bool is_resident);
-    void put(CacheKeyType                     cache_key,
+    bool put(CacheKeyType cache_key, const std::vector<BlockIdxType>& group_block_ids, bool is_resident);
+    bool put(CacheKeyType                     cache_key,
              const std::vector<BlockIdxType>& group_block_ids,
              bool                             is_resident,
              NamespaceId                      namespace_id,
@@ -101,13 +113,30 @@ public:
     std::vector<CacheKeyType> allCacheKeys() const;
 
     int64_t version() const;
-    void    setPrefixTreeEnabled(bool enabled);
-    bool    prefixTreeEnabled() const;
-    void    setIndependentGroupEviction(bool enabled, const std::vector<int>& group_ids);
+
+    // New entries are rejected at the defensive metadata bound instead of
+    // allowing LRUCache to silently discard a referenced item. This invariant
+    // is independent of event publication; callers can observe the optional-
+    // cache degradation without parsing sampled logs.
+    uint64_t capacityRejectedInsertCount() const noexcept;
+
+    // KVCM publishes one logical key only after every required cache group is
+    // visible. Today the production caller captures this during startup while
+    // the cache is empty; the bounded implementation is retained so a future
+    // dynamic publisher attachment cannot introduce an unbounded scan.
+    LogicalCacheSnapshot logicalCacheSnapshot(size_t max_keys = std::numeric_limits<size_t>::max()) const;
+
+    // Installed during engine initialization and cleared before publisher shutdown.
+    // `required_group_ids` lists the groups whose reuse chains are densely
+    // materialized; a key is publishable only when every listed group holds a
+    // matchable block.
+    void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<int>& required_group_ids);
+
+    void setPrefixTreeEnabled(bool enabled);
+    bool prefixTreeEnabled() const;
+    void setIndependentGroupEviction(bool enabled, const std::vector<int>& group_ids);
 
 private:
-    static const size_t kCacheMaxCapacity = 10000000;
-
     struct PrefixTreeNode {
         NamespacedKey                                        key;
         NamespacedKey                                        parent;
@@ -153,6 +182,10 @@ private:
     bool                       updateItemDependencyLocked(UnifiedCacheItem&      item,
                                                           NamespaceId            namespace_id,
                                                           const BlockDependency& dependency) const;
+    bool                       removeItemLocked(CacheKeyType cache_key, UnifiedCacheItem* removed_item);
+    bool                       isLogicallyCompleteLocked(const UnifiedCacheItem& item) const;
+    bool                       eventPublicationEnabledLocked() const noexcept;
+    void                       publishCompletenessTransitionLocked(CacheKeyType cache_key, bool was_complete) noexcept;
     static bool                groupMatchable(const UnifiedCacheItem& item, size_t group_id);
     static bool                hasUsableGroup(const UnifiedCacheItem& item, int group_id);
     std::vector<NamespacedKey> collectEvictChainLocked(const NamespacedKey& leaf_key) const;
@@ -165,12 +198,16 @@ private:
     bool isFlatItemResidentLocked(CacheKeyType cache_key) const;
     bool isIndependentEvictionGroupLocked(int group_id) const;
 
-    LRUCacheType       lru_cache_;
-    mutable std::mutex mu_;
-    int64_t            version_{-1};
-    bool               prefix_tree_enabled_{true};
-    bool               independent_group_eviction_enabled_{false};
-    uint64_t           tree_access_seq_{0};
+    LRUCacheType             lru_cache_;
+    mutable std::mutex       mu_;
+    int64_t                  version_{-1};
+    KVCacheEventPublisherPtr event_publisher_;
+    std::vector<int>         required_group_ids_;
+    bool                     event_publication_disabled_{false};
+    std::atomic<uint64_t>    capacity_rejected_insert_count_{0};
+    bool                     prefix_tree_enabled_{true};
+    bool                     independent_group_eviction_enabled_{false};
+    uint64_t                 tree_access_seq_{0};
 
     int                                                                                    group_num_ = 0;
     std::vector<BlockPoolPtr>                                                              group_pools_;

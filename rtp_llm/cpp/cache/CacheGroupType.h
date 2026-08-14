@@ -153,4 +153,35 @@ inline CacheGroupPolicy defaultCacheGroupPolicy(CacheGroupType group_type) {
     return policy;
 }
 
+// A group belongs to the KV cache event publication completeness set only when
+// it participates in prefix reuse AND materializes every block position.
+// Tail-sparse groups (active_tail_blocks > 0, i.e. LINEAR/SWA keep only their
+// tail blocks) never hold full block chains, so counting them as required
+// would suppress publication for almost every key.
+inline bool cacheGroupPublishesPrefixChain(const CacheGroupPolicy& policy) {
+    return policy.enable_prefix_reuse && policy.active_tail_blocks == 0;
+}
+
+inline std::vector<int> reuseParticipatingGroupIdsFromPolicies(const std::vector<CacheGroupPolicy>& policies) {
+    std::vector<int> group_ids;
+    for (size_t gid = 0; gid < policies.size(); ++gid) {
+        if (cacheGroupPublishesPrefixChain(policies[gid])) {
+            group_ids.push_back(static_cast<int>(gid));
+        }
+    }
+    return group_ids;
+}
+
+// The first event protocol advertises exactly one HBM location. A dense reuse
+// group placed on host memory cannot be represented truthfully by that spec,
+// so the manager gates the whole optional publisher instead of reporting a
+// partial logical cache or charging host bytes to HBM.
+inline bool kvCacheEventGroupsUseDeviceMemory(const std::vector<CacheGroupPolicy>& policies,
+                                              const std::vector<int>&              group_ids) noexcept {
+    return std::all_of(group_ids.begin(), group_ids.end(), [&policies](int gid) {
+        return gid >= 0 && static_cast<size_t>(gid) < policies.size()
+               && policies[static_cast<size_t>(gid)].memory_placement == CacheMemoryPlacement::DEVICE;
+    });
+}
+
 }  // namespace rtp_llm

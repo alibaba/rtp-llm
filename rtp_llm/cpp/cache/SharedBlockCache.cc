@@ -2,7 +2,6 @@
 
 #include <algorithm>
 
-#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
@@ -18,12 +17,12 @@ void SharedBlockCache::init(int group_num, const std::vector<BlockPoolPtr>& grou
     group_pools_ = group_pools;
 }
 
-void SharedBlockCache::put(CacheKeyType cache_key, const std::vector<BlockIdxType>& group_block_ids, bool is_resident) {
+bool SharedBlockCache::put(CacheKeyType cache_key, const std::vector<BlockIdxType>& group_block_ids, bool is_resident) {
     BlockDependency dependency;
-    put(cache_key, group_block_ids, is_resident, kDefaultNamespace, dependency);
+    return put(cache_key, group_block_ids, is_resident, kDefaultNamespace, dependency);
 }
 
-void SharedBlockCache::put(CacheKeyType                     cache_key,
+bool SharedBlockCache::put(CacheKeyType                     cache_key,
                            const std::vector<BlockIdxType>& group_block_ids,
                            bool                             is_resident,
                            NamespaceId                      namespace_id,
@@ -35,8 +34,9 @@ void SharedBlockCache::put(CacheKeyType                     cache_key,
     if (lru_cache_.contains(cache_key)) {
         auto [success, existing_item] = lru_cache_.get(cache_key);
         if (success) {
-            const auto now_us   = currentTimeUs();
-            const bool resident = existing_item.is_resident || is_resident;
+            const bool was_complete = eventPublicationEnabledLocked() && isLogicallyCompleteLocked(existing_item);
+            const auto now_us       = currentTimeUs();
+            const bool resident     = existing_item.is_resident || is_resident;
             if (resident != existing_item.is_resident) {
                 existing_item.is_resident = resident;
             }
@@ -74,13 +74,14 @@ void SharedBlockCache::put(CacheKeyType                     cache_key,
                 lru_cache_.put(cache_key, existing_item);
                 ++version_;
             }
+            publishCompletenessTransitionLocked(cache_key, was_complete);
             if (existing_item.is_resident) {
                 markAllTreeAliasesResidentLocked(cache_key);
             }
             upsertTreeNodeLocked(cache_key, namespace_id, dependency, existing_item.is_resident);
             refreshAllTreeAliasesLocked(cache_key);
         }
-        return;
+        return true;
     }
 
     UnifiedCacheItem item;
@@ -101,6 +102,19 @@ void SharedBlockCache::put(CacheKeyType                     cache_key,
     }
     updateItemDependencyLocked(item, namespace_id, dependency);
 
+    // Production pressure is reclaimed through selectAndEvict*, whose caller
+    // owns the offload and eviction-metrics lifecycle. Never let LRUCache::put
+    // silently discard an item, and never create a second eviction path here:
+    // either would lose block references or bypass those external semantics.
+    // A new reusable index entry is optional, so preserve the existing cache
+    // and request-owned blocks when this defensive metadata limit is reached.
+    if (lru_cache_.full()) {
+        // This runs under the cache mutation mutex. Keep even the exceptional
+        // path free of logger I/O; the cumulative metric preserves the signal
+        // without extending an inference critical section.
+        capacity_rejected_insert_count_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
     lru_cache_.put(cache_key, item);
     ++version_;
     upsertTreeNodeLocked(cache_key, namespace_id, dependency, item.is_resident);
@@ -111,6 +125,13 @@ void SharedBlockCache::put(CacheKeyType                     cache_key,
             group_pools_[gid]->blockCacheReference(group_block_ids[gid]);
         }
     }
+    // A published ADD makes the key externally discoverable. Establish every
+    // cache-owned block reference first so the event can never race ahead of
+    // the lifetime guarantee it advertises. Request references usually cover
+    // this narrow insertion window, but publication should not depend on that
+    // caller-side implementation detail.
+    publishCompletenessTransitionLocked(cache_key, /*was_complete=*/false);
+    return true;
 }
 
 SharedBlockCache::MatchResult SharedBlockCache::match(CacheKeyType cache_key) {
@@ -166,7 +187,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvict(size_t min_blocks
             std::vector<NamespacedKey> ordered_chain(chain.rbegin(), chain.rend());
             for (const auto& tree_key : ordered_chain) {
                 UnifiedCacheItem removed_item;
-                if (!lru_cache_.remove(tree_key.cache_key, &removed_item)) {
+                if (!removeItemLocked(tree_key.cache_key, &removed_item)) {
                     removeAllTreeAliasesForCacheKeyLocked(tree_key.cache_key);
                     continue;
                 }
@@ -211,7 +232,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvict(size_t min_blocks
     size_t selected_blocks = 0;
     for (const auto cache_key : lru_keys) {
         UnifiedCacheItem removed_item;
-        if (!lru_cache_.remove(cache_key, &removed_item)) {
+        if (!removeItemLocked(cache_key, &removed_item)) {
             continue;
         }
         removeAllTreeAliasesForCacheKeyLocked(cache_key);
@@ -283,7 +304,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group
                 std::vector<NamespacedKey> ordered_chain(chain.rbegin(), chain.rend());
                 for (const auto& tree_key : ordered_chain) {
                     UnifiedCacheItem removed_item;
-                    if (!lru_cache_.remove(tree_key.cache_key, &removed_item)) {
+                    if (!removeItemLocked(tree_key.cache_key, &removed_item)) {
                         removeAllTreeAliasesForCacheKeyLocked(tree_key.cache_key);
                         continue;
                     }
@@ -334,7 +355,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group
         if (!has_target_group) {
             continue;
         }
-        if (!lru_cache_.remove(cache_key, &removed_item)) {
+        if (!removeItemLocked(cache_key, &removed_item)) {
             continue;
         }
         removeAllTreeAliasesForCacheKeyLocked(cache_key);
@@ -418,7 +439,7 @@ std::optional<SharedBlockCache::UnifiedCacheItem> SharedBlockCache::remove(Cache
     std::lock_guard<std::mutex> lock(mu_);
 
     UnifiedCacheItem removed_item;
-    if (!lru_cache_.remove(cache_key, &removed_item)) {
+    if (!removeItemLocked(cache_key, &removed_item)) {
         return std::nullopt;
     }
     removeAllTreeAliasesForCacheKeyLocked(cache_key);
@@ -450,9 +471,57 @@ std::vector<CacheKeyType> SharedBlockCache::allCacheKeys() const {
     return keys;
 }
 
+SharedBlockCache::LogicalCacheSnapshot SharedBlockCache::logicalCacheSnapshot(size_t max_keys) const {
+    LogicalCacheSnapshot snapshot;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        snapshot.cache_keys.reserve(std::min(lru_cache_.size(), max_keys));
+        for (const auto& [cache_key, item] : lru_cache_.items()) {
+            if (!isLogicallyCompleteLocked(item)) {
+                continue;
+            }
+            if (snapshot.cache_keys.size() >= max_keys) {
+                snapshot.limit_exceeded = true;
+                break;
+            }
+            snapshot.cache_keys.push_back(cache_key);
+        }
+    }
+    std::sort(snapshot.cache_keys.begin(), snapshot.cache_keys.end());
+    return snapshot;
+}
+
+void SharedBlockCache::setEventPublisher(KVCacheEventPublisherPtr publisher,
+                                         const std::vector<int>&  required_group_ids) {
+    // Copy before mutating the installed lifecycle. If allocation fails, the
+    // existing publisher and its completeness definition remain paired.
+    auto required_group_ids_copy = required_group_ids;
+
+    // Retiring the cache's last reference may stop and join a publisher whose
+    // worker is taking an authoritative snapshot from this cache. Move that
+    // reference out while protected, but release it only after mu_ is free;
+    // the API remains deadlock-safe even when its caller holds no second
+    // publisher reference.
+    KVCacheEventPublisherPtr retired_publisher;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        retired_publisher = std::move(event_publisher_);
+        event_publisher_  = std::move(publisher);
+        required_group_ids_.swap(required_group_ids_copy);
+        event_publication_disabled_ = false;
+    }
+}
+
 int64_t SharedBlockCache::version() const {
     std::lock_guard<std::mutex> lock(mu_);
     return version_;
+}
+
+uint64_t SharedBlockCache::capacityRejectedInsertCount() const noexcept {
+    // Metrics sample this once per second. Keep the optional diagnostics path
+    // from contending with cache lookup/insert/eviction on mu_; increments are
+    // rare and the counter has no ordering relationship with cache contents.
+    return capacity_rejected_insert_count_.load(std::memory_order_relaxed);
 }
 
 void SharedBlockCache::setPrefixTreeEnabled(bool enabled) {
@@ -693,6 +762,76 @@ bool SharedBlockCache::updateItemDependencyLocked(UnifiedCacheItem&      item,
     return true;
 }
 
+bool SharedBlockCache::removeItemLocked(CacheKeyType cache_key, UnifiedCacheItem* removed_item) {
+    bool was_complete = false;
+    if (eventPublicationEnabledLocked()) {
+        const auto* item = lru_cache_.find(cache_key);
+        was_complete     = item && isLogicallyCompleteLocked(*item);
+    }
+    if (!lru_cache_.remove(cache_key, removed_item)) {
+        return false;
+    }
+    // CacheStatusPB consumers use this version to reject stale key maps.
+    // Removal and eviction change that map just as insertion does, so advance
+    // the externally observed generation before publishing the transition.
+    ++version_;
+    publishCompletenessTransitionLocked(cache_key, was_complete);
+    return true;
+}
+
+bool SharedBlockCache::isLogicallyCompleteLocked(const UnifiedCacheItem& item) const {
+    // Only groups that participate in prefix reuse are required; groups such as
+    // SWA windows never insert full block chains and must not block publication.
+    if (required_group_ids_.empty()) {
+        return false;
+    }
+    for (const int group_id : required_group_ids_) {
+        if (group_id < 0 || static_cast<size_t>(group_id) >= item.group_block_ids.size()) {
+            return false;
+        }
+        const auto gid = static_cast<size_t>(group_id);
+        if (isNullBlockIdx(item.group_block_ids[gid]) || !groupMatchable(item, gid)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool SharedBlockCache::eventPublicationEnabledLocked() const noexcept {
+    return event_publisher_ && !event_publication_disabled_ && event_publisher_->enabled();
+}
+
+void SharedBlockCache::publishCompletenessTransitionLocked(CacheKeyType cache_key, bool was_complete) noexcept {
+    if (!eventPublicationEnabledLocked()) {
+        // Once a publisher rejects an event, its incremental stream is no
+        // longer authoritative. Remember that locally so every later cache
+        // mutation avoids even the publisher's atomics/virtual calls. A new
+        // publisher installation starts a fresh snapshot-backed lifecycle.
+        if (!event_publication_disabled_ && event_publisher_ && !event_publisher_->enabled()) {
+            event_publication_disabled_ = true;
+        }
+        return;
+    }
+
+    const auto* item        = lru_cache_.find(cache_key);
+    const bool  is_complete = item != nullptr && isLogicallyCompleteLocked(*item);
+    if (is_complete == was_complete) {
+        return;
+    }
+    const auto event_type = is_complete ? KVCacheEventType::BLOCK_ADD : KVCacheEventType::BLOCK_DELETE;
+    const auto result     = event_publisher_->tryPublish({event_type, cache_key, 0});
+    // NOT_RUNNING is expected only in the KVCM install-before-start window;
+    // its startup snapshot includes this transition. Publishers without a
+    // snapshot are started before installation. Only a definitive rejection
+    // or a publisher that disabled itself makes the incremental stream
+    // unrecoverable and removes it from the cache hot path.
+    // DROPPED_RECOVERABLE means KVCM has already paused admission and will
+    // rebuild from an authoritative snapshot that includes this mutation.
+    if (result == PublishResult::QUEUE_FULL || result == PublishResult::DISABLED || !event_publisher_->enabled()) {
+        event_publication_disabled_ = true;
+    }
+}
+
 bool SharedBlockCache::groupMatchable(const UnifiedCacheItem& item, size_t group_id) {
     return group_id >= item.matchable_groups.size() || item.matchable_groups[group_id];
 }
@@ -830,6 +969,7 @@ void SharedBlockCache::removeGroupFromItemLocked(CacheKeyType cache_key, int gro
         lru_cache_.put(cache_key, item);
         return;
     }
+    const bool was_complete = eventPublicationEnabledLocked() && isLogicallyCompleteLocked(item);
 
     std::vector<BlockIdxType> evicted_group_block_ids(item.group_block_ids.size(), NULL_BLOCK_IDX);
     evicted_group_block_ids[static_cast<size_t>(group_id)] = item.group_block_ids[static_cast<size_t>(group_id)];
@@ -864,6 +1004,7 @@ void SharedBlockCache::removeGroupFromItemLocked(CacheKeyType cache_key, int gro
         removeAllTreeAliasesForCacheKeyLocked(cache_key);
     }
     ++version_;
+    publishCompletenessTransitionLocked(cache_key, was_complete);
 }
 
 bool SharedBlockCache::hasFlatItemLocked(CacheKeyType cache_key) const {

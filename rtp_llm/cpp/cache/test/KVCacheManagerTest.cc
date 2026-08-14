@@ -318,13 +318,88 @@ TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
     auto cache_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
 
-    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/true);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.kv_cache_event_publisher_type = "log";
+    auto cache_manager =
+        std::make_shared<KVCacheManager>(cache_config, /*warmup=*/true, /*metrics_reporter=*/nullptr, kv_cache_config);
     ASSERT_TRUE(cache_manager->init());
 
     EXPECT_EQ(cache_manager->cacheConfig().block_num, 1);
 
     EXPECT_EQ(cache_manager->totalBlocksNum(), 0);
     EXPECT_EQ(cache_manager->freeBlocksNum(), 0);
+    EXPECT_EQ(cache_manager->cacheEventPublisherStatus().state, PublisherState::DISABLED);
+}
+
+TEST_F(KVCacheManagerTest, LogCacheEventPublisherStartsWithoutChangingCacheInitialization) {
+    auto cache_config = makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
+
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.kv_cache_event_publisher_type    = "log";
+    kv_cache_config.kv_cache_event_queue_capacity    = 8;
+    kv_cache_config.kv_cache_event_report_batch_size = 4;
+    auto cache_manager =
+        std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr, kv_cache_config);
+    ASSERT_TRUE(cache_manager->init());
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (cache_manager->cacheEventPublisherStatus().state == PublisherState::STARTING
+           && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    EXPECT_EQ(cache_manager->cacheEventPublisherStatus().state, PublisherState::LOGGING);
+    EXPECT_TRUE(cache_manager->cache_event_publisher_->enabled());
+    EXPECT_NE(cache_manager->publisher_shared_cache_, nullptr);
+    EXPECT_GT(cache_manager->totalBlocksNum(), 0);
+}
+
+TEST_F(KVCacheManagerTest, CacheEventPublisherFailureIsFailClosedForExporterOnly) {
+    auto cache_config = makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
+
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.kv_cache_event_publisher_type     = "kvcm";
+    kv_cache_config.kv_cache_event_manager_endpoint   = "ftp://not-an-http-endpoint";
+    kv_cache_config.kv_cache_event_instance_group     = "group";
+    kv_cache_config.kv_cache_event_instance_id        = "instance";
+    kv_cache_config.kv_cache_event_host_ip_port       = "127.0.0.1:1234";
+    kv_cache_config.kv_cache_event_queue_capacity     = 8;
+    kv_cache_config.kv_cache_event_report_batch_size  = 4;
+    kv_cache_config.kv_cache_event_snapshot_max_keys  = 8;
+    kv_cache_config.kv_cache_event_snapshot_max_bytes = 4096;
+    RuntimeConfig runtime_config;
+    runtime_config.model_name = "model";
+
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config,
+                                                          /*warmup=*/false,
+                                                          /*metrics_reporter=*/nullptr,
+                                                          kv_cache_config,
+                                                          ParallelismConfig{},
+                                                          runtime_config);
+    ASSERT_TRUE(cache_manager->init());
+
+    const auto status = cache_manager->cacheEventPublisherStatus();
+    EXPECT_EQ(status.state, PublisherState::CIRCUIT_OPEN);
+    EXPECT_EQ(status.queue_size, 0);
+    ASSERT_NE(cache_manager->cache_event_publisher_, nullptr);
+    EXPECT_FALSE(cache_manager->cache_event_publisher_->enabled());
+    EXPECT_EQ(cache_manager->publisher_shared_cache_, nullptr);
+    EXPECT_GT(cache_manager->totalBlocksNum(), 0);
+}
+
+TEST_F(KVCacheManagerTest, UnknownCacheEventPublisherIsGatedWithoutChangingCacheInitialization) {
+    auto cache_config = makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
+
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.kv_cache_event_publisher_type = "future-publisher";
+    auto cache_manager =
+        std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr, kv_cache_config);
+    ASSERT_TRUE(cache_manager->init());
+
+    EXPECT_EQ(cache_manager->cacheEventPublisherStatus().state, PublisherState::GATED);
+    EXPECT_GT(cache_manager->totalBlocksNum(), 0);
 }
 
 TEST_F(KVCacheManagerTest, InitRejectsSingleLinearGroup) {

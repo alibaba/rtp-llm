@@ -7,23 +7,33 @@
 import argparse
 import datetime
 import os
-from ast import arg
-from typing import Any, List, Tuple
+from dataclasses import dataclass
+from typing import Any, List
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.server.server_args.server_args import EnvArgumentParser
-from rtp_llm.server.server_args.util import str2bool
-from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.server.server_args.util import argument_base_type, str2bool
+
+_UNSAFE_GENERATED_STRING_CHARS = frozenset("'\"\\`$;&|<>(){}!*?[]#~")
+
+
+@dataclass(frozen=True)
+class GeneratedArgumentSpec:
+    long_option: str
+    env_name: str
+    default_value: Any
+    converter: Any
+    empty_as_unset: bool
+    emit_string: bool
 
 
 def get_all_arguments_from_parser(
     parser: EnvArgumentParser,
-) -> List[Tuple[str, str, Any, str]]:
+) -> List[GeneratedArgumentSpec]:
     """
     从解析器中获取所有参数信息
-    返回: [(arg_name, env_name, default_value, arg_type), ...]
     """
-    all_args = []
+    all_args: List[GeneratedArgumentSpec] = []
 
     # 获取所有环境变量映射
     env_mappings = parser.get_env_mappings()
@@ -35,6 +45,7 @@ def get_all_arguments_from_parser(
             env_name = env_mappings[arg_name]
             default_value = action.default
             arg_type = action.type if action.type else str
+            semantics = parser.get_env_semantics(arg_name)
 
             # 获取参数的长选项名
             long_option = None
@@ -44,12 +55,46 @@ def get_all_arguments_from_parser(
                     break
 
             if long_option:
-                all_args.append((long_option, env_name, default_value, arg_type))
+                all_args.append(
+                    GeneratedArgumentSpec(
+                        long_option=long_option,
+                        env_name=env_name,
+                        default_value=default_value,
+                        converter=arg_type,
+                        empty_as_unset=semantics.empty_as_unset,
+                        emit_string=semantics.emit_string_from_env,
+                    )
+                )
 
     return all_args
 
 
-def read_env_value(env_name: str, default_value: Any, arg_type: type) -> Any:
+def _convert_env_value(
+    env_name: str, long_option: str, raw_value: str, converter: Any
+) -> Any:
+    """Convert one explicit environment value with source-aware errors."""
+
+    try:
+        if converter == str2bool:
+            return str2bool(raw_value)
+        base_type = argument_base_type(converter)
+        if base_type == bool:
+            return str2bool(raw_value)
+        if base_type in (int, float):
+            return converter(raw_value)
+        return str(raw_value)
+    except argparse.ArgumentTypeError as error:
+        raise argparse.ArgumentTypeError(
+            f"{env_name} ({long_option}): {error}"
+        ) from error
+
+
+def read_env_value(
+    env_name: str,
+    default_value: Any,
+    arg_type: Any,
+    long_option: str = "<generated argument>",
+) -> Any:
     """
     从环境变量读取值，如果环境变量不存在则返回默认值
     """
@@ -61,24 +106,17 @@ def read_env_value(env_name: str, default_value: Any, arg_type: type) -> Any:
         return default_value
 
     try:
-        # 根据类型转换环境变量值
-        if arg_type == bool:
-            return env_value.lower() in ("true", "1", "yes", "on")
-        elif arg_type == int:
-            return int(env_value)
-        elif arg_type == float:
-            return float(env_value)
-        else:
-            return str(env_value)
+        return _convert_env_value(env_name, long_option, env_value, arg_type)
     except (ValueError, TypeError):
-        # 如果转换失败，返回默认值
+        # Preserve the legacy fallback for converters that raise ordinary
+        # conversion errors. Explicit argparse rejections are source-aware and
+        # fail fast instead of silently changing deployment intent.
         return default_value
 
 
 def format_argument_value(value: Any) -> str:
     """
     格式化参数值为字符串
-    只处理非字符串类型，字符串类型由 format_argument_pair 跳过
     """
     if value is None:
         return ""
@@ -88,13 +126,17 @@ def format_argument_value(value: Any) -> str:
         return str(value)
 
 
-def format_argument_pair(long_option: str, value: Any) -> List[str]:
+def format_argument_pair(
+    long_option: str, value: Any, *, emit_string: bool = False
+) -> List[str]:
     """
     格式化参数对为列表，支持 --xx xx 格式
-    跳过字符串类型的参数
     """
-    # 跳过字符串类型的参数
-    if isinstance(value, str):
+    # String arguments were deliberately excluded from this deployment tool
+    # because its final output is a shell command fragment. Opt in only at the
+    # argument declaration, where the producer and validation contract are
+    # visible together.
+    if isinstance(value, str) and not emit_string:
         return []
 
     formatted_value = format_argument_value(value)
@@ -102,6 +144,49 @@ def format_argument_pair(long_option: str, value: Any) -> List[str]:
         return [long_option, formatted_value]
     else:
         return [long_option]
+
+
+def append_generated_argument(
+    args_list: List[str], argument: GeneratedArgumentSpec, value: Any
+) -> None:
+    """Append one argv pair if its declaration permits deployment emission."""
+
+    if isinstance(value, str):
+        if value == "":
+            if argument.emit_string and not argument.empty_as_unset:
+                raise argparse.ArgumentTypeError(
+                    f"{argument.env_name} ({argument.long_option}): an explicit "
+                    "empty string cannot be represented by the generated argument hand-off"
+                )
+            return
+        if argument.emit_string and any(char.isspace() for char in value):
+            # The deployment hand-off serializes this argv list as a
+            # whitespace-delimited string. Reject an unrepresentable value
+            # instead of silently splitting one identity into multiple args.
+            raise argparse.ArgumentTypeError(
+                f"{argument.env_name} ({argument.long_option}): "
+                "whitespace is not supported by the generated argument hand-off"
+            )
+        if argument.emit_string and (
+            value.startswith("-")
+            or any(char in _UNSAFE_GENERATED_STRING_CHARS for char in value)
+        ):
+            # The final hand-off is deliberately a command fragment rather
+            # than a structured argv encoding. Reject tokens that can become
+            # options, glob patterns, substitutions, redirections, comments,
+            # or control operators when a deployment consumes or pastes it.
+            raise argparse.ArgumentTypeError(
+                f"{argument.env_name} ({argument.long_option}): "
+                "shell metacharacters and leading '-' are not supported by "
+                "the generated argument hand-off"
+            )
+    args_list.extend(
+        format_argument_pair(
+            argument.long_option,
+            value,
+            emit_string=argument.emit_string,
+        )
+    )
 
 
 def generate_args_list(only_env_vars: bool = False) -> List[str]:
@@ -125,64 +210,65 @@ def generate_args_list(only_env_vars: bool = False) -> List[str]:
 
     args_list = []
 
-    for long_option, env_name, default_value, arg_type in all_args:
+    for argument in all_args:
         # 过滤掉argparse的内部参数
-        if long_option == "--help" or default_value == "==SUPPRESS==":
+        if (
+            argument.long_option == "--help"
+            or argument.default_value == argparse.SUPPRESS
+        ):
             continue
 
         # 检查环境变量是否存在
-        env_var_exists = os.getenv(env_name) is not None
+        raw_env_value = os.getenv(argument.env_name)
+        env_var_exists = raw_env_value is not None and not (
+            argument.empty_as_unset and raw_env_value == ""
+        )
         # 如果default_value为None，只要环境变量存在就读取
-        if default_value is None:
+        if argument.default_value is None:
             if env_var_exists:
-                env_value_str = os.getenv(env_name)
+                env_value_str = raw_env_value
                 if env_value_str is not None:
                     try:
-                        # 根据类型转换环境变量值
-                        if arg_type == bool:
-                            env_value = env_value_str.lower() in (
-                                "true",
-                                "1",
-                                "yes",
-                                "on",
-                            )
-                        elif arg_type == int:
-                            env_value = int(env_value_str)
-                        elif arg_type == float:
-                            env_value = float(env_value_str)
-                        elif arg_type == str2bool:
-                            env_value = str2bool(env_value_str)
-                        else:
-                            env_value = str(env_value_str)
-
-                        # 跳过空字符串参数
-                        if isinstance(env_value, str) and env_value == "":
-                            continue
-
-                        args_list.extend(format_argument_pair(long_option, env_value))
+                        env_value = _convert_env_value(
+                            argument.env_name,
+                            argument.long_option,
+                            env_value_str,
+                            argument.converter,
+                        )
+                        append_generated_argument(args_list, argument, env_value)
                     except (ValueError, TypeError):
                         # 如果转换失败，跳过这个参数
                         continue
         else:
             # 从环境变量读取值
-            env_value = read_env_value(env_name, default_value, arg_type)
+            env_value = (
+                read_env_value(
+                    argument.env_name,
+                    argument.default_value,
+                    argument.converter,
+                    argument.long_option,
+                )
+                if env_var_exists
+                else argument.default_value
+            )
 
-            # 跳过空字符串参数
-            if isinstance(env_value, str) and env_value == "":
+            # 历史上生成器不会输出隐式的字符串默认值。保留这个
+            # 行为，但不能丢弃调用方显式设置的字符串环境变量。
+            if isinstance(env_value, str) and not env_var_exists:
                 continue
 
             # 根据only_env_vars参数决定是否只输出环境变量中存在的参数
             if only_env_vars:
                 if env_var_exists:
-                    args_list.extend(format_argument_pair(long_option, env_value))
+                    append_generated_argument(args_list, argument, env_value)
             else:
                 # 总是添加参数，不管环境变量是否存在
-                args_list.extend(format_argument_pair(long_option, env_value))
+                append_generated_argument(args_list, argument, env_value)
 
     return args_list
 
 
-def main():
+def main() -> int:
     """
     主函数：生成并打印参数列表
     """
@@ -241,16 +327,20 @@ def main():
                 f.write(env_args_value)
             if not args.quiet:
                 print(f"参数列表已保存到: {args.output_file}")
+        return 0
 
     except Exception as e:
         print(f"错误: {e}")
         import traceback
 
         traceback.print_exc()
+        return 1
 
 
 if __name__ == "__main__":
     # measure the initialization time
-    current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    current_time = (
+        datetime.datetime.now().astimezone().isoformat(timespec="milliseconds")
+    )
     print(f"[PROCESS_START]{current_time} Start generate args")
-    main()
+    raise SystemExit(main())
