@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "rtp_llm/cpp/cache/DSV4CacheConfigHelper.h"
+#include "rtp_llm/cpp/cache/GLM54CacheConfigHelper.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -228,7 +229,6 @@ void populateHybridAttentionGroups(CacheConfig&             config,
                                    const ModelConfig&       model_config,
                                    const ParallelismConfig& parallelism_config) {
     const auto dtype  = MemoryEvaluationHelper::getDataTypeForCache(model_config);
-    const auto layers = splitHybridPoolLayers(model_config);
 
     config.cache_specs.clear();
     config.global_layer_ids.clear();
@@ -236,27 +236,36 @@ void populateHybridAttentionGroups(CacheConfig&             config,
     config.group_types.clear();
     config.group_region_names.clear();
 
-    if (!layers.full_layers.empty()) {
+    if (!model_config.hybrid_attention_config.enable_hybrid_attention) {
+        std::vector<int> all_layers(static_cast<size_t>(model_config.num_layers));
+        for (int layer = 0; layer < model_config.num_layers; ++layer) {
+            all_layers[static_cast<size_t>(layer)] = layer;
+        }
         appendGroup(config,
-                    layers.full_layers,
+                    all_layers,
                     CacheGroupType::FULL,
                     createFullAttentionSpec(
-                        model_config, parallelism_config, dtype, static_cast<uint32_t>(layers.full_layers.size())));
+                        model_config, parallelism_config, dtype, static_cast<uint32_t>(all_layers.size())));
+        return;
     }
-    if (!layers.swa_layers.empty()) {
-        appendGroup(config,
-                    layers.swa_layers,
-                    CacheGroupType::SWA,
-                    createFullAttentionSpec(
-                        model_config, parallelism_config, dtype, static_cast<uint32_t>(layers.swa_layers.size())));
-    }
-    if (!layers.linear_layers.empty()) {
-        appendGroup(config,
-                    layers.linear_layers,
-                    CacheGroupType::LINEAR,
-                    createLinearAttentionSpec(
-                        model_config, parallelism_config, dtype, static_cast<uint32_t>(layers.linear_layers.size())));
-    }
+
+    const auto layers = splitHybridPoolLayers(model_config);
+
+    appendGroup(config,
+                layers.full_layers,
+                CacheGroupType::FULL,
+                createFullAttentionSpec(
+                    model_config, parallelism_config, dtype, static_cast<uint32_t>(layers.full_layers.size())));
+    appendGroup(config,
+                layers.swa_layers,
+                CacheGroupType::SWA,
+                createFullAttentionSpec(
+                    model_config, parallelism_config, dtype, static_cast<uint32_t>(layers.swa_layers.size())));
+    appendGroup(config,
+                layers.linear_layers,
+                CacheGroupType::LINEAR,
+                createLinearAttentionSpec(
+                    model_config, parallelism_config, dtype, static_cast<uint32_t>(layers.linear_layers.size())));
 }
 
 void setupGroupCounts(CacheConfig& config) {
@@ -296,8 +305,9 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
         DSV4CacheConfigHelper::applyConfig(
             config, model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     } else {
-        RTP_LLM_CHECK_WITH_INFO(model_config.hybrid_attention_config.enable_hybrid_attention,
-                                "HybridPoolConfigCreator requires DSV4 layer_compress_ratios or hybrid attention");
+        RTP_LLM_CHECK_WITH_INFO(model_config.hybrid_attention_config.enable_hybrid_attention
+                                    || model_config.attn_config.indexer_compress_ratio > 1,
+                                "HybridPoolConfigCreator requires DSV4, hybrid attention, or a compressed indexer");
         // Kimi hybrid cache specs are already sized for one complete physical
         // block (tokens_per_block).  setupIndependentPoolSizes uses the
         // kernel/physical ratio only for specs that are kernel-block sized;
@@ -305,6 +315,10 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
         // by tokens_per_block a second time.
         config.kernel_seq_size_per_block = config.seq_size_per_block;
         populateHybridAttentionGroups(config, model_config, parallelism_config);
+        if (model_config.attn_config.indexer_compress_ratio > 1) {
+            GLM54CacheConfigHelper::appendIndexerPools(
+                config, model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
+        }
     }
 
     RTP_LLM_CHECK_WITH_INFO(!config.cache_specs.empty(), "hybrid-pool config produced no cache specs");

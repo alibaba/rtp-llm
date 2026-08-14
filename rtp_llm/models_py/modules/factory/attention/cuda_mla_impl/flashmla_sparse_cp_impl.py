@@ -58,6 +58,8 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         softmax_extra_scale: float,
         top_k: int,
         parallelism_config: Optional[ParallelismConfig] = None,
+        indexer_top_k: Optional[int] = None,
+        indexer_group_size: int = 1,
     ):
         super().__init__(
             num_heads=num_heads,
@@ -67,6 +69,8 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             page_size=page_size,
             softmax_extra_scale=softmax_extra_scale,
             top_k=top_k,
+            indexer_top_k=indexer_top_k,
+            indexer_group_size=indexer_group_size,
         )
 
         self.attn_inputs = None
@@ -175,14 +179,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self, topk_indices: torch.Tensor
     ) -> torch.Tensor:
         """CP: topk 行与 total_local_ids 对齐，req_id 需用 total_global_ids 取 batch_indice_d，保证第 i 行对应 global token 的 request id。"""
-        if topk_indices.dim() == 2:
-            num_tokens, topk = topk_indices.shape
-            h_kv = 1
-            topk_indices_2d = topk_indices
-        else:
-            num_tokens, h_kv, topk = topk_indices.shape
-            topk_indices_2d = topk_indices[:, 0, :]
-        assert topk == self.top_k
+        num_tokens = topk_indices.shape[0]
+        topk_indices_2d, h_kv = self._prepare_local_topk_indices(topk_indices)
+        topk = self.top_k
         assert self.block_table is not None
         assert self.mla_params is not None
         assert (

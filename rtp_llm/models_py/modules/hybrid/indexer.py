@@ -34,6 +34,15 @@ class Indexer(nn.Module):
         self.index_n_heads = attn_config.indexer_head_num
         self.index_head_dim = attn_config.indexer_head_dim
         self.index_topk = attn_config.indexer_topk
+        self.compress_ratio = int(
+            getattr(attn_config, "indexer_compress_ratio", 1)
+        )
+        if self.compress_ratio != 1:
+            raise NotImplementedError(
+                "compressed indexer cache/config is enabled, but the checkpoint "
+                "weight binding and CompressorFP8 model forward are intentionally "
+                "not wired until the GLM-5.4 model files are available"
+            )
 
         self.rope_head_dim = attn_config.rope_head_dim
         self.block_size = 128  # quantization block size (128)

@@ -223,6 +223,7 @@ cc_library(
     srcs = [
         "CacheConfigCreator.cc",
         "DSV4CacheConfigHelper.cc",
+        "GLM54CacheConfigHelper.cc",
         "HybridConfigCreator.cc",
         "HybridPoolConfigCreator.cc",
         "KVCacheHashUtil.cc",
@@ -232,6 +233,7 @@ cc_library(
     hdrs = [
         "CacheConfigCreator.h",
         "DSV4CacheConfigHelper.h",
+        "GLM54CacheConfigHelper.h",
         "HybridConfigCreator.h",
         "HybridPoolConfigCreator.h",
         "KVCacheHashUtil.h",

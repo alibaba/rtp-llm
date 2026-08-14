@@ -344,6 +344,20 @@ cc_test(
 )
 
 cc_test(
+    name = "glm54_cache_test",
+    srcs = [
+        "GLM54CacheTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+    ],
+    env = {},
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
     name = "kv_cache_resource_test",
     srcs = [
         "KVCacheResourceTest.cc",

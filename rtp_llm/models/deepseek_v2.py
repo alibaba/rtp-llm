@@ -712,6 +712,49 @@ class DeepSeekV2(BaseModel):
                 config.attn_config.indexer_head_dim = config_json["index_head_dim"]
                 config.attn_config.indexer_head_num = config_json["index_n_heads"]
                 config.attn_config.indexer_topk = config_json["index_topk"]
+                # GLM-5.4 preliminary compressed-indexer schema. These key
+                # names are intentionally feature-gated and default to the
+                # legacy per-token GLM-5.2 path. Confirm them against the
+                # released checkpoint before treating them as canonical.
+                indexer_compress_ratio = int(
+                    config_json.get(
+                        "indexer_compress_ratio",
+                        config_json.get("index_compress_ratio", 1),
+                    )
+                )
+                if indexer_compress_ratio <= 0:
+                    raise ValueError(
+                        "indexer_compress_ratio must be a positive integer"
+                    )
+                config.attn_config.indexer_compress_ratio = indexer_compress_ratio
+                indexer_compressor_overlap = int(
+                    config_json.get("indexer_compressor_overlap", 1)
+                )
+                if indexer_compressor_overlap not in (0, 1):
+                    raise ValueError(
+                        "indexer_compressor_overlap must be either 0 or 1"
+                    )
+                config.attn_config.indexer_compressor_overlap = (
+                    indexer_compressor_overlap
+                )
+                sparse_attention_topk = int(
+                    config_json.get(
+                        "sparse_attention_topk",
+                        config.attn_config.indexer_topk * indexer_compress_ratio,
+                    )
+                )
+                if sparse_attention_topk <= 0:
+                    raise ValueError("sparse_attention_topk must be positive")
+                config.attn_config.sparse_attention_topk = sparse_attention_topk
+                indexer_layer_ids = config_json.get("indexer_layer_ids", [])
+                if not isinstance(indexer_layer_ids, list) or any(
+                    isinstance(layer, bool) or not isinstance(layer, int)
+                    for layer in indexer_layer_ids
+                ):
+                    raise ValueError(
+                        "indexer_layer_ids must be a list of zero-based integer layer ids"
+                    )
+                config.attn_config.indexer_layer_ids = indexer_layer_ids
 
     @staticmethod
     def get_weight_cls():

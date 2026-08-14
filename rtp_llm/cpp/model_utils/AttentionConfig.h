@@ -60,6 +60,21 @@ struct AttentionConfigs {
     int  indexer_head_num = 0;
     int  indexer_topk     = 0;
 
+    // Compressed sparse-indexer geometry (GLM-5.4 style).
+    //
+    // ``indexer_topk`` is the number of compressed groups selected by the
+    // indexer. ``sparse_attention_topk`` is the number of raw-token slots
+    // consumed by sparse MLA after group expansion. A value of 0 derives the
+    // width as ``indexer_topk * indexer_compress_ratio``.
+    //
+    // ``indexer_compress_ratio == 1`` is the legacy per-token indexer. The
+    // first compressed implementation supports ratio=4. Layer ids are
+    // optional: an empty vector means every non-linear/full-attention layer.
+    int              indexer_compress_ratio     = 1;
+    int              indexer_compressor_overlap = 1;
+    int              sparse_attention_topk      = 0;
+    std::vector<int> indexer_layer_ids;
+
     // DeepSeek-V4 specific
     // Per-layer attention type schedule. Length == num_layers (+1 for MTP).
     //   value 0   -> sliding-window-only / non-compressed (Flash first 2 layers, MTP last)

@@ -15,8 +15,16 @@ namespace rtp_llm {
 
 namespace {
 
-bool hasTypedHybridPoolLayout(const ModelConfig& model_config) {
+bool hasDsv4TypedHybridPoolLayout(const ModelConfig& model_config) {
     return !model_config.attn_config.layer_compress_ratios.empty();
+}
+
+bool hasCompressedIndexerPoolLayout(const ModelConfig& model_config) {
+    return model_config.attn_config.indexer_compress_ratio > 1;
+}
+
+bool hasTypedHybridPoolLayout(const ModelConfig& model_config) {
+    return hasDsv4TypedHybridPoolLayout(model_config) || hasCompressedIndexerPoolLayout(model_config);
 }
 
 bool shouldUseHybridPoolLayout(const ModelConfig& model_config) {
@@ -113,6 +121,29 @@ void validateDsv4KernelSeqSize(size_t seq_size_per_block, size_t kernel_seq_size
                             kernel_seq_size_per_block);
 }
 
+void validateTypedKernelSeqSize(const ModelConfig& model_config,
+                                size_t             seq_size_per_block,
+                                size_t             kernel_seq_size_per_block,
+                                const char*        config_name) {
+    if (hasDsv4TypedHybridPoolLayout(model_config)) {
+        validateDsv4KernelSeqSize(seq_size_per_block, kernel_seq_size_per_block, config_name);
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(kernel_seq_size_per_block > 0 && seq_size_per_block >= kernel_seq_size_per_block
+                                && seq_size_per_block % kernel_seq_size_per_block == 0,
+                            "%s compressed-indexer seq_size_per_block(%zu) must be divisible by "
+                            "kernel_seq_size_per_block(%zu)",
+                            config_name,
+                            seq_size_per_block,
+                            kernel_seq_size_per_block);
+    const auto ratio = static_cast<size_t>(model_config.attn_config.indexer_compress_ratio);
+    RTP_LLM_CHECK_WITH_INFO(ratio > 1 && kernel_seq_size_per_block % ratio == 0,
+                            "%s compressed-indexer kernel_seq_size_per_block(%zu) must be divisible by ratio(%zu)",
+                            config_name,
+                            kernel_seq_size_per_block,
+                            ratio);
+}
+
 }  // namespace
 
 CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
@@ -144,7 +175,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     if (kv_cache_config.kernel_seq_size_per_block > 0) {
         const auto kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
         if (hasTypedHybridPoolLayout(model_config)) {
-            validateDsv4KernelSeqSize(config.seq_size_per_block, kernel_seq_size_per_block, "cache");
+            validateTypedKernelSeqSize(model_config, config.seq_size_per_block, kernel_seq_size_per_block, "cache");
         } else {
             RTP_LLM_CHECK_WITH_INFO(kv_cache_config.seq_size_per_block % kv_cache_config.kernel_seq_size_per_block == 0,
                                     "seq_size_per_block(%d) must be divisible by kernel_seq_size_per_block(%d)",
@@ -233,7 +264,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     if (kv_cache_config.kernel_seq_size_per_block > 0) {
         const size_t kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
         if (hasTypedHybridPoolLayout(score_model_config)) {
-            validateDsv4KernelSeqSize(score_config.seq_size_per_block, kernel_seq_size_per_block, "score");
+            validateTypedKernelSeqSize(
+                score_model_config, score_config.seq_size_per_block, kernel_seq_size_per_block, "score");
         } else {
             RTP_LLM_CHECK_WITH_INFO(score_config.seq_size_per_block % kernel_seq_size_per_block == 0,
                                     "score seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
@@ -241,7 +273,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                     kernel_seq_size_per_block);
         }
         if (hasTypedHybridPoolLayout(propose_model_config)) {
-            validateDsv4KernelSeqSize(propose_config.seq_size_per_block, kernel_seq_size_per_block, "propose");
+            validateTypedKernelSeqSize(
+                propose_model_config, propose_config.seq_size_per_block, kernel_seq_size_per_block, "propose");
         } else {
             RTP_LLM_CHECK_WITH_INFO(
                 propose_config.seq_size_per_block % kernel_seq_size_per_block == 0,
