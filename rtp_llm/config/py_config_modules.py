@@ -503,11 +503,13 @@ class JITConfig:
     def __init__(self):
         self.remote_jit_dir: str = ""
         self.jit_cache_setup_timeout_s: int = 180
+        self.manage_jit_cache: bool = True
 
     def to_string(self):
         return (
             f"remote_jit_dir: {self.remote_jit_dir}\n"
-            f"jit_cache_setup_timeout_s: {self.jit_cache_setup_timeout_s}"
+            f"jit_cache_setup_timeout_s: {self.jit_cache_setup_timeout_s}\n"
+            f"manage_jit_cache: {self.manage_jit_cache}"
         )
 
 

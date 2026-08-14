@@ -89,7 +89,8 @@ def get_aiter_envs(name, envs):
     return ["AITER_ASM_DIR=../../../../../../../bin/internal_source/rtp_llm/test/smoke/" + name + ".runfiles/pip_gpu_rocm_torch_aiter/site-packages/aiter_meta/hsa/"]
 
 SMOKE_FRAMEWORK_DEPS = [
-    "//rtp_llm/test/utils:maga_server_manager",  # brings :test_util transitively
+    "//rtp_llm/test/utils:maga_server_manager",
+    "//rtp_llm/test/utils:test_util",  # smoke srcs import port_util/coredump_util
     "//rtp_llm:uvicorn",
     "//rtp_llm:fastapi",
     "//rtp_llm:psutil",
@@ -106,16 +107,13 @@ SMOKE_FRAMEWORK_DEPS = [
 
 SMOKE_CASE_TAGS = ["smoke_case", "manual"]
 
-def custom_smoke_test(name, main, args=[], gpu_type=[], gpu_count=1, tags=[], data=[], deps=[]):
+def custom_smoke_test(name, main, smoke_args="", args=[], gpu_type=[], tags=[], data=[], deps=[]):
     """Defines a smoke_case py_test with its own unittest main.
 
     Bypasses the entry.py framework while inheriting the framework deps, tags,
-    GPU exec_properties and legacy_create_init guarantees. GPU_COUNT is only
-    honored under //rtp_llm/test/utils:gpu_lock (--run_under). gpu_count must
-    match the world size implied by the main module's own smoke_args (e.g.
-    SmokeConfig in jit_cache_smoke_test.py); it cannot be derived here."""
-    if gpu_count < 1:
-        fail("custom_smoke_test %s: gpu_count must be >= 1, got %s" % (name, gpu_count))
+    GPU exec_properties and legacy_create_init guarantees. smoke_args is the
+    single source for GPU reservation, server arguments and WORLD_SIZE."""
+    gpu_count = get_world_size_from_smoke_args(smoke_args)
     if not gpu_type:
         fail("custom_smoke_test %s: gpu_type must be non-empty" % name)
     native.py_test(
@@ -128,8 +126,13 @@ def custom_smoke_test(name, main, args=[], gpu_type=[], gpu_count=1, tags=[], da
         data = data,
         env = {
             "GPU_COUNT": str(gpu_count),
+            "SMOKE_ARGS": smoke_args,
+            "WORLD_SIZE": str(gpu_count),
             "PYTHONNOUSERSITE": "1",
         },
+        # Local runs inherit the shared root from the shell; CI overrides it with
+        # --test_env. Declared here only: these are the remote-cache smoke cases.
+        env_inherit = ["REMOTE_JIT_DIR"],
         exec_properties = {
             "gpu": gpu_type[0],
             "gpu_count": str(gpu_count),

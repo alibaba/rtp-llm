@@ -8,7 +8,6 @@ import traceback
 import requests
 import torch
 
-from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.utils.time_util import timer_wrapper
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -45,7 +44,7 @@ def check_server_health(server_port, path="/health"):
             return True
         else:
             return False
-    except BaseException as e:
+    except requests.RequestException:
         return False
 
 

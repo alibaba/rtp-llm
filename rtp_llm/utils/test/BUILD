@@ -40,13 +40,14 @@ _JIT_SMOKE_EXTRA_DEPS = [
     "//rtp_llm:sdk",
 ]
 
-# Shared-cache GPU smoke: a production watcher uploads a test-owned probe.
+# Aone injects REMOTE_JIT_DIR; direct runs must provide it explicitly to verify
+# the shared-cache lifecycle instead of passing on a private cold start.
 custom_smoke_test(
     name = "jit_cache_deepseek_v2_lite",
     main = "jit_cache_smoke_test.py",
+    smoke_args = "--warm_up 0 --hack_layer_num 2 --load_method scratch --test_block_num 100 --act_type BF16 --quantization FP8_PER_BLOCK --seq_size_per_block 64 --tp_size 2 --reuse_cache 1",
     args = ["JitCacheSmokeTest.test_deepseek_v2_lite"],
     gpu_type = ["H20"],
-    gpu_count = 2,
     tags = ["multi_device"],
     data = [
         "//:rtp_compute_ops",
@@ -62,9 +63,9 @@ custom_smoke_test(
 custom_smoke_test(
     name = "jit_cache_qwen3_rocm",
     main = "jit_cache_smoke_test.py",
+    smoke_args = "--warm_up 0 --use_swizzleA 1 --use_asm_pa 1 --disable_flashinfer_native 1 --use_aiter_pa 1 --seq_size_per_block 16 --act_type BF16 --test_block_num 1000 --reserver_runtime_mem_mb 70000",
     args = ["JitCacheSmokeTest.test_qwen3_rocm"],
     gpu_type = ["MI308X-ROCM7"],
-    gpu_count = 1,
     tags = ["rocm"],
     data = [
         "//:rtp_compute_ops",

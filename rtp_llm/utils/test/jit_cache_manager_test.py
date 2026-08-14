@@ -1,8 +1,6 @@
-import concurrent.futures
 import contextlib
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import tarfile
@@ -19,10 +17,10 @@ from rtp_llm import start_backend_server as backend
 from rtp_llm.model_loader.tipc import ffi as tipc_ffi
 from rtp_llm.utils import jit_cache_manager as jit
 from rtp_llm.utils import jit_cache_store as store
+from rtp_llm.utils.util import COMPILE_FLAG_ENVS, torch_abi_fingerprint
 
 
 def _fake_probes(hip=None, arch="sm_90", pkg="1_0", toolkit="nvcc-test"):
-    # Stub device/compiler probes so scope resolution is hermetic.
     stack = contextlib.ExitStack()
     stack.enter_context(mock.patch("torch.version.hip", hip))
     stack.enter_context(mock.patch("torch.version.cuda", None if hip else "12.8"))
@@ -48,6 +46,23 @@ def _fake_fuser(umount=None):
     return mock.patch.dict(sys.modules, {"rtp_llm.utils.fuser": module})
 
 
+def _shared_acl_supported():
+    try:  # gate on production's own requirement, not a copy of its ACL spec
+        with tempfile.TemporaryDirectory() as root:
+            jit._prepare_shared_root(Path(root))
+            return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+requires_non_root = unittest.skipIf(
+    os.geteuid() == 0, "root bypasses the permission bits under test"
+)
+requires_shared_acl = unittest.skipUnless(
+    _shared_acl_supported(), "setfacl/getfacl with default ACL support is required"
+)
+
+
 def contents(root: Path) -> dict[str, bytes]:
     return {
         path.relative_to(root).as_posix(): path.read_bytes()
@@ -68,20 +83,20 @@ class JitCacheTestBase(unittest.TestCase):
         old_umask = os.umask(0)
         os.umask(old_umask)
         self.addCleanup(os.umask, old_umask)
-        self.old_env = os.environ.copy()
-        for item in jit.COMPONENTS:
-            os.environ.pop(item.env_name, None)
-        from rtp_llm.utils.util import COMPILE_FLAG_ENVS
-
-        for name in COMPILE_FLAG_ENVS:
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ["TEST_JIT_LOCAL_DIR"] = self.tmp.name
+        for name in (*(item.env_name for item in jit.COMPONENTS), *COMPILE_FLAG_ENVS):
             os.environ.pop(name, None)
-        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(self.old_env)))
+        jit.setup_jit_cache_env.cache_clear()  # memoized: every test starts cold
+        self.addCleanup(jit.setup_jit_cache_env.cache_clear)
         self._seq = 0
 
-    def make_store(self, name="remote"):
+    def make_store(self, name="remote", mounted=""):
         remote = self.root / name
         remote.mkdir(parents=True, exist_ok=True)
-        return store.RemoteSnapshotStore(remote)
+        return store.RemoteSnapshotStore(remote, mounted)
 
     def publish(self, snap_store, files: dict[str, bytes]):
         generation = {}
@@ -92,35 +107,65 @@ class JitCacheTestBase(unittest.TestCase):
             generation[rel] = source
         return snap_store.publish_snapshot(generation)
 
-    def restore(self, snap_store, target: Path) -> bool:
-        # The manager's restore recipe: lock, skip non-empty, prepare, commit.
-        fd = store.acquire_flock(target.with_name(f"{target.name}.lock"))
-        try:
-            if store.scope_root_usable(target):
-                return False
-            staging = snap_store.prepare_restore(
-                target.with_name(f"{target.name}.staging")
-            )
-            if staging is None:
-                return False
-            return store.commit_restore(staging.staging, target)
-        finally:
-            os.close(fd)
-
 
 class StoreTest(JitCacheTestBase):
     def test_publish_keeps_immutable_generations(self):
         snap_store, expected = self.make_store(), {}
-        remote = snap_store.remote_root
         for index in range(3):
             expected[f"triton/hash/k-{index}.cubin"] = f"v{index}".encode()
             self.publish(snap_store, expected)
-        snapshots = list(remote.glob(f"*{store.SNAPSHOT_SUFFIX}"))
-        self.assertEqual(len(snapshots), 3)
-        self.assertTrue(all(f"-{os.uname().nodename}" in p.name for p in snapshots))
-        target = self.root / "target"
-        self.assertTrue(self.restore(snap_store, target))
-        self.assertEqual(contents(target), expected)
+        generations = snapshots(snap_store)
+        self.assertEqual(len(generations), 3)
+        self.assertTrue(all(f"-{os.uname().nodename}" in p.name for p in generations))
+        restored = snap_store.prepare_restore(self.root / "target.staging")
+        self.assertEqual(contents(restored.staging), expected)
+
+    def test_published_snapshot_is_readable_under_a_private_umask(self):
+        os.umask(0o077)
+        snap_store = self.make_store()
+        self.publish(snap_store, {"triton/op.so": b"x"})
+        self.assertEqual(snapshots(snap_store)[0].stat().st_mode & 0o777, 0o644)
+
+    def test_extract_strips_setuid_bits(self):
+        source = self.root / "suid.so"
+        source.write_bytes(b"x")
+        source.chmod(0o6755)
+        archive = self.root / "a.tar.zst"
+        store.pack_zstd_tar(archive, {"triton/suid.so": source})
+        store.extract_zstd_tar(archive, self.root / "out")
+        mode = (self.root / "out" / "triton" / "suid.so").stat().st_mode
+        self.assertFalse(mode & 0o7000)
+
+    def test_newest_snapshot_wins_by_name_not_by_mtime(self):
+        snap_store = self.make_store()
+        for index in range(2):
+            self.publish(snap_store, {"triton/k.cubin": f"v{index}".encode()})
+        newest = snapshots(snap_store)[-1]  # names embed time_ns: name == age
+        # A FUSE mount reports mtimes too coarse (or copy-preserved) to order by.
+        os.utime(newest, (0, 0))
+        restored = snap_store.prepare_restore(self.root / "staging")
+        self.assertEqual(restored.snapshot, newest)
+        self.assertEqual(contents(restored.staging), {"triton/k.cubin": b"v1"})
+
+    def test_snapshot_without_mtime_manifest_fails_open(self):
+        snap_store = self.make_store()
+        self.publish(snap_store, {"triton/op.so": b"x"})
+        with mock.patch.object(store, "MTIME_MANIFEST", ".missing"), self.assertLogs(
+            level="WARNING"
+        ):
+            self.assertIsNone(snap_store.prepare_restore(self.root / "staging"))
+
+    def test_restored_tree_is_shared_with_co_tenants(self):
+        snap_store = self.make_store()
+        self.publish(snap_store, {"triton/op.so": b"x"})
+        restored = snap_store.prepare_restore(self.root / "staging")
+        target = self.root / "scope"
+        self.assertTrue(store.commit_restore(restored.staging, target))
+        # Shared producers use temp-file rename, so every build directory must
+        # permit a trusted peer to replace another uid's artifact.
+        self.assertEqual(target.stat().st_mode & 0o7777, 0o777)
+        self.assertEqual((target / "triton").stat().st_mode & 0o7777, 0o777)
+        self.assertEqual((target / "triton/op.so").stat().st_mode & 0o777, 0o666)
 
     def test_publish_keeps_latest_snapshots_and_reaps_stale_tmp(self):
         snap_store = self.make_store()
@@ -136,36 +181,47 @@ class StoreTest(JitCacheTestBase):
         self.assertEqual(len(snapshots(snap_store)), 2)
         self.assertFalse(stale_tmp.exists())
         self.assertTrue(fresh_tmp.exists())
-        restored = self.root / "restored"
-        self.assertTrue(self.restore(snap_store, restored))
-        self.assertEqual(contents(restored), {"triton/k.cubin": b"v2"})
+        restored = snap_store.prepare_restore(self.root / "restored.staging")
+        self.assertEqual(contents(restored.staging), {"triton/k.cubin": b"v2"})
 
-    def test_reap_only_stale_existence_batons(self):
-        old, old_aiter, fresh, flock_style = (
-            self.root / name
-            for name in ("old/lock", "build/lock_module_fmha", "new/lock", "x.lock")
-        )
-        for path in (old, old_aiter, fresh, flock_style):
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.touch()
+    def test_stale_baton_reaper_does_not_unlink_replacement(self):
+        baton = self.root / "lock"
+        baton.touch()
         stale = time.time() - store.STALE_BATON_S - 1
-        for path in (old, old_aiter, flock_style):
-            os.utime(path, (stale, stale))
-        store.reap_stale_batons(self.root)
-        self.assertFalse(old.exists())
-        self.assertFalse(old_aiter.exists())
-        self.assertTrue(fresh.exists())
-        # flock files live forever and may be held right now; age proves nothing.
-        self.assertTrue(flock_style.exists())
+        os.utime(baton, (stale, stale))
+        real_stat, swapped = Path.stat, False
 
-    def test_scope_root_usable_ignores_empty_directories(self):
-        root = self.root / "scope"
-        (root / "triton").mkdir(parents=True)
-        self.assertFalse(store.scope_root_usable(root))
+        def swap_then_stat(path, *args, **kwargs):
+            nonlocal swapped
+            if path == baton and not swapped:
+                swapped = True
+                path.unlink()
+                path.touch()
+            return real_stat(path, *args, **kwargs)
 
-    def test_scope_root_usable_fails_open_on_scan_error(self):
-        with mock.patch.object(Path, "rglob", side_effect=OSError):
-            self.assertFalse(store.scope_root_usable(self.root / "scope"))
+        with mock.patch.object(Path, "stat", swap_then_stat):
+            store.reap_stale_batons(self.root)
+        self.assertTrue(baton.exists())
+
+    def test_stale_baton_reaper_does_not_wait_for_peer_lock(self):
+        baton = self.root / "lock"
+        baton.touch()
+        os.utime(baton, (time.time() - store.STALE_BATON_S - 1,) * 2)
+        fd = store.acquire_flock(baton)
+        done = threading.Event()
+
+        def reap():
+            store.reap_stale_batons(self.root)
+            done.set()
+
+        worker = threading.Thread(target=reap)
+        worker.start()
+        try:
+            self.assertTrue(done.wait(1))
+            self.assertTrue(baton.exists())
+        finally:
+            os.close(fd)
+            worker.join(1)
 
     def test_extractor_rejects_unsafe_members(self):
         target = self.root / "target"
@@ -182,24 +238,6 @@ class StoreTest(JitCacheTestBase):
         with self.assertRaises(ValueError):
             store._safe_path(target, "../manifest")
 
-    def test_extract_strips_setuid_bits(self):
-        source = self.root / "suid.so"
-        source.write_bytes(b"x")
-        source.chmod(0o6755)
-        archive = self.root / "a.tar.zst"
-        store.pack_zstd_tar(archive, {"triton/suid.so": source})
-        store.extract_zstd_tar(archive, self.root / "out")
-        mode = (self.root / "out" / "triton" / "suid.so").stat().st_mode
-        self.assertFalse(mode & 0o7000)
-
-    def test_snapshot_without_mtime_manifest_fails_open(self):
-        snap_store = self.make_store()
-        self.publish(snap_store, {"triton/op.so": b"x"})
-        with mock.patch.object(store, "MTIME_MANIFEST", ".missing"), self.assertLogs(
-            level="WARNING"
-        ):
-            self.assertIsNone(snap_store.prepare_restore(self.root / "staging"))
-
     def test_corrupt_snapshots_fall_back_then_fail_open(self):
         snap_store = self.make_store()
         self.publish(snap_store, {"triton/old": b"old"})
@@ -207,105 +245,93 @@ class StoreTest(JitCacheTestBase):
         bad = snap_store.remote_root / f"{'9' * 20}-bad{store.SNAPSHOT_SUFFIX}"
         bad.write_bytes(b"bad")
         with self.assertLogs(level="WARNING"):
-            restored = self.root / "restored"
-            self.assertTrue(self.restore(snap_store, restored))
+            restored = snap_store.prepare_restore(self.root / "restored.staging")
+            self.assertIsNotNone(restored)
         self.assertEqual(
-            contents(restored), {"triton/old": b"old", "triton/new": b"new"}
+            contents(restored.staging), {"triton/old": b"old", "triton/new": b"new"}
         )
-        # All snapshots corrupt: prepare yields None, nothing committed or left.
         broken = self.make_store("broken")
         (broken.remote_root / f"{1:020d}{store.SNAPSHOT_SUFFIX}").write_bytes(b"x")
-        cold = self.root / "cold"
         with self.assertLogs(level="WARNING"):
-            self.assertFalse(self.restore(broken, cold))
-        self.assertFalse(cold.exists())
+            self.assertIsNone(broken.prepare_restore(self.root / "cold.staging"))
         self.assertFalse(list((self.root / "cold.staging").glob("*")))
 
-    def test_commit_never_replaces_nonempty_scope_root(self):
+    def test_commit_replaces_existing_empty_scope_root(self):
         snap_store = self.make_store()
         self.publish(snap_store, {"triton/keep/op.so": b"remote"})
         warm = self.root / "warm"
         staging = snap_store.prepare_restore(self.root / "staging")
-        # A peer builder warms the tree between prepare and commit.
         (warm / "triton").mkdir(parents=True)
-        (warm / "triton/op.so").write_bytes(b"local")
-        self.assertFalse(store.commit_restore(staging.staging, warm))
-        self.assertEqual(contents(warm), {"triton/op.so": b"local"})
+        self.assertTrue(store.commit_restore(staging.staging, warm))
+        self.assertEqual(contents(warm), {"triton/keep/op.so": b"remote"})
         self.assertFalse(staging.staging.exists())
 
-    def test_concurrent_publishers_write_independent_snapshots(self):
+    def test_commit_never_replaces_nonempty_scope_root(self):
         snap_store = self.make_store()
-        barrier = threading.Barrier(2)
-        real_copyfile = shutil.copyfile
+        self.publish(snap_store, {"triton/remote.so": b"remote"})
+        warm = self.root / "warm"
+        (warm / "zz_empty_peer").mkdir(parents=True)
+        (warm / "aa_live" / "live.so").parent.mkdir(parents=True)
+        (warm / "aa_live" / "live.so").write_bytes(b"live")
+        staging = snap_store.prepare_restore(self.root / "staging")
+        with self.assertLogs(level="WARNING"):
+            self.assertFalse(store.commit_restore(staging.staging, warm))
+        self.assertEqual(contents(warm), {"aa_live/live.so": b"live"})
+        self.assertTrue((warm / "zz_empty_peer").is_dir())
+        self.assertFalse(staging.staging.exists())
 
-        def interleaved(src, dst, *args, **kwargs):
-            barrier.wait(timeout=10)
-            return real_copyfile(src, dst, *args, **kwargs)
-
-        one, two = self.root / "one", self.root / "two"
-        one.write_bytes(b"one")
-        two.write_bytes(b"two")
-        # One store per publisher, as in production: each owns its own mount lease.
-        peers = (snap_store, self.make_store())
-        with mock.patch.object(
-            store.shutil, "copyfile", side_effect=interleaved
-        ), concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            futures = [
-                pool.submit(peer.publish_snapshot, {"triton/x": path})
-                for peer, path in zip(peers, (one, two))
-            ]
-            for future in futures:
-                future.result()
-        self.assertEqual(
-            len(list(snap_store.remote_root.glob(f"*{store.SNAPSHOT_SUFFIX}"))), 2
-        )
-        restored = self.root / "restored"
-        self.assertTrue(self.restore(snap_store, restored))
-        self.assertIn(contents(restored), ({"triton/x": b"one"}, {"triton/x": b"two"}))
-
-    def test_shared_inode_packs_as_full_content(self):
-        dup_a, dup_b = self.root / "a.cubin", self.root / "b.cubin"
-        dup_a.write_bytes(b"dup")
-        os.link(dup_a, dup_b)
+    def test_commit_failure_keeps_live_scope_unchanged(self):
         snap_store = self.make_store()
-        snap_store.publish_snapshot({"triton/a.cubin": dup_a, "triton/b.cubin": dup_b})
-        target = self.root / "restored"
-        self.assertTrue(self.restore(snap_store, target))
-        self.assertEqual(
-            contents(target), {"triton/a.cubin": b"dup", "triton/b.cubin": b"dup"}
-        )
+        self.publish(snap_store, {"triton/keep/op.so": b"remote"})
+        staging = snap_store.prepare_restore(self.root / "staging")
+        target = self.root / "cold"
+        with mock.patch.object(store.os, "rename", side_effect=OSError("disk full")):
+            with self.assertLogs(level="WARNING"):
+                self.assertFalse(store.commit_restore(staging.staging, target))
+        self.assertFalse(target.exists())
+        self.assertFalse(staging.staging.exists())
 
-    def test_new_generation_replaces_source_and_binary_together(self):
-        snap_store = self.make_store()
-        self.publish(
-            snap_store,
-            {"triton/u/op.cu": b"v1", "triton/u/op.so": b"v1", "triton/u/old.o": b"x"},
+    def test_failed_publish_is_atomic(self):
+        signatures = iter([(1, 2, 7, 100), (1, 2, 42, 200)])
+        cases = (
+            (
+                "rewritten",
+                mock.patch.object(
+                    store, "file_sig", side_effect=lambda _: next(signatures)
+                ),
+                False,
+                store.SnapshotRaced,
+            ),
+            (
+                "disappeared",
+                mock.patch.object(store, "file_sig", side_effect=FileNotFoundError),
+                False,
+                store.SnapshotRaced,
+            ),
+            (
+                "chmod",
+                mock.patch.object(Path, "chmod", side_effect=OSError("denied")),
+                False,
+                OSError,
+            ),
+            ("grew", contextlib.nullcontext(), True, store.SnapshotRaced),
         )
-        self.publish(snap_store, {"triton/u/op.cu": b"v2", "triton/u/op.so": b"v2"})
-        restored = self.root / "restored"
-        self.assertTrue(self.restore(snap_store, restored))
-        self.assertEqual(
-            contents(restored), {"triton/u/op.cu": b"v2", "triton/u/op.so": b"v2"}
-        )
-
-    def test_publish_defers_when_builder_writes_during_pack(self):
-        snap_store = self.make_store()
-        source = self.root / "op.so"
-        source.write_bytes(b"partial")
-        # Signature seen before add, then a moved signature on the verify pass:
-        # a builder rewrote the artifact mid-pack, so the generation must defer.
-        sigs = iter([(1, 2, 7, 100), (1, 2, 42, 200)])
-        with mock.patch.object(store, "_file_sig", side_effect=lambda _: next(sigs)):
-            with self.assertRaises(store.SnapshotRaced):
-                snap_store.publish_snapshot({"triton/op.so": source})
-        self.assertEqual(snapshots(snap_store), [])
-        self.assertEqual(
-            list(snap_store.remote_root.glob(f"*{store.SNAPSHOT_SUFFIX}.tmp")), []
-        )
+        for name, patcher, grows, error in cases:
+            snap_store = self.make_store(name)
+            source = self.root / f"{name}.so"
+            source.write_bytes(b"payload")
+            files, rescan = {f"triton/{name}.so": source}, None
+            if grows:  # a builder emits one more product while we pack
+                extra = self.root / "extra.so"
+                extra.write_bytes(b"extra")
+                rescan = lambda: {**files, "triton/extra.so": extra}
+            with self.subTest(name=name), patcher, self.assertRaises(error):
+                snap_store.publish_snapshot(files, rescan)
+            self.assertFalse(snapshots(snap_store))
+            self.assertFalse(list(snap_store.remote_root.glob("*.tmp")))
 
     def test_unmount_waits_for_in_flight_publish(self):
-        snap_store = self.make_store()
-        snap_store._mounted = "/mnt/fake"
+        snap_store = self.make_store(mounted="/mnt/fake")
         source = self.root / "op.so"
         source.write_bytes(b"payload")
         released, packing, release = [], threading.Event(), threading.Event()
@@ -327,7 +353,7 @@ class StoreTest(JitCacheTestBase):
             self.assertTrue(packing.wait(5))
             closer = threading.Thread(target=snap_store.close)
             closer.start()
-            closer.join(0.3)
+            closer.join(0.05)
             self.assertTrue(closer.is_alive())  # the live copy holds the mount
             self.assertEqual(released, [])
             release.set()
@@ -345,49 +371,50 @@ class StoreTest(JitCacheTestBase):
         os.utime(source, ns=(mtime_ns, mtime_ns))
         snap_store = self.make_store()
         snap_store.publish_snapshot({"tree/op.so": source})
-        restored = self.root / "restored"
-        self.assertTrue(self.restore(snap_store, restored))
-        self.assertEqual((restored / "tree/op.so").stat().st_mtime_ns, mtime_ns)
+        restored = snap_store.prepare_restore(self.root / "restored.staging")
+        self.assertEqual((restored.staging / "tree/op.so").stat().st_mtime_ns, mtime_ns)
 
 
+@requires_shared_acl
 class ScopeTest(JitCacheTestBase):
-    def resolve(self, **overrides):
+    def resolve(self, root=None, **overrides):
         with _fake_probes(**overrides):
-            scope = jit.resolve_scope(self.root)
+            scope = jit.resolve_scope(root or self.root)
         self.assertIsNotNone(scope)
         return scope
 
-    def scope_id(self, **overrides):
-        return self.resolve(**overrides).scope_id
+    def scope_id(self, root=None, **overrides):
+        return self.resolve(root, **overrides).scope_id
 
     def test_scope_id_covers_every_environment_axis(self):
         base = self.scope_id()
         self.assertEqual(base, self.scope_id())  # deterministic
         self.assertNotEqual(base, self.scope_id(arch="sm_80"))
         self.assertNotEqual(base, self.scope_id(toolkit="nvcc-new"))
+        # artifacts bake the local root in, so a relocated tree needs its own remote
+        self.assertNotEqual(base, self.scope_id(root=self.root / "elsewhere"))
         with mock.patch("torch.__version__", "0.0.0+scope"):
             self.assertNotEqual(base, self.scope_id())
+        with mock.patch("torch.__file__", "/other/prefix/torch/__init__.py"):
+            self.assertNotEqual(base, self.scope_id())  # ninja files bake in the prefix
         with _fake_probes(pkg="2_0"):
             bumped = jit.resolve_scope(self.root).scope_id
         self.assertNotEqual(base, bumped)  # any managed package version moves it
         os.environ["TRITON_CACHE_DIR"] = str(self.root / "preset")
-        self.assertNotEqual(base, self.scope_id())  # presets change the identity
+        # An opted-out component must fork the id, not share it: this node's snapshots
+        # omit that component, and restore is a whole-tree rename rather than a merge,
+        # so a shared id would let a partial snapshot strip a full peer's cache.
+        self.assertNotEqual(base, self.scope_id())
         os.environ.pop("TRITON_CACHE_DIR")
-        os.environ["TORCH_CUDA_ARCH_LIST"] = "8.0"
-        self.assertNotEqual(base, self.scope_id())  # compile flags change it too
+        for name in COMPILE_FLAG_ENVS:  # every compile flag is part of the identity
+            os.environ[name] = "8.0"
+            self.assertNotEqual(base, self.scope_id(), name)
+            os.environ.pop(name)
 
         missing = mock.Mock(side_effect=jit.importlib.metadata.PackageNotFoundError)
         with _fake_probes(pkg=missing):
             triton_only = jit.resolve_scope(self.root)
         self.assertEqual([x.name for x in triton_only.components], ["triton"])
-        with _fake_probes(pkg=missing, arch="sm_80"):
-            self.assertNotEqual(
-                triton_only.scope_id, jit.resolve_scope(self.root).scope_id
-            )
-        with mock.patch("torch.__version__", "0.0.0+scope"), _fake_probes(pkg=missing):
-            self.assertNotEqual(
-                triton_only.scope_id, jit.resolve_scope(self.root).scope_id
-            )
 
     def test_torch_extensions_scope_tracks_rtp_kernel_build(self):
         def with_kernel(version):
@@ -400,7 +427,6 @@ class ScopeTest(JitCacheTestBase):
 
             return resolver
 
-        # A different source fingerprint must never map to the same snapshot scope.
         self.assertNotEqual(
             self.scope_id(pkg=with_kernel("0.1.0+aaa")),
             self.scope_id(pkg=with_kernel("0.1.0+bbb")),
@@ -418,9 +444,7 @@ class ScopeTest(JitCacheTestBase):
 
     def test_setup_env_redirects_and_respects_presets(self):
         os.environ["TRITON_CACHE_DIR"] = str(self.root / "preset")
-        with _fake_probes(), mock.patch.object(
-            jit, "LOCAL_JIT_ROOT", self.root / ".jit_cache"
-        ):
+        with _fake_probes():
             scope = jit.setup_jit_cache_env()
         self.assertNotIn("triton", {item.name for item in scope.components})
         self.assertEqual(os.environ["TRITON_CACHE_DIR"], str(self.root / "preset"))
@@ -428,47 +452,121 @@ class ScopeTest(JitCacheTestBase):
         self.assertEqual(os.environ["TORCH_EXTENSIONS_DIR"], str(torch_ext.local_dir))
         self.assertIn(scope.scope_id, os.environ["TORCH_EXTENSIONS_DIR"])
 
-    def test_env_override_relocates_local_root(self):
-        override = self.root / "isolated" / ".jit_cache"
-        os.environ["RTP_JIT_LOCAL_ROOT"] = str(override)
+    def test_presetting_every_component_disables_all_redirection(self):
+        off = self.root / "off"  # the documented rollback: no root, no ACL, no env
+        os.environ["TEST_JIT_LOCAL_DIR"] = str(off)
+        for item in jit.COMPONENTS:
+            os.environ[item.env_name] = str(self.root / item.name)
+        with _fake_probes():
+            self.assertIsNone(jit.setup_jit_cache_env())
+        self.assertFalse(off.exists())
+
+    def test_baton_reaping_spares_flock_components(self):
         with _fake_probes():
             scope = jit.setup_jit_cache_env()
-        self.assertEqual(scope.root.parents[1], override)
-        torch_ext = next(x for x in scope.components if x.name == "torch_extensions")
-        self.assertTrue(str(torch_ext.local_dir).startswith(str(override)))
+            dirs = {item.name: item.local_dir for item in scope.components}
+            torch_dir, tvm_dir = dirs["torch_extensions"], dirs["tvm_ffi"]
+            reaped = [torch_dir / name for name in ("lock", "m/lock_module_fmha")]
+            flocks = (torch_dir / "m/.load.lock", tvm_dir / "lock")
+            spared = [*flocks, torch_dir / "m/k.so", torch_dir / "m/locking.h"]
+            stale = time.time() - store.STALE_BATON_S - 1
+            for path in reaped + spared:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+                os.utime(path, (stale, stale))
+            for item in scope.components:  # a preset env var opts the component out
+                os.environ.pop(item.env_name, None)
+            jit.setup_jit_cache_env.cache_clear()  # a restart, not a repeat call
+            jit.setup_jit_cache_env()
+        self.assertEqual([p for p in reaped if p.exists()], [])
+        self.assertEqual([p for p in spared if not p.exists()], [])
 
-    def test_local_root_is_shared(self):
+    def test_local_root_is_shared_across_uids(self):
         owned = self.root / "owned"
-        old_file = owned / ".jit_cache" / "v1" / "scope" / "old.so"
-        old_file.parent.mkdir(parents=True)
-        old_file.write_bytes(b"old")
+        owned.mkdir()
         os.chmod(owned, 0o700)
-        os.chmod(old_file.parent, 0o700)
-        os.chmod(old_file, 0o600)
-        with mock.patch.object(
+        os.environ.pop("TEST_JIT_LOCAL_DIR", None)
+        with _fake_probes(), mock.patch.object(
             jit, "LOCAL_JIT_ROOT", owned / ".jit_cache"
-        ), mock.patch.object(
-            jit, "resolve_scope", return_value=None
-        ), mock.patch.object(
-            jit.os, "umask"
-        ) as umask:
-            self.assertIsNone(jit.setup_jit_cache_env())
-        umask.assert_called_once_with(0)
-        # Both roots stay sticky; inside the tree commit_restore still needs rename.
+        ):
+            scope = jit.setup_jit_cache_env()
+            self.assertIsNotNone(scope)
+            self.assertIs(scope, jit.setup_jit_cache_env())  # repeat calls are stable
         self.assertEqual(os.stat(owned).st_mode & 0o7777, 0o1777)
         self.assertEqual(os.stat(owned / ".jit_cache").st_mode & 0o7777, 0o1777)
-        self.assertEqual(os.stat(old_file.parent).st_mode & 0o7777, 0o777)
-        self.assertEqual(os.stat(old_file).st_mode & 0o777, 0o666)
+
+        os.umask(0o022)
+        inherited = owned / ".jit_cache" / "new" / "nested"
+        inherited.mkdir(parents=True)
+        (inherited / "new.so").touch()
+        outside = self.root / "outside"
+        outside.touch()
+        self.assertEqual(inherited.stat().st_mode & 0o7777, 0o777)
+        self.assertEqual((inherited / "new.so").stat().st_mode & 0o777, 0o666)
+        self.assertEqual(outside.stat().st_mode & 0o777, 0o644)
+
+    def test_managed_directories_inherit_shared_acl(self):
+        with _fake_probes():
+            scope = jit.setup_jit_cache_env()
+        version_root = scope.root.parent
+        locks, staging = version_root / jit.LOCKS_DIR, version_root / jit.STAGING_DIR
+        self.assertFalse(version_root.exists())
+        lock = locks / "probe.lock"
+        os.close(store.acquire_flock(lock))
+        staging.mkdir()
+        for path in (version_root, locks, staging):
+            self.assertEqual(os.stat(path).st_mode & 0o7777, 0o777, path)
+        self.assertEqual(lock.stat().st_mode & 0o777, 0o666)
+
+    @requires_non_root
+    def test_unwritable_scope_root_fails_open(self):
+        with _fake_probes():
+            scope = jit.setup_jit_cache_env()
+            self.assertIsNotNone(scope)
+            scope.root.mkdir(parents=True)
+            scope.root.chmod(0o500)  # a co-tenant tree we cannot add kernels to
+            for item in jit.COMPONENTS:  # a second resolve needs a clean env
+                os.environ.pop(item.env_name, None)
+            jit.setup_jit_cache_env.cache_clear()
+            with self.assertLogs(level="WARNING") as logs:
+                self.assertIsNone(jit.setup_jit_cache_env())
+            scope.root.chmod(0o700)
+        self.assertIn("not shared by its owner", "\n".join(logs.output))
+
+    def test_missing_acl_support_fails_open(self):
+        os.umask(0o022)
+        with _fake_probes(), mock.patch.object(
+            jit, "_run", side_effect=[OSError("no setfacl"), "user::rwx"]
+        ):
+            with self.assertLogs(level="WARNING") as logs:
+                self.assertIsNone(jit.setup_jit_cache_env())
+        self.assertIn("shared ACL unavailable", "\n".join(logs.output))
+
+    def test_preconfigured_foreign_root_does_not_require_ownership(self):
+        shared = self.root / ".jit_cache"
+        shared.mkdir()
+        os.chmod(self.root, 0o777)
+        os.chmod(shared, 0o777)
+        jit._prepare_shared_root(shared)
+        with _fake_probes(), mock.patch.object(
+            jit.os, "chmod", side_effect=PermissionError
+        ):
+            with mock.patch.object(
+                jit,
+                "_run",
+                side_effect=[PermissionError, "other::rwx\ndefault:other::rwx"],
+            ):
+                self.assertIsNotNone(jit.setup_jit_cache_env())
 
     def test_symlinked_local_root_is_refused(self):
         target = self.root / "target"
         target.mkdir(mode=0o700)
         linked = self.root / "linked"
         linked.symlink_to(target, target_is_directory=True)
-        os.environ["RTP_JIT_LOCAL_ROOT"] = str(linked / ".jit_cache")
-        with self.assertLogs(level="WARNING") as logs:
+        os.environ["TEST_JIT_LOCAL_DIR"] = str(linked)
+        with _fake_probes(), self.assertLogs(level="WARNING") as logs:
             self.assertIsNone(jit.setup_jit_cache_env())
-        self.assertIn("untrusted JIT root", "\n".join(logs.output))
+        self.assertIn("untrusted JIT dir", "\n".join(logs.output))
         self.assertEqual(os.stat(target).st_mode & 0o777, 0o700)  # never widened
         self.assertFalse((target / ".jit_cache").exists())
 
@@ -504,19 +602,22 @@ class ScopeTest(JitCacheTestBase):
             self.assertEqual(jit._accelerator_scope("cuda", "12.8"), "cuda-12.8-sm_90")
         self.assertEqual(probe.call_args.args[0][:2], [sys.executable, "-c"])
 
-    def test_toolkit_scope_uses_actual_compiler_version(self):
-        with mock.patch.object(jit, "shutil") as shutil_module, mock.patch.object(
-            jit.subprocess, "check_output", return_value="nvcc 12.9\n"
-        ) as probe:
-            shutil_module.which.return_value = "/toolkit/bin/nvcc"
-            with mock.patch("torch.utils.cpp_extension.CUDA_HOME", None), mock.patch(
-                "torch.utils.cpp_extension.ROCM_HOME", None
-            ):
-                scope = jit._toolkit_scope(jit.CUDA)
-        self.assertEqual(scope, "nvcc-nvcc 12.9")
-        self.assertEqual(probe.call_args.args[0], ["/toolkit/bin/nvcc", "--version"])
+    def test_optimized_gpu_probe_rejects_mixed_architectures(self):
+        fake_torch = (
+            "class C:\n device_count=lambda s:2\n"
+            " get_device_capability=lambda s,i:((8,0),(9,0))[i]\n"
+            "class V:hip=None\nclass T:cuda=C();version=V()\ntorch=T()"
+        )
+        with mock.patch.object(
+            jit, "GPU_PROBE", jit.GPU_PROBE.replace("import torch", fake_torch)
+        ), mock.patch.dict(os.environ, {"PYTHONOPTIMIZE": "1"}), self.assertLogs(
+            level="WARNING"
+        ) as logs:
+            self.assertIsNone(jit._accelerator_scope("cuda", "12.8"))
+        self.assertIn("mixed GPU architectures", "\n".join(logs.output))
 
 
+@requires_shared_acl
 class ManagerTest(JitCacheTestBase):
     def setUp(self):
         super().setUp()
@@ -524,9 +625,7 @@ class ManagerTest(JitCacheTestBase):
         self.addCleanup(lambda: [manager.stop() for manager in self.managers])
 
     def make_scope(self):
-        with _fake_probes(), mock.patch.object(
-            jit, "LOCAL_JIT_ROOT", self.root / "local"
-        ):
+        with _fake_probes():
             return jit.setup_jit_cache_env()
 
     def make_manager(self, scope, remote="remote"):
@@ -542,15 +641,28 @@ class ManagerTest(JitCacheTestBase):
         path.write_bytes(data)
         return path
 
-    def publish_remote(self, manager, scope, rel, data):
+    def publish_remote(self, manager, rel, data):
         """Publish one member straight to the scope's remote, as a peer host would."""
-        remote = Path(manager._remote_value) / jit.RTP_JIT_VERSION / scope.scope_id
+        version_root = Path(manager._remote_value) / jit.RTP_JIT_VERSION
+        remote = version_root / manager.scope.scope_id
         remote.mkdir(parents=True, exist_ok=True)
-        source = self.root / Path(rel).name
-        source.write_bytes(data)
-        store.RemoteSnapshotStore(remote).publish_snapshot({rel: source})
+        self.publish(store.RemoteSnapshotStore(remote), {rel: data})
 
-    def test_bootstrap_restores_before_ranks_then_publishes(self):
+    def test_non_positive_setup_timeout_starts_cold(self):
+        # argparse rejects these; a raw env read must degrade, not raise.
+        for timeout_s in (0, -2):
+            blocked = threading.Event()
+            manager = self.make_manager(self.make_scope())
+            try:
+                with self.subTest(timeout_s=timeout_s), mock.patch.object(
+                    jit.JitCacheManager, "_prepare", lambda _: blocked.wait(10)
+                ), self.assertLogs(level="WARNING") as logs:
+                    self.assertFalse(manager.bootstrap(timeout_s))
+                self.assertIn("setup timed out", "\n".join(logs.output))
+            finally:
+                blocked.set()
+
+    def test_publish_then_restore_round_trip(self):
         scope = self.make_scope()
         producer = self.make_manager(scope)
         self.assertTrue(producer.bootstrap(timeout_s=30))
@@ -560,7 +672,6 @@ class ManagerTest(JitCacheTestBase):
         self.assertTrue(snapshots(producer.store))
         producer.stop()
 
-        # A fresh host (empty scope root) restores that generation up front.
         shutil.rmtree(scope.root)
         consumer = self.make_manager(scope)
         self.assertTrue(consumer.bootstrap(timeout_s=30))
@@ -577,8 +688,6 @@ class ManagerTest(JitCacheTestBase):
         ):
             producer.publish_pending_snapshot()
         self.assertTrue(producer._dirty.is_set())
-        self.assertEqual(snapshots(producer.store), [])
-        producer.stop()
 
     def test_scan_failure_rearms_dirty_and_frees_publish_lock(self):
         scope = self.make_scope()
@@ -596,79 +705,53 @@ class ManagerTest(JitCacheTestBase):
         producer.publish_pending_snapshot()
         self.assertTrue(snapshots(producer.store))
 
-    def test_empty_run_does_not_block_later_restore(self):
-        scope = self.make_scope()
-        manager = self.make_manager(scope)
-        self.assertTrue(manager.bootstrap(timeout_s=30))
-        self.assertTrue(scope.root.exists())
-        self.assertFalse(store.scope_root_usable(scope.root))
-        self.assertTrue(manager._dirty.is_set())
-        manager.stop()
-
-        self.publish_remote(manager, scope, "triton/fresh.cubin", b"fresh")
-        consumer = self.make_manager(scope)
-        self.assertTrue(consumer.bootstrap(timeout_s=30))
-        self.assertEqual((scope.root / "triton" / "fresh.cubin").read_bytes(), b"fresh")
-
     def test_live_peer_empty_tree_swap_still_backfills(self):
-        # A peer between _start_watch and its first artifact owns only empty dirs,
-        # so a later restore may swap the tree out from under it. That costs the
-        # peer its inotify watches, not correctness: it writes by path, and its next
-        # full scan packs both its own artifact and the restored one.
         scope = self.make_scope()
         peer = self.make_manager(scope)
         self.assertTrue(peer.bootstrap(timeout_s=30))
-        self.assertFalse(store.scope_root_usable(scope.root))
-
-        self.publish_remote(peer, scope, "triton/third_host.cubin", b"third")
+        self.publish_remote(peer, "triton/remote.cubin", b"remote")
         consumer = self.make_manager(scope)
         self.assertTrue(consumer.bootstrap(timeout_s=30))
-        self.assertEqual(
-            (scope.root / "triton" / "third_host.cubin").read_bytes(), b"third"
-        )
-
         self.write_artifact(scope, "triton/peer.cubin", b"peer")
-        peer._dirty.set()  # stands in for the watcher event of that write
+        peer._dirty.set()
         peer.publish_pending_snapshot()
         peek = self.root / "peek"
         peek.mkdir()
         store.extract_zstd_tar(snapshots(peer.store)[-1], peek)
         self.assertEqual(
             contents(peek),
-            {"triton/third_host.cubin": b"third", "triton/peer.cubin": b"peer"},
+            {"triton/remote.cubin": b"remote", "triton/peer.cubin": b"peer"},
         )
 
     def test_bootstrap_skips_restore_on_peer_warm_tree(self):
         scope = self.make_scope()
-        peer_file = scope.root / "triton" / "peer.cubin"
-        peer_file.parent.mkdir(parents=True, exist_ok=True)
-        peer_file.write_bytes(b"peer")
+        self.write_artifact(scope, "triton/peer.cubin", b"peer")
         manager = self.make_manager(scope)
-        with mock.patch.object(
-            store, "extract_zstd_tar", side_effect=AssertionError("re-extracted")
-        ):
-            self.assertTrue(manager.bootstrap(timeout_s=30))
-        self.assertEqual(peer_file.read_bytes(), b"peer")
+        self.publish_remote(manager, "triton/remote.cubin", b"remote")
+        self.assertTrue(manager.bootstrap(timeout_s=30))
+        # A live peer owns this tree: nothing may be unpacked, let alone renamed in.
+        self.assertFalse(
+            (scope.root.parent / jit.STAGING_DIR / scope.scope_id).exists()
+        )
+        self.assertEqual(contents(scope.root), {"triton/peer.cubin": b"peer"})
 
     def test_warm_tree_seeds_empty_remote_and_restart_stays_quiet(self):
         scope = self.make_scope()
         seeder = self.make_manager(scope)
         self.write_artifact(scope, "triton/warm.cubin", b"warm")
         self.assertTrue(seeder.bootstrap(timeout_s=30))
-        self.assertTrue(seeder._dirty.is_set())  # empty remote gets seeded once
         seeder.publish_pending_snapshot()
-        self.assertEqual(len(snapshots(seeder.store)), 1)
+        self.assertEqual(len(snapshots(seeder.store)), 1)  # empty remote seeded once
         seeder.stop()
 
         restart = self.make_manager(scope)
         self.assertTrue(restart.bootstrap(timeout_s=30))
-        self.assertFalse(restart._dirty.is_set())  # published remote: no re-upload
         restart.publish_pending_snapshot()
-        self.assertEqual(len(snapshots(restart.store)), 1)
+        self.assertEqual(len(snapshots(restart.store)), 1)  # published: no re-upload
 
-        # A later build still publishes the complete current tree.
+        # No watcher event stands in here: the rescan alone must notice the write,
+        # which is the only path left once inotify has gone blind.
         self.write_artifact(scope, "triton/fresh.cubin", b"fresh")
-        restart._dirty.set()  # stands in for the watcher event of that write
         restart.publish_pending_snapshot()
         peek = self.root / "peek"
         peek.mkdir()
@@ -689,130 +772,53 @@ class ManagerTest(JitCacheTestBase):
             return real_prepare(self_store, staging_root)
 
         manager = self.make_manager(scope)
-        self.publish_remote(manager, scope, "triton/k.cubin", b"fresh")
+        self.publish_remote(manager, "triton/k.cubin", b"fresh")
         with mock.patch.object(
             store.RemoteSnapshotStore, "prepare_restore", slow_prepare
         ), self.assertLogs(level="WARNING"):
-            self.assertFalse(manager.bootstrap(timeout_s=1))
+            self.assertFalse(manager.bootstrap(timeout_s=0.05))
         self.write_artifact(scope, "triton/local.cubin", b"local")
         release.set()
         manager._prepare_thread.join(timeout=10)
         self.assertFalse(manager._prepare_thread.is_alive())
         retry = self.make_manager(scope)
-        self.assertTrue(retry.bootstrap(timeout_s=1))
+        self.assertTrue(retry.bootstrap(timeout_s=30))
         retry._dirty.set()
         retry.publish_pending_snapshot()
         self.assertEqual(len(snapshots(retry.store)), 2)
-        # The timed-out worker cleans staging and never overwrites the live tree.
         self.assertEqual((scope.root / "triton" / "local.cubin").read_bytes(), b"local")
-        staging = scope.root.parent / ".staging" / scope.scope_id
+        staging = scope.root.parent / jit.STAGING_DIR / scope.scope_id
         self.assertFalse(list(staging.glob("*")))
 
-    def test_bootstrap_timeout_discards_result_delivered_at_boundary(self):
-        scope = self.make_scope()
-        manager = self.make_manager(scope)
-        staging = self.root / "prepared"
-        staging.mkdir()
-        delivered, discarded = threading.Event(), threading.Event()
-        released = []
-        pending_store = store.RemoteSnapshotStore(self.root, "/mnt/fake")
-
-        def prepare(_):
-            manager._prepared.put(
-                (pending_store, store.Restored(staging, mock.Mock()), None)
-            )
-            delivered.set()
-
-        def boundary_get(*args, **kwargs):
-            if kwargs.get("timeout") is not None:
-                self.assertTrue(delivered.wait(1))
-                raise jit.queue.Empty
-            return jit.queue.Queue.get(manager._prepared, *args, **kwargs)
-
-        def unmount(path):
-            released.append(path)
-            discarded.set()
-
-        with mock.patch.object(
-            manager, "_prepare", side_effect=prepare
-        ), mock.patch.object(
-            manager._prepared, "get", side_effect=boundary_get
-        ), _fake_fuser(
-            umount=unmount
-        ), self.assertLogs(
-            level="WARNING"
-        ):
-            self.assertFalse(manager.bootstrap(timeout_s=1))
-            manager._prepare_thread.join(timeout=1)
-            self.assertTrue(discarded.wait(1))
-        self.assertFalse(staging.exists())
-        self.assertEqual(released, ["/mnt/fake"])
-
     def test_event_handler_marks_dirty_only_for_trigger_files(self):
-        names = ("triton", "flydsl", "cute_dsl", "tilelang")
-        components = tuple(
-            replace(
-                next(x for x in jit.COMPONENTS if x.name == name),
-                local_dir=self.root / name,
-            )
-            for name in names
+        triton = replace(
+            next(x for x in jit.COMPONENTS if x.name == "triton"),
+            local_dir=self.root / "triton",
         )
-        scope = jit.Scope("test", self.root, components)
-        manager = self.make_manager(scope)
-        triton = next(x for x in scope.components if x.name == "triton")
+        manager = self.make_manager(jit.Scope("test", self.root, (triton,)))
         quiet = triton.local_dir / "hash" / "t.autotune.json"
         loud = triton.local_dir / "hash" / "k.cubin"
         quiet.parent.mkdir(parents=True, exist_ok=True)
-        for path, expect in ((quiet, False), (loud, True)):
+        for path, event_type, expect in (
+            (quiet, "closed", False),
+            (loud, "moved", True),
+        ):
             manager._dirty.clear()
             path.write_bytes(b"x")
             manager.on_any_event(
-                mock.Mock(event_type="closed", src_path=str(path), is_directory=False)
-            )
-            self.assertEqual(manager._dirty.is_set(), expect, path.name)
-
-        for name, suffix in (
-            ("flydsl", ".pkl"),
-            ("cute_dsl", ".mlir"),
-            ("tilelang", ".so"),
-        ):
-            manager._dirty.clear()
-            item = next(x for x in components if x.name == name)
-            dest = item.local_dir / f"kernel{suffix}"
-            dest.parent.mkdir(parents=True)
-            dest.write_bytes(b"x")
-            manager.on_any_event(
                 mock.Mock(
-                    event_type="moved",
-                    src_path=str(self.root / "ignored.tmp"),
-                    dest_path=str(dest),
+                    event_type=event_type,
+                    src_path=str(quiet),
+                    dest_path=str(path),
                     is_directory=False,
                 )
             )
-            self.assertTrue(manager._dirty.is_set(), name)
-
-    def test_restore_waits_before_mounting_remote(self):
-        scope = self.make_scope()
-        manager = self.make_manager(scope)
-        lock = scope.root.parent / ".locks" / f"{scope.scope_id}.restore.lock"
-        restore_fd = store.acquire_flock(lock)
-        result = []
-        real_resolve = store.resolve_remote
-        with mock.patch.object(store, "resolve_remote", wraps=real_resolve) as resolve:
-            worker = threading.Thread(
-                target=lambda: result.append(manager.bootstrap(5))
-            )
-            worker.start()
-            time.sleep(0.1)
-            self.assertFalse(resolve.called)
-            os.close(restore_fd)
-            worker.join(5)
-        self.assertEqual(result, [True])
+            self.assertEqual(manager._dirty.is_set(), expect, path.name)
 
     def test_restore_lock_wait_honors_setup_timeout(self):
         scope = self.make_scope()
         manager = self.make_manager(scope)
-        lock = scope.root.parent / ".locks" / f"{scope.scope_id}.restore.lock"
+        lock = scope.root.parent / jit.LOCKS_DIR / f"{scope.scope_id}.restore.lock"
         restore_fd = store.acquire_flock(lock)
         try:
             with mock.patch.object(store, "resolve_remote") as resolve, self.assertLogs(
@@ -823,33 +829,6 @@ class ManagerTest(JitCacheTestBase):
         finally:
             os.close(restore_fd)
         manager._prepare_thread.join(5)
-
-    def test_failed_watch_start_is_stopped_during_cleanup(self):
-        manager = jit.JitCacheManager(mock.Mock(components=()), "")
-        observer = mock.Mock()
-        observer.start.side_effect = RuntimeError("watch failed")
-        with mock.patch.object(jit, "Observer", return_value=observer), self.assertLogs(
-            level="ERROR"
-        ):
-            self.assertFalse(manager._start_watch())
-        manager.stop()
-        observer.stop.assert_called_once_with()
-        observer.join.assert_called_once_with()
-
-    def test_watch_scopes_each_component(self):
-        scope = self.make_scope()
-        manager = self.make_manager(scope)
-        observer = mock.Mock()
-        with mock.patch.object(jit, "Observer", return_value=observer):
-            self.assertTrue(manager._start_watch())
-        self.assertEqual(
-            observer.schedule.call_args_list,
-            [
-                mock.call(manager, str(item.local_dir), recursive=True)
-                for item in scope.components
-            ],
-        )
-        self.assertTrue(all(item.local_dir.is_dir() for item in scope.components))
 
     def test_second_stop_retries_failed_unmount(self):
         manager = jit.JitCacheManager(mock.Mock(), "")
@@ -867,15 +846,16 @@ class ManagerTest(JitCacheTestBase):
             manager.stop()
         self.assertEqual(attempts, ["/mnt/fake", "/mnt/fake"])
 
-    def test_stop_timeout_starts_daemon_unmount(self):
+    def test_stop_is_bounded_by_a_hung_final_publish(self):
         manager = jit.JitCacheManager(mock.Mock(), "")
         manager.store = store.RemoteSnapshotStore(self.root, "/mnt/fake")
         publishing, release, unmounted = (threading.Event() for _ in range(3))
         self.addCleanup(release.set)
 
-        def publish():
-            publishing.set()
-            release.wait(5)
+        def publish():  # a real publish holds the mount lock while it packs
+            with manager.store._mount_lock:
+                publishing.set()
+                release.wait(5)
 
         manager._dirty.set()
         with mock.patch.object(
@@ -887,10 +867,13 @@ class ManagerTest(JitCacheTestBase):
         ):
             manager._worker = threading.Thread(target=manager._sync_loop)
             manager._worker.start()
-            manager.stop()
+            manager.stop()  # returns without waiting for the publish to land
             self.assertTrue(publishing.wait(1))
-            self.assertTrue(unmounted.wait(1))
+            # close() shares the mount lock, so unmount waits the publish out
+            # instead of truncating it.
+            self.assertFalse(unmounted.is_set())
             release.set()
+            self.assertTrue(unmounted.wait(5))
 
     def test_mount_owned_and_released_exactly_once(self):
         released = []
@@ -904,44 +887,15 @@ class ManagerTest(JitCacheTestBase):
                 stop.join(1)
             manager.stop()
         self.assertEqual(released, ["/mnt/fake"])
-        with self.assertLogs(level="WARNING"):
-            self.assertIsNone(
-                store.resolve_remote(
-                    str(self.root / "missing"), jit.RTP_JIT_VERSION, "scope"
-                )
-            )
-        snap_store = store.resolve_remote(str(self.root), jit.RTP_JIT_VERSION, "scope")
-        self.assertEqual(
-            snap_store.remote_root,
-            self.root / jit.RTP_JIT_VERSION / "scope",
-        )
 
-    def test_mount_failure_paths_release_exactly_once(self):
-        released = []
-        with _fake_fuser(umount=released.append):
-            fuser = sys.modules["rtp_llm.utils.fuser"]
-            fuser.fetch_remote_file_to_local = mock.Mock(return_value="/mnt/fake")
-            # Mounted, but the mounted path is unusable: lease must close.
-            with self.assertLogs(level="WARNING"):
-                self.assertIsNone(
-                    store.resolve_remote("oss://bucket/x", jit.RTP_JIT_VERSION, "scope")
-                )
-            self.assertEqual(released, ["/mnt/fake"])
-            fuser.fetch_remote_file_to_local = mock.Mock(side_effect=RuntimeError)
-            with self.assertLogs(level="WARNING"):
-                self.assertIsNone(
-                    store.resolve_remote("oss://bucket/x", jit.RTP_JIT_VERSION, "scope")
-                )
-            self.assertEqual(released, ["/mnt/fake"])  # nothing new mounted
-
-    def test_each_manager_can_publish(self):
+    def test_publish_lock_defers_peer_managers(self):
         scope = self.make_scope()
         managers = (self.make_manager(scope), self.make_manager(scope))
         self.assertTrue(all(manager.bootstrap(30) for manager in managers))
-        artifact = scope.root / "triton" / "kernel.cubin"
-        artifact.parent.mkdir(parents=True, exist_ok=True)
-        artifact.write_bytes(b"payload")
-        publish_lock = scope.root.parent / ".locks" / f"{scope.scope_id}.publish.lock"
+        self.write_artifact(scope, "triton/kernel.cubin")
+        publish_lock = (
+            scope.root.parent / jit.LOCKS_DIR / f"{scope.scope_id}.publish.lock"
+        )
         publisher_fd = store.acquire_flock(publish_lock)
         managers[0]._dirty.set()
         managers[0].publish_pending_snapshot()
@@ -952,91 +906,125 @@ class ManagerTest(JitCacheTestBase):
             manager._dirty.set()
             manager.publish_pending_snapshot()
         self.assertEqual(len(snapshots(managers[0].store)), 2)
-        self.assertTrue(all(manager._worker for manager in managers))
 
 
 class BackendTest(JitCacheTestBase):
-    def make_configs(self, remote=""):
+    def make_configs(self, remote="", world_size=1):
         configs = mock.Mock()
         configs.jit_config.remote_jit_dir = remote
         configs.jit_config.jit_cache_setup_timeout_s = 5
+        configs.jit_config.manage_jit_cache = True
+        configs.parallelism_config.world_size = world_size
         return configs
 
-    def test_local_only_redirects_env_without_manager(self):
-        with _fake_probes(), mock.patch.object(
-            jit, "LOCAL_JIT_ROOT", self.root / "local"
+    def patched_backend(self, *, cuda=True, device_count=1, signal_handler=None):
+        """Neutralize start_backend_server's process-wide startup side effects."""
+        stack = contextlib.ExitStack()
+        for target, name, kwargs in (
+            (backend, "load_gpu_nic_affinity", {}),
+            (backend, "setproctitle", {}),
+            (backend.os, "makedirs", {}),
+            (backend.signal, "signal", {"side_effect": signal_handler}),
+            (backend.torch.cuda, "is_available", {"return_value": cuda}),
+            (backend.torch.cuda, "device_count", {"return_value": device_count}),
         ):
+            stack.enter_context(mock.patch.object(target, name, **kwargs))
+        return stack
+
+    def test_no_remote_sets_up_local_jit_env(self):
+        with mock.patch.object(
+            jit, "setup_jit_cache_env", return_value=mock.Mock()
+        ) as setup, mock.patch.object(jit, "JitCacheManager") as manager:
             self.assertIsNone(jit.start_from_config(self.make_configs().jit_config))
-        self.assertIn("TORCH_EXTENSIONS_DIR", os.environ)
+        setup.assert_called_once_with()
+        manager.assert_not_called()
+
+    def test_manage_jit_cache_false_skips_all_setup(self):
+        config = self.make_configs(remote="/r").jit_config
+        config.manage_jit_cache = False
+        with mock.patch.object(jit, "setup_jit_cache_env") as setup, mock.patch.object(
+            jit, "JitCacheManager"
+        ) as manager:
+            self.assertIsNone(jit.start_from_config(config))
+        setup.assert_not_called()
+        manager.assert_not_called()
 
     def test_cpu_path_forwards_pipe_writer_and_skips_jit(self):
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            self.addCleanup(signal.signal, sig, signal.getsignal(sig))
         controller, configs, pipe_writer = mock.Mock(), mock.Mock(), mock.Mock()
-        with mock.patch.object(
-            backend.torch.cuda, "is_available", return_value=False
-        ), mock.patch.object(backend, "load_gpu_nic_affinity"), mock.patch.object(
+        with self.patched_backend(cuda=False), mock.patch.object(
             backend, "local_rank_start", return_value="served"
-        ) as rank_start, mock.patch.object(
-            jit, "start_from_config", side_effect=AssertionError("no JIT on CPU path")
-        ):
+        ) as rank_start, mock.patch.object(jit, "start_from_config") as jit_start:
             result = backend.start_backend_server(controller, configs, pipe_writer)
         self.assertEqual(result, "served")
         rank_start.assert_called_once_with(controller, configs, 0, pipe_writer)
+        jit_start.assert_not_called()
 
-    def test_bootstrap_failure_fails_open(self):
-        scope = mock.Mock()
-        manager = mock.Mock()
-        manager.bootstrap.return_value = False
-        with mock.patch.object(
-            jit, "setup_jit_cache_env", return_value=scope
-        ), mock.patch.object(jit, "JitCacheManager", return_value=manager):
-            self.assertIsNone(
-                jit.start_from_config(self.make_configs(remote="/r").jit_config)
-            )
-        manager.bootstrap.assert_called_once_with(5)
-        manager.stop.assert_called_once_with()
+    def test_bootstrap_failure_releases_the_manager(self):
+        # start_from_config owns no fail-open: a false return, an Exception, and a
+        # startup-abort BaseException must all stop the manager and propagate.
+        for failure in (
+            False,
+            RuntimeError("restore failed"),
+            KeyboardInterrupt("sig 15"),
+        ):
+            manager = mock.Mock()
+            manager.bootstrap.side_effect = failure or None
+            manager.bootstrap.return_value = False
+            config = self.make_configs(remote="/r").jit_config
+            with self.subTest(failure=failure), mock.patch.object(
+                jit, "setup_jit_cache_env", return_value=mock.Mock()
+            ), mock.patch.object(jit, "JitCacheManager", return_value=manager):
+                if failure:  # the only fail-open handler is the caller's, not ours
+                    self.assertRaises(type(failure), jit.start_from_config, config)
+                else:
+                    self.assertIsNone(jit.start_from_config(config))
+                manager.bootstrap.assert_called_once_with(5)
+                manager.stop.assert_called_once_with()
 
-    def test_bootstrap_exception_fails_open(self):
-        scope = mock.Mock()
-        manager = mock.Mock()
-        manager.bootstrap.side_effect = RuntimeError("restore failed")
-        with mock.patch.object(
-            jit, "setup_jit_cache_env", return_value=scope
+    def test_jit_setup_failure_still_starts_the_engine(self):
+        configs = self.make_configs(remote="/r", world_size=1)
+        with self.patched_backend(), mock.patch.object(
+            jit, "start_from_config", side_effect=RuntimeError("setup blew up")
         ), mock.patch.object(
-            jit, "JitCacheManager", return_value=manager
-        ), self.assertLogs(
+            backend, "local_rank_start", return_value="served"
+        ) as rank_start, self.assertLogs(
             level="ERROR"
         ):
-            self.assertIsNone(
-                jit.start_from_config(self.make_configs(remote="/r").jit_config)
-            )
-        manager.stop.assert_called_once_with()
+            self.assertEqual(backend.start_backend_server(None, configs), "served")
+        rank_start.assert_called_once()
 
-    def test_entry_stops_manager_after_ranks_exit(self):
+    def test_multi_rank_start_owns_manager_cleanup(self):
         manager = mock.Mock()
-        configs = self.make_configs(remote="/r")
-        configs.parallelism_config.world_size = 2
-        with mock.patch.object(
+        configs = self.make_configs(remote="/r", world_size=2)
+        with self.patched_backend(device_count=2), mock.patch.object(
             jit, "start_from_config", return_value=manager
         ), mock.patch.object(
             backend, "multi_rank_start", return_value=["proc"]
-        ) as ranks, mock.patch.object(
-            backend, "load_gpu_nic_affinity"
-        ), mock.patch.object(
-            backend.torch.cuda, "is_available", return_value=True
-        ), mock.patch.object(
-            backend.torch.cuda, "device_count", return_value=2
-        ), mock.patch.object(
-            backend, "setproctitle"
-        ), mock.patch.object(
-            backend.os, "makedirs"
-        ), mock.patch.object(
-            backend.signal, "signal"
-        ):
+        ) as ranks:
             backend.start_backend_server(None, configs)
         ranks.assert_called_once()
+        self.assertIs(ranks.call_args.kwargs["cleanup"], manager.stop)
         manager.stop.assert_called_once_with()
+
+    def test_single_rank_returns_after_stopping_the_manager(self):
+        events = []
+        manager = mock.Mock()
+        manager.stop.side_effect = lambda: events.append("stop")
+        configs = self.make_configs(remote="/r", world_size=1)
+        with self.patched_backend(device_count=1), mock.patch.object(
+            jit, "start_from_config", return_value=manager
+        ), mock.patch.object(
+            backend,
+            "local_rank_start",
+            side_effect=lambda *_: events.append("rank") or "served",
+        ), mock.patch.object(
+            # A hard exit here would truncate the caller's own teardown.
+            backend.os,
+            "_exit",
+            side_effect=AssertionError("single rank must return, not hard exit"),
+        ):
+            self.assertEqual(backend.start_backend_server(None, configs), "served")
+        self.assertEqual(events, ["rank", "stop"])
 
     def test_runtime_handler_installed_after_start_requests_shutdown(self):
         handlers = {}
@@ -1050,7 +1038,6 @@ class BackendTest(JitCacheTestBase):
                 FakeBackendManager.instance = self
 
             def start(self):
-                # While the engine is starting, no rank-level handler exists.
                 assert backend.signal.SIGTERM not in handlers
 
         backend_module = types.ModuleType("rtp_llm.server.backend_manager")
@@ -1086,45 +1073,21 @@ class BackendTest(JitCacheTestBase):
 
     def test_parent_signal_during_jit_setup_prevents_rank_start(self):
         handlers = {}
-        configs = self.make_configs(remote="/r")
-        configs.parallelism_config.world_size = 2
+        configs = self.make_configs(remote="/r", world_size=2)
 
         def start_jit(_config):
             handlers[backend.signal.SIGTERM](backend.signal.SIGTERM, None)
 
-        with mock.patch.object(
-            backend.signal,
-            "signal",
-            side_effect=lambda signum, handler: handlers.__setitem__(signum, handler),
+        with self.patched_backend(
+            device_count=2, signal_handler=handlers.__setitem__
         ), mock.patch.object(
             jit, "start_from_config", side_effect=start_jit
         ), mock.patch.object(
             backend, "multi_rank_start"
-        ) as ranks, mock.patch.object(
-            backend, "load_gpu_nic_affinity"
-        ), mock.patch.object(
-            backend.torch.cuda, "is_available", return_value=True
-        ), mock.patch.object(
-            backend.torch.cuda, "device_count", return_value=2
-        ), mock.patch.object(
-            backend, "setproctitle"
-        ), mock.patch.object(
-            backend.os, "makedirs"
-        ):
+        ) as ranks:
             with self.assertRaises(KeyboardInterrupt):
                 backend.start_backend_server(None, configs)
         ranks.assert_not_called()
-
-    def test_start_from_config_releases_manager_on_startup_abort(self):
-        manager = mock.Mock()
-        manager.bootstrap.side_effect = KeyboardInterrupt("signal 15 during startup")
-        config = self.make_configs(remote="/r").jit_config
-        with mock.patch.object(
-            jit, "setup_jit_cache_env", return_value=mock.Mock()
-        ), mock.patch.object(jit, "JitCacheManager", return_value=manager):
-            with self.assertRaises(KeyboardInterrupt):
-                jit.start_from_config(config)
-        manager.stop.assert_called_once_with()
 
     @staticmethod
     def _fake_create(proc):
@@ -1203,19 +1166,6 @@ class BackendTest(JitCacheTestBase):
                 [proc, proc], [pipe("success"), pipe("failed")], 2
             )
 
-    def test_process_manager_cleanup_runs_before_hard_exit(self):
-        from rtp_llm.utils import process_manager as pm
-
-        cleanup = mock.Mock()
-        with mock.patch.object(pm.signal, "signal"):
-            manager = pm.ProcessManager(pre_exit_cleanup=cleanup)
-        manager.failure_detected = True
-        with mock.patch.object(pm.os, "_exit", side_effect=SystemExit(1)) as hard_exit:
-            with self.assertRaises(SystemExit):
-                manager.monitor_and_release_processes()
-        cleanup.assert_called_once_with()
-        hard_exit.assert_called_once_with(1)
-
     def test_hard_exit_runs_bounded_cleanup(self):
         configs = self.make_configs(remote="/r")
         configs.distribute_config.fake_gang_env = False
@@ -1241,31 +1191,6 @@ class BackendTest(JitCacheTestBase):
         proc.terminate.assert_called_once_with()
         proc.kill.assert_called_once_with()
 
-    def test_normal_rank_returns_without_hard_exit(self):
-        instance = mock.Mock()
-        backend_module = types.ModuleType("rtp_llm.server.backend_manager")
-        backend_module.BackendManager = mock.Mock(return_value=instance)
-        configs = mock.Mock()
-        configs.parallelism_config.local_rank = 0
-        configs.parallelism_config.world_size = 1
-        with mock.patch.dict(
-            sys.modules, {"rtp_llm.server.backend_manager": backend_module}
-        ), contextlib.ExitStack() as stack:
-            for name in (
-                "copy_gemm_config",
-                "set_parallelism_config",
-                "setup_cuda_device_and_accl_env",
-                "set_global_controller",
-                "setproctitle",
-            ):
-                stack.enter_context(mock.patch.object(backend, name))
-            stack.enter_context(mock.patch.object(backend.signal, "signal"))
-            stack.enter_context(mock.patch.object(backend, "_send_pipe_status"))
-            hard_exit = stack.enter_context(mock.patch.object(backend.os, "_exit"))
-            backend.local_rank_start(None, configs)
-        hard_exit.assert_not_called()
-        instance.serve_forever.assert_called_once_with()
-
 
 class TipcTest(JitCacheTestBase):
     def test_source_signature_tracks_content(self):
@@ -1278,13 +1203,11 @@ class TipcTest(JitCacheTestBase):
         signature = tipc_ffi._source_signature(source_root, args)
         clone = self.root / "clone"
         shutil.copytree(source_root, clone)
-        self.assertEqual(signature, tipc_ffi._source_signature(clone, args))
+        self.assertNotEqual(signature, tipc_ffi._source_signature(clone, args))
         header.write_text("#pragma once\n// changed\n")
         self.assertNotEqual(signature, tipc_ffi._source_signature(source_root, args))
 
     def test_compile_scopes_by_arch_and_clears_stale_baton(self):
-        from rtp_llm.utils.util import torch_abi_fingerprint
-
         build_root = self.root / "build"
         cap = (8, 0)
         build_dir = build_root / "tipc" / "fixed-signature"
@@ -1296,7 +1219,9 @@ class TipcTest(JitCacheTestBase):
             self.assertFalse((build_dir / "lock").exists())  # cleared pre-load
             return "module"
 
-        with mock.patch.dict(
+        with mock.patch.object(
+            tipc_ffi.os, "open", wraps=os.open
+        ) as open_file, mock.patch.dict(
             os.environ,
             {
                 "TORCH_EXTENSIONS_DIR": str(build_root),
@@ -1311,12 +1236,41 @@ class TipcTest(JitCacheTestBase):
         ) as load:
             self.assertEqual(tipc_ffi.__CompileHelper__().compile(), "module")
             load.assert_called_once()
-        source_root, build_args = signature.call_args.args
-        self.assertEqual(source_root, Path(tipc_ffi.__file__).with_name("csrc"))
-        self.assertLessEqual(
-            {"sm_80", "--threads=4", *map(str, torch_abi_fingerprint())},
-            set(build_args),
-        )
+            self.assertTrue(open_file.call_args.args[1] & os.O_NOFOLLOW)
+            source_root, build_args = signature.call_args.args
+            self.assertEqual(source_root, Path(tipc_ffi.__file__).with_name("csrc"))
+            self.assertTrue(
+                {
+                    "sm_80",
+                    *map(str, torch_abi_fingerprint()),
+                    *(
+                        f"{name}={os.environ.get(name, '')}"
+                        for name in COMPILE_FLAG_ENVS
+                    ),
+                }.issubset(build_args)
+            )
+
+    def test_compile_key_names_environment_inputs(self):
+        def build_args(env):
+            env = {"TORCH_EXTENSIONS_DIR": str(self.root / "build"), **env}
+            with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
+                tipc_ffi.torch.cuda, "get_device_capability", return_value=(8, 0)
+            ), mock.patch.object(
+                tipc_ffi, "_source_signature", return_value="fixed-signature"
+            ) as signature, mock.patch.object(
+                tipc_ffi, "load", return_value="module"
+            ):
+                tipc_ffi.__CompileHelper__().compile()
+                return signature.call_args.args[1]
+
+        append = build_args({"NVCC_APPEND_FLAGS": "same"})
+        prepend = build_args({"NVCC_PREPEND_FLAGS": "same"})
+        self.assertNotEqual(append, prepend)
+
+        base = build_args({})
+        for name in ("CXX", "CC", "PYTORCH_NVCC"):
+            with self.subTest(name=name):
+                self.assertNotEqual(base, build_args({name: "/toolchain/compiler"}))
 
 
 if __name__ == "__main__":

@@ -120,6 +120,7 @@ requirement([
     "openai",
     "oss2",
     "pyOpenSSL",
+    "requests",
     "nest_asyncio",
     "blobfile",
     "partial_json_parser",
@@ -462,6 +463,7 @@ py_library(
         ":psutil",
         ":oss2",
         ":orjson",
+        ":requests",
         # add qwen agent package
         ":pydantic",
         ":json5",
@@ -615,6 +617,7 @@ py_package(
 )
 
 whl_reqs = [
+    "filelock>=3.20.0",
     "jinja2",
     "sympy",
     "typing-extensions",

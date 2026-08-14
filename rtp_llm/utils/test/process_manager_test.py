@@ -9,16 +9,16 @@ from unittest.mock import Mock, patch
 
 from rtp_llm.utils.process_manager import (
     BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV,
-    DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS_ENV,
     DEFER_FIRST_SIGTERM_ENV,
     DEFER_FIRST_SIGTERM_SECONDS_ENV,
     DEFER_FIRST_SIGTERM_VALUE,
+    DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS_ENV,
     FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV,
     PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV,
     PRE_STOP_DRAIN_SIGNAL_ENV,
-    ProcessManager,
     SHUTDOWN_TIMEOUT_ENV,
     STOP_TIMEOUT_MS_ENV,
+    ProcessManager,
 )
 
 
@@ -29,6 +29,7 @@ def _watchdog(seconds: float, msg: str = "test exceeded watchdog"):
     Uses SIGALRM (main-thread only); raises AssertionError on timeout so the
     test fails immediately instead of blocking the whole suite.
     """
+
     def handler(_signum: int, _frame: object) -> None:
         raise AssertionError(f"{msg}: exceeded {seconds}s")
 
@@ -1174,10 +1175,10 @@ class TestFailureShutdownPaths(unittest.TestCase):
 
         sleeps = []
         with patch.dict(os.environ, {BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV: "10"}):
-            with patch("time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
-                self.manager._linger_before_deferred_group_shutdown(
-                    time.time() + 0.05
-                )
+            with patch(
+                "time.sleep", side_effect=lambda seconds: sleeps.append(seconds)
+            ):
+                self.manager._linger_before_deferred_group_shutdown(time.time() + 0.05)
 
         self.assertEqual(len(sleeps), 1)
         self.assertGreater(sleeps[0], 0)
@@ -1301,9 +1302,7 @@ class TestFailureShutdownPaths(unittest.TestCase):
         then force-kills the non-draining frontend after POST_KILL_REAP_WINDOW."""
         frontend = _FakeProc("frontend")  # ignores SIGTERM
         # Backend dies 0.1s into drain wait with non-zero exitcode (crash).
-        backend = _FakeProc(
-            "backend", dies_after=time.time() + 0.1, exitcode=1
-        )
+        backend = _FakeProc("backend", dies_after=time.time() + 0.1, exitcode=1)
         self.manager.add_process(frontend, shutdown_group="frontend")
         self.manager.add_process(backend, shutdown_group="backend")
         self.manager.shutdown_requested = True  # mirror SIGTERM handler
@@ -1335,9 +1334,7 @@ class TestFailureShutdownPaths(unittest.TestCase):
         because they ignore SIGTERM."""
         frontend = _FakeProc("frontend")  # ignores SIGTERM
         # Backend exits cleanly 0.1s into drain wait.
-        backend = _FakeProc(
-            "backend", dies_after=time.time() + 0.1, exitcode=0
-        )
+        backend = _FakeProc("backend", dies_after=time.time() + 0.1, exitcode=0)
         self.manager.add_process(frontend, shutdown_group="frontend")
         self.manager.add_process(backend, shutdown_group="backend")
         self.manager.shutdown_requested = True  # mirror SIGTERM handler
@@ -1391,9 +1388,7 @@ class TestFailureShutdownPaths(unittest.TestCase):
         """No backend group registered. SIGTERM lets frontend drain (here:
         dies after 0.2s, well under shutdown_timeout). No SIGKILL, no failure."""
         # Frontend exits cleanly on SIGTERM after a short fake drain.
-        frontend = _FakeProc(
-            "frontend", dies_after=time.time() + 0.2
-        )
+        frontend = _FakeProc("frontend", dies_after=time.time() + 0.2)
         self.manager.add_process(frontend, shutdown_group="frontend")
         # No backend at all.
         self.manager.shutdown_requested = True
@@ -1526,7 +1521,9 @@ class TestFailureShutdownPaths(unittest.TestCase):
             {DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS_ENV: "1"},
         ), patch(
             "os.kill", side_effect=lambda pid, sig: kills.append((pid, sig))
-        ), _watchdog(3, "backend-only deferred headroom regressed"):
+        ), _watchdog(
+            3, "backend-only deferred headroom regressed"
+        ):
             self.manager._monitor_processes_health()
 
         self.assertEqual(kills, [])
@@ -1663,9 +1660,12 @@ class TestFailureShutdownPaths(unittest.TestCase):
         in finally; processes is still []. Without this, the parent silently
         exits 0 and k8s/systemd never restarts.
         """
+        cleanup = Mock()
+        self.manager.pre_exit_cleanup = cleanup
         self.manager.request_failure_shutdown()
         with patch("os._exit") as mock_exit:
             self.manager.monitor_and_release_processes()
+            cleanup.assert_called_once_with()
             mock_exit.assert_called_once_with(1)
 
     def test_empty_processes_without_failure_returns_cleanly(self):
