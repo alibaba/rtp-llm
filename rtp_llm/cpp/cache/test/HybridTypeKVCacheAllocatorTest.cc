@@ -20,9 +20,9 @@
 namespace rtp_llm {
 namespace test {
 
-static CacheConfig makeTinyHybridConfig() {
+static CacheConfig makeTinyHybridConfig(int block_num = 10) {
     auto config                      = makeSimpleHybridMhaCacheConfig(/*layer_num=*/4,
-                                                 /*block_num=*/10,
+                                                 block_num,
                                                  /*tokens_per_block=*/4,
                                                  rtp_llm::DataType::TYPE_FP16,
                                                  /*group_layer_num=*/2,
@@ -1275,6 +1275,35 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DefaultHybridLinearPrefixReuseSupportsIns
     auto result                    = allocator->malloc(hit_malloc);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(result.reuse_len, 12);
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, PrefixReuseStopsBeforeCustomOutputToken) {
+    auto config       = makeTinyHybridConfig(/*block_num=*/16);
+    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto shared_cache = std::make_shared<SharedBlockCache>();
+    allocator->setSharedBlockCache(shared_cache);
+    ASSERT_TRUE(allocator->init());
+
+    auto seed_res    = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102});
+    auto seed_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+    MallocInfo seed_info{seed_res, seed_tokens};
+    seed_info.enable_device_cache = false;
+    seed_info.reuse_cache         = false;
+    ASSERT_TRUE(allocator->malloc(seed_info).success);
+    allocator->insertIntoCache(InsertInfo{seed_res, seed_tokens, /*is_resident=*/false});
+
+    auto hit_res    = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102, 103});
+    auto hit_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/16, /*seq_size_per_block=*/4);
+    MallocInfo hit_info{hit_res, hit_tokens};
+    hit_info.max_reuse_len = 6;
+
+    auto result = allocator->malloc(hit_info);
+    ASSERT_TRUE(result.success);
+    // The linear group only materializes its recurrent state at the seeded
+    // tail (key 102). Once matching is bounded before the target token, that
+    // state is unavailable, so joint hybrid reuse must safely fall back to 0.
+    EXPECT_EQ(result.reuse_len, 0);
+    EXPECT_LT(result.reuse_len, hit_info.max_reuse_len);
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, ConvertIndexToBufferAndAllLayerCacheBaseSmoke) {
