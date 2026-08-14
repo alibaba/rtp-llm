@@ -42,6 +42,10 @@ from rtp_llm.models_py.distributed.sequence_parallel import (
     token_shard_layout,
 )
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
+from rtp_llm.models_py.model_desc.kimi_k3_chunk_planner import (
+    KimiK3ChunkRound,
+    plan_kimi_k3_chunk_rounds,
+)
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.base import RMSNorm
 from rtp_llm.models_py.modules.base.common.embedding import Embedding
@@ -685,15 +689,19 @@ class KimiK3Model(GptModelBase):
         input_ids = inputs.input_ids.reshape(-1)
         tp_size = int(self.parallelism_config.get_attn_tp_size())
         ep_size = int(self.parallelism_config.ep_size)
+        if self.kv_cache is None:
+            raise RuntimeError("whole-model K3 Prefill requires an initialized cache")
+        page_size = int(self.kv_cache.seq_size_per_block)
+        if page_size <= 0 or page_size % 64:
+            raise RuntimeError(
+                "whole-model K3 Prefill requires a positive cache page size "
+                "divisible by the cuLA checkpoint step 64; "
+                f"page_size={page_size}"
+            )
         if chunk_tokens <= 0 or chunk_tokens % tp_size:
             raise RuntimeError(
                 "KIMI_K3_PREFILL_CHUNK_TOKENS must be divisible by attention TP; "
                 f"chunk={chunk_tokens}, TP={tp_size}"
-            )
-        if input_ids.numel() % tp_size:
-            raise RuntimeError(
-                "whole-model K3 Prefill requires total tokens divisible by "
-                f"attention TP; tokens={input_ids.numel()}, TP={tp_size}"
             )
         if ep_size != tp_size:
             raise RuntimeError(
@@ -704,56 +712,140 @@ class KimiK3Model(GptModelBase):
             raise RuntimeError("whole-model K3 Prefill does not support target verify")
         if bool(getattr(attention_inputs, "is_cuda_graph", False)):
             raise RuntimeError("whole-model K3 Prefill does not support CUDA Graph")
-        prefix_lengths = attention_inputs.prefix_lengths
-        if prefix_lengths is not None and prefix_lengths.numel():
-            if bool(torch.any(prefix_lengths != 0).item()):
-                raise RuntimeError(
-                    "whole-model K3 Prefill currently requires a fresh request"
-                )
+        if getattr(attention_inputs, "context_parallel_info", None) is not None:
+            raise RuntimeError(
+                "whole-model K3 Prefill does not support framework Prefill CP"
+            )
+        if bool(getattr(attention_inputs, "need_all_logits", False)):
+            raise RuntimeError("whole-model K3 Prefill does not support all logits")
+        if bool(getattr(attention_inputs, "need_all_hidden_states", False)):
+            raise RuntimeError(
+                "whole-model K3 Prefill does not support all hidden states"
+            )
+        if os.environ.get("SP_TYPE", "").lower() == "eagle3":
+            raise RuntimeError("whole-model K3 Prefill does not support EAGLE3/MTP")
+        multimodal = inputs.multimodal_inputs
+        if multimodal.multimodal_features or (
+            multimodal.mm_features_locs_host is not None
+            and multimodal.mm_features_locs_host.numel()
+        ):
+            raise RuntimeError("whole-model K3 Prefill does not support multimodal input")
+
+    @staticmethod
+    def _host_lengths(value: torch.Tensor, name: str) -> list[int]:
+        if value is None or not value.numel():
+            raise RuntimeError(f"whole-model K3 Prefill requires {name}")
+        source = value if value.device.type == "cpu" else value.detach().cpu()
+        return [int(item) for item in source.tolist()]
+
+    @staticmethod
+    def _select_batch_rows(value: torch.Tensor, indices: list[int]) -> torch.Tensor:
+        if value is None or not value.numel():
+            return value
+        index = torch.tensor(indices, dtype=torch.long, device=value.device)
+        return value.index_select(0, index).contiguous()
+
+    @classmethod
+    def _select_group_batch_rows(
+        cls, values: Sequence[torch.Tensor], indices: list[int]
+    ) -> list[torch.Tensor]:
+        return [cls._select_batch_rows(value, indices) for value in values]
 
     @staticmethod
     def _chunk_attention_inputs(
         attention_inputs: PyAttentionInputs,
         *,
-        start: int,
-        end: int,
+        round_plan: KimiK3ChunkRound,
         device: torch.device,
-        publish_cache_store: bool,
     ) -> PyAttentionInputs:
-        length = end - start
-        if length <= 0:
-            raise ValueError(f"invalid whole-model Prefill chunk [{start}, {end})")
+        lengths = [item.new_length for item in round_plan.slices]
+        prefixes = [item.absolute_start for item in round_plan.slices]
+        sequence_lengths = [item.absolute_end for item in round_plan.slices]
+        batch_indices = [item.original_batch_idx for item in round_plan.slices]
+        total_tokens = sum(lengths)
         chunk = copy.copy(attention_inputs)
-        chunk.cu_seqlens = torch.tensor(
-            [0, length], dtype=torch.int32, device=device
-        )
+        cu_seqlens = [0]
+        cu_kv_seqlens = [0]
+        for length, sequence_length in zip(lengths, sequence_lengths):
+            cu_seqlens.append(cu_seqlens[-1] + length)
+            cu_kv_seqlens.append(cu_kv_seqlens[-1] + sequence_length)
+        chunk.cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
         chunk.cu_kv_seqlens = torch.tensor(
-            [0, end], dtype=torch.int32, device=device
+            cu_kv_seqlens, dtype=torch.int32, device=device
         )
-        chunk.input_lengths = torch.tensor(
-            [length], dtype=torch.int32, device=device
-        )
-        chunk.prefix_lengths = torch.tensor(
-            [start], dtype=torch.int32, device=device
-        )
+        chunk.input_lengths = torch.tensor(lengths, dtype=torch.int32, device=device)
+        chunk.prefix_lengths = torch.tensor(prefixes, dtype=torch.int32, device=device)
         chunk.sequence_lengths = torch.tensor(
-            [end], dtype=torch.int32, device=device
+            sequence_lengths, dtype=torch.int32, device=device
         )
-        chunk.sequence_lengths_plus_1_d = torch.arange(
-            start + 1, end + 1, dtype=torch.int32, device=device
+        chunk.sequence_lengths_plus_1_d = chunk.sequence_lengths + 1
+        max_length = max(lengths)
+        padding_offset: list[int] = []
+        cumulative_padding = 0
+        for length in lengths:
+            padding_offset.extend([cumulative_padding] * length)
+            cumulative_padding += max_length - length
+        chunk.padding_offset = torch.tensor(
+            padding_offset, dtype=torch.int32, device=device
         )
-        chunk.cu_seqlens_host = torch.tensor([0, length], dtype=torch.int32)
-        chunk.input_lengths_host = torch.tensor([length], dtype=torch.int32)
-        chunk.prefix_lengths_host = torch.tensor([start], dtype=torch.int32)
-        chunk.sequence_lengths_host = torch.tensor([end], dtype=torch.int32)
-        chunk.total_tokens = int(length)
-        chunk.context_total_kv_length = int(end)
+        chunk.cu_seqlens_host = torch.tensor(cu_seqlens, dtype=torch.int32)
+        chunk.input_lengths_host = torch.tensor(lengths, dtype=torch.int32)
+        chunk.prefix_lengths_host = torch.tensor(prefixes, dtype=torch.int32)
+        chunk.sequence_lengths_host = torch.tensor(
+            sequence_lengths, dtype=torch.int32
+        )
+        chunk.original_batch_indices_host = torch.tensor(
+            batch_indices, dtype=torch.int64
+        )
+        chunk.total_tokens = int(total_tokens)
+        chunk.context_total_kv_length = int(sum(sequence_lengths))
         chunk.is_prefill = True
         chunk.is_cuda_graph = False
-        chunk.cache_store_inputs = (
-            attention_inputs.cache_store_inputs if publish_cache_store else None
+        chunk.cache_store_inputs = None
+        singular_block_tables = (
+            "kv_cache_block_id_host",
+            "kv_cache_block_id_device",
+            "kv_cache_kernel_block_id_host",
+            "kv_cache_kernel_block_id_device",
+        )
+        for name in singular_block_tables:
+            selected = KimiK3Model._select_batch_rows(
+                getattr(attention_inputs, name), batch_indices
+            )
+            # Undefined C++ tensors are exposed as None, but pybind's Tensor
+            # setter does not accept assigning None back to the copied object.
+            if selected is not None:
+                setattr(chunk, name, selected)
+        chunk.kv_cache_block_id_host_by_group = (
+            KimiK3Model._select_group_batch_rows(
+                attention_inputs.kv_cache_block_id_host_by_group, batch_indices
+            )
+        )
+        chunk.kv_cache_kernel_block_id_host_by_group = (
+            KimiK3Model._select_group_batch_rows(
+                attention_inputs.kv_cache_kernel_block_id_host_by_group,
+                batch_indices,
+            )
+        )
+        chunk.kv_cache_kernel_block_id_device_by_group = (
+            KimiK3Model._select_group_batch_rows(
+                attention_inputs.kv_cache_kernel_block_id_device_by_group,
+                batch_indices,
+            )
         )
         return chunk
+
+    def _publish_whole_chunk_cache(
+        self, attention_inputs: PyAttentionInputs
+    ) -> None:
+        writer = create_write_cache_store_impl(attention_inputs, self.kv_cache)
+        if writer is None or self.kv_cache is None:
+            return
+        for layer_idx, layer in enumerate(self.layers):
+            layer_cache = self.kv_cache.get_layer_cache(layer_idx)
+            if layer.is_kda:
+                layer.prepare_kda_cache_store(layer_cache)
+            writer(layer_cache)
 
     def _forward_whole_chunk_prefill(
         self,
@@ -766,46 +858,120 @@ class KimiK3Model(GptModelBase):
         attention_inputs = inputs.attention_inputs
         assert attention_inputs is not None
         total_tokens = int(input_ids.numel())
+        input_lengths = self._host_lengths(
+            attention_inputs.input_lengths_host, "input_lengths_host"
+        )
+        prefix_lengths = self._host_lengths(
+            attention_inputs.prefix_lengths_host, "prefix_lengths_host"
+        )
+        if sum(input_lengths) != total_tokens:
+            raise RuntimeError(
+                "whole-model K3 packed lengths do not cover input tokens: "
+                f"lengths={sum(input_lengths)} tokens={total_tokens}"
+            )
+        page_size = int(self.kv_cache.seq_size_per_block)
+        rounds = plan_kimi_k3_chunk_rounds(
+            input_lengths,
+            prefix_lengths,
+            chunk_budget=chunk_tokens,
+            page_size=page_size,
+        )
         barrier(Group.TP)
         logging.info(
             "[K3_WHOLE_CHUNK_PREFILL] enabled total_tokens=%d "
-            "chunk_tokens=%d TP=%d EP=%d",
+            "requests=%d rounds=%d chunk_tokens=%d page_size=%d TP=%d EP=%d",
             total_tokens,
+            len(input_lengths),
+            len(rounds),
             chunk_tokens,
+            page_size,
             int(self.parallelism_config.get_attn_tp_size()),
             int(self.parallelism_config.ep_size),
         )
-        kda_modules = [
-            layer.self_attn
-            for layer in self.layers
-            if layer.is_kda and isinstance(layer.self_attn, KimiK3KDA)
-        ]
-        for module in kda_modules:
-            module._whole_chunk_prefill_state_active = True
-            module._whole_chunk_prefill_state = None
-        final_output: Optional[PyModelOutputs] = None
+        if self._layer_group_ids is None:
+            layer_map_host = getattr(
+                attention_inputs, "kv_cache_layer_to_group_host", None
+            )
+            if layer_map_host is not None and layer_map_host.numel():
+                self._layer_group_ids = tuple(
+                    int(value) for value in layer_map_host.tolist()
+                )
+        terminal_hidden: list[Optional[torch.Tensor]] = [None] * len(input_lengths)
+        final_params: Any = None
+        initialized_kda_modules: list[KimiK3KDA] = []
         try:
-            for start in range(0, total_tokens, chunk_tokens):
-                end = min(start + chunk_tokens, total_tokens)
+            for layer_idx, layer in enumerate(self.layers):
+                if layer.is_kda and isinstance(layer.self_attn, KimiK3KDA):
+                    static_group_id = (
+                        self._layer_group_ids[layer_idx]
+                        if self._layer_group_ids is not None
+                        and layer_idx < len(self._layer_group_ids)
+                        else None
+                    )
+                    select_block_map_for_layer(
+                        attention_inputs, layer_idx, static_group_id
+                    )
+                    layer_cache = self.kv_cache.get_layer_cache(layer_idx)
+                    if int(layer_cache.seq_size_per_block) != page_size:
+                        raise RuntimeError(
+                            "whole-model K3 KDA/cache checkpoint step mismatch: "
+                            f"layer={layer_idx} linear_page="
+                            f"{layer_cache.seq_size_per_block} "
+                            f"physical_page={page_size}"
+                        )
+                    layer.self_attn.begin_whole_chunk_prefill(
+                        layer_cache,
+                        attention_inputs,
+                        attention_inputs.cu_seqlens,
+                        len(input_lengths),
+                    )
+                    initialized_kda_modules.append(layer.self_attn)
+            for round_plan in rounds:
                 chunk_attention = self._chunk_attention_inputs(
                     attention_inputs,
-                    start=start,
-                    end=end,
+                    round_plan=round_plan,
                     device=input_ids.device,
-                    publish_cache_store=end == total_tokens,
                 )
                 chunk_inputs = PyModelInputs()
-                chunk_inputs.input_ids = input_ids.narrow(0, start, end - start)
+                chunk_inputs.input_ids = torch.cat(
+                    [
+                        input_ids.narrow(
+                            0, item.source_start, item.new_length
+                        )
+                        for item in round_plan.slices
+                    ],
+                    dim=0,
+                )
                 chunk_inputs.attention_inputs = chunk_attention
-                final_output = self._forward_impl_one(chunk_inputs, fmha_impl)
+                round_output = self._forward_impl_one(chunk_inputs, fmha_impl)
+                final_params = getattr(round_output, "params_ptr", None)
+                packed_end = 0
+                for item in round_plan.slices:
+                    packed_end += item.new_length
+                    if item.terminal:
+                        terminal_hidden[item.original_batch_idx] = (
+                            round_output.hidden_states[packed_end - 1 : packed_end]
+                        )
                 del chunk_inputs
                 del chunk_attention
+                del round_output
+            self._publish_whole_chunk_cache(attention_inputs)
         finally:
-            for module in kda_modules:
-                module._whole_chunk_prefill_state_active = False
-                module._whole_chunk_prefill_state = None
-        assert final_output is not None
-        return final_output
+            for module in initialized_kda_modules:
+                module.end_whole_chunk_prefill()
+        if any(value is None for value in terminal_hidden):
+            missing = [idx for idx, value in enumerate(terminal_hidden) if value is None]
+            raise RuntimeError(f"whole-model K3 missing terminal rows for {missing}")
+        hidden = torch.cat(
+            [value for value in terminal_hidden if value is not None], dim=0
+        )
+        result = (
+            PyModelOutputs(hidden, final_params)
+            if final_params is not None
+            else PyModelOutputs(hidden)
+        )
+        result.lm_output_already_selected = True
+        return result
 
     def _forward_impl_one(
         self, inputs: PyModelInputs, fmha_impl: Any = None

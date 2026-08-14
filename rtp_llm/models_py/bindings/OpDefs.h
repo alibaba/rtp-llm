@@ -322,6 +322,8 @@ struct PyContextParallelParams {
 struct PyAttentionInputs {
     bool is_prefill{false};
     bool is_target_verify{false};
+    bool need_all_logits{false};
+    bool need_all_hidden_states{false};
     // True for the synthetic stream used to keep DP/EP collectives aligned.
     // Python models must not read or write request KV state for this stream.
     bool          is_fake_stream{false};
@@ -332,6 +334,8 @@ struct PyAttentionInputs {
     torch::Tensor prefix_lengths_host;
     torch::Tensor sequence_lengths_host;
     torch::Tensor input_lengths_host;
+    // Stable request identity for one model-side whole-chunk invocation.
+    torch::Tensor original_batch_indices_host;
     // Kernel-granularity block IDs for attention compute.
     // Shape: [group, batch, max_kernel_blocks] or [batch, max_kernel_blocks].
     torch::Tensor kv_cache_kernel_block_id_host;
@@ -415,6 +419,7 @@ struct PyModelOutputs {
     torch::Tensor          hidden_states;
     rtp_llm::ParamsBasePtr params_ptr{nullptr};
     py::object             py_attn_params{py::none()};
+    bool                   lm_output_already_selected{false};
 
     PyModelOutputs() = default;
 

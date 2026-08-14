@@ -9,6 +9,7 @@ import torch
 from rtp_llm.models_py.modules.kimi_k3.kda.state import KimiKDAState
 from rtp_llm.models_py.triton_kernels.kimi_kda import (
     kimi_k3_store_linear_cache_state,
+    kimi_k3_store_linear_cache_states,
 )
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
@@ -259,6 +260,41 @@ class KimiK3KDACache:
             state,
             state_index,
             block_id,
+            ssm_cache,
+            conv_cache,
+        )
+
+    def store_blocks(
+        self,
+        state: KimiKDAState,
+        block_ids: list[int],
+        kv_cache: LayerKVCache,
+        attention_inputs: PyAttentionInputs,
+    ) -> None:
+        """Store packed checkpoints with one cache-write kernel launch."""
+
+        if self._is_fake_stream(attention_inputs):
+            return
+        state_count = int(state.recurrent_state.shape[0])
+        if state_count != len(block_ids):
+            raise ValueError(
+                "packed KDA states/block IDs disagree: "
+                f"states={state_count} blocks={len(block_ids)}"
+            )
+        if state_count == 0:
+            return
+        ssm_cache, conv_cache = self.get_views(kv_cache)
+        block_ids_device = torch.tensor(
+            block_ids,
+            dtype=torch.int32,
+            device=state.recurrent_state.device,
+        )
+        kimi_k3_store_linear_cache_states(
+            state.recurrent_state,
+            state.q_conv_state,
+            state.k_conv_state,
+            state.v_conv_state,
+            block_ids_device,
             ssm_cache,
             conv_cache,
         )

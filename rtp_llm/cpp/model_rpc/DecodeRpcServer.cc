@@ -124,16 +124,7 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
 
     const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
     if (cache_config.use_mla && hasSegmentedLinearCacheGroup(cache_config)) {
-        constexpr size_t kK3PhysicalTokensPerBlock = 4096;
-        constexpr size_t kK3KernelTokensPerBlock   = 128;
-        constexpr int    kK3PrefillAttentionTp     = 8;
-        RTP_LLM_CHECK_WITH_INFO(
-            cache_config.seq_size_per_block == kK3PhysicalTokensPerBlock
-                && cache_config.kernel_seq_size_per_block == kK3KernelTokensPerBlock,
-            "request [%s] this K3 PD stage requires decode physical/kernel block sizes 4096/128, got %zu/%zu",
-            decode_context.request_key.c_str(),
-            cache_config.seq_size_per_block,
-            cache_config.kernel_seq_size_per_block);
+        constexpr int kK3PrefillAttentionTp = 8;
         RTP_LLM_CHECK_WITH_INFO(decode_context.prefill_seq_size_per_block > 0
                                     && static_cast<size_t>(decode_context.prefill_seq_size_per_block)
                                            == cache_config.seq_size_per_block,

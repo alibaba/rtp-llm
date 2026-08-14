@@ -148,6 +148,8 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("is_prefill", &PyAttentionInputs::is_prefill)
         .def_readwrite("is_cuda_graph", &PyAttentionInputs::is_cuda_graph)
         .def_readwrite("is_target_verify", &PyAttentionInputs::is_target_verify)
+        .def_readwrite("need_all_logits", &PyAttentionInputs::need_all_logits)
+        .def_readwrite("need_all_hidden_states", &PyAttentionInputs::need_all_hidden_states)
         .def_readwrite("is_fake_stream", &PyAttentionInputs::is_fake_stream)
         .def_readwrite("prefix_lengths", &PyAttentionInputs::prefix_lengths)
         .def_readwrite("sequence_lengths", &PyAttentionInputs::sequence_lengths)
@@ -155,6 +157,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("prefix_lengths_host", &PyAttentionInputs::prefix_lengths_host)
         .def_readwrite("sequence_lengths_host", &PyAttentionInputs::sequence_lengths_host)
         .def_readwrite("input_lengths_host", &PyAttentionInputs::input_lengths_host)
+        .def_readwrite("original_batch_indices_host", &PyAttentionInputs::original_batch_indices_host)
         .def_readwrite("kv_cache_kernel_block_id_host", &PyAttentionInputs::kv_cache_kernel_block_id_host)
         .def_readwrite("kv_cache_kernel_block_id_device", &PyAttentionInputs::kv_cache_kernel_block_id_device)
         .def_readwrite("kv_cache_block_id_host", &PyAttentionInputs::kv_cache_block_id_host)
@@ -269,7 +272,10 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::arg("params_ptr"),
              "Initialize with hidden states tensor and params pointer")
         .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
-        .def_readwrite("params_ptr", &PyModelOutputs::params_ptr, "Parameters pointer");
+        .def_readwrite("params_ptr", &PyModelOutputs::params_ptr, "Parameters pointer")
+        .def_readwrite("lm_output_already_selected",
+                       &PyModelOutputs::lm_output_already_selected,
+                       "True when Python already returned one terminal row per LM output");
 }
 
 }  // namespace torch_ext

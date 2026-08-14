@@ -9,6 +9,10 @@ import torch
 from torch import nn
 
 from rtp_llm.models_py.modules.kimi_k3.kda.cache import KimiK3KDACache
+from rtp_llm.models_py.model_desc.kimi_k3_checkpoint import (
+    join_packed_conv_outputs,
+    packed_checkpoint_layout,
+)
 from rtp_llm.models_py.modules.kimi_k3.kda.state import KimiKDAState
 from rtp_llm.models_py.modules.kimi_k3.sequence import sequence_offsets
 from rtp_llm.models_py.triton_kernels.kimi_kda import kimi_kda_short_conv_prefill
@@ -95,9 +99,10 @@ def _packed_causal_depthwise_conv1d_prefill(
             )
         outputs.append(output)
         final_states.append(final_state)
+    output = join_packed_conv_outputs(outputs, output_target)
     if len(outputs) == 1:
-        return outputs[0], final_states[0].unsqueeze(0)
-    return torch.cat(outputs, dim=0), torch.stack(final_states, dim=0)
+        return output, final_states[0].unsqueeze(0)
+    return output, torch.stack(final_states, dim=0)
 
 
 class KimiK3KDAPrefill(nn.Module):
@@ -251,7 +256,7 @@ class KimiK3KDAPrefill(nn.Module):
                 output = output_target
         return output.to(dtype=q.dtype), final_state
 
-    def _aligned_checkpoint_prefill(
+    def _packed_checkpoint_prefill(
         self,
         q_projected: torch.Tensor,
         k_projected: torch.Tensor,
@@ -263,11 +268,11 @@ class KimiK3KDAPrefill(nn.Module):
         kv_cache: LayerKVCache,
         attention_inputs: PyAttentionInputs,
         *,
-        past_length: int,
+        past_lengths: list[int],
         page_size: int,
         block_map: list[list[int]],
     ) -> tuple[torch.Tensor, KimiKDAState]:
-        """Run one long cuLA invocation and publish exact page checkpoints."""
+        """Run one packed cuLA invocation and publish per-sequence checkpoints."""
 
         token_count = int(q_projected.shape[0])
         if token_count <= 0:
@@ -277,23 +282,35 @@ class KimiK3KDAPrefill(nn.Module):
                 "cuLA checkpoint page size must be a multiple of 64 tokens, "
                 f"got {page_size}"
             )
-        if past_length % page_size:
+        if any(past_length % page_size for past_length in past_lengths):
             raise ValueError(
-                "cuLA checkpoint prefill requires a page-aligned prefix, "
-                f"got past_length={past_length}, page_size={page_size}"
+                "packed cuLA checkpoint prefill requires page-aligned prefixes, "
+                f"got past_lengths={past_lengths}, page_size={page_size}"
             )
-        checkpoint_count = (token_count + page_size - 1) // page_size
+        ranges = sequence_offsets(
+            cu_seqlens,
+            token_count,
+            cu_seqlens_host=getattr(attention_inputs, "cu_seqlens_host", None),
+        )
+        if len(ranges) != len(past_lengths):
+            raise ValueError(
+                "packed KDA ranges/prefixes disagree: "
+                f"ranges={len(ranges)} prefixes={len(past_lengths)}"
+            )
+        sequence_lengths = [end - start for start, end in ranges]
+        checkpoint_counts, checkpoint_offsets = packed_checkpoint_layout(
+            sequence_lengths, page_size
+        )
+        checkpoint_count = checkpoint_offsets[-1]
         q_conv = torch.empty_like(q_projected)
         k_conv = torch.empty_like(k_projected)
         v_conv = torch.empty_like(v_projected)
-        sequence_range = [(0, token_count)]
         q_result, q_final = _packed_causal_depthwise_conv1d_prefill(
             q_projected,
             self.q_conv,
             cu_seqlens,
             initial_state.q_conv_state,
-            use_initial_state=past_length > 0,
-            sequence_ranges=sequence_range,
+            sequence_ranges=ranges,
             output_target=q_conv,
         )
         k_result, k_final = _packed_causal_depthwise_conv1d_prefill(
@@ -301,8 +318,7 @@ class KimiK3KDAPrefill(nn.Module):
             self.k_conv,
             cu_seqlens,
             initial_state.k_conv_state,
-            use_initial_state=past_length > 0,
-            sequence_ranges=sequence_range,
+            sequence_ranges=ranges,
             output_target=k_conv,
         )
         v_result, v_final = _packed_causal_depthwise_conv1d_prefill(
@@ -310,8 +326,7 @@ class KimiK3KDAPrefill(nn.Module):
             self.v_conv,
             cu_seqlens,
             initial_state.v_conv_state,
-            use_initial_state=past_length > 0,
-            sequence_ranges=sequence_range,
+            sequence_ranges=ranges,
             output_target=v_conv,
         )
         if (
@@ -332,7 +347,9 @@ class KimiK3KDAPrefill(nn.Module):
             dtype=torch.float32,
             device=q_projected.device,
         )
-        cu_seqlens_cpu = self._host_cu_seqlens_for_segment(token_count)
+        cu_seqlens_cpu = getattr(attention_inputs, "cu_seqlens_host", None)
+        if cu_seqlens_cpu is None or not cu_seqlens_cpu.numel():
+            cu_seqlens_cpu = cu_seqlens.detach().cpu()
         head_shape = (1, token_count, self.local_heads, self.head_dim)
         output, recurrent_final = self._cula(
             q_conv.reshape(head_shape),
@@ -340,56 +357,72 @@ class KimiK3KDAPrefill(nn.Module):
             v_conv.reshape(head_shape),
             raw_gate.reshape(head_shape),
             raw_beta.reshape(1, token_count, self.local_heads),
-            None if past_length == 0 else initial_state.recurrent_state,
+            initial_state.recurrent_state,
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
             checkpoint_interval=page_size,
             checkpoint_states=recurrent_checkpoints,
         )
 
-        for checkpoint_index in range(checkpoint_count):
-            end = min((checkpoint_index + 1) * page_size, token_count)
-            absolute_end = past_length + end
-            if end >= self.history_size:
-                q_checkpoint = (
-                    q_projected.narrow(
-                        0, end - self.history_size, self.history_size
-                    )
-                    .transpose(0, 1)
-                    .unsqueeze(0)
+        q_checkpoints: list[torch.Tensor] = []
+        k_checkpoints: list[torch.Tensor] = []
+        v_checkpoints: list[torch.Tensor] = []
+        checkpoint_block_ids: list[int] = []
+        for sequence_idx, ((start, end), past_length) in enumerate(
+            zip(ranges, past_lengths)
+        ):
+            sequence_length = end - start
+            for local_checkpoint_idx in range(checkpoint_counts[sequence_idx]):
+                local_end = min(
+                    (local_checkpoint_idx + 1) * page_size, sequence_length
                 )
-                k_checkpoint = (
-                    k_projected.narrow(
-                        0, end - self.history_size, self.history_size
+                packed_end = start + local_end
+                absolute_end = past_length + local_end
+                if local_end >= self.history_size:
+                    q_checkpoint = (
+                        q_projected.narrow(
+                            0, packed_end - self.history_size, self.history_size
+                        )
+                        .transpose(0, 1)
                     )
-                    .transpose(0, 1)
-                    .unsqueeze(0)
-                )
-                v_checkpoint = (
-                    v_projected.narrow(
-                        0, end - self.history_size, self.history_size
+                    k_checkpoint = (
+                        k_projected.narrow(
+                            0, packed_end - self.history_size, self.history_size
+                        )
+                        .transpose(0, 1)
                     )
-                    .transpose(0, 1)
-                    .unsqueeze(0)
+                    v_checkpoint = (
+                        v_projected.narrow(
+                            0, packed_end - self.history_size, self.history_size
+                        )
+                        .transpose(0, 1)
+                    )
+                else:
+                    q_checkpoint = q_final[sequence_idx]
+                    k_checkpoint = k_final[sequence_idx]
+                    v_checkpoint = v_final[sequence_idx]
+                q_checkpoints.append(q_checkpoint)
+                k_checkpoints.append(k_checkpoint)
+                v_checkpoints.append(v_checkpoint)
+                block_id = self.cache._block_id_or_none(
+                    block_map,
+                    sequence_idx,
+                    absolute_end - 1,
+                    page_size,
                 )
-            else:
-                q_checkpoint = q_final
-                k_checkpoint = k_final
-                v_checkpoint = v_final
-            self.cache.store_position(
-                KimiKDAState(
-                    q_conv_state=q_checkpoint,
-                    k_conv_state=k_checkpoint,
-                    v_conv_state=v_checkpoint,
-                    recurrent_state=recurrent_checkpoints[:, checkpoint_index],
-                ),
-                0,
-                kv_cache,
-                attention_inputs,
-                0,
-                absolute_end - 1,
-                block_map=block_map,
-            )
+                checkpoint_block_ids.append(-1 if block_id is None else block_id)
+
+        self.cache.store_blocks(
+            KimiKDAState(
+                q_conv_state=torch.stack(q_checkpoints),
+                k_conv_state=torch.stack(k_checkpoints),
+                v_conv_state=torch.stack(v_checkpoints),
+                recurrent_state=recurrent_checkpoints.squeeze(0),
+            ),
+            checkpoint_block_ids,
+            kv_cache,
+            attention_inputs,
+        )
 
         return output, KimiKDAState(
             q_conv_state=q_final,
@@ -422,8 +455,8 @@ class KimiK3KDAPrefill(nn.Module):
         page_size = int(kv_cache.seq_size_per_block)
         if page_size <= 0:
             raise ValueError("linear cache seq_size_per_block must be positive")
-        if len(ranges) == 1 and past_lengths[0] % page_size == 0:
-            return self._aligned_checkpoint_prefill(
+        if all(past_length % page_size == 0 for past_length in past_lengths):
+            return self._packed_checkpoint_prefill(
                 q_projected,
                 k_projected,
                 v_projected,
@@ -433,10 +466,16 @@ class KimiK3KDAPrefill(nn.Module):
                 initial_state,
                 kv_cache,
                 attention_inputs,
-                past_length=past_lengths[0],
+                past_lengths=past_lengths,
                 page_size=page_size,
                 block_map=block_map,
             )
+        logging.warning(
+            "[K3_WHOLE_CHUNK_PREFILL] falling back to page-by-page KDA for "
+            "non-aligned prefixes=%s page_size=%d",
+            past_lengths,
+            page_size,
+        )
 
         fused_output = q_projected.new_empty(
             1, q_projected.shape[0], self.local_heads, self.head_dim

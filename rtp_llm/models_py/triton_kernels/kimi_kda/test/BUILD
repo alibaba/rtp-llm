@@ -54,3 +54,16 @@ py_test(
     tags = ["H20"],
     visibility = ["//visibility:public"],
 )
+
+py_test(
+    name = "cache_store_test",
+    srcs = ["cache_store_test.py"],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:kimi_kda",
+        ":torch",
+        ":triton",
+    ],
+    exec_properties = {"gpu": "B300"},
+    tags = ["B300"],
+    visibility = ["//visibility:public"],
+)

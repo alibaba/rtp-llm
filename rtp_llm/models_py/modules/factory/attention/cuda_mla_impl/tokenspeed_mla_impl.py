@@ -291,7 +291,16 @@ def tokenspeed_mla_kernel_supported(
 
 
 def _uniform_decode_q_len(attn_inputs: PyAttentionInputs) -> Optional[int]:
-    """Return the rectangular decode q_len without reading device metadata."""
+    """Return the rectangular q_len for a decode-shaped framework batch.
+
+    Normal RTP decode contributes exactly one query token per sequence.  Its
+    ``input_lengths`` metadata retains each request's original input length, so
+    it must not be interpreted as q_len.  Multi-token target verification is
+    the only decode implementation shape whose packed input lengths describe
+    q_len directly.
+    """
+    if not getattr(attn_inputs, "is_target_verify", False):
+        return 1
     input_lengths = getattr(attn_inputs, "input_lengths_host", None)
     if input_lengths is None or not input_lengths.numel():
         input_lengths = getattr(attn_inputs, "input_lengths", None)

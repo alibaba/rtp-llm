@@ -152,6 +152,74 @@ class KimiK3KDA(nn.Module):
                 fused_conv=fused_conv,
             )
 
+    @staticmethod
+    def _clone_state(state: KimiKDAState) -> KimiKDAState:
+        return KimiKDAState(
+            q_conv_state=state.q_conv_state.clone(),
+            k_conv_state=state.k_conv_state.clone(),
+            v_conv_state=state.v_conv_state.clone(),
+            recurrent_state=state.recurrent_state.clone(),
+        )
+
+    def begin_whole_chunk_prefill(
+        self,
+        kv_cache: LayerKVCache,
+        attention_inputs: PyAttentionInputs,
+        cu_seqlens: torch.Tensor,
+        original_batch_size: int,
+    ) -> None:
+        """Load one persistent KDA state per original request for this forward."""
+
+        if not self._is_prefill_role or self.prefill_executor is None:
+            raise RuntimeError("whole-model K3 Prefill requires the Prefill KDA role")
+        if getattr(self, "_whole_chunk_prefill_state_registry", None) is not None:
+            raise RuntimeError("nested whole-model K3 Prefill is not supported")
+        state = self.cache.load_state(kv_cache, attention_inputs, cu_seqlens)
+        if state.recurrent_state.shape[0] != original_batch_size:
+            raise RuntimeError(
+                "whole-model K3 state batch mismatch: "
+                f"state={state.recurrent_state.shape[0]} "
+                f"requests={original_batch_size}"
+            )
+        # load_state may return direct views for a one-request hit.  The
+        # invocation registry must not mutate cache storage while rounds run.
+        self._whole_chunk_prefill_state_registry = self._clone_state(state)
+
+    def end_whole_chunk_prefill(self) -> None:
+        self._whole_chunk_prefill_state_registry = None
+
+    def _whole_chunk_active_indices(
+        self, attention_inputs: Optional[PyAttentionInputs], device: torch.device
+    ) -> torch.Tensor:
+        if attention_inputs is None:
+            raise RuntimeError("whole-model K3 Prefill requires attention metadata")
+        indices_host = getattr(
+            attention_inputs, "original_batch_indices_host", None
+        )
+        if indices_host is None or not indices_host.numel():
+            raise RuntimeError(
+                "whole-model K3 Prefill round is missing original batch indices"
+            )
+        return indices_host.to(device=device, dtype=torch.long).contiguous()
+
+    @staticmethod
+    def _gather_state(state: KimiKDAState, indices: torch.Tensor) -> KimiKDAState:
+        return KimiKDAState(
+            q_conv_state=state.q_conv_state.index_select(0, indices),
+            k_conv_state=state.k_conv_state.index_select(0, indices),
+            v_conv_state=state.v_conv_state.index_select(0, indices),
+            recurrent_state=state.recurrent_state.index_select(0, indices),
+        )
+
+    @staticmethod
+    def _scatter_state(
+        state: KimiKDAState, indices: torch.Tensor, update: KimiKDAState
+    ) -> None:
+        state.q_conv_state.index_copy_(0, indices, update.q_conv_state)
+        state.k_conv_state.index_copy_(0, indices, update.k_conv_state)
+        state.v_conv_state.index_copy_(0, indices, update.v_conv_state)
+        state.recurrent_state.index_copy_(0, indices, update.recurrent_state)
+
     def _project_fused_kda_inputs(
         self,
         hidden_states: torch.Tensor,
@@ -360,15 +428,17 @@ class KimiK3KDA(nn.Module):
             sequence_parallel=sequence_parallel,
             prefill_sp_layout=prefill_sp_layout,
         )
-        whole_chunk_state_active = bool(
-            getattr(self, "_whole_chunk_prefill_state_active", False)
-            and mode == "prefill"
+        state_registry = getattr(
+            self, "_whole_chunk_prefill_state_registry", None
         )
+        whole_chunk_state_active = state_registry is not None and mode == "prefill"
+        active_indices: Optional[torch.Tensor] = None
         if whole_chunk_state_active:
-            # HybridPool deliberately materializes only sparse LINEAR cache
-            # checkpoints. Carry one compact KDA state per layer so the next
-            # contiguous 64K model chunk does not depend on an absent page.
-            state = getattr(self, "_whole_chunk_prefill_state", None)
+            assert state_registry is not None
+            active_indices = self._whole_chunk_active_indices(
+                attention_inputs, state_registry.recurrent_state.device
+            )
+            state = self._gather_state(state_registry, active_indices)
 
         (
             q_projected,
@@ -425,7 +495,14 @@ class KimiK3KDA(nn.Module):
         )
         if whole_chunk_state_active:
             assert final_state is not None
-            self._whole_chunk_prefill_state = final_state
+            assert state_registry is not None and active_indices is not None
+            if final_state.recurrent_state.shape[0] != active_indices.numel():
+                raise RuntimeError(
+                    "whole-model K3 final-state batch mismatch: "
+                    f"state={final_state.recurrent_state.shape[0]} "
+                    f"active={active_indices.numel()}"
+                )
+            self._scatter_state(state_registry, active_indices, final_state)
         return output, final_state
 
 

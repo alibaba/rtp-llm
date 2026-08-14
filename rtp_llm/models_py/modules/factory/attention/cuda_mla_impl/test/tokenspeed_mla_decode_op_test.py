@@ -768,9 +768,10 @@ class TokenSpeedMlaDecodeSupportTest(TestCase):
         configs.kernel_tokens_per_block = 64
         return configs
 
-    def _inputs(self, q_lens=(1,), is_prefill=False):
+    def _inputs(self, q_lens=(1,), is_prefill=False, is_target_verify=False):
         return SimpleNamespace(
             is_prefill=is_prefill,
+            is_target_verify=is_target_verify,
             input_lengths_host=torch.tensor(q_lens, dtype=torch.int32),
         )
 
@@ -812,7 +813,7 @@ class TokenSpeedMlaDecodeSupportTest(TestCase):
         ):
             self.assertFalse(tokenspeed_mla_kernel_supported(12, 777, 48, 96, q_len=9))
 
-    def test_auto_prefers_tokenspeed_on_supported_blackwell(self):
+    def test_auto_prefers_tokenspeed_for_different_decode_prompt_lengths(self):
         with mock.patch.dict(os.environ):
             os.environ.pop(MLA_DECODE_KERNEL_ENV, None)
             with mock.patch(
@@ -824,10 +825,10 @@ class TokenSpeedMlaDecodeSupportTest(TestCase):
             ) as capability:
                 self.assertTrue(
                     TokenSpeedMlaDecodeImpl.support(
-                        self._configs(), self._inputs(q_lens=(8, 8))
+                        self._configs(), self._inputs(q_lens=(1369, 1209, 1813))
                     )
                 )
-        self.assertEqual(capability.call_args.args[4], 8)
+        self.assertEqual(capability.call_args.args[4], 1)
 
     def test_auto_falls_back_on_other_arch_or_missing_dependency(self):
         with mock.patch.dict(os.environ):
@@ -893,7 +894,7 @@ class TokenSpeedMlaDecodeSupportTest(TestCase):
                     )
                 )
 
-    def test_explicit_selection_reports_shape_and_batch_contracts(self):
+    def test_explicit_selection_reports_unsupported_kernel_shape(self):
         with mock.patch.dict(
             os.environ, {MLA_DECODE_KERNEL_ENV: "tokenspeed_mla"}
         ), mock.patch(
@@ -907,10 +908,23 @@ class TokenSpeedMlaDecodeSupportTest(TestCase):
                 TokenSpeedMlaDecodeImpl.support(
                     self._configs(), self._inputs(q_lens=(9, 9))
                 )
-            with self.assertRaisesRegex(RuntimeError, "uniform q_len"):
+
+    def test_explicit_tokenspeed_ignores_original_decode_input_lengths(self):
+        with mock.patch.dict(
+            os.environ, {MLA_DECODE_KERNEL_ENV: "tokenspeed_mla"}
+        ), mock.patch(
+            f"{self.module}._is_tokenspeed_blackwell", return_value=True
+        ), mock.patch(
+            f"{self.module}._load_tokenspeed_mla", return_value=True
+        ), mock.patch(
+            f"{self.module}.tokenspeed_mla_kernel_supported", return_value=True
+        ) as capability:
+            self.assertTrue(
                 TokenSpeedMlaDecodeImpl.support(
-                    self._configs(), self._inputs(q_lens=(1, 2))
+                    self._configs(), self._inputs(q_lens=(1369, 1209, 1813))
                 )
+            )
+        self.assertEqual(capability.call_args.args[4], 1)
 
     def test_prefill_is_never_selected(self):
         with mock.patch.dict(os.environ, {MLA_DECODE_KERNEL_ENV: "tokenspeed_mla"}):
@@ -946,7 +960,7 @@ class TokenSpeedMlaDecodeSupportTest(TestCase):
                     is_cuda_graph,
                 )
 
-    def test_impl_sizes_graph_buffers_from_captured_query_shape(self):
+    def test_impl_sizes_normal_decode_graph_for_one_query_per_request(self):
         configs = self._configs()
         configs.nope_head_dim = 128
         configs.softmax_extra_scale = 1.0
@@ -975,7 +989,7 @@ class TokenSpeedMlaDecodeSupportTest(TestCase):
             )
 
         self.assertEqual(decode_op_cls.call_args.kwargs["max_bs"], 2)
-        self.assertEqual(decode_op_cls.call_args.kwargs["max_q_len"], 5)
+        self.assertEqual(decode_op_cls.call_args.kwargs["max_q_len"], 1)
 
 
 if __name__ == "__main__":
