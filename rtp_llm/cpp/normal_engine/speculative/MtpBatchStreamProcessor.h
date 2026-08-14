@@ -118,7 +118,6 @@ public:
                                          const GptModelOutputs&                       model_output,
                                          const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
                                          const size_t                                 batch_size,
-                                         torch::Tensor&                               hidden_states_d_t,
                                          TensorHolder&                                host_holder);
 
     void updateOneStepDraftSamplerOutput(const StreamGroups& stream_groups,
@@ -149,10 +148,6 @@ protected:
                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                      const MergedOutput&                          draft_prefill_output,
                                      std::vector<StreamSpecUpdateInfo>&           spec_update_infos) const;
-
-    torch::Tensor compactAcceptedPositionIds(const torch::Tensor&    combo_position_ids,
-                                             const std::vector<int>& accept_lens,
-                                             size_t                  total_accept_len) const;
 
     void gatherHiddenStates(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
 
