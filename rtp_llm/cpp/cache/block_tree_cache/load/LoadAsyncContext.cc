@@ -24,8 +24,8 @@ LoadAsyncContext::LoadAsyncContext(std::vector<TransferDescriptor>              
     matched_blocks_(local_matched_blocks),
     storage_backend_(std::move(storage_backend)),
     storage_request_(std::move(storage_request)),
-    deferred_malloc_(storage_backend_ && !storage_request_.empty()),
-    backend_pending_(deferred_malloc_),
+    need_backend_match_(storage_backend_ && !storage_request_.empty()),
+    backend_pending_(need_backend_match_),
     remaining_transfer_count_(std::count_if(load_descs_.begin(), load_descs_.end(), [](const auto& desc) {
         return desc.source_tier == Tier::HOST || desc.source_tier == Tier::DISK;
     })) {
@@ -54,7 +54,7 @@ void LoadAsyncContext::rebuildMatchedBlocksByTier() {
 }
 
 bool LoadAsyncContext::empty() const {
-    return load_descs_.empty() && !deferred_malloc_;
+    return load_descs_.empty() && !need_backend_match_;
 }
 
 uint64_t LoadAsyncContext::contextId() const {
@@ -74,26 +74,25 @@ size_t LoadAsyncContext::matchedBlocks(Tier tier) const {
     return tier >= Tier::DEVICE && tier <= Tier::DISK ? matched_blocks_by_tier_[static_cast<size_t>(tier)] : 0;
 }
 
-bool LoadAsyncContext::deferredMalloc() const {
-    return deferred_malloc_;
+bool LoadAsyncContext::needBackendMatch() const {
+    return need_backend_match_;
 }
 
 void LoadAsyncContext::setMatchCallback(MatchCallback callback) {
-    RTP_LLM_CHECK(deferred_malloc_ && callback && !match_callback_ && !backend_started_);
+    RTP_LLM_CHECK(need_backend_match_ && callback && !match_callback_ && !backend_started_);
     match_callback_ = std::move(callback);
 }
 
 void LoadAsyncContext::startBackendMatch() {
-    RTP_LLM_CHECK(deferred_malloc_ && match_callback_ && !backend_started_);
+    RTP_LLM_CHECK(need_backend_match_ && match_callback_ && !backend_started_);
     backend_started_                     = true;
     std::weak_ptr<LoadAsyncContext> weak = weak_from_this();
     storage_backend_->match(storage_request_,
-                            [weak](size_t matched_blocks_num,
-                                   std::shared_ptr<StorageBackendMatchMeta> match_meta) {
-        if (auto context = weak.lock()) {
-            context->onBackendMatch(matched_blocks_num, std::move(match_meta));
-        }
-    });
+                            [weak](size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta) {
+                                if (auto context = weak.lock()) {
+                                    context->onBackendMatch(matched_blocks_num, std::move(match_meta));
+                                }
+                            });
 }
 
 void LoadAsyncContext::setTargetBlocks(size_t desc_index, std::vector<BlockIdxType> target_blocks) {
@@ -116,8 +115,7 @@ const std::vector<std::vector<StorageBlockHandle>>& LoadAsyncContext::backendHan
     return storage_request_.handles;
 }
 
-void LoadAsyncContext::onBackendMatch(size_t matched_blocks_num,
-                                      std::shared_ptr<StorageBackendMatchMeta> match_meta) {
+void LoadAsyncContext::onBackendMatch(size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta) {
     if (!coordinator_->beginActiveCallback()) {
         return;
     }
@@ -322,7 +320,7 @@ std::shared_ptr<LoadAsyncContext> LoadContextCoordinator::create(std::vector<Tra
                                                                  std::shared_ptr<StorageBackend> storage_backend,
                                                                  StorageRequest                  storage_request) {
     const auto coordinator = shared_from_this();
-    uint64_t context_id = 0;
+    uint64_t   context_id  = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!accepting_) {
@@ -356,7 +354,7 @@ bool LoadContextCoordinator::beginActiveCallback() {
 bool LoadContextCoordinator::commit(uint64_t context_id) {
     std::shared_ptr<LoadAsyncContext> context;
     {
-        std::lock_guard<std::mutex>       lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         const auto                  pending = pending_contexts_.find(context_id);
         if (!accepting_ || pending == pending_contexts_.end() || !(context = pending->second.lock())) {
             return false;
@@ -374,7 +372,7 @@ bool LoadContextCoordinator::commit(uint64_t context_id) {
 
 bool LoadContextCoordinator::abort(LoadAsyncContext& context) noexcept {
     {
-        std::lock_guard<std::mutex>       lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         const auto                  pending = pending_contexts_.find(context.contextId());
         if (pending == pending_contexts_.end()) {
             return false;

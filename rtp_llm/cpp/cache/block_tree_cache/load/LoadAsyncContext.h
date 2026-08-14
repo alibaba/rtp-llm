@@ -44,15 +44,15 @@ public:
     size_t   localMatchedBlocks() const;
     size_t   matchedBlocks() const;
     size_t   matchedBlocks(Tier tier) const;
-    bool     deferredMalloc() const;
+    bool     needBackendMatch() const;
 
     void setMatchCallback(MatchCallback callback);
     void startBackendMatch();
     void setTargetBlocks(size_t desc_index, std::vector<BlockIdxType> target_blocks);
     void setBackendTargetBlock(size_t key_index, size_t handle_index, BlockIdxType target_block);
 
-    const std::vector<TransferDescriptor>& loadDescs() const;
-    const std::vector<bool>& joinedLoads() const;
+    const std::vector<TransferDescriptor>&              loadDescs() const;
+    const std::vector<bool>&                            joinedLoads() const;
     const std::vector<std::vector<StorageBlockHandle>>& backendHandles() const;
 
     bool commit();
@@ -69,25 +69,25 @@ public:
 private:
     void markAborted();
     void rebuildMatchedBlocksByTier();
-    void   onBackendMatch(size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta);
-    void   onBackendRead();
-    void   failBeforeCommit();
-    void   finishIfReadyLocked(bool& notify);
-    void   finishMatchCallback();
+    void onBackendMatch(size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta);
+    void onBackendRead();
+    void failBeforeCommit();
+    void finishIfReadyLocked(bool& notify);
+    void finishMatchCallback();
 
     std::shared_ptr<LoadContextCoordinator> coordinator_;
     const uint64_t                          context_id_;
-    std::vector<TransferDescriptor> load_descs_;
-    std::vector<bool>     joined_load_;
+    std::vector<TransferDescriptor>         load_descs_;
+    std::vector<bool>                       joined_load_;
     const size_t                            local_matched_blocks_{0};
     size_t                                  matched_blocks_{0};
     size_t                                  backend_matched_blocks_{0};
-    std::array<size_t, 3>           matched_blocks_by_tier_{};
+    std::array<size_t, 3>                   matched_blocks_by_tier_{};
 
     std::shared_ptr<StorageBackend> storage_backend_;
     StorageRequest                  storage_request_;
     MatchCallback                   match_callback_;
-    const bool                      deferred_malloc_{false};
+    const bool                      need_backend_match_{false};
     bool                            backend_started_{false};
     bool                            backend_pending_{false};
     bool                            committed_{false};

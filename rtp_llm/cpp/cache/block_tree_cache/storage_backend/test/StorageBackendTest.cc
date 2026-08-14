@@ -3,6 +3,7 @@
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <utility>
 
@@ -142,7 +143,7 @@ protected:
         for (const auto& key_handles : request.handles) {
             write_handle_count_ += key_handles.size();
         }
-        write_done_         = std::move(done);
+        write_done_ = std::move(done);
         cv_.notify_all();
     }
 
@@ -186,6 +187,23 @@ std::shared_ptr<const CacheTopology> makeTopology() {
     return CacheTopology::create({std::move(group)}, {{0, {"default"}}});
 }
 
+std::shared_ptr<const CacheTopology> makeSharedPoolTopology() {
+    std::vector<GroupBase> groups;
+    for (size_t group_id = 0; group_id < 2; ++group_id) {
+        auto spec = std::make_shared<MHAKVCacheSpec>();
+        spec->tag = "group_" + std::to_string(group_id);
+        GroupBase group;
+        group.tag                       = spec->tag;
+        group.spec                      = std::move(spec);
+        group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+        group.layer_ids                 = {0};
+        group.seq_size_per_block        = 1;
+        group.kernel_seq_size_per_block = 1;
+        groups.push_back(std::move(group));
+    }
+    return CacheTopology::create(std::move(groups), {{0, {"group_0", "group_1"}}});
+}
+
 bool initBackend(TestBackend& backend, const std::shared_ptr<IBlockPool>& pool) {
     return backend.init(
         makeTopology(),
@@ -210,7 +228,7 @@ StorageRequest makeRequest(BlockIdxType block, size_t key_count = 1) {
 }
 
 TEST(StorageBackendTest, MatchReturnsBeforeAsynchronousCompletion) {
-    auto        pool      = std::make_shared<TestBlockPool>();
+    auto        pool = std::make_shared<TestBlockPool>();
     TestBackend backend;
     ASSERT_TRUE(initBackend(backend, pool));
     bool completed = false;
@@ -268,6 +286,29 @@ TEST(StorageBackendTest, WriteIsFireAndForgetAndPinsEachPhysicalBlockOnce) {
 
     backend.finishWrite();
     EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 0u);
+    pool->decRef(block, BlockRefType::REQUEST);
+}
+
+TEST(StorageBackendTest, SharedPoolPinsOnceAndReleasesEveryGroup) {
+    auto pool  = std::make_shared<TestBlockPool>();
+    auto block = pool->malloc().value();
+    pool->incRef(block, BlockRefType::REQUEST);
+    std::vector<BlockReleaseReceipt> receipts;
+    TestBackend                      backend;
+    ASSERT_TRUE(backend.init(
+        makeSharedPoolTopology(),
+        {pool, pool},
+        [](int, int, int) { return std::vector<BlockInfo>{{false, 0, 0, reinterpret_cast<void*>(1), 16}}; },
+        [&](const auto& released) { receipts.insert(receipts.end(), released.begin(), released.end()); }));
+
+    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1}), {{{0, block}, {1, block}}}};
+    backend.write(backend.prepareWrite(std::move(request)));
+    backend.waitForWrite();
+    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 1u);
+    backend.finishWrite();
+    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 0u);
+    ASSERT_EQ(receipts.size(), 2u);
+    EXPECT_EQ((std::set<size_t>{receipts[0].group_id, receipts[1].group_id}), (std::set<size_t>{0, 1}));
     pool->decRef(block, BlockRefType::REQUEST);
 }
 

@@ -70,21 +70,21 @@ bool SingleTypeKVCacheAllocator::doInit() {
 }
 
 MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo& malloc_info) {
-    auto& kv_resource = malloc_info.batch_kv_cache_resource;
-    auto& block_ids_0 = kv_resource->mutableBlockIds(0, 0);
-    const auto& cache_keys        = kv_resource->cacheKeys(0);
-    const int   seq_len           = malloc_info.complete_token_ids->seqLength();
-    const int reuse_unit_tokens =
+    auto&       kv_resource = malloc_info.batch_kv_cache_resource;
+    auto&       block_ids_0 = kv_resource->mutableBlockIds(0, 0);
+    const auto& cache_keys  = kv_resource->cacheKeys(0);
+    const int   seq_len     = malloc_info.complete_token_ids->seqLength();
+    const int   reuse_unit_tokens =
         cp_slot_mapper_ ? cp_slot_mapper_->reuseBlockTokens(config_) : full_kv_cache_group_->seqSizePerBlock();
 
-    int64_t                           match_cost_time_us = 0;
-    int64_t                           match_end_time_us  = 0;
+    int64_t                           match_cost_time_us    = 0;
+    int64_t                           match_end_time_us     = 0;
     size_t                            matched_device_blocks = 0;
     size_t                            total_logical_blocks  = 0;
     std::shared_ptr<LoadAsyncContext> load_context;
     std::vector<MultiNodeResource>    matched_resources;
     bool                              matched_blocks_released = false;
-    bool                                      load_attempted          = false;
+    bool                              load_attempted          = false;
     const std::function<void()>       release_matched_blocks  = [&]() {
         if (!matched_blocks_released) {
             block_tree_cache_->releaseMatchedResources(matched_resources);
@@ -131,7 +131,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         if (has_async_context && load_context == nullptr) {
             return rollback();
         }
-        matched_device_blocks = match_result.matched_device_blocks;
+        matched_device_blocks               = match_result.matched_device_blocks;
         total_logical_blocks                = load_context ? load_context->localMatchedBlocks() : matched_device_blocks;
         BlockIndicesType ready_group_blocks = block_tree_cache_->matchedBlocksForGroup(0, matched_resources);
         block_ids_0.assign(BlockIndicesType(total_logical_blocks, NULL_BLOCK_IDX));
@@ -178,7 +178,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         release_matched_blocks();
     }
 
-    if (load_context && load_context->deferredMalloc()) {
+    if (load_context && load_context->needBackendMatch()) {
         auto self = shared_from_this();
         load_context->setMatchCallback(
             [self = std::move(self), malloc_info](LoadAsyncContext& context, size_t matched_blocks) {

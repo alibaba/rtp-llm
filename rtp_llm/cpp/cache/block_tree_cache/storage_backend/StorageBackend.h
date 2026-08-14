@@ -74,10 +74,10 @@ public:
 
     virtual ~StorageBackend() = default;
 
-    bool init(std::shared_ptr<const CacheTopology>       topology,
-              std::vector<std::shared_ptr<IBlockPool>> group_pools,
-              BufferResolver                          buffer_resolver,
-              ReleaseCallback                         release_callback);
+    bool             init(std::shared_ptr<const CacheTopology>     topology,
+                          std::vector<std::shared_ptr<IBlockPool>> device_pools,
+                          BufferResolver                           buffer_resolver,
+                          ReleaseCallback                          release_callback);
     void             match(StorageRequest request, MatchDone done);
     void             read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done);
     StorageWriteTask prepareWrite(StorageRequest request);
@@ -92,17 +92,15 @@ protected:
     // before allocating read targets.
     bool isHandleRequired(size_t key_index, size_t matched_key_count, size_t group_id) const;
 
-    virtual bool initImpl() = 0;
-    virtual void matchImpl(StorageRequest request, MatchDone done) = 0;
-    virtual void readImpl(StorageRequest request,
-                          std::shared_ptr<StorageBackendMatchMeta> match_meta,
-                          Done done) = 0;
-    virtual void writeImpl(StorageRequest request, Done done)      = 0;
+    virtual bool initImpl()                                                                                       = 0;
+    virtual void matchImpl(StorageRequest request, MatchDone done)                                                = 0;
+    virtual void readImpl(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done) = 0;
+    virtual void writeImpl(StorageRequest request, Done done)                                                     = 0;
 
 private:
     std::shared_ptr<storage_backend_detail::StorageTaskState> prepare(StorageRequest request);
     std::shared_ptr<const CacheTopology>                      topology_;
-    std::vector<std::shared_ptr<IBlockPool>>                  group_pools_;
+    std::vector<std::shared_ptr<IBlockPool>>                  device_pools_;
     BufferResolver                                            buffer_resolver_;
     ReleaseCallback                                           release_callback_;
     bool                                                      initialized_{false};

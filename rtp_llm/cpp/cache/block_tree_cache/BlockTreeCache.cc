@@ -22,7 +22,7 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
                                std::unique_ptr<BlockTreeTaskPool>       task_pool):
     config_(std::move(config)),
     tree_(std::move(tree)),
-    storage_backend_(config_.enable_remote_cache ? std::move(storage_backend) : nullptr),
+    storage_backend_(std::move(storage_backend)),
     transfer_dispatcher_(std::move(transfer_dispatcher)),
     task_pool_(std::move(task_pool)),
     evictor_(
@@ -248,14 +248,14 @@ BlockTreeKeySnapshot BlockTreeCache::getKeySnapshot(size_t limit) const {
 bool BlockTreeCache::getDeviceBlockDebugInfo(size_t                group_id,
                                              BlockIdxType          block_id,
                                              DeviceBlockDebugInfo& debug_info) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex>  lock(mutex_);
     const ReusableGroupLocation* location = tree_->reusableGroupLocation(group_id);
     if (location == nullptr) {
         return false;
     }
 
     const GroupSetPtr& group_set = tree_->groupSets()[location->group_set_id];
-    TreeNode*          node = group_set->findTreeNodeByDeviceBlock(location->member_group_id, block_id);
+    TreeNode*          node      = group_set->findTreeNodeByDeviceBlock(location->member_group_id, block_id);
     if (node == nullptr) {
         return false;
     }

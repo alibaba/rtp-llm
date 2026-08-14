@@ -51,11 +51,11 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
 
     std::shared_ptr<LoadAsyncContext> load_context =
         std::dynamic_pointer_cast<LoadAsyncContext>(init_result.async_context);
-    if (load_context && load_context->deferredMalloc()) {
+    if (load_context && load_context->needBackendMatch()) {
         load_context->startBackendMatch();
     } else {
         std::shared_ptr<AsyncContext> pending_async_context = std::move(init_result.async_context);
-        MallocResult incr_result = incrMalloc(malloc_info);
+        MallocResult                  incr_result           = incrMalloc(malloc_info);
         if (!incr_result.success) {
             pending_async_context.reset();
             FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};

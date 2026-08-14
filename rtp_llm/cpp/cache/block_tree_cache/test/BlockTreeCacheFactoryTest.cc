@@ -123,12 +123,12 @@ CacheConfig makeHybridConfig(bool independent_pools, bool disable_linear_reuse =
 CacheConfig makeSharedBackingCascadeConfig() {
     CacheConfig config = makeHybridConfig(/*independent_pools=*/false);
 
-    const std::shared_ptr<const KVCacheSpec>& linear_spec   = config.specForGroup(0);
-    const std::shared_ptr<const KVCacheSpec>& full_spec     = config.specForGroup(1);
-    const CacheGroupPolicy                   linear_policy = config.policyForGroup(0);
-    const CacheGroupPolicy                   full_policy   = config.policyForGroup(1);
-    const size_t                             linear_stride = config.kvBlockStrideBytesForGroup(0);
-    const size_t                             full_stride   = config.kvBlockStrideBytesForGroup(1);
+    const std::shared_ptr<const KVCacheSpec>& linear_spec     = config.specForGroup(0);
+    const std::shared_ptr<const KVCacheSpec>& full_spec       = config.specForGroup(1);
+    const CacheGroupPolicy                    linear_policy   = config.policyForGroup(0);
+    const CacheGroupPolicy                    full_policy     = config.policyForGroup(1);
+    const size_t                              linear_stride   = config.kvBlockStrideBytesForGroup(0);
+    const size_t                              full_stride     = config.kvBlockStrideBytesForGroup(1);
     std::vector<KVCacheSpecPtr>               reordered_specs = {
         full_spec->clone(),
         linear_spec->clone(),
@@ -489,8 +489,8 @@ protected:
     }
     void matchImpl(StorageRequest request, MatchDone done) override {
         ++match_calls_;
-        match_keys_             = *request.keys;
-        local_matched_blocks_   = request.local_matched_blocks_num;
+        match_keys_           = *request.keys;
+        local_matched_blocks_ = request.local_matched_blocks_num;
         match_handle_counts_.clear();
         for (const auto& handles : request.handles) {
             match_handle_counts_.push_back(handles.size());
@@ -561,11 +561,11 @@ TEST_F(BlockTreeCacheFactoryTest, SingleTypeBindsExistingTargetGroupAndPool) {
 }
 
 TEST_F(BlockTreeCacheFactoryTest, RemoteBackendResolverDoesNotKeepAttachedCacheAndAllocatorAlive) {
-    const auto config    = makeSingleConfig();
-    auto       allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
-    auto       shutdown_count = std::make_shared<size_t>(0);
-    auto       resolved_count = std::make_shared<size_t>(0);
-    auto       backend = std::make_shared<ShutdownCountingStorageBackend>(shutdown_count, resolved_count);
+    const auto    config         = makeSingleConfig();
+    auto          allocator      = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto          shutdown_count = std::make_shared<size_t>(0);
+    auto          resolved_count = std::make_shared<size_t>(0);
+    auto          backend        = std::make_shared<ShutdownCountingStorageBackend>(shutdown_count, resolved_count);
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_remote_cache = true;
     auto cache = createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{}, backend);
@@ -593,8 +593,8 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteMatchSkipsBackendWhenNoGroupSupportsPref
     policies[0].enable_prefix_reuse = false;
     config.setGroupPolicies(std::move(policies));
 
-    auto allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
-    auto backend   = std::make_shared<CountingStorageBackend>();
+    auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto          backend   = std::make_shared<CountingStorageBackend>();
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_remote_cache = true;
     auto cache = createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{}, backend);
@@ -607,18 +607,18 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteMatchSkipsBackendWhenNoGroupSupportsPref
 }
 
 TEST_F(BlockTreeCacheFactoryTest, RemoteMatchReceivesCompleteKeysAndExplicitLocalBoundary) {
-    const auto config    = makeSingleConfig();
-    auto       allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
-    auto       backend   = std::make_shared<CountingStorageBackend>();
+    const auto    config    = makeSingleConfig();
+    auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto          backend   = std::make_shared<CountingStorageBackend>();
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_remote_cache = true;
     auto cache = createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{}, backend);
     ASSERT_NE(cache, nullptr);
     allocator->attachBlockTreeCache(cache);
 
-    constexpr CacheKeyType local_key = 700;
-    const auto request_blocks = insertOneKeyThroughAllocator(config, allocator, local_key);
-    BlockTreeMatchResult result = cache->match({local_key, local_key + 1});
+    constexpr CacheKeyType local_key      = 700;
+    const auto             request_blocks = insertOneKeyThroughAllocator(config, allocator, local_key);
+    BlockTreeMatchResult   result         = cache->match({local_key, local_key + 1});
     EXPECT_EQ(result.matched_device_blocks, 1u);
     auto context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
     ASSERT_NE(context, nullptr);
@@ -643,16 +643,33 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteMatchReceivesCompleteKeysAndExplicitLoca
 }
 
 TEST_F(BlockTreeCacheFactoryTest, RemoteBackendInitFailureIsFatal) {
-    const auto config    = makeSingleConfig();
-    auto       allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
-    auto       backend   = std::make_shared<FailingInitStorageBackend>();
+    const auto    config    = makeSingleConfig();
+    auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto          backend   = std::make_shared<FailingInitStorageBackend>();
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_remote_cache = true;
 
     CoreDumpGuard guard;
-    EXPECT_ANY_THROW(
-        createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{}, backend));
+    EXPECT_ANY_THROW(createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{}, backend));
     EXPECT_EQ(backend->initCalls(), 1u);
+}
+
+TEST_F(BlockTreeCacheFactoryTest, RemoteBackendIsDroppedWhenRemoteCacheDisabled) {
+    const auto    config    = makeSingleConfig();
+    auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto          backend   = std::make_shared<CountingStorageBackend>();
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_remote_cache = false;
+
+    auto cache = createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{}, backend);
+    ASSERT_NE(cache, nullptr);
+    EXPECT_FALSE(cache->isRemoteCacheEnabled());
+    EXPECT_EQ(cache->storageBackend(), nullptr);
+    EXPECT_EQ(backend->matchCalls(), 0u);
+
+    const BlockTreeMatchResult result = cache->match({1, 2});
+    EXPECT_EQ(result.async_context, nullptr);
+    EXPECT_EQ(backend->matchCalls(), 0u);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, SwaGroupSetUsesDeclaredPolicyWindow) {
@@ -709,7 +726,7 @@ TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguo
     kv_cache_config.enable_host_cache        = true;
     kv_cache_config.host_cache_size_mb       = 1;
     kv_cache_config.enable_host_cache_pinned = false;
-    auto cache                           = createBlockTreeCache(config, kv_cache_config, allocator);
+    auto cache                               = createBlockTreeCache(config, kv_cache_config, allocator);
     ASSERT_NE(cache, nullptr);
 
     const auto target_groups = allocator->cacheGroups();
@@ -864,9 +881,9 @@ TEST_F(BlockTreeCacheFactoryTest, ProductionEvictionConfigurationPropagatesToBlo
     auto       allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
 
     KVCacheConfig kv_cache_config;
-    kv_cache_config.device_eviction_policy  = "FIFO";
-    kv_cache_config.host_eviction_policy    = "lfu";
-    kv_cache_config.disk_eviction_policy    = "LrU";
+    kv_cache_config.device_eviction_policy = "FIFO";
+    kv_cache_config.host_eviction_policy   = "lfu";
+    kv_cache_config.disk_eviction_policy   = "LrU";
 
     auto cache = createBlockTreeCache(config, kv_cache_config, allocator);
     ASSERT_NE(cache, nullptr);
@@ -876,7 +893,7 @@ TEST_F(BlockTreeCacheFactoryTest, ProductionEvictionConfigurationPropagatesToBlo
 }
 
 TEST_F(BlockTreeCacheFactoryTest, UnsupportedProductionEvictionPolicyFailsClosed) {
-    using PolicyField = std::string KVCacheConfig::*;
+    using PolicyField = std::string                        KVCacheConfig::*;
     const std::vector<std::pair<const char*, PolicyField>> policy_fields = {
         {"device", &KVCacheConfig::device_eviction_policy},
         {"host", &KVCacheConfig::host_eviction_policy},
@@ -1008,7 +1025,7 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkSharesPendingRel
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_host_cache  = true;
     kv_cache_config.host_cache_size_mb = 1;
-    auto cache                           = createBlockTreeCache(config, kv_cache_config, allocator);
+    auto cache                         = createBlockTreeCache(config, kv_cache_config, allocator);
     ASSERT_NE(cache, nullptr);
     allocator->attachBlockTreeCache(cache);
 
@@ -1078,8 +1095,8 @@ TEST_F(BlockTreeCacheFactoryTest, FailedWatermarkPlanStopsThisPassAndRecomputesO
     block_tree_cache_test::BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, scripted_copy);
     scripted_copy->enqueue(/*success=*/false);
 
-    auto backing = allocator->cacheGroups().front()->blockPool();
-    const auto blocks = insertOneKeyThroughAllocator(config, allocator, /*key=*/810);
+    auto       backing = allocator->cacheGroups().front()->blockPool();
+    const auto blocks  = insertOneKeyThroughAllocator(config, allocator, /*key=*/810);
     ASSERT_EQ(backing->freeBlocksNum(), 6u);
     block_tree_cache_test::BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.01);
     BlockReleaseBatch releases;
@@ -1107,8 +1124,8 @@ TEST_F(BlockTreeCacheFactoryTest, DeviceMinFreeDoesNotTriggerBlockTreeWatermarkE
     auto       allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
 
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_host_cache          = true;
-    kv_cache_config.host_cache_size_mb         = 1;
+    kv_cache_config.enable_host_cache            = true;
+    kv_cache_config.host_cache_size_mb           = 1;
     kv_cache_config.device_cache_min_free_blocks = 7;
     auto cache                                   = createBlockTreeCache(config, kv_cache_config, allocator);
     ASSERT_NE(cache, nullptr);
@@ -1160,9 +1177,9 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
     const auto    config    = makeIncompatibleFullGroupsConfig();
     auto          allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_host_cache    = true;
-    kv_cache_config.host_cache_size_mb   = 1;
-    auto cache                           = createBlockTreeCache(config, kv_cache_config, allocator);
+    kv_cache_config.enable_host_cache  = true;
+    kv_cache_config.host_cache_size_mb = 1;
+    auto cache                         = createBlockTreeCache(config, kv_cache_config, allocator);
     ASSERT_NE(cache, nullptr);
     allocator->attachBlockTreeCache(cache);
 
@@ -1415,11 +1432,11 @@ TEST_F(BlockTreeCacheFactoryTest, CreatesDiskCacheWithoutHostCache) {
     auto                                     allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
     block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_l3_only");
     KVCacheConfig                            kv_cache_config;
-    kv_cache_config.enable_host_cache             = false;
-    kv_cache_config.enable_disk_cache             = true;
-    kv_cache_config.disk_cache_size_mb            = 1;
-    kv_cache_config.disk_cache_paths              = disk_dir.path;
-    kv_cache_config.disk_cache_buffered_io        = true;
+    kv_cache_config.enable_host_cache      = false;
+    kv_cache_config.enable_disk_cache      = true;
+    kv_cache_config.disk_cache_size_mb     = 1;
+    kv_cache_config.disk_cache_paths       = disk_dir.path;
+    kv_cache_config.disk_cache_buffered_io = true;
 
     auto cache = createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{});
     ASSERT_NE(cache, nullptr);
@@ -1440,10 +1457,10 @@ TEST_F(BlockTreeCacheFactoryTest, DiskStagingBlockCountPropagatesAndValidates) {
 
     const auto makeDiskKvCacheConfig = [](const std::string& disk_path) {
         KVCacheConfig kv_cache_config;
-        kv_cache_config.enable_host_cache         = false;
-        kv_cache_config.enable_disk_cache         = true;
-        kv_cache_config.disk_cache_size_mb        = 1;
-        kv_cache_config.disk_cache_paths          = disk_path;
+        kv_cache_config.enable_host_cache  = false;
+        kv_cache_config.enable_disk_cache  = true;
+        kv_cache_config.disk_cache_size_mb = 1;
+        kv_cache_config.disk_cache_paths   = disk_path;
         return kv_cache_config;
     };
 
@@ -1471,7 +1488,7 @@ TEST_F(BlockTreeCacheFactoryTest, DiskStagingBlockCountPropagatesAndValidates) {
         auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
         KVCacheConfig kv_cache_config;
         kv_cache_config.disk_cache_staging_block_count = 0;
-        auto cache = createBlockTreeCache(config, kv_cache_config, allocator);
+        auto cache                                     = createBlockTreeCache(config, kv_cache_config, allocator);
         ASSERT_NE(cache, nullptr);
     }
 }
@@ -1548,22 +1565,21 @@ TEST_F(BlockTreeCacheFactoryTest, RejectsTierEnabledWithoutItsOwnCapacity) {
         auto                                     allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
         block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_l3_no_capacity");
         KVCacheConfig                            kv_cache_config;
-        kv_cache_config.enable_disk_cache         = true;
-        kv_cache_config.disk_cache_size_mb        = 0;
-        kv_cache_config.disk_cache_paths          = disk_dir.path;
+        kv_cache_config.enable_disk_cache  = true;
+        kv_cache_config.disk_cache_size_mb = 0;
+        kv_cache_config.disk_cache_paths   = disk_dir.path;
         expectFactoryRejects(config, allocator, kv_cache_config);
     }
 
     {
         auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
         KVCacheConfig kv_cache_config;
-        kv_cache_config.enable_disk_cache         = true;
-        kv_cache_config.disk_cache_size_mb        = 1;
-        kv_cache_config.disk_cache_paths          = "";
+        kv_cache_config.enable_disk_cache  = true;
+        kv_cache_config.disk_cache_size_mb = 1;
+        kv_cache_config.disk_cache_paths   = "";
         expectFactoryRejects(config, allocator, kv_cache_config);
     }
 }
-
 
 TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
     if (!block_tree_cache_test::cudaAvailable()) {
@@ -1605,13 +1621,13 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
 
     block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_full_swa");
     KVCacheConfig                            kv_cache_config;
-    kv_cache_config.enable_device_cache           = true;
-    kv_cache_config.enable_host_cache             = true;
-    kv_cache_config.host_cache_size_mb            = 1;
-    kv_cache_config.enable_disk_cache             = true;
-    kv_cache_config.disk_cache_size_mb            = 1;
-    kv_cache_config.disk_cache_paths              = disk_dir.path;
-    kv_cache_config.disk_cache_buffered_io        = true;
+    kv_cache_config.enable_device_cache    = true;
+    kv_cache_config.enable_host_cache      = true;
+    kv_cache_config.host_cache_size_mb     = 1;
+    kv_cache_config.enable_disk_cache      = true;
+    kv_cache_config.disk_cache_size_mb     = 1;
+    kv_cache_config.disk_cache_paths       = disk_dir.path;
+    kv_cache_config.disk_cache_buffered_io = true;
 
     BlockTreeCachePtr factory_cache =
         createBlockTreeCache(cache_config, kv_cache_config, allocator, ParallelismConfig{});

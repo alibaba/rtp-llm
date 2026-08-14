@@ -272,20 +272,17 @@ size_t computeGroupSetPayloadBytes(const CacheConfig& cache_config, const std::v
     return payload_bytes;
 }
 
-std::vector<BlockInfo> resolveStorageBuffers(const CacheTopology&                    topology,
+std::vector<BlockInfo> resolveStorageBuffers(const CacheTopology&                   topology,
                                              const std::vector<DeviceBlockPoolPtr>& group_pools,
                                              int                                    layer_id,
                                              int                                    group_id,
                                              int                                    block_id) {
-    RTP_LLM_CHECK_WITH_INFO(group_id >= 0 && static_cast<size_t>(group_id) < group_pools.size(),
-                            "invalid storage group_id=%d",
-                            group_id);
+    RTP_LLM_CHECK_WITH_INFO(
+        group_id >= 0 && static_cast<size_t>(group_id) < group_pools.size(), "invalid storage group_id=%d", group_id);
     const auto& group = topology.groupById(static_cast<size_t>(group_id));
     const auto  layer = std::find(group.layer_ids.begin(), group.layer_ids.end(), layer_id);
-    RTP_LLM_CHECK_WITH_INFO(layer != group.layer_ids.end(),
-                            "layer_id=%d does not belong to storage group_id=%d",
-                            layer_id,
-                            group_id);
+    RTP_LLM_CHECK_WITH_INFO(
+        layer != group.layer_ids.end(), "layer_id=%d does not belong to storage group_id=%d", layer_id, group_id);
     auto buffers = group_pools[static_cast<size_t>(group_id)]->convertIndexToBuffer(
         static_cast<int>(std::distance(group.layer_ids.begin(), layer)), block_id);
     RTP_LLM_CHECK_WITH_INFO(!buffers.empty(), "storage group_id=%d returned no block buffers", group_id);
@@ -337,8 +334,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     const auto device_eviction_policy = parseEvictionPolicy(kv_cache_config.device_eviction_policy);
     const auto host_eviction_policy   = parseEvictionPolicy(kv_cache_config.host_eviction_policy);
     const auto disk_eviction_policy   = parseEvictionPolicy(kv_cache_config.disk_eviction_policy);
-    if (!device_eviction_policy.has_value() || !host_eviction_policy.has_value()
-        || !disk_eviction_policy.has_value()) {
+    if (!device_eviction_policy.has_value() || !host_eviction_policy.has_value() || !disk_eviction_policy.has_value()) {
         RTP_LLM_LOG_ERROR("createBlockTreeCache: unsupported eviction policy, device=%s host=%s disk=%s",
                           kv_cache_config.device_eviction_policy.c_str(),
                           kv_cache_config.host_eviction_policy.c_str(),
@@ -482,10 +478,13 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     }
 
     BlockTreeCacheConfig config;
-    config.enable_device_cache    = kv_cache_config.enable_device_cache;
-    config.enable_host_cache      = host_enabled;
-    config.enable_disk_cache      = disk_enabled;
-    config.enable_remote_cache    = kv_cache_config.enable_remote_cache && storage_backend != nullptr;
+    config.enable_device_cache = kv_cache_config.enable_device_cache;
+    config.enable_host_cache   = host_enabled;
+    config.enable_disk_cache   = disk_enabled;
+    config.enable_remote_cache = kv_cache_config.enable_remote_cache && storage_backend != nullptr;
+    if (!config.enable_remote_cache) {
+        storage_backend = nullptr;
+    }
     config.device_eviction_policy = *device_eviction_policy;
     config.host_eviction_policy   = *host_eviction_policy;
     config.disk_eviction_policy   = *disk_eviction_policy;
@@ -545,20 +544,20 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
                                                    std::move(transfer_dispatcher),
                                                    std::move(task_pool));
     if (result->isRemoteCacheEnabled()) {
-        const auto                                   storage_topology = cache_config.topologyPtr();
-        const auto                                   resolver_pools   = group_pools;
-        std::vector<std::shared_ptr<IBlockPool>> storage_group_pools(group_pools.begin(), group_pools.end());
-        RTP_LLM_CHECK_WITH_INFO(
-            result->storageBackend()->init(
-                storage_topology,
-                std::move(storage_group_pools),
-                [storage_topology, resolver_pools](int layer_id, int group_id, int block_id) {
-                    return resolveStorageBuffers(*storage_topology, resolver_pools, layer_id, group_id, block_id);
-                },
-                [cache = result.get()](const std::vector<BlockReleaseReceipt>& receipts) {
-                    cache->onBlocksReleased(receipts);
-                }),
-            "StorageBackend init failed");
+        const auto                               storage_topology = cache_config.topologyPtr();
+        const auto                               resolver_pools   = group_pools;
+        std::vector<std::shared_ptr<IBlockPool>> storage_device_pools(group_pools.begin(), group_pools.end());
+        RTP_LLM_CHECK_WITH_INFO(result->storageBackend()->init(
+                                    storage_topology,
+                                    std::move(storage_device_pools),
+                                    [storage_topology, resolver_pools](int layer_id, int group_id, int block_id) {
+                                        return resolveStorageBuffers(
+                                            *storage_topology, resolver_pools, layer_id, group_id, block_id);
+                                    },
+                                    [cache = result.get()](const std::vector<BlockReleaseReceipt>& receipts) {
+                                        cache->onBlocksReleased(receipts);
+                                    }),
+                                "StorageBackend init failed");
     }
     if (!result->init()) {
         RTP_LLM_LOG_ERROR("BlockTreeCache init failed");

@@ -299,12 +299,12 @@ void IBlockPool::decRefOneNoLock(BlockIdxType block, size_t ref_type_index) {
 }
 
 bool IBlockPool::isActiveTreeCachedBlockNoLock(BlockIdxType block) const {
-    const size_t request_index     = refTypeIndex(BlockRefType::REQUEST);
-    const size_t connector_index   = refTypeIndex(BlockRefType::STORAGE_BACKEND);
-    const size_t block_cache_index = refTypeIndex(BlockRefType::BLOCK_CACHE);
+    const size_t request_index         = refTypeIndex(BlockRefType::REQUEST);
+    const size_t storage_backend_index = refTypeIndex(BlockRefType::STORAGE_BACKEND);
+    const size_t block_cache_index     = refTypeIndex(BlockRefType::BLOCK_CACHE);
     return metric_refcounts_by_type_[block_cache_index][block] > 0
            && (metric_refcounts_by_type_[request_index][block] > 0
-               || metric_refcounts_by_type_[connector_index][block] > 0);
+               || metric_refcounts_by_type_[storage_backend_index][block] > 0);
 }
 
 void IBlockPool::adjustActiveTreeCachedBlocksNoLock(bool was_active, bool is_active) {
@@ -320,7 +320,7 @@ void IBlockPool::adjustActiveTreeCachedBlocksNoLock(bool was_active, bool is_act
 void IBlockPool::freeAllocatedBlockNoLock(BlockIdxType block) {
     const bool was_active = isActiveTreeCachedBlockNoLock(block);
     for (size_t ref_type_index = 0; ref_type_index < kBlockRefTypeCount; ++ref_type_index) {
-        const uint32_t metric_refcount                   = metric_refcounts_by_type_[ref_type_index][block];
+        const uint32_t metric_refcount = metric_refcounts_by_type_[ref_type_index][block];
         if (metric_refcount > 0) {
             assert(referenced_block_counts_[ref_type_index] > 0);
             referenced_block_counts_[ref_type_index] -= 1;

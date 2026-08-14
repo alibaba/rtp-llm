@@ -20,9 +20,9 @@ class BlockTransferDispatcher;
 class BlockTreeTaskPool;
 
 struct BlockTreeMatchResult {
-    size_t                         matched_device_blocks{0};
-    std::vector<MultiNodeResource> matched_device_resources;
-    std::shared_ptr<LoadAsyncContext> async_context;
+    size_t                                              matched_device_blocks{0};
+    std::vector<MultiNodeResource>                      matched_device_resources;
+    std::shared_ptr<LoadAsyncContext>                   async_context;
     std::vector<BlockTreeCacheReuseTimeMetricsSnapshot> reuse_time_metrics_snapshots;
 };
 
@@ -33,43 +33,41 @@ public:
     // Invoked with the shared cache mutex held.
     using SettledFn = std::function<void(bool tree_data_mutated, bool check_watermark)>;
 
-    BlockTreeLoader(BlockTree*                     tree,
-                    BlockTreeEvictor&              evictor,
-                    BlockTransferDispatcher*       transfer_dispatcher,
-                    BlockTreeTaskPool*             task_pool,
-                    BlockTreeCacheMetricsReporter& metrics_reporter,
-                    std::mutex&                    mutex,
-                    int                            disk_timeout_ms,
-                    int                            host_timeout_ms,
-                    bool                           enable_device_cache,
+    BlockTreeLoader(BlockTree*                      tree,
+                    BlockTreeEvictor&               evictor,
+                    BlockTransferDispatcher*        transfer_dispatcher,
+                    BlockTreeTaskPool*              task_pool,
+                    BlockTreeCacheMetricsReporter&  metrics_reporter,
+                    std::mutex&                     mutex,
+                    int                             disk_timeout_ms,
+                    int                             host_timeout_ms,
+                    bool                            enable_device_cache,
                     std::shared_ptr<StorageBackend> storage_backend,
-                    SettledFn                      settled);
+                    SettledFn                       settled);
 
     // The caller must hold the shared BlockTreeCache mutex.
     BlockTreeMatchResult matchLocked(const CacheKeysType& cache_keys);
-    void releaseMatchedResourcesLocked(const std::vector<MultiNodeResource>& resources);
-    BlockIndicesType matchedBlocksForGroup(size_t                                group_id,
-                                           const std::vector<MultiNodeResource>& matched_resources) const;
-    // The caller must hold the shared BlockTreeCache mutex.
-    bool cancelLoad(const std::shared_ptr<AsyncContext>& context);
-    void shutdown();
+    void                 releaseMatchedResourcesLocked(const std::vector<MultiNodeResource>& resources);
+    BlockIndicesType     matchedBlocksForGroup(size_t                                group_id,
+                                               const std::vector<MultiNodeResource>& matched_resources) const;
+    bool                 cancelLoad(const std::shared_ptr<AsyncContext>& context);
+    void                 shutdown();
 
 private:
     bool validMatch(std::vector<TreeNode*>& path, std::vector<bool>& candidate_valid) const;
-    std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>
-    collectReuseTimeSnapshots(const std::vector<TreeNode*>& path,
-                              size_t                        matched_device_blocks,
-                              int64_t                       access_time_us) const;
+    std::vector<BlockTreeCacheReuseTimeMetricsSnapshot> collectReuseTimeSnapshots(const std::vector<TreeNode*>& path,
+                                                                                  size_t  matched_device_blocks,
+                                                                                  int64_t access_time_us) const;
     BlockTreeMatchResult createMatchResult(std::vector<TreeNode*>& path, const CacheKeysType& cache_keys);
-    StorageRequest makeStorageRequest(const CacheKeysType& cache_keys, size_t local_matched_blocks_num) const;
-    bool commitLoad(const std::shared_ptr<LoadAsyncContext>& context);
-    bool releaseDeviceLoadSourcesLocked(const LoadAsyncContext& context);
+    StorageRequest       makeStorageRequest(const CacheKeysType& cache_keys, size_t local_matched_blocks_num) const;
+    bool                 commitLoad(const std::shared_ptr<LoadAsyncContext>& context);
+    bool                 releaseDeviceLoadSourcesLocked(const LoadAsyncContext& context);
     void                 abortLoadLocked(const std::vector<TransferDescriptor>& load_descs,
                                          const std::vector<bool>&               joined_loads,
                                          size_t                                 prepared_desc_count,
                                          uint64_t                               context_id);
-    void runLoadTask(const LoadTaskRunner::TaskPtr& task);
-    bool settleLoadLocked(LoadTaskRunner::Task& task, bool copy_success);
+    void                 runLoadTask(const LoadTaskRunner::TaskPtr& task);
+    bool                 settleLoadLocked(LoadTaskRunner::Task& task, bool copy_success);
 
     bool changeTransferState(TreeNode*             node,
                              size_t                group_set_id,
@@ -85,7 +83,7 @@ private:
     int                                     disk_timeout_ms_{0};
     int                                     host_timeout_ms_{0};
     bool                                    enable_device_cache_{true};
-    std::shared_ptr<StorageBackend>                              storage_backend_;
+    std::shared_ptr<StorageBackend>         storage_backend_;
     SettledFn                               settled_;
     LoadTaskRunner                          load_task_runner_;
     LoadJoinRegistry                        load_join_registry_;

@@ -80,16 +80,16 @@ HybridKVCacheAllocator::freeBlocksInGroup(int group_id, const BlockIndicesType& 
 }
 
 std::shared_ptr<LoadAsyncContext> HybridKVCacheAllocator::prepareKVCache(const CacheKeysType&  cache_keys,
-                                            BatchKVCacheResource&                kv_resource,
-                                            const std::shared_ptr<CPSlotMapper>& cp_mapper,
-                                            PreparedKVCache&                     prepared) {
+                                                                         BatchKVCacheResource& kv_resource,
+                                                                         const std::shared_ptr<CPSlotMapper>& cp_mapper,
+                                                                         PreparedKVCache& prepared) {
     if (!block_tree_cache_ || cache_keys.empty()) {
         return nullptr;
     }
-    const int            cp_scale     = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
-    BlockTreeMatchResult match_result = block_tree_cache_->match(cache_keys);
+    const int                         cp_scale     = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
+    BlockTreeMatchResult              match_result = block_tree_cache_->match(cache_keys);
     std::shared_ptr<LoadAsyncContext> load_context = std::move(match_result.async_context);
-    prepared.matched_device_blocks = match_result.matched_device_blocks;
+    prepared.matched_device_blocks                 = match_result.matched_device_blocks;
     prepared.total_logical_blocks =
         load_context ? load_context->localMatchedBlocks() : match_result.matched_device_blocks;
     if (prepared.total_logical_blocks == 0 && !load_context) {
@@ -153,10 +153,10 @@ std::shared_ptr<LoadAsyncContext> HybridKVCacheAllocator::prepareKVCache(const C
 }
 
 MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& malloc_info) {
-    auto&                 kv_resource    = malloc_info.batch_kv_cache_resource;
-    const int             seq_len        = malloc_info.complete_token_ids->seqLength();
-    const auto&           cp_mapper      = cp_slot_mapper_;
-    const int reuse_unit_tokens = cp_mapper ? cp_mapper->reuseBlockTokens(config_) : seqSizePerBlock();
+    auto&       kv_resource       = malloc_info.batch_kv_cache_resource;
+    const int   seq_len           = malloc_info.complete_token_ids->seqLength();
+    const auto& cp_mapper         = cp_slot_mapper_;
+    const int   reuse_unit_tokens = cp_mapper ? cp_mapper->reuseBlockTokens(config_) : seqSizePerBlock();
 
     const CacheKeysType& cache_keys         = kv_resource->cacheKeys(0);
     int64_t              match_cost_time_us = 0;
@@ -165,16 +165,16 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     bool                 load_attempted = false;
     prepared.referenced_blocks.resize(static_cast<size_t>(kv_resource->groupNums()));
     std::shared_ptr<LoadAsyncContext> load_context;
-    BlockReleaseBatch releases;
+    BlockReleaseBatch                 releases;
 
     if (malloc_info.enable_cache_lookup) {
         CacheKeysType match_keys = cpCanonicalCacheKeys(cp_mapper, cache_keys);
         match_keys.resize(std::min(match_keys.size(), maxReusableMatchKeys(seq_len, reuse_unit_tokens)));
         const int64_t begin_us = currentTimeUs();
-        load_context = prepareKVCache(match_keys, *kv_resource, cp_mapper, prepared);
-        match_end_time_us  = currentTimeUs();
-        match_cost_time_us = match_end_time_us - begin_us;
-        load_attempted     = load_context != nullptr;
+        load_context           = prepareKVCache(match_keys, *kv_resource, cp_mapper, prepared);
+        match_end_time_us      = currentTimeUs();
+        match_cost_time_us     = match_end_time_us - begin_us;
+        load_attempted         = load_context != nullptr;
         kv_resource->cacheResource(0).setDeviceReuseBlockNum(prepared.matched_device_blocks);
     }
 
@@ -190,7 +190,7 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         return result;
     };
 
-    if (load_context && load_context->deferredMalloc()) {
+    if (load_context && load_context->needBackendMatch()) {
         auto self              = shared_from_this();
         auto deferred_prepared = std::make_shared<PreparedKVCache>(std::move(prepared));
         load_context->setMatchCallback([self = std::move(self), malloc_info, deferred_prepared](
