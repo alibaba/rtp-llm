@@ -33,7 +33,10 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector 
     BaseFormatDetector,
 )
 from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import ReasoningParser
-from rtp_llm.openai.renderers.sglang_helpers.token_normalizer import TokenNormalizer
+from rtp_llm.openai.renderers.sglang_helpers.token_normalizer import (
+    _MAX_UTF8_WINDOW,
+    TokenNormalizer,
+)
 from rtp_llm.utils.base_model_datatypes import GenerateOutput
 
 
@@ -439,7 +442,12 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         # If normalizer didn't yield anything (buffered for \uFFFD resolution),
         # don't update so next iteration has full context for sliding window.
         if normalizer_yielded and new_token_ids:
-            status.last_token_length = len(new_token_ids)
+            # Keep enough context for the next iteration's UTF-8 resolution.  A
+            # multi-byte character that spans a step boundary is resolved from
+            # prev_token_id + new_token_ids, so its head bytes live in the previous
+            # step.  Using only len(new_token_ids) would drop those head bytes and
+            # make _calculate_yielded_length see a leading \uFFFD it cannot resolve.
+            status.last_token_length = min(len(status.output_ids), _MAX_UTF8_WINDOW)
             status.last_output_ids = status.output_ids
 
         if collected_deltas:
