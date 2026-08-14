@@ -997,6 +997,22 @@ void CudaGraphRunner::initCapture() {
             capture_range_ = getPrefillSequenceLengthsToCapture();
         } else {
             capture_range_ = getDecodeBatchSizesToCapture();
+            // Decode buckets are batch sizes, and canRun() accepts any batch up to the largest
+            // captured bucket. max_bs_ comes from the role's CONCURRENCY_LIMIT, which bounds the
+            // requests a role admits but not the number of decode streams handed to it by its PD
+            // peer, so a batch between max_bs_ and the largest bucket is reachable. Size the
+            // buffers for the largest bucket: replaying into buffers that only hold max_bs_ rows
+            // makes the output slice() clamp silently, and the caller then reshapes a short tensor
+            // by the real batch size.
+            if (!capture_range_.empty() && capture_range_.back() > max_bs_) {
+                RTP_LLM_LOG_INFO(
+                    "decode capture buckets reach %d beyond max_bs_ %d; sizing graph buffers for %d",
+                    capture_range_.back(),
+                    max_bs_,
+                    capture_range_.back());
+                max_bs_        = capture_range_.back();
+                max_num_token_ = max_bs_ * num_tokens_per_bs_;
+            }
         }
 
         PyModelInputs inputs;
