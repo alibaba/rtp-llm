@@ -145,6 +145,8 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     const torch::Tensor success_cpu       = copyToPinnedCpuAsync(sampler_output.success, need_d2h_sync);
     const torch::Tensor custom_output_cpu =
         copyToPinnedCpuAsync(merge_outputs.model_output.custom_output, need_d2h_sync);
+    const torch::Tensor custom_output_valid_mask_cpu =
+        copyToPinnedCpuAsync(merge_outputs.model_output.custom_output_valid_mask, need_d2h_sync);
     syncPinnedCpuCopies(need_d2h_sync);
     batch_idx_out = 0;
     RTP_LLM_LOG_DEBUG("new_tokens = [%s]", tensorDebugStringWithData<int32_t>(new_tokens_all).c_str());
@@ -164,12 +166,29 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
         // custom_output contains context rows only; decode streams are placed
         // before context streams in the merged model batch.
         torch::Tensor batch_custom_output;
+        bool          custom_output_valid = false;
+        const bool custom_output_failed = !merge_outputs.model_output.custom_output_error.empty()
+                                          && batch_idx_in >= total_decode_batch_size;
         if (custom_output_cpu.defined() && batch_idx_in >= total_decode_batch_size
             && batch_idx_in - total_decode_batch_size + cur_batch_size <= custom_output_cpu.size(0)) {
-            batch_custom_output = custom_output_cpu.narrow(0, batch_idx_in - total_decode_batch_size, cur_batch_size);
+            const int context_row = batch_idx_in - total_decode_batch_size;
+            custom_output_valid = !custom_output_valid_mask_cpu.defined();
+            if (custom_output_valid_mask_cpu.defined()
+                && context_row + cur_batch_size <= custom_output_valid_mask_cpu.size(0)) {
+                const auto* mask = custom_output_valid_mask_cpu.data_ptr<bool>() + context_row;
+                custom_output_valid = mask[0];
+                for (int i = 1; i < cur_batch_size; ++i) {
+                    RTP_LLM_CHECK_WITH_INFO(mask[i] == custom_output_valid,
+                                            "custom output validity differs within stream batch");
+                }
+            }
+            if (custom_output_valid) {
+                batch_custom_output = custom_output_cpu.narrow(0, context_row, cur_batch_size);
+            }
         }
 
-        auto task = [&, stream, batch_idx_in, batch_idx_out, token_offset, dispatch_stream, batch_custom_output]() {
+        auto task = [&, stream, batch_idx_in, batch_idx_out, token_offset, dispatch_stream, batch_custom_output,
+                     custom_output_valid, custom_output_failed]() {
             c10::InferenceMode           inference_guard(true);
             cuda_graph::GraphStreamGuard stream_guard(dispatch_stream);
             dispatchSingleStream(stream,
@@ -180,7 +199,9 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
                                  return_all_probs,
                                  new_tokens_all,
                                  success_cpu,
-                                 batch_custom_output);
+                                 batch_custom_output,
+                                 custom_output_valid,
+                                 custom_output_failed);
         };
 
         if (thread_pool_) {
@@ -210,7 +231,9 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                                   bool                 return_all_probs,
                                                   const torch::Tensor& new_tokens_all,
                                                   const torch::Tensor& success_cpu,
-                                                  const torch::Tensor& batch_custom_output) const {
+                                                  const torch::Tensor& batch_custom_output,
+                                                  bool                 custom_output_valid,
+                                                  bool                 custom_output_failed) const {
 
     const auto&  model_output   = merge_outputs.model_output;
     const auto&  sampler_output = merge_outputs.sampler_output;
@@ -381,6 +404,10 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     }
 
     auto error_info = collectStreamSamplerError(sampler_output, success_cpu, batch_idx_in, cur_batch_size);
+    if (custom_output_failed) {
+        error_info = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
+                               "custom output processor failed: " + model_output.custom_output_error);
+    }
     if (asyncDebugEnabled() && success_cpu.defined()) {
         for (int i = 0; i < cur_batch_size; ++i) {
             if (!(success_cpu.data_ptr<bool>()[batch_idx_in + i])) {
@@ -415,7 +442,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                  loss,
                                  src_batch_indices,
                                  all_hidden_states,
-                                 batch_custom_output,
+                                 custom_output_valid ? batch_custom_output : torch::Tensor(),
                                  /*update_remote_generate=*/true,
                                  /*force_update_info=*/false,
                                  std::move(prompt_logits_output),

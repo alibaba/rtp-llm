@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/engine_base/executor_base/PostLayersProcessor.h"
 
 #include <pybind11/stl.h>
+#include <cerrno>
+#include <climits>
 #include <stdexcept>
 // torch/extension.h registers the pybind11 casters for at::Tensor; without it
 // handler_.attr(...)(**kwargs).cast<torch::Tensor>() throws "Unregistered type".
@@ -15,6 +17,27 @@
 namespace py = pybind11;
 
 namespace rtp_llm {
+
+namespace {
+
+int parseSelectorEnv(const char* name, bool require_negative) {
+    const char* value = std::getenv(name);
+    errno             = 0;
+    char* end         = nullptr;
+    const long parsed = std::strtol(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || parsed < INT_MIN || parsed > INT_MAX) {
+        throw std::runtime_error(std::string(name) + " must be a valid int32 integer");
+    }
+    if (require_negative && parsed >= 0) {
+        throw std::runtime_error(std::string(name) + " must be negative");
+    }
+    if (!require_negative && parsed < 0) {
+        throw std::runtime_error(std::string(name) + " must be non-negative");
+    }
+    return static_cast<int>(parsed);
+}
+
+}  // namespace
 
 PostLayersProcessor::PostLayersProcessor() = default;
 
@@ -70,6 +93,11 @@ void PostLayersProcessor::setHandler(py::object handler) {
             throw std::runtime_error(
                 "selected_hidden_states requires exactly one of CUSTOM_OUTPUT_TOKEN_POSITION or "
                 "CUSTOM_OUTPUT_TRACKED_TOKEN_ID");
+        }
+        if (has_position) {
+            parseSelectorEnv("CUSTOM_OUTPUT_TOKEN_POSITION", true);
+        } else {
+            parseSelectorEnv("CUSTOM_OUTPUT_TRACKED_TOKEN_ID", false);
         }
     }
 
@@ -132,12 +160,10 @@ torch::Tensor PostLayersProcessor::runOnContext(const torch::Tensor& lm_rows, in
     if (context_batch_size <= 0) {
         return {};
     }
-    try {
-        return invokeHandler(lm_rows.narrow(0, decode_batch_size, context_batch_size));
-    } catch (const std::exception& e) {
-        RTP_LLM_LOG_ERROR("post-layers handler failed, custom_output dropped for this step: %s", e.what());
-        return {};
-    }
+    // A configured custom output is part of the request contract. Propagate
+    // handler failures so callers never receive a successful response with a
+    // silently missing custom_output.
+    return invokeHandler(lm_rows.narrow(0, decode_batch_size, context_batch_size));
 }
 
 void PostLayersProcessor::warmup(int64_t hidden_size, c10::ScalarType dtype) const {

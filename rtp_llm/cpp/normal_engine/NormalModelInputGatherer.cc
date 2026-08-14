@@ -604,9 +604,18 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
                                     "custom output token at position %d was consumed by prefix cache (reuse=%d)",
                                     target_position,
                                     stream->reuseLength());
+            const int chunk_begin = stream->prefixLength();
+            const int chunk_end   = chunk_begin + input_tokens.size();
+            // -1 means that this request's selected position is outside the
+            // current chunk. PyWrappedModel filters such rows before invoking
+            // the handler, and the dispatcher preserves the stream's previous
+            // custom output. Legacy last-hidden handlers remain valid on every
+            // context step.
             model_input.custom_output_indexes.data_ptr<int32_t>()[prefill_batch_idx] =
                 target_position < 0 ? ctx.token_idx + input_tokens.size() - 1 :
-                                      ctx.token_idx + target_position - stream->reuseLength();
+                target_position >= chunk_begin && target_position < chunk_end ?
+                    ctx.token_idx + target_position - chunk_begin :
+                    -1;
 
             RETURN_IF_STATUS_ERROR(
                 validateMultimodalProducerContract(stream, input_tokens.size(), config_.is_multimodal, &input_masks));

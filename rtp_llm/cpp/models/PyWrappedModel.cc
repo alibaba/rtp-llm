@@ -1047,18 +1047,44 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         }
 
         torch::Tensor custom_output;
+        torch::Tensor custom_output_valid_mask;
+        std::string   custom_output_error;
         if (post_layers_processor_ && post_layers_processor_->shouldRunOnContext(has_context_request)) {
             // lm_output rows: decode rows first, context rows at the tail.
             torch::Tensor lm_rows = need_all_logits ?
                                         torch::index_select(hidden, 0, lm_output_indexes_device.to(torch::kLong)) :
                                         last_hidden;
-            if (inputs.custom_output_indexes.defined() && inputs.custom_output_indexes.numel() > 0) {
-                buffer_holder_.hold_host(inputs.custom_output_indexes);
-                auto indexes = inputs.custom_output_indexes.to(torch::kCUDA, /*non_blocking=*/true).to(torch::kLong);
-                auto selected = torch::index_select(hidden, 0, indexes);
-                custom_output = post_layers_processor_->runOnContext(selected, 0);
-            } else {
-                custom_output = post_layers_processor_->runOnContext(lm_rows, inputs.sequence_lengths.size(0));
+            try {
+                if (inputs.custom_output_indexes.defined() && inputs.custom_output_indexes.numel() > 0) {
+                    buffer_holder_.hold_host(inputs.custom_output_indexes);
+                    auto indexes =
+                        inputs.custom_output_indexes.to(torch::kCUDA, /*non_blocking=*/true).to(torch::kLong);
+                    custom_output_valid_mask = indexes.ge(0);
+                    auto valid_indexes       = indexes.masked_select(custom_output_valid_mask);
+                    if (valid_indexes.numel() > 0) {
+                        auto selected       = torch::index_select(hidden, 0, valid_indexes);
+                        auto compact_output = post_layers_processor_->runOnContext(selected, 0);
+                        if (compact_output.defined()) {
+                            auto full_sizes = compact_output.sizes().vec();
+                            full_sizes[0]   = indexes.size(0);
+                            custom_output   = torch::zeros(full_sizes, compact_output.options());
+                            auto valid_rows = torch::nonzero(custom_output_valid_mask).reshape({-1});
+                            custom_output.index_copy_(0, valid_rows, compact_output);
+                        }
+                    }
+                } else {
+                    custom_output =
+                        post_layers_processor_->runOnContext(lm_rows, inputs.sequence_lengths.size(0));
+                }
+            } catch (const std::exception& error) {
+                custom_output_error = error.what();
+                const auto traceback = custom_output_error.find("\n\nAt:");
+                if (traceback != std::string::npos) {
+                    custom_output_error.resize(traceback);
+                }
+                RTP_LLM_LOG_ERROR("custom output processor failed: %s", custom_output_error.c_str());
+                custom_output            = torch::Tensor();
+                custom_output_valid_mask = torch::Tensor();
             }
         }
         printTorchTensorData(logits, "logits");
@@ -1081,7 +1107,9 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         if (need_all_logits) {
             auto            last_logits = torch::index_select(logits, 0, lm_output_indexes_device.to(torch::kLong));
             GptModelOutputs outputs{last_logits, last_hidden, hidden, logits, softmax_result_t};
-            outputs.custom_output = custom_output;
+            outputs.custom_output            = custom_output;
+            outputs.custom_output_valid_mask = custom_output_valid_mask;
+            outputs.custom_output_error      = custom_output_error;
             return outputs;
         }
 
@@ -1089,7 +1117,9 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             hidden = merged_eagle3_hidden;
         }
         GptModelOutputs outputs{logits, last_hidden, hidden, torch::Tensor(), softmax_result_t};
-        outputs.custom_output = custom_output;
+        outputs.custom_output            = custom_output;
+        outputs.custom_output_valid_mask = custom_output_valid_mask;
+        outputs.custom_output_error      = custom_output_error;
         return outputs;
     } else {
         return {torch::Tensor(), torch::Tensor(), hidden};

@@ -40,7 +40,9 @@ private:
                               bool                 return_all_probs,
                               const torch::Tensor& new_tokens_all,
                               const torch::Tensor& success_cpu,
-                              const torch::Tensor& batch_custom_output = {}) const;
+                              const torch::Tensor& batch_custom_output = {},
+                              bool                 custom_output_valid  = false,
+                              bool                 custom_output_failed = false) const;
 
 private:
     std::vector<int64_t>                       output_vocab_ids_;

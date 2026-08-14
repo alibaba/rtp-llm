@@ -2,6 +2,7 @@ import functools
 import json
 import logging
 import os
+from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Callable, Dict, Optional, Union
 
 import grpc
@@ -43,6 +44,70 @@ from rtp_llm.utils.grpc_util import (
 
 MAX_GRPC_TIMEOUT_SECONDS = 3600
 JsonableOption = Optional[Union[str, Dict[str, Any], bool]]
+
+
+@dataclass(frozen=True)
+class CustomOutputSelector:
+    """Validated deployment selector, created once per RPC client."""
+
+    relative_position: Optional[int] = None
+    tracked_token_id: Optional[int] = None
+
+    @classmethod
+    def from_env(cls) -> "CustomOutputSelector":
+        position_raw = os.environ.get("CUSTOM_OUTPUT_TOKEN_POSITION")
+        token_id_raw = os.environ.get("CUSTOM_OUTPUT_TRACKED_TOKEN_ID")
+        if position_raw is not None and token_id_raw is not None:
+            raise ValueError(
+                "CUSTOM_OUTPUT_TOKEN_POSITION and CUSTOM_OUTPUT_TRACKED_TOKEN_ID are mutually exclusive"
+            )
+        if position_raw is not None:
+            try:
+                position = int(position_raw)
+            except ValueError as error:
+                raise ValueError("CUSTOM_OUTPUT_TOKEN_POSITION must be an integer") from error
+            if position < -(2**31) or position >= 0:
+                raise ValueError(
+                    "CUSTOM_OUTPUT_TOKEN_POSITION must be between -2147483648 and -1"
+                )
+            return cls(relative_position=position)
+        if token_id_raw is not None:
+            try:
+                token_id = int(token_id_raw)
+            except ValueError as error:
+                raise ValueError("CUSTOM_OUTPUT_TRACKED_TOKEN_ID must be an integer") from error
+            if token_id < 0 or token_id > 2**31 - 1:
+                raise ValueError(
+                    "CUSTOM_OUTPUT_TRACKED_TOKEN_ID must be between 0 and 2147483647"
+                )
+            return cls(tracked_token_id=token_id)
+        return cls()
+
+    def resolve(self, token_ids: list[int]) -> int:
+        if self.relative_position is not None:
+            position = len(token_ids) + self.relative_position
+            if position < 0:
+                raise FtRuntimeException(
+                    ExceptionType.INVALID_PARAMS,
+                    f"CUSTOM_OUTPUT_TOKEN_POSITION {self.relative_position} is outside prompt length {len(token_ids)}",
+                )
+            return position
+        if self.tracked_token_id is not None:
+            position = next(
+                (
+                    position
+                    for position in range(len(token_ids) - 1, -1, -1)
+                    if token_ids[position] == self.tracked_token_id
+                ),
+                -1,
+            )
+            if position < 0:
+                raise FtRuntimeException(
+                    ExceptionType.INVALID_PARAMS,
+                    f"CUSTOM_OUTPUT_TRACKED_TOKEN_ID {self.tracked_token_id} was not found in the prompt",
+                )
+            return position
+        return -1
 
 
 class StreamState:
@@ -91,7 +156,9 @@ def _trans_jsonable_options(
     )
 
 
-def trans_input(input_py: GenerateInput):
+def trans_input(
+    input_py: GenerateInput, selector: Optional[CustomOutputSelector] = None
+):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
     token_ids = input_py.token_ids.reshape(-1).tolist()
@@ -101,36 +168,10 @@ def trans_input(input_py: GenerateInput):
     custom_output_token_position = input_py.custom_output_token_position
     if custom_output_token_position < -1:
         raise ValueError("custom_output_token_position must be -1 or non-negative")
-    configured_position = os.environ.get("CUSTOM_OUTPUT_TOKEN_POSITION")
-    configured_token_id = os.environ.get("CUSTOM_OUTPUT_TRACKED_TOKEN_ID")
-    if configured_position is not None and configured_token_id is not None:
-        raise ValueError(
-            "CUSTOM_OUTPUT_TOKEN_POSITION and CUSTOM_OUTPUT_TRACKED_TOKEN_ID are mutually exclusive"
-        )
+    if selector is None:
+        selector = CustomOutputSelector.from_env()
     if custom_output_token_position < 0:
-        if configured_position is not None:
-            relative_position = int(configured_position)
-            if relative_position >= 0:
-                raise ValueError("CUSTOM_OUTPUT_TOKEN_POSITION must be negative")
-            custom_output_token_position = len(token_ids) + relative_position
-            if custom_output_token_position < 0:
-                raise ValueError(
-                    f"CUSTOM_OUTPUT_TOKEN_POSITION {relative_position} is outside prompt length {len(token_ids)}"
-                )
-        elif configured_token_id is not None:
-            tracked_token_id = int(configured_token_id)
-            custom_output_token_position = next(
-                (
-                    position
-                    for position in range(len(token_ids) - 1, -1, -1)
-                    if token_ids[position] == tracked_token_id
-                ),
-                -1,
-            )
-            if custom_output_token_position < 0:
-                raise ValueError(
-                    f"CUSTOM_OUTPUT_TRACKED_TOKEN_ID {tracked_token_id} was not found in the prompt"
-                )
+        custom_output_token_position = selector.resolve(token_ids)
     input_pb.batch_group_size = input_py.batch_group_size
     if custom_output_token_position >= 0:
         input_pb.custom_output_token_position.value = custom_output_token_position
@@ -597,6 +638,10 @@ class ModelRpcClient(object):
         self._max_rpc_timeout_ms = max_rpc_timeout_ms
         self._decode_entrance = decode_entrance
         self._trans_output_fn = trans_output_fn or trans_output
+        # Environment-backed deployment config is immutable after startup.
+        # Parse and validate it once instead of reading/parsing env vars for
+        # every request on the frontend hot path.
+        self._custom_output_selector = CustomOutputSelector.from_env()
         self._options = []
         for key, value in client_config.items():
             self._options.append((key, value))
@@ -683,7 +728,7 @@ class ModelRpcClient(object):
             # matches the client gRPC deadline: engine-side timeout checks and
             # P2P deadlineMs() require a positive timeout_ms.
             input_py.generate_config.timeout_ms = int(effective_ms)
-        input_pb = trans_input(input_py)
+        input_pb = trans_input(input_py, self._custom_output_selector)
         response_iterator = None
         stream_state = StreamState()
 
