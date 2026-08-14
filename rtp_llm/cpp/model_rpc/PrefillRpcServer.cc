@@ -171,8 +171,8 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
 }
 
 ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream) {
-    static int max_wait_timeout_us = maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms * 1000;
-    auto       begin_time_us       = currentTimeUs();
+    const int64_t max_wait_timeout_us = maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms * int64_t{1000};
+    auto          begin_time_us       = currentTimeUs();
     while (!stream->hasError() && stream->getStatus() == StreamState::WAITING) {
         usleep(100);
         auto current_time_us = currentTimeUs();
@@ -206,10 +206,6 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     if (!engine_->isMTPEagle()) {
         input->generate_config->force_disable_sp_run = true;
     }
-    RTP_LLM_LOG_INFO("[pd_request_sp] request_id=%ld force_disable_sp_run=%d is_mtp_eagle=%d",
-                     prefill_context.request_id,
-                     input->generate_config->force_disable_sp_run,
-                     engine_->isMTPEagle());
     prefill_context.generate_input = input;
 
     RTP_LLM_LOG_DEBUG("request [%ld] get rpc connection", prefill_context.request_id);
@@ -376,6 +372,7 @@ void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_cont
     }
     AtomicGuard       request_guard(loading_cache_requests_);
     GenerateRequestPB load_request;
+    load_request.set_stage(RemoteStage::LOAD);
     load_request.set_client_id(process_id_);
     load_request.set_request_id(prefill_context.request_id);
     load_request.set_start_time(currentTimeUs());

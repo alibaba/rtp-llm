@@ -271,6 +271,11 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
     GenerateRequestPB load_request;
     GRPC_RET_IF_ERROR(
         decode_context, grpc_stream->Read(&load_request), grpc::StatusCode::INTERNAL, "failed to get loadReqeust");
+    const auto load_stage = load_request.stage();
+    GRPC_RET_IF_ERROR(decode_context,
+                      load_stage == RemoteStage::LOAD || load_stage == RemoteStage::ALLOCATE,
+                      grpc::StatusCode::INTERNAL,
+                      "message second status is neither RemoteStage::LOAD nor legacy ALLOCATE");
     decode_context.time_info.updateLoadBeginTime();
     auto error_info = loadCacheForAllRank(decode_context);
     decode_context.time_info.updateLoadEndTime();
