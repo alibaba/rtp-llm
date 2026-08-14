@@ -334,6 +334,11 @@ class KimiK3LatentMoE(nn.Module):
         )
         del s2_raw
 
+        # Each layer's MegaMoE layout transform uses large temporary tensors.
+        # Release inactive blocks from the previous layer and the raw staging
+        # tensors above before asking DeepGEMM for another contiguous buffer.
+        torch.cuda.empty_cache()
+
         (self._mega_l1_w, self._mega_l1_sf), (
             self._mega_l2_w,
             self._mega_l2_sf,
@@ -343,6 +348,11 @@ class KimiK3LatentMoE(nn.Module):
             activation="situ",
         )
         del w13, s13, w2, s2
+
+        # The transform inputs keep their expandable allocator segments live
+        # until this point.  Cleaning immediately after dropping them prevents
+        # one partially occupied segment from accumulating for every MoE layer.
+        torch.cuda.empty_cache()
 
         self._mega_group = dist.group.WORLD
         self._mega_buf = _get_or_create_mega_buf(

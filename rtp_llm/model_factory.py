@@ -221,6 +221,16 @@ class ModelFactory:
         logging.info(f"create model finish")
 
         # Create propose model if provided
+        # Loading and transforming the target model can leave large inactive
+        # CUDA allocator blocks behind.  Release those cached blocks before
+        # materializing the speculative model so its weights do not compete
+        # with memory that is no longer live.
+        if (
+            propose_model_config is not None
+            and engine_config.sp_config.type != SpeculativeType.NONE
+            and torch.cuda.is_available()
+        ):
+            torch.cuda.empty_cache()
         propose_model = ModelFactory.get_sp_model(
             model_config=model_config,
             propose_model_config=propose_model_config,
