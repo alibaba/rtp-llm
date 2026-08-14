@@ -90,6 +90,7 @@ cc_test(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/cache:kv_cache_specs",
+        "//rtp_llm/cpp/config:static_config",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),

@@ -49,6 +49,9 @@ struct MLAKVCacheSpec: public KVCacheSpec {
 #endif
 
         if (is_fp8 && !use_compact_fp8_layout) {
+            RTP_LLM_CHECK_WITH_INFO(no_pe % 128 == 0,
+                                    "MLA fp8 KVCacheSpec tag=%s requires kv_lora_rank aligned to 128, got=%zu",
+                                    desc.tag.c_str(), no_pe);
             spec->elems_per_token = no_pe + no_pe / 128 * 4 + rope * 2;
         } else {
             spec->elems_per_token = no_pe + rope;
