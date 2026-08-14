@@ -215,10 +215,24 @@ class MegaMoeWrapperLayoutTest(unittest.TestCase):
             )
 
         captured = _FakeMegaMoE.instance.fp4_kwargs
-        torch.testing.assert_close(captured["w1_w"][:, :4], gate_w)
-        torch.testing.assert_close(captured["w1_w"][:, 4:], up_w)
-        torch.testing.assert_close(captured["w1_s"][:, :4], gate_s)
-        torch.testing.assert_close(captured["w1_s"][:, 4:], up_s)
+        self.assertEqual(captured["w1_layout"], "up_gate")
+        torch.testing.assert_close(captured["w1_w"][:, :4], up_w)
+        torch.testing.assert_close(captured["w1_w"][:, 4:], gate_w)
+        torch.testing.assert_close(captured["w1_s"][:, :4], up_s)
+        torch.testing.assert_close(captured["w1_s"][:, 4:], gate_s)
+
+    def test_fp4_up_gate_interleave_matches_deepgemm_layout(self):
+        up = torch.arange(2 * 16 * 4, dtype=torch.int32).reshape(2, 16, 4)
+        gate = up + 10000
+        stacked = torch.cat([up, gate], dim=1)
+
+        actual = mega_moe._interleave_stacked_up_gate(stacked)
+        expected = torch.stack(
+            [gate.reshape(2, 2, 8, 4), up.reshape(2, 2, 8, 4)], dim=2
+        ).reshape(2, 32, 4)
+
+        torch.testing.assert_close(actual, expected)
+        self.assertNotEqual(actual.data_ptr(), stacked.data_ptr())
 
     def test_decode_mtp_budget_includes_verify_width(self):
         from rtp_llm.ops import RoleType

@@ -55,6 +55,32 @@ _PRE_KERNEL_BARRIER_VERBOSE_ENV = "GLM5_MEGA_MOE_PRE_KERNEL_BARRIER_VERBOSE"
 _PRE_KERNEL_BARRIER_LOGGED_KEYS: set[tuple[int, int]] = set()
 
 
+def _interleave_stacked_up_gate(t: torch.Tensor, gran: int = 8) -> torch.Tensor:
+    """Convert RTP's ``[up | gate]`` layout without full-size temporaries."""
+    if t.dim() not in (2, 3):
+        raise ValueError(f"Expected a 2D or 3D tensor, got shape={tuple(t.shape)}")
+
+    squeeze_group_dim = t.dim() == 2
+    if squeeze_group_dim:
+        t = t.unsqueeze(0)
+
+    groups, rows, *rest = t.shape
+    half = rows // 2
+    if rows % (2 * gran) != 0:
+        raise ValueError(
+            f"Expected the row dimension to be divisible by {2 * gran}, "
+            f"got shape={tuple(t.shape)}"
+        )
+
+    up = t[:, :half].reshape(groups, half // gran, gran, *rest)
+    gate = t[:, half:].reshape(groups, half // gran, gran, *rest)
+    result = torch.empty_like(t)
+    result_blocks = result.reshape(groups, half // gran, 2, gran, *rest)
+    result_blocks[:, :, 0].copy_(gate)
+    result_blocks[:, :, 1].copy_(up)
+    return result.squeeze(0) if squeeze_group_dim else result
+
+
 def _mega_output_capacity(buf, requested_capacity: int) -> int:
     """Output rows must cover DeepGEMM's internally aligned token capacity."""
     capacity = max(int(requested_capacity), 1)
@@ -278,6 +304,7 @@ class GLM5MegaMoE(nn.Module):
         w1_s: torch.Tensor,  # [E_local, 2*inter, dim//FP4_BLOCK] float8_e8m0fnu
         w2_w: torch.Tensor,  # [E_local, dim, inter//2] int8 (FP4 packed)
         w2_s: torch.Tensor,  # [E_local, dim, inter//FP4_BLOCK] float8_e8m0fnu
+        w1_layout: str = "gate_up",
     ) -> None:
         """Setup weights from pre-quantized FP4 format (same as DSv4 checkpoint).
 
@@ -297,11 +324,24 @@ class GLM5MegaMoE(nn.Module):
         s13_int = prepare_fp4_weight_scale_for_deepgemm(w1_s, 2 * inter, D, E)
         s2_int = prepare_fp4_weight_scale_for_deepgemm(w2_s, D, inter, E)
 
-        # Apply mega MoE transform: L1 gate/up interleave + UTCCP transpose SF
-        (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
-            (w1_w, s13_int),
-            (w2_w, s2_int),
-        )
+        # Apply mega MoE transform: L1 gate/up interleave + UTCCP transpose SF.
+        # RTP checkpoints store L1 as [up | gate].  Transforming that layout
+        # directly avoids split, restack, and torch.stack copies of the full
+        # per-layer expert tensor during model startup.
+        if w1_layout == "up_gate":
+            from deep_gemm.mega import _transpose_sf_for_utccp
+
+            l1_w = _interleave_stacked_up_gate(w1_w)
+            l1_sf = _transpose_sf_for_utccp(_interleave_stacked_up_gate(s13_int))
+            l2_w = w2_w
+            l2_sf = _transpose_sf_for_utccp(s2_int)
+        elif w1_layout == "gate_up":
+            (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
+                (w1_w, s13_int),
+                (w2_w, s2_int),
+            )
+        else:
+            raise ValueError(f"Unsupported FP4 W1 layout: {w1_layout}")
         del s13_int, s2_int
         torch.cuda.empty_cache()
 
