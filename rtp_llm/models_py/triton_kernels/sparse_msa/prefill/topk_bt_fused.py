@@ -18,6 +18,14 @@ import triton.language as tl
 
 from ..common.utils import get_cu_seqblocks, robust_allocator
 from .flash_with_topk_idx import _bitonic_merge, _flash_attn_fwd_with_block_score_kernel
+from .score_chunk import (
+    M3_PREFILL_WORKSPACE_CACHE,
+    build_prefill_score_chunks,
+    get_float32_workspace_views,
+    get_or_create_m3_prefill_workspace,
+    m3_index_score_chunk_enabled,
+    m3_index_score_chunk_rows,
+)
 
 # Opt-1+: bypass the fmha_sm100 adapter in step3, preallocating the CSR/schedule/
 # page_table buffers once per forward (reused across all sparse layers) so the
@@ -64,7 +72,8 @@ _M3_SPARSE_ATTN_PARTIAL_DTYPE = (
     else torch.bfloat16
 )
 
-# One-time reusable workspace for the chunked step3 (M3_SPARSE_ATTN_CHUNK_ENABLE).
+# One-time reusable workspace for chunked prefill score and step3. The two
+# phases execute serially, so one flat allocation can back both layouts.
 # Mirrors the megamoe symm-mem buffer pattern (mega_buf._MEGA_BUF_CACHE): a single
 # flat CUDA uint8 tensor is allocated on first use, cached at module level per
 # device, grown only when a later plan needs more bytes, and reused across every
@@ -81,17 +90,14 @@ _M3_SPARSE_ATTN_PARTIAL_DTYPE = (
 #       row_counts [Hkv, total_rows] + row_map [1, max_kv_blocks]
 #       + row_coords [total_rows, 2] + tile_counts [G_total, Hkv, total_rows],
 #       csr_words = build_k2q_csr.k2q_csr_workspace_words(...) (a few MiB)
-_M3_CHUNK_WS_CACHE: dict = {}  # torch.device -> flat uint8 workspace
+# Compatibility alias retained for the existing sparse-prefill chunk tests.
+_M3_CHUNK_WS_CACHE = M3_PREFILL_WORKSPACE_CACHE
 
 _CHUNKED_SPARSE_ATTN_LOGGED = False
 
 
 def _get_or_create_chunk_ws(nbytes: int, device: torch.device) -> torch.Tensor:
-    ws = _M3_CHUNK_WS_CACHE.get(device)
-    if ws is None or ws.numel() < nbytes:
-        ws = torch.empty(nbytes, dtype=torch.uint8, device=device)
-        _M3_CHUNK_WS_CACHE[device] = ws
-    return ws
+    return get_or_create_m3_prefill_workspace(nbytes, device)
 
 
 def _patch_fmha_sm100_cxx_standard():
@@ -750,6 +756,232 @@ def _launch_topk_to_block_table(
         )
 
 
+_INDEX_SCORE_CHUNK_LOGGED = False
+
+
+def _allocate_topk_outputs(
+    total_q: int,
+    num_kv_heads: int,
+    topk: int,
+    device: torch.device,
+    emit_block_table: bool,
+):
+    if emit_block_table:
+        block_tables = torch.zeros(
+            total_q * num_kv_heads, topk, dtype=torch.int32, device=device
+        )
+        output_seq_lens = torch.zeros(
+            total_q * num_kv_heads, dtype=torch.int32, device=device
+        )
+    else:
+        block_tables = torch.empty(1, 1, dtype=torch.int32, device=device)
+        output_seq_lens = torch.empty(1, dtype=torch.int32, device=device)
+    topk_idx = torch.full(
+        (num_kv_heads, total_q, topk), -1, dtype=torch.int32, device=device
+    )
+    return block_tables, output_seq_lens, topk_idx
+
+
+def _get_fmha_index_score_chunks(
+    index_score_plan,
+    cu_seqlens,
+    seq_lens,
+    prefix_lens,
+    kv_indices,
+    chunk_rows,
+    block_size_k,
+    num_heads,
+    idx_kv_heads,
+):
+    total_q = int(cu_seqlens[-1].item())
+    cache_key = (
+        chunk_rows,
+        total_q,
+        int(seq_lens.shape[0]),
+        int(seq_lens.max().item()),
+        block_size_k,
+        num_heads,
+        idx_kv_heads,
+    )
+    if isinstance(index_score_plan, dict):
+        cached = index_score_plan.get("_index_score_chunk_meta")
+        if cached is not None and cached["key"] == cache_key:
+            return cached["chunks"]
+
+    chunks = build_prefill_score_chunks(
+        cu_seqlens,
+        seq_lens,
+        prefix_lens,
+        torch.arange(seq_lens.shape[0], dtype=torch.int64, device=cu_seqlens.device),
+        chunk_rows,
+        block_size_k,
+        kv_indices=kv_indices,
+    )
+    chunks_with_plans = [
+        (
+            chunk,
+            build_index_score_plan(
+                chunk.cu_seqlens,
+                chunk.seq_lens,
+                chunk.prefix_lens,
+                num_heads,
+                idx_kv_heads,
+                block_size_k,
+            ),
+        )
+        for chunk in chunks
+    ]
+    if isinstance(index_score_plan, dict):
+        index_score_plan["_index_score_chunk_meta"] = {
+            "key": cache_key,
+            "chunks": chunks_with_plans,
+        }
+    return chunks_with_plans
+
+
+def _flash_prefill_topk_to_block_tables_chunked(
+    idx_q,
+    k_pages,
+    cu_seqlens,
+    seq_lens,
+    prefix_lens,
+    block_size_k,
+    topk,
+    num_pages,
+    init_blocks,
+    local_blocks,
+    sm_scale,
+    index_score_plan,
+    kv_indices,
+    emit_block_table,
+    num_heads,
+    idx_kv_heads,
+):
+    from fmha_sm100.api import _fmha_sm100
+
+    total_q = idx_q.shape[0]
+    chunk_rows = m3_index_score_chunk_rows()
+    chunks_with_plans = _get_fmha_index_score_chunks(
+        index_score_plan,
+        cu_seqlens,
+        seq_lens,
+        prefix_lens,
+        kv_indices,
+        chunk_rows,
+        block_size_k,
+        num_heads,
+        idx_kv_heads,
+    )
+    block_tables, output_seq_lens, topk_idx = _allocate_topk_outputs(
+        total_q, num_heads, topk, idx_q.device, emit_block_table
+    )
+
+    maxscore_capacity = 0
+    score_capacity = 0
+    for chunk, plan in chunks_with_plans:
+        max_k_tiles = int(plan["max_k_tiles"])
+        if max_k_tiles <= 0:
+            raise RuntimeError(
+                "M3 chunked fmha index score produced invalid max_k_tiles="
+                f"{max_k_tiles} for chunk_rows={chunk.q_end - chunk.q_start}"
+            )
+        chunk_q = chunk.q_end - chunk.q_start
+        max_seqblock_k = triton.cdiv(chunk.max_seqlen_k, block_size_k)
+        maxscore_capacity = max(maxscore_capacity, num_heads * max_k_tiles * chunk_q)
+        score_capacity = max(score_capacity, num_heads * chunk_q * max_seqblock_k)
+
+    maxscore_storage, score_storage = get_float32_workspace_views(
+        idx_q.device, ((maxscore_capacity,), (score_capacity,))
+    )
+
+    global _INDEX_SCORE_CHUNK_LOGGED
+    if not _INDEX_SCORE_CHUNK_LOGGED:
+        _INDEX_SCORE_CHUNK_LOGGED = True
+        logging.info(
+            "[M3 index score] chunked fmha enabled: total_q=%d chunk_rows=%d "
+            "chunks=%d workspace_bytes=%d",
+            total_q,
+            chunk_rows,
+            len(chunks_with_plans),
+            (maxscore_capacity + score_capacity) * 4,
+        )
+
+    for chunk, plan in chunks_with_plans:
+        q_start, q_end = chunk.q_start, chunk.q_end
+        chunk_q = q_end - q_start
+        max_k_tiles = int(plan["max_k_tiles"])
+        max_seqblock_k = triton.cdiv(chunk.max_seqlen_k, block_size_k)
+        maxscore_numel = num_heads * max_k_tiles * chunk_q
+        score_numel = num_heads * chunk_q * max_seqblock_k
+        maxscore = maxscore_storage[:maxscore_numel].view(
+            num_heads, max_k_tiles, chunk_q
+        )
+        score = score_storage[:score_numel].view(
+            num_heads, chunk_q, max_seqblock_k
+        )
+
+        _o, maxscore = _fmha_sm100(
+            idx_q[q_start:q_end],
+            k_pages,
+            k_pages,
+            plan,
+            kv_indices=chunk.kv_indices,
+            output_o=False,
+            output_maxscore=True,
+            sm_scale=sm_scale,
+            max_score=maxscore,
+        )
+        _maxscore_to_score(maxscore, max_seqblock_k, out=score)
+
+        cu_seqblocks_q, max_seqblock_q, _, _, _, _ = get_cu_seqblocks(
+            chunk.cu_seqlens,
+            chunk.max_seqlen_q,
+            1,
+            block_size_k,
+        )
+        if emit_block_table:
+            bt_chunk = block_tables[q_start * num_heads : q_end * num_heads]
+            sl_chunk = output_seq_lens[q_start * num_heads : q_end * num_heads]
+        else:
+            bt_chunk = block_tables
+            sl_chunk = output_seq_lens
+        topk_chunk = topk_idx[:, q_start:q_end, :]
+        _launch_topk_to_block_table(
+            max_seqblock_q,
+            chunk.cu_seqlens.shape[0] - 1,
+            num_heads,
+            max_seqblock_k,
+            score,
+            bt_chunk,
+            sl_chunk,
+            topk_chunk,
+            1,
+            block_size_k,
+            chunk.cu_seqlens,
+            cu_seqblocks_q,
+            chunk.prefix_lens,
+            topk,
+            init_blocks,
+            local_blocks,
+            num_pages,
+            score.stride(0),
+            score.stride(1),
+            score.stride(2),
+            bt_chunk.stride(0),
+            bt_chunk.stride(1),
+            topk_chunk.stride(0),
+            topk_chunk.stride(1),
+            topk_chunk.stride(2),
+            NKV=num_heads,
+            MASK_INIT=False,
+            MASK_LOCAL=False,
+            EMIT_BLOCK_TABLE=emit_block_table,
+            EMIT_TOPK_IDX=True,
+        )
+
+    return block_tables, output_seq_lens, topk_idx
+
+
 @torch.no_grad()
 def flash_prefill_topk_to_block_tables(
     idx_q: torch.Tensor,  # [total_q, num_idx_heads(=num_kv_heads), d]
@@ -811,6 +1043,25 @@ def flash_prefill_topk_to_block_tables(
     # per forward by the caller and threaded in (shared with step3); else built here.
     if kv_indices is None:
         kv_indices = build_kv_page_indices(req_to_token, seq_lens, block_size_k)
+    if m3_index_score_chunk_enabled(total_q):
+        return _flash_prefill_topk_to_block_tables_chunked(
+            idx_q=idx_q,
+            k_pages=k_pages,
+            cu_seqlens=cu_seqlens,
+            seq_lens=seq_lens,
+            prefix_lens=prefix_lens,
+            block_size_k=block_size_k,
+            topk=topk,
+            num_pages=num_pages,
+            init_blocks=init_blocks,
+            local_blocks=local_blocks,
+            sm_scale=sm_scale,
+            index_score_plan=index_score_plan,
+            kv_indices=kv_indices,
+            emit_block_table=emit_block_table,
+            num_heads=num_heads,
+            idx_kv_heads=idx_kv_heads,
+        )
     # The fmha plan depends only on the per-forward segment shape (identical across
     # every sparse layer). The caller builds it once per forward and passes it in;
     # build on the fly only when not supplied (decode fast-path / non-CP callers).
@@ -1482,6 +1733,164 @@ def flash_decode_with_trtllm_gen(
     )
 
 
+def _flash_prefill_with_fused_topk_index_chunked(
+    idx_q,
+    idx_k_cache,
+    req_to_token,
+    slot_ids,
+    cu_seqlens,
+    seq_lens,
+    prefix_lens,
+    block_size_k,
+    topk,
+    init_blocks,
+    local_blocks,
+    sm_scale,
+    score_type,
+):
+    total_q, num_heads, qk_head_dim = idx_q.shape
+    max_slots, idx_kv_heads, _ = idx_k_cache.shape
+    gqa_group_size = num_heads // idx_kv_heads
+    chunk_rows = m3_index_score_chunk_rows()
+    chunks = build_prefill_score_chunks(
+        cu_seqlens,
+        seq_lens,
+        prefix_lens,
+        slot_ids,
+        chunk_rows,
+        block_size_k,
+    )
+    score_capacity = max(
+        num_heads
+        * (chunk.q_end - chunk.q_start)
+        * triton.cdiv(chunk.max_seqlen_k, block_size_k)
+        for chunk in chunks
+    )
+    (score_storage,) = get_float32_workspace_views(
+        idx_q.device, ((score_capacity,),)
+    )
+    topk_idx = torch.full(
+        (num_heads, total_q, topk),
+        fill_value=-1,
+        dtype=torch.int32,
+        device=idx_q.device,
+    )
+    block_table_dummy = torch.empty(1, 1, dtype=torch.int32, device=idx_q.device)
+    seq_lens_dummy = torch.empty(1, dtype=torch.int32, device=idx_q.device)
+
+    global _INDEX_SCORE_CHUNK_LOGGED
+    if not _INDEX_SCORE_CHUNK_LOGGED:
+        _INDEX_SCORE_CHUNK_LOGGED = True
+        logging.info(
+            "[M3 index score] chunked Triton fused path enabled: total_q=%d "
+            "chunk_rows=%d chunks=%d workspace_bytes=%d",
+            total_q,
+            chunk_rows,
+            len(chunks),
+            score_capacity * 4,
+        )
+
+    for chunk in chunks:
+        q_start, q_end = chunk.q_start, chunk.q_end
+        chunk_q = q_end - q_start
+        max_seqblock_k = triton.cdiv(chunk.max_seqlen_k, block_size_k)
+        score_numel = num_heads * chunk_q * max_seqblock_k
+        score = score_storage[:score_numel].view(
+            num_heads, chunk_q, max_seqblock_k
+        )
+
+        def grid(meta):
+            return (
+                triton.cdiv(chunk.max_seqlen_q, meta["BLOCK_SIZE_Q"]),
+                (chunk.cu_seqlens.shape[0] - 1) * num_heads,
+            )
+
+        q_chunk = idx_q[q_start:q_end]
+        _flash_attn_fwd_with_block_score_kernel[grid](
+            q_chunk,
+            idx_k_cache,
+            None,
+            None,
+            None,
+            score,
+            req_to_token,
+            chunk.cu_seqlens,
+            chunk.seq_lens,
+            chunk.prefix_lens,
+            chunk.slot_ids,
+            max_slots,
+            num_heads,
+            gqa_group_size,
+            qk_head_dim,
+            qk_head_dim,
+            block_size_k,
+            sm_scale,
+            False,
+            1,
+            q_chunk.stride(0),
+            q_chunk.stride(1),
+            q_chunk.stride(2),
+            idx_k_cache.stride(0),
+            idx_k_cache.stride(1),
+            idx_k_cache.stride(2),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            score.stride(0),
+            score.stride(1),
+            score.stride(2),
+            req_to_token.stride(0),
+            SCORE_TYPE=score_type,
+            DISABLE_INDEX_VALUE=True,
+        )
+
+        cu_seqblocks_q, max_seqblock_q, _, _, _, _ = get_cu_seqblocks(
+            chunk.cu_seqlens,
+            chunk.max_seqlen_q,
+            1,
+            block_size_k,
+        )
+        topk_chunk = topk_idx[:, q_start:q_end, :]
+        _launch_topk_to_block_table(
+            max_seqblock_q,
+            chunk.cu_seqlens.shape[0] - 1,
+            num_heads,
+            max_seqblock_k,
+            score,
+            block_table_dummy,
+            seq_lens_dummy,
+            topk_chunk,
+            1,
+            block_size_k,
+            chunk.cu_seqlens,
+            cu_seqblocks_q,
+            chunk.prefix_lens,
+            topk,
+            init_blocks,
+            local_blocks,
+            0,
+            score.stride(0),
+            score.stride(1),
+            score.stride(2),
+            block_table_dummy.stride(0),
+            block_table_dummy.stride(1),
+            topk_chunk.stride(0),
+            topk_chunk.stride(1),
+            topk_chunk.stride(2),
+            NKV=num_heads,
+            MASK_INIT=False,
+            MASK_LOCAL=False,
+            EMIT_BLOCK_TABLE=False,
+            EMIT_TOPK_IDX=True,
+        )
+    return None, topk_idx
+
+
 @torch.no_grad()
 def flash_prefill_with_fused_topk_index(
     idx_q: torch.Tensor,  # [total_q, num_idx_heads, idx_head_dim]
@@ -1512,6 +1921,23 @@ def flash_prefill_with_fused_topk_index(
     block_size_q = 1
     if sm_scale is None:
         sm_scale = qk_head_dim**-0.5
+
+    if m3_index_score_chunk_enabled(total_q):
+        return _flash_prefill_with_fused_topk_index_chunked(
+            idx_q,
+            idx_k_cache,
+            req_to_token,
+            slot_ids,
+            cu_seqlens,
+            seq_lens,
+            prefix_lens,
+            block_size_k,
+            topk,
+            init_blocks,
+            local_blocks,
+            sm_scale,
+            score_type,
+        )
 
     cu_seqblocks_q, max_seqblock_q, _all_seqblock_q, _, _, _ = get_cu_seqblocks(
         cu_seqlens, max_seqlen_q, block_size_q, block_size_k

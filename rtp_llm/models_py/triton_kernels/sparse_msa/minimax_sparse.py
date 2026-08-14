@@ -32,6 +32,10 @@ from .decode.topk_sparse import (
     flash_decode_with_gqa_share_sparse_paged,
 )
 from .prefill.flash_with_topk_idx import flash_prefill_with_topk_index
+from .prefill.score_chunk import (
+    m3_index_score_chunk_enabled,
+    m3_index_score_chunk_rows,
+)
 from .prefill.topk_bt_fused import (
     flash_decode_with_trtllm_gen,
     flash_prefill_with_fmha,
@@ -111,16 +115,18 @@ def minimax_sparse_prefill(
     # requests (verified bit-identical vs per-request runs), so it is NOT capped.
     # No per-call q_len cap — flash_prefill_with_fmha/decode chunk internally to stay
     # under CUDA's grid_dim_x = 65535 limit.
-    # fmha OnlyScore step1 would overflow its int32-indexed maxscore buffer on
-    # long context (num_idx_heads * max_k_tiles * total_q > 2**31) -> fall back to
-    # the Triton block-score path (use_fused below) to avoid the maxscore=None crash.
-    # total_q here is the EXTEND (reuse-after) query token count == idx_q.shape[0]
-    # == cu_seqlens[-1] == fmha nnz_qo/total_qo_len (the exact 3rd dim of the buffer
-    # that overflows). max_seqlen_k is the FULL KV len (prefix+extend, reuse-before),
-    # matching how fmha derives max_k_tiles -- so the product is same-source as fmha's.
+    # fmha OnlyScore addresses maxscore with int32. Without score chunking, use
+    # total_q and fall back to Triton when its full buffer would exceed 2**31
+    # elements. With score chunking, each fmha call only addresses chunk_rows,
+    # so retain the faster fmha path when that bounded allocation fits.
+    # max_seqlen_k is the FULL KV len (prefix+extend, reuse-before), matching how
+    # fmha derives max_k_tiles.
     total_q = idx_q.shape[0]
+    fmha_score_rows = total_q
+    if m3_index_score_chunk_enabled(total_q):
+        fmha_score_rows = min(total_q, m3_index_score_chunk_rows())
     fmha_score_fits = not _fmha_onlyscore_overflows_int32(
-        num_idx_heads, max_seqlen_k, total_q
+        num_idx_heads, max_seqlen_k, fmha_score_rows
     )
     use_trtllm = (
         workspace is not None
