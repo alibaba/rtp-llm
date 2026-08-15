@@ -48,40 +48,48 @@ JsonableOption = Optional[Union[str, Dict[str, Any], bool]]
 
 @dataclass(frozen=True)
 class CustomOutputSelector:
-    """Validated deployment selector, created once per RPC client."""
+    """Validated fixed -2 selection, created once per RPC client."""
 
     relative_position: Optional[int] = None
-    tracked_token_id: Optional[int] = None
+    expected_token_id: Optional[int] = None
 
     @classmethod
     def from_env(cls) -> "CustomOutputSelector":
         position_raw = os.environ.get("CUSTOM_OUTPUT_TOKEN_POSITION")
-        token_id_raw = os.environ.get("CUSTOM_OUTPUT_TRACKED_TOKEN_ID")
-        if position_raw is not None and token_id_raw is not None:
+        expected_token_id_raw = os.environ.get("CUSTOM_OUTPUT_EXPECTED_TOKEN_ID")
+        if os.environ.get("CUSTOM_OUTPUT_TRACKED_TOKEN_ID") is not None:
             raise ValueError(
-                "CUSTOM_OUTPUT_TOKEN_POSITION and CUSTOM_OUTPUT_TRACKED_TOKEN_ID are mutually exclusive"
+                "CUSTOM_OUTPUT_TRACKED_TOKEN_ID is not supported; use "
+                "CUSTOM_OUTPUT_TOKEN_POSITION=-2 and optional "
+                "CUSTOM_OUTPUT_EXPECTED_TOKEN_ID"
             )
-        if position_raw is not None:
-            try:
-                position = int(position_raw)
-            except ValueError as error:
-                raise ValueError("CUSTOM_OUTPUT_TOKEN_POSITION must be an integer") from error
-            if position < -(2**31) or position >= 0:
+        if position_raw is None:
+            if expected_token_id_raw is not None:
                 raise ValueError(
-                    "CUSTOM_OUTPUT_TOKEN_POSITION must be between -2147483648 and -1"
+                    "CUSTOM_OUTPUT_EXPECTED_TOKEN_ID requires "
+                    "CUSTOM_OUTPUT_TOKEN_POSITION=-2"
                 )
-            return cls(relative_position=position)
-        if token_id_raw is not None:
+            return cls()
+        try:
+            position = int(position_raw)
+        except ValueError as error:
+            raise ValueError("CUSTOM_OUTPUT_TOKEN_POSITION must be an integer") from error
+        if position != -2:
+            raise ValueError("CUSTOM_OUTPUT_TOKEN_POSITION must be -2")
+
+        expected_token_id = None
+        if expected_token_id_raw is not None:
             try:
-                token_id = int(token_id_raw)
+                expected_token_id = int(expected_token_id_raw)
             except ValueError as error:
-                raise ValueError("CUSTOM_OUTPUT_TRACKED_TOKEN_ID must be an integer") from error
-            if token_id < 0 or token_id > 2**31 - 1:
                 raise ValueError(
-                    "CUSTOM_OUTPUT_TRACKED_TOKEN_ID must be between 0 and 2147483647"
+                    "CUSTOM_OUTPUT_EXPECTED_TOKEN_ID must be an integer"
+                ) from error
+            if expected_token_id < 0 or expected_token_id > 2**31 - 1:
+                raise ValueError(
+                    "CUSTOM_OUTPUT_EXPECTED_TOKEN_ID must be between 0 and 2147483647"
                 )
-            return cls(tracked_token_id=token_id)
-        return cls()
+        return cls(relative_position=-2, expected_token_id=expected_token_id)
 
     def resolve(self, token_ids: list[int]) -> int:
         if self.relative_position is not None:
@@ -91,20 +99,14 @@ class CustomOutputSelector:
                     ExceptionType.INVALID_PARAMS,
                     f"CUSTOM_OUTPUT_TOKEN_POSITION {self.relative_position} is outside prompt length {len(token_ids)}",
                 )
-            return position
-        if self.tracked_token_id is not None:
-            position = next(
-                (
-                    position
-                    for position in range(len(token_ids) - 1, -1, -1)
-                    if token_ids[position] == self.tracked_token_id
-                ),
-                -1,
-            )
-            if position < 0:
+            if (
+                self.expected_token_id is not None
+                and token_ids[position] != self.expected_token_id
+            ):
                 raise FtRuntimeException(
                     ExceptionType.INVALID_PARAMS,
-                    f"CUSTOM_OUTPUT_TRACKED_TOKEN_ID {self.tracked_token_id} was not found in the prompt",
+                    f"token at CUSTOM_OUTPUT_TOKEN_POSITION -2 is {token_ids[position]}, "
+                    f"expected {self.expected_token_id}",
                 )
             return position
         return -1

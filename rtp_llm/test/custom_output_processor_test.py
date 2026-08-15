@@ -97,6 +97,30 @@ class CreatePostLayersModuleTest(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_loads_relative_py_file_from_checkpoint(self):
+        with tempfile.TemporaryDirectory() as ckpt_path:
+            processor_name = "custom_output_processor.py"
+            processor_path = os.path.join(ckpt_path, processor_name)
+            with open(processor_path, "w") as processor_file:
+                processor_file.write(DUMMY_MODULE)
+
+            config = mock.Mock(ckpt_path=ckpt_path)
+            with mock.patch.dict(
+                os.environ, {"CUSTOM_OUTPUT_PROCESSOR": processor_name}
+            ):
+                module = create_post_layers_module(config, "tok")
+
+            self.assertIsNotNone(module)
+            self.assertIs(module.config, config)
+            self.assertEqual(module.tokenizer, "tok")
+
+    def test_relative_py_file_requires_checkpoint_path(self):
+        with mock.patch.dict(
+            os.environ, {"CUSTOM_OUTPUT_PROCESSOR": "custom_output_processor.py"}
+        ):
+            with self.assertRaisesRegex(RuntimeError, "checkpoint path"):
+                create_post_layers_module(None, None)
+
     def test_module_returning_none_fails(self):
         with tempfile.NamedTemporaryFile(
             "w", suffix=".py", delete=False
