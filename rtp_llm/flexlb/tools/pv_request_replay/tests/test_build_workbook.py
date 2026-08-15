@@ -104,6 +104,9 @@ def status_record(request_id: str, worker: str, request_time_ms: int) -> dict:
 
 
 class BuildWorkbookTest(unittest.TestCase):
+    def test_p95_to_p99_band_uses_bright_yellow(self) -> None:
+        self.assertEqual(workbook_module.PERCENTILE_COLORS["P95-P99"], "FFFF00")
+
     def test_joins_by_instance_and_filters_only_route_request_time(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -178,7 +181,7 @@ class BuildWorkbookTest(unittest.TestCase):
             self.assertEqual(summary["complete_request_count"], 2)
             self.assertEqual(summary["event_counts"]["route_outside_window"], 1)
 
-            workbook = load_workbook(destination, read_only=True, data_only=True)
+            workbook = load_workbook(destination, data_only=True)
             self.assertEqual(
                 workbook.sheetnames,
                 [
@@ -190,18 +193,47 @@ class BuildWorkbookTest(unittest.TestCase):
                 ],
             )
             worksheet = workbook["Requests"]
-            headers = [cell.value for cell in worksheet[4]]
+            headers = [cell.value for cell in worksheet[1]]
+            self.assertEqual(worksheet.freeze_panes, "A2")
+            self.assertEqual(
+                headers[:17],
+                [
+                    "request_id",
+                    "flexlb_instance",
+                    "prefill_host",
+                    "host_sequence_no",
+                    "route_log_time (decision)",
+                    "selection_reason",
+                    "prefill_engine_ttft_ms",
+                    "input_tokens",
+                    "actual_hit_rate_pct",
+                    "uncache_tokens",
+                    "selected outstanding uncache",
+                    "selected outstanding after request",
+                    "decision cache lead tokens",
+                    "decision extra work tokens",
+                    "actual_minus_predicted_pp",
+                    "hbm_local_match_tokens",
+                    "remote_kv_added_match_tokens",
+                ],
+            )
             request_id_col = headers.index("request_id")
             instance_col = headers.index("flexlb_instance")
             request_rows = [
                 row
-                for row in worksheet.iter_rows(min_row=5, values_only=True)
+                for row in worksheet.iter_rows(min_row=2, values_only=True)
                 if row[request_id_col] == "same-request"
             ]
             self.assertEqual(len(request_rows), 2)
             self.assertEqual(
                 {row[instance_col] for row in request_rows}, {"flexlb-a", "flexlb-b"}
             )
+            request_cell = next(
+                row[request_id_col]
+                for row in worksheet.iter_rows(min_row=2)
+                if row[request_id_col].value == "same-request"
+            )
+            self.assertEqual(request_cell.alignment.horizontal, "center")
 
             snapshot_sheet = workbook["Decision Snapshot Top5"]
             snapshot_headers = [cell.value for cell in snapshot_sheet[4]]

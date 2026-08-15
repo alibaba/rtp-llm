@@ -45,7 +45,7 @@ PERCENTILE_COLORS = {
     "P0-P50": "C6EFCE",      # light green
     "P50-P90": "DDEBF7",     # light blue
     "P90-P95": "FFF2CC",     # light yellow
-    "P95-P99": "FCE4D6",     # light orange
+    "P95-P99": "FFFF00",     # bright yellow
     "P99-P100": "E4DFEC",    # light purple
     "NO_TTFT": "FFC7CE",     # red / incomplete telemetry
 }
@@ -842,7 +842,32 @@ REFERENCE_AND_EVIDENCE_COLUMNS = [
     Column("flexlb_predicted_prefill_time", "flexlb_predicted_prefill_time (routing prediction)", 39, "ms"),
 ]
 
-ALL_COLUMNS = LEFT_COLUMNS + REFERENCE_AND_EVIDENCE_COLUMNS
+_BASE_COLUMNS = LEFT_COLUMNS + REFERENCE_AND_EVIDENCE_COLUMNS
+_COLUMN_BY_KEY = {column.key: column for column in _BASE_COLUMNS}
+
+# Keep the routing outcome and the workload/cache evidence used to judge it
+# together.  The remaining fields retain their original relative order.
+_PROMOTED_AFTER_SELECTION_KEYS = (
+    "prefill_engine_ttft_ms",
+    "input_tokens",
+    "actual_hit_rate_pct",
+    "uncache_tokens",
+    "selected_snapshot_outstanding_uncached_tokens",
+    "selected_snapshot_outstanding_after_request_uncached_tokens",
+    "decision_cache_lead_tokens",
+    "decision_extra_work_tokens",
+    "actual_minus_predicted_pp",
+    "hbm_local_match_tokens",
+    "remote_kv_added_match_tokens",
+)
+_REQUEST_PREFIX_KEYS = (
+    *(column.key for column in LEFT_COLUMNS[:6]),
+    *_PROMOTED_AFTER_SELECTION_KEYS,
+)
+ALL_COLUMNS = [
+    *(_COLUMN_BY_KEY[key] for key in _REQUEST_PREFIX_KEYS),
+    *(column for column in _BASE_COLUMNS if column.key not in _REQUEST_PREFIX_KEYS),
+]
 
 
 def write_cell(worksheet: xlsxwriter.worksheet.Worksheet, row: int, col: int, value: Any,
@@ -865,18 +890,18 @@ def formats(workbook: xlsxwriter.Workbook) -> dict[str, xlsxwriter.format.Format
         "note": workbook.add_format({"font_color": "1F1F1F", "bg_color": "F5F9FC", "text_wrap": True, "valign": "top"}),
         "legend_label": workbook.add_format({"bold": True, "align": "center", "valign": "vcenter", "border": 1}),
         "header": workbook.add_format({"bold": True, "font_color": "FFFFFF", "bg_color": "1F4E78", "align": "center", "valign": "vcenter", "text_wrap": True, "border": 1, "border_color": "D9E2F3"}),
-        "host": workbook.add_format({"bold": True, "font_color": "FFFFFF", "bg_color": "305496", "align": "left", "valign": "vcenter"}),
-        "text": workbook.add_format({"valign": "top"}),
-        "integer": workbook.add_format({"num_format": "#,##0", "valign": "top"}),
-        "ms": workbook.add_format({"num_format": "#,##0", "valign": "top"}),
-        "us": workbook.add_format({"num_format": "#,##0", "valign": "top"}),
-        "pct": workbook.add_format({"num_format": '0.000"%"', "valign": "top"}),
-        "rate": workbook.add_format({"num_format": '0.0"%"', "valign": "top"}),
+        "host": workbook.add_format({"bold": True, "font_color": "FFFFFF", "bg_color": "305496", "align": "center", "valign": "vcenter"}),
+        "text": workbook.add_format({"align": "center", "valign": "vcenter"}),
+        "integer": workbook.add_format({"num_format": "#,##0", "align": "center", "valign": "vcenter"}),
+        "ms": workbook.add_format({"num_format": "#,##0", "align": "center", "valign": "vcenter"}),
+        "us": workbook.add_format({"num_format": "#,##0", "align": "center", "valign": "vcenter"}),
+        "pct": workbook.add_format({"num_format": '0.000"%"', "align": "center", "valign": "vcenter"}),
+        "rate": workbook.add_format({"num_format": '0.0"%"', "align": "center", "valign": "vcenter"}),
         "summary_header": workbook.add_format({"bold": True, "font_color": "FFFFFF", "bg_color": "1F4E78", "align": "center", "valign": "vcenter", "text_wrap": True}),
-        "summary_text": workbook.add_format({"valign": "top"}),
-        "summary_int": workbook.add_format({"num_format": "#,##0", "valign": "top"}),
-        "summary_ms": workbook.add_format({"num_format": "#,##0", "valign": "top"}),
-        "summary_pct": workbook.add_format({"num_format": '0.0"%"', "valign": "top"}),
+        "summary_text": workbook.add_format({"align": "center", "valign": "vcenter"}),
+        "summary_int": workbook.add_format({"num_format": "#,##0", "align": "center", "valign": "vcenter"}),
+        "summary_ms": workbook.add_format({"num_format": "#,##0", "align": "center", "valign": "vcenter"}),
+        "summary_pct": workbook.add_format({"num_format": '0.0"%"', "align": "center", "valign": "vcenter"}),
         "warning": workbook.add_format({"bold": True, "font_color": "9C0006", "bg_color": "FFC7CE", "text_wrap": True}),
     }
 
@@ -887,53 +912,31 @@ def write_requests_sheet(workbook: xlsxwriter.Workbook, rows: list[dict[str, Any
     last_col = len(ALL_COLUMNS) - 1
     worksheet.hide_gridlines(2)
     worksheet.set_zoom(78)
-    fill_row(worksheet, 0, last_col, fmt["title"])
-    worksheet.write(0, 0, "FlexLB PV × cache comparison × Prefill WorkerStatus — host timeline (decision-time ascending)", fmt["title"])
-    worksheet.set_row(0, 26)
-    fill_row(worksheet, 1, last_col, fmt["note"])
-    worksheet.write(1, 0, "Scope", fmt["note"])
-    worksheet.write(1, 1, "This CSV has FlexLB route/cache and Prefill WorkerStatus only. It does NOT contain Chat/Decode completion or full Prefill finish time.", fmt["note"])
-    worksheet.write(1, 2, "Percentile basis", fmt["note"])
-    worksheet.write(1, 3, "P90/P95/P99 colors use prefill_engine_ttft_ms = firstTokenTimeMs - inputQueueEnqueueTimeMs; this is Prefill engine TTFT, not Chat E2E.", fmt["note"])
-    worksheet.set_row(1, 38)
-
-    legends = [
-        ("P0-P50", f"P0–P50 ≤ {threshold['P50']:,} ms" if threshold["P50"] is not None else "P0–P50"),
-        ("P50-P90", f"P50–P90 ≤ {threshold['P90']:,} ms" if threshold["P90"] is not None else "P50–P90"),
-        ("P90-P95", f"P90–P95 ≤ {threshold['P95']:,} ms" if threshold["P95"] is not None else "P90–P95"),
-        ("P95-P99", f"P95–P99 ≤ {threshold['P99']:,} ms" if threshold["P99"] is not None else "P95–P99"),
-        ("P99-P100", "P99–P100 tail"),
-    ]
-    for col, (band, text) in enumerate(legends):
-        legend_fmt = workbook.add_format({"bold": True, "align": "center", "valign": "vcenter", "bg_color": PERCENTILE_COLORS[band], "border": 1})
-        worksheet.write(2, col, text, legend_fmt)
-    for col in range(len(legends), last_col + 1):
-        worksheet.write_blank(2, col, None, fmt["legend_label"])
-    worksheet.set_row(2, 22)
-
     for col, column in enumerate(ALL_COLUMNS):
-        worksheet.write(3, col, column.label, fmt["header"])
+        worksheet.write(0, col, column.label, fmt["header"])
         worksheet.set_column(col, col, column.width)
-    worksheet.set_row(3, 38)
-    worksheet.freeze_panes(4, 1)
-    worksheet.autofilter(3, 0, 3 + len(rows) + len({row['prefill_host'] for row in rows}), last_col)
+    worksheet.set_row(0, 38)
+    worksheet.freeze_panes(1, 0)
+    host_count = len({row["prefill_host"] for row in rows})
+    worksheet.autofilter(0, 0, len(rows) + host_count, last_col)
 
     formats_by_band = {
         band: {kind: workbook.add_format({
             "bg_color": color,
-            "valign": "top",
+            "align": "center",
+            "valign": "vcenter",
             "num_format": {"integer": "#,##0", "ms": "#,##0", "us": "#,##0", "pct": '0.000"%"', "rate": '0.0"%"'}.get(kind, "General"),
         }) for kind in ("text", "integer", "ms", "us", "pct", "rate")}
         for band, color in PERCENTILE_COLORS.items()
     }
     error_formats = {
         kind: workbook.add_format({
-            "bg_color": "FFC7CE", "font_color": "9C0006", "valign": "top",
+            "bg_color": "FFC7CE", "font_color": "9C0006", "align": "center", "valign": "vcenter",
             "num_format": {"integer": "#,##0", "ms": "#,##0", "us": "#,##0", "pct": '0.000"%"', "rate": '0.0"%"'}.get(kind, "General"),
         }) for kind in ("text", "integer", "ms", "us", "pct", "rate")
     }
 
-    current_row = 4
+    current_row = 1
     for host in sorted({row["prefill_host"] for row in rows}):
         # The physical sheet order is intentional: each visible host section
         # is a decision-time timeline, independent of the request-id ordering
@@ -980,10 +983,10 @@ def write_requests_sheet(workbook: xlsxwriter.Workbook, rows: list[dict[str, Any
     # separate README, so a copied sheet does not lose interpretation.
     worksheet.set_comments_author("Codex")
     column_index = {column.key: index for index, column in enumerate(ALL_COLUMNS)}
-    worksheet.write_comment(3, column_index["prefill_engine_ttft_ms"], "P bands use firstTokenTimeMs - inputQueueEnqueueTimeMs. This source has no Chat/Decode E2E completion.")
-    worksheet.write_comment(3, column_index["hbm_local_match_tokens"], "HBM-local cache hits. Together with remote_kv_added_match_tokens it equals engine actual cache-hit tokens for joined rows.")
-    worksheet.write_comment(3, column_index["remote_kv_wait_ms"], "A component of scheduler_to_running_ms; do not add remote_kv_wait_ms to scheduler_to_running_ms again.")
-    worksheet.write_comment(3, column_index["running_to_first_token_ms"], "Measured from RUNNING to the first generated token. It can be high under chunked prefill / batch compute contention even on a high cache hit.")
+    worksheet.write_comment(0, column_index["prefill_engine_ttft_ms"], "P bands use firstTokenTimeMs - inputQueueEnqueueTimeMs. This source has no Chat/Decode E2E completion.")
+    worksheet.write_comment(0, column_index["hbm_local_match_tokens"], "HBM-local cache hits. Together with remote_kv_added_match_tokens it equals engine actual cache-hit tokens for joined rows.")
+    worksheet.write_comment(0, column_index["remote_kv_wait_ms"], "A component of scheduler_to_running_ms; do not add remote_kv_wait_ms to scheduler_to_running_ms again.")
+    worksheet.write_comment(0, column_index["running_to_first_token_ms"], "Measured from RUNNING to the first generated token. It can be high under chunked prefill / batch compute contention even on a high cache hit.")
 
 
 def write_p99_focus_sheet(workbook: xlsxwriter.Workbook, rows: list[dict[str, Any]], threshold: dict[str, float | None]) -> None:
@@ -1024,7 +1027,7 @@ def write_p99_focus_sheet(workbook: xlsxwriter.Workbook, rows: list[dict[str, An
 
     band_formats = {
         band: {kind: workbook.add_format({
-            "bg_color": color, "valign": "top",
+            "bg_color": color, "align": "center", "valign": "vcenter",
             "num_format": {"integer": "#,##0", "ms": "#,##0", "us": "#,##0", "pct": '0.000"%"', "rate": '0.0"%"'}.get(kind, "General"),
         }) for kind in ("text", "integer", "ms", "us", "pct", "rate")}
         for band, color in PERCENTILE_COLORS.items()
@@ -1103,7 +1106,7 @@ def write_decision_snapshot_sheet(workbook: xlsxwriter.Workbook, rows: list[dict
     number_formats = {"integer": "#,##0", "ms": "#,##0", "us": "#,##0", "pct": '0.000"%"'}
     band_formats = {
         band: {
-            kind: workbook.add_format({"bg_color": color, "valign": "top", "num_format": number_formats.get(kind, "General")})
+            kind: workbook.add_format({"bg_color": color, "align": "center", "valign": "vcenter", "num_format": number_formats.get(kind, "General")})
             for kind in ("text", "integer", "ms", "us", "pct")
         }
         for band, color in PERCENTILE_COLORS.items()

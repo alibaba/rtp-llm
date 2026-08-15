@@ -20,7 +20,7 @@ from openpyxl import load_workbook
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 REQUESTS_SHEET = "Requests"
 CANDIDATES_SHEET = "Decision Snapshot Top5"
-HEADER_ROW = 4
+CANDIDATES_HEADER_ROW = 4
 DATA_PLACEHOLDER = "__REPLAY_DATA__"
 
 
@@ -72,7 +72,20 @@ def cell_bool(value: Any) -> bool:
     return str(value).strip().lower() in {"true", "yes", "1", "y"}
 
 
-def read_table(worksheet: Any, header_row: int = HEADER_ROW) -> list[dict[str, Any]]:
+def read_table(worksheet: Any, header_row: int | None = None) -> list[dict[str, Any]]:
+    if header_row is None:
+        for candidate_row in range(1, min(worksheet.max_row, 10) + 1):
+            headers = [
+                cell.value
+                for cell in next(
+                    worksheet.iter_rows(min_row=candidate_row, max_row=candidate_row)
+                )
+            ]
+            if "request_id" in headers:
+                header_row = candidate_row
+                break
+        else:
+            return []
     headers = [
         cell.value
         for cell in next(
@@ -215,7 +228,7 @@ def _build_replay(input_path: Path) -> dict[str, Any]:
         requests.sort(key=lambda item: item["route"])
 
         candidates: dict[str, list[dict[str, Any]]] = {}
-        for row in read_table(workbook[CANDIDATES_SHEET]):
+        for row in read_table(workbook[CANDIDATES_SHEET], CANDIDATES_HEADER_ROW):
             item = compact_candidate(row)
             if item:
                 candidates.setdefault(replay_key(row), []).append(item)

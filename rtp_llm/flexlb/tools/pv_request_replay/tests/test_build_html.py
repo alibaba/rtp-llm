@@ -79,6 +79,20 @@ class BuildHtmlTest(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_builds_replay_from_legacy_requests_header_row(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            workbook_path = root / "legacy.xlsx"
+            output_path = root / "replay.html"
+            self._write_workbook(workbook_path, legacy_requests_header=True)
+
+            summary = build_html(
+                workbook_path, TOOL_DIR / "replay_template.html", output_path
+            )
+
+            self.assertEqual(summary["request_count"], 2)
+            self.assertTrue(output_path.is_file())
+
     @staticmethod
     def _embedded_replay(html: str) -> dict:
         prefix = "const REPLAY = "
@@ -87,12 +101,13 @@ class BuildHtmlTest(unittest.TestCase):
         return json.loads(html[start:end])
 
     @staticmethod
-    def _write_workbook(path: Path) -> None:
+    def _write_workbook(path: Path, legacy_requests_header: bool = False) -> None:
         workbook = Workbook()
         requests = workbook.active
         requests.title = "Requests"
-        for _ in range(3):
-            requests.append([])
+        if legacy_requests_header:
+            for _ in range(3):
+                requests.append([])
         requests.append(
             [
                 "request_id",
