@@ -41,7 +41,18 @@ try:
     from flash_mla import get_mla_metadata  # type: ignore[import-not-found]
 
     _FLASH_MLA_AVAILABLE = True
-except (ImportError, AttributeError, OSError, ValueError) as e:
+# Any import failure means unavailable. RuntimeError is in the list
+# because that is what a torch C++ extension raises on an ABI mismatch
+# or a duplicate op registration -- the exact "incompatible wheel"
+# case this gate exists for, and one that used to escape the tuple and
+# take the whole attention module's import down with it.
+except (
+    ImportError,
+    AttributeError,
+    OSError,
+    ValueError,
+    RuntimeError,
+) as e:
     logging.warning(
         "[dsv4-fp8] flash_mla not available (%s); FP8 sparse attn fast path "
         "will fail unless reference is called explicitly",

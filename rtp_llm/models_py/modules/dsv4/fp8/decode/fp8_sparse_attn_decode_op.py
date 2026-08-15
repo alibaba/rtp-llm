@@ -20,9 +20,9 @@ carry flash_mla.
 Availability is decided by whether the import succeeds, not by
 ``torch.version.cuda``. The wheel is built against CUDA >= 12.9, but that
 is a property of the *wheel*, not of the torch the wheel is loaded into:
-the H20 DSV4 env runs torch 2.8.0+cu128 against a vendored flash_mla at
-/home/admin/dsv4_pkgs, which exports both entry points and loads its
-sm_90a cubin fine. Gating on the runtime CUDA minor version turned that
+the H20 DSV4 env runs torch 2.8.0+cu128 against a vendored flash_mla on
+PYTHONPATH, which exports both entry points and loads its sm_90a cubin
+fine. Gating on the runtime CUDA minor version turned that
 into "flash_mla wheel is required for FP8 sparse decode" at the first
 decode step, after prefill had already succeeded. If a genuinely
 incompatible wheel is ever present the import itself raises, which is
@@ -44,7 +44,18 @@ try:
     from flash_mla import get_mla_metadata  # type: ignore[import-not-found]
 
     _FLASH_MLA_AVAILABLE = True
-except (ImportError, AttributeError, OSError, ValueError) as e:
+# Any import failure means unavailable. RuntimeError is in the list
+# because that is what a torch C++ extension raises on an ABI mismatch
+# or a duplicate op registration -- the exact "incompatible wheel"
+# case this gate exists for, and one that used to escape the tuple and
+# take the whole attention module's import down with it.
+except (
+    ImportError,
+    AttributeError,
+    OSError,
+    ValueError,
+    RuntimeError,
+) as e:
     logging.warning("[dsv4-fp8] flash_mla wheel unavailable (%s)", e)
 
 
