@@ -618,12 +618,9 @@ def _flash_prefill_with_topk_index_chunked(
             DISABLE_INDEX_VALUE=disable_index_value,
         )
 
-        cu_seqblocks_q, max_seqblock_q, _, _, _, _ = get_cu_seqblocks(
-            chunk.cu_seqlens,
-            chunk.max_seqlen_q,
-            1,
-            block_size_k,
-        )
+        # Chunked scoring is restricted to block_size_q == 1.
+        cu_seqblocks_q = chunk.cu_seqlens
+        max_seqblock_q = chunk.max_seqlen_q
         topk_chunk = topk_idx[:, q_start:q_end, :]
         _topk_index_kernel[
             (max_seqblock_q, chunk.cu_seqlens.shape[0] - 1, num_heads)

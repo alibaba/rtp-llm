@@ -20,11 +20,13 @@ from ..common.utils import get_cu_seqblocks, robust_allocator
 from .flash_with_topk_idx import _bitonic_merge, _flash_attn_fwd_with_block_score_kernel
 from .score_chunk import (
     M3_PREFILL_WORKSPACE_CACHE,
+    PrefillScoreHostMetadata,
     build_prefill_score_chunks,
     get_float32_workspace_views,
     get_or_create_m3_prefill_workspace,
     m3_index_score_chunk_enabled,
     m3_index_score_chunk_rows,
+    resolve_prefill_score_host_metadata,
 )
 
 # Opt-1+: bypass the fmha_sm100 adapter in step3, preallocating the CSR/schedule/
@@ -307,7 +309,14 @@ def _maxscore_to_score(maxscore, max_seqblock_k, out=None):
 
 
 def build_index_score_plan(
-    cu_seqlens, seq_lens, prefix_lens, num_idx_heads, idx_kv_heads, block_size_k
+    cu_seqlens,
+    seq_lens,
+    prefix_lens,
+    num_idx_heads,
+    idx_kv_heads,
+    block_size_k,
+    *,
+    host_metadata: PrefillScoreHostMetadata | None = None,
 ):
     """Build the fmha_sm100 OnlyScore plan for the index QK score.
 
@@ -318,11 +327,15 @@ def build_index_score_plan(
     first sparse layer pays the build cost (no module-global cache needed)."""
     from fmha_sm100.api import _fmha_sm100_plan
 
-    qo_seg = (cu_seqlens[1:] - cu_seqlens[:-1]).cpu().to(torch.int32)
-    kv_seg = seq_lens.cpu().to(torch.int32)
-    qo_off = prefix_lens.cpu().to(
-        torch.int32
-    )  # qo_offset=prefix -> bottom-right causal
+    host_metadata = resolve_prefill_score_host_metadata(
+        cu_seqlens,
+        seq_lens,
+        prefix_lens,
+        host_metadata=host_metadata,
+    )
+    qo_seg = torch.tensor(host_metadata.query_lens, dtype=torch.int32, device="cpu")
+    kv_seg = torch.tensor(host_metadata.seq_lens, dtype=torch.int32, device="cpu")
+    qo_off = torch.tensor(host_metadata.prefix_lens, dtype=torch.int32, device="cpu")
     return _fmha_sm100_plan(
         qo_seg,
         kv_seg,
@@ -782,7 +795,7 @@ def _allocate_topk_outputs(
     return block_tables, output_seq_lens, topk_idx
 
 
-def _get_fmha_index_score_chunks(
+def prepare_fmha_index_score_chunks(
     index_score_plan,
     cu_seqlens,
     seq_lens,
@@ -792,13 +805,16 @@ def _get_fmha_index_score_chunks(
     block_size_k,
     num_heads,
     idx_kv_heads,
+    total_q,
+    max_seqlen_k,
+    *,
+    host_metadata: PrefillScoreHostMetadata | None = None,
 ):
-    total_q = int(cu_seqlens[-1].item())
     cache_key = (
         chunk_rows,
-        total_q,
+        int(total_q),
         int(seq_lens.shape[0]),
-        int(seq_lens.max().item()),
+        int(max_seqlen_k),
         block_size_k,
         num_heads,
         idx_kv_heads,
@@ -812,10 +828,11 @@ def _get_fmha_index_score_chunks(
         cu_seqlens,
         seq_lens,
         prefix_lens,
-        torch.arange(seq_lens.shape[0], dtype=torch.int64, device=cu_seqlens.device),
+        None,
         chunk_rows,
         block_size_k,
         kv_indices=kv_indices,
+        host_metadata=host_metadata,
     )
     chunks_with_plans = [
         (
@@ -827,6 +844,7 @@ def _get_fmha_index_score_chunks(
                 num_heads,
                 idx_kv_heads,
                 block_size_k,
+                host_metadata=chunk.host_metadata,
             ),
         )
         for chunk in chunks
@@ -845,6 +863,7 @@ def _flash_prefill_topk_to_block_tables_chunked(
     cu_seqlens,
     seq_lens,
     prefix_lens,
+    max_seqlen_k,
     block_size_k,
     topk,
     num_pages,
@@ -861,7 +880,7 @@ def _flash_prefill_topk_to_block_tables_chunked(
 
     total_q = idx_q.shape[0]
     chunk_rows = m3_index_score_chunk_rows()
-    chunks_with_plans = _get_fmha_index_score_chunks(
+    chunks_with_plans = prepare_fmha_index_score_chunks(
         index_score_plan,
         cu_seqlens,
         seq_lens,
@@ -871,6 +890,8 @@ def _flash_prefill_topk_to_block_tables_chunked(
         block_size_k,
         num_heads,
         idx_kv_heads,
+        total_q,
+        max_seqlen_k,
     )
     block_tables, output_seq_lens, topk_idx = _allocate_topk_outputs(
         total_q, num_heads, topk, idx_q.device, emit_block_table
@@ -933,12 +954,11 @@ def _flash_prefill_topk_to_block_tables_chunked(
         )
         _maxscore_to_score(maxscore, max_seqblock_k, out=score)
 
-        cu_seqblocks_q, max_seqblock_q, _, _, _, _ = get_cu_seqblocks(
-            chunk.cu_seqlens,
-            chunk.max_seqlen_q,
-            1,
-            block_size_k,
-        )
+        # Score chunking is only enabled for block_size_q == 1, so token and
+        # query-block cumulative offsets are identical. Avoid get_cu_seqblocks:
+        # its first call reads two reduction scalars back to the host.
+        cu_seqblocks_q = chunk.cu_seqlens
+        max_seqblock_q = chunk.max_seqlen_q
         if emit_block_table:
             bt_chunk = block_tables[q_start * num_heads : q_end * num_heads]
             sl_chunk = output_seq_lens[q_start * num_heads : q_end * num_heads]
@@ -1021,11 +1041,6 @@ def flash_prefill_topk_to_block_tables(
     if sm_scale is None:
         sm_scale = qk_head_dim**-0.5
 
-    cu_seqblocks_q, max_seqblock_q, all_seqblock_q, _, _, _ = get_cu_seqblocks(
-        cu_seqlens, max_seqlen_q, block_size_q, block_size_k
-    )
-    max_seqblock_k = triton.cdiv(max_seqlen_k, block_size_k)
-
     # Index QK score via fmha_sm100 OnlyScore (SM100/Blackwell) instead of the
     # Triton block-score kernel. fmha emits the same per-128-block max score that
     # the bitonic topk->block_table kernel below consumes, but is MMA-efficient on
@@ -1050,6 +1065,7 @@ def flash_prefill_topk_to_block_tables(
             cu_seqlens=cu_seqlens,
             seq_lens=seq_lens,
             prefix_lens=prefix_lens,
+            max_seqlen_k=max_seqlen_k,
             block_size_k=block_size_k,
             topk=topk,
             num_pages=num_pages,
@@ -1062,6 +1078,10 @@ def flash_prefill_topk_to_block_tables(
             num_heads=num_heads,
             idx_kv_heads=idx_kv_heads,
         )
+    cu_seqblocks_q, max_seqblock_q, all_seqblock_q, _, _, _ = get_cu_seqblocks(
+        cu_seqlens, max_seqlen_q, block_size_q, block_size_k
+    )
+    max_seqblock_k = triton.cdiv(max_seqlen_k, block_size_k)
     # The fmha plan depends only on the per-forward segment shape (identical across
     # every sparse layer). The caller builds it once per forward and passes it in;
     # build on the fly only when not supplied (decode fast-path / non-CP callers).
@@ -1849,12 +1869,8 @@ def _flash_prefill_with_fused_topk_index_chunked(
             DISABLE_INDEX_VALUE=True,
         )
 
-        cu_seqblocks_q, max_seqblock_q, _, _, _, _ = get_cu_seqblocks(
-            chunk.cu_seqlens,
-            chunk.max_seqlen_q,
-            1,
-            block_size_k,
-        )
+        cu_seqblocks_q = chunk.cu_seqlens
+        max_seqblock_q = chunk.max_seqlen_q
         topk_chunk = topk_idx[:, q_start:q_end, :]
         _launch_topk_to_block_table(
             max_seqblock_q,

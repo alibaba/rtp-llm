@@ -67,6 +67,36 @@ def _fmha_onlyscore_overflows_int32(
     return num_idx_heads * max_k_tiles * total_q > _FMHA_MAXSCORE_INT32_LIMIT
 
 
+def m3_fmha_prefill_enabled(
+    *,
+    workspace: Optional[torch.Tensor],
+    sparse_attn_plan: Optional[object],
+    num_idx_heads: int,
+    num_kv_heads: int,
+    disable_index_value: bool,
+    has_idx_sink: bool,
+    has_sink: bool,
+    max_seqlen_k: int,
+    total_q: int,
+) -> bool:
+    """Return whether the FMHA index-score and sparse-attention path is usable."""
+    fmha_score_rows = total_q
+    if m3_index_score_chunk_enabled(total_q):
+        fmha_score_rows = min(total_q, m3_index_score_chunk_rows())
+    fmha_score_fits = not _fmha_onlyscore_overflows_int32(
+        num_idx_heads, max_seqlen_k, fmha_score_rows
+    )
+    return (
+        workspace is not None
+        and sparse_attn_plan is not None
+        and num_idx_heads // num_kv_heads == 1
+        and disable_index_value
+        and not has_idx_sink
+        and not has_sink
+        and fmha_score_fits
+    )
+
+
 def minimax_sparse_prefill(
     q: torch.Tensor,  # [total_extend_tokens, num_q_heads, qk_head_dim]
     k_cache: torch.Tensor,  # [max_slots, num_kv_heads, head_dim] (paged main)
@@ -122,20 +152,16 @@ def minimax_sparse_prefill(
     # max_seqlen_k is the FULL KV len (prefix+extend, reuse-before), matching how
     # fmha derives max_k_tiles.
     total_q = idx_q.shape[0]
-    fmha_score_rows = total_q
-    if m3_index_score_chunk_enabled(total_q):
-        fmha_score_rows = min(total_q, m3_index_score_chunk_rows())
-    fmha_score_fits = not _fmha_onlyscore_overflows_int32(
-        num_idx_heads, max_seqlen_k, fmha_score_rows
-    )
-    use_trtllm = (
-        workspace is not None
-        and sparse_attn_plan is not None
-        and idx_group_size == 1
-        and disable_index_value
-        and idx_sink is None
-        and sink is None
-        and fmha_score_fits
+    use_trtllm = m3_fmha_prefill_enabled(
+        workspace=workspace,
+        sparse_attn_plan=sparse_attn_plan,
+        num_idx_heads=num_idx_heads,
+        num_kv_heads=num_kv_heads,
+        disable_index_value=disable_index_value,
+        has_idx_sink=idx_sink is not None,
+        has_sink=sink is not None,
+        max_seqlen_k=max_seqlen_k,
+        total_q=total_q,
     )
     if use_trtllm:
         sm_scale_v = sm_scale if sm_scale is not None else q.shape[-1] ** -0.5
