@@ -72,7 +72,9 @@ def _mhc_pre_norm_fn_fwd_mul(
     token_block: int = 32,
     hidden_block: int = 256,
 ) -> tilelang.JITKernel:
-    assert mhc_mult3 <= 32
+    assert 0 < mhc_mult3 <= 32, (
+        f"mhc_mult3={mhc_mult3} must be positive and fit the 32-wide store fragment"
+    )
     num_tokens = T.dynamic("num_tokens")
     assert rms_group_size % hidden_block == 0
 
@@ -130,7 +132,7 @@ def _mhc_pre_norm_fn_fwd_mul(
             for i in T.Parallel(token_block):
                 sqrsum[pid_x * token_block + i, pid_y] = sqrsum_l[i]
             for i, j in T.Parallel(token_block, 32):
-                if j < 24:
+                if j < mhc_mult3:
                     out[pid_x * token_block + i, pid_y, j] = out_frag[i, j]
 
     return _mhc_pre_norm_fn_fwd_mul_kernel
@@ -173,7 +175,9 @@ def _mhc_pre_norm_fn_fwd_mul_splitk(
     versus 4.10-4.45e-04 for the single-block kernel, because each accumulation
     chain is 64x shorter.
     """
-    assert mhc_mult3 <= 32
+    assert 0 < mhc_mult3 <= 32, (
+        f"mhc_mult3={mhc_mult3} must be positive and fit the 32-wide store fragment"
+    )
     num_tokens = T.dynamic("num_tokens")
     assert rms_group_size % hidden_block == 0
     n_blk = rms_group_size // hidden_block
@@ -247,7 +251,7 @@ def _mhc_pre_norm_fn_fwd_mul_splitk(
             for i in T.Parallel(token_block):
                 sqrsum[pid_s, pid_x * token_block + i, pid_y] = sqrsum_l[i]
             for i, j in T.Parallel(token_block, 32):
-                if j < 24:
+                if j < mhc_mult3:
                     out[pid_s, pid_x * token_block + i, pid_y, j] = out_frag[i, j]
 
     return _mhc_pre_norm_fn_fwd_mul_splitk_kernel
@@ -350,7 +354,9 @@ def _mhc_pre_norm_fn_bwd_mul(
     token_block: int = 128,
     hidden_block: int = 128,
 ) -> tilelang.JITKernel:
-    assert mhc_mult3 <= 32
+    assert 0 < mhc_mult3 <= 32, (
+        f"mhc_mult3={mhc_mult3} must be positive and fit the 32-wide store fragment"
+    )
     num_tokens = T.dynamic("num_tokens")
     assert rms_group_size % hidden_block == 0
 
