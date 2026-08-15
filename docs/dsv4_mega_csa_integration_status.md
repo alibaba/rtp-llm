@@ -4,9 +4,11 @@
 
 ## 1. 当前结论
 
-DSV4 Mega CSA 的开源框架适配已经进入生产 decode 层循环，但还不能称为 RTP-LLM
-端到端已跑通：框架当前锁定的 CUDA13 `rtp-kernel` wheel 不含 Mega 扩展，必须先发布
-`cuda_extension@cd8671f` 对应制品，再做真实 GPU eager、CUDA Graph 和整模型验证。
+DSV4 Mega CSA 的开源框架适配已经进入生产 decode 层循环。使用本地
+`cuda_extension@cd8671f` wheel，TP1 单层真实 RTP attention sublayer 的数值对照、eager、
+CUDA Graph 和 slot reuse 已通过；但还不能称为 RTP-LLM 整模型端到端已跑通。框架当前锁定的
+CUDA13 `rtp-kernel` wheel 仍不含 Mega 扩展，必须先发布对应制品并完成真实 allocator、
+prefill/decode 切换和整模型验证。
 
 当前实现遵循“完整 attention sublayer 单独选路”，没有逐个替换普通算子：
 
@@ -60,6 +62,7 @@ MTP 是独立模型且当前 `compress_ratio == 0`，不会挂载 CSA adapter。
 | `fp8/decode/mega_csa_runtime.py` | 共享 workspace、logits、MQA schedule、RoPE table 和 slot mirror 生命周期 |
 | `fp8/decode/mega_csa_adapter.py` | 绑定现有 cache/metadata，编排 Mega 算子、TopK、原生 FlashMLA 和 o-proj |
 | `fp8/test/test_mega_csa_adapter.py` | 覆盖选路、PDFUSION、权重布局、ABI 和 runtime 生命周期 |
+| `fp8/test/test_mega_csa_rtp_eager.py` | 用真实 `AttentionFP8`/`KVCache` 对照原 attention 子层，并覆盖 eager、graph、cache/state 和性能 |
 
 ### 3.2 权重
 
@@ -139,8 +142,8 @@ commit: cd8671f feat(dsv4): migrate WUDA TP1 decode optimizations
 
 ```text
 /root/work/cuda_extension/dist/
-  rtp_kernel-0.1.0+cd8671fa-cp310-cp310-linux_x86_64.whl
-sha256: bf9ae29cbf8f8f3a90fe6180dec24b3eea436a39d7ab915af4c5e7fc4ab86435
+  rtp_kernel-0.1.0+cd8671fa.cu132-cp310-cp310-linux_x86_64.whl
+sha256: 994fc4e64cd70f2a9e5bc21d8913986cdce467646ba67bb4f1507fa11f01e408
 ```
 
 wheel 已确认包含：
@@ -195,22 +198,60 @@ bazelisk build //rtp_llm:rtp_llm \
 使用本地 `cuda_extension@cd8671f` 和 Bazel CUDA13 依赖路径执行 adapter ABI 检查已通过，
 geometry 为 main `65536`、index `8192`、merged `73728`、main heads `128`、index heads `64`。
 
-这些结果证明 Python 接口、选路和完整目标可以编译，但不证明真实数据上的算子链正确性或性能。
+新增 SM100 单卡测试：
+
+```text
+//rtp_llm/models_py/modules/dsv4/fp8/test:test_mega_csa_rtp_eager
+```
+
+测试使用一个真实 `AttentionFP8` 层、确定性合成权重和两套相同初态的 RTP pybind `KVCache`。
+reference 严格执行 `Block.forward_decode` 的原 attention 分支：
+
+```text
+attn_hc.pre -> attn_norm -> AttentionFP8.forward_decode -> attn_hc.post
+```
+
+Mega 与 reference 分别写独立 cache，连续执行 position `0..3` 到首个 CSA compression boundary。
+结果如下：
+
+| 对照项 | `calc_diff` / 结果 | 门限 |
+| --- | ---: | ---: |
+| 最终 attention sublayer 输出 | `1.047576e-05` | `< 1e-3` |
+| CSA KV（解量化） | `1.261505e-05` | `< 1e-3` |
+| Indexer KV（解量化） | `3.661147e-04` | `< 1e-3` |
+| SWA KV（解量化） | `4.985002e-07` | `< 1e-3` |
+| CSA state | `5.116385e-11` | `< 1e-4` |
+| Indexer state | `5.772682e-11` | `< 1e-4` |
+| TopK | int32 全量一致 | 精确一致 |
+| CUDA Graph replay | bitwise 一致 | 精确一致 |
+
+另在 position `4095` 预填充 1024 个随机有效 FP8 packed CSA/Indexer cache entry，从 1024 个
+候选中选择 Top-512：Mega/reference TopK overlap 为 `512/512`，最终输出 `calc_diff=7.413731e-09`。
+
+reference 使用 RTP 默认 TileLang mHC。在 context position `2047` 上使用预热后的 CUDA Event
+中位数计时；metadata 构造、首次 JIT 和每个 model step 只调用一次的 `runtime.begin_decode`
+不计入单层时间：
+
+| Batch | 原路径 eager | Mega eager | 变化 | 原路径 graph | Mega graph | 变化 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | `2132.31 us` | `755.53 us` | `-64.6%` | `215.49 us` | `144.47 us` | `-33.0%` |
+| 8 | `2116.03 us` | `749.21 us` | `-64.6%` | `221.59 us` | `147.25 us` | `-33.5%` |
+| 16 | `2589.91 us` | `720.48 us` | `-72.2%` | `233.75 us` | `161.67 us` | `-30.8%` |
+
+性能模式通过 `--test_env=DSV4_MEGA_RUN_PERF=1` 显式开启，并对每个 batch 设置不高于原路径
+`1.05x` 的回归门。它覆盖真实 RTP 单层算子链，但 typed pool/block table 仍由测试按生产 geometry
+构造，不是 `KVCacheManager` 分配；也未使用真实 checkpoint，不能替代整模型端到端验证。
 
 ## 6. 端到端剩余缺口
 
 按阻塞顺序还需要：
 
 1. 发布 `cd8671f` 的 CUDA13 x86_64 wheel，并更新开源/内源实际使用的依赖入口和 lock；
-2. 在隔离环境加载新 wheel，跑一个 CSA layer 的 eager RTP 调用；
-3. 校验非平凡 block id、slot reuse、负 slot 和 compression boundary；
-4. 校验 normal prefill -> Mega decode -> normal target verify -> Mega decode；
-5. 对固定 batch graph 做 warmup、capture 和多次 replay，确认地址与 schedule 生命周期；
-6. 跑完整 TP1 模型正确性；
-7. 对 normal FP8 与 Mega FP8 做 attention sublayer 和整模型性能 A/B。
-
-当前 GPU 0..3 仍各占用约 216 GiB，GPU 4..7 约 267 GiB，未启动新的 GPU kernel，避免影响
-其他任务。显存可用后优先执行第 2..5 项，再进入完整模型。
+2. 增加由真实 `KVCacheManager` 创建 typed pools/block tables 的集成测试，替代手工 pool fixture；
+3. 校验 normal prefill -> Mega decode -> normal target verify -> Mega decode；
+4. 跑完整 TP1 模型正确性；
+5. 测量开关关闭时普通 FP8 整模型路径，确认新增 Python 分支不可测；
+6. 对 normal FP8 与 Mega FP8 做真实模型、代表性长上下文和完整 batch grid 性能 A/B。
 
 性能报告至少应单列：
 
@@ -228,7 +269,8 @@ geometry 为 main `65536`、index `8192`、merged `73728`、main heads `128`、i
 目标内源分支为 `develop/wangyin_ds_v4_20260424`。在开源提交稳定后：
 
 1. 将目标内源 worktree 对齐远端分支，保留现有用户修改和 gitlink；
-2. 迁移本提交的七个源码/测试改动，不迁移 Wuda TPDP 或改造版 FlashMLA 逻辑；
+2. 迁移本分支的 adapter、runtime、weights、选路及测试文档改动，不迁移 Wuda TPDP 或改造版
+   FlashMLA 逻辑；
 3. 新 wheel 发布后，同时更新内源 CUDA13 requirements lock 和实际 Bazel 依赖选择；
 4. 先跑与开源相同的 CPU tests 和 `//rtp_llm:rtp_llm` 完整编译；
 5. 再在内源服务配置中只对 TP1 FP8 `DECODE/PDFUSION` 打开 `DSV4_MEGA_CSA=1`；
