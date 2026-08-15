@@ -24,6 +24,11 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
     private volatile double interArrivalEmaMs;
     private final Map<Long, ParkTrace> lastParkByRequest = new ConcurrentHashMap<>();
 
+    /** Throttle for [dispatch-blocked] logs — the inflight_full park loops at
+     * ~1ms, so log at most once per second per batcher (one algorithm instance
+     * per WorkerBatcher, accessed only by its single batcher thread). */
+    private long lastBlockedLogMs;
+
     // ==================== BatcherAlgorithm implementation ====================
 
     @Override
@@ -95,6 +100,13 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
             if (budgetMs <= inflightGuardMs && !ctx.cfg().isAutoTpmEnabled()) {
                 dropHead(ctx, head, now, budgetMs, "inflight_full_guard");
                 return;
+            }
+            long blockedNowMs = System.currentTimeMillis();
+            if (blockedNowMs - lastBlockedLogMs >= 1000L) {
+                lastBlockedLogMs = blockedNowMs;
+                Logger.warn("[dispatch-blocked] target={} inflight={}/{} queueDepth={} headBudget={}ms",
+                        ctx.key(), ctx.prefillEp().getInflightBatchCount(),
+                        maxInflightBatches, ctx.size(), budgetMs);
             }
             recordPark(ctx, head, "inflight_full", budgetMs, now);
             parkBriefly();

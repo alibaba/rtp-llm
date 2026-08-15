@@ -57,6 +57,11 @@ import java.util.concurrent.TimeUnit;
  */
 public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
 
+    /** Throttle for [dispatch-blocked] logs — the backpressure gate parks in a
+     * 1ms hot loop, so log at most once per second per batcher (one algorithm
+     * instance per WorkerBatcher, accessed only by its single batcher thread). */
+    private long lastBlockedLogMs;
+
     @Override
     public long computeSortKey(BatcherContext ctx, BatchItem item) {
         // FIFO: arrival timestamp as sort key
@@ -161,6 +166,13 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         //    many batches inflight, to prevent overloading the engine.
         int maxInflightBatches = ctx.cfg().getFlexlbBatchFixedMaxInflightBatches();
         if (maxInflightBatches > 0 && ctx.prefillEp().getInflightBatchCount() >= maxInflightBatches) {
+            long nowMs = System.currentTimeMillis();
+            if (nowMs - lastBlockedLogMs >= 1000L) {
+                lastBlockedLogMs = nowMs;
+                Logger.warn("[dispatch-blocked] target={} inflight={}/{} queueDepth={}",
+                        ctx.key(), ctx.prefillEp().getInflightBatchCount(),
+                        maxInflightBatches, ctx.size());
+            }
             TimeUnit.MILLISECONDS.sleep(1);
             return;
         }

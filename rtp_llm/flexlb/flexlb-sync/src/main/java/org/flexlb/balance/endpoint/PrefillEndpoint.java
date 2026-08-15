@@ -494,6 +494,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
             });
             BatchInflight removed = evicted.get();
             if (removed != null) {
+                // Observability only: a stale batch left the ledger via the TTL
+                // safety net — this is what reopens the maxInflightBatches gate.
+                logger.warn("[batch-ttl-expired] batch={} target={} unobservedFor={}ms ttl={}ms requests={}",
+                        batchId, ipPort(), nowMs - removed.lastObservedAtMs(), ttlMs,
+                        removed.requests().size());
                 inflightRequestCount.addAndGet(-removed.requests().size());
                 cachedWaitTimeExpireAtMs = 0;
                 evictedCount.incrementAndGet();

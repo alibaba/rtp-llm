@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import com.google.protobuf.InvalidProtocolBufferException;
+import io.grpc.Status;
 import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -174,6 +175,7 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
         long deadlineMs = configService.loadBalanceConfig().getFlexlbBatchEnqueueDeadlineMs();
         String prefillIp = prefillEp.getIp();
         int prefillGrpcPort = prefillEp.getGrpcPort();
+        long sendStartMs = System.currentTimeMillis();
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture;
         try {
             attempt.rpcInvocationStarted = true;
@@ -198,6 +200,14 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
                         Throwable cause = unwrapCompletionFailure(ex);
                         Logger.debug("EnqueueBatch failed batchId: {}, entrypoint: {}:{}, err: {}",
                                 batchId, prefillIp, prefillGrpcPort, cause.getMessage());
+                        if (Status.fromThrowable(cause).getCode() == Status.Code.DEADLINE_EXCEEDED) {
+                            // Observability only: the gRPC deadline fired before the
+                            // Engine ACK arrived; the batch enters the uncertain path.
+                            Logger.warn("[dispatch-timeout] batch={} target={}:{} elapsed={}ms deadline={}ms inflight={}",
+                                    batchId, prefillIp, prefillGrpcPort,
+                                    System.currentTimeMillis() - sendStartMs, deadlineMs,
+                                    prefillEp.getInflightBatchCount());
+                        }
                         // Once the asynchronous RPC is invoked, no
                         // transport status proves the server did not
                         // accept the request. Reconcile every transport
@@ -293,6 +303,8 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
             successIds.add(success.getRequestId());
         }
 
+        logEngineRejections(batchId, items, successIds, errorByRequestId);
+
         for (BatchItem item : items) {
             try {
                 if (successIds.contains(item.requestId())) {
@@ -318,6 +330,44 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
                 Logger.error("EnqueueBatch item callback failed request_id={} batch_id={}",
                         item.requestId(), batchId, callbackFailure);
             }
+        }
+    }
+
+    /**
+     * Observability only: surface Engine-side enqueue rejections and missing
+     * ACKs once per batch response, so master-visible engine rejections are
+     * greppable without enabling debug logs.
+     */
+    private static void logEngineRejections(long batchId, List<BatchItem> items,
+                                            Set<Long> successIds,
+                                            Map<Long, EngineRpcService.EnqueueBatchErrorPB> errorByRequestId) {
+        int rejected = 0;
+        int missingAck = 0;
+        long firstErrorCode = 0;
+        String firstErrorMessage = null;
+        for (BatchItem item : items) {
+            if (successIds.contains(item.requestId())) {
+                continue;
+            }
+            EngineRpcService.EnqueueBatchErrorPB error = errorByRequestId.get(item.requestId());
+            if (error != null) {
+                rejected++;
+                if (firstErrorMessage == null) {
+                    firstErrorCode = error.hasErrorInfo() ? error.getErrorInfo().getErrorCode() : 0L;
+                    firstErrorMessage = error.hasErrorInfo()
+                            ? error.getErrorInfo().getErrorMessage() : "missing error_info";
+                }
+            } else {
+                missingAck++;
+            }
+        }
+        if (rejected > 0 || missingAck > 0) {
+            String target = items.get(0).prefillEp() != null
+                    ? items.get(0).prefillEp().ipPort() : "unknown";
+            Logger.warn("[engine-reject] batch={} target={} accepted={} rejected={} missingAck={} "
+                            + "firstErrorCode={} firstErrorMsg={}",
+                    batchId, target, successIds.size(), rejected, missingAck,
+                    firstErrorCode, firstErrorMessage);
         }
     }
 

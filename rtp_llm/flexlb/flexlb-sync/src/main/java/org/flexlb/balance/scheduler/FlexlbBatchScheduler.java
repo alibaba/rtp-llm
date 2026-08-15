@@ -314,6 +314,14 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                             requestId, entry.lifecycle.snapshot().batchId(),
                             entry.lifecycle.snapshot().state());
                     if (startDispatchReconciliationLocked(entry)) {
+                        // Observability only: admission deadline fired while the
+                        // dispatch ACK is still ambiguous — same uncertain path.
+                        Logger.warn("[batch-uncertain] batch={} request={} target={} "
+                                        + "reason=admission_deadline_after_dispatch_claim inflightAfter={}",
+                                entry.lifecycle.snapshot().batchId(), requestId,
+                                entry.item.prefillEp() != null ? entry.item.prefillEp().ipPort() : "unknown",
+                                entry.item.prefillEp() != null
+                                        ? entry.item.prefillEp().getInflightBatchCount() : -1);
                         CompletableFuture.runAsync(() -> reconcileUncertainDispatch(entry, 0));
                     }
                     return;
@@ -758,6 +766,10 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                         // has been settled. Ordinary Prefill success/error may
                         // belong to normal execution (or stale status) and must
                         // not roll back the Master ledgers underneath it.
+                        // Observability only: WorkerStatus reconciled the
+                        // uncertain dispatch via the typed Prefill CANCELED.
+                        Logger.warn("[batch-uncertain-resolved] outcome=prefill_canceled request={} batch={}",
+                                requestId, snapshot.batchId());
                         reduceOrdinaryTerminalLocked(entry, DeferredTerminal.timeout(
                                 "EnqueueBatch reconciled by typed Prefill CANCELED"));
                     } else {
@@ -821,6 +833,9 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     // Enqueue ACK. Stop the Prefill cancel-fence retry chain
                     // and publish the logical ACK while both ownership paths
                     // are linearized by the same dispatch fence.
+                    // Observability only: uncertain dispatch settled as accepted.
+                    Logger.info("[batch-uncertain-resolved] outcome=decode_owned request={} batch={}",
+                            entry.item.requestId(), entry.lifecycle.snapshot().batchId());
                     clearDispatchReconciliation(entry);
                     applyAcknowledgeLocked(entry, entry.lifecycle.snapshot().batchId());
                 }
@@ -1414,6 +1429,12 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     RoleType.PREFILL.name(),
                     ep != null ? ep.getIp() : "",
                     System.currentTimeMillis() - dispatchedAtMs);
+            // DEBUG: fires once per successfully enqueued request — tens per
+            // second under batch-mode load, too chatty for WARN/INFO.
+            Logger.debug("[dispatch-ack] batch={} request={} target={} ackLatency={}ms",
+                    batchId, item.requestId(),
+                    ep != null ? ep.ipPort() : "unknown",
+                    System.currentTimeMillis() - dispatchedAtMs);
         }
         if (!item.future().isDone()) {
             completeSuccess(item);
@@ -1511,6 +1532,12 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     item.requestId(), batchId,
                     item.prefillEp() != null ? item.prefillEp().ipPort() : "unknown",
                     error == null ? "deadline exceeded" : error.getMessage());
+            // Observability only: the request enters ACK-ambiguous reconciliation.
+            Logger.warn("[batch-uncertain] batch={} request={} target={} reason={} inflightAfter={}",
+                    batchId, item.requestId(),
+                    item.prefillEp() != null ? item.prefillEp().ipPort() : "unknown",
+                    error == null ? "deadline exceeded" : error.getMessage(),
+                    item.prefillEp() != null ? item.prefillEp().getInflightBatchCount() : -1);
             reconcileUncertainDispatch(entry, 0);
         }
     }
@@ -1598,6 +1625,12 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 }
                 switch (outcome.ack()) {
                     case TOMBSTONED -> {
+                        // Observability only: uncertain dispatch settled — the
+                        // Engine fenced the late enqueue, request goes terminal.
+                        Logger.warn("[batch-uncertain-resolved] outcome=engine_fenced request={} "
+                                        + "batch={} attempt={}",
+                                entry.item.requestId(),
+                                entry.lifecycle.snapshot().batchId(), attempt);
                         reduceOrdinaryTerminalLocked(entry, DeferredTerminal.timeout(
                                 "EnqueueBatch deadline exceeded; engine fenced late enqueue"));
                     }
