@@ -117,6 +117,31 @@ def _constraints(lock_text, base, source):
     return "\n".join(result) + "\n" if result else ""
 
 
+def _require_pinned_uv(manifest):
+    """Running uv must be the pinned one: its `# via` annotation formatting is
+    version-dependent, so a different uv rewrites those comment lines and every committed
+    lock reads as DRIFT with nothing in the repo having changed."""
+    want = manifest.get("python", {}).get("uv")
+    if not want:
+        return
+    try:
+        out = subprocess.run(
+            ["uv", "--version"], stdout=subprocess.PIPE, text=True, check=True
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(
+            "cannot determine uv version (%s); need uv==%s" % (exc, want)
+        )
+    got = out.split()[1] if len(out.split()) > 1 else out.strip()
+    if got != want:
+        raise RuntimeError(
+            "uv %s != pinned %s (deps.json python.uv). uv's annotation formatting is "
+            "version-dependent, so this would rewrite every lock's `# via` lines and "
+            "report DRIFT on all profiles. Install the pinned one: "
+            "python3 -m pip install -q 'uv==%s'" % (got, want, want)
+        )
+
+
 def _run_uv(argv, cwd):
     for attempt in range(3):
         completed = subprocess.run(
@@ -241,6 +266,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     manifest = json.loads((DEPS / "deps.json").read_text(encoding="utf-8"))
+    _require_pinned_uv(manifest)
     names = [p["name"] for p in manifest["profiles"]] if args.all else args.profile
     uv_pin = manifest.get("python", {}).get("uv")
 

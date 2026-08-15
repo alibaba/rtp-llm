@@ -131,15 +131,15 @@ msgstr ""
 
 #: ../../references/Update-whl-Deps.md:95
 msgid ""
-"Add the corresponding pip dependencies in the whl_reqs section of the "
-"`rtp_llm/BUILD` file to ensure that dependencies are included during "
-"packaging."
+"Wheel packaging metadata (`Requires-Dist`) is fully derived from "
+"`deps/deps.json` — do not hand-edit any `wheel_requires*.txt`. Common "
+"runtime packages come from the manifest `packages[].common` plus "
+"`wheel.groups.wheel` with versions from the lock; architecture-specific "
+"big items are declared by name in `wheel.arch_names.<profile>`. Regenerate "
+"with `scripts/rtpcli deps sync --all` and verify with `scripts/rtpcli deps check --all`."
 msgstr ""
-
-#: ../../references/Update-whl-Deps.md:110
-msgid ""
-"Note: For hardware-related packages, you need to branch and select the "
-"appropriate packages based on hardware type in the whl_deps function in "
-"the `arch_config/arch_select.bzl` file."
-msgstr ""
-
+"wheel 打包元数据(`Requires-Dist`)完全派生自 `deps/deps.json`——不要手改任何 "
+"`wheel_requires*.txt`。通用运行时包名来自 manifest 的 packages[].common 与 "
+"wheel.groups.wheel,版本取自 lock;arch 专属大件在 `wheel.arch_names.<profile>` "
+"只写包名。改完跑 `scripts/rtpcli deps sync --all` 重派生,并用 "
+"`scripts/rtpcli deps check --all` 校验。"

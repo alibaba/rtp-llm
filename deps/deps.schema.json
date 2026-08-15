@@ -22,9 +22,10 @@
     "python": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["version"],
+      "required": ["version", "uv"],
       "properties": {
-        "version": {"type": "string", "description": "Target python version for resolution/build, e.g. 3.10."}
+        "version": {"type": "string", "description": "Target python version for resolution/build, e.g. 3.10."},
+        "uv": {"type": "string", "description": "Pinned uv version. uv's `# via` annotation formatting is version-dependent, so an unpinned resolver makes the committed lock bytes drift with no repo change."}
       }
     },
     "indexes": {
