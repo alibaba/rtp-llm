@@ -2,6 +2,10 @@
 
 namespace rtp_llm {
 
+std::shared_ptr<BaseLogitsProcessor> MultiSeqLogitsProcessor::clone() const {
+    return std::make_shared<MultiSeqLogitsProcessor>(*this);
+}
+
 std::shared_ptr<MultiSeqLogitsProcessor>
 MultiSeqLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> generate_input, int64_t eos_token_id) {
 

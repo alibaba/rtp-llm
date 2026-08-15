@@ -22,7 +22,7 @@ struct StreamTreeInfo {
         current_output_length(output_length),
         is_beam_search(is_beam_search),
         dfa_ptr(dfa_ptr) {}
-    StreamTreeInfo copy() {
+    StreamTreeInfo copy() const {
         StreamTreeInfo tree_info;
         tree_info.in_tree_mode          = in_tree_mode;
         tree_info.input_length          = input_length;
@@ -46,6 +46,7 @@ public:
                                                                   int32_t                        num);
 
 public:
+    std::shared_ptr<BaseLogitsProcessor> clone() const override;
     void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
     void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
     void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;

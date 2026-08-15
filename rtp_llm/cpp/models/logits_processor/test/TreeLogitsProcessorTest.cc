@@ -201,6 +201,31 @@ TEST_F(TreeLogitsProcessorTest, testUpdateStatus) {
     }
 }
 
+TEST_F(TreeLogitsProcessorTest, testCloneHasIndependentDfaStateAndConstraint) {
+    SamplerDataBuilder builder;
+    const std::string  file_path = "./rtp_llm/cpp/models/logits_processor/test/gir_prefix_dict.json";
+    auto canonical = builder.generateLogitsProcessor(true, 1, file_path);
+    auto cloned    = canonical->clone();
+
+    cloned->updateStatus(torch::tensor({{64000}}, torch::kInt32), 1);
+
+    auto canonical_tree = std::dynamic_pointer_cast<TreeLogitsProcessor>(canonical);
+    auto cloned_tree    = std::dynamic_pointer_cast<TreeLogitsProcessor>(cloned);
+    ASSERT_NE(canonical_tree, nullptr);
+    ASSERT_NE(cloned_tree, nullptr);
+    EXPECT_EQ(canonical_tree->getStatus(), std::vector<std::string>({"225"}));
+    EXPECT_EQ(cloned_tree->getStatus(), std::vector<std::string>({"225_64000"}));
+
+    auto sampler_inputs = builder.allocate({1, 65000, 1}, {cloned}, {1});
+    sampler_inputs.logits.fill_(1.0f);
+    cloned->process(sampler_inputs, 0, 1);
+    auto logits = sampler_inputs.logits.cpu();
+    EXPECT_FLOAT_EQ(logits[0][64001].item<float>(), 1.0f);
+    const auto masked_logit = logits[0][64000].item<float>();
+    EXPECT_TRUE(masked_logit == BaseLogitsProcessor::neg_inf || masked_logit == -INFINITY);
+    EXPECT_EQ(canonical_tree->getStatus(), std::vector<std::string>({"225"}));
+}
+
 TEST_F(TreeLogitsProcessorTest, testProcess) {
     {
         SamplerDataBuilder     builder;

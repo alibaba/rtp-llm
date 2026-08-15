@@ -10,6 +10,15 @@ namespace rtp_llm {
 RecommendationLogitsProcessor::RecommendationLogitsProcessor(std::vector<StreamRecommendationInfo> infos):
     infos_(std::move(infos)) {}
 
+std::shared_ptr<BaseLogitsProcessor> RecommendationLogitsProcessor::clone() const {
+    std::vector<StreamRecommendationInfo> cloned_infos;
+    cloned_infos.reserve(infos_.size());
+    for (const auto& info : infos_) {
+        cloned_infos.push_back(info.copy());
+    }
+    return std::make_shared<RecommendationLogitsProcessor>(std::move(cloned_infos));
+}
+
 std::shared_ptr<RecommendationLogitsProcessor>
 RecommendationLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> generate_input, int32_t num) {
     const auto& config = generate_input->generate_config;

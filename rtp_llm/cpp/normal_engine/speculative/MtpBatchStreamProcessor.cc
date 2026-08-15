@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
+#include <algorithm>
 #include <numeric>
 #include <cstring>
 
@@ -66,7 +68,6 @@ MtpBatchStreamProcessor::gatherDecodeModelInput(const StreamGroups& stream_group
 
 absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
     const StreamGroups& stream_groups, const GptModelInputs& model_inputs, const GptModelOutputs& model_output) const {
-    (void)model_inputs;
     RTP_LLM_CHECK(!stream_groups.empty());
     auto               all_streams      = stream_groups.allStreams();
     ReturnAllProbsMode return_all_probs = stream_groups.needReturnAllProbs();
@@ -82,9 +83,31 @@ absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
         allocateSamplerInputs(stream_groups, total_batch_size, total_batch_size, propose_step_);
     fillSamplerCommonInputs(sampler_inputs, all_streams, true, propose_step_);
 
+    const bool has_logits_processors =
+        std::any_of(all_streams.begin(), all_streams.end(), [](const auto& stream) {
+            return !stream->getAllLogitsProcessorPtr().empty();
+        });
+    torch::Tensor             combo_tokens;
+    LogitsProcessorStatesPtr processor_states;
+    if (has_logits_processors) {
+        RTP_LLM_CHECK_WITH_INFO(model_inputs.combo_tokens.defined(), "MTP target verify combo tokens are undefined");
+        RTP_LLM_CHECK_WITH_INFO(model_inputs.combo_tokens.scalar_type() == torch::kInt32,
+                                "MTP target verify combo tokens must be int32");
+        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(model_inputs.combo_tokens.numel()) == total_batch_size,
+                                "MTP target verify combo token count mismatch: expected %zu, got %ld",
+                                total_batch_size,
+                                static_cast<long>(model_inputs.combo_tokens.numel()));
+        combo_tokens = (model_inputs.combo_tokens.is_cpu() ? model_inputs.combo_tokens : model_inputs.combo_tokens.cpu())
+                           .contiguous()
+                           .reshape({static_cast<int64_t>(stream_groups.size()), static_cast<int64_t>(score_len)});
+        processor_states = std::make_shared<LogitsProcessorStates>();
+    }
+
     int batch_idx = 0;
+    int stream_idx = 0;
     for (auto& stream : all_streams) {
         auto complete_token_ids = stream->completeTokenIds();
+        auto canonical_processors = stream->getAllLogitsProcessorPtr();
         auto seq_len            = stream->seqLength();
         auto current_batch_size = score_len;
 
@@ -92,14 +115,30 @@ absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
             memcpy(sampler_inputs.token_ids.data_ptr<int32_t>() + ((batch_idx) * (sampler_inputs.step + 1)),
                    complete_token_ids.data_ptr<int32_t>(),
                    seq_len * sizeof(int));
+
+            sampler_inputs.sequence_lengths.data_ptr<int32_t>()[batch_idx] = seq_len + i;
+            torch::Tensor speculative_prefix;
+            if (i > 0 && !canonical_processors.empty()) {
+                speculative_prefix = combo_tokens[stream_idx].narrow(0, 1, i).reshape({1, i});
+            }
+            for (const auto& canonical_processor : canonical_processors) {
+                auto row_processor = canonical_processor->clone();
+                if (i > 0) {
+                    row_processor->updateStatus(speculative_prefix, i);
+                }
+                processor_states->insert(row_processor, batch_idx, batch_idx + 1);
+            }
             batch_idx += 1;
         }
         RTP_LLM_LOG_DEBUG("stream [%ld], sampler inputs token ids = [%s]",
                           stream->streamId(),
                           tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
+        stream_idx += 1;
     }
+    sampler_inputs.logits_processor_states_ptr = std::move(processor_states);
 
-    auto vocab_size = (size_t)model_output.logits.size(1);
+    auto vocab_size           = (size_t)model_output.logits.size(1);
+    sampler_inputs.vocab_size = vocab_size;
     if (return_all_probs != ReturnAllProbsMode::NONE) {
         sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size, (int64_t)vocab_size},
                                                 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));

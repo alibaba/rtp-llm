@@ -31,7 +31,7 @@ struct StreamThinkInfo {
         is_beam_search(is_beam_search),
         dfa_ptr(dfa_ptr) {}
 
-    StreamThinkInfo copy() {
+    StreamThinkInfo copy() const {
         StreamThinkInfo think_info;
         think_info.in_think_mode         = in_think_mode;
         think_info.max_thinking_tokens   = max_thinking_tokens;
@@ -57,6 +57,7 @@ public:
                                                                        int32_t                        num);
 
 public:
+    std::shared_ptr<BaseLogitsProcessor> clone() const override;
     void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
     void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
     void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;

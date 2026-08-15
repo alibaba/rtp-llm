@@ -114,6 +114,28 @@ TEST_F(RecommendationLogitsProcessorTest, testUpdateStatusDedup) {
     EXPECT_EQ(std::vector<int>({7, 8, 9}), *processor->infos()[0].banned_combos.begin());
 }
 
+TEST_F(RecommendationLogitsProcessorTest, testCloneHasIndependentStateAndConstraint) {
+    auto canonical = std::make_shared<RecommendationLogitsProcessor>(
+        std::vector<StreamRecommendationInfo>{makeInfo(3, {{4, 5, 6}})});
+    auto cloned = std::dynamic_pointer_cast<RecommendationLogitsProcessor>(canonical->clone());
+    ASSERT_NE(cloned, nullptr);
+
+    cloned->updateStatus(torch::tensor({{4, 5}}, torch::kInt32), 2);
+
+    ASSERT_EQ(canonical->infos()[0].pos_in_combo, 0);
+    EXPECT_TRUE(canonical->infos()[0].current_prefix.empty());
+    ASSERT_EQ(cloned->infos()[0].pos_in_combo, 2);
+    EXPECT_EQ(cloned->infos()[0].current_prefix, std::vector<int>({4, 5}));
+
+    auto sampler_inputs = allocateSamplerInputs(1, 10, cloned);
+    sampler_inputs.logits.fill_(1.0f);
+    cloned->process(sampler_inputs, 0, 1);
+    auto logits = sampler_inputs.logits.cpu();
+    EXPECT_EQ(logits[0][6].item<float>(), -INFINITY);
+    EXPECT_FLOAT_EQ(logits[0][5].item<float>(), 1.0f);
+    EXPECT_EQ(canonical->infos()[0].pos_in_combo, 0);
+}
+
 // 场景 4：去重闭环 —— 生成第一个 combo 后，再次到达同一前缀时该 combo 的最后一位被屏蔽
 TEST_F(RecommendationLogitsProcessorTest, testDedupBlockRepeatedCombo) {
     const size_t vocab_size = 100;

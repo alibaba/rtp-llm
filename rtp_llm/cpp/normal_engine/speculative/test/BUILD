@@ -113,3 +113,16 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "mtp_target_logits_processor_test",
+    srcs = ["MtpTargetLogitsProcessorTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/models:models",
+        "//rtp_llm/cpp/normal_engine:normal_engine",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

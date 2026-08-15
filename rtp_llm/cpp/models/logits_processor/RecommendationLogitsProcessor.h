@@ -78,6 +78,7 @@ public:
     fromGenerateInput(std::shared_ptr<GenerateInput> generate_input, int32_t num);
 
 public:
+    std::shared_ptr<BaseLogitsProcessor> clone() const override;
     void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
     void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
     void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;

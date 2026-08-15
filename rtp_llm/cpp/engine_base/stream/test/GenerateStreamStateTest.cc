@@ -27,6 +27,9 @@ namespace {
 
 class ThrowingLogitsProcessor: public BaseLogitsProcessor {
 public:
+    std::shared_ptr<BaseLogitsProcessor> clone() const override {
+        return std::make_shared<ThrowingLogitsProcessor>();
+    }
     void process(const SamplerInputs&, size_t, size_t) override {}
     void updateMultiSeqStatus(const std::vector<int>&) override {}
 

@@ -6,6 +6,15 @@ namespace rtp_llm {
 
 TreeLogitsProcessor::TreeLogitsProcessor(std::vector<StreamTreeInfo> tree_infos): tree_infos_(tree_infos) {}
 
+std::shared_ptr<BaseLogitsProcessor> TreeLogitsProcessor::clone() const {
+    std::vector<StreamTreeInfo> cloned_infos;
+    cloned_infos.reserve(tree_infos_.size());
+    for (const auto& info : tree_infos_) {
+        cloned_infos.push_back(info.copy());
+    }
+    return std::make_shared<TreeLogitsProcessor>(std::move(cloned_infos));
+}
+
 void TreeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
     auto batch_size = size();
     RTP_LLM_CHECK(batch_size == finish_idx - start_idx);

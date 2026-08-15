@@ -7,6 +7,15 @@ namespace rtp_llm {
 ThinkModeLogitsProcessor::ThinkModeLogitsProcessor(std::vector<StreamThinkInfo> think_infos):
     think_infos_(think_infos) {};
 
+std::shared_ptr<BaseLogitsProcessor> ThinkModeLogitsProcessor::clone() const {
+    std::vector<StreamThinkInfo> cloned_infos;
+    cloned_infos.reserve(think_infos_.size());
+    for (const auto& info : think_infos_) {
+        cloned_infos.push_back(info.copy());
+    }
+    return std::make_shared<ThinkModeLogitsProcessor>(std::move(cloned_infos));
+}
+
 void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
     RTP_LLM_CHECK(size() == finish_idx - start_idx);
 
