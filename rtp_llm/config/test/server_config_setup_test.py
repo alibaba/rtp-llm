@@ -1,3 +1,7 @@
+import contextlib
+import io
+import os
+import sys
 import unittest
 from unittest import TestCase
 from unittest.mock import patch
@@ -10,6 +14,17 @@ from rtp_llm.config.server_config_setup import (
 )
 from rtp_llm.ops import NcclCommConfig, RoleType
 from rtp_llm.server.server_args.server_args import setup_args
+
+# clear=True must preserve gpu_lock isolation across Torch lazy initialization.
+_PINNED_DEVICES = {
+    name: os.environ[name]
+    for name in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES")
+    if name in os.environ
+}
+
+
+def _jit_env(**values):
+    return {**_PINNED_DEVICES, "MODEL_TYPE": "fake_model", **values}
 
 
 class ServerConfigPortLayoutTest(TestCase):
@@ -46,6 +61,7 @@ class GenerateConfigTest(TestCase):
     @patch.dict(
         "os.environ",
         {
+            **_PINNED_DEVICES,
             "TP_SIZE": "1",
             "PP_SIZE": "1",
             "WORLD_SIZE": "1",
@@ -87,6 +103,84 @@ class GenerateConfigTest(TestCase):
         self.assertFalse(config.enable_gpu_prefix_tree)
         self.assertFalse(config.enable_prefix_tree_memory_cache)
         self.assertTrue(config.enable_legacy_memory_connector_fallback)
+
+    def test_jit_config(self):
+        valid = (
+            ([], {}, ("", 180)),
+            (
+                [],
+                {"REMOTE_JIT_DIR": "/remote/jit", "JIT_CACHE_SETUP_TIMEOUT_S": "60"},
+                ("/remote/jit", 60),
+            ),
+            (["--jit_cache_setup_timeout_s", "5"], {}, ("", 5)),
+            (["--jit_cache_setup_timeout_s", "-1"], {}, ("", -1)),
+            ([], {"JIT_CACHE_SETUP_TIMEOUT_S": "-1"}, ("", -1)),
+            # CLI wins over env even for -1, which the provided_args scanner sees
+            # as an option rather than as a value.
+            (
+                ["--jit_cache_setup_timeout_s", "-1"],
+                {"JIT_CACHE_SETUP_TIMEOUT_S": "60"},
+                ("", -1),
+            ),
+        )
+        for args, env, expected in valid:
+            with self.subTest(args=args, env=env), patch.dict(
+                os.environ, _jit_env(**env), clear=True
+            ):
+                config = setup_args(args).jit_config
+                self.assertEqual(
+                    (config.remote_jit_dir, config.jit_cache_setup_timeout_s), expected
+                )
+
+        for args, env, expected in (
+            ([], {}, True),
+            (["--manage_jit_cache", "0"], {}, False),
+            ([], {"MANAGE_JIT_CACHE": "0"}, False),
+        ):
+            with self.subTest(args=args, env=env), patch.dict(
+                os.environ, _jit_env(**env), clear=True
+            ):
+                self.assertIs(setup_args(args).jit_config.manage_jit_cache, expected)
+
+        timeout_error, bool_error = "positive integer or -1", "Boolean value expected"
+        for args, env, message in (
+            (["--jit_cache_setup_timeout_s", "0"], {}, timeout_error),
+            (["--jit_cache_setup_timeout_s", "-2"], {}, timeout_error),
+            ([], {"JIT_CACHE_SETUP_TIMEOUT_S": "0"}, timeout_error),
+            ([], {"JIT_CACHE_SETUP_TIMEOUT_S": "invalid"}, timeout_error),
+            ([], {"MANAGE_JIT_CACHE": "maybe"}, bool_error),
+            # An empty value fails like every other int/str2bool arg does.
+            ([], {"JIT_CACHE_SETUP_TIMEOUT_S": ""}, timeout_error),
+            ([], {"MANAGE_JIT_CACHE": ""}, bool_error),
+        ):
+            stderr = io.StringIO()
+            with self.subTest(args=args, env=env), patch.dict(
+                os.environ, _jit_env(**env), clear=True
+            ), contextlib.redirect_stderr(stderr), self.assertRaises(
+                SystemExit
+            ) as context:
+                setup_args(args)
+            self.assertEqual(context.exception.code, 2)
+            # Fail *because of this validator*, not from an unrelated parse error.
+            self.assertIn(message, stderr.getvalue())
+
+    def test_jit_config_pure_env_path_without_cli_args(self):
+        """setup_args() with no argv reaches the env-only branch of the scanner.
+
+        This is the deployment path: every value arrives as a raw env string.
+        """
+        for env, expected in (
+            ({"JIT_CACHE_SETUP_TIMEOUT_S": "45"}, (45, True)),
+            ({"MANAGE_JIT_CACHE": "0"}, (180, False)),
+        ):
+            with self.subTest(env=env), patch.object(sys, "argv", ["prog"]), patch.dict(
+                os.environ, _jit_env(**env), clear=True
+            ):
+                config = setup_args().jit_config
+                self.assertEqual(
+                    (config.jit_cache_setup_timeout_s, config.manage_jit_cache),
+                    expected,
+                )
 
     def test_engine_config_propagates_role_to_parallelism_config(self):
         py_env_configs = PyEnvConfigs()
@@ -153,6 +247,7 @@ class GenerateConfigTest(TestCase):
     @patch.dict(
         "os.environ",
         {
+            **_PINNED_DEVICES,
             "START_PORT": "20000",
             "REMOTE_SERVER_PORT": "30000",
             "WORKER_INFO_PORT_NUM": "13",
@@ -193,6 +288,7 @@ class GenerateConfigTest(TestCase):
     @patch.dict(
         "os.environ",
         {
+            **_PINNED_DEVICES,
             "TP_SIZE": "4",
             "PP_SIZE": "1",
             "WORLD_SIZE": "4",
@@ -231,6 +327,7 @@ class GenerateConfigTest(TestCase):
     @patch.dict(
         "os.environ",
         {
+            **_PINNED_DEVICES,
             "TP_SIZE": "2",
             "PP_SIZE": "1",
             "WORLD_SIZE": "2",
@@ -259,6 +356,7 @@ class GenerateConfigTest(TestCase):
     @patch.dict(
         "os.environ",
         {
+            **_PINNED_DEVICES,
             "TP_SIZE": "4",
             "PP_SIZE": "1",
             "WORLD_SIZE": "4",
@@ -282,6 +380,7 @@ class GenerateConfigTest(TestCase):
     @patch.dict(
         "os.environ",
         {
+            **_PINNED_DEVICES,
             "TP_SIZE": "4",
             "DP_SIZE": "2",
             "PP_SIZE": "1",

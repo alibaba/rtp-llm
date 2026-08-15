@@ -207,3 +207,8 @@ def rocm_oss_suites():
             ),
         ],
     )
+
+    native.test_suite(
+        name = "smoke_rocm_jit_remote_cache",
+        tests = ["//rtp_llm/utils/test:jit_cache_qwen3_rocm"],
+    )
