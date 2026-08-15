@@ -57,6 +57,14 @@ class KVCacheWriteOp:
             v_cache = kv_cache.kv_cache_base[
                 :, 1, :, :, :
             ]  # [num_pages, num_kv_heads, page_size, head_dim]
+            if key.dtype != k_cache.dtype:
+                raise ValueError(
+                    f"key dtype {key.dtype} must match K cache dtype {k_cache.dtype}"
+                )
+            if value.dtype != v_cache.dtype:
+                raise ValueError(
+                    f"value dtype {value.dtype} must match V cache dtype {v_cache.dtype}"
+                )
 
             # FlashInfer requires batch_indices/positions size == nnz.
             # Device planner leaves buffers oversized, so narrow without a host sync.
