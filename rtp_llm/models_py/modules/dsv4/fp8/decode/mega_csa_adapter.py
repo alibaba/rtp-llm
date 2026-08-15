@@ -167,6 +167,7 @@ class MegaCSAAdapter:
             "n_merged": MAIN_HEADS * HEAD_DIM + INDEX_HEADS * INDEX_HEAD_DIM,
             "num_main_heads": MAIN_HEADS,
             "num_index_heads": INDEX_HEADS,
+            "slot_dtype_bits": 64,
         }
         if geometry != expected:
             raise RuntimeError(
@@ -258,7 +259,7 @@ class MegaCSAAdapter:
         ):
             raise ValueError("DSV4 mega pool geometry contains an empty region")
 
-        slots = self.runtime.prepare_slot_mappings(metadata, token_count)
+        slots = self.runtime.slot_mappings(metadata, token_count)
         return MegaCSAPoolContext(
             main_state=main_state,
             indexer_state=indexer_state,

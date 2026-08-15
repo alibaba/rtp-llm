@@ -49,12 +49,6 @@ class MegaCSASlotMappings:
     swa_destinations: torch.Tensor
 
 
-@dataclass
-class _SlotCache:
-    mappings: MegaCSASlotMappings
-    prepared_step: int = -1
-
-
 class MegaCSARuntime:
     """Storage shared by all CSA layers in one transformer instance."""
 
@@ -64,8 +58,6 @@ class MegaCSARuntime:
         self._active_is_cuda_graph = False
         self._layer_workspaces: Dict[Tuple[str, int, int], MegaCSALayerWorkspace] = {}
         self._logits: Dict[Tuple[str, int, int], torch.Tensor] = {}
-        self._eager_slot_caches: Dict[Tuple[str, int], _SlotCache] = {}
-        self._graph_slot_caches: Dict[Tuple[int, ...], _SlotCache] = {}
         self._schedule_step = -1
         self._schedule_key: Optional[Tuple[str, int, int]] = None
         self._schedule: Optional[torch.Tensor] = None
@@ -75,7 +67,7 @@ class MegaCSARuntime:
         ] = {}
 
     def begin_decode(self, metadata: Any) -> None:
-        """Mark one Python forward; graph replay replays the captured copies."""
+        """Mark one Python forward for shared metadata and schedule lifetime."""
         self._step += 1
         self._metadata_id = id(metadata)
         self._active_is_cuda_graph = bool(getattr(metadata, "is_cuda_graph", False))
@@ -143,7 +135,7 @@ class MegaCSARuntime:
             self._logits[key] = logits
         return logits
 
-    def prepare_slot_mappings(self, metadata: Any, m: int) -> MegaCSASlotMappings:
+    def slot_mappings(self, metadata: Any, m: int) -> MegaCSASlotMappings:
         from rtp_llm.models_py.modules.dsv4.attn_type import (
             CSA_KV,
             CSA_STATE,
@@ -180,35 +172,10 @@ class MegaCSARuntime:
                 raise TypeError(
                     f"DSV4 mega {name} slots must be contiguous CUDA tensors"
                 )
+            if source.dtype != torch.int64:
+                raise TypeError(f"DSV4 mega {name} slots must be int64")
 
-        device = sources[0].device
-        if self._active_is_cuda_graph:
-            graph_key = (m, *(int(source.data_ptr()) for source in sources))
-            caches = self._graph_slot_caches
-            cache_key = graph_key
-        else:
-            caches = self._eager_slot_caches
-            cache_key = (str(device), m)
-        cache = caches.get(cache_key)
-        if cache is None:
-            outputs = [
-                torch.empty(m, dtype=torch.int32, device=device) for _ in sources
-            ]
-            cache = _SlotCache(mappings=MegaCSASlotMappings(*outputs))
-            caches[cache_key] = cache
-
-        if cache.prepared_step != self._step:
-            destinations = (
-                cache.mappings.main_state_rows,
-                cache.mappings.indexer_state_rows,
-                cache.mappings.main_destinations,
-                cache.mappings.indexer_destinations,
-                cache.mappings.swa_destinations,
-            )
-            for destination, source in zip(destinations, sources):
-                destination.copy_(source[:m])
-            cache.prepared_step = self._step
-        return cache.mappings
+        return MegaCSASlotMappings(*sources)
 
     def mqa_schedule(
         self, context_lens: torch.Tensor, entries_per_block: int

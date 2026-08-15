@@ -5,7 +5,7 @@
 ## 1. 当前结论
 
 DSV4 Mega CSA 的开源框架适配已经进入生产 decode 层循环。使用本地
-`cuda_extension@cd8671f` wheel，TP1 单层真实 RTP attention sublayer 的数值对照、eager、
+`cuda_extension@1a01cd6` 本地构建，TP1 单层真实 RTP attention sublayer 的数值对照、eager、
 CUDA Graph 和 slot reuse 已通过；但还不能称为 RTP-LLM 整模型端到端已跑通。框架当前锁定的
 CUDA13 `rtp-kernel` wheel 仍不含 Mega 扩展，必须先发布对应制品并完成真实 allocator、
 prefill/decode 切换和整模型验证。
@@ -59,7 +59,7 @@ MTP 是独立模型且当前 `compress_ratio == 0`，不会挂载 CSA adapter。
 | `dsv4/decode/forward.py` | 在生产 layer loop 前推进一次 Mega decode step |
 | `dsv4/block.py` | 在 attention sublayer 入口选择完整 Mega 路径；FFN 前重新汇合 |
 | `fp8/decode/mega_csa_weights.py` | 校验 checkpoint tensor 并构造算子要求的 TP1 fused layout |
-| `fp8/decode/mega_csa_runtime.py` | 共享 workspace、logits、MQA schedule、RoPE table 和 slot mirror 生命周期 |
+| `fp8/decode/mega_csa_runtime.py` | 共享 workspace、logits、MQA schedule 和 RoPE table；校验并透传框架 slot tensor |
 | `fp8/decode/mega_csa_adapter.py` | 绑定现有 cache/metadata，编排 Mega 算子、TopK、原生 FlashMLA 和 o-proj |
 | `fp8/test/test_mega_csa_adapter.py` | 覆盖选路、PDFUSION、权重布局、ABI 和 runtime 生命周期 |
 | `fp8/test/test_mega_csa_rtp_eager.py` | 用真实 `AttentionFP8`/`KVCache` 对照原 attention 子层，并覆盖 eager、graph、cache/state 和性能 |
@@ -90,14 +90,14 @@ runtime 还负责：
 
 - 每个模型 decode step 只生成一次 MQA schedule；
 - 在 WQ-B 提交前准备 schedule，保持 WQ-B 到 MQA 的 PDL 顺序；
-- 把框架五组 slot mapping 从 int64 转成算子需要的 int32，每个模型 step 各一次；
-- 按 graph metadata/buffer pointer 保留 slot mirror，避免 capture 后地址失效；
+- 校验框架五组 slot mapping 为连续 CUDA int64 tensor，并将原 tensor 直接传给算子；
 - 保留 capture 期间生成的 schedule tensor，避免 graph 中悬空指针；
 - 缓存从 `freqs_cis` 拆出的连续 cos/sin table。
 
-五次 slot `copy_` 目前意味着每个模型 step 新增五个很小的 dtype-conversion launch，而不是
-每个 layer 五次。这是当前最明确的框架侧性能成本，需要在 GPU A/B 中单列；若可测开销明显，
-下一步应把五路转换融合成一个 kernel，而不是把 mirror 字段扩散进通用 metadata。
+`cuda_extension@1a01cd6` 已把 FP8 CSA 的五组 slot ABI 改为 int64，与 RTP metadata 对齐。
+runtime 不再分配 int32 mirror，不执行 `copy_`，也不按 eager/graph metadata 缓存 slot 副本；
+CUDA Graph 捕获期间直接使用框架 tensor 的稳定地址。position、block table、context length 和
+schedule metadata 等其他 ABI 均未扩大为 int64。
 
 ### 3.4 Cache 与 FlashMLA
 
@@ -122,7 +122,7 @@ RTP 当前原生 FlashMLA wheel。进入 Mega 且发生 cache write 后，任何
 
 ### 3.5 普通路径影响
 
-开关关闭时不构造 fused weights、runtime、workspace 或 slot mirror，也不新增 CUDA kernel。
+开关关闭时不构造 fused weights、runtime 或 workspace，也不新增 CUDA kernel。
 普通路径保留原有 tensor 和 cache ABI。代码层只增加一次 model-step runtime presence check，以及
 每层一次 `adapter is not None` 的 Python 分支；是否可测必须由 normal FP8 A/B 给出，不能只凭
 静态分析宣称零下降。
@@ -135,10 +135,10 @@ CUDA Extension 已完成 Wuda 最新 TP1（不含 TPDP）迁移并推送：
 repo:   /root/work/cuda_extension
 branch: origin/dsv4_megakernel
 base:   origin/main@3bc0ca4
-commit: cd8671f feat(dsv4): migrate WUDA TP1 decode optimizations
+commit: 1a01cd6 feat(dsv4): consume framework int64 cache slots
 ```
 
-本地 CUDA13 wheel：
+当前 `dist/` 中的 CUDA13 wheel 仍由前一提交构建：
 
 ```text
 /root/work/cuda_extension/dist/
@@ -159,8 +159,10 @@ RTP 当前 CUDA13 lock 仍解析到：
 rtp-kernel 0.1.0+cu13.4a1a7e3
 ```
 
-该旧 wheel 没有 `dsv4_mega`。在新 wheel 上传到稳定制品地址并取得哈希前，不把本地绝对路径
-或临时 URL 写进公共 requirements lock。
+该 RTP lock 中的旧 wheel 没有 `dsv4_mega`。`dist/` 中的 `cd8671f` wheel 虽包含 Mega，
+但还不包含 int64 slot ABI；当前验证使用 `1a01cd6` 的本地 inplace build，并临时替换 Bazel
+external cache 中的扩展产物。必须重新构建、发布 wheel 后再更新公共 requirements lock，不能
+把本地绝对路径或临时 URL 写进去。
 
 adapter 另外依赖当前 DeepGEMM 的：
 
@@ -195,8 +197,9 @@ bazelisk build //rtp_llm:rtp_llm \
   --jobs=64
 ```
 
-使用本地 `cuda_extension@cd8671f` 和 Bazel CUDA13 依赖路径执行 adapter ABI 检查已通过，
-geometry 为 main `65536`、index `8192`、merged `73728`、main heads `128`、index heads `64`。
+使用本地 `cuda_extension@1a01cd6` 和 Bazel CUDA13 依赖路径执行 adapter ABI 检查已通过，
+geometry 为 main `65536`、index `8192`、merged `73728`、main heads `128`、index heads `64`，
+slot ABI 为 int64。
 
 新增 SM100 单卡测试：
 
@@ -247,34 +250,24 @@ Mega 与 reference 分别写独立 cache，连续执行 position `0..3` 到首�
 候选中选择 Top-1024：Mega/reference 有效 TopK overlap 为 `1024/1024`，最终输出
 `calc_diff=3.098951e-09`。
 
-reference 使用 RTP 默认 TileLang mHC。以下 CUDA Event 是五组预热样本的中位数；首次 JIT、
-metadata 构造和每个 model step 只调用一次的 `runtime.begin_decode` 不计入单层时间。生产 graph
-保留 adapter 在 graph 内实际执行的五路 slot dtype conversion 和动态 FlashMLA metadata planner：
+reference 使用 RTP 默认 TileLang mHC。切换到 int64 slot ABI 后重新测量 B128/64K；首次 JIT、
+metadata 构造和每个 model step 只调用一次的 `runtime.begin_decode` 不计入单层时间：
 
-| Batch | Context | 原路径 eager | Mega eager | 变化 | 原路径生产 graph | Mega 生产 graph | 变化 |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 2048 | `1965.04 us` | `686.58 us` | `-65.1%` | `223.83 us` | `156.47 us` | `-30.1%` |
-| 8 | 2048 | `2146.59 us` | `771.39 us` | `-64.1%` | `232.32 us` | `158.37 us` | `-31.8%` |
-| 16 | 2048 | `2155.24 us` | `773.68 us` | `-64.1%` | `243.60 us` | `166.74 us` | `-31.6%` |
-| 128 | 65536 | `2159.37 us` | `770.76 us` | `-64.3%` | `383.64 us` | `302.44 us` | `-21.2%` |
+| Batch | Context | 口径 | 原路径 | Mega | 变化 |
+| ---: | ---: | --- | ---: | ---: | ---: |
+| 128 | 65536 | 生产 CUDA Event | `384.39 us` | `293.49 us` | `-23.6%` |
+| 128 | 65536 | 预绑定纯算子链 | `358.31 us` | `264.43 us` | `-26.2%` |
 
-Wuda 的 `graph` 列不是上述生产 graph 口径，而是输入和 int32 slot 已绑定、FlashMLA schedule 已在
-capture 前生成的纯算子链。测试另外对 Mega 和原 RTP 路径都按该口径 capture，并用 profiler 的
-首个 mHC kernel 到最后一个 mHC post kernel 的 envelope 计时：
+Mega 生产 graph 的 profiler kernel envelope 为 `293.99 us`。与 `264.43 us` 的纯算子链相比，
+剩余约 `29.6 us`：输入 memcpy 约 `3.33 us`，动态 FlashMLA metadata planner 约 `26.14 us`。
+五个 slot conversion kernel 已从 timeline 完全消失。因此约 `294 us` 是 RTP 当前生产 graph，
+约 `264 us` 是与 Wuda `graph` 列对应的预绑定算子链；二者差额不能归因于 RTP TopK。
 
-| Batch | Context | 原路径纯算子链 | Mega 纯算子链 | 变化 |
-| ---: | ---: | ---: | ---: | ---: |
-| 1 | 2048 | `209.56 us` | `136.38 us` | `-34.9%` |
-| 8 | 2048 | `216.16 us` | `133.15 us` | `-38.4%` |
-| 16 | 2048 | `225.66 us` | `139.39 us` | `-38.2%` |
-| 128 | 65536 | `356.99 us` | `265.29 us` | `-25.7%` |
-
-因此 B128/64K 的 Mega 算子链是约 `265 us`；约 `300 us` 是当前 RTP 生产 graph。两者约
-`34 us` 的差额主要来自五路 slot conversion 和约 `25 us` 的 FlashMLA metadata planner，不能
-归因于 RTP TopK。RTP persistent TopK 在该次生产 graph timeline 中为 `14.5 us`。
+此前 B1/8/16 和 B128 的生产数据使用旧 int32 mirror ABI，不再作为当前性能结论；完整 batch
+grid 需要在新 wheel/最终依赖环境下重测。
 
 B128/64K 使用两套相同的随机有效 FP8 packed CSA/Indexer/SWA cache。最终 attention sublayer
-输出 `calc_diff=2.682161e-07`、最大绝对误差 `2.944946e-02`、cosine `0.999789715`。每个请求
+输出 `calc_diff=2.681404e-07`、最大绝对误差 `2.944946e-02`、cosine `0.999789834`。每个请求
 从 16384 个 compressed 候选中选择 Top-1024，有效
 overlap min/mean/max 为 `1000/1023.7/1024`。测试门限为每个请求至少 97% 有效 overlap；差异
 集中在 TopK 截断边界，最终输出仍满足数值门限。ctx=2048 时只有 512 个有效 compressed 候选，
@@ -294,7 +287,7 @@ typed pool/block table 仍由测试按生产 geometry 构造，不是 `KVCacheMa
 
 按阻塞顺序还需要：
 
-1. 发布 `cd8671f` 的 CUDA13 x86_64 wheel，并更新开源/内源实际使用的依赖入口和 lock；
+1. 基于 `1a01cd6` 构建并发布 CUDA13 x86_64 wheel，更新开源/内源实际使用的依赖入口和 lock；
 2. 增加由真实 `KVCacheManager` 创建 typed pools/block tables 的集成测试，替代手工 pool fixture；
 3. 校验 normal prefill -> Mega decode -> normal target verify -> Mega decode；
 4. 跑完整 TP1 模型正确性；
@@ -303,7 +296,7 @@ typed pool/block table 仍由测试按生产 geometry 构造，不是 `KVCacheMa
 
 性能报告至少应单列：
 
-- 五次 slot int64 -> int32 转换；
+- 框架 int64 slot 直传，并确认 timeline 中没有隐式 conversion/copy；
 - mHC pre 到 front、WQ-B 到 MQA 的 PDL 收益；
 - MQA schedule 生成；
 - TopK + 原生 FlashMLA；
