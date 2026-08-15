@@ -56,14 +56,22 @@ private:
     struct ScheduleRuntime {
         size_t  admitted_running_stream_count             = 0;
         size_t  admitted_prefill_token_size_with_cache    = 0;
+        size_t  admitted_prefill_max_seq_len_with_cache   = 0;
+        size_t  admitted_prefill_sequence_count           = 0;
         size_t  admitted_prefill_token_size_without_cache = 0;
         size_t  newly_inited_kv_streams                   = 0;
     };
 
     int64_t lastScheduleTime() override;
+    bool    fitsPrefillTokenLimits(size_t                   admitted_stream_count,
+                                   size_t                   admitted_tokens,
+                                   size_t                   admitted_max_seq_len,
+                                   size_t                   admitted_sequence_count,
+                                   const GenerateStreamPtr& candidate) const;
     bool    evaluateRunningBatch(const ScheduleRuntime& schedule_runtime, const GenerateStreamPtr& new_stream) const;
     bool   evaluateRunningBatch(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
     size_t  prefillTokenCostWithoutCache(const GenerateStreamPtr& stream) const;
+    size_t  prefillSeqLenWithCache(const GenerateStreamPtr& stream) const;
     size_t  prefillTokenCostWithCache(const GenerateStreamPtr& stream) const;
     size_t  countInitedKVCacheStreams() const;
     size_t  groupQueueStreamsSize(const StreamGroupQueue& group_queue) const;
