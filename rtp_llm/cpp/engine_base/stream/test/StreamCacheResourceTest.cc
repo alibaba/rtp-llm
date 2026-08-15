@@ -305,6 +305,23 @@ protected:
     std::shared_ptr<KVCacheManager> cache_manager_;
 };
 
+TEST_F(StreamCacheResourceTest, testResourceContextReadsIgnoreRequestCacheSwitchesEnv) {
+    {
+        autil::EnvGuard env_guard("RTP_LLM_IGNORE_REQUEST_CACHE_SWITCHES", "0");
+        ResourceContext resource_context;
+        KVCacheConfig    kv_cache_config;
+        resource_context.initCacheConfig(kv_cache_config);
+        EXPECT_FALSE(resource_context.ignore_request_cache_switches);
+    }
+    {
+        autil::EnvGuard env_guard("RTP_LLM_IGNORE_REQUEST_CACHE_SWITCHES", "1");
+        ResourceContext resource_context;
+        KVCacheConfig    kv_cache_config;
+        resource_context.initCacheConfig(kv_cache_config);
+        EXPECT_TRUE(resource_context.ignore_request_cache_switches);
+    }
+}
+
 TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesTaggedTopology) {
     ResourceContext resource_context;
     ModelConfig     model_config;
@@ -459,6 +476,18 @@ TEST_F(StreamCacheResourceTest, testStreamCacheResourceReuseCacheMethod) {
     ASSERT_FALSE(resource.reuseCache());
 }
 
+TEST_F(StreamCacheResourceTest, testReuseCacheIgnoresPerRequestSwitchWhenConfigured) {
+    prepareResource(true);
+    auto& resource                                           = stream_->streamCacheResource();
+    resource.resource_context_.ignore_request_cache_switches = true;
+
+    stream_->generate_input_->generate_config->reuse_cache = false;
+    ASSERT_TRUE(resource.reuseCache());
+
+    resource.resource_context_.reuse_cache = false;
+    ASSERT_FALSE(resource.reuseCache());
+}
+
 TEST_F(StreamCacheResourceTest, testCacheLookupIgnoresPerRequestTierSwitches) {
     prepareResource(true);
     auto& resource   = stream_->streamCacheResource();
@@ -490,6 +519,9 @@ TEST_F(StreamCacheResourceTest, testCacheLookupIgnoresPerRequestTierSwitches) {
     deployment.enable_device_cache = true;
     request.reuse_cache            = false;
     EXPECT_FALSE(resource.enableCacheLookup());
+
+    deployment.ignore_request_cache_switches = true;
+    EXPECT_TRUE(resource.enableCacheLookup());
 }
 
 TEST_F(StreamCacheResourceTest, testStoreTargetPicksHighestMutuallyPermittedTier) {
@@ -521,6 +553,32 @@ TEST_F(StreamCacheResourceTest, testStoreTargetPicksHighestMutuallyPermittedTier
     EXPECT_EQ(resource.storeTarget(), Tier::DISK);
 
     request.reuse_cache = false;
+    EXPECT_EQ(resource.storeTarget(), Tier::NONE);
+}
+
+TEST_F(StreamCacheResourceTest, testStoreTargetIgnoresPerRequestSwitchesWhenConfigured) {
+    prepareResource(true);
+    auto& resource   = stream_->streamCacheResource();
+    auto& request    = *stream_->generate_input_->generate_config;
+    auto& deployment = resource.resource_context_;
+
+    deployment.ignore_request_cache_switches = true;
+    request.reuse_cache                       = false;
+    request.enable_device_cache               = false;
+    request.enable_host_cache                 = false;
+    request.enable_disk_cache                 = false;
+    deployment.enable_device_cache            = true;
+    deployment.enable_host_cache              = true;
+    deployment.enable_disk_cache              = true;
+    EXPECT_EQ(resource.storeTarget(), Tier::DEVICE);
+
+    deployment.enable_device_cache = false;
+    EXPECT_EQ(resource.storeTarget(), Tier::HOST);
+
+    deployment.enable_host_cache = false;
+    EXPECT_EQ(resource.storeTarget(), Tier::DISK);
+
+    deployment.enable_disk_cache = false;
     EXPECT_EQ(resource.storeTarget(), Tier::NONE);
 }
 
