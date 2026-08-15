@@ -6,7 +6,7 @@
 
 DSV4 Mega CSA 的开源框架适配已经进入生产 decode 层循环，但还不能称为 RTP-LLM
 端到端已跑通：框架当前锁定的 CUDA13 `rtp-kernel` wheel 不含 Mega 扩展，必须先发布
-`cuda_extension@4c70d40` 对应制品，再做真实 GPU eager、CUDA Graph 和整模型验证。
+`cuda_extension@cd8671f` 对应制品，再做真实 GPU eager、CUDA Graph 和整模型验证。
 
 当前实现遵循“完整 attention sublayer 单独选路”，没有逐个替换普通算子：
 
@@ -131,15 +131,16 @@ CUDA Extension 已完成 Wuda 最新 TP1（不含 TPDP）迁移并推送：
 ```text
 repo:   /root/work/cuda_extension
 branch: origin/dsv4_megakernel
-commit: 4c70d40 feat(dsv4): migrate WUDA TP1 decode optimizations
+base:   origin/main@3bc0ca4
+commit: cd8671f feat(dsv4): migrate WUDA TP1 decode optimizations
 ```
 
 本地 CUDA13 wheel：
 
 ```text
 /root/work/cuda_extension/dist/
-  rtp_kernel-0.1.0+4c70d40e-cp310-cp310-linux_x86_64.whl
-sha256: 0e3e037f3d95e3c823244677f0e4ecc0d96f30547e17c964ffb6b65826534c6c
+  rtp_kernel-0.1.0+cd8671fa-cp310-cp310-linux_x86_64.whl
+sha256: bf9ae29cbf8f8f3a90fe6180dec24b3eea436a39d7ab915af4c5e7fc4ab86435
 ```
 
 wheel 已确认包含：
@@ -191,7 +192,7 @@ bazelisk build //rtp_llm:rtp_llm \
   --jobs=64
 ```
 
-使用本地 `cuda_extension@4c70d40` 和 Bazel CUDA13 依赖路径执行 adapter ABI 检查已通过，
+使用本地 `cuda_extension@cd8671f` 和 Bazel CUDA13 依赖路径执行 adapter ABI 检查已通过，
 geometry 为 main `65536`、index `8192`、merged `73728`、main heads `128`、index heads `64`。
 
 这些结果证明 Python 接口、选路和完整目标可以编译，但不证明真实数据上的算子链正确性或性能。
@@ -200,7 +201,7 @@ geometry 为 main `65536`、index `8192`、merged `73728`、main heads `128`、i
 
 按阻塞顺序还需要：
 
-1. 发布 `4c70d40` 的 CUDA13 x86_64 wheel，并更新开源/内源实际使用的依赖入口和 lock；
+1. 发布 `cd8671f` 的 CUDA13 x86_64 wheel，并更新开源/内源实际使用的依赖入口和 lock；
 2. 在隔离环境加载新 wheel，跑一个 CSA layer 的 eager RTP 调用；
 3. 校验非平凡 block id、slot reuse、负 slot 和 compression boundary；
 4. 校验 normal prefill -> Mega decode -> normal target verify -> Mega decode；
