@@ -25,8 +25,12 @@ DeepGEMM scales are FP32 rather than packed UE8M0:
     SwiGLU runs as the explicit bf16 sequence that kernel was written to match
     followed by an ordinary per-token-group quant.
 
-CUDA graph capture is not supported here (the FP4 path has a dedicated capture
-branch); run with ``enable_cuda_graph=0``.
+CUDA graph capture goes through the masked layout (``_local_experts_masked``). The
+contiguous path cannot be captured: its buffer is ``sum_e align(count_e, 128)``, which
+is device-resident, and reading it back is the per-layer ``num_recv.cpu()`` sync. The
+masked layout fixes the shapes at capture time and leaves the per-expert row count on
+the device in ``masked_m``, so the work still follows the routing. Set
+``DSV4_MOE_MASKED=1`` to use it in eager decode as well; capture always uses it.
 
 EP > 1
 ------
@@ -62,6 +66,7 @@ import torch.nn.functional as F
 
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     m_grouped_fp8_gemm_nt_contiguous,
+    m_grouped_fp8_gemm_nt_masked,
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
@@ -87,6 +92,22 @@ _EP_CHECK_SIZES_ENV = "DSV4_EP_CHECK_SIZES"
 _GROUPED_ALIGNMENT = 128
 
 _HOPPER_MAJOR = 9
+
+# Use the masked layout in eager decode too, not only under capture. Default off: the
+# capture path has to take it (see _local_experts_masked) but eager is the configuration
+# every banked number was measured under, so it stays byte-identical unless asked.
+_MASKED_ENV = "DSV4_MOE_MASKED"
+
+# Above this many tokens per MoE call the masked layout is refused, because its buffer is
+# E * align(N, 128) rows: decode's N (batch x ep, <=256 here) gives 8-16k rows, while a
+# 16k-token prefill chunk would ask for E * 16384 = a million rows. The contiguous layout
+# is the right one there -- at prefill N its per-expert 128-row padding is a few percent,
+# not the 64x it is at decode N.
+_MASKED_MAX_N = 1024
+
+
+def _masked_enabled() -> bool:
+    return os.environ.get(_MASKED_ENV, "0").strip().lower() in ("1", "true", "on", "yes")
 
 
 @functools.cache
@@ -268,10 +289,6 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         N, D = x.shape
         device = x.device
 
-        if torch.cuda.is_current_stream_capturing():
-            raise RuntimeError(
-                f"{self.name} has no CUDA-graph capture path; run with enable_cuda_graph=0"
-            )
         if cfg.ep_size == 1:
             if N == 0:
                 return torch.zeros(N, D, dtype=torch.float32, device=device)
@@ -347,6 +364,9 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         DeepEP's combine moves; the MoE output is cast to BF16 by
         ``combine_routed_and_shared`` anyway.
         """
+        if self._should_mask(x.shape[0]):
+            return self._local_experts_masked(x, weights, indices, expert_start)
+
         cfg = self.cfg
         N, D = x.shape
         E = cfg.n_local_experts
@@ -456,4 +476,172 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         # weight in an fp32 register, one bf16 store — no [N, topk, D] temporary.
         gather_out = torch.empty((N, D), dtype=torch.bfloat16, device=device)
         ep_gather(down_out, adjusted_topk_ids, weights, output_index, gather_out)
+        return gather_out
+
+    @staticmethod
+    def _should_mask(n_tokens: int) -> bool:
+        """Masked layout, yes or no — decided from host state only.
+
+        Every rank must reach the same answer or the group deadlocks at the next
+        collective, so this reads a shape and an environment variable and never the
+        data. ``n_tokens`` is the row count this call will process (post-all-gather
+        under EP), which is a shape on every rank and equal across them.
+        """
+        capturing = torch.cuda.is_current_stream_capturing()
+        if capturing or _masked_enabled():
+            if n_tokens > _MASKED_MAX_N:
+                if capturing:
+                    raise RuntimeError(
+                        f"{GroupedFP8Strategy.name}: CUDA-graph capture needs the masked "
+                        f"layout, but n_tokens={n_tokens} exceeds _MASKED_MAX_N="
+                        f"{_MASKED_MAX_N}; its buffer is n_local_experts * "
+                        "align(n_tokens, 128) rows. Capture decode only, or raise the cap."
+                    )
+                return False
+            return True
+        return False
+
+    def _local_experts_masked(
+        self,
+        x: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.Tensor,
+        expert_start: int,
+    ) -> torch.Tensor:
+        """``_local_experts`` with static shapes and no device->host read.
+
+        Why this exists: the decode step is ~86% device-idle (40 ms of kernels spread
+        over a 292 ms step, measured), so the fix is CUDA graph, and the only thing
+        refusing capture was this strategy. Two properties of the contiguous path are
+        what make it uncapturable, and both are the same fact -- the buffer is
+        ``sum_e align(count_e, 128)``, a quantity that lives on the device:
+
+          * ``num_recv.cpu()`` drains the pipeline once per MoE layer (43x per step);
+          * the allocation size is therefore not known at capture time.
+
+        Making that size host-known by padding every local expert to 128 rows whether or
+        not it was routed to would cost ``64 * 128 = 8192`` rows of GEMM per layer at
+        ep4 against the ~200 the dynamic path computes at decode batch. The masked
+        layout avoids the trade: shapes are fixed at capture, while the per-expert row
+        count stays on the device in ``masked_m`` and the kernel reads it, so the work
+        still scales with the routing.
+
+        The layout comes for free from ``ep_scatter``. It places expert e's rows at
+        ``expert_start_loc[e]``, built as the exclusive cumsum of the counts it is
+        handed; hand it a UNIFORM ``max_m`` for every expert and the flat
+        ``[E*max_m, D]`` buffer it fills *is* ``[E, max_m, D]``. No new kernel, no
+        transpose, and ``masked_m`` is ``num_recv`` exactly as it already exists.
+
+        ``max_m`` must be a multiple of 128, and that is load-bearing rather than
+        cosmetic: ``ep_scatter`` tiles ``m_indices`` in ``BLOCK_E=128`` row blocks, so
+        per-expert segments shorter than that overrun the end of the buffer and corrupt
+        whatever the caching allocator handed out next. Measured on 11.24.224.84: at
+        ``max_m=32`` the MoE output is ~45% wrong with the damage landing in unrelated
+        tensors (and the first call in a fresh process looking fine, because the stomped
+        page was still untouched); at 128 and 256 the result is bit-identical to the
+        contiguous path over repeated calls.
+        """
+        cfg = self.cfg
+        N, D = x.shape
+        E = cfg.n_local_experts
+        inter = cfg.moe_inter_dim
+        device = x.device
+
+        # A token reaches an expert at most once per top-k slot, so no expert can be sent
+        # more rows than there are tokens: N is a valid bound, and aligning it up to the
+        # scatter's block size keeps the segments legal.
+        max_m = align(N, _GROUPED_ALIGNMENT)
+        rows = E * max_m
+
+        a_fp8, a_scale = sgl_per_token_group_quant_fp8(
+            x.contiguous(),
+            group_size=FP8_BLOCK,
+            eps=1e-4,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=False,
+        )
+
+        adjusted_topk_ids, num_recv = recompute_topk_ids_sum_expert_count(
+            indices,
+            current_expert_start_id=expert_start,
+            num_local_experts=E,
+        )
+
+        uniform_counts = torch.full(
+            (E,), max_m, dtype=torch.int32, device=device
+        )
+        # zeros, not empty, for the same reason the contiguous path zeroes its scale: the
+        # masked GEMM computes whole 64-row tiles, so rows between ``num_recv[e]`` and the
+        # end of the tile are read. They are discarded downstream -- ep_gather only visits
+        # the rows in ``output_index`` -- but an uninitialised fp8 byte is a legal NaN and
+        # NaN * 0 is NaN, so they must not be garbage.
+        scatter_out = torch.zeros((rows, D), dtype=torch.float8_e4m3fn, device=device)
+        scatter_out_scale = torch.zeros(
+            [D // FP8_BLOCK, rows], device=device, dtype=torch.float32
+        ).transpose(0, 1)
+        m_indices = torch.zeros(rows, dtype=torch.int32, device=device)
+        output_index = torch.empty_like(adjusted_topk_ids)
+        expert_start_loc = torch.empty_like(uniform_counts)
+        ep_scatter(
+            a_fp8,
+            a_scale,
+            adjusted_topk_ids,
+            uniform_counts,
+            expert_start_loc,
+            scatter_out,
+            scatter_out_scale,
+            m_indices,
+            output_index,
+            scale_ue8m0=False,
+        )
+        del a_fp8, a_scale
+
+        # No m_indices.clamp_ here: in the masked layout the group of a row is its
+        # position, not a tag, so the GEMM never reads m_indices at all. ep_scatter still
+        # writes it, so it still has to be allocated.
+        gate_up = torch.zeros(E, max_m, 2 * inter, device=device, dtype=torch.bfloat16)
+        m_grouped_fp8_gemm_nt_masked(
+            (scatter_out.view(E, max_m, D), scatter_out_scale.view(E, max_m, D // FP8_BLOCK)),
+            (self._w13, self._s13),
+            gate_up,
+            num_recv,
+            expected_m=max_m,
+        )
+        del scatter_out, scatter_out_scale
+
+        # Identical arithmetic to the contiguous path, on a [rows, 2*inter] view.
+        gate_up_2d = gate_up.view(rows, 2 * inter)
+        gate, up = gate_up_2d[:, :inter], gate_up_2d[:, inter:]
+        limit = cfg.swiglu_limit
+        if limit > 0:
+            gate = gate.clamp(max=limit)
+            up = up.clamp(min=-limit, max=limit)
+        hidden = (F.silu(gate.float()) * up.float()).to(torch.bfloat16)
+        del gate_up, gate_up_2d, gate, up
+
+        h_fp8, h_scale = sgl_per_token_group_quant_fp8(
+            hidden.contiguous(),
+            group_size=FP8_BLOCK,
+            eps=1e-4,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=False,
+        )
+        del hidden
+
+        down_out = torch.zeros(E, max_m, D, device=device, dtype=torch.bfloat16)
+        m_grouped_fp8_gemm_nt_masked(
+            (h_fp8.view(E, max_m, inter), h_scale.view(E, max_m, inter // FP8_BLOCK)),
+            (self._w2, self._s2),
+            down_out,
+            num_recv,
+            expected_m=max_m,
+        )
+        del h_fp8, h_scale
+
+        gather_out = torch.empty((N, D), dtype=torch.bfloat16, device=device)
+        ep_gather(
+            down_out.view(rows, D), adjusted_topk_ids, weights, output_index, gather_out
+        )
         return gather_out
