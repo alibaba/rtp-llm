@@ -467,6 +467,12 @@ def _silu_mul_quant_fp32scale(
 class GroupedFP8Strategy(RoutedExpertsStrategy):
     name = "grouped_fp8"
 
+    # Both are set in setup_weights; the class-level defaults exist so forward is
+    # safe for a caller that drives the strategy without one (the equivalence test
+    # does call setup_weights, but nothing enforces that).
+    _ll_ok: bool = False
+    _captured_ns = None
+
     @classmethod
     def can_handle(cls, cfg: MoeCfg) -> bool:
         """Deliberately does NOT check whether the checkpoint's experts are FP8.
@@ -550,10 +556,27 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         del stacked_w1_w, stacked_w1_s, stacked_w2_w, stacked_w2_s
         del stacked_w3_w, stacked_w3_s
 
+        self._captured_ns = set()
+
         # Build the LL buffer here, not on first forward: it is collective and does
         # an NVSHMEM handshake, neither of which can happen inside a graph capture.
         # Doing it before empty_cache() also means KV-pool sizing sees it as taken.
-        if cfg.ep_size > 1 and _deepep_ll_enabled():
+        #
+        # Gated on the role's own bound, not just on the env flag.
+        # ``resolve_moe_max_tokens_per_rank`` returns ``max_generate_batch_size *
+        # tokens_per_batch`` for a decode role (8 here) and a >= 4096 budget for
+        # anything else, so ``max_tokens_per_rank <= ll_max_tokens`` is exactly the
+        # question "can this role ever reach the low-latency branch". Without the
+        # gate a prefill rank allocates a 136 MB NVSHMEM buffer it can never use,
+        # and a short enough prefill request would fall into ``_ll_buffer`` and do
+        # that allocation *mid-request*, since the forward branch tests the runtime
+        # token count rather than the bound.
+        self._ll_ok = (
+            cfg.ep_size > 1
+            and _deepep_ll_enabled()
+            and cfg.max_tokens_per_rank <= _ll_max_tokens(cfg.ep_size)
+        )
+        if self._ll_ok:
             _ll_buffer(cfg.ep_size, D, cfg.n_routed_experts)
 
         # Hand the loader's freed blocks back to the driver so KV-pool sizing
@@ -606,7 +629,9 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         # size fixed at load. So all ranks take the same branch and no collective is
         # left half-entered. N == 0 keeps the all-gather path, whose zero-token case
         # is already handled below; LL dispatch has no such contract.
-        if N > 0 and _deepep_ll_enabled():
+        self._assert_one_captured_size(N)
+
+        if self._ll_ok and N > 0:
             buf, ll_max_tokens = _ll_buffer(ep, D, cfg.n_routed_experts)
             if N <= ll_max_tokens:
                 return self._local_experts_ll(x, weights, indices, buf, ll_max_tokens).float()
@@ -802,6 +827,57 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         gather_out = torch.empty((N, D), dtype=torch.bfloat16, device=device)
         ep_gather(down_out, adjusted_topk_ids, weights, output_index, gather_out)
         return gather_out
+
+    def _assert_one_captured_size(self, n_tokens: int) -> None:
+        """Refuse a capture set that would deadlock at replay, at capture time.
+
+        This strategy's EP exchange is inside the graph -- three all-gathers and a
+        reduce-scatter per layer on the all-gather path, dispatch/combine on the
+        low-latency one. ``CudaGraphRunner::tryGetRealGraphDecodeBatchSize`` picks a
+        graph per rank by ``lower_bound`` over *that rank's own* batch size, and
+        nothing equalises per-rank batch: ``mayAddFakeStream`` only guarantees each
+        dp rank has at least one stream, not the same number. So if more than one
+        batch size is captured, two ranks can replay different graphs and issue
+        those collectives with different counts. NCCL neither errors nor recovers --
+        it hangs, and the symptom is one token followed by the P/D timeout, tens of
+        seconds away from the cause.
+
+        A capture set of exactly one size, equal to the largest per-rank batch the
+        scheduler can produce, makes all ranks agree by construction. That is a
+        deployment constraint that used to live only in a comment; this turns
+        violating it into a startup error.
+
+        The proper fix is an ``all_reduce(MAX)`` over the dp group before
+        ``lower_bound``, so ranks pick the smallest graph that fits the *global*
+        batch. That is a change in ``cuda_graph_runner.cc`` and is not attempted
+        here, which is exactly why this check exists.
+        """
+        if self.cfg.ep_size <= 1 or not torch.cuda.is_current_stream_capturing():
+            return
+        seen = self._captured_ns
+        if seen is None:
+            seen = self._captured_ns = set()
+        seen.add(int(n_tokens))
+        if len(seen) > 1:
+            raise RuntimeError(
+                f"{self.name} with ep_size={self.cfg.ep_size} saw CUDA-graph "
+                f"capture at more than one batch size ({sorted(seen)}). Its EP "
+                "collectives are inside the graph and CudaGraphRunner selects a "
+                "graph per rank, so two ranks can replay different graphs and hang "
+                "in NCCL. Capture exactly one batch size, equal to "
+                "--concurrency_limit (e.g. DECODE_CAPTURE_CONFIG=8 with "
+                "--concurrency_limit 8)."
+            )
+        if int(n_tokens) < int(self.cfg.max_tokens_per_rank):
+            raise RuntimeError(
+                f"{self.name} with ep_size={self.cfg.ep_size} is capturing "
+                f"{n_tokens} rows per rank while the scheduler may hand it up to "
+                f"{self.cfg.max_tokens_per_rank}. A rank whose batch exceeds the "
+                "captured size falls back to eager while the others replay the "
+                "graph, which hangs in the in-graph EP collectives. Raise "
+                "DECODE_CAPTURE_CONFIG to --concurrency_limit, or lower "
+                "--concurrency_limit to the captured size."
+            )
 
     @staticmethod
     def _should_mask(n_tokens: int) -> bool:
