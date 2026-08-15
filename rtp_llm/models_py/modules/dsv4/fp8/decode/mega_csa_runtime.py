@@ -16,6 +16,7 @@ from .mega_csa_weights import (
     INDEX_HEADS,
     MAIN_HEADS,
     MQA_SPLIT_KV,
+    O_GROUPS,
     Q_LORA_RANK,
 )
 
@@ -38,6 +39,8 @@ class MegaCSALayerWorkspace:
     q_lora_sf: torch.Tensor
     indexer_q: torch.Tensor
     indexer_folded_weights: torch.Tensor
+    o_proj_fp8: torch.Tensor
+    o_proj_scale: torch.Tensor
 
 
 @dataclass
@@ -85,6 +88,27 @@ class MegaCSARuntime:
         key = (str(device), m, num_split)
         workspace = self._layer_workspaces.get(key)
         if workspace is None:
+            o_heads_per_group = MAIN_HEADS // O_GROUPS
+            o_aligned_m = ((m + 3) // 4) * 4
+            o_proj_fp8 = torch.empty(
+                O_GROUPS,
+                m,
+                o_heads_per_group * HEAD_DIM,
+                dtype=torch.float8_e4m3fn,
+                device=device,
+            ).transpose(0, 1)
+            o_proj_scale = (
+                torch.empty(
+                    O_GROUPS * o_heads_per_group * o_aligned_m,
+                    dtype=torch.int32,
+                    device=device,
+                )
+                .as_strided(
+                    (O_GROUPS, m, o_heads_per_group),
+                    (o_heads_per_group * o_aligned_m, 1, o_aligned_m),
+                )
+                .transpose(0, 1)
+            )
             workspace = MegaCSALayerWorkspace(
                 hc_partial=torch.empty(
                     num_split, m, HC_MIX, dtype=torch.float32, device=device
@@ -122,6 +146,8 @@ class MegaCSARuntime:
                 indexer_folded_weights=torch.empty(
                     m, INDEX_HEADS, dtype=torch.float32, device=device
                 ),
+                o_proj_fp8=o_proj_fp8,
+                o_proj_scale=o_proj_scale,
             )
             self._layer_workspaces[key] = workspace
         return workspace

@@ -5,7 +5,7 @@
 ## 1. 当前结论
 
 DSV4 Mega CSA 的开源框架适配已经进入生产 decode 层循环。使用本地
-`cuda_extension@1a01cd6` 本地构建，TP1 单层真实 RTP attention sublayer 的数值对照、eager、
+`cuda_extension@e1d1c985` 本地构建，TP1 单层真实 RTP attention sublayer 的数值对照、eager、
 CUDA Graph 和 slot reuse 已通过；但还不能称为 RTP-LLM 整模型端到端已跑通。框架当前锁定的
 CUDA13 `rtp-kernel` wheel 仍不含 Mega 扩展，必须先发布对应制品并完成真实 allocator、
 prefill/decode 切换和整模型验证。
@@ -21,7 +21,8 @@ Block.forward_decode
   │    -> FP8 MQA + main compressor + query RMS/RoPE
   │    -> RTP persistent TopK
   │    -> RTP 原生 FlashMLA 路径
-  │    -> 现有 output projection
+  │    -> CUDA inverse-RoPE + FP8 quant
+  │    -> 现有 wo_a / wo_b output projection
   │    -> mHC post
   └─ 原路径: 其他所有情况
        attn_hc.pre -> AttentionFP8.forward_decode
@@ -79,7 +80,7 @@ wq_b_sf = [index_wq_b_scale; main_wq_b_scale]
 FP8 权重和 UE8M0 scale 不做数值反量化/再量化。Indexer score 的两个归一化因子在初始化时
 折入 `index_weight_proj`，与现有 `IndexerFP8` 语义一致。
 
-当前每个 CSA 层约增加 152 MiB 连续权重副本，21 个 CSA 层约 3.2 GiB。它不影响单步
+当前每个 CSA 层约增加 158 MiB 连续权重副本，21 个 CSA 层约 3.3 GiB。它不影响单步
 kernel 时间，但影响模型初始化和常驻显存；在保留普通 target-verify 路径时不能直接释放原权重。
 后续可评估 loader 直接产出 fused layout，或者调整 kernel 接受分段权重，避免重复存储。
 
@@ -94,7 +95,7 @@ runtime 还负责：
 - 保留 capture 期间生成的 schedule tensor，避免 graph 中悬空指针；
 - 缓存从 `freqs_cis` 拆出的连续 cos/sin table。
 
-`cuda_extension@1a01cd6` 已把 FP8 CSA 的五组 slot ABI 改为 int64，与 RTP metadata 对齐。
+`cuda_extension@e1d1c985` 已把 FP8 CSA 的五组 slot ABI 改为 int64，与 RTP metadata 对齐。
 runtime 不再分配 int32 mirror，不执行 `copy_`，也不按 eager/graph metadata 缓存 slot 副本；
 CUDA Graph 捕获期间直接使用框架 tensor 的稳定地址。position、block table、context length 和
 schedule metadata 等其他 ABI 均未扩大为 int64。
@@ -120,6 +121,12 @@ FlashMLA wrapper 没有修改，也不依赖 Wuda 的改造版 FlashMLA。adapte
 RTP 当前原生 FlashMLA wheel。进入 Mega 且发生 cache write 后，任何错误直接上抛，禁止回退
 普通 attention，避免同一步重复写 cache。
 
+Wuda `origin/main@6818258` 新增的 MLA output inverse-RoPE + FP8 quant CUDA producer 已迁入
+`rtp-kernel`。Mega runtime 为它提供模型级复用的 graph-stable FP8/scale workspace；adapter 直接
+传框架 int64 position 和已有的 FP32 cos/sin table，不再先执行 `freqs_cis.index_select`。producer
+输出继续交给 RTP 现有 `_wo_a_einsum_from_fp8` 和 `wo_b`。普通 attention 路径仍使用原 Triton
+producer，没有修改通用 output-projection 选路。
+
 ### 3.5 普通路径影响
 
 开关关闭时不构造 fused weights、runtime 或 workspace，也不新增 CUDA kernel。
@@ -135,15 +142,16 @@ CUDA Extension 已完成 Wuda 最新 TP1（不含 TPDP）迁移并推送：
 repo:   /root/work/cuda_extension
 branch: origin/dsv4_megakernel
 base:   origin/main@3bc0ca4
-commit: 1a01cd6 feat(dsv4): consume framework int64 cache slots
+source: Wuda origin/main@6818258
+commit: e1d1c985 feat(dsv4): fuse MLA output inverse RoPE quant
 ```
 
-当前 `dist/` 中的 CUDA13 wheel 仍由前一提交构建：
+当前已生成但尚未发布的本地 CUDA13.2 wheel：
 
 ```text
 /root/work/cuda_extension/dist/
-  rtp_kernel-0.1.0+cd8671fa.cu132-cp310-cp310-linux_x86_64.whl
-sha256: 994fc4e64cd70f2a9e5bc21d8913986cdce467646ba67bb4f1507fa11f01e408
+  rtp_kernel-0.1.0+e1d1c985.cu132-cp310-cp310-linux_x86_64.whl
+sha256: 175b34b2e08bb6234dd50b35d83c48abd1f54fd363863203b24ec7088add5bd1
 ```
 
 wheel 已确认包含：
@@ -159,10 +167,9 @@ RTP 当前 CUDA13 lock 仍解析到：
 rtp-kernel 0.1.0+cu13.4a1a7e3
 ```
 
-该 RTP lock 中的旧 wheel 没有 `dsv4_mega`。`dist/` 中的 `cd8671f` wheel 虽包含 Mega，
-但还不包含 int64 slot ABI；当前验证使用 `1a01cd6` 的本地 inplace build，并临时替换 Bazel
-external cache 中的扩展产物。必须重新构建、发布 wheel 后再更新公共 requirements lock，不能
-把本地绝对路径或临时 URL 写进去。
+该 RTP lock 中的旧 wheel 没有 `dsv4_mega`。当前验证使用 `e1d1c985` 本地 wheel，通过未跟踪的
+本地 CUDA13 lock 让 Bazel 正常解析，没有替换 Bazel external cache。必须发布 wheel 后再更新
+公共 requirements 和 lock，不能把本地绝对路径或临时 URL 写进提交。
 
 adapter 另外依赖当前 DeepGEMM 的：
 
@@ -197,7 +204,7 @@ bazelisk build //rtp_llm:rtp_llm \
   --jobs=64
 ```
 
-使用本地 `cuda_extension@1a01cd6` 和 Bazel CUDA13 依赖路径执行 adapter ABI 检查已通过，
+使用本地 `cuda_extension@e1d1c985` 和 Bazel CUDA13 依赖路径执行 adapter ABI 检查已通过，
 geometry 为 main `65536`、index `8192`、merged `73728`、main heads `128`、index heads `64`，
 slot ABI 为 int64。
 
@@ -218,7 +225,7 @@ index_n_heads=64, index_head_dim=128, index_topk=1024
 original_seq_len=65536, max_seq_len=65536
 rope_theta=10000, rope_factor=16, beta_fast=32, beta_slow=1
 compress_rope_theta=160000, hc_mult=4, hc_sinkhorn_iters=20
-FP8 indexer, TP1, RTP persistent TopK, RTP output projection, official FlashMLA
+FP8 indexer, TP1, RTP persistent TopK, RTP wo_a/wo_b, official FlashMLA
 ```
 
 Mega 和 reference 都调用 RTP 现有 persistent TopK；没有迁移或选择 Wuda TopK。2026-08-15
@@ -237,7 +244,7 @@ Mega 与 reference 分别写独立 cache，连续执行 position `0..3` 到首�
 
 | 对照项 | `calc_diff` / 结果 | 门限 |
 | --- | ---: | ---: |
-| 最终 attention sublayer 输出 | `1.140849e-05` | `< 1e-3` |
+| 最终 attention sublayer 输出 | `1.135427e-05` | `< 1e-3` |
 | CSA KV（解量化） | `1.261505e-05` | `< 1e-3` |
 | Indexer KV（解量化） | `3.661147e-04` | `< 1e-3` |
 | SWA KV（解量化） | `4.985002e-07` | `< 1e-3` |
@@ -248,26 +255,27 @@ Mega 与 reference 分别写独立 cache，连续执行 position `0..3` 到首�
 
 另在 position `4095` 预填充 1024 个随机有效 FP8 packed CSA/Indexer cache entry，从 1024 个
 候选中选择 Top-1024：Mega/reference 有效 TopK overlap 为 `1024/1024`，最终输出
-`calc_diff=3.098951e-09`。
+`calc_diff=3.094866e-09`。
 
 reference 使用 RTP 默认 TileLang mHC。切换到 int64 slot ABI 后重新测量 B128/64K；首次 JIT、
 metadata 构造和每个 model step 只调用一次的 `runtime.begin_decode` 不计入单层时间：
 
 | Batch | Context | 口径 | 原路径 | Mega | 变化 |
 | ---: | ---: | --- | ---: | ---: | ---: |
-| 128 | 65536 | 生产 CUDA Event | `384.39 us` | `293.49 us` | `-23.6%` |
-| 128 | 65536 | 预绑定纯算子链 | `358.31 us` | `264.43 us` | `-26.2%` |
+| 128 | 65536 | 生产 CUDA Event | `384.72 us` | `289.91 us` | `-24.6%` |
+| 128 | 65536 | 预绑定纯算子链 | `357.17 us` | `261.22 us` | `-26.9%` |
 
-Mega 生产 graph 的 profiler kernel envelope 为 `293.99 us`。与 `264.43 us` 的纯算子链相比，
-剩余约 `29.6 us`：输入 memcpy 约 `3.33 us`，动态 FlashMLA metadata planner 约 `26.14 us`。
-五个 slot conversion kernel 已从 timeline 完全消失。因此约 `294 us` 是 RTP 当前生产 graph，
-约 `264 us` 是与 Wuda `graph` 列对应的预绑定算子链；二者差额不能归因于 RTP TopK。
+Mega 生产 graph 的 profiler kernel envelope 为 `290.47 us`。与 `261.22 us` 的纯算子链相比，
+仍相差约 `29.3 us`，主要是动态 FlashMLA metadata planner；新的 O-proj producer 直接消费
+position/cos/sin，不再需要此前的 `freqs_cis.index_select` 输入复制。五个 slot conversion kernel
+仍未出现在 timeline。因此约 `290 us` 是 RTP 当前生产 graph，约 `261 us` 是与 Wuda `graph`
+列对应的预绑定算子链；二者差额不能归因于 RTP TopK。
 
 此前 B1/8/16 和 B128 的生产数据使用旧 int32 mirror ABI，不再作为当前性能结论；完整 batch
 grid 需要在新 wheel/最终依赖环境下重测。
 
 B128/64K 使用两套相同的随机有效 FP8 packed CSA/Indexer/SWA cache。最终 attention sublayer
-输出 `calc_diff=2.681404e-07`、最大绝对误差 `2.944946e-02`、cosine `0.999789834`。每个请求
+输出 `calc_diff=2.684947e-07`、最大绝对误差 `2.954102e-02`、cosine `0.999789596`。每个请求
 从 16384 个 compressed 候选中选择 Top-1024，有效
 overlap min/mean/max 为 `1000/1023.7/1024`。测试门限为每个请求至少 97% 有效 overlap；差异
 集中在 TopK 截断边界，最终输出仍满足数值门限。ctx=2048 时只有 512 个有效 compressed 候选，
@@ -287,7 +295,7 @@ typed pool/block table 仍由测试按生产 geometry 构造，不是 `KVCacheMa
 
 按阻塞顺序还需要：
 
-1. 基于 `1a01cd6` 构建并发布 CUDA13 x86_64 wheel，更新开源/内源实际使用的依赖入口和 lock；
+1. 发布 `e1d1c985` 对应的 CUDA13 x86_64 wheel，更新开源/内源实际使用的依赖入口和 lock；
 2. 增加由真实 `KVCacheManager` 创建 typed pools/block tables 的集成测试，替代手工 pool fixture；
 3. 校验 normal prefill -> Mega decode -> normal target verify -> Mega decode；
 4. 跑完整 TP1 模型正确性；

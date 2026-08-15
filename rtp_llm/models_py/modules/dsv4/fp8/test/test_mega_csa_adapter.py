@@ -20,6 +20,8 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_weights import (
     INDEX_HEADS,
     MAIN_HEADS,
     MAX_BATCH,
+    O_GROUPS,
+    O_LORA_RANK,
     Q_LORA_RANK,
     ROPE_DIM,
     MegaCSAWeights,
@@ -272,6 +274,8 @@ class MegaCSAWeightsTest(unittest.TestCase):
             n_heads=MAIN_HEADS,
             head_dim=HEAD_DIM,
             rope_head_dim=ROPE_DIM,
+            n_groups=O_GROUPS,
+            o_lora_rank=O_LORA_RANK,
             indexer=indexer,
         )
         with self.assertRaisesRegex(ValueError, "tp_size=2"):
@@ -284,6 +288,7 @@ class MegaCSAWeightsTest(unittest.TestCase):
             front_mixed_gemm_csa=lambda: None,
             wq_b_proj_gemm_merged_csa=lambda: None,
             mqa_logits_fp8_decode_out=lambda: None,
+            mla_o_inv_rope_quant=lambda: None,
         )
         adapter = MegaCSAAdapter.__new__(MegaCSAAdapter)
         adapter._runtime_checked = False

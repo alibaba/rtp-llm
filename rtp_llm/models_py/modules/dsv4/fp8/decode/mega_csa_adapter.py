@@ -17,6 +17,8 @@ from .mega_csa_weights import (
     INDEX_HEADS,
     MAIN_HEADS,
     MAX_BATCH,
+    O_GROUPS,
+    O_LORA_RANK,
     Q_LORA_RANK,
     ROPE_DIM,
     MegaCSAWeights,
@@ -80,6 +82,8 @@ class MegaCSAAdapter:
             ("n_heads", attn.n_heads, MAIN_HEADS),
             ("head_dim", attn.head_dim, HEAD_DIM),
             ("rope_head_dim", attn.rope_head_dim, ROPE_DIM),
+            ("o_groups", attn.n_groups, O_GROUPS),
+            ("o_lora_rank", attn.o_lora_rank, O_LORA_RANK),
         )
         problems = [
             f"{name}={actual} (expected {wanted})"
@@ -122,6 +126,7 @@ class MegaCSAAdapter:
             "front_mixed_gemm_csa",
             "wq_b_proj_gemm_merged_csa",
             "mqa_logits_fp8_decode_out",
+            "mla_o_inv_rope_quant",
         )
         missing = [name for name in required if not hasattr(dsv4_mega, name)]
         if missing:
@@ -147,6 +152,14 @@ class MegaCSAAdapter:
                 "query_x",
                 "query_out",
                 "pdl",
+            ),
+            "mla_o_inv_rope_quant": (
+                "input",
+                "positions",
+                "rope_cos",
+                "rope_sin",
+                "output_fp8",
+                "output_scale",
             ),
         }
         incompatible = []
@@ -332,9 +345,6 @@ class MegaCSAAdapter:
         from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, SWA_KV
         from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
             get_or_build_sched_meta,
-        )
-        from rtp_llm.models_py.modules.dsv4.fp8.decode.output_proj import (
-            decode_output_proj,
         )
         from rtp_llm.models_py.modules.dsv4.fp8.indexer import _get_topk_workspace
         from rtp_llm.ops.compute_ops import rtp_llm_ops
@@ -539,8 +549,18 @@ class MegaCSAAdapter:
             metadata,
             cmp_attn_type=CSA_KV,
         )
-        freqs = attn.freqs_cis.index_select(0, positions_i64).contiguous()
-        projected = decode_output_proj(attn, attention, freqs, m, 1)
+        dsv4_mega.mla_o_inv_rope_quant(
+            attention.view(m, MAIN_HEADS, HEAD_DIM),
+            positions_i64,
+            rope_cos,
+            rope_sin,
+            workspace.o_proj_fp8,
+            workspace.o_proj_scale,
+        )
+        o_lora = attn._wo_a_einsum_from_fp8(
+            workspace.o_proj_fp8, workspace.o_proj_scale, m, 1
+        )
+        projected = attn._lin(attn.wo_b, o_lora.flatten(2))
         return block.attn_hc.post(
             projected,
             hidden,
