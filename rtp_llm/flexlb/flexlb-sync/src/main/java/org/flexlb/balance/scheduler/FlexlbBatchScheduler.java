@@ -768,8 +768,14 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                         // not roll back the Master ledgers underneath it.
                         // Observability only: WorkerStatus reconciled the
                         // uncertain dispatch via the typed Prefill CANCELED.
-                        Logger.warn("[batch-uncertain-resolved] outcome=prefill_canceled request={} batch={}",
-                                requestId, snapshot.batchId());
+                        Logger.warn("[batch-uncertain-resolved] outcome=prefill_canceled request={} "
+                                        + "batch={} target={} uncertainDuration={}ms inflightAfter={}",
+                                requestId, snapshot.batchId(),
+                                entry.item.prefillEp() != null
+                                        ? entry.item.prefillEp().ipPort() : "unknown",
+                                entry.uncertainDurationMs(),
+                                entry.item.prefillEp() != null
+                                        ? entry.item.prefillEp().getInflightBatchCount() : -1);
                         reduceOrdinaryTerminalLocked(entry, DeferredTerminal.timeout(
                                 "EnqueueBatch reconciled by typed Prefill CANCELED"));
                     } else {
@@ -834,8 +840,14 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     // and publish the logical ACK while both ownership paths
                     // are linearized by the same dispatch fence.
                     // Observability only: uncertain dispatch settled as accepted.
-                    Logger.info("[batch-uncertain-resolved] outcome=decode_owned request={} batch={}",
-                            entry.item.requestId(), entry.lifecycle.snapshot().batchId());
+                    Logger.info("[batch-uncertain-resolved] outcome=decode_owned request={} "
+                                    + "batch={} target={} uncertainDuration={}ms inflightAfter={}",
+                            entry.item.requestId(), entry.lifecycle.snapshot().batchId(),
+                            entry.item.prefillEp() != null
+                                    ? entry.item.prefillEp().ipPort() : "unknown",
+                            entry.uncertainDurationMs(),
+                            entry.item.prefillEp() != null
+                                    ? entry.item.prefillEp().getInflightBatchCount() : -1);
                     clearDispatchReconciliation(entry);
                     applyAcknowledgeLocked(entry, entry.lifecycle.snapshot().batchId());
                 }
@@ -1552,6 +1564,9 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             return false;
         }
         entry.dispatchReconciliation = true;
+        // Observability only: timestamp for [batch-uncertain-resolved]
+        // uncertainDuration and [dispatch-retry] elapsed time.
+        entry.uncertainSinceMs = System.currentTimeMillis();
         long batchId = entry.lifecycle.snapshot().batchId();
         PrefillEndpoint prefill = entry.item.prefillEp();
         if (prefill != null && batchId > 0) {
@@ -1628,9 +1643,15 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                         // Observability only: uncertain dispatch settled — the
                         // Engine fenced the late enqueue, request goes terminal.
                         Logger.warn("[batch-uncertain-resolved] outcome=engine_fenced request={} "
-                                        + "batch={} attempt={}",
+                                        + "batch={} attempt={} target={} "
+                                        + "uncertainDuration={}ms inflightAfter={}",
                                 entry.item.requestId(),
-                                entry.lifecycle.snapshot().batchId(), attempt);
+                                entry.lifecycle.snapshot().batchId(), attempt,
+                                entry.item.prefillEp() != null
+                                        ? entry.item.prefillEp().ipPort() : "unknown",
+                                entry.uncertainDurationMs(),
+                                entry.item.prefillEp() != null
+                                        ? entry.item.prefillEp().getInflightBatchCount() : -1);
                         reduceOrdinaryTerminalLocked(entry, DeferredTerminal.timeout(
                                 "EnqueueBatch deadline exceeded; engine fenced late enqueue"));
                     }
@@ -1653,6 +1674,16 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         }
         if (retry) {
             long delayMs = Math.min(5_000L, 100L << Math.min(attempt, 5));
+            // Observability only: the cancel-fence chain re-arms. By design the
+            // original batch is never re-dispatched after uncertain release —
+            // this retry chain is the closest "dispatch retry" semantic, so a
+            // long-running loop here is the cascade-stall signature to watch.
+            Logger.warn("[dispatch-retry] batch={} target={} retryCount={} "
+                            + "previousUncertainDuration={}ms nextDelayMs={}",
+                    entry.lifecycle.snapshot().batchId(),
+                    entry.item.prefillEp() != null
+                            ? entry.item.prefillEp().ipPort() : "unknown",
+                    attempt + 1, entry.uncertainDurationMs(), delayMs);
             CompletableFuture.delayedExecutor(delayMs, TimeUnit.MILLISECONDS)
                     .execute(() -> reconcileUncertainDispatch(entry, attempt + 1));
         }
@@ -1941,6 +1972,13 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         boolean cleanupOwned;
         PreemptionRegistration preemption;
         boolean dispatchReconciliation;
+        // Wall-clock instant when dispatchReconciliation was armed; 0 = never.
+        long uncertainSinceMs;
+
+        long uncertainDurationMs() {
+            return uncertainSinceMs > 0
+                    ? System.currentTimeMillis() - uncertainSinceMs : -1;
+        }
 
         InflightEntry(BatchItem item, boolean autoTpmAdmission) {
             this.item = Objects.requireNonNull(item);
