@@ -31,16 +31,17 @@ from rtp_llm.models_py.modules.dsv4.decode.fp8_kv_quant_decode_op import (
 
 _FLASH_MLA_AVAILABLE = False
 try:
-    if torch.version.cuda:
-        major, minor = map(int, torch.version.cuda.split(".")[:2])
-        if (major, minor) >= (12, 9):
-            from flash_mla import (
-                flash_mla_with_kvcache,  # type: ignore[import-not-found]
-            )
-            from flash_mla import get_mla_metadata  # type: ignore[import-not-found]
+    # Import success, not torch.version.cuda, is the availability test: the
+    # CUDA >= 12.9 requirement is on how the wheel was BUILT, and the H20
+    # DSV4 env loads a vendored flash_mla under torch 2.8.0+cu128 without
+    # trouble. See the sibling fp8/decode/fp8_sparse_attn_decode_op.py.
+    from flash_mla import (
+        flash_mla_with_kvcache,  # type: ignore[import-not-found]
+    )
+    from flash_mla import get_mla_metadata  # type: ignore[import-not-found]
 
-            _FLASH_MLA_AVAILABLE = True
-except (ImportError, AttributeError, ValueError) as e:
+    _FLASH_MLA_AVAILABLE = True
+except (ImportError, AttributeError, OSError, ValueError) as e:
     logging.warning(
         "[dsv4-fp8] flash_mla not available (%s); FP8 sparse attn fast path "
         "will fail unless reference is called explicitly",
@@ -50,7 +51,7 @@ except (ImportError, AttributeError, ValueError) as e:
 
 def _flash_mla_unavailable_reason(q: torch.Tensor, kv_cache: torch.Tensor) -> str:
     if not _FLASH_MLA_AVAILABLE:
-        return "flash_mla import failed or CUDA version is below 12.9"
+        return "flash_mla import failed"
     if not q.is_cuda:
         return f"q is on {q.device}, expected CUDA"
     if not kv_cache.is_cuda:
