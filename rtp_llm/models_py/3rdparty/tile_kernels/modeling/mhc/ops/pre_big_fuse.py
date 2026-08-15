@@ -1,4 +1,5 @@
 import functools
+import logging
 import os
 
 import torch
@@ -11,73 +12,48 @@ from ....mhc.norm_fn_kernel import (
 from ....mhc.pre_big_fuse_kernel import _mhc_pre_big_fuse
 
 
+_logger = logging.getLogger(__name__)
+
+
 def _ceil_div(x: int, y: int) -> int:
     return (x + y - 1) // y
 
 
+@functools.cache
+def _policy():
+    """The module that owns backend selection and the split-K arithmetic.
+
+    Imported function-locally, as this file already does for ``deepgemm_wrapper``:
+    that module holds no TileLang dependency and must stay importable in a CPU-only
+    test lane, which importing it from this file's module scope would defeat.
+    """
+    from rtp_llm.models_py.modules.dsv4 import mhc_prenorm_backend
+
+    return mhc_prenorm_backend
+
+
 def _largest_divisor_le(n: int, want: int) -> int:
-    """Largest divisor of ``n`` that is <= ``want`` (>= 1).
-
-    ``_compute_num_split`` returns ``n_sms // grid_size`` capped at
-    ``num_block_k // 4``, which is not in general a divisor of the TileLang
-    kernel's K block count -- at 78 SMs and m=512 it returns 9, and the split-K
-    kernel needs the K blocks to divide evenly. Rounding down to a divisor keeps
-    every block's slice the same length, which is what lets the ``pz`` loop stay
-    a compile-time constant.
-    """
-    d = min(max(int(want), 1), n)
-    while d > 1 and n % d:
-        d -= 1
-    return max(d, 1)
+    """See :func:`mhc_prenorm_backend.largest_divisor_le`."""
+    return _policy().largest_divisor_le(n, want)
 
 
 @functools.cache
-def _compute_num_split(block_k: int, k: int, grid_size: int) -> int:
-    device_props = torch.cuda.get_device_properties(0)
-    n_sms = device_props.multi_processor_count
-    split_k = n_sms // max(grid_size, 1)
-    num_block_k = _ceil_div(k, block_k)
-    split_k = min(split_k, num_block_k // 4)
-    return max(split_k, 1)
+def device_num_sms() -> int:
+    return torch.cuda.get_device_properties(0).multi_processor_count
 
 
-@functools.cache
-def _has_deepgemm_prenorm() -> bool:
-    """Whether DeepGEMM in this build exports the split-K mHC pre GEMM.
-
-    ``tf32_hc_prenorm_gemm`` is optional in DeepGEMM: the wrapper leaves the impl
-    None rather than raising when it is absent, which is exactly the case that has
-    to be detected before selecting the backend that needs it.
-    """
-    try:
-        from rtp_llm.models_py.kernels.cuda import deepgemm_wrapper
-
-        return getattr(deepgemm_wrapper, "_tf32_hc_prenorm_gemm_impl", None) is not None or hasattr(
-            __import__("deep_gemm"), "tf32_hc_prenorm_gemm"
-        )
-    except Exception:
-        return False
+def resolve_n_splits(**kwargs) -> int:
+    """See :func:`mhc_prenorm_backend.resolve_n_splits`."""
+    return _policy().resolve_n_splits(**kwargs)
 
 
-def _requested_backend() -> str:
-    requested = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
-    if requested in ("", "auto"):
-        # DeepGEMM's split-K kernel when the build has it -- it is the fastest of
-        # the three and the SM100 smoke suite validates DSV4 greedy/golden
-        # semantics against it. When the build does NOT export
-        # tf32_hc_prenorm_gemm, "auto" used to resolve to it anyway and every call
-        # raised, which is why deployments pinned tilelang_single by hand. Fall
-        # back to tilelang_splitk instead: same math as tilelang_single, same
-        # number of kernels, but the K loop is spread over the grid rather than
-        # walked by one CUDA block, which is worth ~20% of decode TPOT.
-        return "deepgemm" if _has_deepgemm_prenorm() else "tilelang_splitk"
-    aliases = {
-        "dg": "deepgemm",
-        "tilelang": "tilelang_single",
-        "single": "tilelang_single",
-        "splitk": "tilelang_splitk",
-    }
-    return aliases.get(requested, requested)
+def resolve_backend() -> str:
+    """See :func:`mhc_prenorm_backend.resolve_backend`."""
+    return _policy().resolve_backend()
+
+
+# Historical name, kept because the ablation scripts and tests reference it.
+_requested_backend = resolve_backend
 
 
 def _run_tilelang_single_gemm(
@@ -178,22 +154,19 @@ def mhc_pre_big_fuse(
     num_tokens = residual_flat.shape[0]
     fn_flat = fn
 
-    backend = _requested_backend()
-    block_k = 64
-    block_m = 64
-    n_splits = (
-        _compute_num_split(block_k, mhc_hidden_size, _ceil_div(num_tokens, block_m))
-        if backend in ("deepgemm", "tilelang_splitk")
-        else 1
+    backend = resolve_backend()
+    # At decode (num_tokens <= a couple of dozen) grid_size is 1 and the split
+    # count lands on the cap, 64 for a 16384-wide fn; at prefill grid_size
+    # already fills the GPU and the heuristic returns 1, which makes the split-K
+    # kernel identical in shape to the single-GEMM one. Every distinct count is a
+    # distinct tl.constexpr and so a distinct compile, which is why the JIT
+    # warmup enumerates them through this same function.
+    n_splits = resolve_n_splits(
+        mhc_hidden_size=mhc_hidden_size,
+        num_tokens=num_tokens,
+        num_sms=device_num_sms(),
+        backend=backend,
     )
-    if backend == "tilelang_splitk":
-        # The TileLang kernel slices K in units of its hidden_block (256), so
-        # the split count has to divide that block count evenly. At decode
-        # (num_tokens <= a couple of dozen) grid_size is 1 and this lands on the
-        # cap, 64 for a 16384-wide fn; at prefill grid_size already fills the
-        # GPU and _compute_num_split returns 1, which makes this kernel identical
-        # in shape to the single-GEMM one.
-        n_splits = _largest_divisor_le(mhc_hidden_size // 256, n_splits)
 
     post_mix = torch.empty(
         num_tokens, mhc_mult, dtype=torch.float32, device=residual.device
