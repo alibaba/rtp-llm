@@ -1595,13 +1595,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 return py::make_tuple(self.method, self.comm_buffer_size, self.segment_size_alignment);
             },
             [](py::tuple t) {
-                if (t.size() != 2 && t.size() != 3)
+                // Runtime process-transfer format; producer and consumer use
+                // the same binary, so accepting partial states is unsafe.
+                if (t.size() != 3)
                     throw std::runtime_error("Invalid state!");
                 PrefillCPConfig c;
                 try {
                     c.method                 = t[0].cast<CPRotateMethod>();
                     c.comm_buffer_size       = t[1].cast<size_t>();
-                    c.segment_size_alignment = t.size() == 3 ? t[2].cast<size_t>() : 1;
+                    c.segment_size_alignment = t[2].cast<size_t>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("PrefillCPConfig unpickle error: ") + e.what());
                 }

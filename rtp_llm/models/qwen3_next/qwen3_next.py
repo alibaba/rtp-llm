@@ -46,6 +46,8 @@ class Qwen3NextBase(BaseModel):
             "Qwen3-Next/Qwen3.5 prefill CP requires "
             "TP_SIZE=WORLD_SIZE>=2, DP_SIZE=1, EP_SIZE=1, PP_SIZE=1, "
             "FFN_SP_SIZE=1, ROLE_TYPE=PDFUSION, and FFN disaggregation disabled; "
+            "set EP_SIZE=1 explicitly because the default EP_SIZE=0 expands to "
+            "TP_SIZE*DP_SIZE; "
             f"got TP_SIZE={parallelism_config.tp_size}, "
             f"WORLD_SIZE={parallelism_config.world_size}, "
             f"DP_SIZE={parallelism_config.dp_size}, "

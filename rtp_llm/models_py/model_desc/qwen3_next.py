@@ -634,6 +634,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         attention_inputs: PyAttentionInputs,
         kv_cache_tensor: Optional[torch.Tensor],
         seq_size_per_block: int,
+        attn_meta: Qwen3NextMetadata,
     ) -> Optional[str]:
         """Return why the linear-attention CP relay cannot run, if applicable."""
         if attention_inputs.input_lengths.shape[0] != 1:
@@ -655,6 +656,12 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 return "prefix_block_out_of_range"
             if int(block_map[0, prefix_block_pos].item()) <= 0:
                 return "missing_prefix_boundary_state"
+        if (
+            attn_meta.cp_local_conv1d_meta is None
+            or attn_meta.cp_local_conv_cu_seqlens is None
+            or attn_meta.cp_local_conv_prefix_lengths is None
+        ):
+            return "missing_local_conv_metadata"
         return None
 
     def _log_linear_cp_fallback_once(
@@ -748,9 +755,9 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         ssm_states: torch.Tensor, prefix_block_id: int
     ) -> torch.Tensor:
         """Copy a cached boundary into the FP32 relay buffer."""
-        return ssm_states[prefix_block_id].to(
-            dtype=torch.float32, copy=True
-        ).unsqueeze(0)
+        return (
+            ssm_states[prefix_block_id].to(dtype=torch.float32, copy=True).unsqueeze(0)
+        )
 
     @staticmethod
     def _sync_linear_cp_cache_states(
@@ -1068,6 +1075,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             attention_inputs,
             kv_cache_tensor,
             seq_size_per_block,
+            attn_meta,
         )
         use_linear_cp_relay = fallback_reason is None
         if fallback_reason is not None:
@@ -1204,38 +1212,12 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 seq_size_per_block,
             )
 
-        if full_mixed_qkv.shape[0] >= 2048 and gdn.head_k_dim == gdn.head_v_dim:
-            query, key, value = scatter_qkv(
-                full_mixed_qkv,
-                gdn.local_num_k_heads,
-                gdn.local_num_v_heads,
-                gdn.head_k_dim,
-                gdn.head_v_dim,
-            )
-        else:
-            query, key, value = torch.split(
-                full_mixed_qkv,
-                [
-                    gdn.local_num_k_heads * gdn.head_k_dim,
-                    gdn.local_num_k_heads * gdn.head_k_dim,
-                    gdn.local_num_v_heads * gdn.head_v_dim,
-                ],
-                dim=-1,
-            )
-            query = query.view(1, -1, gdn.local_num_k_heads, gdn.head_k_dim)
-            key = key.view(1, -1, gdn.local_num_k_heads, gdn.head_k_dim)
-            value = value.view(1, -1, gdn.local_num_v_heads, gdn.head_v_dim)
-
-        attn_out, h, final_state = chunk_gated_delta_rule(
-            query,
-            key,
-            value,
+        attn_out, h, final_state = gdn._run_chunk_gdn(
+            full_mixed_qkv,
             g,
             beta,
-            initial_state=initial_states,
-            output_final_state=True,
-            cu_seqlens=full_cu,
-            use_qk_l2norm_in_kernel=True,
+            initial_states,
+            full_cu,
         )
 
         if ssm_states is not None:

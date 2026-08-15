@@ -52,10 +52,8 @@ def get_mla_impl(
             )
         )
 
-        if (
-            uses_context_parallel
-            and not use_fast_path
-            and not impl.support_parallelism_config(parallelism_config)
+        if uses_context_parallel and not impl.support_parallelism_config(
+            parallelism_config
         ):
             continue
 
@@ -169,9 +167,8 @@ def get_fmha_impl(
             continue
 
         # Check if implementation supports parallelism config
-        if (
-            uses_context_parallel
-            and not impl.support_parallelism_config(parallelism_config)
+        if uses_context_parallel and not impl.support_parallelism_config(
+            parallelism_config
         ):
             continue
         try:

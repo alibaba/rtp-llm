@@ -78,10 +78,7 @@ def auto_configure_deepep(
     prefill_cp_enabled = parallelism_config.prefill_cp_config.is_enabled()
     is_single_gpu = ep_size == 1
     is_pure_tp = (
-        tp_size > 1
-        and dp_size == 1
-        and ep_size == tp_size
-        and not prefill_cp_enabled
+        tp_size > 1 and dp_size == 1 and ep_size == tp_size and not prefill_cp_enabled
     )
     # Explicit opt-in via --moe_strategy must preserve use_all_gather, otherwise
     # the matching strategy's check_conditions (which requires use_all_gather)
@@ -384,6 +381,11 @@ def _configure_model_prefill_cp(py_env_configs: PyEnvConfigs) -> None:
     if not prefill_cp_config.is_enabled():
         return
 
+    # These processes do not execute the language-model forward and may share
+    # the backend's environment without participating in context parallelism.
+    if py_env_configs.role_config.role_type in (RoleType.FRONTEND, RoleType.VIT):
+        return
+
     if py_env_configs.device_resource_config.enable_layer_micro_batch:
         raise ValueError(
             "Context parallelism cannot be combined with layer micro-batching: "
@@ -409,17 +411,11 @@ def _configure_model_prefill_cp(py_env_configs: PyEnvConfigs) -> None:
             f"Model {py_env_configs.model_args.model_type} returned invalid CP "
             f"segment alignment {required_alignment}"
         )
-    configured_alignment = prefill_cp_config.segment_size_alignment
-    if configured_alignment == 1:
-        configured_alignment = required_alignment
-    elif configured_alignment % required_alignment != 0:
-        raise ValueError(
-            f"CP segment alignment {configured_alignment} is incompatible with "
-            f"{py_env_configs.model_args.model_type}, which requires a multiple of "
-            f"{required_alignment}"
-        )
-
-    prefill_cp_config.segment_size_alignment = configured_alignment
+    # This is an internal model requirement, not a user-tunable setting.
+    prefill_cp_config.segment_size_alignment = required_alignment
+    py_env_configs.parallelism_config.prefill_cp_config.segment_size_alignment = (
+        required_alignment
+    )
 
     required_block_alignment = model_cls.prefill_cp_cache_block_size_alignment()
     if required_block_alignment <= 0:
@@ -485,11 +481,11 @@ def setup_default_args(py_env_configs):
     if py_env_configs.kv_cache_config.seq_size_per_block == 0:
         py_env_configs.kv_cache_config.seq_size_per_block = 64
 
-    _configure_model_prefill_cp(py_env_configs)
     set_parallelism_config(
         py_env_configs.parallelism_config,
         py_prefill_cp_config=py_env_configs.prefill_cp_config,
     )
+    _configure_model_prefill_cp(py_env_configs)
 
     # Set NCCL_P2P_DISABLE for RTX GPUs or when CUDA is not available
     # Frontend doesn't need this setting

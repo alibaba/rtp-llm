@@ -78,6 +78,10 @@ TEST(PyWrappedModelTest, ContextParallelRequiresPurePrefill) {
 
 TEST(PyWrappedModelTest, ContextParallelRejectsDecodeAndMixedBatches) {
     GptModelInputs inputs;
+    inputs.input_lengths    = torch::empty({0}, torch::kInt32);
+    inputs.sequence_lengths = torch::empty({0}, torch::kInt32);
+    EXPECT_FALSE(PyWrappedModel::shouldUseContextParallel(inputs, true));
+
     inputs.input_lengths    = torch::empty({1}, torch::kInt32);
     inputs.sequence_lengths = torch::empty({1}, torch::kInt32);
     EXPECT_FALSE(PyWrappedModel::shouldUseContextParallel(inputs, true));

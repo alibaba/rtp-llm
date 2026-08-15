@@ -185,11 +185,17 @@ class TestCPLinearAttnIndexMath(unittest.TestCase):
             prefix_lengths=torch.tensor([64], dtype=torch.int32),
             kv_cache_kernel_block_id_host=torch.tensor([[1]], dtype=torch.int32),
         )
+        attn_meta = SimpleNamespace(
+            cp_local_conv1d_meta=object(),
+            cp_local_conv_cu_seqlens=object(),
+            cp_local_conv_prefix_lengths=object(),
+        )
 
         reason = Qwen3NextGatedDeltaNet._get_linear_cp_relay_fallback_reason(
             attention_inputs,
             kv_cache_tensor=torch.empty(1, 1),
             seq_size_per_block=64,
+            attn_meta=attn_meta,
         )
         self.assertIsNone(reason)
 
@@ -198,10 +204,35 @@ class TestCPLinearAttnIndexMath(unittest.TestCase):
             attention_inputs,
             kv_cache_tensor=torch.empty(1, 1),
             seq_size_per_block=64,
+            attn_meta=attn_meta,
         )
         self.assertEqual(reason, "unaligned_internal_prefix")
         with self.assertRaisesRegex(RuntimeError, "cannot safely reconstruct"):
             Qwen3NextGatedDeltaNet._raise_for_invalid_cp_state(reason, 65)
+
+    def test_cp_relay_missing_local_conv_metadata_falls_back(self):
+        from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextGatedDeltaNet
+
+        attention_inputs = SimpleNamespace(
+            input_lengths=torch.tensor([256], dtype=torch.int32),
+            is_cuda_graph=False,
+            prefix_lengths=torch.tensor([0], dtype=torch.int32),
+            kv_cache_kernel_block_id_host=None,
+        )
+        attn_meta = SimpleNamespace(
+            cp_local_conv1d_meta=None,
+            cp_local_conv_cu_seqlens=None,
+            cp_local_conv_prefix_lengths=None,
+        )
+
+        reason = Qwen3NextGatedDeltaNet._get_linear_cp_relay_fallback_reason(
+            attention_inputs,
+            kv_cache_tensor=None,
+            seq_size_per_block=64,
+            attn_meta=attn_meta,
+        )
+        self.assertEqual(reason, "missing_local_conv_metadata")
+        Qwen3NextGatedDeltaNet._raise_for_invalid_cp_state(reason, 0)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -1222,9 +1253,7 @@ class TestCPLinearAttnForward(unittest.TestCase):
             self.assertEqual(src, step.owner_rank)
             expected_state = expected_broadcast_states[broadcast_index]
             if cp_rank == src:
-                torch.testing.assert_close(
-                    state, expected_state, rtol=1e-3, atol=1e-3
-                )
+                torch.testing.assert_close(state, expected_state, rtol=1e-3, atol=1e-3)
             else:
                 state.copy_(expected_state)
             broadcast_index += 1

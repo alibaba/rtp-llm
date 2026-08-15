@@ -507,8 +507,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
         if (use_context_parallel) {
-            size_t num_valid_tokens =
-                context_parallel_processor_->handleOutputs(hidden_states, *forward_inputs, cp_params);
+            size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
             return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
         }
         return callForwardPostLayers(hidden_states, inputs, true);
@@ -644,11 +643,10 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
 
         auto logits = torch::mm(last_hidden.to(lm_head->kernel.dtype()), lm_head->kernel.t()).to(torch::kFloat32);
         printTorchTensorData(logits, "logits");
-        // Prefill CP reuses the physical TP group for sequence partitioning,
-        // while each rank keeps a full-vocabulary lm_head. Gathering those
-        // logits would duplicate the vocabulary once per CP rank. Real TP
-        // still shards lm_head and therefore retains the all-gather below.
-        if (device_props_.tp_size > 1 && !device_props_.enable_prefill_cp) {
+        // Gather only when weight loading actually sharded lm_head. Prefill CP
+        // normally keeps a full-vocabulary copy on every rank, while layouts
+        // involving another parallel dimension may still shard it.
+        if (device_props_.tp_size > 1 && !device_props_.lm_head_is_replicated) {
             logits = tpSyncEmbeddingOrLogits(logits);
         }
         if (check_nan_) {

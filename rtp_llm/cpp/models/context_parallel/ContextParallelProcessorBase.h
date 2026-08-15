@@ -27,6 +27,7 @@ public:
     void handleInputs(GptModelInputs& model_input, torch_ext::PyContextParallelParams& cp_params);
 
     /// @brief Gather outputs from all CP ranks and restore original token order.
+    /// @param inputs Original, unsharded request metadata.
     virtual size_t handleOutputs(torch::Tensor&                            hidden_states,
                                  const GptModelInputs&                     inputs,
                                  const torch_ext::PyContextParallelParams& cp_params) = 0;
