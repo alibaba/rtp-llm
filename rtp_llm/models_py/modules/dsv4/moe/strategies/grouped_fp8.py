@@ -125,6 +125,10 @@ _MASKED_MAX_N = 1024
 # token granularity anyway -- but it is a real difference, so it gets its own switch.
 _FUSED_SWIGLU_ENV = "DSV4_MOE_FUSED_SWIGLU"
 
+# Sentinel ROWS_PER_E for the E == 1 (contiguous) call: any constant >= M works,
+# and holding it constant is what keeps the kernel out of a per-request JIT.
+_ROWS_PER_E_FLAT = 1 << 30
+
 # Replace the all-gather/reduce-scatter EP combine with DeepEP's low-latency
 # dispatch/combine. Off by default: it needs an RDMA-capable DeepEP build on the
 # library path, so a missing libmlx5 must not take down a run that never asked.
@@ -420,6 +424,16 @@ def _silu_mul_quant_fp32scale(
     E, T = gate_up3.shape[0], gate_up3.shape[1]
     M = E * T
     assert gate_up3.shape[2] == 2 * inter, (tuple(gate_up3.shape), inter)
+
+    # ROWS_PER_E is a tl.constexpr, so a value that changes between calls forces a
+    # fresh Triton compile. The masked path passes a max_m fixed at load, but the
+    # contiguous path's all_tokens is the sum of per-expert routed counts and so
+    # differs on every request -- which turned a 0.2 ms kernel into a per-request
+    # JIT and took 32k TTFT from 1.77 s to 5.4 s. When E == 1 the group index is
+    # identically 0 and row_j is the flat row, so any constant >= M gives the same
+    # arithmetic; pin a power of two so the div/mod stay shifts and the kernel is
+    # compiled once for every shape this path will ever see.
+    rows_per_e = T if E > 1 else _ROWS_PER_E_FLAT
     num_groups = inter // FP8_BLOCK
     q = torch.empty((M, inter), dtype=torch.float8_e4m3fn, device=gate_up3.device)
     scale = torch.empty(
@@ -434,7 +448,7 @@ def _silu_mul_quant_fp32scale(
         M,
         gate_up3.stride(0),
         gate_up3.stride(1),
-        T,
+        rows_per_e,
         q.stride(0),
         scale.stride(1),
         float(clamp_limit),
@@ -729,26 +743,50 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         del scatter_out, scatter_out_scale
 
         # V4 SwiGLU: gate clamps from above only, up clamps symmetrically, and
-        # the product rounds through bf16 before quantisation. This is the exact
-        # sequence _silu_mul_fp8_quant_triton was written to reproduce; it is
-        # spelled out here because that kernel emits only packed UE8M0 scales.
-        gate, up = gate_up[:, :inter], gate_up[:, inter:]
+        # the product rounds through bf16 before quantisation.
         limit = cfg.swiglu_limit
-        if limit > 0:
-            gate = gate.clamp(max=limit)
-            up = up.clamp(min=-limit, max=limit)
-        hidden = (F.silu(gate.float()) * up.float()).to(torch.bfloat16)
-        del gate_up, gate, up
+        if _fused_swiglu_enabled():
+            # The same kernel the masked path uses. Here ``gate_up`` is
+            # ``[all_tokens, 2*inter]`` rather than ``[E, T, 2*inter]``, and
+            # ``unsqueeze(0)`` is a free view that makes E=1, T=all_tokens --
+            # shapes the kernel's grid (num_groups, cdiv(M, 64)) already handles.
+            # Its outputs are the same pair this path already feeds to
+            # ``m_grouped_fp8_gemm_nt_contiguous``: ``[M, inter]`` fp8 plus an
+            # ``[M, inter/128]`` fp32 scale whose M stride is 1, which is what
+            # ``sgl_per_token_group_quant_fp8(column_major_scales=True)`` produced.
+            #
+            # This is where prefill spends its largest single non-GEMM block. The
+            # explicit sequence below makes about eight passes over an
+            # ``[all_tokens, 2*inter]`` tensor and several full-size fp32
+            # temporaries; measured standalone at the CP4/32k row count
+            # (all_tokens = 49152): 4.457 -> 0.206 ms per layer, 0.11 -> 2.46 TB/s,
+            # i.e. ~183 ms of a ~1770 ms 32k TTFT. Scales come out bit-identical;
+            # 0.092% of quantised bytes differ by one fp8 e4m3 ULP, the same
+            # residue documented on the masked path, so this honours the same
+            # ``DSV4_MOE_FUSED_SWIGLU=0`` escape hatch.
+            h_fp8, h_scale = _silu_mul_quant_fp32scale(
+                gate_up.unsqueeze(0), inter, limit
+            )
+            del gate_up
+        else:
+            # The exact sequence _silu_mul_fp8_quant_triton was written to
+            # reproduce; spelled out because that kernel emits only packed UE8M0.
+            gate, up = gate_up[:, :inter], gate_up[:, inter:]
+            if limit > 0:
+                gate = gate.clamp(max=limit)
+                up = up.clamp(min=-limit, max=limit)
+            hidden = (F.silu(gate.float()) * up.float()).to(torch.bfloat16)
+            del gate_up, gate, up
 
-        h_fp8, h_scale = sgl_per_token_group_quant_fp8(
-            hidden.contiguous(),
-            group_size=FP8_BLOCK,
-            eps=1e-4,
-            column_major_scales=True,
-            scale_tma_aligned=True,
-            scale_ue8m0=False,
-        )
-        del hidden
+            h_fp8, h_scale = sgl_per_token_group_quant_fp8(
+                hidden.contiguous(),
+                group_size=FP8_BLOCK,
+                eps=1e-4,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                scale_ue8m0=False,
+            )
+            del hidden
 
         down_out = torch.empty(all_tokens, D, device=device, dtype=torch.bfloat16)
         m_grouped_fp8_gemm_nt_contiguous(
