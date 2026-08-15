@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from unittest import mock
 
 # Importing strategies populates the registry via ``register_strategy``.
+from rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp8 import _MASKED_MAX_N
 from rtp_llm.models_py.modules.dsv4.moe.strategies import (
     DeepEPStrategy,
     GroupedFP4Strategy,
@@ -201,6 +202,11 @@ class StrategySelectTest(unittest.TestCase):
         cuda = (
             "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp8.torch.cuda"
         )
+
+        # The last probe below leaves a mocked True in the cache, and a failing
+        # assertion would otherwise skip the trailing clear and leak that answer
+        # into every later case in this process.
+        self.addCleanup(_has_grouped_fp8_kernel.cache_clear)
 
         def probe():
             _has_grouped_fp8_kernel.cache_clear()
@@ -451,16 +457,88 @@ class GroupedFP8LowLatencyGateTest(unittest.TestCase):
             self.assertEqual(_ll_max_tokens(4), 16)   # empty/0 still clears the floor
 
     def test_gate_predicate_separates_the_roles(self):
-        # resolve_moe_max_tokens_per_rank gives a decode role
-        # max_generate_batch_size * tokens_per_batch, and any other role a >= 4096
-        # budget, so the predicate below is exactly "is this a decode role".
-        from rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp8 import (
-            _ll_max_tokens,
-        )
+        """``_ll_gate`` decides whether a 136 MB RDMA buffer is allocated.
 
-        with _env(DSV4_MOE_LL_MAX_TOKENS="8"):
-            self.assertLessEqual(8, _ll_max_tokens(4))       # decode, conc 8
-            self.assertGreater(8192, _ll_max_tokens(4))      # prefill budget
+        ``resolve_moe_max_tokens_per_rank`` gives a decode role
+        ``max_generate_batch_size * tokens_per_batch`` and any other role a >= 4096
+        budget, so the predicate is exactly "is this a decode role". Asserted
+        through the predicate rather than through arithmetic on ``_ll_max_tokens``:
+        an earlier version of this case compared 8 <= 16 and 8192 > 16, which held
+        no matter what the gate did.
+        """
+        with _env(DSV4_MOE_DEEPEP_LL="1", DSV4_MOE_LL_MAX_TOKENS="8"):
+            # decode: bound is the concurrency limit, inside the LL capacity
+            self.assertTrue(
+                GroupedFP8Strategy._ll_gate(
+                    dataclasses.replace(_cfg(ep_size=4), max_tokens_per_rank=8)
+                )
+            )
+            # prefill: >= 4096 budget, far past it
+            self.assertFalse(
+                GroupedFP8Strategy._ll_gate(
+                    dataclasses.replace(_cfg(ep_size=4), max_tokens_per_rank=8192)
+                )
+            )
+            # exactly at the rounded capacity is still reachable
+            self.assertTrue(
+                GroupedFP8Strategy._ll_gate(
+                    dataclasses.replace(_cfg(ep_size=4), max_tokens_per_rank=16)
+                )
+            )
+            self.assertFalse(
+                GroupedFP8Strategy._ll_gate(
+                    dataclasses.replace(_cfg(ep_size=4), max_tokens_per_rank=17)
+                )
+            )
+            # single rank: no exchange to accelerate
+            self.assertFalse(
+                GroupedFP8Strategy._ll_gate(
+                    dataclasses.replace(_cfg(ep_size=1), max_tokens_per_rank=8)
+                )
+            )
+        # opt-in flag off -> gate closed regardless of the bound
+        with _env(DSV4_MOE_DEEPEP_LL="0", DSV4_MOE_LL_MAX_TOKENS="8"):
+            self.assertFalse(
+                GroupedFP8Strategy._ll_gate(
+                    dataclasses.replace(_cfg(ep_size=4), max_tokens_per_rank=8)
+                )
+            )
+
+
+class GroupedFP8ShouldMaskTest(unittest.TestCase):
+    """``_should_mask`` reads a shape and an env var, never the data.
+
+    Host-only by design -- every rank has to reach the same answer or the group
+    deadlocks at the next collective -- so it belongs in the CPU suite. It used to
+    be covered from the GPU-only equivalence module, where the capture branch was
+    unreachable and the whole case skipped on any CPU lane.
+    """
+
+    CAPTURING = (
+        "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp8."
+        "torch.cuda.is_current_stream_capturing"
+    )
+
+    def test_env_enabled_and_not_capturing(self):
+        with _env(DSV4_MOE_MASKED="1"), mock.patch(self.CAPTURING, return_value=False):
+            self.assertTrue(GroupedFP8Strategy._should_mask(8))
+            self.assertTrue(GroupedFP8Strategy._should_mask(_MASKED_MAX_N))
+            # Past the cap and not capturing: the contiguous path is still legal.
+            self.assertFalse(GroupedFP8Strategy._should_mask(_MASKED_MAX_N + 1))
+
+    def test_env_disabled_and_not_capturing(self):
+        with _env(DSV4_MOE_MASKED="0"), mock.patch(self.CAPTURING, return_value=False):
+            self.assertFalse(GroupedFP8Strategy._should_mask(8))
+
+    def test_capture_forces_the_masked_layout(self):
+        with _env(DSV4_MOE_MASKED="0"), mock.patch(self.CAPTURING, return_value=True):
+            self.assertTrue(GroupedFP8Strategy._should_mask(8))
+
+    def test_capture_past_the_cap_raises(self):
+        """Capture cannot express the contiguous path, so this must not fall back."""
+        with _env(DSV4_MOE_MASKED="1"), mock.patch(self.CAPTURING, return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "_MASKED_MAX_N"):
+                GroupedFP8Strategy._should_mask(_MASKED_MAX_N + 1)
 
 
 if __name__ == "__main__":

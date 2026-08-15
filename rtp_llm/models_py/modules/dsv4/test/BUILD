@@ -158,6 +158,12 @@ py_test(
     ],
 )
 
+# Scheduled onto the H20 pool like the other GPU tests in this package -- not
+# "manual". Manual would keep them out of `//...`, and since each module also skips
+# itself without a GPU, the result was a target that never ran anywhere and
+# reported PASSED with zero assertions when it was invoked directly. On the H20
+# lane the modules fail rather than skip when CUDA is present but the kernels they
+# exercise cannot be imported, so a broken build cannot come back green.
 py_test(
     name = "mhc_prenorm_splitk_test",
     srcs = ["mhc_prenorm_splitk_test.py"],
@@ -165,8 +171,11 @@ py_test(
         "//rtp_llm/models_py:modules",
         "//rtp_llm:testlib",
     ],
-    # Needs a CUDA GPU and the vendored tilelang; skips otherwise.
-    tags = ["manual", "H20"],
+    exec_properties = {
+        "gpu": "H20",
+        "gpu_count": "1",
+    },
+    tags = ["H20"],
 )
 
 py_test(
@@ -176,10 +185,50 @@ py_test(
         "//rtp_llm/models_py:modules",
         "//rtp_llm:testlib",
     ],
-    # Needs a Hopper GPU and a DeepGEMM carrying the SM90 FP8 grouped kernels; the
-    # module skips rather than fails when either is absent, but marking it manual
-    # keeps it out of the default CPU run.
-    tags = ["manual", "H20"],
+    exec_properties = {
+        "gpu": "H20",
+        "gpu_count": "1",
+    },
+    tags = ["H20"],
+)
+
+py_test(
+    name = "grouped_fp8_swiglu_fusion_test",
+    srcs = ["grouped_fp8_swiglu_fusion_test.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {
+        "gpu": "H20",
+        "gpu_count": "1",
+    },
+    tags = ["H20"],
+)
+
+py_test(
+    name = "wo_a_sm90_gemm_test",
+    srcs = ["wo_a_sm90_gemm_test.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {
+        "gpu": "H20",
+        "gpu_count": "1",
+    },
+    tags = ["H20"],
+)
+
+# Host-only: the scale unpack and the weight regrouping are plain tensor algebra,
+# so they carry no CUDA or DeepGEMM dependency and run in the default lane.
+py_test(
+    name = "wo_a_sm90_layout_test",
+    srcs = ["wo_a_sm90_layout_test.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
 )
 
 py_test(
