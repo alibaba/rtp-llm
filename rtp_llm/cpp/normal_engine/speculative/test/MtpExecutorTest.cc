@@ -787,6 +787,21 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     checkOutput(stream1, {0, 1, 2, 3, 2, 0}, {0, 1}, {0.0, 1.0, 0.0, 0.0}, {0.3, 0.33});
 }
 
+TEST_F(MtpExecutorTest, testTargetVerifyHostMetadataMatchesPackedInput) {
+    GptModelInputs target;
+    auto prefix_lengths_host =
+        torch::tensor({126, 255}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+
+    MtpExecutor::populateTargetVerifyHostMetadata(target, prefix_lengths_host, 2, 4);
+
+    EXPECT_TRUE(target.input_lengths_host_for_log.defined());
+    EXPECT_FALSE(target.input_lengths_host_for_log.is_cuda());
+    EXPECT_TRUE(target.input_lengths_host_for_log.is_pinned());
+    EXPECT_EQ(std::vector<int32_t>({4, 4}), toVec<int32_t>(target.input_lengths_host_for_log));
+    EXPECT_EQ(std::vector<int32_t>({126, 255}), toVec<int32_t>(target.prefix_lengths_host_for_log));
+    EXPECT_FALSE(target.sequence_lengths_host_for_log.defined());
+}
+
 TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetToken) {
     size_t propose_step = 2;
     size_t vocab_size   = 4;

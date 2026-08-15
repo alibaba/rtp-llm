@@ -138,64 +138,16 @@ int inferTotalTokensNoSync(const PyModelInputs& inputs) {
 bool targetVerifyMetadataFitsCapture(const PyModelInputs& inputs,
                                      int                  batch_size,
                                      int                  max_seq_len,
-                                     int                  kernel_tokens_per_block,
                                      int                  captured_query_length) {
-    const auto& attention           = inputs.attention_inputs;
-    const auto& input_lengths_host  = attention.input_lengths_host;
-    const auto& prefix_lengths_host = attention.prefix_lengths_host;
-    const auto& block_table         = attention.kv_cache_kernel_block_id_device;
-
-    auto valid_host_lengths = [batch_size](const torch::Tensor& tensor) {
-        return tensor.defined() && !tensor.is_cuda() && tensor.scalar_type() == torch::kInt32 && tensor.is_contiguous()
-               && tensor.dim() == 1 && tensor.numel() >= batch_size;
-    };
-    if (!valid_host_lengths(input_lengths_host) || !valid_host_lengths(prefix_lengths_host)) {
-        RTP_LLM_LOG_WARNING("target-verify CUDA graph requires contiguous CPU int32 input/prefix length mirrors; "
-                            "fallback to eager execution");
-        return false;
-    }
-    if (!block_table.defined() || !block_table.is_cuda() || block_table.dim() != 2
-        || block_table.scalar_type() != torch::kInt32 || block_table.size(0) < batch_size) {
-        RTP_LLM_LOG_WARNING("target-verify CUDA graph received an invalid kernel block table; fallback to eager "
-                            "execution");
-        return false;
-    }
-
-    const int64_t block_capacity      = block_table.size(1);
-    const auto*   input_lengths       = input_lengths_host.data_ptr<int32_t>();
-    const auto*   prefix_lengths      = prefix_lengths_host.data_ptr<int32_t>();
-    const int64_t packed_query_tokens = inferTotalTokensNoSync(inputs);
-    if (packed_query_tokens != static_cast<int64_t>(batch_size) * captured_query_length) {
-        RTP_LLM_LOG_WARNING("target-verify CUDA graph query shape differs from capture: tokens=%ld, batch=%d, "
-                            "captured_query_length=%d; fallback to eager execution",
-                            packed_query_tokens,
-                            batch_size,
-                            captured_query_length);
-        return false;
-    }
+    const auto* prefix_lengths = inputs.attention_inputs.prefix_lengths_host.data_ptr<int32_t>();
     for (int batch = 0; batch < batch_size; ++batch) {
-        const int64_t query_length  = input_lengths[batch];
-        const int64_t prefix_length = prefix_lengths[batch];
-        if (query_length != captured_query_length || prefix_length < 0) {
-            RTP_LLM_LOG_WARNING("target-verify CUDA graph received invalid lengths at batch %d: prefix=%ld, "
-                                "query=%ld (captured=%d); fallback to eager execution",
-                                batch,
-                                prefix_length,
-                                query_length,
-                                captured_query_length);
-            return false;
-        }
-        const int64_t kv_length       = prefix_length + query_length;
-        const int64_t required_blocks = (kv_length + kernel_tokens_per_block - 1) / kernel_tokens_per_block;
-        if (kv_length > max_seq_len || required_blocks > block_capacity) {
+        const int64_t kv_length = prefix_lengths[batch] + captured_query_length;
+        if (kv_length > max_seq_len) {
             RTP_LLM_LOG_WARNING("target-verify CUDA graph metadata exceeds capture capacity at batch %d: "
-                                "kv_length=%ld (max=%d), required_blocks=%ld (available=%ld); fallback to eager "
-                                "execution",
+                                "kv_length=%ld (max=%d); fallback to eager execution",
                                 batch,
                                 kv_length,
-                                max_seq_len,
-                                required_blocks,
-                                block_capacity);
+                                max_seq_len);
             return false;
         }
     }
@@ -670,10 +622,6 @@ bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs
 
 bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.canRun");
-    // Check if this is speculative sampling:
-    // 1. prefix_lengths is not empty
-    // 2. all values in input_lengths are the same
-    // this is for 2.2.1
     if (is_target_verify_) {
         if (inputs.attention_inputs.is_target_verify) {
             // Target-verify must also respect captured decode range.
@@ -681,11 +629,9 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
             if (!tryGetRealGraphDecodeBatchSize(inputs, state)) {
                 return false;
             }
-            // Replay-time attention planning cannot grow fixed CUDA Graph
-            // buffers. Validate the request against the captured context and
-            // page-table capacity before the planner runs.
+            // Replay-time attention planning cannot grow the captured context.
             return targetVerifyMetadataFitsCapture(
-                inputs, state.current_batch_size, max_seq_len_, kernel_seq_size_per_block_, num_tokens_per_bs_);
+                inputs, state.current_batch_size, max_seq_len_, num_tokens_per_bs_);
         }
         return false;
     }

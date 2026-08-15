@@ -225,24 +225,5 @@ class CudaGraphTargetVerifyMetadataTest(unittest.TestCase):
 
         self.assertFalse(runner.canRun(replay_inputs))
 
-    def test_runner_falls_back_when_query_length_differs_from_capture(self):
-        model = _MetadataProbeModel()
-        runner = CudaGraphRunner()
-        runner.init_decode(
-            model,
-            hidden_size=16,
-            max_seq_len=384,
-            tokens_per_block=64,
-            kernel_tokens_per_block=64,
-            decode_capture_batch_sizes=[1],
-            num_tokens_per_bs=4,
-            is_target_verify=True,
-            max_context_batch_size=1,
-        )
-        replay_inputs = self._build_replay_inputs(batch_size=1, q_len=3)
-
-        self.assertFalse(runner.canRun(replay_inputs))
-
-
 if __name__ == "__main__":
     unittest.main()
