@@ -204,6 +204,10 @@ geometry 为 main `65536`、index `8192`、merged `73728`、main heads `128`、i
 //rtp_llm/models_py/modules/dsv4/fp8/test:test_mega_csa_rtp_eager
 ```
 
+该测试显式固定 DSV4 Pro geometry：`index_topk=1024`、`o_groups=16`、
+`o_lora_rank=1024`。2026-08-15 纠正：提交 `792fd721d` 中的合成测试误用了
+`index_topk=512`、`o_groups=8`；该提交记录的性能数字不是 Pro 配置，已全部作废并由下表替换。
+
 测试使用一个真实 `AttentionFP8` 层、确定性合成权重和两套相同初态的 RTP pybind `KVCache`。
 reference 严格执行 `Block.forward_decode` 的原 attention 分支：
 
@@ -216,7 +220,7 @@ Mega 与 reference 分别写独立 cache，连续执行 position `0..3` 到首�
 
 | 对照项 | `calc_diff` / 结果 | 门限 |
 | --- | ---: | ---: |
-| 最终 attention sublayer 输出 | `1.047576e-05` | `< 1e-3` |
+| 最终 attention sublayer 输出 | `1.140849e-05` | `< 1e-3` |
 | CSA KV（解量化） | `1.261505e-05` | `< 1e-3` |
 | Indexer KV（解量化） | `3.661147e-04` | `< 1e-3` |
 | SWA KV（解量化） | `4.985002e-07` | `< 1e-3` |
@@ -226,22 +230,25 @@ Mega 与 reference 分别写独立 cache，连续执行 position `0..3` 到首�
 | CUDA Graph replay | bitwise 一致 | 精确一致 |
 
 另在 position `4095` 预填充 1024 个随机有效 FP8 packed CSA/Indexer cache entry，从 1024 个
-候选中选择 Top-512：Mega/reference TopK overlap 为 `512/512`，最终输出 `calc_diff=7.413731e-09`。
+候选中选择 Top-1024：Mega/reference 有效 TopK overlap 为 `1024/1024`，最终输出
+`calc_diff=3.098951e-09`。
 
 reference 使用 RTP 默认 TileLang mHC，并使用预热后的 CUDA Event 中位数计时；metadata 构造、
 首次 JIT 和每个 model step 只调用一次的 `runtime.begin_decode` 不计入单层时间：
 
 | Batch | Context | 原路径 eager | Mega eager | 变化 | 原路径 graph | Mega graph | 变化 |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 2048 | `2132.31 us` | `755.53 us` | `-64.6%` | `215.49 us` | `144.47 us` | `-33.0%` |
-| 8 | 2048 | `2116.03 us` | `749.21 us` | `-64.6%` | `221.59 us` | `147.25 us` | `-33.5%` |
-| 16 | 2048 | `2589.91 us` | `720.48 us` | `-72.2%` | `233.75 us` | `161.67 us` | `-30.8%` |
-| 128 | 65536 | `2045.56 us` | `731.21 us` | `-64.3%` | `341.29 us` | `258.92 us` | `-24.1%` |
+| 1 | 2048 | `1949.50 us` | `694.50 us` | `-64.4%` | `222.67 us` | `154.14 us` | `-30.8%` |
+| 8 | 2048 | `1933.53 us` | `702.34 us` | `-63.7%` | `228.62 us` | `155.05 us` | `-32.2%` |
+| 16 | 2048 | `1945.50 us` | `699.06 us` | `-64.1%` | `241.46 us` | `163.92 us` | `-32.1%` |
+| 128 | 65536 | `1994.41 us` | `714.86 us` | `-64.2%` | `381.14 us` | `300.27 us` | `-21.2%` |
 
 B128/64K 使用两套相同的随机有效 FP8 packed CSA/Indexer/SWA cache。最终 attention sublayer
-输出 `calc_diff=8.914554e-07`；每个请求从 16384 个 compressed 候选中选择 Top-512，overlap
-min/mean/max 为 `498/511.7/512`。测试门限为每个请求至少 97% overlap；差异集中在 TopK 截断
-边界，最终输出仍满足数值门限。
+输出 `calc_diff=2.682290e-07`；每个请求从 16384 个 compressed 候选中选择 Top-1024，有效
+overlap min/mean/max 为 `1000/1023.7/1024`。测试门限为每个请求至少 97% 有效 overlap；差异
+集中在 TopK 截断边界，最终输出仍满足数值门限。ctx=2048 时只有 512 个有效 compressed 候选，
+因此固定宽度 1024 的 TopK buffer 表现为 512 个有效索引和 512 个 padding；这三个 case 的有效
+overlap 均为 `512/512`。
 
 性能模式通过 `--test_env=DSV4_MEGA_RUN_PERF=1` 显式开启，并对每个 batch 设置不高于原路径
 `1.05x` 的回归门。它覆盖真实 RTP 单层算子链，但 typed pool/block table 仍由测试按生产 geometry

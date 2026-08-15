@@ -65,6 +65,9 @@ _KV_ENTRY_BYTES = 584
 _INDEXER_ENTRY_BYTES = 132
 _KV_BLOCK_ALIGNMENT_BYTES = 576
 _REGION_COUNT = 8
+_INDEX_TOPK = 1024
+_O_GROUPS = 16
+_O_LORA_RANK = 1024
 _RUN_PERF = os.environ.get("DSV4_MEGA_RUN_PERF", "0") == "1"
 
 
@@ -131,22 +134,20 @@ def _make_layer_weights(device: torch.device) -> dict[str, torch.Tensor]:
         W.v4_attn_sink: torch.randn(MAIN_HEADS, device=device),
     }
 
-    o_groups = 8
-    o_lora_rank = 1024
-    o_group_input = MAIN_HEADS * HEAD_DIM // o_groups
+    o_group_input = MAIN_HEADS * HEAD_DIM // _O_GROUPS
     weights.update(
         {
             W.v4_attn_wo_a_w: _random_fp8(
-                (o_groups * o_lora_rank, o_group_input), device, scale=0.01
+                (_O_GROUPS * _O_LORA_RANK, o_group_input), device, scale=0.01
             ),
             W.v4_attn_wo_a_s: _ue8m0_ones(
-                (o_groups * o_lora_rank // 128, o_group_input // 128), device
+                (_O_GROUPS * _O_LORA_RANK // 128, o_group_input // 128), device
             ),
             W.v4_attn_wo_b_w: _random_fp8(
-                (DIM, o_groups * o_lora_rank), device, scale=0.01
+                (DIM, _O_GROUPS * _O_LORA_RANK), device, scale=0.01
             ),
             W.v4_attn_wo_b_s: _ue8m0_ones(
-                (DIM // 128, o_groups * o_lora_rank // 128), device
+                (DIM // 128, _O_GROUPS * _O_LORA_RANK // 128), device
             ),
         }
     )
@@ -411,8 +412,8 @@ class MegaCSARTPEagerTest(unittest.TestCase):
             q_lora_rank=Q_LORA_RANK,
             head_dim=HEAD_DIM,
             rope_head_dim=ROPE_DIM,
-            o_lora_rank=1024,
-            o_groups=8,
+            o_lora_rank=_O_LORA_RANK,
+            o_groups=_O_GROUPS,
             window_size=128,
             compress_ratio=4,
             compress_rope_theta=160000.0,
@@ -425,7 +426,7 @@ class MegaCSARTPEagerTest(unittest.TestCase):
             max_seq_len=_MODEL_MAX_SEQ_LEN,
             index_n_heads=INDEX_HEADS,
             index_head_dim=INDEX_HEAD_DIM,
-            index_topk=512,
+            index_topk=_INDEX_TOPK,
             norm_eps=1.0e-6,
             layer_weights=weights,
             tp_size=1,
@@ -449,7 +450,7 @@ class MegaCSARTPEagerTest(unittest.TestCase):
             head_dim=HEAD_DIM,
             max_seq_len=pools.max_seq_len,
             compress_ratios=[4],
-            index_topk=512,
+            index_topk=_INDEX_TOPK,
             device=self.device,
             paged_block_tables=pools.block_tables,
             paged_pool_entries_per_block=pools.entries_per_block,
@@ -709,15 +710,26 @@ class MegaCSARTPEagerTest(unittest.TestCase):
             self.mega_pools,
         )
         output_diff = calc_diff(mega_output.float(), reference_output.float())
-        mega_topk = mega_metadata.topk_buffer_compressed.flatten()
-        reference_topk = reference_metadata.topk_buffer_compressed.flatten()
-        overlap = len(set(mega_topk.tolist()) & set(reference_topk.tolist()))
+        mega_topk = {
+            index
+            for index in mega_metadata.topk_buffer_compressed.flatten().tolist()
+            if index >= 0
+        }
+        reference_topk = {
+            index
+            for index in reference_metadata.topk_buffer_compressed.flatten().tolist()
+            if index >= 0
+        }
+        overlap = len(mega_topk & reference_topk)
+        valid_topk = len(reference_topk)
         print(
             "Mega/reference long-context attention sublayer "
-            f"calc_diff: {output_diff:.6e}; TopK overlap: {overlap}/512"
+            f"calc_diff: {output_diff:.6e}; "
+            f"valid TopK overlap: {overlap}/{valid_topk}"
         )
         self.assertLess(output_diff, 1.0e-3)
-        self.assertGreaterEqual(overlap, 510)
+        self.assertEqual(len(mega_topk), valid_topk)
+        self.assertGreaterEqual(overlap, int(0.97 * valid_topk))
 
     @unittest.skipUnless(
         _RUN_PERF,
@@ -770,23 +782,34 @@ class MegaCSARTPEagerTest(unittest.TestCase):
             reference_topk = reference_metadata.topk_buffer_compressed.view(
                 batch_size, -1
             )
-            overlaps = [
-                len(set(mega_row) & set(reference_row))
-                for mega_row, reference_row in zip(
-                    mega_topk.tolist(), reference_topk.tolist()
-                )
+            mega_sets = [
+                {index for index in row if index >= 0} for row in mega_topk.tolist()
             ]
+            reference_sets = [
+                {index for index in row if index >= 0}
+                for row in reference_topk.tolist()
+            ]
+            overlaps = [
+                len(mega_set & reference_set)
+                for mega_set, reference_set in zip(mega_sets, reference_sets)
+            ]
+            valid_topks = [len(reference_set) for reference_set in reference_sets]
             min_overlap = min(overlaps)
             mean_overlap = sum(overlaps) / len(overlaps)
             max_overlap = max(overlaps)
+            min_valid_topk = min(valid_topks)
+            max_valid_topk = max(valid_topks)
             print(
                 "Mega/reference performance-case correctness "
                 f"B={batch_size}, ctx={context_length}: calc_diff={check_diff:.6e}, "
-                "TopK overlap "
-                f"min/mean/max={min_overlap}/{mean_overlap:.1f}/{max_overlap} of 512"
+                "valid TopK overlap "
+                f"min/mean/max={min_overlap}/{mean_overlap:.1f}/{max_overlap} "
+                f"of {min_valid_topk}..{max_valid_topk}"
             )
             self.assertLess(check_diff, 1.0e-3)
-            self.assertGreaterEqual(min_overlap, int(0.97 * 512))
+            self.assertEqual([len(mega_set) for mega_set in mega_sets], valid_topks)
+            for overlap, valid_topk in zip(overlaps, valid_topks):
+                self.assertGreaterEqual(overlap, int(0.97 * valid_topk))
 
             reference_hidden = hidden.clone()
             mega_hidden = hidden.clone()
