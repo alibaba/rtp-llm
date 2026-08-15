@@ -125,9 +125,38 @@ _MASKED_MAX_N = 1024
 # token granularity anyway -- but it is a real difference, so it gets its own switch.
 _FUSED_SWIGLU_ENV = "DSV4_MOE_FUSED_SWIGLU"
 
+# Replace the all-gather/reduce-scatter EP combine with DeepEP's low-latency
+# dispatch/combine. Off by default: it needs an RDMA-capable DeepEP build on the
+# library path, so a missing libmlx5 must not take down a run that never asked.
+#
+# This lives here rather than in DeepEPStrategy because the two are not the same
+# integration. DeepEPStrategy wraps NORMAL-mode DeepEP and delegates its local
+# compute to LocalLoopStrategy, which hardcodes FP4 storage -- unusable against an
+# FP8 checkpoint. The low-latency kernels, by contrast, hand back exactly the
+# layout this strategy's masked path already consumes: fp8 ``[E, M, D]`` with
+# ``[E, M, D/128]`` fp32 scales column-major in the last two dims, and a
+# ``recv_count`` that *is* ``masked_m``. So dispatch replaces ep_scatter + the
+# input quant + three all-gathers, and combine replaces ep_gather + the
+# reduce-scatter, with the two GEMMs and the fused swiglu untouched.
+_DEEPEP_LL_ENV = "DSV4_MOE_DEEPEP_LL"
+
+# Tokens per rank the LL buffer is sized for. The buffer is allocated once, before
+# any forward, so this cannot be inferred from a batch; unset means "the smallest
+# legal size", which already covers any decode batch up to _MASKED_TILE. A call
+# with more tokens than the buffer holds falls back to the all-gather combine.
+_DEEPEP_LL_MAX_TOKENS_ENV = "DSV4_MOE_LL_MAX_TOKENS"
+
+# (Buffer, max_tokens_per_rank) for this process, or None. One buffer serves every
+# layer: it is a communication scratchpad, not per-layer state.
+_ll_buffer_state = None
+
 
 def _masked_enabled() -> bool:
     return os.environ.get(_MASKED_ENV, "0").strip().lower() in ("1", "true", "on", "yes")
+
+
+def _deepep_ll_enabled() -> bool:
+    return os.environ.get(_DEEPEP_LL_ENV, "0").strip().lower() in ("1", "true", "on", "yes")
 
 
 def _fused_swiglu_enabled() -> bool:
@@ -183,6 +212,80 @@ def _ep_group_size() -> int:
     import torch.distributed as dist
 
     return dist.get_world_size(group=group)
+
+
+def _ll_max_tokens(ep: int) -> int:
+    """Tokens per rank to size the LL buffer for.
+
+    Dispatch's recv buffer is ``max_tokens * ep`` rows per local expert, and that
+    total -- not ``max_tokens`` -- is what has to clear DeepGEMM's masked tile, so
+    ``calc_low_latency_max_token_per_rank``'s round-up to 64 is one ep factor too
+    conservative. Rounding to ``_MASKED_TILE / gcd(_MASKED_TILE, ep)`` instead keeps
+    ``max_tokens * ep`` a multiple of the tile while making it as small as the tile
+    allows: at ep=4 that is 16 rather than 64, so the recv buffer is 64 rows -- the
+    fewest the GEMM can use -- instead of 256. Measured on 11.24.224.84 at 8
+    tokens/rank: 0.666 -> 0.609 ms per MoE layer, because everything between the two
+    GEMMs (the swiglu, the quant, and 67 MB of buffer per layer) shrinks 4x while the
+    GEMMs themselves compute the same tiles.
+    """
+    from math import gcd
+
+    unit = _MASKED_TILE // gcd(_MASKED_TILE, ep)
+    return align(max(int(os.environ.get(_DEEPEP_LL_MAX_TOKENS_ENV, "0") or 0), 1), unit)
+
+
+def _ll_buffer(ep: int, dim: int, n_experts: int):
+    """The process-wide DeepEP low-latency buffer, created on first use.
+
+    Collective: every rank in the EP group must reach this together. Creation is
+    driven from ``setup_weights`` so it lands during weight load rather than inside
+    a CUDA graph capture, where the NVSHMEM handshake could not run.
+    """
+    global _ll_buffer_state
+    if _ll_buffer_state is not None:
+        return _ll_buffer_state
+    if torch.cuda.is_current_stream_capturing():
+        raise RuntimeError(
+            f"{_DEEPEP_LL_ENV}=1 but the low-latency buffer does not exist yet and "
+            "this is a graph capture; its NVSHMEM setup cannot be captured. The "
+            "buffer is normally built in setup_weights -- check that "
+            f"{_DEEPEP_LL_ENV} was set before the model was loaded."
+        )
+    group = _ep_group()
+    if group is None:
+        raise RuntimeError(
+            f"{_DEEPEP_LL_ENV}=1 needs an initialised Group.TP process group."
+        )
+    try:
+        from deep_ep import Buffer
+    except ImportError as exc:  # RDMA libs missing from the loader path
+        raise RuntimeError(
+            f"{_DEEPEP_LL_ENV}=1 but DeepEP is not importable ({exc}). Its extension "
+            "links libmlx5/libibverbs; put the RDMA libs on LD_LIBRARY_PATH ahead of "
+            "any older libibverbs (IBVERBS_PRIVATE_34 is required)."
+        ) from exc
+
+    max_tokens = _ll_max_tokens(ep)
+    buf = Buffer(
+        group,
+        num_nvl_bytes=0,
+        num_rdma_bytes=Buffer.get_low_latency_rdma_size_hint(
+            max_tokens, dim, ep, n_experts
+        ),
+        low_latency_mode=True,
+        # One QP per local expert is what the LL kernels index by.
+        num_qps_per_rank=n_experts // ep,
+        # The kernels' docstrings say IBGDA; on a single NVLink node there is no NIC
+        # to go through and this makes them use NVLink peer stores instead. Verified
+        # working on 11.24.224.84 (8x H20, no IB fabric between the ranks).
+        allow_nvlink_for_low_latency_mode=True,
+        allow_mnnvl=False,
+    )
+    # The LL kernels need part of the buffer zeroed and never re-clean it, so this
+    # has to happen once here, outside capture, before the first dispatch.
+    buf.clean_low_latency_buffer(max_tokens, dim, n_experts)
+    _ll_buffer_state = (buf, max_tokens)
+    return _ll_buffer_state
 
 
 def _all_gather_cat(tensor: torch.Tensor, ep: int, group) -> torch.Tensor:
@@ -432,6 +535,13 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
 
         del stacked_w1_w, stacked_w1_s, stacked_w2_w, stacked_w2_s
         del stacked_w3_w, stacked_w3_s
+
+        # Build the LL buffer here, not on first forward: it is collective and does
+        # an NVSHMEM handshake, neither of which can happen inside a graph capture.
+        # Doing it before empty_cache() also means KV-pool sizing sees it as taken.
+        if cfg.ep_size > 1 and _deepep_ll_enabled():
+            _ll_buffer(cfg.ep_size, D, cfg.n_routed_experts)
+
         # Hand the loader's freed blocks back to the driver so KV-pool sizing
         # sees real residual HBM instead of allocator-cached blocks.
         torch.cuda.empty_cache()
@@ -476,6 +586,17 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
             self._assert_uniform_token_count(N, group, device)
 
         ep = cfg.ep_size
+
+        # Every term below is host-side and equal on every rank -- an env var, this
+        # rank's token count (a CP invariant, see _EP_CHECK_SIZES_ENV) and a buffer
+        # size fixed at load. So all ranks take the same branch and no collective is
+        # left half-entered. N == 0 keeps the all-gather path, whose zero-token case
+        # is already handled below; LL dispatch has no such contract.
+        if N > 0 and _deepep_ll_enabled():
+            buf, ll_max_tokens = _ll_buffer(ep, D, cfg.n_routed_experts)
+            if N <= ll_max_tokens:
+                return self._local_experts_ll(x, weights, indices, buf, ll_max_tokens).float()
+
         x_full = _all_gather_cat(x.contiguous(), ep, group)
         w_full = _all_gather_cat(weights.contiguous(), ep, group)
         i_full = _all_gather_cat(indices.contiguous(), ep, group)
@@ -847,3 +968,117 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
             gather_out,
         )
         return gather_out
+
+    def _local_experts_ll(
+        self,
+        x: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.Tensor,
+        buf,
+        ll_max_tokens: int,
+    ) -> torch.Tensor:
+        """The whole EP combine over DeepEP low-latency kernels. ``[N, D]`` BF16.
+
+        Replaces ``_all_gather_cat`` x3 + ``_local_experts_masked`` +
+        ``reduce_scatter_tensor``. What is left of the masked path is its middle: the
+        two grouped FP8 GEMMs and the fused swiglu, byte-for-byte the same calls.
+
+        The stages that disappear are the ones that only existed to build the masked
+        layout locally after moving every token to every rank:
+
+          * the three all-gathers moved ``ep * N`` tokens, weights and indices to all
+            ranks so each could pick out its own experts' rows. Dispatch sends each
+            token only to the ranks that own an expert it routed to.
+          * ``sgl_per_token_group_quant_fp8`` on the input: dispatch quantises to fp8
+            in flight, and returns scales already column-major in the last two dims.
+          * ``ep_scatter``, whose only job was to place rows at ``e * max_m``, and its
+            two zero-filled buffers. Dispatch packs per expert and reports the counts.
+          * ``ep_gather`` + the reduce-scatter, which summed ``ep`` full ``[N, D]``
+            partials. Combine reduces with the router weights inside the kernel and
+            each rank receives only its own tokens.
+
+        No device->host read anywhere, and every shape is fixed by ``ll_max_tokens``
+        and ``ep``, so this captures into a CUDA graph like the masked path does.
+        """
+        cfg = self.cfg
+        E, inter = cfg.n_local_experts, cfg.moe_inter_dim
+        device = x.device
+
+        # topk_idx carries GLOBAL expert ids and -1 for "no expert": no remapping to
+        # a local range, and no padding of top-6 to a power of two (top-6 is accepted
+        # as-is; verified on 11.24.224.84).
+        (recv_x, recv_scale), recv_count, handle, _, _ = buf.low_latency_dispatch(
+            x.contiguous(),
+            indices.contiguous(),
+            ll_max_tokens,
+            cfg.n_routed_experts,
+            use_fp8=True,
+            # SM90 DeepGEMM wants fp32 scales, which is what round_scale=False and
+            # use_ue8m0=False produce -- the same widening setup_weights does.
+            round_scale=False,
+            use_ue8m0=False,
+            async_finish=False,
+            return_recv_hook=False,
+        )
+        # ll_max_tokens * ep, and by construction (see _ll_max_tokens) the smallest
+        # multiple of _MASKED_TILE that can hold the dispatch, so there is no
+        # equivalent of the masked path's t_rows narrowing left to do.
+        rows = recv_x.shape[1]
+
+        # torch.empty, not zeros: the GEMM writes whole _MASKED_TILE tiles, so rows
+        # past ``recv_count[e]`` hold junk, and groups with recv_count 0 are skipped
+        # entirely and stay uninitialised. Neither reaches the output -- combine reads
+        # only each expert's live rows via the dispatch handle -- and the quant below
+        # is per row-group, so a NaN cannot leak sideways into a live row. Confirmed
+        # against the all-gather arm over 43 iterations with 27 of 64 groups empty.
+        gate_up = torch.empty(E, rows, 2 * inter, device=device, dtype=torch.bfloat16)
+        m_grouped_fp8_gemm_nt_masked(
+            (recv_x, recv_scale),
+            (self._w13, self._s13),
+            gate_up,
+            recv_count,
+            expected_m=rows,
+        )
+
+        if _fused_swiglu_enabled():
+            h_fp8, h_scale = _silu_mul_quant_fp32scale(gate_up, inter, cfg.swiglu_limit)
+        else:
+            gate, up = gate_up[..., :inter], gate_up[..., inter:]
+            limit = cfg.swiglu_limit
+            if limit > 0:
+                gate = gate.clamp(max=limit)
+                up = up.clamp(min=-limit, max=limit)
+            hidden = (F.silu(gate.float()) * up.float()).to(torch.bfloat16).reshape(
+                E * rows, inter
+            )
+            del gate, up
+            h_fp8, h_scale = sgl_per_token_group_quant_fp8(
+                hidden.contiguous(),
+                group_size=FP8_BLOCK,
+                eps=1e-4,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                scale_ue8m0=False,
+            )
+            del hidden
+        del gate_up
+
+        # combine's input must be the full ``[E, rows, D]``; a narrowed view is not an
+        # option anyway, DeepGEMM asserts stride(0) == rows * D on its output.
+        down = torch.empty(E, rows, cfg.dim, device=device, dtype=torch.bfloat16)
+        m_grouped_fp8_gemm_nt_masked(
+            (h_fp8.view(E, rows, inter), h_scale.view(E, rows, inter // FP8_BLOCK)),
+            (self._w2, self._s2),
+            down,
+            recv_count,
+            expected_m=rows,
+        )
+        del h_fp8, h_scale
+
+        out, _, _ = buf.low_latency_combine(
+            down, indices.contiguous(), weights.contiguous(), handle
+        )
+        # ``out`` aliases the RDMA buffer, which the next layer's combine overwrites.
+        # forward()'s .float() copies it out before that happens; returning it as bf16
+        # would hand the caller a tensor with 42 layers left to live.
+        return out
