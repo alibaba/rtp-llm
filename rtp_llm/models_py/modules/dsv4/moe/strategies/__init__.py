@@ -8,7 +8,8 @@ kernel availability).
 Importing this package populates the strategy registry (each
 ``@register_strategy``-decorated class registers itself on import). Order
 of import below = priority for ``select_strategy(forced=None)`` auto-pick.
-EP>1 is special-cased to require Mega and fail fast when it is unavailable.
+EP>1 is special-cased to prefer Mega and fall back to DeepEP when Mega is
+unavailable (for example on SM120 RTX cards without NVLink).
 
 NOTE: ``# isort: skip_file`` above is REQUIRED. The import order here is the
 priority order, and it is load-bearing: ``deepep`` transitively imports

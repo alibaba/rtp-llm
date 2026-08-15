@@ -264,6 +264,10 @@ def prewarm(
     """
     if not model_warm_up_enabled() or not _TILELANG_AVAILABLE:
         return
+    if str(device).startswith("cuda") and torch.cuda.get_device_capability(device)[0] == 12:
+        # SM120 sparse MLA is provided by FlashInfer, not this SM100 TileLang kernel.
+        return
+
     h_padded = max(n_heads, 16)
     _log.info(
         "[dsv4] pre-warming TileLang sparse_attn h=%d d=%d scale=%.6f on %s",
