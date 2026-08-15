@@ -13,6 +13,13 @@ _DEFAULT_INDEX_SCORE_CHUNK_ROWS = 0
 _WORKSPACE_ALIGNMENT = 256
 
 
+class PrefillScoreHostMetadata(NamedTuple):
+    query_lens: Tuple[int, ...]
+    seq_lens: Tuple[int, ...]
+    prefix_lens: Tuple[int, ...]
+    slot_ids: Tuple[int, ...]
+
+
 class PrefillScoreChunk(NamedTuple):
     q_start: int
     q_end: int
@@ -23,6 +30,7 @@ class PrefillScoreChunk(NamedTuple):
     max_seqlen_q: int
     max_seqlen_k: int
     kv_indices: Optional[torch.Tensor]
+    host_metadata: PrefillScoreHostMetadata
 
 
 # One flat allocation per device is shared by index score chunks and sparse
@@ -112,14 +120,55 @@ def _pack_segments_into_chunks(
     return groups
 
 
+def resolve_prefill_score_host_metadata(
+    cu_seqlens: torch.Tensor,
+    seq_lens: torch.Tensor,
+    prefix_lens: torch.Tensor,
+    slot_ids: Optional[torch.Tensor] = None,
+    host_metadata: Optional[PrefillScoreHostMetadata] = None,
+) -> PrefillScoreHostMetadata:
+    """Return validated host geometry, falling back to device reads if needed."""
+    if host_metadata is None:
+        query_lens = (cu_seqlens[1:] - cu_seqlens[:-1]).cpu().tolist()
+        seq_lens_host = seq_lens.cpu().tolist()
+        prefix_lens_host = prefix_lens.cpu().tolist()
+        slot_ids_host = (
+            slot_ids.cpu().tolist()
+            if slot_ids is not None
+            else range(len(query_lens))
+        )
+        host_metadata = PrefillScoreHostMetadata(
+            query_lens=tuple(int(value) for value in query_lens),
+            seq_lens=tuple(int(value) for value in seq_lens_host),
+            prefix_lens=tuple(int(value) for value in prefix_lens_host),
+            slot_ids=tuple(int(value) for value in slot_ids_host),
+        )
+    segment_count = len(host_metadata.query_lens)
+    if not (
+        len(host_metadata.seq_lens)
+        == len(host_metadata.prefix_lens)
+        == len(host_metadata.slot_ids)
+        == segment_count
+    ):
+        raise ValueError(
+            "prefill score host metadata length mismatch: "
+            f"query={segment_count}, seq={len(host_metadata.seq_lens)}, "
+            f"prefix={len(host_metadata.prefix_lens)}, "
+            f"slots={len(host_metadata.slot_ids)}"
+        )
+    return host_metadata
+
+
 def build_prefill_score_chunks(
     cu_seqlens: torch.Tensor,
     seq_lens: torch.Tensor,
     prefix_lens: torch.Tensor,
-    slot_ids: torch.Tensor,
+    slot_ids: Optional[torch.Tensor],
     chunk_rows: int,
     block_size_k: int,
     kv_indices: Optional[torch.Tensor] = None,
+    *,
+    host_metadata: Optional[PrefillScoreHostMetadata] = None,
 ) -> list[PrefillScoreChunk]:
     """Build packed varlen metadata for query-row score chunks.
 
@@ -127,15 +176,16 @@ def build_prefill_score_chunks(
     its prefix by the segment-local row offset, preserving causal positions.
     """
     device = cu_seqlens.device
-    query_lens = (cu_seqlens[1:] - cu_seqlens[:-1]).cpu().tolist()
-    seq_lens_host = [int(value) for value in seq_lens.cpu().tolist()]
-    prefix_lens_host = [int(value) for value in prefix_lens.cpu().tolist()]
-    slot_ids_host = [int(value) for value in slot_ids.cpu().tolist()]
+    host_metadata = resolve_prefill_score_host_metadata(
+        cu_seqlens, seq_lens, prefix_lens, slot_ids, host_metadata
+    )
+    query_lens = host_metadata.query_lens
+    slot_dtype = slot_ids.dtype if slot_ids is not None else torch.int64
 
     page_runs = []
     page_offset = 0
     if kv_indices is not None:
-        for seq_len in seq_lens_host:
+        for seq_len in host_metadata.seq_lens:
             page_count = (seq_len + block_size_k - 1) // block_size_k
             page_runs.append((page_offset, page_count))
             page_offset += page_count
@@ -153,11 +203,16 @@ def build_prefill_score_chunks(
         for query_len in local_query_lens:
             local_cu_seqlens.append(local_cu_seqlens[-1] + query_len)
 
-        local_seq_lens = [seq_lens_host[batch_idx] for batch_idx, _, _ in group]
-        local_prefix_lens = [
-            prefix_lens_host[batch_idx] + start for batch_idx, start, _ in group
+        local_seq_lens = [
+            host_metadata.seq_lens[batch_idx] for batch_idx, _, _ in group
         ]
-        local_slot_ids = [slot_ids_host[batch_idx] for batch_idx, _, _ in group]
+        local_prefix_lens = [
+            host_metadata.prefix_lens[batch_idx] + start
+            for batch_idx, start, _ in group
+        ]
+        local_slot_ids = [
+            host_metadata.slot_ids[batch_idx] for batch_idx, _, _ in group
+        ]
 
         local_kv_indices = None
         if kv_indices is not None:
@@ -179,11 +234,17 @@ def build_prefill_score_chunks(
                     local_prefix_lens, dtype=torch.int32, device=device
                 ),
                 slot_ids=torch.tensor(
-                    local_slot_ids, dtype=slot_ids.dtype, device=device
+                    local_slot_ids, dtype=slot_dtype, device=device
                 ),
                 max_seqlen_q=max(local_query_lens),
                 max_seqlen_k=max(local_seq_lens),
                 kv_indices=local_kv_indices,
+                host_metadata=PrefillScoreHostMetadata(
+                    query_lens=tuple(local_query_lens),
+                    seq_lens=tuple(local_seq_lens),
+                    prefix_lens=tuple(local_prefix_lens),
+                    slot_ids=tuple(local_slot_ids),
+                ),
             )
         )
     return chunks

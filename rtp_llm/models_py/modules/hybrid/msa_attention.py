@@ -1238,50 +1238,96 @@ def _fused_cp_paged_write_kernel(
     scratch_idx_ptr,
     base_flat_ptr,
     scale_flat_ptr,
+    kv_lens_ptr,
     TOKEN_COUNT,
+    BATCH_SIZE,
     NK: tl.constexpr,
     NI: tl.constexpr,
     NUM_KV_HEADS: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
+    SCRATCH_SEQ_LEN: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_I: tl.constexpr,
 ):
     t = tl.program_id(0)
-    if t >= TOKEN_COUNT:
-        return
-    per_token = 2 * NK + NI
-    src_row = tl.load(unpad_ptr + t).to(tl.int64) * per_token
-    dst_slot = tl.load(write_slots_ptr + t).to(tl.int64)
-    physical_slot = tl.load(slot_mapping_ptr + t).to(tl.int64)
-
-    valid = physical_slot >= 0
-    safe_slot = tl.where(valid, physical_slot, 0)
-    block_id = safe_slot // PAGE_SIZE
-    page_off = safe_slot - block_id * PAGE_SIZE
-    head_stride = PAGE_SIZE * HEAD_DIM
-    kv_stride = NUM_KV_HEADS * head_stride
-    paged_k = block_id * 2 * kv_stride + page_off * HEAD_DIM
-
     d = tl.arange(0, BLOCK_D)
     dmask = d < HEAD_DIM
-    for h in tl.range(0, NUM_KV_HEADS):
-        k = tl.load(packed_ptr + src_row + h * HEAD_DIM + d, mask=dmask, other=0.0)
-        v = tl.load(packed_ptr + src_row + NK + h * HEAD_DIM + d, mask=dmask, other=0.0)
-        tl.store(scratch_k_ptr + dst_slot * NK + h * HEAD_DIM + d, k, mask=dmask)
-        tl.store(scratch_v_ptr + dst_slot * NK + h * HEAD_DIM + d, v, mask=dmask)
-        tl.store(base_flat_ptr + paged_k + h * head_stride + d, k, mask=dmask & valid)
-        tl.store(
-            base_flat_ptr + paged_k + kv_stride + h * head_stride + d,
-            v,
-            mask=dmask & valid,
-        )
-
     di = tl.arange(0, BLOCK_I)
     imask = di < NI
-    idx = tl.load(packed_ptr + src_row + 2 * NK + di, mask=imask, other=0.0)
-    tl.store(scratch_idx_ptr + dst_slot * NI + di, idx, mask=imask)
-    tl.store(scale_flat_ptr + safe_slot * NI + di, idx, mask=imask & valid)
+
+    if t < TOKEN_COUNT:
+        per_token = 2 * NK + NI
+        src_row = tl.load(unpad_ptr + t).to(tl.int64) * per_token
+        dst_slot = tl.load(write_slots_ptr + t).to(tl.int64)
+        physical_slot = tl.load(slot_mapping_ptr + t).to(tl.int64)
+
+        valid = physical_slot >= 0
+        safe_slot = tl.where(valid, physical_slot, 0)
+        block_id = safe_slot // PAGE_SIZE
+        page_off = safe_slot - block_id * PAGE_SIZE
+        head_stride = PAGE_SIZE * HEAD_DIM
+        kv_stride = NUM_KV_HEADS * head_stride
+        paged_k = block_id * 2 * kv_stride + page_off * HEAD_DIM
+
+        for h in tl.range(0, NUM_KV_HEADS):
+            k = tl.load(
+                packed_ptr + src_row + h * HEAD_DIM + d, mask=dmask, other=0.0
+            )
+            v = tl.load(
+                packed_ptr + src_row + NK + h * HEAD_DIM + d,
+                mask=dmask,
+                other=0.0,
+            )
+            tl.store(
+                scratch_k_ptr + dst_slot * NK + h * HEAD_DIM + d, k, mask=dmask
+            )
+            tl.store(
+                scratch_v_ptr + dst_slot * NK + h * HEAD_DIM + d, v, mask=dmask
+            )
+            tl.store(
+                base_flat_ptr + paged_k + h * head_stride + d,
+                k,
+                mask=dmask & valid,
+            )
+            tl.store(
+                base_flat_ptr + paged_k + kv_stride + h * head_stride + d,
+                v,
+                mask=dmask & valid,
+            )
+
+        idx = tl.load(packed_ptr + src_row + 2 * NK + di, mask=imask, other=0.0)
+        tl.store(scratch_idx_ptr + dst_slot * NI + di, idx, mask=imask)
+        tl.store(scale_flat_ptr + safe_slot * NI + di, idx, mask=imask & valid)
+
+    # The scratch pool is reused across requests. Clear the short tail between
+    # each real KV length and its page boundary in the same launch so padded CP
+    # queries cannot observe stale K/V/index values.
+    if t < BATCH_SIZE * PAGE_SIZE:
+        batch_idx = t // PAGE_SIZE
+        page_offset = t - batch_idx * PAGE_SIZE
+        kv_len = tl.load(kv_lens_ptr + batch_idx).to(tl.int64)
+        tail = (PAGE_SIZE - kv_len % PAGE_SIZE) % PAGE_SIZE
+        scratch_row = batch_idx * SCRATCH_SEQ_LEN + kv_len + page_offset
+        clear = (page_offset < tail) & (
+            scratch_row < (batch_idx + 1) * SCRATCH_SEQ_LEN
+        )
+        for h in tl.range(0, NUM_KV_HEADS):
+            tl.store(
+                scratch_k_ptr + scratch_row * NK + h * HEAD_DIM + d,
+                0.0,
+                mask=dmask & clear,
+            )
+            tl.store(
+                scratch_v_ptr + scratch_row * NK + h * HEAD_DIM + d,
+                0.0,
+                mask=dmask & clear,
+            )
+        tl.store(
+            scratch_idx_ptr + scratch_row * NI + di,
+            0.0,
+            mask=imask & clear,
+        )
 
 
 def _fused_cp_paged_write(
@@ -1294,6 +1340,8 @@ def _fused_cp_paged_write(
     idx_scratch: torch.Tensor,
     base: torch.Tensor,
     scale_flat: torch.Tensor,
+    kv_lens: torch.Tensor,
+    scratch_seq_len: int,
     nk: int,
     ni: int,
     num_kv_heads: int,
@@ -1304,14 +1352,16 @@ def _fused_cp_paged_write(
     """Unpad CP all-gather output and write scratch plus scheduler paged caches."""
     if token_count is None:
         token_count = int(write_slots.numel())
-    if token_count == 0:
+    batch_size = int(kv_lens.numel())
+    if token_count == 0 and batch_size == 0:
         return
     if nk != num_kv_heads * head_dim:
         raise ValueError(
             f"_fused_cp_paged_write expects nk == num_kv_heads * head_dim, got "
             f"nk={nk}, num_kv_heads={num_kv_heads}, head_dim={head_dim}"
         )
-    _fused_cp_paged_write_kernel[(token_count,)](
+    grid_size = max(token_count, batch_size * page_size)
+    _fused_cp_paged_write_kernel[(grid_size,)](
         packed,
         unpad_indices,
         write_slots,
@@ -1321,12 +1371,15 @@ def _fused_cp_paged_write(
         idx_scratch.reshape(-1, ni),
         base.reshape(-1),
         scale_flat,
+        kv_lens,
         token_count,
+        batch_size,
         NK=nk,
         NI=ni,
         NUM_KV_HEADS=num_kv_heads,
         HEAD_DIM=head_dim,
         PAGE_SIZE=page_size,
+        SCRATCH_SEQ_LEN=scratch_seq_len,
         BLOCK_D=triton.next_power_of_2(head_dim),
         BLOCK_I=triton.next_power_of_2(ni),
         num_warps=1,
@@ -2396,6 +2449,7 @@ class MSAAttention(nn.Module):
         write_slots: torch.Tensor,
         slot_mapping: torch.Tensor,
         device: torch.device,
+        kv_lens: torch.Tensor,
         nk: int,
         ni: int,
         token_count: int,
@@ -2443,6 +2497,8 @@ class MSAAttention(nn.Module):
             idx_scratch,
             base,
             idx_view.reshape(-1, self.idx_head_dim),
+            kv_lens,
+            int(self._scratch_seq_len),
             nk,
             ni,
             self.kv_head_num,
@@ -3110,12 +3166,21 @@ class MSAAttention(nn.Module):
         Q/idx_q RoPE overlap with packed all_gather.
         """
         from rtp_llm.models_py.triton_kernels.sparse_msa.minimax_sparse import (
+            m3_fmha_prefill_enabled,
             minimax_sparse_prefill,
         )
 
         cp_info = attn_inputs.context_parallel_info
         device = hidden_states.device
         local_tokens = hidden_states.shape[0]
+        from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.score_chunk import (
+            PrefillScoreHostMetadata,
+            m3_index_score_chunk_enabled,
+            m3_index_score_chunk_rows,
+        )
+
+        index_score_chunk_enabled = m3_index_score_chunk_enabled(local_tokens)
+        index_score_host_metadata = None
 
         cache = MSAAttention._cp_shared_meta
         if (
@@ -3134,6 +3199,7 @@ class MSAAttention(nn.Module):
             max_seqlen_k = cache["max_seqlen_k"]
             n_seg = cache["n_seg"]
             kv_lens_cpu = cache["kv_lens_cpu"]
+            kv_lens_i32 = cache["kv_lens_i32"]
             kv_lens_cpu_list = cache["kv_lens_cpu_list"]
             prefix_cpu_list = cache["prefix_cpu_list"]
             prefix_sum = cache["prefix_sum"]
@@ -3143,6 +3209,7 @@ class MSAAttention(nn.Module):
             nk = cache["nk"]
             ni = cache["ni"]
             index_score_plan = cache["index_score_plan"]
+            index_score_host_metadata = cache["index_score_host_metadata"]
             sparse_attn_plan = cache["sparse_attn_plan"]
             need_meta = False
         else:
@@ -3264,27 +3331,36 @@ class MSAAttention(nn.Module):
             prefix_i32 = packed_seg_dev[2 * n_seg :].to(torch.int32)
             cu_seqlens = torch.zeros(n_seg + 1, device=device, dtype=torch.int32)
             cu_seqlens[1:] = torch.cumsum(segment_lengths_t, dim=0)
-            kv_lens_device = kv_lens_cpu.to(device=device, dtype=torch.int32)
-            seq_lens_i32 = kv_lens_device.index_select(0, segment_req_ids_t)
+            kv_lens_i32 = kv_lens_cpu.to(device=device, dtype=torch.int32)
+            seq_lens_i32 = kv_lens_i32.index_select(0, segment_req_ids_t)
             max_seqlen_q = int(pair_arr.max()) if len(pair_arr) > 0 else 0
             max_seqlen_k = max_kv
 
             # Build or initialize the fmha index-score plan cache once per forward
             # here, then reuse it across sparse layers via _cp_shared_meta.
-            from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.score_chunk import (
-                m3_index_score_chunk_enabled,
-            )
             from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.topk_bt_fused import (
                 build_index_score_plan,
                 build_sparse_attn_plan,
             )
 
-            if m3_index_score_chunk_enabled(local_tokens):
-                # Chunk plans are built lazily by the first sparse layer and
-                # cached here for the remaining layers. Avoid constructing the
-                # unusable full-Q OnlyScore plan first: its int32 maxscore
-                # geometry can overflow on the long contexts chunking targets.
+            if index_score_chunk_enabled:
+                # Avoid the unusable full-Q OnlyScore plan: its int32 maxscore
+                # geometry can overflow on long contexts. The chunk plans are
+                # prepared below once the shared physical page table is ready.
                 index_score_plan = {}
+                segment_req_ids_host = [int(value) for value in segment_req_ids_np]
+                index_score_host_metadata = PrefillScoreHostMetadata(
+                    query_lens=tuple(
+                        int(value) for value in segment_lengths_np
+                    ),
+                    seq_lens=tuple(
+                        kv_lens_cpu_list[req_id] for req_id in segment_req_ids_host
+                    ),
+                    prefix_lens=tuple(
+                        int(value) for value in segment_starts_np
+                    ),
+                    slot_ids=tuple(range(n_seg)),
+                )
             else:
                 index_score_plan = build_index_score_plan(
                     cu_seqlens,
@@ -3320,6 +3396,7 @@ class MSAAttention(nn.Module):
                 "max_seqlen_k": max_seqlen_k,
                 "n_seg": n_seg,
                 "kv_lens_cpu": kv_lens_cpu,
+                "kv_lens_i32": kv_lens_i32,
                 "kv_lens_cpu_list": kv_lens_cpu_list,
                 "prefix_cpu_list": prefix_cpu_list,
                 "prefix_sum": prefix_sum,
@@ -3329,6 +3406,7 @@ class MSAAttention(nn.Module):
                 "nk": nk,
                 "ni": ni,
                 "index_score_plan": index_score_plan,
+                "index_score_host_metadata": index_score_host_metadata,
                 "sparse_attn_plan": sparse_attn_plan,
             }
 
@@ -3385,6 +3463,39 @@ class MSAAttention(nn.Module):
                     "slot_mapping": slot_mapping,
                     "kv_page_indices": kv_page_indices,
                 }
+
+        trtllm_workspace = self._maybe_trtllm_workspace(device)
+        if index_score_chunk_enabled:
+            assert index_score_host_metadata is not None
+            if m3_fmha_prefill_enabled(
+                workspace=trtllm_workspace,
+                sparse_attn_plan=sparse_attn_plan,
+                num_idx_heads=self.num_idx_heads,
+                num_kv_heads=self.kv_head_num,
+                disable_index_value=self.disable_index_value,
+                has_idx_sink=False,
+                has_sink=False,
+                max_seqlen_k=max_seqlen_k,
+                total_q=local_tokens,
+            ):
+                from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.topk_bt_fused import (
+                    prepare_fmha_index_score_chunks,
+                )
+
+                prepare_fmha_index_score_chunks(
+                    index_score_plan=index_score_plan,
+                    cu_seqlens=cu_seqlens,
+                    seq_lens=seq_lens_i32,
+                    prefix_lens=prefix_i32,
+                    kv_indices=kv_page_indices,
+                    chunk_rows=m3_index_score_chunk_rows(),
+                    block_size_k=self.block_size,
+                    num_heads=self.num_idx_heads,
+                    idx_kv_heads=1,
+                    total_q=local_tokens,
+                    max_seqlen_k=max_seqlen_k,
+                    host_metadata=index_score_host_metadata,
+                )
 
         idx_k = idx_k.contiguous()
         dummy_idx = _ROPE_DUMMY_SCRATCH.acquire(
@@ -3457,6 +3568,7 @@ class MSAAttention(nn.Module):
                 write_slots,
                 slot_mapping,
                 device,
+                kv_lens_i32,
                 nk,
                 ni,
                 token_count,
@@ -3516,7 +3628,7 @@ class MSAAttention(nn.Module):
                     device,
                     slot_mapping=slot_mapping,
                 )
-        self._zero_scratch_padding_tail(kv_lens_cpu_list, bsz)
+            self._zero_scratch_padding_tail(kv_lens_cpu_list, bsz)
 
         if (
             kv_cache is not None
@@ -3553,7 +3665,7 @@ class MSAAttention(nn.Module):
             local_blocks=self.local_blocks,
             score_type=self.score_type,
             disable_index_value=self.disable_index_value,
-            workspace=self._maybe_trtllm_workspace(device),
+            workspace=trtllm_workspace,
             index_score_plan=index_score_plan,
             sparse_attn_plan=sparse_attn_plan,
             kv_indices=kv_page_indices,
