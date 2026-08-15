@@ -1,4 +1,7 @@
 #include "rtp_llm/cpp/cache/BlockPool.h"
+
+#include <array>
+
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -10,7 +13,10 @@
 namespace rtp_llm {
 
 BlockPool::BlockPool(const BlockPoolConfig& config, AllocationType allocation_type):
-    config_(config), allocation_type_(allocation_type) {}
+    config_(config),
+    allocation_type_(allocation_type),
+    cache_buffer_allocator_(
+        [](at::IntArrayRef sizes, const torch::TensorOptions& options) { return torch::empty(sizes, options); }) {}
 
 BlockPool::~BlockPool() {
     cache_aligned_buffer_ = torch::Tensor();
@@ -37,16 +43,23 @@ void BlockPool::validateConfig() const {
 }
 
 void BlockPool::initializeCacheBuffer() {
-    if (allocation_type_ == AllocationType::HOST) {
-        cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
-                                             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU))
-                                    .pin_memory();
-    } else {
-        cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
-                                             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
-    }
+    cache_aligned_buffer_ = allocateCacheBuffer(
+        static_cast<int64_t>(config_.total_size_bytes), allocation_type_, cache_buffer_allocator_);
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
+}
+
+torch::Tensor BlockPool::allocateCacheBuffer(int64_t                     num_bytes,
+                                             AllocationType              allocation_type,
+                                             const CacheBufferAllocator& allocator) {
+    auto options = torch::TensorOptions().dtype(torch::kUInt8);
+    if (allocation_type == AllocationType::HOST) {
+        options = options.device(torch::kCPU).pinned_memory(true);
+    } else {
+        options = options.device(torch::kCUDA);
+    }
+    const std::array<int64_t, 1> sizes = {num_bytes};
+    return allocator(sizes, options);
 }
 
 void BlockPool::initializeLayerMappings() {

@@ -86,6 +86,19 @@ cc_test(
 )
 
 cc_test(
+    name = "block_pool_host_allocation_test",
+    srcs = [
+        "BlockPoolHostAllocationTest.cc",
+    ],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:block_pool",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+)
+
+cc_test(
     name = "memory_layout_strategy_test",
     srcs = [
         "MemoryLayoutStrategyTest.cc",

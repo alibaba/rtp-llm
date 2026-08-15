@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <cstdint>
 #include <memory>
 #include <vector>
 #include <set>
@@ -106,6 +107,31 @@ TEST_F(BlockPoolTest, ConstructorAndInit) {
     EXPECT_TRUE(init_result);
 
     EXPECT_EQ(block_pool_->freeBlocksNum(), config.block_num - 1);
+}
+
+TEST(BlockPoolHostTest, AllocatesPinnedBufferAtConfiguredSize) {
+    auto config = createTestConfig();
+    auto pool   = std::make_shared<BlockPool>(config, AllocationType::HOST);
+
+    ASSERT_TRUE(pool->init());
+    ASSERT_NE(pool->getBaseAddress(), nullptr);
+    EXPECT_EQ(pool->getTotalSizeBytes(), config.total_size_bytes);
+
+    const auto layer_tensors = pool->allLayerCacheBase();
+    ASSERT_EQ(layer_tensors.size(), config.memory_layouts.front().layer_num);
+    ASSERT_FALSE(layer_tensors.empty());
+
+    const auto pool_begin       = reinterpret_cast<uintptr_t>(pool->getBaseAddress());
+    auto       expected_address = pool_begin;
+    for (const auto& tensor : layer_tensors) {
+        EXPECT_TRUE(tensor.device().is_cpu());
+        EXPECT_TRUE(tensor.is_pinned());
+        EXPECT_TRUE(tensor.is_contiguous());
+        EXPECT_EQ(tensor.scalar_type(), torch::kFloat16);
+        EXPECT_EQ(reinterpret_cast<uintptr_t>(tensor.data_ptr()), expected_address);
+        expected_address += tensor.nbytes();
+    }
+    EXPECT_EQ(expected_address, pool_begin + pool->getTotalSizeBytes());
 }
 
 TEST_F(BlockPoolTest, MTPProposalStepsReuseOneDraftCacheLayout) {

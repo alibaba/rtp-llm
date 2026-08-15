@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -76,6 +77,9 @@ public:
     }
 
 private:
+    using CacheBufferAllocator =
+        std::function<torch::Tensor(at::IntArrayRef sizes, const torch::TensorOptions& options)>;
+
     void initFreeBlocks();
     void tryFreeBlocks(const BlockIndicesType& block_indices);
     // global_layer_id -> {layout_index, local_layer_id}
@@ -85,6 +89,9 @@ private:
     // Helper functions for init()
     void validateConfig() const;
     void initializeCacheBuffer();
+    static torch::Tensor allocateCacheBuffer(int64_t                     num_bytes,
+                                             AllocationType              allocation_type,
+                                             const CacheBufferAllocator& allocator);
     void initializeLayerMappings();
     void initializeLayoutStrategies();
 
@@ -125,7 +132,8 @@ private:
     BlockRefCounter        block_cache_ref_counter_;
     BlockRefCounter        req_cache_ref_counter_;
 
-    AllocationType allocation_type_;
+    AllocationType       allocation_type_;
+    CacheBufferAllocator cache_buffer_allocator_;
 
     BlockCachePtr block_cache_;
 
