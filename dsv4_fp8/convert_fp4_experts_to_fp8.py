@@ -11,20 +11,48 @@ this checkpoint and this fleet.
 This converter rewrites just those tensors into the same FP8 layout the rest of
 the checkpoint already uses, leaving every other byte untouched.
 
-The rewrite is value-exact, not merely close. Dequantised FP4 is
-``v * 2^e`` where ``v`` comes from a 16-entry e2m1 table and ``e`` is a UE8M0
-exponent. Every table entry needs at most four significant bits, which is exactly
-what e4m3 carries, so re-expressing a weight against a *power-of-two* block scale
-only shifts the exponent and never touches the mantissa. Values survive bit for
-bit as long as the shift keeps them inside e4m3's range, which the block scale is
-chosen to guarantee; ``--verify`` reports the fraction that did.
+The rewrite is exact under a condition on the data, not unconditionally, and the
+condition is worth stating precisely because the earlier wording ("value-exact")
+only covered half of it.
+
+Dequantised FP4 is ``v * 2^e`` where ``v`` comes from a 16-entry e2m1 table and
+``e`` is a UE8M0 exponent. Every table entry needs at most three mantissa bits,
+which is what e4m3 normals carry, so re-expressing a weight against a
+*power-of-two* block scale shifts the exponent and leaves the mantissa alone. What
+the block scale guarantees is only the **upper** end: it puts the block's largest
+magnitude in ``(2^7, 2^8]``, so nothing overflows e4m3's 448.
+
+The **lower** end is a property of the block's contents. Scaling is uniform across
+the 128x128 block, so a value far below the block max lands near the bottom of
+e4m3's range:
+
+  * within ``2^14`` of the block max the value is a *normal* e4m3 (smallest normal
+    ``2^-6``) and keeps all three mantissa bits -- exact;
+  * between ``2^14`` and ``2^17`` it is subnormal, and stays exact only if its
+    mantissa fits the bits left (powers of two do, 1.5 and 3 do not);
+  * past ``2^17`` it flushes to zero.
+
+So the guarantee is: **exact for every block whose dynamic range is at most
+2^14**. Measured on the released DeepSeek-V4-Flash checkpoint's routed experts
+(4096 blocks over three shards, 59.3M nonzero weights): the largest in-block
+dynamic range is **48, i.e. 2^5.58**, and **no** surviving nonzero weight is
+subnormal -- 8.4 octaves of headroom against the bound. That is the evidence for
+the claim, not the algebra alone; ``dsv4_fp8/measure_expert_block_span.py``
+reproduces it on any converted checkpoint.
+
+Verification therefore runs by default rather than behind a flag, and a shortfall
+is an error: any tensor whose reconstruction is not bit-exact fails the run with a
+non-zero exit code and the offending tensor name plus that tensor's worst block
+span, so an inexact checkpoint cannot be produced silently. ``--no-verify`` skips
+it for a throughput run on a checkpoint already verified once.
 
 Usage:
-    python3 convert_fp4_experts_to_fp8.py --src DIR --dst DIR [--verify] [--limit N]
+    python3 convert_fp4_experts_to_fp8.py --src DIR --dst DIR [--no-verify] [--limit N]
 """
 
 import argparse
 import json
+import math
 import os
 import shutil
 import struct
@@ -129,7 +157,7 @@ def convert_expert(weight_bytes, scale_bytes, n, k_packed, device):
     scaled = dequant * inv.repeat_interleave(FP8_BLOCK, 0).repeat_interleave(FP8_BLOCK, 1)
     quant = scaled.to(torch.float8_e4m3fn)
 
-    exact_fraction, max_rel_err = None, None
+    exact_fraction, max_rel_err, worst_span = None, None, None
     if VERIFY:
         recon = quant.float() * torch.exp2(block_exp.float()).repeat_interleave(
             FP8_BLOCK, 0
@@ -137,10 +165,20 @@ def convert_expert(weight_bytes, scale_bytes, n, k_packed, device):
         exact_fraction = float((recon == dequant).float().mean())
         denom = dequant.abs().clamp_min(1e-30)
         max_rel_err = float(((recon - dequant).abs() / denom).max())
+        # The block dynamic range is what decides exactness (see the module
+        # docstring), so report it with the verdict: a failure is far easier to act
+        # on when it says which block was too wide than when it only says how many
+        # elements moved.
+        finite = torch.where(blocks.abs() > 0, blocks.abs(), torch.inf)
+        block_min = finite.amin(dim=(1, 3))
+        span = torch.where(
+            torch.isfinite(block_min) & (amax > 0), amax / block_min, torch.ones_like(amax)
+        )
+        worst_span = float(span.max())
 
     weight_out = quant.view(torch.uint8).cpu().numpy().tobytes()
     scale_out = biased.to(torch.uint8).cpu().numpy().tobytes()
-    return weight_out, scale_out, exact_fraction, max_rel_err
+    return weight_out, scale_out, exact_fraction, max_rel_err, worst_span
 
 
 def plan_file(header):
@@ -239,8 +277,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", required=True)
     ap.add_argument("--dst", required=True)
-    ap.add_argument("--verify", action="store_true",
-                    help="measure per-tensor exactness (adds a reconstruction pass)")
+    ap.add_argument("--no-verify", dest="verify", action="store_false",
+                    help="skip the per-tensor exactness check (default: on). Only "
+                         "for re-running a checkpoint already verified once -- "
+                         "without it, an inexact rewrite produces a checkpoint "
+                         "that looks fine and serves wrong numbers")
+    ap.set_defaults(verify=True)
     ap.add_argument("--limit", type=int, default=0,
                     help="convert only the first N shards, for a quick check")
     args = ap.parse_args()
@@ -260,22 +302,47 @@ def main():
     # Subdirectories are copied whole, not skipped: V4 ships executable pieces
     # of the checkpoint (encoding/encoding_dsv4.py, inference/) that the loader
     # imports by path, so a converted checkpoint missing them cannot start.
+    index_entries = []
     for entry in sorted(os.listdir(args.src)):
         src_path = os.path.join(args.src, entry)
         if entry.endswith(".safetensors"):
             continue
         dst_path = os.path.join(args.dst, entry)
+        if entry.endswith(".index.json"):
+            # Deferred: metadata.total_size has to be recomputed from the output
+            # shards, which do not exist yet. Copied verbatim it stays the FP4
+            # figure -- 148.6 GiB against a 254 GiB output on the released
+            # checkpoint -- and hf_model_helper trusts it.
+            index_entries.append((src_path, dst_path))
+            continue
         if os.path.isdir(src_path):
             shutil.copytree(src_path, dst_path, dirs_exist_ok=True)
         elif entry == "config.json":
-            cfg = json.load(open(src_path))
-            cfg["expert_dtype"] = "fp8"
-            json.dump(cfg, open(dst_path, "w"), indent=2)
-            print(f"config.json: expert_dtype -> fp8")
+            if args.limit:
+                # A sampled run is not a loadable checkpoint: most shards are
+                # missing, so stamping expert_dtype=fp8 would produce a directory
+                # that claims to be convertible-and-converted and fails much later
+                # inside the loader.
+                shutil.copy2(src_path, dst_path)
+                print("config.json: copied unchanged (--limit: partial output)")
+            else:
+                cfg = json.load(open(src_path))
+                cfg["expert_dtype"] = "fp8"
+                json.dump(cfg, open(dst_path, "w"), indent=2)
+                print("config.json: expert_dtype -> fp8")
         else:
             shutil.copy2(src_path, dst_path)
 
-    stats = {"tensors": 0, "verified": 0, "exact_min": 1.0, "exact_sum": 0.0, "rel_max": 0.0}
+    stats = {
+        "tensors": 0,
+        "verified": 0,
+        "exact_min": 1.0,
+        "exact_sum": 0.0,
+        "rel_max": 0.0,
+        "span_max": 0.0,
+        "span_max_tensor": "",
+        "inexact": [],
+    }
     t0 = time.time()
     for i, shard in enumerate(shards, 1):
         t1 = time.time()
@@ -286,10 +353,71 @@ def main():
               f"{time.time() - t1:.1f}s  (total {(time.time() - t0) / 60:.1f}m)",
               flush=True)
 
+    for src_path, dst_path in index_entries:
+        if args.limit:
+            shutil.copy2(src_path, dst_path)
+            print(f"{os.path.basename(src_path)}: copied unchanged (--limit: "
+                  "weight_map still names shards that were not converted)")
+            continue
+        index = json.load(open(src_path))
+        total = 0
+        for shard in shards:
+            shard_path = os.path.join(args.dst, shard)
+            _hdr, data_start = read_header(shard_path)
+            total += os.path.getsize(shard_path) - data_start
+        old_total = int(index.get("metadata", {}).get("total_size", 0) or 0)
+        index.setdefault("metadata", {})["total_size"] = total
+        mapped = {v for v in index.get("weight_map", {}).values()}
+        missing = mapped - set(shards)
+        if missing:
+            raise ValueError(
+                f"{os.path.basename(src_path)} weight_map names shards that were "
+                f"not converted: {sorted(missing)[:5]}"
+            )
+        json.dump(index, open(dst_path, "w"), indent=2)
+        print(f"{os.path.basename(src_path)}: total_size {old_total} -> {total} "
+              f"({total / 2**30:.1f} GiB)")
+
     print(f"\nconverted {stats['tensors']} expert weights in {(time.time() - t0) / 60:.1f} min")
-    if stats["verified"]:
-        print(f"exactness: mean {stats['exact_sum'] / stats['verified']:.6f}, "
-              f"worst tensor {stats['exact_min']:.6f}, max rel err {stats['rel_max']:.3e}")
+    if not stats["verified"]:
+        if not args.verify:
+            print(
+                "WARNING: --no-verify was passed, so nothing checked that the "
+                "rewrite is exact. See the module docstring for the condition it "
+                "depends on."
+            )
+        else:
+            print(
+                "nothing to verify: no FP4 routed-expert tensors were found, so "
+                "this source is either already converted or not a V4-Flash "
+                "checkpoint"
+            )
+        return 0
+
+    print(f"exactness: mean {stats['exact_sum'] / stats['verified']:.6f}, "
+          f"worst tensor {stats['exact_min']:.6f}, max rel err {stats['rel_max']:.3e}")
+    print(
+        f"largest in-block dynamic range: {stats['span_max']:.4g} "
+        f"= 2^{math.log2(max(stats['span_max'], 1.0)):.2f} "
+        f"({stats['span_max_tensor'] or 'n/a'}); exactness holds to 2^14"
+    )
+    if stats["inexact"]:
+        print(
+            f"\nFAILED: {len(stats['inexact'])} of {stats['verified']} tensors did "
+            "not survive the rewrite bit for bit. The rewrite is exact only while a "
+            "block's dynamic range stays inside e4m3's normal range (2^14); past it "
+            "values land in the subnormal region and lose mantissa bits."
+        )
+        for item in stats["inexact"][:10]:
+            print(
+                f"  {item['tensor']}: exact_fraction={item['exact_fraction']:.6f} "
+                f"max_rel_err={item['max_rel_err']:.3e} "
+                f"block_span=2^{math.log2(max(item['block_span'] or 1.0, 1.0)):.2f}"
+            )
+        if len(stats["inexact"]) > 10:
+            print(f"  ... and {len(stats['inexact']) - 10} more")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

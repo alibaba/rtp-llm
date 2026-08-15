@@ -221,6 +221,63 @@ class GroupedFP8MaskedEquivalenceTest(unittest.TestCase):
                 f"max|diff|={(y_contig - y_masked).abs().max().item():.3e}",
             )
 
+    def test_masked_path_is_capturable_and_replays(self):
+        """The reason the masked layout exists: it can go inside a CUDA graph.
+
+        Everything else in this file compares numbers; nothing checked the
+        capturability that motivates the layout. Three facts land here at once and
+        nowhere else:
+
+        * the path performs no device->host sync -- a ``num_recv.cpu()`` anywhere
+          in it makes ``torch.cuda.graph`` raise, which is exactly why the
+          contiguous path cannot be captured;
+        * ``max_m = align(N, 128)`` is a host-side constant under capture, so every
+          buffer has a static shape;
+        * replay reproduces the eager result, i.e. the captured graph reads the
+          routing from ``masked_m`` on the device rather than from anything baked in
+          at capture time.
+
+        One eager call first, for the same reason the engine runs an eager forward
+        before ``captureDecode()``: DeepGEMM's JIT cannot compile inside a capture.
+
+        ``ep_size`` is 1 here (``_cfg()``), so no EP collective is captured -- that
+        combination is what the deployment constraint in ``_assert_one_captured_size``
+        is about and is left to the multi-card smoke.
+        """
+        n_tokens = 24
+        with _env(DSV4_MOE_FUSED_SWIGLU="0"):
+            x, w, idx = _inputs(n_tokens, self.device, seed=31337)
+
+            # Compile and warm outside the capture.
+            eager = self.strategy._local_experts_masked(x, w, idx, 0).clone()
+            torch.cuda.synchronize()
+
+            out = torch.empty_like(eager)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                out.copy_(self.strategy._local_experts_masked(x, w, idx, 0))
+
+            graph.replay()
+            torch.cuda.synchronize()
+            self.assertTrue(
+                torch.equal(out, eager),
+                "replay diverged from eager: max|diff|="
+                f"{(out.float() - eager.float()).abs().max().item()}",
+            )
+
+            # Replay again after changing the input in place: the graph must read
+            # the new values rather than a capture-time copy.
+            x.mul_(2.0)
+            expected = self.strategy._local_experts_masked(x, w, idx, 0).clone()
+            torch.cuda.synchronize()
+            graph.replay()
+            torch.cuda.synchronize()
+            self.assertTrue(
+                torch.equal(out, expected),
+                "replay after mutating the input did not follow it: max|diff|="
+                f"{(out.float() - expected.float()).abs().max().item()}",
+            )
+
     def test_masked_matches_contiguous_with_fused_swiglu(self):
         """With the fused kernel on, the two paths agree to fp8 rounding.
 
