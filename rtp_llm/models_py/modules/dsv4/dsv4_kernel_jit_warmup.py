@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4 import mhc_prenorm_backend
 from rtp_llm.utils.warmup import model_warm_up_enabled
 
 _DENSE_GEMM_FALLBACK_M_GRID = [
@@ -1413,37 +1414,17 @@ def _generate_dense_gemm_warmup_m_grid(
     return tuple(sorted(reps_by_signature.values()))
 
 
-def _mhc_prenorm_deepgemm_backend_enabled() -> bool:
-    requested = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
-    if requested in ("", "auto", "deepgemm", "dg"):
-        return True
-    if requested in ("tilelang", "single", "tilelang_single", "tilelang_splitk"):
-        return False
-    return requested == "deepgemm"
+def _mhc_prenorm_backend() -> str:
+    """Delegate to the shared resolver -- do not re-derive it here.
 
-
-def _mhc_prenorm_deepgemm_backend_name() -> str:
-    requested = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
-    if requested in ("", "auto", "deepgemm", "dg"):
-        return "deepgemm"
-    if requested in ("tilelang", "single"):
-        return "tilelang_single"
-    return requested
-
-
-def _compute_mhc_prenorm_num_split(
-    *,
-    m_value: int,
-    k_value: int,
-    num_sms: int,
-) -> int:
-    block_m = 64
-    block_k = 64
-    grid_size = _ceil_div(max(int(m_value), 1), block_m)
-    split_k = max(int(num_sms), 1) // max(grid_size, 1)
-    num_block_k = _ceil_div(int(k_value), block_k)
-    split_k = min(split_k, num_block_k // 4)
-    return max(split_k, 1)
+    This module used to parse ``DSV4_MHC_PRE_GEMM_BACKEND`` itself, and the copy
+    resolved bare/``auto`` to ``deepgemm`` unconditionally while the runtime probes
+    for ``tf32_hc_prenorm_gemm`` and falls back to ``tilelang_splitk``. On a build
+    without that symbol the two disagreed: warmup drove the DeepGEMM path and
+    failed during startup, and the TileLang split-K kernel that requests actually
+    run was never compiled ahead of time.
+    """
+    return mhc_prenorm_backend.resolve_backend()
 
 
 @lru_cache(maxsize=1024)
@@ -1452,30 +1433,39 @@ def _generate_mhc_prenorm_warmup_specs(
     max_m: int,
     k_value: int,
     num_sms: int,
+    backend: str,
 ) -> tuple[tuple[int, int], ...]:
     """Return ``(num_splits, representative_m)`` pairs for mHC prenorm GEMM.
 
-    DeepGEMM compiles ``num_splits`` for this kernel, not M itself.  RTP's
-    TileKernels wrapper derives ``num_splits`` from ``ceil(num_tokens / 64)``;
-    choose the first M that reaches each split value up to the rank-local
-    prefill token bound.
+    Both backends compile ``num_splits`` for this kernel, not M itself, so one
+    representative M per reachable split count covers every shape.  The counts
+    come from the runtime's own :func:`resolve_n_splits` -- this used to re-derive
+    DeepGEMM's heuristic locally, which omitted the TileLang divisor clamp and so
+    named split counts the TileLang backend never launches.
+
+    ``backend`` is therefore load-bearing: ``tilelang_single`` has a single
+    variant, while the two split-K backends disagree on the count for the same M.
     """
 
     max_m = max(int(max_m), 0)
     if max_m <= 0:
         return ()
 
+    resolve_n_splits = mhc_prenorm_backend.resolve_n_splits
     reps_by_split: dict[int, int] = {}
     max_grid = _ceil_div(max_m, 64)
     for grid_size in range(1, max_grid + 1):
         m_value = (grid_size - 1) * 64 + 1
-        num_splits = _compute_mhc_prenorm_num_split(
-            m_value=m_value,
-            k_value=k_value,
-            num_sms=num_sms,
+        num_splits = resolve_n_splits(
+            mhc_hidden_size=int(k_value),
+            num_tokens=m_value,
+            num_sms=int(num_sms),
+            backend=str(backend),
         )
         reps_by_split.setdefault(num_splits, m_value)
         if num_splits == 1:
+            # Monotone: the count only falls as M grows, and the TileLang clamp
+            # is monotone in it, so nothing new appears past the first 1.
             break
 
     return tuple((split, reps_by_split[split]) for split in sorted(reps_by_split))
@@ -1675,21 +1665,24 @@ def warmup_mhc_prenorm_gemm_jit(
         return
     _assert_not_capturing()
 
-    backend = _mhc_prenorm_deepgemm_backend_name()
-    deepgemm_enabled = _mhc_prenorm_deepgemm_backend_enabled()
+    backend = _mhc_prenorm_backend()
+    deepgemm_enabled = backend == "deepgemm"
     num_sms = _get_deep_gemm_num_sms(device)
     shape_keys = tuple(sorted(shapes.keys()))
-    if deepgemm_enabled:
-        specs_by_shape = {
-            key: _generate_mhc_prenorm_warmup_specs(
-                max_m=int(max_m),
-                k_value=int(key[1]),
-                num_sms=num_sms,
-            )
-            for key in shape_keys
-        }
-    else:
-        specs_by_shape = {key: ((1, 1),) for key in shape_keys if int(max_m) > 0}
+    # Enumerate for every backend, not just DeepGEMM. The TileLang branch used to
+    # warm one hardcoded ``(1, 1)`` spec, which compiles only whatever split count
+    # M=1 resolves to (64 for a 16384-wide fn) -- so with tilelang_splitk selected,
+    # a prefill request at any other M compiled its own variant inside the request.
+    # tilelang_single resolves to 1 for every M, so it still yields one spec.
+    specs_by_shape = {
+        key: _generate_mhc_prenorm_warmup_specs(
+            max_m=int(max_m),
+            k_value=int(key[1]),
+            num_sms=num_sms,
+            backend=backend,
+        )
+        for key in shape_keys
+    }
     specs_by_shape = {key: specs for key, specs in specs_by_shape.items() if specs}
     if not specs_by_shape:
         return
@@ -1755,7 +1748,7 @@ def warmup_mhc_prenorm_gemm_jit(
                 else:
                     _run_tilelang_warmup_launch_with_retry(
                         "DSV4 mHC TileLangPre",
-                        f"shape={key} m={m_value}",
+                        f"shape={key} backend={backend} num_splits={num_splits} m={m_value}",
                         partial(
                             _launch_dummy_mhc_pre_wrapper,
                             key=key,

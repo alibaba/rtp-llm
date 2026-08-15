@@ -34,6 +34,7 @@ _stub_package(
     os.path.join(_REPO, "rtp_llm", "models_py", "modules", "dsv4"),
 )
 
+from rtp_llm.models_py.modules.dsv4 import mhc_prenorm_backend
 from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     _collect_dsv4_branch_kernel_configs,
     _collect_dsv4_batched_fp8_einsum_shapes,
@@ -41,12 +42,12 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     _collect_dsv4_fp8_mqa_logits_shapes,
     _collect_dsv4_mhc_head_fused_shapes,
     _collect_dsv4_mhc_prenorm_shapes,
-    _compute_mhc_prenorm_num_split,
     _cp_padded_tokens_per_rank_bound,
     _dense_gemm_m_grid,
     _dist_rank,
     _generate_dense_gemm_warmup_m_grid,
     _generate_mhc_prenorm_warmup_specs,
+    _mhc_prenorm_backend,
     _run_deepgemm_warmup_launch_with_retry,
     _run_tilelang_warmup_launch_with_retry,
     _run_triton_warmup_launch_with_retry,
@@ -564,27 +565,72 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             max_m=200000,
             k_value=16384,
             num_sms=148,
+            backend=mhc_prenorm_backend.DEEPGEMM,
         )
         splits = {split for split, _ in specs}
         self.assertTrue({1, 8, 49, 64}.issubset(splits))
 
-        reps_by_split = dict(specs)
-        self.assertEqual(
-            _compute_mhc_prenorm_num_split(
-                m_value=reps_by_split[49],
+        # Each representative M must resolve back to the split it stands for, via
+        # the same function the runtime calls -- that agreement is the point of
+        # the spec list, and re-deriving the heuristic here would not test it.
+        for split, m_value in specs:
+            self.assertEqual(
+                mhc_prenorm_backend.resolve_n_splits(
+                    mhc_hidden_size=16384,
+                    num_tokens=m_value,
+                    num_sms=148,
+                    backend=mhc_prenorm_backend.DEEPGEMM,
+                ),
+                split,
+                f"m={m_value} no longer resolves to {split}",
+            )
+
+    def test_mhc_prenorm_warmup_specs_follow_the_tilelang_divisor_clamp(self):
+        """The TileLang backend launches fewer distinct splits than DeepGEMM.
+
+        Its count has to divide the kernel's K block count (16384/256 = 64), so
+        DeepGEMM's 49 and 39 are unreachable there. Warming DeepGEMM's list would
+        compile variants no request runs and miss the ones they do.
+        """
+        deepgemm = {
+            split
+            for split, _ in _generate_mhc_prenorm_warmup_specs(
+                max_m=200000,
                 k_value=16384,
                 num_sms=148,
-            ),
-            49,
+                backend=mhc_prenorm_backend.DEEPGEMM,
+            )
+        }
+        splitk_specs = _generate_mhc_prenorm_warmup_specs(
+            max_m=200000,
+            k_value=16384,
+            num_sms=148,
+            backend=mhc_prenorm_backend.TILELANG_SPLITK,
         )
-        self.assertEqual(
-            _compute_mhc_prenorm_num_split(
-                m_value=reps_by_split[8],
-                k_value=16384,
-                num_sms=148,
-            ),
-            8,
+        splitk = {split for split, _ in splitk_specs}
+        self.assertTrue(all(64 % split == 0 for split in splitk), splitk)
+        self.assertIn(49, deepgemm)
+        self.assertNotIn(49, splitk)
+        for split, m_value in splitk_specs:
+            self.assertEqual(
+                mhc_prenorm_backend.resolve_n_splits(
+                    mhc_hidden_size=16384,
+                    num_tokens=m_value,
+                    num_sms=148,
+                    backend=mhc_prenorm_backend.TILELANG_SPLITK,
+                ),
+                split,
+            )
+
+    def test_mhc_prenorm_warmup_specs_single_backend_has_one_variant(self):
+        """tilelang_single is one kernel for every M, so one spec is enough."""
+        specs = _generate_mhc_prenorm_warmup_specs(
+            max_m=200000,
+            k_value=16384,
+            num_sms=148,
+            backend=mhc_prenorm_backend.TILELANG_SINGLE,
         )
+        self.assertEqual({split for split, _ in specs}, {1})
 
     def test_mhc_warmup_launches_prenorm_gemm_and_pre_big_fuse(self):
         calls = []
@@ -618,11 +664,8 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             old_values["_get_deep_gemm_num_sms"] = with_patch(
                 "_get_deep_gemm_num_sms", lambda device: 148
             )
-            old_values["_mhc_prenorm_deepgemm_backend_name"] = with_patch(
-                "_mhc_prenorm_deepgemm_backend_name", lambda: "deepgemm"
-            )
-            old_values["_mhc_prenorm_deepgemm_backend_enabled"] = with_patch(
-                "_mhc_prenorm_deepgemm_backend_enabled", lambda: True
+            old_values["_mhc_prenorm_backend"] = with_patch(
+                "_mhc_prenorm_backend", lambda: mhc_prenorm_backend.DEEPGEMM
             )
             old_values["_generate_mhc_prenorm_warmup_specs"] = with_patch(
                 "_generate_mhc_prenorm_warmup_specs",
@@ -705,11 +748,8 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             old_values["_get_deep_gemm_num_sms"] = with_patch(
                 "_get_deep_gemm_num_sms", lambda device: 148
             )
-            old_values["_mhc_prenorm_deepgemm_backend_name"] = with_patch(
-                "_mhc_prenorm_deepgemm_backend_name", lambda: "tilelang_single"
-            )
-            old_values["_mhc_prenorm_deepgemm_backend_enabled"] = with_patch(
-                "_mhc_prenorm_deepgemm_backend_enabled", lambda: False
+            old_values["_mhc_prenorm_backend"] = with_patch(
+                "_mhc_prenorm_backend", lambda: mhc_prenorm_backend.TILELANG_SINGLE
             )
             old_values["_dist_rank"] = with_patch("_dist_rank", lambda: 0)
             old_values["_sync_cuda"] = with_patch("_sync_cuda", lambda device: None)
@@ -1197,6 +1237,105 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 launch,
                 device=torch.device("cpu"),
             )
+
+
+class MhcPrenormBackendResolutionTest(unittest.TestCase):
+    """The warmup and the runtime must not disagree about the backend.
+
+    They did, silently: this module resolved an unset or ``auto``
+    ``DSV4_MHC_PRE_GEMM_BACKEND`` to ``deepgemm`` unconditionally, while the
+    TileLang wrapper probes for ``deep_gemm.tf32_hc_prenorm_gemm`` and falls back
+    to ``tilelang_splitk``. On a build without that symbol -- the H20 build this
+    PR targets -- warmup drove the DeepGEMM path and raised during startup, and
+    the split-K kernel requests actually run was never compiled ahead of time.
+
+    Pure host: no CUDA, no ``deep_gemm``, no ``tilelang``.
+    """
+
+    def setUp(self):
+        self._saved = os.environ.get(mhc_prenorm_backend.BACKEND_ENV)
+        self.addCleanup(self._restore_env)
+        # Both are @functools.cache'd; clear on entry *and* exit so neither a
+        # probe result nor a log-once marker leaks between cases or out of them.
+        self.addCleanup(mhc_prenorm_backend.has_deepgemm_prenorm.cache_clear)
+        self.addCleanup(mhc_prenorm_backend._log_backend_choice.cache_clear)
+        mhc_prenorm_backend.has_deepgemm_prenorm.cache_clear()
+        mhc_prenorm_backend._log_backend_choice.cache_clear()
+
+    def _restore_env(self):
+        if self._saved is None:
+            os.environ.pop(mhc_prenorm_backend.BACKEND_ENV, None)
+        else:
+            os.environ[mhc_prenorm_backend.BACKEND_ENV] = self._saved
+
+    def _with_probe(self, available: bool):
+        """Replace the DeepGEMM symbol probe, restoring it on cleanup."""
+        original = mhc_prenorm_backend.has_deepgemm_prenorm
+        mhc_prenorm_backend.has_deepgemm_prenorm = lambda: available
+        self.addCleanup(setattr, mhc_prenorm_backend, "has_deepgemm_prenorm", original)
+
+    def test_warmup_and_runtime_resolve_identically(self):
+        for probe in (True, False):
+            for value in (
+                None,
+                "",
+                "   ",
+                "auto",
+                "AUTO",
+                "  auto  ",
+                "deepgemm",
+                "dg",
+                "tilelang",
+                "single",
+                "tilelang_single",
+                "splitk",
+                "tilelang_splitk",
+                "bogus",
+            ):
+                with self.subTest(probe=probe, value=value):
+                    self._with_probe(probe)
+                    mhc_prenorm_backend._log_backend_choice.cache_clear()
+                    if value is None:
+                        os.environ.pop(mhc_prenorm_backend.BACKEND_ENV, None)
+                    else:
+                        os.environ[mhc_prenorm_backend.BACKEND_ENV] = value
+                    self.assertEqual(
+                        _mhc_prenorm_backend(),
+                        mhc_prenorm_backend.resolve_backend(),
+                    )
+
+    def test_auto_follows_the_symbol_probe(self):
+        for value in (None, "", "auto"):
+            with self.subTest(value=value):
+                if value is None:
+                    os.environ.pop(mhc_prenorm_backend.BACKEND_ENV, None)
+                else:
+                    os.environ[mhc_prenorm_backend.BACKEND_ENV] = value
+
+                self._with_probe(True)
+                mhc_prenorm_backend._log_backend_choice.cache_clear()
+                self.assertEqual(_mhc_prenorm_backend(), mhc_prenorm_backend.DEEPGEMM)
+
+                self._with_probe(False)
+                mhc_prenorm_backend._log_backend_choice.cache_clear()
+                self.assertEqual(
+                    _mhc_prenorm_backend(), mhc_prenorm_backend.TILELANG_SPLITK
+                )
+
+    def test_explicit_deepgemm_is_not_downgraded_by_the_probe(self):
+        """An explicit pin must reach the runtime error, not a silent fallback."""
+        os.environ[mhc_prenorm_backend.BACKEND_ENV] = "deepgemm"
+        self._with_probe(False)
+        self.assertEqual(_mhc_prenorm_backend(), mhc_prenorm_backend.DEEPGEMM)
+
+    def test_unknown_value_is_passed_through(self):
+        os.environ[mhc_prenorm_backend.BACKEND_ENV] = "tilelang_splitq"
+        self.assertEqual(_mhc_prenorm_backend(), "tilelang_splitq")
+
+    def test_probe_never_raises_without_deep_gemm(self):
+        """The real probe answers False on a build/box without the symbol."""
+        mhc_prenorm_backend.has_deepgemm_prenorm.cache_clear()
+        self.assertIsInstance(mhc_prenorm_backend.has_deepgemm_prenorm(), bool)
 
 
 if __name__ == "__main__":
