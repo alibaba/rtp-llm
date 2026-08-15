@@ -63,6 +63,8 @@ from typing import Dict
 
 import torch
 import torch.nn.functional as F
+import triton
+import triton.language as tl
 
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     m_grouped_fp8_gemm_nt_contiguous,
@@ -112,8 +114,24 @@ _MASKED_TILE = 64
 _MASKED_MAX_N = 1024
 
 
+# The fused swiglu+quant kernel below replaces ~8 kernels per MoE layer with 1 and is
+# 6.3x faster on the decode shape (238.5 -> 37.8 us, measured), but it is NOT bit-identical
+# to the sequence it replaces: 7623 of 8388608 quantised activation elements (0.09%) differ
+# by exactly one fp8 e4m3 ULP, deterministically, with the per-group scales bit-identical.
+# The reference quantiser is a CUDA op, so the residual difference is its rounding at the
+# halfway boundary and could not be matched from Triton (matching torch's x*sigmoid(x) form
+# of silu removed the rest). One fp8 ULP on an activation that was just quantised to fp8 is
+# far below the model's numerical noise -- and this engine is not run-to-run reproducible at
+# token granularity anyway -- but it is a real difference, so it gets its own switch.
+_FUSED_SWIGLU_ENV = "DSV4_MOE_FUSED_SWIGLU"
+
+
 def _masked_enabled() -> bool:
     return os.environ.get(_MASKED_ENV, "0").strip().lower() in ("1", "true", "on", "yes")
+
+
+def _fused_swiglu_enabled() -> bool:
+    return os.environ.get(_FUSED_SWIGLU_ENV, "1").strip().lower() not in ("0", "false", "off", "no")
 
 
 @functools.cache
@@ -185,6 +203,148 @@ def _all_gather_cat(tensor: torch.Tensor, ep: int, group) -> torch.Tensor:
     dist.all_gather_into_tensor(out, tensor, group=group)
     return out
 
+
+
+# ---------------------------------------------------------------------------
+# Fused clamp + SiLU + multiply + per-token-group FP8 quant, FP32 scale.
+#
+# The unfused sequence this replaces is, per MoE layer:
+#   gate.clamp(max=L), up.clamp(-L, L), silu(gate.float()), * up.float(),
+#   .to(bf16), .contiguous(), then sgl_per_token_group_quant_fp8
+# -- around eight kernels and several fp32 temporaries of E*t_rows*inter
+# elements each. The capture-mode profile charged that chain ~8 ms of the
+# 53 ms step (2 clamps at 42.8 us/layer, silu 33 us, mul 25 us, plus copies),
+# all of it moving 8-33 MB per buffer per layer to produce one bf16 result.
+#
+# ``moe/_silu_mul_fp8_quant_triton.py`` already fuses exactly this, with the
+# same fp32-internal arithmetic and the same "round through bf16 before
+# quantising" step -- but it emits a *packed UE8M0* scale, because that is what
+# the SM100 FP4 path consumes. UE8M0 rounds the scale up to a power of two,
+# which changes the quantised values, so it cannot be reused as-is on SM90
+# where DeepGEMM takes FP32 scales. This is that kernel with the exponent
+# rounding and the int32 packing removed, and eps matched to the
+# ``sgl_per_token_group_quant_fp8(eps=1e-4)`` call it stands in for:
+# ``scale = max(absmax, eps) / fp8_max``.
+@triton.jit(do_not_specialize=["M"])
+def _silu_mul_fp8_quant_fp32scale_kernel(
+    input_ptr,          # [M, 2*inter] bf16, gate in [:inter], up in [inter:]
+    output_q_ptr,       # [M, inter] fp8 e4m3fn
+    output_scale_ptr,   # [M, inter/GROUP_SIZE] fp32, stride (1, M): M-major
+    M,
+    input_stride_e,     # gate_up.stride(0): the gap between groups
+    input_stride_m,     # gate_up.stride(1)
+    ROWS_PER_E: tl.constexpr,
+    output_q_stride_m,
+    output_scale_stride_k,
+    clamp_limit,
+    N: tl.constexpr,            # 2 * inter
+    NUM_GROUPS: tl.constexpr,   # inter // GROUP_SIZE
+    eps: tl.constexpr,
+    fp8_min: tl.constexpr,
+    fp8_max: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    HAS_CLAMP: tl.constexpr,
+):
+    N_2: tl.constexpr = N // 2
+
+    pid_g = tl.program_id(0).to(tl.int64)   # which 128-wide quant group
+    pid_m = tl.program_id(1).to(tl.int64)   # which BLOCK_M row tile
+    m_offset = pid_m * BLOCK_M
+    if m_offset >= M:
+        return
+
+    offs_m = tl.arange(0, BLOCK_M).to(tl.int64)
+    offs_n = tl.arange(0, GROUP_SIZE)
+    row_mask = (m_offset + offs_m) < M
+
+    n_offset = pid_g * GROUP_SIZE
+    # Flat row -> (group, row-within-group). The caller hands us a [E, ROWS_PER_E, 2*inter]
+    # slice of a taller buffer, so the two dims cannot be merged into one stride and a
+    # reshape would copy the whole thing -- which is the copy this kernel exists to avoid.
+    rows = m_offset + offs_m
+    row_e = rows // ROWS_PER_E
+    row_j = rows % ROWS_PER_E
+    row_base = row_e * input_stride_e + row_j * input_stride_m
+    act_ptrs = input_ptr + row_base[:, None] + n_offset + offs_n[None, :]
+    act_in = tl.load(act_ptrs, mask=row_mask[:, None], other=0.0)
+    mul_in = tl.load(act_ptrs + N_2, mask=row_mask[:, None], other=0.0)
+
+    act_f32 = act_in.to(tl.float32)
+    mul_f32 = mul_in.to(tl.float32)
+    # V4 SwiGLU clamp convention: gate upper-only, up symmetric. Clamping in fp32
+    # after the widening is identical to the eager path's clamp in bf16 -- min/max
+    # select an operand, and both operands are exactly representable in both types.
+    if HAS_CLAMP:
+        act_f32 = tl.minimum(act_f32, clamp_limit)
+        mul_f32 = tl.clamp(mul_f32, -clamp_limit, clamp_limit)
+
+    # x * sigmoid(x), not x / (1 + exp(-x)): torch's silu does the reciprocal first and
+    # the two differ in the last bit, which occasionally survives the bf16 rounding below
+    # and shows up as a 1-ULP difference in the quantised fp8 activation.
+    y = (act_f32 * (1.0 / (1.0 + tl.exp(-act_f32)))) * mul_f32
+    # Round through bf16 exactly where the eager path does: it materialises
+    # hidden as bf16 and the quant reads that, not the fp32 product.
+    y = y.to(tl.bfloat16).to(tl.float32)
+
+    absmax = tl.max(tl.abs(y), axis=1)
+    scale = tl.maximum(absmax, eps) / fp8_max
+    y_q = tl.clamp(y / scale[:, None], fp8_min, fp8_max)
+
+    out_q_ptrs = (
+        output_q_ptr + (m_offset + offs_m[:, None]) * output_q_stride_m
+        + n_offset + offs_n[None, :]
+    )
+    tl.store(out_q_ptrs, y_q.to(output_q_ptr.dtype.element_ty), mask=row_mask[:, None])
+
+    scale_ptrs = output_scale_ptr + pid_g * output_scale_stride_k + m_offset + offs_m
+    tl.store(scale_ptrs, scale, mask=row_mask)
+
+
+def _silu_mul_quant_fp32scale(
+    gate_up3: torch.Tensor, inter: int, clamp_limit: float
+):
+    """``[E, T, 2*inter]`` bf16 -> (``[E*T, inter]`` fp8, ``[E*T, inter/128]`` fp32 M-major).
+
+    Takes the 3D view rather than a flattened one on purpose: the caller passes
+    ``gate_up[:, :t_rows]``, whose first two dims are not mergeable, so flattening it
+    would copy every element.
+
+    The scale is allocated transposed so its M stride is 1, which is the
+    column-major/TMA-aligned layout DeepGEMM wants for the LHS and the same one
+    ``sgl_per_token_group_quant_fp8(column_major_scales=True)`` produces.
+    """
+    E, T = gate_up3.shape[0], gate_up3.shape[1]
+    M = E * T
+    assert gate_up3.shape[2] == 2 * inter, (tuple(gate_up3.shape), inter)
+    num_groups = inter // FP8_BLOCK
+    q = torch.empty((M, inter), dtype=torch.float8_e4m3fn, device=gate_up3.device)
+    scale = torch.empty(
+        (num_groups, M), dtype=torch.float32, device=gate_up3.device
+    ).transpose(0, 1)
+    block_m = 64
+    grid = (num_groups, triton.cdiv(M, block_m))
+    _silu_mul_fp8_quant_fp32scale_kernel[grid](
+        gate_up3,
+        q,
+        scale,
+        M,
+        gate_up3.stride(0),
+        gate_up3.stride(1),
+        T,
+        q.stride(0),
+        scale.stride(1),
+        float(clamp_limit),
+        N=2 * inter,
+        NUM_GROUPS=num_groups,
+        eps=1e-4,
+        fp8_min=-448.0,
+        fp8_max=448.0,
+        GROUP_SIZE=FP8_BLOCK,
+        BLOCK_M=block_m,
+        HAS_CLAMP=clamp_limit > 0,
+    )
+    return q, scale
 
 @register_strategy
 class GroupedFP8Strategy(RoutedExpertsStrategy):
@@ -631,29 +791,36 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         )
         del scatter_out, scatter_out_scale
 
-        # Identical arithmetic to the contiguous path, on the live prefix. The slice is a
-        # strided view, so the clamps and silu read 2x less; the single copy that does
-        # happen (the .to(bfloat16) result) is already only t_rows tall.
-        gu = gate_up[:, :t_rows]
-        gate, up = gu[..., :inter], gu[..., inter:]
-        limit = cfg.swiglu_limit
-        if limit > 0:
-            gate = gate.clamp(max=limit)
-            up = up.clamp(min=-limit, max=limit)
-        hidden = (F.silu(gate.float()) * up.float()).to(torch.bfloat16).reshape(
-            E * t_rows, inter
-        )
-        del gate_up, gu, gate, up
-
-        h_fp8, h_scale = sgl_per_token_group_quant_fp8(
-            hidden.contiguous(),
-            group_size=FP8_BLOCK,
-            eps=1e-4,
-            column_major_scales=True,
-            scale_tma_aligned=True,
-            scale_ue8m0=False,
-        )
-        del hidden
+        # clamp + silu + mul + quant in one kernel over the live prefix. The eager
+        # equivalent is eight kernels and several fp32 temporaries; see
+        # _silu_mul_quant_fp32scale. gate_up[:, :t_rows] is a strided view (contiguous
+        # within each group's block, with a gap between groups), which the kernel reads
+        # through input_stride_m, so no gathering copy is needed either.
+        if _fused_swiglu_enabled():
+            h_fp8, h_scale = _silu_mul_quant_fp32scale(
+                gate_up[:, :t_rows], inter, cfg.swiglu_limit
+            )
+        else:
+            gu = gate_up[:, :t_rows]
+            gate, up = gu[..., :inter], gu[..., inter:]
+            limit = cfg.swiglu_limit
+            if limit > 0:
+                gate = gate.clamp(max=limit)
+                up = up.clamp(min=-limit, max=limit)
+            hidden = (F.silu(gate.float()) * up.float()).to(torch.bfloat16).reshape(
+                E * t_rows, inter
+            )
+            del gu, gate, up
+            h_fp8, h_scale = sgl_per_token_group_quant_fp8(
+                hidden.contiguous(),
+                group_size=FP8_BLOCK,
+                eps=1e-4,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                scale_ue8m0=False,
+            )
+            del hidden
+        del gate_up
 
         down_out = torch.zeros(E, t_rows, D, device=device, dtype=torch.bfloat16)
         m_grouped_fp8_gemm_nt_masked(
