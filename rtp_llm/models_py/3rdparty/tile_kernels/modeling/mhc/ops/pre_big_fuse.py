@@ -41,17 +41,41 @@ def _compute_num_split(block_k: int, k: int, grid_size: int) -> int:
     return max(split_k, 1)
 
 
+@functools.cache
+def _has_deepgemm_prenorm() -> bool:
+    """Whether DeepGEMM in this build exports the split-K mHC pre GEMM.
+
+    ``tf32_hc_prenorm_gemm`` is optional in DeepGEMM: the wrapper leaves the impl
+    None rather than raising when it is absent, which is exactly the case that has
+    to be detected before selecting the backend that needs it.
+    """
+    try:
+        from rtp_llm.models_py.kernels.cuda import deepgemm_wrapper
+
+        return getattr(deepgemm_wrapper, "_tf32_hc_prenorm_gemm_impl", None) is not None or hasattr(
+            __import__("deep_gemm"), "tf32_hc_prenorm_gemm"
+        )
+    except Exception:
+        return False
+
+
 def _requested_backend() -> str:
     requested = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
     if requested in ("", "auto"):
-        # Experiment branch: enable DeepGEMM by default to validate DSV4
-        # greedy/golden semantics under the full SM100 smoke suite. This is
-        # intentionally hard: DeepGEMM/JIT failures must surface directly.
-        return "deepgemm"
+        # DeepGEMM's split-K kernel when the build has it -- it is the fastest of
+        # the three and the SM100 smoke suite validates DSV4 greedy/golden
+        # semantics against it. When the build does NOT export
+        # tf32_hc_prenorm_gemm, "auto" used to resolve to it anyway and every call
+        # raised, which is why deployments pinned tilelang_single by hand. Fall
+        # back to tilelang_splitk instead: same math as tilelang_single, same
+        # number of kernels, but the K loop is spread over the grid rather than
+        # walked by one CUDA block, which is worth ~20% of decode TPOT.
+        return "deepgemm" if _has_deepgemm_prenorm() else "tilelang_splitk"
     aliases = {
         "dg": "deepgemm",
         "tilelang": "tilelang_single",
         "single": "tilelang_single",
+        "splitk": "tilelang_splitk",
     }
     return aliases.get(requested, requested)
 

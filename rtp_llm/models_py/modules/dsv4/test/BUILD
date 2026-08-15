@@ -159,6 +159,30 @@ py_test(
 )
 
 py_test(
+    name = "mhc_prenorm_splitk_test",
+    srcs = ["mhc_prenorm_splitk_test.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    # Needs a CUDA GPU and the vendored tilelang; skips otherwise.
+    tags = ["manual", "H20"],
+)
+
+py_test(
+    name = "grouped_fp8_masked_equivalence_test",
+    srcs = ["grouped_fp8_masked_equivalence_test.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    # Needs a Hopper GPU and a DeepGEMM carrying the SM90 FP8 grouped kernels; the
+    # module skips rather than fails when either is absent, but marking it manual
+    # keeps it out of the default CPU run.
+    tags = ["manual", "H20"],
+)
+
+py_test(
     name = "test_strategy_select",
     srcs = ["test_strategy_select.py"],
     deps = [

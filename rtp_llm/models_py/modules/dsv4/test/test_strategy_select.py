@@ -7,6 +7,7 @@ contract. Pure-Python, no CUDA / DeepGEMM / dist required — runs on host.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import sys
 import types
@@ -366,6 +367,100 @@ class StrategySelectTest(unittest.TestCase):
                 select_strategy(_cfg(ep_size=1), forced="mega", strict=False),
                 LocalLoopStrategy,
             )
+
+
+class GroupedFP8CaptureGuardTest(unittest.TestCase):
+    """``_assert_one_captured_size``: turn a replay-time NCCL hang into a startup error.
+
+    The hazard is that ``CudaGraphRunner`` selects a graph per rank from that rank's
+    own batch size while this strategy's EP collectives sit inside the graph, so two
+    ranks on different graphs hang. Neither condition is observable from inside the
+    strategy at replay time, but both are observable at capture time: more than one
+    captured size, or a captured size the scheduler can exceed.
+    """
+
+    CAPTURING = (
+        "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp8."
+        "torch.cuda.is_current_stream_capturing"
+    )
+
+    def _strategy(self, ep_size: int, max_tokens_per_rank: int) -> GroupedFP8Strategy:
+        # MoeCfg is immutable, so the bound is set by rebuilding it.
+        cfg = dataclasses.replace(
+            _cfg(ep_size=ep_size), max_tokens_per_rank=max_tokens_per_rank
+        )
+        strat = GroupedFP8Strategy(cfg)
+        strat._captured_ns = set()
+        return strat
+
+    def test_single_size_at_the_scheduler_bound_is_accepted(self):
+        strat = self._strategy(ep_size=4, max_tokens_per_rank=8)
+        with mock.patch(self.CAPTURING, return_value=True):
+            strat._assert_one_captured_size(8)
+            strat._assert_one_captured_size(8)  # same size again is fine
+
+    def test_second_captured_size_raises(self):
+        strat = self._strategy(ep_size=4, max_tokens_per_rank=8)
+        with mock.patch(self.CAPTURING, return_value=True):
+            strat._assert_one_captured_size(8)
+            with self.assertRaises(RuntimeError) as cm:
+                strat._assert_one_captured_size(16)
+        self.assertIn("more than one batch size", str(cm.exception))
+        self.assertIn("concurrency_limit", str(cm.exception))
+
+    def test_captured_size_below_scheduler_bound_raises(self):
+        # A rank whose batch exceeds the graph falls back to eager while the others
+        # replay -- the same divergence, reached the other way.
+        strat = self._strategy(ep_size=4, max_tokens_per_rank=64)
+        with mock.patch(self.CAPTURING, return_value=True):
+            with self.assertRaises(RuntimeError) as cm:
+                strat._assert_one_captured_size(8)
+        self.assertIn("may hand it up to", str(cm.exception))
+
+    def test_ep1_and_non_capturing_are_exempt(self):
+        # ep_size == 1 has no EP collectives in the graph, and outside capture the
+        # runner is not selecting graphs at all.
+        strat = self._strategy(ep_size=1, max_tokens_per_rank=8)
+        with mock.patch(self.CAPTURING, return_value=True):
+            strat._assert_one_captured_size(8)
+            strat._assert_one_captured_size(999)
+        strat = self._strategy(ep_size=4, max_tokens_per_rank=8)
+        with mock.patch(self.CAPTURING, return_value=False):
+            strat._assert_one_captured_size(8)
+            strat._assert_one_captured_size(999)
+
+
+class GroupedFP8LowLatencyGateTest(unittest.TestCase):
+    """The low-latency buffer must only be built where the role can reach it.
+
+    ``_ll_max_tokens`` rounds the requested tokens-per-rank up to the alignment the
+    masked GEMM needs at this ``ep``: the 64-row floor is on ``M_MAX * ep``, not on
+    ``M_MAX``, so the unit is ``64 // gcd(64, ep)``.
+    """
+
+    def test_ll_max_tokens_alignment_unit_follows_ep(self):
+        from rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp8 import (
+            _ll_max_tokens,
+        )
+
+        with _env(DSV4_MOE_LL_MAX_TOKENS="8"):
+            self.assertEqual(_ll_max_tokens(4), 16)   # 64 // gcd(64, 4) = 16
+            self.assertEqual(_ll_max_tokens(8), 8)    # 64 // gcd(64, 8) = 8
+            self.assertEqual(_ll_max_tokens(1), 64)   # single rank: the full floor
+        with _env(DSV4_MOE_LL_MAX_TOKENS="0"):
+            self.assertEqual(_ll_max_tokens(4), 16)   # empty/0 still clears the floor
+
+    def test_gate_predicate_separates_the_roles(self):
+        # resolve_moe_max_tokens_per_rank gives a decode role
+        # max_generate_batch_size * tokens_per_batch, and any other role a >= 4096
+        # budget, so the predicate below is exactly "is this a decode role".
+        from rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp8 import (
+            _ll_max_tokens,
+        )
+
+        with _env(DSV4_MOE_LL_MAX_TOKENS="8"):
+            self.assertLessEqual(8, _ll_max_tokens(4))       # decode, conc 8
+            self.assertGreater(8192, _ll_max_tokens(4))      # prefill budget
 
 
 if __name__ == "__main__":
