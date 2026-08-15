@@ -297,6 +297,7 @@ class MegaCSAWeightsTest(unittest.TestCase):
 class _FakeSource:
     is_cuda = True
     device = torch.device("cuda:0")
+    dtype = torch.int64
 
     def __init__(self, pointer: int) -> None:
         self.pointer = pointer
@@ -314,14 +315,6 @@ class _FakeSource:
 
     def __getitem__(self, _key):
         return self
-
-
-class _FakeDestination:
-    def __init__(self) -> None:
-        self.copy_count = 0
-
-    def copy_(self, _source) -> None:
-        self.copy_count += 1
 
 
 class MegaCSARuntimeTest(unittest.TestCase):
@@ -349,56 +342,54 @@ class MegaCSARuntimeTest(unittest.TestCase):
             },
         )
 
-    def test_slot_conversion_requires_model_step_boundary(self) -> None:
+    def test_slot_access_requires_model_step_boundary(self) -> None:
         runtime = MegaCSARuntime()
         metadata = self._metadata(100)
         with self.assertRaisesRegex(RuntimeError, "begin_decode"):
-            runtime.prepare_slot_mappings(metadata, 2)
+            runtime.slot_mappings(metadata, 2)
 
-    def test_eager_slots_convert_once_per_model_step(self) -> None:
+    def test_slots_reuse_framework_tensors_without_allocation(self) -> None:
         runtime = MegaCSARuntime()
         metadata = self._metadata(100)
-        created: list[_FakeDestination] = []
-
-        def fake_empty(*_args, **_kwargs):
-            destination = _FakeDestination()
-            created.append(destination)
-            return destination
-
-        with patch("torch.empty", side_effect=fake_empty):
+        with patch("torch.empty", side_effect=AssertionError("unexpected allocation")):
             runtime.begin_decode(metadata)
-            first = runtime.prepare_slot_mappings(metadata, 2)
-            second = runtime.prepare_slot_mappings(metadata, 2)
-            self.assertIs(first, second)
-            self.assertEqual(sum(item.copy_count for item in created), 5)
+            slots = runtime.slot_mappings(metadata, 2)
 
-            runtime.begin_decode(metadata)
-            runtime.prepare_slot_mappings(metadata, 2)
-            self.assertEqual(sum(item.copy_count for item in created), 10)
-            self.assertEqual(len(created), 5)
+        sources = (
+            *metadata.compressor_state_slot_mappings.values(),
+            *metadata.pool_write_slot_mappings.values(),
+        )
+        actual = (
+            slots.main_state_rows,
+            slots.indexer_state_rows,
+            slots.main_destinations,
+            slots.indexer_destinations,
+            slots.swa_destinations,
+        )
+        for source, result in zip(sources, actual):
+            self.assertIs(source, result)
 
-    def test_graph_slot_buffers_remain_owned_per_metadata(self) -> None:
+    def test_slots_follow_active_metadata(self) -> None:
         runtime = MegaCSARuntime()
         first_meta = self._metadata(100, is_cuda_graph=True)
         second_meta = self._metadata(200, is_cuda_graph=True)
-        created: list[_FakeDestination] = []
+        runtime.begin_decode(first_meta)
+        first = runtime.slot_mappings(first_meta, 2)
+        runtime.begin_decode(second_meta)
+        second = runtime.slot_mappings(second_meta, 2)
 
-        def fake_empty(*_args, **_kwargs):
-            destination = _FakeDestination()
-            created.append(destination)
-            return destination
+        self.assertEqual(first.main_state_rows.data_ptr(), 100)
+        self.assertEqual(second.main_state_rows.data_ptr(), 200)
 
-        with patch("torch.empty", side_effect=fake_empty):
-            runtime.begin_decode(first_meta)
-            first = runtime.prepare_slot_mappings(first_meta, 2)
-            runtime.begin_decode(second_meta)
-            runtime.prepare_slot_mappings(second_meta, 2)
-            runtime.begin_decode(first_meta)
-            first_again = runtime.prepare_slot_mappings(first_meta, 2)
-
-        self.assertIs(first, first_again)
-        self.assertEqual(len(created), 10)
-        self.assertEqual(len(runtime._graph_slot_caches), 2)
+    def test_slots_reject_non_framework_dtype(self) -> None:
+        runtime = MegaCSARuntime()
+        metadata = self._metadata(100)
+        metadata.pool_write_slot_mappings[
+            next(iter(metadata.pool_write_slot_mappings))
+        ].dtype = torch.int32
+        runtime.begin_decode(metadata)
+        with self.assertRaisesRegex(TypeError, "must be int64"):
+            runtime.slot_mappings(metadata, 2)
 
 
 if __name__ == "__main__":
