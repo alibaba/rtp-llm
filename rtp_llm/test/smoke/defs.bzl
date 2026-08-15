@@ -1,4 +1,5 @@
 
+load("@rules_python//python:defs.bzl", "py_test")
 def extract_data(envs):
     data = []
     prefix = 'internal_source/rtp_llm/test/smoke/'
@@ -103,6 +104,10 @@ SMOKE_FRAMEWORK_DEPS = [
     "//rtp_llm:partial_json_parser",
     "//rtp_llm:openai",
     "//rtp_llm/test/utils:device_resource",
+    # case_runner -> dash_grpc_comparer -> rtp_llm.dash_sc.{client,codec,proto};
+    # the server stack is already in the closure via //rtp_llm:testlib, so this
+    # only adds dash_sc itself and its proto.
+    "//rtp_llm/dash_sc:dash_sc_grpc_server",
 ]
 
 SMOKE_CASE_TAGS = ["smoke_case", "manual"]
@@ -199,7 +204,7 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
         extra_deps = []
         data = data + ["//rtp_llm/test/smoke:smoke_framework_srcs"]
 
-    native.py_test(
+    py_test(
         name = name,
         main = entry_main,
         srcs = all_srcs,

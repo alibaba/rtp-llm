@@ -38,17 +38,17 @@ checkout_code() {
     fi
     cd RTP-LLM;
     (git fetch origin && git reset --hard $GIT_CHECKOUT_REF) || exit 1;
-    echo "开始更新子模块..."
+    echo "Updating submodules..."
     (git submodule sync --recursive) || exit 1;
     (git submodule update --init --recursive --remote) || exit 1;
     cd github-opensource;
     (git fetch origin && git reset --hard $OPEN_SOURCE_REF) || exit 1;
-    echo "更新子模块成功"
-    echo "当前commit id: $OPEN_SOURCE_REF"
-    echo "开始下载大文件..."
+    echo "Submodules updated successfully"
+    echo "Current commit id: $OPEN_SOURCE_REF"
+    echo "Downloading large files..."
     (sh .githooks/post-checkout) || exit 1;
-    echo "成功下载大文件..."
-    echo "子模块更新完成"
+    echo "Large files downloaded successfully"
+    echo "Submodule update finished"
   else
     if [ -d "RTP-LLM" ] && [ -d "RTP-LLM/internal_source" ]; then
       rm -rf RTP-LLM;
@@ -63,14 +63,31 @@ checkout_code() {
     fi
     cd github-opensource;
     (git fetch origin && git reset --hard $OPEN_SOURCE_REF) || exit 1;
-    echo "当前commit id: $OPEN_SOURCE_REF"
-    echo "开始下载大文件..."
+    echo "Current commit id: $OPEN_SOURCE_REF"
+    echo "Downloading large files..."
     (sh .githooks/post-checkout) || exit 1;
-    echo "成功下载大文件..."
+    echo "Large files downloaded successfully"
   fi
   if [ "$CLEAR_BAZEL_CACHE" = true ]; then
     (rm -rf $WORK_DIR/bazel_cache) || true;
-    (bazelisk clean --expunge) || true;
+    RTPCLI="${RTPCLI:-./scripts/rtpcli}"
+    bazel_profile_args
+    ("${RTPCLI}" bazel clean "${BAZEL_PROFILE_ARGS[@]}" --expunge --batch --stream) || true;
+  fi
+}
+
+bazel_profile_args() {
+  BAZEL_PROFILE_ARGS=()
+  if [ -n "${BAZEL_PROFILE:-}" ]; then
+    BAZEL_PROFILE_ARGS=(--profile "${BAZEL_PROFILE}")
+  elif [[ "${BAZEL_BUILD_ARGS:-}" == *"--config=rocm"* ]]; then
+    BAZEL_PROFILE_ARGS=(--profile rocm)
+  elif [[ "${BAZEL_BUILD_ARGS:-}" == *"--config=cuda12_9_arm"* ]]; then
+    BAZEL_PROFILE_ARGS=(--profile cuda12_9_arm)
+  elif [ "$(uname -m)" = "aarch64" ]; then
+    BAZEL_PROFILE_ARGS=(--profile cuda12_9_arm)
+  else
+    BAZEL_PROFILE_ARGS=(--profile cuda12_9)
   fi
 }
 
@@ -78,20 +95,28 @@ install_requirements() {
   if [ "${BUILD_FROM_SCRATCH:-2}" -gt 1 ]; then
     # Pip install requirements
     if [ `uname -m` == "aarch64" ]; then
-      (/opt/conda310/bin/python3 -m pip install -r ./internal_source/deps/requirements_lock_cuda12_arm.txt) || exit 1;
+      (/opt/conda310/bin/python3 -m pip install -r ./deps/requirements_lock_cuda12_arm.txt) || exit 1;
     else
-      (/opt/conda310/bin/python3 -m pip install -r ./internal_source/deps/requirements_lock_torch_gpu_cuda12.txt) || exit 1;
+      (/opt/conda310/bin/python3 -m pip install -r ./deps/requirements_lock_torch_gpu_cuda12.txt) || exit 1;
     fi
   fi
 }
 
 build_code() {
   if [ "${BUILD_FROM_SCRATCH:-2}" -gt 0 ]; then
-    # Kill bazel build processes
-    (ps axuww | grep 'bazelisk --batch --output_user_root' | grep -v grep | awk '{print $2}' | xargs kill -9) || true;
-    # Build with all arguments
+    # Build through the public checkout's unified runner. It supplies the
+    # profile cache and precheck, while this script retains its target layout.
+    RTPCLI="${RTPCLI:-./scripts/rtpcli}"
+    if [ ! -x "${RTPCLI}" ]; then
+      echo "missing executable rtpcli: ${RTPCLI}" >&2
+      exit 1
+    fi
+    bazel_profile_args
     BAZEL_TARGETS=${BAZEL_TARGETS:-"//:th_transformer //rtp_llm:rtp_llm_lib"}
-    (bazelisk --batch --output_user_root=$WORK_DIR/bazel_cache build ${BAZEL_TARGETS} ${BAZEL_BUILD_ARGS}) || exit 1;
+    read -r -a BAZEL_TARGET_ARGS <<< "${BAZEL_TARGETS}"
+    read -r -a BAZEL_BUILD_ARG_LIST <<< "${BAZEL_BUILD_ARGS:-}"
+    ("${RTPCLI}" bazel build "${BAZEL_PROFILE_ARGS[@]}" --batch --stream \
+      "${BAZEL_TARGET_ARGS[@]}" "${BAZEL_BUILD_ARG_LIST[@]}") || exit 1;
     # Create symbolic links for proto files
     bazel_subdir=k8-opt
     if [ -d "bazel-out/aarch64-opt" ]; then

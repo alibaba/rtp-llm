@@ -1,5 +1,6 @@
 load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
 load("@arch_config//:arch_select.bzl", "torch_deps")
+load("@rules_cc//cc:defs.bzl", "cc_library")
 
 preloaded_deps = [
     ":flashinfer_hdrs",
@@ -15,7 +16,7 @@ preloaded_deps = [
 
 
 def sub_lib(name, deps, copts):
-    native.cc_library(
+    cc_library(
         name = name + '_cu',
         srcs = native.glob([
             "csrc/*.h",

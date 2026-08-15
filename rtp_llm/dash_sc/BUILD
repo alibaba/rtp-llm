@@ -4,7 +4,6 @@ load("//bazel:arch_select.bzl", "requirement")
 requirement([
     "grpcio",
     "jsonschema",
-    "xgrammar",
 ])
 
 # Scripts and data to be packaged with the wheel (dash_sc gRPC client).
@@ -50,7 +49,6 @@ py_library(
         "//rtp_llm/server:server",
         ":grpcio",
         ":jsonschema",
-        ":xgrammar",
         "//rtp_llm/access_logger:access_logger",
         "//rtp_llm:config",
         "//rtp_llm/dash_sc/proto:predict_v2_py_proto",
@@ -59,6 +57,11 @@ py_library(
         "//rtp_llm:orjson",
         "//rtp_llm:sentencepiece",
         "//rtp_llm:tiktoken",
+    ] + select({
+        # xgrammar is cuda12_9 only (platform-only py_library in //rtp_llm:BUILD)
+        "@//:using_cuda12_9_x86": ["//rtp_llm:xgrammar"],
+        "//conditions:default": [],
+    }) + [
         "//rtp_llm:utils",
     ],
 )

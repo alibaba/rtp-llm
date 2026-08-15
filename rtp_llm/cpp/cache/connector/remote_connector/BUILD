@@ -1,4 +1,5 @@
 load("//:def.bzl", "copts")
+load("@arch_config//:arch_select.bzl", "vipserver_deps")
 
 config_setting(
     name = "RECO_INTERNAL",
@@ -82,9 +83,7 @@ cc_library(
         "@havenask//aios/autil:env_util",
         "@havenask//aios/autil:lock_free",
     ] + select({
-        ":RECO_INTERNAL": [
-            "@vipserver",
-        ],
+        ":RECO_INTERNAL": vipserver_deps(),
         "//conditions:default": [],
     }),
 )

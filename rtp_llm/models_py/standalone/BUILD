@@ -18,14 +18,18 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+# ninja = the executable invoked by flashinfer's JIT backend (see the note on the
+# variable of the same name in //rtp_llm:BUILD)
 flashinfer = [
     "//rtp_llm:flashinfer-python",
+    "//rtp_llm:ninja",
 ]
 
 flashinfer_with_cache = [
     "//rtp_llm:flashinfer-cubin",
     "//rtp_llm:flashinfer-jit-cache",
     "//rtp_llm:nvidia-cutlass-dsl",
+    "//rtp_llm:ninja",
 ]
 
 flashmla = [
@@ -73,7 +77,19 @@ py_library(
             "//rtp_llm:amdsmi",
             "//rtp_llm:triton",
         ],
-        "@//:using_cuda13_arm": [
+        # deep-gemm: x86 uses 2.2.0/2.1.1, cuda12_9_arm uses the 2.1.1+local aarch64
+        # wheel. That version once shipped as both linux_aarch64 and
+        # manylinux_2_28_aarch64 (same build re-tagged and repacked; the 838 entries
+        # differ only in RECORD/WHEEL); on arm both matched, making the alias fail
+        # with "Illegal ambiguous match". The non-canonical-tag copy is now in
+        # pip_repo's QUARANTINED_KEYS and off the index page.
+        "@//:using_cuda12_9_x86": [
+            "//rtp_llm:deep_gemm",
+        ],
+        "@//:cuda_pre_12_9": [
+            "//rtp_llm:deep_gemm",
+        ],
+        "@//:using_cuda12_arm": [
             "//rtp_llm:deep_gemm",
         ],
         "@//:using_cuda12": [
@@ -84,10 +100,20 @@ py_library(
         ],
         "//conditions:default": [],
     }) + select({
+        # cuda13 has no pip supply in this tree, so these branches only keep the failure
+        # explicit (the //rtp_llm shims route cuda13 to the absence stub); without them
+        # cuda13_arm would take the using_cuda12_arm wheels below.
         "@//:using_cuda13_x86": ["//rtp_llm:flash-mla"],
         "@//:using_cuda13_arm": ["//rtp_llm:flash-mla"],
+        # The cuda12_9_arm lock contains flashinfer-python 0.6.9 + rtp-kernel aarch64
+        # wheels; jit-cache/cutlass-dsl truly only have x86_64 wheels (absent), and
+        # the flash-attn family is carried by the main package, not referenced by
+        # standalone. cubin must be included: it is py3-none-any, the same artifact
+        # as on x86, and it supplies the fmha_gen JIT's flashInferMetaInfo.h; without
+        # it compilation is guaranteed to fail in CI (no internet) -- same criteria
+        # as the arm branch in //rtp_llm:BUILD.
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
-        "@//:using_cuda12_arm": flashinfer_with_cache,
+        "@//:using_cuda12_arm": flashinfer + ["//rtp_llm:flashinfer-cubin"],
         "@//:cuda_pre_12_9": flashinfer,
         "//conditions:default": []
     }) + select({
@@ -101,7 +127,6 @@ py_library(
         "@//:using_cuda13_x86": [],
         "@//:using_cuda13_arm": [],
         "@//:using_cuda12_9_x86": flashattn,
-        "@//:using_cuda12_arm": flashattn,
         "@//:cuda_pre_12_9": [],
         "//conditions:default": []
     }) + internal_deps(),

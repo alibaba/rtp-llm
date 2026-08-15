@@ -1,3 +1,4 @@
+load("@rules_cc//cc:defs.bzl", "cc_import", "cc_library")
 def copy_so(target):
     name = 'lib' + target.split(':')[1] + '_so'
     so_name = 'lib' + target.split(':')[1] + '.so'
@@ -41,72 +42,6 @@ def copy_target_to(name, to_copy, copy_name, dests = [], **kwargs):
         outs = outs,
         cmd = cmd,
         **kwargs
-    )
-
-def _upload_pkg_impl(ctx):
-    ctx.actions.expand_template(
-        template = ctx.file._deploy_script,
-        substitutions = {
-            "{oss_prefix}" : ctx.attr.oss_prefix,
-            "{pkg_prefix}" : ctx.attr.pkg_prefix,
-        },
-        output = ctx.outputs.executable,
-        is_executable = True
-    )
-    return DefaultInfo(
-        executable = ctx.outputs.executable,
-        runfiles = ctx.runfiles(
-            files = [ctx.file.target],
-            symlinks = {"pkg.tar": ctx.file.target}))
-
-_upload_pkg = rule(
-    attrs = {
-        "target": attr.label(
-            allow_single_file = True,
-        ),
-        "oss_prefix": attr.string(
-            mandatory = True,
-            doc = "upload to, ex. rtp_pkg",
-        ),
-        "pkg_prefix": attr.string(
-            mandatory = True,
-            doc = "ex. rtp_",
-        ),
-        "_deploy_script": attr.label(
-            allow_single_file = True,
-            default = "//bazel:upload_package.py",
-        ),
-    },
-    implementation = _upload_pkg_impl,
-    executable = True,
-)
-
-def upload_pkg(name, **kwargs):
-    key = "tags"
-    tags = kwargs.get(key) or []
-    tags.extend(["manual"])
-    kwargs.setdefault(key, tags)
-
-    _upload_pkg( name = name, **kwargs)
-
-def upload_wheel(name, src, dir, wheel_prefix):
-    oss_path = "oss://search-ad/%s/%s" % (dir, wheel_prefix) + "_$$(date '+%Y-%m-%d_%H_%M_%S')"
-    native.genrule(
-        name = name,
-        srcs = [src],
-        outs = ["tmp_wheel.whl"],
-        cmd = "bash -c 'set -xe;" +
-            "mkdir tmp;" +
-            "cp $(locations %s) tmp; " % (src) +
-            "osscmd put $(locations %s) %s/$$(basename $(locations %s));" % (src, oss_path, src) +
-            "mv tmp/$$(basename $(locations %s)) $(OUTS);" % (src) +
-            "rm tmp -rf;" +
-            "'",
-        tags = [
-            "local",
-            "manual",
-        ],
-        visibility = ["//visibility:public"],
     )
 
 def pyc_wheel(name, package_name, src):
@@ -247,7 +182,7 @@ def rpm_library(
         )
 
     if static_lib == None:
-        native.cc_library(
+        cc_library(
             name = name,
             hdrs = [hdrs_fg_target],
             srcs = shared_files,
@@ -260,14 +195,14 @@ def rpm_library(
     else:
         import_target = name + "_import"
         alwayslink = static_lib!=None
-        native.cc_import(
+        cc_import(
             name = import_target,
             static_library = static_lib,
             shared_library = shared_lib,
             alwayslink=alwayslink,
             visibility = ["//visibility:public"],
         )
-        native.cc_library(
+        cc_library(
             name = name,
             hdrs = [hdrs_fg_target],
             srcs = srcs,

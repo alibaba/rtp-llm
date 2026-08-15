@@ -79,3 +79,6 @@ docs/index/dist/
 
 # Local analysis reports
 *_analysis_report.md
+
+# Sphinx output snapshots (removed from tracking; never re-add)
+docs/build_*.tar

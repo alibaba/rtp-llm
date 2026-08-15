@@ -69,6 +69,7 @@ py_test(
     },
     tags = ["H20"],
     exec_properties = {"gpu": "H20"},
+    visibility = ["//visibility:public"],
 )
 
 py_test(
@@ -94,6 +95,7 @@ py_test(
     },
     tags = ["H20"],
     exec_properties = {"gpu": "H20"},
+    visibility = ["//visibility:public"],
 )
 
 py_test(
@@ -136,4 +138,5 @@ py_test(
     },
     tags = ["H20"],
     exec_properties = {"gpu": "H20"},
+    visibility = ["//visibility:public"],
 )

@@ -1,4 +1,5 @@
 load("//:def.bzl", "cuda_copts")
+load("@rules_cc//cc:defs.bzl", "cc_library")
 
 
 def build_lib(head_dim, page_size, group_size, xqa_name, xqa_kernel_name, input_type_id, kv_cache_type_id, output_type_id, spec_dec):
@@ -24,7 +25,7 @@ def build_lib(head_dim, page_size, group_size, xqa_name, xqa_kernel_name, input_
         addition_cuda_copts += [
             '-DSPEC_DEC=1'
         ]
-    native.cc_library(
+    cc_library(
         name = xqa_name,
         srcs = ["mha_sm90.cu"],
         hdrs = native.glob([

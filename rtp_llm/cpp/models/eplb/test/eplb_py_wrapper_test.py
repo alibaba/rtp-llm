@@ -1,6 +1,4 @@
-import os
 import random
-import sys
 import unittest
 from dataclasses import dataclass
 
@@ -106,7 +104,6 @@ class FakeExpertBalancer:
 class TestEplbPyWrapper(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
-        sys.path.append(os.environ["TEST_SRCDIR"] + "/rtp_llm/rtp_llm/cpp/eplb/test")
 
     def _single_test(self, config: TestMoeConfig):
         eplb_op = EplbPyWrapperOP()

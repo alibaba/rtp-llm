@@ -2,6 +2,7 @@ load("@hedron_compile_commands//:refresh_compile_commands.bzl", "refresh_compile
 load("//:def.bzl", "copts", "cuda_copts")
 load("@arch_config//:arch_select.bzl", "torch_deps", "flashinfer_deps", "select_py_bindings")
 load("@bazel_skylib//lib:selects.bzl", "selects")
+load("@rules_python//python:defs.bzl", "py_runtime_pair")
 flashinfer_deps()
 
 config_setting(
@@ -41,10 +42,12 @@ config_setting(
     values = {"define": "using_cuda12_arm=true"},
 )
 
-# using_cuda13_arm is a stricter subset of using_cuda12_arm (the config_setting
-# above still matches so existing selects that route ARM → pip_cuda12_arm_torch
-# keep working); additionally enables code paths that need to differentiate
-# CUDA 13 from CUDA 12 (e.g. the flashinfer_cpp_cu13 repo).
+# using_cuda13_arm is a stricter subset of using_cuda12_arm, so C++/toolchain
+# selects that only carry an ARM branch keep working on cuda13_arm. The pip supply
+# does not piggyback that way: requirement() gives cuda13_arm its own branch
+# pointing at the @arch_config absence stub, because this tree has no cuda13 pip
+# supply. This setting additionally enables the code paths that need to
+# differentiate CUDA 13 from CUDA 12.
 config_setting(
     name = "using_cuda13_arm",
     # Lists every define the cuda13_arm config sets so this setting is a strict
@@ -60,10 +63,10 @@ config_setting(
 )
 
 # x86_64 counterpart of using_cuda13_arm — same CUDA-13-vs-12 differentiation,
-# applied on x86 builds.  Enables the CUDA-13 variants of cutlass / flashinfer
-# on the x86 toolchain.
-#
-# define_values lists ALL flags this config requires, so Bazel can detect
+# applied on x86 builds.  The CUDA-13 variants of the C++ deps (cutlass /
+# flashinfer) are not declared in this tree, so the branches guarded by this
+# setting point at the @arch_config absence stubs instead of at a CUDA-12 build.
+# define_values lists ALL flags this config requires so Bazel can detect
 # specialization: a select() with both `using_cuda` and `using_cuda13_x86`
 # keys picks `using_cuda13_x86` for cuda13 builds (it's the strict superset).
 # Without listing using_cuda + using_cuda12 here, Bazel would report
@@ -75,11 +78,6 @@ config_setting(
         "using_cuda12": "true",
         "using_cuda13_x86": "true",
     },
-)
-
-config_setting(
-    name = "using_cuda12_x86",
-    values = {"define": "using_cuda12_x86=true"},
 )
 
 config_setting(
@@ -192,7 +190,7 @@ cc_binary(
     copts = copts(),
     linkopts = [
         "-Wl,-rpath='$$ORIGIN'",
-        # "-Wl,--exclude-libs,ALL",  # 添加这行，隐藏静态库符号
+        # "-Wl,--exclude-libs,ALL",  # add this line to hide static-library symbols
     ],
     linkshared = 1,
     visibility = ["//visibility:public"],
@@ -208,6 +206,24 @@ py_runtime(
     interpreter_path = "/opt/conda310/bin/python",
     python_version = "PY3",
     stub_shebang = "#!/opt/conda310/bin/python",
+    visibility = ["//visibility:public"],
+)
+
+# conda310 registered as the official python toolchain.
+# Under bzlmod, pip hubs and py_* rules go through toolchain resolution
+# (@bazel_tools//tools/python:toolchain_type); the old --python_top cannot feed it — on 7.7.1
+# analysis, a missing registration means "No matching toolchains". target and exec share the
+# same runtime (conda310 is this project's only interpreter; build tools and runtime share the same source).
+py_runtime_pair(
+    name = "python310_pair",
+    py2_runtime = None,
+    py3_runtime = ":python310",
+)
+
+toolchain(
+    name = "python310_toolchain",
+    toolchain = ":python310_pair",
+    toolchain_type = "@bazel_tools//tools/python:toolchain_type",
     visibility = ["//visibility:public"],
 )
 

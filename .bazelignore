@@ -1,2 +1,14 @@
 internal_source/rdma
+# Repo root of @com_google_protobuf (REPO.bazel, local_repository in MODULE.bazel). The main
+# repo has no //3rdparty/protobuf: labels; it is consumed only via @com_google_protobuf. But
+# REPO.bazel, unlike the old WORKSPACE, does not make wildcards skip that subtree, so
+# protobuf's bundled cc_test (needing @submodule_gmock — declared only by its original
+# WORKSPACE) would land in the `bazel test ...` ut target surface.
+3rdparty/protobuf
+# Repo roots of @rtp_extension / @arch_config (with REPO.bazel). internal_source is mounted
+# into the workspace as a symlink, so the main repo would discover them a second time; shadow
+# packages reference same-extension siblings by apparent name (@solar etc.), visible only
+# inside the extension's repos, and would necessarily fail to resolve in the main repo.
+internal_source/deps
+internal_source/bazel
 open_source

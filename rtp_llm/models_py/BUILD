@@ -8,7 +8,7 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
-# flashinfer-python ships in the cuda12 and cuda13 locks
+# flashinfer-python ships in the cuda12 locks (cuda13 supply is internal-only)
 flashinfer = ["flashinfer-python"]
 deep = ["deep_gemm", "deep_ep"]
 flashmla = ["fast-hadamard-transform", "flash-mla", "tilelang"]
@@ -65,10 +65,17 @@ py_library(
         "//rtp_llm/models_py/distributed:collective_torch",
         "//rtp_llm/models_py/distributed:user_buffers",
     ] + select({
-        # cuda13 locks ship flashinfer-python; deep-ep only in the x86 lock.
-        "@//:using_cuda13_x86": flashinfer + deep,
+        # using_cuda12 also covers cuda12_9_arm, hence per-config enumeration.
+        # deep-gemm/deep-ep are supplied via deps.json on arm too; apache-tvm-ffi is
+        # brought in transitively by flashinfer.
+        "@//:using_cuda12_9_x86": flashinfer + deep,
+        "@//:cuda_pre_12_9": flashinfer + deep,
+        "@//:using_cuda12_arm": ["flashinfer-python"] + deep,
+        # cuda13 has no pip supply in this tree; the branches stay so its shims fail
+        # explicitly instead of cuda13_arm silently taking the cuda12_9_arm wheels
+        # (using_cuda12_arm also matches there).
+        "@//:using_cuda13_x86": flashinfer + ["deep_gemm"],
         "@//:using_cuda13_arm": flashinfer + ["deep_gemm"],
-        "@//:using_cuda12": flashinfer + deep,
         "@//:using_ppu": deep,
         "@//:using_rocm": [
             "//rtp_llm/models_py/modules/base/rocm:rocm_base",
@@ -76,8 +83,8 @@ py_library(
         ],
         "//conditions:default": [],
     }) + select({
-        # cuda13 locks currently ship flash-mla (+tilelang on arm; no fast-hadamard).
-        # cuda12_arm (kept from main) has no branch here: its lock ships none of these.
+        # The internal cuda13 locks ship flash-mla (+tilelang on arm; no fast-hadamard);
+        # this tree has no cuda13 lock, so the branches only keep the absence explicit.
         "@//:using_cuda13_x86": ["flash-mla"],
         "@//:using_cuda13_arm": ["flash-mla", "tilelang"],
         "@//:using_cuda12_9_x86": flashmla,
@@ -86,14 +93,14 @@ py_library(
         "@//:using_cuda13_x86": rtp_kernel,
         "@//:using_cuda13_arm": rtp_kernel,
         "@//:using_cuda12_9_x86": rtp_kernel,
-        "@//:using_cuda12_arm": rtp_kernel,
+        "@//:using_cuda12_arm": rtp_kernel,  # arm upgraded to flashinfer 0.6.9, xqa available
         "//conditions:default": [],
     }) + select({
         # flash_attn / flash_attn_3: deferred rebuild for torch 2.11+cu130.
         "@//:using_cuda13_x86": [],
         "@//:using_cuda13_arm": [],
         "@//:using_cuda12_9_x86": flashattn,
-        "@//:using_cuda12_arm": flashattn,
+        "@//:using_cuda12_arm": flashattn,  # aarch64 wheels are in deps.json (2026-08-03)
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

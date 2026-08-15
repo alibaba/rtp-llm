@@ -6,8 +6,8 @@ exports_files([
 
 load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
 # make different torch for different device when in compiling
-load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel", "rename_wheel_aarch64")
-load("@arch_config//:arch_select.bzl", "requirement", "whl_deps", "internal_deps", "jit_deps", "platform_deps", "triton_deps")
+load("//bazel:defs.bzl", "copy_target_to", "rename_wheel", "rename_wheel_aarch64")
+load("@arch_config//:arch_select.bzl", "requirement", "internal_deps", "jit_deps", "whl_reqs_profile_srcs", "whl_reqs_profile_flag")
 load("//bazel:bundle.bzl", "bundle_files", "bundle_tar")
 
 load("@release_version//:defs.bzl", "RELEASE_VERSION")
@@ -26,12 +26,17 @@ flashinfer = [
     "flashinfer-python",
 ]
 
+# ninja: flashinfer's JIT backend invokes it via subprocess. List it only in this
+# variable -- the requirement() list below only merges flashinfer_with_cache (not the
+# flashinfer variable); listing it in both would make the absence stub name collide and
+# fail loading the whole BUILD file.
 flashinfer_with_cache = [
     "apache-tvm-ffi",
     "flashinfer-python",
     "flashinfer-cubin",
     "nvidia-cutlass-dsl",
-    "flashinfer-jit-cache"
+    "flashinfer-jit-cache",
+    "ninja",
 ]
 
 flashmla = [
@@ -54,26 +59,10 @@ flashattn = [
     "flash-attn-3"
 ]
 
-xft_dep = select({
-    "@//:using_arm": [],
-    "//:xft_use_icx": [
-        # "xfastertransformer_devel_icx",
-    ],
-    "//conditions:default": [
-        # "xfastertransformer_devel",
-    ],
-})
-
 arch_dep = select({
     "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
     "//conditions:default": [":decord", ":av"],
-})
-
-arch_with_version_dep = select({
-    "@//:using_arm": [],
-    "@//:using_cuda12_arm": [],
-    "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
 })
 
 requirement([
@@ -139,16 +128,21 @@ requirement([
     "pybind11_stubgen",
     "watchdog",
     "zstandard",
-    "xgrammar",
 ] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
 
-
+# xgrammar: DSV4 structured output, cuda12_9/cuda13 only. Its METADATA requires
+# transformers<5 which is unsatisfiable with transformers==5.2.0, so it bypasses the
+# deps.json relock and is served directly from the cuda12_9 hub; dash_sc imports it
+# optionally and degrades gracefully where this resolves to nothing.
 py_library(
-    name = "empty_target",
-    srcs = [],
-    deps = [],
+    name = "xgrammar",
+    deps = select({
+        "@//:using_cuda12_9_x86": ["@pip_gpu_cuda12_9_torch//xgrammar"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )
+
 
 _JIT_CACHE_SRCS = [
     "utils/jit_cache_manager.py",
@@ -172,8 +166,11 @@ py_library(
         ":cpm_kernels",
         ":prettytable",
         ":psutil",
+        # utils/util.py imports these two at module top level.
+        ":aiohttp",
+        ":requests",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
-    ] + arch_dep + internal_deps()
+    ] + internal_deps()
 )
 
 py_library(
@@ -269,6 +266,10 @@ py_library(
 	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
         "@//:using_cpu": [],
         "@//:using_cuda12_arm": [],
+        # flash_attn is not rebuilt for torch 2.11, so ppu.json declares it absent for
+        # cuda13; requesting it here would fail cuda13 image analysis at the stub.
+        "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_arm": [],
         "//conditions:default": ["flash_attn"]
     }) + arch_dep,
 )
@@ -288,7 +289,6 @@ py_library(
         ":tiktoken",
         ":protobuf",
         ":torch",
-        ":triton",
         ":einops",
         ":utils",
         ":ops",
@@ -299,19 +299,38 @@ py_library(
         "//rtp_llm/models_py:models",
         ":multimodal",
     ] + select({
-        # cuda13 x86 lock ships deep-ep; the arm lock does not yet.
-        "@//:using_cuda13_x86": deep,
-        "@//:using_cuda13_arm": ["deep_gemm"],
-        "@//:using_cuda": deep,
+        # triton only has wheels on the cuda/rocm lines (deps.json exceptions: missing
+        # on cpu/arm); as an unconditional dep, cpu/arm builds would hit the absence
+        # stub at analysis time.
+        "@//:using_cuda": [":triton"],
+        "@//:using_rocm": [":triton"],
         "//conditions:default": []
     }) + select({
-        # cuda13 locks ship flashinfer-python (+apache-tvm-ffi, nvidia-cutlass-dsl)
-        # and flash-mla (+tilelang on arm), but not flashinfer-cubin/jit-cache or
-        # fast-hadamard; those rebuilds for torch 2.11+cu130 are tracked separately.
-        "@//:using_cuda13_x86": flashinfer + ["nvidia-cutlass-dsl", "flash-mla"],
+        # using_cuda is set by the --config=cuda base chain and cuda12_9_arm inherits
+        # it too, hence per-config enumeration. The CUDA13 locks carry deep-gemm; deep-ep is
+        # intentionally absent until a CUDA13-compatible wheel is supplied.
+        "@//:using_cuda12_9_x86": deep,
+        "@//:using_cuda12_arm": deep,
+        "@//:cuda_pre_12_9": deep,
+        "@//:using_cuda13_x86": ["deep_gemm"],
+        "@//:using_cuda13_arm": ["deep_gemm"],
+        "//conditions:default": []
+    }) + select({
+        # The CUDA13 locks ship flashinfer-python (+apache-tvm-ffi), nvidia-cutlass-dsl,
+        # flash-mla and tilelang, but not flashinfer-cubin/jit-cache or fast-hadamard.
+        "@//:using_cuda13_x86": flashinfer + ["nvidia-cutlass-dsl", "flash-mla", "tilelang"],
         "@//:using_cuda13_arm": flashinfer + ["nvidia-cutlass-dsl", "flash-mla", "tilelang"],
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
-        "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
+        # The cuda12_9_arm lock provides flashinfer-python itself + cubin + flash-mla +
+        # fast-hadamard-transform; apache-tvm-ffi/flashinfer-jit-cache/nvidia-cutlass-dsl
+        # are absent in that profile (deps.json exceptions). cubin must ship on the arm
+        # line: it is py3-none-any and carries trtllm-gen's flashInferMetaInfo.h; the
+        # fmha_gen JIT (taken at runtime on GB200=sm100a) can only find that header when
+        # this package is installed, otherwise it falls back to a cache requiring network
+        # downloads -- CI has no internet, so compilation fails outright. jit-cache is
+        # the one that truly only has x86_64 wheels.
+        "@//:using_cuda12_arm": ["flashinfer-python", "flashinfer-cubin", "flash-mla",
+                                 "fast-hadamard-transform"],
         "@//:cuda_pre_12_9": flashinfer,
         "//conditions:default": []
     }) + select({
@@ -373,12 +392,19 @@ py_library(
     srcs = glob([
         "config/*.py",
         "config/**/*.py",
-    ]),
+    ], exclude = ["config/port_config.py"]),
     deps = [
         "//rtp_llm/distribute:distribute",
-        ":multimodal"
+        ":multimodal",
+        ":port_config",
     ],
     data = [":alog_config"]
+)
+
+py_library(
+    name = "port_config",
+    srcs = ["config/port_config.py"],
+    visibility = ["//visibility:public"],
 )
 
 py_library(
@@ -460,9 +486,11 @@ py_library(
         '__init__.py',
         'model_factory.py',
         'start_server.py',
+        # start_server.start_dash_sc_server_impl imports it dynamically; it must be
+        # registered here to make it into runfiles.
+        'start_dash_sc_server.py',
         'start_frontend_server.py',
         'start_backend_server.py',
-        'start_dash_sc_server.py',
         '_ft_pickler.py',
         'model_factory_register.py',
     ],
@@ -549,7 +577,6 @@ py_library(
         "//rtp_llm/server:server",
         ":plugins",
         "//rtp_llm/cpp/model_rpc:model_rpc_client",
-        "//rtp_llm/dash_sc:dash_sc_grpc_server",
         ":openai_api",
         ":lora",
         ":sdk",
@@ -622,70 +649,71 @@ py_package(
     packages = [
         "rtp_llm",
     ] + select({
-        "@//:using_cuda12": deep,
+        # Same criteria as the deep select in //rtp_llm:models; using_cuda12 also covers
+        # cuda12_9_arm, hence per-config enumeration.
+        "@//:using_cuda12_9_x86": deep,
+        "@//:using_cuda12_arm": deep,
+        "@//:cuda_pre_12_9": deep,
         "//conditions:default": [],
     }),
 )
 
-whl_reqs = [
-    "filelock>=3.20.0",
-    "jinja2",
-    "sympy",
-    "typing-extensions",
-    "importlib_metadata",
-    "transformers==5.2.0",
-    "sentencepiece==0.2.0",
-    "fastapi==0.115.6",
-    "grpcio-tools==1.57.0",
-    "uvicorn==0.30.0",
-    "setuptools==60.5.0",
-    "dacite",
-    "pynvml",
-    "thrift",
-    "numpy<2.0a0,>=1.25",
-    "psutil",
-    "tiktoken==0.7.0",
-    "lru-dict",
-    "py-spy",
-    "pyarrow==14.0.0",
-    "safetensors",
-    "cpm_kernels",
-    "Pillow",
-    "pillow-heif",
-    "pillow-avif-plugin",
-    "protobuf==4.25",
-    "einops",
-    "prettytable",
-    "pydantic",
-    "timm==0.9.12",
-    "onnx",
-    "sentence-transformers==5.2.0",
-    # "xfastertransformer_devel==1.8.1.1",
-    # "xfastertransformer_devel_icx==1.8.1.1",
-    "grpcio==1.62.0",
-    #"decord==0.6.0",
-    "oss2",
-    "orjson",
-    "aiohttp",
-    "watchdog==6.0.0",
-    "zstandard==0.25.0",
-    "json5",
-    "jsonschema==4.26.0",
-    "dashscope>=1.11.0",
-    "jieba",
-    "openai",
-    "nest_asyncio",
-    "blobfile",
-    "partial_json_parser",
-    "librosa",
-    "matplotlib",
-    "setproctitle",
-    "bitsandbytes",
-    "portalocker",
-    "concurrent_log_handler",
-    "apache-tvm-ffi",
-    "xgrammar==0.2.5",
-] + whl_deps() + platform_deps() + xft_dep
+# Single source of truth for wheel requires: //deps:gen_wheel_requires (stdlib py_binary).
+# Derives the Requires-Dist aggregate from deps.json + the selected profile's own lock;
+# platform pins / kserve increments are deps.json verbatim; the generator dedupes internally.
+# The seven keys are mutually exclusive and complete -- using_cuda, which the --config base
+# chain transitively sets to true, is not used to distinguish profiles.
+# Private profiles (internal-source) go through the @arch_config injection point: the lock and
+# overlay labels stay out of the public tree's dependency declarations. The public stub returns
+# empty values; its explicit absence branches still make private configs fail clearly.
+# dev (no profile define) falls to
+# //conditions:default = the cuda12_6 fact (a real profile, not a seventh pseudo profile).
+_whl_reqs_profile_lock = select({
+    "@//:cuda_pre_12_9": ["//deps:requirements_lock_torch_gpu_cuda12.txt"],
+    "@//:using_cuda12_9_x86": ["//deps:requirements_lock_torch_gpu_cuda12_9.txt"],
+    "@//:using_cuda12_arm": ["//deps:requirements_lock_cuda12_arm.txt"],
+    "@//:using_cuda13_x86": whl_reqs_profile_srcs("cuda13"),
+    "@//:using_cuda13_arm": whl_reqs_profile_srcs("cuda13_arm"),
+    "@//:using_rocm": ["//deps:requirements_lock_rocm.txt"],
+    "@//:using_arm": ["//deps:requirements_lock_torch_arm.txt"],
+    "@//:using_cpu": ["//deps:requirements_lock_torch_cpu.txt"],
+    "@//:using_ppu": whl_reqs_profile_srcs("ppu"),
+    "//conditions:default": ["//deps:requirements_lock_torch_gpu_cuda12.txt"],
+})
+
+_whl_reqs_srcs = ["//deps:deps.json"] + _whl_reqs_profile_lock
+
+# --lock (plus private profiles' --profile/--overlay) is selected per config; all
+# $(location) targets are in srcs.
+_whl_reqs_lock_flag = select({
+    "@//:cuda_pre_12_9": "--lock $(location //deps:requirements_lock_torch_gpu_cuda12.txt)",
+    "@//:using_cuda12_9_x86": "--lock $(location //deps:requirements_lock_torch_gpu_cuda12_9.txt)",
+    "@//:using_cuda12_arm": "--lock $(location //deps:requirements_lock_cuda12_arm.txt)",
+    "@//:using_cuda13_x86": whl_reqs_profile_flag("cuda13"),
+    "@//:using_cuda13_arm": whl_reqs_profile_flag("cuda13_arm"),
+    "@//:using_rocm": "--lock $(location //deps:requirements_lock_rocm.txt)",
+    "@//:using_arm": "--lock $(location //deps:requirements_lock_torch_arm.txt)",
+    "@//:using_cpu": "--lock $(location //deps:requirements_lock_torch_cpu.txt)",
+    "@//:using_ppu": whl_reqs_profile_flag("ppu"),
+    "//conditions:default": "--lock $(location //deps:requirements_lock_torch_gpu_cuda12.txt)",
+})
+
+genrule(
+    name = "wheel_requires_full",
+    srcs = _whl_reqs_srcs,
+    outs = ["wheel_requires_full.txt"],
+    tools = ["//deps:gen_wheel_requires"],
+    cmd = "$(execpath //deps:gen_wheel_requires) --manifest $(location //deps:deps.json) " + _whl_reqs_lock_flag + " --mode full --out $@",
+)
+
+# kserve wheel: full aggregate + kserve increment (generator dedupes internally with sort -u)
+genrule(
+    name = "wheel_requires_kserve",
+    srcs = _whl_reqs_srcs,
+    outs = ["wheel_requires_kserve.txt"],
+    tools = ["//deps:gen_wheel_requires"],
+    cmd = "$(execpath //deps:gen_wheel_requires) --manifest $(location //deps:deps.json) " + _whl_reqs_lock_flag + " --mode kserve --out $@",
+)
 
 py_wheel(
     name = "rtp_llm_frontend_whl",
@@ -695,9 +723,9 @@ py_wheel(
     version = RELEASE_VERSION,
     deps = [
         ":rtp_llm_frontend_package",
-        "@rtp_deps//:extension_package_frontend"
+        "@rtp_extension//:extension_package_frontend"
     ],
-    requires = whl_reqs,
+    requires_file = ":wheel_requires_full",
 )
 
 rename_wheel(
@@ -765,9 +793,9 @@ py_wheel(
     },
     deps = [
         ":rtp_llm_package",
-        "@rtp_deps//:extension_package"
+        "@rtp_extension//:extension_package"
     ],
-    requires = whl_reqs,
+    requires_file = ":wheel_requires_full",
 )
 
 py_wheel(
@@ -778,17 +806,16 @@ py_wheel(
     version = RELEASE_VERSION,
     deps = [
         ":rtp_llm_package",
-        "@rtp_deps//:extension_package",
+        "@rtp_extension//:extension_package",
     ],
-    requires = whl_reqs + [
-        "kserve",
-    ] + xft_dep + arch_with_version_dep,
+    requires_file = ":wheel_requires_kserve",
 )
 
 py_package(
     name = "rtp_llm_deepgemm_pkg",
     deps = select({
-        "@//:using_cuda12": ["@deep_gemm_ext//:deep_gemm"],
+        "@//:using_cuda12_9_x86": deep,
+        "@//:cuda_pre_12_9": deep,
         "//conditions:default": [],
     }),
     packages = [
@@ -836,7 +863,7 @@ py_library(
     deps = [
         ":rtp_llm_lib",
         "//rtp_llm/test/utils:test_util",
-        "@rtp_deps//:extension_lib",
+        "@rtp_extension//:extension_lib",
         ":aiohttp",
     ]
 )

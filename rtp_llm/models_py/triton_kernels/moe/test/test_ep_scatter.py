@@ -9,8 +9,8 @@ The test verifies:
   2. expert_start_loc holds the correct exclusive prefix sum
   3. Runs in a tight loop (stress) to increase race-window hit probability
 
-Run with bazel:
-    bazel test //rtp_llm/models_py/triton_kernels/moe/test:test_ep_scatter --config=cuda12
+Run with the repository runner:
+    scripts/rtpcli bazel test --profile cuda12_9 //rtp_llm/models_py/triton_kernels/moe/test:test_ep_scatter
 """
 
 import math
@@ -20,9 +20,7 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
-    _fwd_kernel_ep_scatter_1,
-)
+from rtp_llm.models_py.triton_kernels.moe.ep_kernels import _fwd_kernel_ep_scatter_1
 
 
 def align_up(n: int, alignment: int = 128) -> int:

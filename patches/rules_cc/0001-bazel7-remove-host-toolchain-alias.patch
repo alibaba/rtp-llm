@@ -1,0 +1,11 @@
+diff --git a/cc/BUILD b/cc/BUILD
+index 8e0b55b..c9f51b1 100644
+--- a/cc/BUILD
++++ b/cc/BUILD
+@@ -70,6 +70,4 @@ filegroup(
+ 
+ cc_toolchain_alias(name = "current_cc_toolchain")
+ 
+-cc_host_toolchain_alias(name = "current_cc_host_toolchain")
+-
+ cc_libc_top_alias(name = "current_libc_top")

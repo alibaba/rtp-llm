@@ -1,0 +1,14 @@
+diff --git a/cc/find_cc_toolchain.bzl b/cc/find_cc_toolchain.bzl
+index 1df7c4f..8f9a6bf 100644
+--- a/cc/find_cc_toolchain.bzl
++++ b/cc/find_cc_toolchain.bzl
+@@ -64,5 +64,8 @@ def find_cc_toolchain(ctx):
+     # Check the incompatible flag for toolchain resolution.
+     if hasattr(cc_common, "is_cc_toolchain_resolution_enabled_do_not_use") and cc_common.is_cc_toolchain_resolution_enabled_do_not_use(ctx = ctx):
+         if "//cc:toolchain_type" in ctx.toolchains:
+-            return ctx.toolchains["//cc:toolchain_type"]
++            toolchain_info = ctx.toolchains["//cc:toolchain_type"]
++            if hasattr(toolchain_info, "cc_provider_in_toolchain") and hasattr(toolchain_info, "cc"):
++                return toolchain_info.cc
++            return toolchain_info
+         fail("In order to use find_cc_toolchain, your rule has to depend on C++ toolchain. See find_cc_toolchain.bzl docs for details.")

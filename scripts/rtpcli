@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+if [[ -n "${PYTHON:-}" ]]; then
+    command -v "${PYTHON}" >/dev/null 2>&1 || {
+        echo "PYTHON is not executable: ${PYTHON}" >&2
+        exit 2
+    }
+    exec "${PYTHON}" "${SCRIPT_DIR}/rtpcli.py" "$@"
+fi
+
+for candidate in /opt/conda310/bin/python3 /opt/conda/bin/python3 /usr/bin/python3; do
+    if [[ -x "${candidate}" ]]; then
+        exec "${candidate}" "${SCRIPT_DIR}/rtpcli.py" "$@"
+    fi
+done
+
+# `-x` above tests a path, so a bare `python3` would never match even when it is on PATH.
+if command -v python3 >/dev/null 2>&1; then
+    exec python3 "${SCRIPT_DIR}/rtpcli.py" "$@"
+fi
+
+echo "python3 is required (set PYTHON=/path/to/python3)" >&2
+exit 2

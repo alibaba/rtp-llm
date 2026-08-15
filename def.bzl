@@ -4,6 +4,8 @@ load(
     _if_cuda = "if_cuda",
 )
 
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_import", "cc_library")
+
 load(
     "@local_config_rocm//rocm:build_defs.bzl",
     "rocm_default_copts",
@@ -101,7 +103,7 @@ def rpm_library(
         )
 
     if static_lib == None:
-        native.cc_library(
+        cc_library(
             name = name,
             hdrs = [hdrs_fg_target],
             srcs = shared_files,
@@ -114,14 +116,14 @@ def rpm_library(
     else:
         import_target = name + "_import"
         alwayslink = static_lib!=None
-        native.cc_import(
+        cc_import(
             name = import_target,
             static_library = static_lib,
             shared_library = shared_lib,
             alwayslink=alwayslink,
             visibility = ["//visibility:public"],
         )
-        native.cc_library(
+        cc_library(
             name = name,
             hdrs = [hdrs_fg_target],
             srcs = srcs,
@@ -186,7 +188,7 @@ def cc_test_wrapper(
         tags = []
 
     binary_name = name + "_bin"
-    native.cc_binary(
+    cc_binary(
         name = binary_name,
         srcs = srcs,
         deps = deps,
@@ -264,30 +266,3 @@ def gen_cpp_code(name, elements_list, template_header, template, template_tail,
         name = name,
         srcs = files
     )
-
-
-def _read_release_version_impl(repository_ctx):
-    # Read the release_version.py file
-    release_version_content = repository_ctx.read(repository_ctx.path(Label("//rtp_llm:release_version.py")))
-    # Extract the RELEASE_VERSION value from the Python file
-    # We assume the format is RELEASE_VERSION = "x.x.x"
-    release_version = "0.0.1"  # fallback version
-
-    # Look for the pattern RELEASE_VERSION = "x.x.x"
-    pattern = 'RELEASE_VERSION = "'
-    start_index = release_version_content.find(pattern)
-    if start_index != -1:
-        # Find the start of the version string
-        start_index += len(pattern)
-        # Find the end of the version string
-        end_index = release_version_content.find('"', start_index)
-        if end_index != -1:
-            release_version = release_version_content[start_index:end_index]
-
-    repository_ctx.file("BUILD", "")
-    repository_ctx.file("defs.bzl", "RELEASE_VERSION = '{}'".format(release_version))
-
-read_release_version = repository_rule(
-    implementation = _read_release_version_impl,
-    attrs = {},
-)

@@ -278,13 +278,31 @@ class CaseRunner(object):
 
         return TaskStates()
 
-    def _start_remote_kvcm_server(self) -> Optional[RemoteKVCMServer]:
-        server_path = os.path.join(
-            os.environ["TEST_SRCDIR"],
-            os.environ["TEST_WORKSPACE"],
-            "external/remote_kv_cache_manager_server",
+    @staticmethod
+    def _runfiles_repo_dir(apparent_name: str) -> str:
+        """Directory of an external repo inside runfiles.
+
+        Under Bzlmod, runfiles land on disk under canonical repo names
+        (_main~<extension>~<name>; from Bazel 8 the separator becomes +) and the
+        apparent name never appears -- in practice everything under external/ uses
+        separator-bearing canonical names. So locate by suffix and hard-code
+        neither spelling.
+        """
+        external = os.path.join(
+            os.environ["TEST_SRCDIR"], os.environ["TEST_WORKSPACE"], "external"
         )
-        kvcm_src_logs_path = os.path.join(os.environ["TEST_SRCDIR"], "rtp_llm/logs")
+        for entry in sorted(os.listdir(external)):
+            if entry == apparent_name or entry.endswith(
+                ("~" + apparent_name, "+" + apparent_name)
+            ):
+                return os.path.join(external, entry)
+        raise FileNotFoundError(f"{apparent_name} not found under {external}")
+
+    def _start_remote_kvcm_server(self) -> Optional[RemoteKVCMServer]:
+        server_path = self._runfiles_repo_dir("remote_kv_cache_manager_server")
+        kvcm_src_logs_path = os.path.join(
+            os.environ["TEST_SRCDIR"], os.environ["TEST_WORKSPACE"], "logs"
+        )
         bazel_outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
         kvcm_dst_logs_path = os.path.join(bazel_outputs_dir, "kvcm_logs")
         remote_kvcm_server = RemoteKVCMServer(
@@ -843,13 +861,10 @@ class CaseRunner(object):
         server_manager_callback: Optional[Callable[[MagaServerManager], None]] = None,
         cancel_event: Optional[threading.Event] = None,
     ) -> Optional[MagaServerManager]:
-        # If smoke_args_str is not provided, try to get it from self.smoke_args dict based on role_name
         if smoke_args_str is None:
             if self.smoke_args and isinstance(self.smoke_args, dict):
-                # Get smoke_args for this role, fallback to empty string if not found
                 smoke_args_str = self.smoke_args.get(role_name, "")
             else:
-                # Use the string value (for list env_args case)
                 smoke_args_str = self.smoke_args_str
         server_manager = MagaServerManager(
             env_args=env_dict,
@@ -970,15 +985,15 @@ class CaseRunner(object):
         self, server_configs: List[Dict[str, Any]]
     ) -> Tuple[List[Any], List[Any]]:
         """
-        并行启动多个服务器
+        Start multiple servers in parallel
 
         Args:
-            server_configs: 服务器配置列表，每个配置包含:
-                - env_dict: 环境变量字典
-                - task_info: 任务信息
-                - port: 端口号
-                - role_name: 角色名称
-                - smoke_args_str: smoke参数字符串(可选)
+            server_configs: list of server configs; each config contains:
+                - env_dict: environment variable dict
+                - task_info: task info
+                - port: port number
+                - role_name: role name
+                - smoke_args_str: smoke args string (optional)
 
         Returns:
             Tuple[List[server_managers], List[task_states]]
@@ -1016,7 +1031,6 @@ class CaseRunner(object):
             task_info = config["task_info"]
             port = config["port"]
             role_name = config["role_name"]
-            # If smoke_args_str is provided in config, use it; otherwise let start_server choose from dict
             smoke_args_str = config.get("smoke_args_str")
 
             task_states = TaskStates()
@@ -1048,20 +1062,18 @@ class CaseRunner(object):
                 stop_registered_servers(role_name)
             return server_manager, task_states
 
-        # 并行启动所有服务器
+        # Start all servers in parallel
         server_managers = []
         task_states_list = []
 
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=len(server_configs)
         ) as executor:
-            # 提交所有任务
             future_to_config = {
                 executor.submit(start_single_server, config): config
                 for config in server_configs
             }
 
-            # 收集结果
             results = {}
             for future in concurrent.futures.as_completed(future_to_config):
                 config = future_to_config[future]
@@ -1081,6 +1093,7 @@ class CaseRunner(object):
                     )
                     results[config["role_name"]] = (None, task_states)
 
+<<<<<<< HEAD
                 if results[config["role_name"]][1].ret != True:
                     if not failure_event.is_set():
                         logging.error(
@@ -1094,6 +1107,9 @@ class CaseRunner(object):
                     stop_registered_servers(config["role_name"])
 
             # 按照原始顺序返回结果
+=======
+            # Return results in the original order
+>>>>>>> feat(deps): single-source the OSS pip supply chain on Bzlmod
             for config in server_configs:
                 role_name = config["role_name"]
                 server_managers.append(results[role_name][0])

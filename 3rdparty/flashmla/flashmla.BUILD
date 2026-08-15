@@ -4,7 +4,7 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch", "if_cuda")
 
 flash_mla_cuda_copts = copts() + cuda_default_copts_without_arch() + if_cuda([
-    "-D_USE_MATH_DEFINES", 
+    "-D_USE_MATH_DEFINES",
     "-Wno-deprecated-declarations",
     "-U__CUDA_NO_HALF_OPERATORS__",
     "-U__CUDA_NO_HALF_CONVERSIONS__",
@@ -27,16 +27,15 @@ cc_library(
     name = "flashmla_hdrs",
     hdrs = flash_mla_headers,
     deps = select({
-        # CUDA 13: use the cutlass_cu13 build (CUTLASS v3.8 v2) which gates
-        # cuTensorMapEncode on __CUDACC_VER_MAJOR__ > 12 so CUDA 13 gets the
-        # versioned PFN_*_v12000 typedefs.  CUDA 12 keeps the existing @cutlass.
+        # The cu13 cutlass view lives behind @arch_config: absent stubs on the
+        # open-source side, the real cuda13 repos via the internal overlay.
         "@//:using_cuda13_arm": [
-            "@cutlass_cu13//:cutlass",
-            "@cutlass_cu13//:cutlass_utils",
+            "@arch_config//:cutlass_cuda13",
+            "@arch_config//:cutlass_cuda13_utils",
         ],
         "@//:using_cuda13_x86": [
-            "@cutlass_cu13//:cutlass",
-            "@cutlass_cu13//:cutlass_utils",
+            "@arch_config//:cutlass_cuda13",
+            "@arch_config//:cutlass_cuda13_utils",
         ],
         "//conditions:default": [
             "@cutlass//:cutlass",

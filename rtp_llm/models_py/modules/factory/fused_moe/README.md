@@ -328,7 +328,7 @@ python -m pytest rtp_llm/models_py/modules/factory/fused_moe/tests/
 Or using Bazel:
 
 ```bash
-bazelisk test //rtp_llm/models_py/modules/factory/fused_moe/tests:all
+scripts/rtpcli bazel test --profile cuda12_9 //rtp_llm/models_py/modules/factory/fused_moe/tests:all
 ```
 
 ## Refactoring Benefits

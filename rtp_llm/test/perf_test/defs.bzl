@@ -1,4 +1,5 @@
 load("//rtp_llm/test/smoke:defs.bzl", "get_world_size_from_smoke_args")
+load("@rules_python//python:defs.bzl", "py_test")
 
 def tp_tuple(gpu_type, tp_size):
     out = []
@@ -35,7 +36,7 @@ def perf_test(name, model_type, ckpt_path, gpu_type,
 
     test_args += args
 
-    native.py_test(
+    py_test(
         name = name,
         main = "//rtp_llm/test/perf_test:test_entry.py",
         srcs = ["//rtp_llm/test/perf_test:test_entry.py"],
@@ -44,6 +45,9 @@ def perf_test(name, model_type, ckpt_path, gpu_type,
             "//rtp_llm:pyodps",
             "//rtp_llm:testlib",
             "//rtp_llm/test/perf_test:perf_test_lib",
+            # start_server spawns the dash_sc_server process (imports rtp_llm.dash_sc);
+            # same registration as smoke defs.bzl; omitting it means ModuleNotFoundError.
+            "//rtp_llm/dash_sc:dash_sc_grpc_server",
         ] + deps,
         data = [
             "//rtp_llm:sdk",

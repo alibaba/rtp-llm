@@ -1,0 +1,137 @@
+From: RTP-LLM build owners <rtp-llm@alibaba-inc.com>
+Subject: [PATCH 2/2] bazel: retire //external binds, map dep names to real labels
+
+This repo retired bind()/the //external package, but grpc's bazel helpers still
+route external_deps through the retired bind targets (//external:cares,
+//external:protobuf, //external:protocol_compiler, ...), which no longer resolve.
+
+Map each external dep name to the real label the retired bind pointed at
+(boringssl / nanopb / protobuf(+lib,+headers) / zlib / absl / googletest via
+_EXTERNAL_DEP_LABELS, cares special-cased to @com_github_cares_cares//:ares,
+protoc to @com_google_protobuf//:protoc). grpc's unprovided test and optional
+plugin dependencies point at explicit analysis-fail stubs in //deps; any name
+not in the map (grpc's python-test-only "twisted"/"yaml", "address_sorting", or
+a future addition) routes to @rtp_llm//deps:grpc_unmapped_absent, which fails at
+analysis of the specific target that needs it rather than failing package
+loading for everyone via a load-time fail().
+
+Enumerated external_deps universe (scan of every external_deps=[...] in grpc's
+BUILD files at rev 109c5707): absl-base, absl-time, address_sorting, benchmark,
+cares, gflags, gmock, gtest, libssl, nanopb, opencensus-stats,
+opencensus-stats-test, opencensus-trace, protobuf, protobuf_clib,
+protobuf_headers, twisted, yaml, zlib. Of these, address_sorting/twisted/yaml
+are only reached by targets outside RTP-LLM's C++ build graph, so they resolve
+to the absent stub; re-scan on any grpc upgrade.
+
+Upstream tracking: not filed — the map encodes this repo's label choices against
+a 2019-era grpc commit (109c5707); upstream's bazel dep handling has moved on, so
+there is no hunk upstream could take. Re-verify on any grpc upgrade; if the new
+rev no longer references //external:, drop this patch.
+
+Regression cover: every compile leg on pipeline 1346 builds @grpc from source,
+so an unresolvable or mis-mapped label fails analysis there.
+
+Note: patch is generated without a/b prefixes, same as 0001 in this patch list.
+---
+diff --git bazel/grpc_build_system.bzl bazel/grpc_build_system.bzl
+--- bazel/grpc_build_system.bzl
++++ bazel/grpc_build_system.bzl
+@@ -34,6 +34,26 @@
+         "//:windows_msvc": [],
+         "//conditions:default": a,
+     })
++
++# bind()/the //external package are retired in this repo; map external dep
++# names to the real labels the retired binds pointed at (rtp_llm patch).
++_EXTERNAL_DEP_LABELS = {
++    "absl-base": "@com_google_absl//absl/base",
++    "absl-time": "@com_google_absl//absl/time",
++    "benchmark": "@rtp_llm//deps:grpc_benchmark_absent",
++    "gflags": "@rtp_llm//deps:grpc_gflags_absent",
++    "gmock": "@com_google_googletest//:gmock",
++    "gtest": "@com_google_googletest//:gtest",
++    "libssl": "@boringssl//:ssl",
++    "nanopb": "@com_github_nanopb_nanopb//:nanopb",
++    "opencensus-stats": "@rtp_llm//deps:grpc_opencensus_stats_absent",
++    "opencensus-stats-test": "@rtp_llm//deps:grpc_opencensus_stats_test_absent",
++    "opencensus-trace": "@rtp_llm//deps:grpc_opencensus_trace_absent",
++    "protobuf": "@com_google_protobuf//:protobuf",
++    "protobuf_clib": "@com_google_protobuf//:protoc_lib",
++    "protobuf_headers": "@com_google_protobuf//:protobuf_headers",
++    "zlib": "@zlib_archive//:zlib",
++}
+
+ def _get_external_deps(external_deps):
+     ret = []
+@@ -43,10 +54,12 @@
+         elif dep == "cares":
+             ret += select({
+                 "//:grpc_no_ares": [],
+-                "//conditions:default": ["//external:cares"],
++                "//conditions:default": ["@com_github_cares_cares//:ares"],
+             })
+         else:
+-            ret += ["//external:" + dep]
++            # Unmapped names (grpc's python-test-only twisted/yaml, address_sorting, or a
++            # future addition) route to an analysis-time absent stub, not a load-time fail().
++            ret += [_EXTERNAL_DEP_LABELS.get(dep, "@rtp_llm//deps:grpc_unmapped_absent")]
+     return ret
+
+ def _maybe_update_cc_library_hdrs(hdrs):
+diff --git bazel/cc_grpc_library.bzl bazel/cc_grpc_library.bzl
+--- bazel/cc_grpc_library.bzl
++++ bazel/cc_grpc_library.bzl
+@@ -53,7 +53,7 @@
+         **kwargs
+     )
+     grpc_deps  = ["@com_github_grpc_grpc//:grpc++_codegen_proto",
+-                  "//external:protobuf"]
++                  "@com_google_protobuf//:protobuf"]
+     native.cc_library(
+         name = name,
+         srcs = [":" + codegen_grpc_target, ":" + codegen_target],
+@@ -66,6 +66,6 @@
+         name = name,
+         srcs = [":" + codegen_target],
+         hdrs = [":" + codegen_target],
+-        deps = deps + ["//external:protobuf"],
++        deps = deps + ["@com_google_protobuf//:protobuf"],
+         **kwargs
+     )
+diff --git bazel/generate_cc.bzl bazel/generate_cc.bzl
+--- bazel/generate_cc.bzl
++++ bazel/generate_cc.bzl
+@@ -103,7 +103,7 @@
+             mandatory = False,
+         ),
+         "_protoc": attr.label(
+-            default = Label("//external:protocol_compiler"),
++            default = Label("@com_google_protobuf//:protoc"),
+             executable = True,
+             cfg = "host",
+         ),
+diff --git third_party/cares/cares.BUILD third_party/cares/cares.BUILD
+--- third_party/cares/cares.BUILD
++++ third_party/cares/cares.BUILD
+@@ -49,1 +49,1 @@
+-    srcs = ["@com_github_grpc_grpc//third_party/cares:ares_build.h"],
++    srcs = ["@grpc//third_party/cares:ares_build.h"],
+@@ -57,9 +57,9 @@
+-        ":ios_x86_64": ["@com_github_grpc_grpc//third_party/cares:config_darwin/ares_config.h"],
+-        ":ios_armv7": ["@com_github_grpc_grpc//third_party/cares:config_darwin/ares_config.h"],
+-        ":ios_armv7s": ["@com_github_grpc_grpc//third_party/cares:config_darwin/ares_config.h"],
+-        ":ios_arm64": ["@com_github_grpc_grpc//third_party/cares:config_darwin/ares_config.h"],
+-        ":darwin": ["@com_github_grpc_grpc//third_party/cares:config_darwin/ares_config.h"],
+-        ":darwin_x86_64": ["@com_github_grpc_grpc//third_party/cares:config_darwin/ares_config.h"],
+-        ":windows": ["@com_github_grpc_grpc//third_party/cares:config_windows/ares_config.h"],
+-        ":android": ["@com_github_grpc_grpc//third_party/cares:config_android/ares_config.h"],
+-        "//conditions:default": ["@com_github_grpc_grpc//third_party/cares:config_linux/ares_config.h"],
++        ":ios_x86_64": ["@grpc//third_party/cares:config_darwin/ares_config.h"],
++        ":ios_armv7": ["@grpc//third_party/cares:config_darwin/ares_config.h"],
++        ":ios_armv7s": ["@grpc//third_party/cares:config_darwin/ares_config.h"],
++        ":ios_arm64": ["@grpc//third_party/cares:config_darwin/ares_config.h"],
++        ":darwin": ["@grpc//third_party/cares:config_darwin/ares_config.h"],
++        ":darwin_x86_64": ["@grpc//third_party/cares:config_darwin/ares_config.h"],
++        ":windows": ["@grpc//third_party/cares:config_windows/ares_config.h"],
++        ":android": ["@grpc//third_party/cares:config_android/ares_config.h"],
++        "//conditions:default": ["@grpc//third_party/cares:config_linux/ares_config.h"],

@@ -1,0 +1,191 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://rtp-llm/deps/deps.schema.json",
+  "title": "RTP-LLM single dependency manifest",
+  "description": "Public dependency manifest; deps/check_manifest.py performs schema-lite + equivalence validation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "python",
+    "indexes",
+    "profiles",
+    "packages",
+    "exceptions",
+    "wheel"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Manifest structure version, currently fixed at 1."
+    },
+    "python": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version"],
+      "properties": {
+        "version": {"type": "string", "description": "Target python version for resolution/build, e.g. 3.10."}
+      }
+    },
+    "indexes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["oss_base"],
+      "properties": {
+        "oss_base": {"type": "string", "description": "OSS bucket that hosts our own per-flavor pip index trees."}
+      }
+    },
+    "profiles": {
+      "type": "array",
+      "description": "The 6 build profiles, fixed order cpu,arm,cuda12_6,cuda12_9,cuda12_9_arm,rocm.",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "platform", "bazel_config", "index_view", "hub", "lock"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": ["cpu", "arm", "cuda12_6", "cuda12_9", "cuda12_9_arm", "rocm"]
+          },
+          "platform": {
+            "type": "string",
+            "description": "uv --python-platform target triple.",
+            "enum": ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+          },
+          "bazel_config": {"type": "string", "description": "--config name in .bazelrc."},
+          "index_view": {"type": "string", "description": "simple-<flavor> subtree of our OSS index; also the flavor key used by flavor_rules."},
+          "hub": {"type": "string", "description": "hub_name of pip.parse in MODULE.bazel."},
+          "lock": {"type": "string", "description": "Lock file name of this profile."}
+        }
+      }
+    },
+    "packages": {
+      "type": "array",
+      "description": "All direct dependencies, sorted by package name; each entry has at least one of common or per_profile.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": {"type": "string"},
+          "_comment": {"type": "string", "description": "Maintainer note (not machine-consumed)."},
+          "common": {"$ref": "#/definitions/depEntry"},
+          "per_profile": {
+            "type": "object",
+            "description": "profile name -> spec difference/profile-specific declaration for that profile.",
+            "propertyNames": {
+              "enum": ["cpu", "arm", "cuda12_6", "cuda12_9", "cuda12_9_arm", "rocm"]
+            },
+            "additionalProperties": {"$ref": "#/definitions/depEntry"}
+          }
+        }
+      }
+    },
+    "exceptions": {
+      "type": "array",
+      "description": "Profile coverage exception registry (profile-specific packages + allowed reference sites).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "exists_in", "allowed_refs", "reason"],
+        "properties": {
+          "name": {"type": "string"},
+          "exists_in": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["cpu", "arm", "cuda12_6", "cuda12_9", "cuda12_9_arm", "rocm"]
+            }
+          },
+          "allowed_refs": {"type": "array", "items": {"type": "string"}},
+          "reason": {"type": "string"}
+        }
+      }
+    },
+    "wheel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["groups", "exclude", "arch_names", "platform_pins"],
+      "properties": {
+        "groups": {
+          "type": "object",
+          "description": "Extra runtime package groups for the wheel (wheel = generic increment, kserve = kserve extra).",
+          "additionalProperties": {"type": "array", "items": {"type": "string"}}
+        },
+        "exclude": {
+          "type": "object",
+          "description": "Wheel packaging exclusions (key = package name, with machine-verifiable annotations).",
+          "additionalProperties": {
+            "type": "object",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "required": ["shipped", "reason"],
+                "properties": {
+                  "shipped": {"const": false},
+                  "reason": {"type": "string"}
+                }
+              },
+              {
+                "additionalProperties": false,
+                "required": ["provided_by"],
+                "properties": {
+                  "provided_by": {"type": "array", "items": {"type": "string"}, "description": "Evidence: the package is provided by platform_pins.<key> or groups.<name> inside the manifest (not by the base wheel set)."}
+                }
+              }
+            ]
+          }
+        },
+        "arch_names": {
+          "type": "object",
+          "description": "profile name -> wheel arch leaf big-artifact list.",
+          "propertyNames": {
+            "enum": ["cpu", "arm", "cuda12_6", "cuda12_9", "cuda12_9_arm", "rocm"]
+          },
+          "additionalProperties": {"type": "array", "items": {"type": "string"}}
+        },
+        "platform_pins": {
+          "type": "object",
+          "description": "Per-profile platform pins (e.g. decord/amdsmi), recorded verbatim, for wheel derivation.",
+          "additionalProperties": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    }
+  },
+  "definitions": {
+    "depEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["spec"],
+      "properties": {
+        "spec": {"type": "string", "description": "PEP 440 specifier (may be an empty string meaning no pin; may also be an `@<URL>` direct link)."},
+        "marker": {"type": "string", "description": "PEP 508 environment marker (compared after normalization)."},
+        "source": {
+          "type": "string",
+          "enum": ["oss_flavor", "pypi"],
+          "description": "Explicit source declaration (enum; unknown values must fail -- never default to pypi). When omitted, inferred from the spec: local version present = oss_flavor, otherwise pypi."
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Once declared, the lock must pin exactly these artifact bytes (consumed by check_lock_artifacts)."
+        },
+        "cc_view": {"$ref": "#/definitions/ccView"}
+      }
+    },
+    "ccView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "sha256", "urls", "build_file"],
+      "description": "torch_*/aiter http_archive coordinates matching http_deps.bzl.",
+      "properties": {
+        "name": {"type": "string"},
+        "sha256": {"type": "string"},
+        "urls": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "build_file": {"type": "string"}
+      }
+    }
+  }
+}

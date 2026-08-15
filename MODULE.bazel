@@ -1,0 +1,267 @@
+# RTP-LLM's single dependency declaration surface (Bazel 7.7.1, Bzlmod-only).
+# BCR modules live here; all non-BCR deps are created by the rtp_non_module_deps
+# extension (deps/extensions/defs.bzl), derived from deps.json.
+module(
+    name = "rtp_llm",
+    version = "0.0.0",
+    compatibility_level = 1,
+)
+
+bazel_dep(name = "rules_python", version = "0.33.2")
+
+# Promoted to a direct dep so @platforms is visible to repos created by the non-module
+# extension (git_deps.bzl rewrites absl's BUILD to @platforms//{os,cpu}:*, which otherwise
+# fails select() resolution there).
+bazel_dep(name = "platforms", version = "0.0.10")
+
+# Tarball of commit 084b877c, mirrored in our own public bucket (byte-identical to upstream,
+# sha256 verified) to avoid depending on GitHub reachability. Patches have no a/b prefix, hence strip=0.
+# Upgrading past 2.0 requires: self-built hubs generating config.bzl, explicit target_platforms
+# for the arm hub, and removing the override map wholesale.
+archive_override(
+    module_name = "rules_python",
+    integrity = "sha256-PW/nLxoFazRi8Cr7pQSSEKy67BMQh/sZCC+meSGYqfo=",
+    patch_strip = 0,
+    patches = [
+        "//patches/rules_python:0002-remove-import-from-rules_cc.patch",
+        "//patches/rules_python:0001-wheelmaker-store-and-zip64.patch",
+        "//patches/rules_python:0003-fail-closed-on-missing-locked-artifact.patch",
+    ],
+    strip_prefix = "rules_python-084b877c98b580839ceab2b071b02fc6768f3de6",
+    urls = ["https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/archives/github.com/bazelbuild/rules_python/084b877c98b580839ceab2b071b02fc6768f3de6.tar.gz"],
+)
+
+# use_repo_rule is kept only for the vendored protobuf below (root-module labels //deps:* reach deps/ directly).
+local_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
+
+# Vendored protobuf at 3rdparty/protobuf. Declared at MODULE top level because
+# native.local_repository is illegal inside a module_extension and relative paths
+# inside extensions do not resolve to the main repo root.
+local_repository(
+    name = "com_google_protobuf",
+    path = "3rdparty/protobuf",
+)
+
+# Non-BCR archive repos + autoconfig + injection points are all created by this one extension.
+# The use_repo list is maintained by `scripts/rtpcli bazel mod-tidy`.
+rtp_non_module_deps = use_extension("//deps/extensions:defs.bzl", "rtp_non_module_deps")
+use_repo(
+    rtp_non_module_deps,
+    "KleidiAI",
+    "aiter",
+    "arch_config",
+    "arm_compute",
+    "bazel_skylib",
+    "boost",
+    "boringssl",
+    "com_github_cares_cares",
+    "com_github_nanopb_nanopb",
+    "com_google_absl",
+    "com_google_googletest",
+    "curl",
+    "cutlass",
+    "cutlass3.6",
+    "cutlass4.0",
+    "cutlass_h_moe",
+    "flashinfer_cpp",
+    "flashmla",
+    "grpc",
+    "havenask",
+    "hedron_compile_commands",
+    "hf3fs_rpm",
+    "jsoncpp_git",
+    "krb5-devel",
+    "libcom_err-devel",
+    "local_config_cuda",
+    "local_config_python",
+    "local_config_rocm",
+    "nacos_sdk_cpp",
+    "rapidjson",
+    "release_version",
+    "remote_kv_cache_manager_client_rpm",
+    "remote_kv_cache_manager_server",
+    "rtp_extension",
+    "rules_cc",
+    "rules_pkg",
+    "six_archive",
+    "torch_2.6_py310_cuda",
+    "torch_2.8_py310_cuda",
+    "torch_py310_cpu",
+    "torch_py310_cpu_aarch64",
+    "torch_rocm",
+    "xgrammar",
+    "zlib_archive",
+)
+
+# conda310 python toolchain (defined in root BUILD); the python version is declared once,
+# via the python_version flag in .bazelrc.
+register_toolchains("//:python310_toolchain")
+
+# 6 pip hubs; hub/lock/interpreter/index and the self-supply set are pinned to deps.json
+# profiles by deps/check_module_pip.py (MODULE.bazel cannot load(), so the duplication can
+# only be validated).
+# The primary index must be aliyun: rules_python 0.33.2 takes "the first readable page" per
+# package and never merges indexes, so our partial mirror as primary would shadow complete
+# aliyun pages. Exclusively self-supplied packages are pointed back to their flavor view via
+# experimental_index_url_overrides.
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+
+# ninja's executable lives in the wheel's .data/scripts (installed to bin/, no entry_points),
+# but rules_python's spoke BUILD only globs site-packages/**, so bin/ninja is unreachable.
+# flashinfer's JIT backend invokes `ninja` via subprocess, so append a filegroup exposing bin/
+# to each hub whose lock contains ninja (cpu/arm do not, see deps.json exceptions).
+NINJA_BIN_BUILD_CONTENT = """\
+filegroup(
+    name = "bin",
+    srcs = glob(["bin/**"], allow_empty = True),
+    visibility = ["//visibility:public"],
+)
+"""
+
+[
+    pip.whl_mods(
+        additive_build_content = NINJA_BIN_BUILD_CONTENT,
+        # data is merged into the spoke's py_library(pkg) data, so //rtp_llm:ninja
+        # dependents carry bin/ninja (referencing :bin directly is unreachable).
+        data = [":bin"],
+        hub_name = hub,
+        whl_name = "ninja",
+    )
+    for hub in [
+        "ninja_bin_cuda12",
+        "ninja_bin_cuda12_9",
+        "ninja_bin_cuda12_arm",
+        "ninja_bin_rocm",
+    ]
+]
+
+pip.parse(
+    timeout = 3600,
+    experimental_extra_index_urls = ["https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cpu/"],
+    experimental_index_url = "https://mirrors.aliyun.com/pypi/simple/",
+    experimental_index_url_overrides = {
+        "torch": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cpu/",
+        "torchvision": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cpu/",
+    },
+    hub_name = "pip_cpu_torch",
+    python_interpreter = "/opt/conda310/bin/python3",
+    python_version = "3.10",
+    requirements_lock = "//deps:requirements_lock_torch_cpu.txt",
+)
+pip.parse(
+    timeout = 3600,
+    experimental_extra_index_urls = ["https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-arm/"],
+    experimental_index_url = "https://mirrors.aliyun.com/pypi/simple/",
+    experimental_index_url_overrides = {
+        "torch": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-arm/",
+    },
+    hub_name = "pip_arm_torch",
+    python_interpreter = "/opt/conda310/bin/python3",
+    python_version = "3.10",
+    requirements_lock = "//deps:requirements_lock_torch_arm.txt",
+)
+pip.parse(
+    timeout = 3600,
+    experimental_extra_index_urls = ["https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12/"],
+    experimental_index_url = "https://mirrors.aliyun.com/pypi/simple/",
+    experimental_index_url_overrides = {
+        "deep-ep": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12/",
+        "deep-gemm": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12/",
+        "flash-attn": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12/",
+        "tensorrt-cu12-libs": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12/",
+        "torch": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12/",
+        "torchvision": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12/",
+    },
+    hub_name = "pip_gpu_cuda12_torch",
+    python_interpreter = "/opt/conda310/bin/python3",
+    python_version = "3.10",
+    quiet = False,
+    requirements_lock = "//deps:requirements_lock_torch_gpu_cuda12.txt",
+    whl_modifications = {"@ninja_bin_cuda12//:ninja.json": "ninja"},
+)
+pip.parse(
+    timeout = 3600,
+    experimental_extra_index_urls = ["https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_9/"],
+    experimental_index_url = "https://mirrors.aliyun.com/pypi/simple/",
+    experimental_index_url_overrides = {
+        "deep-ep": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_9/",
+        "deep-gemm": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_9/",
+        "fast-hadamard-transform": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_9/",
+        "fast-safetensors": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_9/",
+        "fastsafetensors": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_9/",
+        "flash-attn": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_9/",
+        "flash-attn-3": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_9/",
+        "flash-mla": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_9/",
+        "flashinfer-cubin": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_9/",
+        "flashinfer-jit-cache": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_9/",
+        "flashinfer-python": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_9/",
+        "rtp-kernel": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_9/",
+        "sqlglot": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_9/",
+        "tensorrt-cu12-libs": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_9/",
+        "torch": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_9/",
+        "torchvision": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_9/",
+    },
+    hub_name = "pip_gpu_cuda12_9_torch",
+    python_interpreter = "/opt/conda310/bin/python3",
+    python_version = "3.10",
+    quiet = False,
+    requirements_lock = "//deps:requirements_lock_torch_gpu_cuda12_9.txt",
+    whl_modifications = {"@ninja_bin_cuda12_9//:ninja.json": "ninja"},
+)
+pip.parse(
+    timeout = 3600,
+    experimental_extra_index_urls = ["https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_arm/"],
+    experimental_index_url = "https://mirrors.aliyun.com/pypi/simple/",
+    experimental_index_url_overrides = {
+        "deep-ep": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_arm/",
+        "deep-gemm": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_arm/",
+        "fast-hadamard-transform": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_arm/",
+        "flash-attn": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_arm/",
+        "flash-attn-3": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_arm/",
+        "flashinfer-cubin": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_arm/",
+        "flashinfer-python": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_arm/",
+        "flash-mla": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_arm/",
+        "rtp-kernel": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_arm/",
+        "torch": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_arm/",
+        "torchvision": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-cuda12_arm/",
+    },
+    hub_name = "pip_cuda12_arm_torch",
+    python_interpreter = "/opt/conda310/bin/python3",
+    python_version = "3.10",
+    quiet = False,
+    requirements_lock = "//deps:requirements_lock_cuda12_arm.txt",
+    whl_modifications = {"@ninja_bin_cuda12_arm//:ninja.json": "ninja"},
+)
+pip.parse(
+    timeout = 12000,
+    experimental_extra_index_urls = ["https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-rocm/"],
+    experimental_index_url = "https://mirrors.aliyun.com/pypi/simple/",
+    experimental_index_url_overrides = {
+        "aiter": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-rocm/",
+        "amdsmi": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-rocm/",
+        "torch": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-rocm/",
+        "torchvision": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-rocm/",
+        "triton": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-rocm/",
+        "triton-kernels": "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple-rocm/",
+    },
+    hub_name = "pip_gpu_rocm_torch",
+    python_interpreter = "/opt/conda310/bin/python3",
+    python_version = "3.10",
+    requirements_lock = "//deps:requirements_lock_rocm.txt",
+    whl_modifications = {"@ninja_bin_rocm//:ninja.json": "ninja"},
+)
+use_repo(
+    pip,
+    # whl_mods annotation repos: must be visible to the root module or the
+    # whl_modifications tags fail with "no repository visible as".
+    "ninja_bin_cuda12",
+    "ninja_bin_cuda12_9",
+    "ninja_bin_cuda12_arm",
+    "ninja_bin_rocm",
+    "pip_arm_torch",
+    "pip_cpu_torch",
+    "pip_cuda12_arm_torch",
+    "pip_gpu_cuda12_9_torch",
+    "pip_gpu_cuda12_torch",
+    "pip_gpu_rocm_torch",
+)
