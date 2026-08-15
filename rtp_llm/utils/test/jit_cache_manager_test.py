@@ -130,11 +130,23 @@ class StoreTest(JitCacheTestBase):
         source = self.root / "suid.so"
         source.write_bytes(b"x")
         source.chmod(0o6755)
-        archive = self.root / "a.tar.zst"
-        store.pack_zstd_tar(archive, {"triton/suid.so": source})
-        store.extract_zstd_tar(archive, self.root / "out")
+        archive = self.root / f"a{store.SNAPSHOT_SUFFIX}"
+        store.pack_snapshot(archive, {"triton/suid.so": source})
+        store.extract_snapshot(archive, self.root / "out")
         mode = (self.root / "out" / "triton" / "suid.so").stat().st_mode
         self.assertFalse(mode & 0o7000)
+
+    def test_gzip_round_trip_without_zstandard(self):
+        source = self.root / "kernel.so"
+        source.write_bytes(b"compiled")
+        archive = self.root / "fallback.tar.gz"
+        with mock.patch.object(store, "zstd", None):
+            store.pack_snapshot(archive, {"triton/kernel.so": source})
+            store.extract_snapshot(archive, self.root / "gzip-out")
+        self.assertEqual(
+            (self.root / "gzip-out" / "triton" / "kernel.so").read_bytes(),
+            b"compiled",
+        )
 
     def test_newest_snapshot_wins_by_name_not_by_mtime(self):
         snap_store = self.make_store()
@@ -336,7 +348,7 @@ class StoreTest(JitCacheTestBase):
         source.write_bytes(b"payload")
         released, packing, release = [], threading.Event(), threading.Event()
         self.addCleanup(release.set)
-        real_pack = store.pack_zstd_tar
+        real_pack = store.pack_snapshot
 
         def pack(archive, files):
             packing.set()
@@ -344,7 +356,7 @@ class StoreTest(JitCacheTestBase):
             real_pack(archive, files)
 
         with _fake_fuser(umount=released.append), mock.patch.object(
-            store, "pack_zstd_tar", side_effect=pack
+            store, "pack_snapshot", side_effect=pack
         ):
             publisher = threading.Thread(
                 target=snap_store.publish_snapshot, args=({"triton/op.so": source},)
@@ -393,6 +405,8 @@ class ScopeTest(JitCacheTestBase):
         self.assertNotEqual(base, self.scope_id(toolkit="nvcc-new"))
         # artifacts bake the local root in, so a relocated tree needs its own remote
         self.assertNotEqual(base, self.scope_id(root=self.root / "elsewhere"))
+        with mock.patch.object(store, "zstd", None):
+            self.assertNotEqual(base, self.scope_id())
         with mock.patch("torch.__version__", "0.0.0+scope"):
             self.assertNotEqual(base, self.scope_id())
         with mock.patch("torch.__file__", "/other/prefix/torch/__init__.py"):
@@ -648,6 +662,17 @@ class ManagerTest(JitCacheTestBase):
         remote.mkdir(parents=True, exist_ok=True)
         self.publish(store.RemoteSnapshotStore(remote), {rel: data})
 
+    def test_missing_watchdog_uses_polling_worker(self):
+        manager = self.make_manager(mock.Mock(components=()))
+        with mock.patch.object(jit, "Observer", None), mock.patch.object(
+            manager, "_sync_loop"
+        ) as sync_loop, self.assertLogs(level="WARNING") as logs:
+            self.assertTrue(manager._start_watch())
+            manager._worker.join(1)
+        sync_loop.assert_called_once_with()
+        self.assertIsNone(manager._observer)
+        self.assertIn("polling fallback active", "\n".join(logs.output))
+
     def test_non_positive_setup_timeout_starts_cold(self):
         # argparse rejects these; a raw env read must degrade, not raise.
         for timeout_s in (0, -2):
@@ -717,7 +742,7 @@ class ManagerTest(JitCacheTestBase):
         peer.publish_pending_snapshot()
         peek = self.root / "peek"
         peek.mkdir()
-        store.extract_zstd_tar(snapshots(peer.store)[-1], peek)
+        store.extract_snapshot(snapshots(peer.store)[-1], peek)
         self.assertEqual(
             contents(peek),
             {"triton/remote.cubin": b"remote", "triton/peer.cubin": b"peer"},
@@ -755,7 +780,7 @@ class ManagerTest(JitCacheTestBase):
         restart.publish_pending_snapshot()
         peek = self.root / "peek"
         peek.mkdir()
-        store.extract_zstd_tar(snapshots(restart.store)[-1], peek)
+        store.extract_snapshot(snapshots(restart.store)[-1], peek)
         self.assertEqual(
             contents(peek),
             {"triton/warm.cubin": b"warm", "triton/fresh.cubin": b"fresh"},
