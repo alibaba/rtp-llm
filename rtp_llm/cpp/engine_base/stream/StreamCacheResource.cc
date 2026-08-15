@@ -432,23 +432,28 @@ int StreamCacheResource::mallocFailedTimes() const {
 }
 
 bool StreamCacheResource::reuseCache() const {
-    return resource_context_.reuse_cache && stream_->reuseCache();
+    return resource_context_.reuse_cache
+           && (resource_context_.ignore_request_cache_switches || stream_->reuseCache());
 }
 
 bool StreamCacheResource::enableRemoteCache() const {
-    return resource_context_.enable_remote_cache && stream_->enableRemoteCache();
+    return resource_context_.enable_remote_cache
+           && (resource_context_.ignore_request_cache_switches || stream_->enableRemoteCache());
 }
 
 bool StreamCacheResource::enableHostCache() const {
-    return resource_context_.enable_host_cache && stream_->enableHostCache();
+    return resource_context_.enable_host_cache
+           && (resource_context_.ignore_request_cache_switches || stream_->enableHostCache());
 }
 
 bool StreamCacheResource::enableDeviceCache() const {
-    return resource_context_.enable_device_cache && stream_->enableDeviceCache();
+    return resource_context_.enable_device_cache
+           && (resource_context_.ignore_request_cache_switches || stream_->enableDeviceCache());
 }
 
 bool StreamCacheResource::enableDiskCache() const {
-    return resource_context_.enable_disk_cache && stream_->enableDiskCache();
+    return resource_context_.enable_disk_cache
+           && (resource_context_.ignore_request_cache_switches || stream_->enableDiskCache());
 }
 
 bool StreamCacheResource::enableCacheLookup() const {
