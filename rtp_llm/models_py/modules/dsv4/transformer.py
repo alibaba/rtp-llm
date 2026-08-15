@@ -206,7 +206,7 @@ class V4Transformer(nn.Module):
                 for i in range(args.n_layers)
             ]
         )
-
+        self._mega_csa_runtime = None
         if self.commit_only:
             # A commit worker never embeds tokens, reduces mHC lanes, or
             # applies the target LM head.  Deliberately leave these members as
@@ -221,6 +221,23 @@ class V4Transformer(nn.Module):
             # ``nn.Parameter``); the framework dict supplies the real tensor.
             self.embed = EmbeddingTorch(gw[W.embedding])
             self.norm = RMSNorm(gw[W.final_ln_gamma], args.norm_eps)
+            if os.environ.get("DSV4_MEGA_CSA", "0") not in (
+                "0",
+                "",
+                "false",
+                "False",
+            ):
+                if not args.fp8_kv_cache or args.tp_size != 1:
+                    raise RuntimeError("DSV4_MEGA_CSA requires FP8 KV cache and TP1")
+                from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_runtime import (
+                    MegaCSARuntime,
+                )
+
+                self._mega_csa_runtime = MegaCSARuntime()
+                for layer_id, layer in enumerate(self.layers):
+                    layer.enable_mega_csa(
+                        self._mega_csa_runtime, mw.weights[layer_id]
+                    )
 
         # LM head — plain weight matrix [vocab_size, dim].  Accept either
         # BF16 (ckpt-native, used when ``enable_fp32_lm_head=False``) or
@@ -440,6 +457,11 @@ class V4Transformer(nn.Module):
         """Reduce the hc axis for ``[B, S, hc, d]`` or flat ``[T, hc, d]``."""
         return self.head_hc.head(x)
 
+    def begin_decode(self, attn_metadata: object) -> None:
+        """Advance model-wide decode state before entering the layer loop."""
+        if self._mega_csa_runtime is not None:
+            self._mega_csa_runtime.begin_decode(attn_metadata)
+
     @torch.inference_mode()
     def forward_decode(
         self,
@@ -460,6 +482,7 @@ class V4Transformer(nn.Module):
             input_ids_2d = input_ids
         h = self.embed(input_ids_2d)  # [B, q_len, dim]
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, q_len, hc, dim]
+        self.begin_decode(attn_metadata)
         layer_forward_range = _profiler.make_layer_forward_range()
         for layer_idx, layer in enumerate(self.layers):
             with layer_forward_range(layer_idx):

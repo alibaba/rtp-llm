@@ -1,219 +1,237 @@
-# DSV4 Mega CSA TP1 接入状态
+# DSV4 Mega CSA TP1 接入状态与后续方案
 
-更新日期：2026-08-12
+更新日期：2026-08-15
 
 ## 1. 当前结论
 
-RTP 开源分支 `dsv4-mega` 已重新对齐 `upstream/feat/dsv4_on_dev@bbf66a5f8`。
-当前 `rtp_llm` 代码相对上游为零差异，生产 decode 没有 Mega 开关、backend 或选路逻辑。
+DSV4 Mega CSA 的开源框架适配已经进入生产 decode 层循环，但还不能称为 RTP-LLM
+端到端已跑通：框架当前锁定的 CUDA13 `rtp-kernel` wheel 不含 Mega 扩展，必须先发布
+`cuda_extension@4c70d40` 对应制品，再做真实 GPU eager、CUDA Graph 和整模型验证。
 
-此前从 `8d75c0666` 开始的五个实验提交已从分支历史撤回，并保存在本地备份分支：
-
-```text
-backup/dsv4-mega-pre-minimal-20260812 @ 18cba4448
-```
-
-备份只用于查阅旧实验，不应继续作为生产接入基础。旧实现混合了必要性未证实的 cache ABI、
-Mega 专用 metadata、旧 FlashMLA fused-query contract 和未进入生产路由的旁路 backend。
-
-## 2. 为什么最终没有保留框架代码
-
-### 2.1 Cache geometry 不需要新增 ABI
-
-算子需要两个量：
+当前实现遵循“完整 attention sublayer 单独选路”，没有逐个替换普通算子：
 
 ```text
-entries_per_block
-block_stride_bytes
+Block.forward_decode
+  ├─ CSA Mega: adapter 已挂载 && q_len == 1
+  │    mHC pre + attention RMSNorm
+  │    -> front mixed GEMM
+  │    -> WQ-B + indexer compressor + SWA write
+  │    -> FP8 MQA + main compressor + query RMS/RoPE
+  │    -> RTP persistent TopK
+  │    -> RTP 原生 FlashMLA 路径
+  │    -> 现有 output projection
+  │    -> mHC post
+  └─ 原路径: 其他所有情况
+       attn_hc.pre -> AttentionFP8.forward_decode
+       -> output projection -> attn_hc.post
 ```
 
-当前框架已经把每层 typed pool 暴露为二维 tensor：
+FFN sublayer、FFN mHC、model head mHC 不在 Mega 替换范围内。
+
+## 2. 支持边界
+
+| 项目 | 当前支持 | 处理方式 |
+| --- | --- | --- |
+| 硬件 | Blackwell `sm_100a/sm_103a` | 首次执行前强校验 |
+| 并行 | TP1、单卡 | `tp_size != 1` 初始化失败 |
+| KV cache | FP8 | 非 FP8 初始化失败 |
+| 层类型 | `compress_ratio == 4` 的 CSA 层 | 只给这些层挂 adapter |
+| 请求形态 | decode、`q_len == 1`、batch 1..128 | 其余形态走现有路径 |
+| 进程角色 | `DECODE` 和单卡 `PDFUSION` | 由 `forward_decode` 限制实际执行 |
+| 开关 | `DSV4_MEGA_CSA=1` | 默认关闭，模型构造期固定 |
+
+下列场景保持现有实现：prefill、SWA-only、HCA、target verify (`q_len > 1`)、MTP、TP2/DP2。
+MTP 是独立模型且当前 `compress_ratio == 0`，不会挂载 CSA adapter。
+
+`is_decode_role=False` 同时覆盖 `PDFUSION` 和专用 PREFILL，框架目前没有更细的构造参数。
+因此 `DSV4_MEGA_CSA=1` 只应配置在 `DECODE/PDFUSION` 进程；误配到专用 PREFILL
+不会执行 Mega decode，但会产生不必要的 fused-weight 重排和显存占用。
+
+## 3. 已完成的框架适配
+
+### 3.1 文件与职责
+
+| 文件 | 修改 |
+| --- | --- |
+| `dsv4/transformer.py` | 解析开关；校验 FP8 KV/TP1；创建模型级 runtime；给 CSA 层挂 adapter |
+| `dsv4/decode/forward.py` | 在生产 layer loop 前推进一次 Mega decode step |
+| `dsv4/block.py` | 在 attention sublayer 入口选择完整 Mega 路径；FFN 前重新汇合 |
+| `fp8/decode/mega_csa_weights.py` | 校验 checkpoint tensor 并构造算子要求的 TP1 fused layout |
+| `fp8/decode/mega_csa_runtime.py` | 共享 workspace、logits、MQA schedule、RoPE table 和 slot mirror 生命周期 |
+| `fp8/decode/mega_csa_adapter.py` | 绑定现有 cache/metadata，编排 Mega 算子、TopK、原生 FlashMLA 和 o-proj |
+| `fp8/test/test_mega_csa_adapter.py` | 覆盖选路、PDFUSION、权重布局、ABI 和 runtime 生命周期 |
+
+### 3.2 权重
+
+`MegaCSAWeights` 在模型初始化时从原 checkpoint tensor 构造以下连续布局：
 
 ```text
-[kernel_block_count, physical_stride_elements]
+front_fp8 = [wq_a; wkv]
+front_sf = [wq_a_scale; wkv_scale]
+front_bf16 = [main_wkv; main_wgate; index_wkv; index_wgate; index_weight_proj]
+wq_b_fp8 = [index_wq_b; main_wq_b]
+wq_b_sf = [index_wq_b_scale; main_wq_b_scale]
 ```
 
-因此物理 stride 可以直接获得：
+FP8 权重和 UE8M0 scale 不做数值反量化/再量化。Indexer score 的两个归一化因子在初始化时
+折入 `index_weight_proj`，与现有 `IndexerFP8` 语义一致。
 
-```python
-block_stride_bytes = pool.stride(0) * pool.element_size()
-```
+当前每个 CSA 层约增加 152 MiB 连续权重副本，21 个 CSA 层约 3.2 GiB。它不影响单步
+kernel 时间，但影响模型初始化和常驻显存；在保留普通 target-verify 路径时不能直接释放原权重。
+后续可评估 loader 直接产出 fused layout，或者调整 kernel 接受分段权重，避免重复存储。
 
-现有 DSV4 约定从物理 stride 和已知 entry bytes 得到 entry 数：
+### 3.3 模型级 runtime
 
-```python
-entries_per_block = block_stride_bytes // bytes_per_entry
-```
+所有 CSA 层顺序复用同一批按 `(device, batch, split)` 缓存的 workspace，不按层重复分配。
+runtime 还负责：
 
-FP8 MLA pool 的 entry 为 584B，TMA 对齐为 576B；补齐量始终小于一个 entry，因此当前
-支持的 geometry 下整数除法不会产生额外 phantom entry。例如：
+- 每个模型 decode step 只生成一次 MQA schedule；
+- 在 WQ-B 提交前准备 schedule，保持 WQ-B 到 MQA 的 PDL 顺序；
+- 把框架五组 slot mapping 从 int64 转成算子需要的 int32，每个模型 step 各一次；
+- 按 graph metadata/buffer pointer 保留 slot mirror，避免 capture 后地址失效；
+- 保留 capture 期间生成的 schedule tensor，避免 graph 中悬空指针；
+- 缓存从 `freqs_cis` 拆出的连续 cos/sin table。
 
-| Pool | 物理 stride | entry bytes | 推导结果 |
-| --- | ---: | ---: | ---: |
-| CSA KV | 19008B | 584B | 32 |
-| HCA KV | 1152B | 584B | 1 |
-| Indexer KV | 4224B | 132B | 32 |
-| SWA KV | 74880B | 584B | 128 |
+五次 slot `copy_` 目前意味着每个模型 step 新增五个很小的 dtype-conversion launch，而不是
+每个 layer 五次。这是当前最明确的框架侧性能成本，需要在 GPU A/B 中单列；若可测开销明显，
+下一步应把五路转换融合成一个 kernel，而不是把 mirror 字段扩散进通用 metadata。
 
-FULL pool 在 C++ memory layout 中已经展开为 kernel-block 粒度；prefill CP 的 SWA byte-slice
-也已有专用逻辑恢复全 ring entry 数。因此新增以下字段没有提供当前代码无法推导的信息：
+### 3.4 Cache 与 FlashMLA
 
-```text
-logical_entries_per_block()
-group_entries_per_block
-LayerKVCache.kv_entries_per_block
-LayerKVCache.kv_block_stride_bytes
-```
-
-这组 ABI 改动已撤销。只有未来出现 `padding >= bytes_per_entry`、非二维 pool view，或者
-entry payload 与物理 record 不再一一对应时，才需要重新引入显式 descriptor。
-
-### 2.2 现有 metadata 已有正确性所需字段
-
-上游 `DSv4DecodeAttnMetadataFP8` 已经提供：
+没有增加通用 cache ABI。adapter 直接使用现有：
 
 ```text
 pool_block_tables
 pool_write_slot_mappings
 compressor_state_slot_mappings
-position_ids / position_ids_long
 compressed_lens
 topk_buffer_compressed
+position_ids / position_ids_long
 swa_global_slots
 ```
 
-旧提交新增的 `mega_*_i32` mirror 只是适配当时 CUDA kernel 的 int32 ABI，并避免每层 cast；
-它不是新的框架语义。最终 kernel ABI 尚未稳定，现在保留会提前固化重复 buffer 和通用
-metadata 结构，因此已撤销。
+`entries_per_block` 和 `block_stride_bytes` 继续从 typed pool 的现有 view/stride 推导。
 
-MQA schedule epoch/cache 同样应先由 Mega adapter 私有管理。只有确认多个 layer 必须共享，且
-CUDA graph capture/replay 生命周期无法由 adapter 管理时，才提升到通用 metadata。
+FlashMLA wrapper 没有修改，也不依赖 Wuda 的改造版 FlashMLA。adapter 在写 cache 前检查
+现有 FlashMLA metadata 和 backend，再通过 `AttentionFP8._forward_decode_compressed` 调用
+RTP 当前原生 FlashMLA wheel。进入 Mega 且发生 cache write 后，任何错误直接上抛，禁止回退
+普通 attention，避免同一步重复写 cache。
 
-### 2.3 旧 FlashMLA contract 已失效
+### 3.5 普通路径影响
 
-旧提交给通用 FlashMLA wrapper 增加了：
+开关关闭时不构造 fused weights、runtime、workspace 或 slot mirror，也不新增 CUDA kernel。
+普通路径保留原有 tensor 和 cache ABI。代码层只增加一次 model-step runtime presence check，以及
+每层一次 `adapter is not None` 的 Python 分支；是否可测必须由 normal FP8 A/B 给出，不能只凭
+静态分析宣称零下降。
 
-```text
-q_rms_sum_sq
-q_rope_cos
-q_rope_sin
-q_rms_eps
-```
+## 4. 算子与制品状态
 
-最新 Wuda 改为 FlashMLA 前完成 query RMSNorm/RoPE route，再调用原生 FlashMLA wheel。
-旧 fused-query 参数不再是目标 ABI，相关框架修改和运行时 `TypeError` 探测已全部撤销。
-
-### 2.4 旧 Mega backend 不是生产框架实现
-
-旧 `mega_csa_backend.py` 从未被 `Block.forward_decode` 选择，并明确标记
-`full_pipeline_ready = False`。它还依赖旧 FlashMLA contract、Mega int32 mirror 和旧
-CUDA Extension 快照。继续维护只会制造“已经接入”的错觉，因此不保留在当前分支。
-
-## 3. 当前真实链路
-
-每层 decode 仍执行：
+CUDA Extension 已完成 Wuda 最新 TP1（不含 TPDP）迁移并推送：
 
 ```text
-attn_hc.pre
--> attention RMSNorm
--> AttentionFP8.forward_decode
--> output projection
--> attn_hc.post
--> FFN sublayer
+repo:   /root/work/cuda_extension
+branch: origin/dsv4_megakernel
+commit: 4c70d40 feat(dsv4): migrate WUDA TP1 decode optimizations
 ```
 
-入口位于：
+本地 CUDA13 wheel：
 
 ```text
-rtp_llm/models_py/modules/dsv4/block.py::Block.forward_decode
+/root/work/cuda_extension/dist/
+  rtp_kernel-0.1.0+4c70d40e-cp310-cp310-linux_x86_64.whl
+sha256: 0e3e037f3d95e3c823244677f0e4ecc0d96f30547e17c964ffb6b65826534c6c
 ```
 
-Mega 最终应接管整个 attention sublayer，而不是只替换
-`AttentionFP8.forward_decode`：
+wheel 已确认包含：
 
 ```text
-attention MHC pre
--> front / WQ_B / Indexer / MQA / TopK
--> native FlashMLA
--> output projection
--> attention MHC post
+rtp_kernel/dsv4_mega.py
+rtp_ops_dsv4_mega.cpython-310-x86_64-linux-gnu.so
 ```
 
-FFN MHC 和层循环后的 model head MHC 不属于替换范围。
+RTP 当前 CUDA13 lock 仍解析到：
 
-## 4. 算子仓库状态
-
-| 仓库 | 当前基线 | 说明 |
-| --- | --- | --- |
-| Wuda | `main@d9e53a0` | 最新优化源；包含 query route、PDL overlap 和正在演进的 TP1/TP2 逻辑 |
-| CUDA Extension | `dsv4_megakernel@b2f07a8` | 较早 RTP 交付快照；包含 FP8 indexer producer 和 FP8 MQA/main compressor |
-| RTP 开源 | `dsv4-mega@bbf66a5f8` | 与上游完全一致，仅增加本文档提交后产生一个 docs commit |
-| RTP 内源 | `develop/wangyin_ds_v4_20260424` | 最终承接开源版本和内源制品依赖 |
-
-Wuda 与 CUDA Extension 的重构和迁移方案见
-`docs/dsv4_mega_cuda_extension_refactor.md`。
-
-## 5. 后续最小框架接入面
-
-必须先固定 CUDA Extension 和原生 FlashMLA 的最终 TP1 ABI，再修改 RTP。届时框架侧只允许
-增加以下三类改动。
-
-### 5.1 配置和生命周期
-
-- 默认关闭、模型构造期固定的 `enable_mega_csa`；
-- 只支持 FP8 KV cache、TP1、`q_len == 1` 和已验证 CSA geometry；
-- 只为满足条件的 layer 构造 adapter、权重布局和 graph-stable workspace；
-- capability check、JIT 和 workspace 分配必须在 cache write/CUDA graph capture 前完成。
-
-### 5.2 薄 adapter
-
-adapter 只负责：
-
-- 将现有 framework pool tensor、block table、slot mapping 和 position metadata 传给算子；
-- 从 tensor stride 取得 runtime page geometry；
-- 管理 Mega 私有 schedule/workspace；
-- 调用原生 FlashMLA wheel；
-- cache write 前完成全部 ABI 校验，写入后失败时禁止回退普通 attention。
-
-不要把算子 pipeline 重新用 Python 拼成 1000 行 backend，也不要把尚未共享的 schedule 和
-dtype mirror 提前放入通用 metadata。
-
-### 5.3 Attention sublayer switch
-
-`Block.forward_decode` 在 attention sublayer 入口选择：
-
-```python
-if mega_adapter is not None and q_len == 1:
-    x = mega_adapter.forward_attention_sublayer(x, metadata, kv_cache)
-else:
-    x = existing_attention_sublayer(x, metadata, kv_cache)
+```text
+rtp-kernel 0.1.0+cu13.4a1a7e3
 ```
 
-两条路径在 FFN 前汇合。普通 `AttentionFP8.forward_decode` 必须继续服务开关关闭、SWA-only、
-HCA、target verify、prefill 和不支持的 geometry。
+该旧 wheel 没有 `dsv4_mega`。在新 wheel 上传到稳定制品地址并取得哈希前，不把本地绝对路径
+或临时 URL 写进公共 requirements lock。
 
-## 6. 重新增加框架字段的门槛
+adapter 另外依赖当前 DeepGEMM 的：
 
-未来任何框架字段都要同时满足：
+```text
+tf32_hc_prenorm_gemm
+get_paged_mqa_logits_metadata
+get_num_sms
+```
 
-1. 最终算子 ABI 已固定；
-2. 现有 pool/metadata 无法正确或无额外 launch 地提供该信息；
-3. 字段有明确 eager、capture、replay 生命周期；
-4. 开关关闭时不分配、不更新、不增加 kernel；
-5. 有独立正确性测试和普通路径性能 A/B。
+首次真实执行会同时检查 GPU capability、`rtp_kernel.dsv4_mega` 函数签名和固定 geometry，
+避免“有同名旧符号但 ABI 不兼容”时进入 cache write。
 
-不满足这些条件的内容留在 adapter 或算子仓库，不修改通用 RTP 框架。
+## 5. 已完成验证
 
-## 7. 验证顺序
+以下 CPU/静态回归已通过：
 
-1. Wuda TP1 `--fullrank`，不启用 TP2；
-2. CUDA Extension 单算子正确性和性能 A/B；
-3. 原生 FlashMLA adapter contract test；
-4. RTP eager TP1、batch=1、`q_len=1`；
-5. normal prefill -> Mega decode -> normal target verify -> Mega decode；
-6. slot reuse、非平凡 block id、compression boundary；
-7. CUDA graph capture/replay；
-8. 普通 FP8 与 Mega FP8 的整段 attention、整模型性能 A/B。
+```text
+//rtp_llm/models_py/modules/dsv4/fp8/test:test_mega_csa_adapter
+//rtp_llm/models_py/modules/dsv4/fp8/test:test_attention_csa_overlap
+//rtp_llm/models_py/modules/dsv4/fp8/test:test_decode_topk_length
+//rtp_llm/models_py/modules/dsv4/decode/test:decode_fmha_impl_test
+```
 
-当前阶段不应提前修改 `Block.forward_decode` 或通用 metadata；先完成 Wuda -> CUDA
-Extension 的稳定 TP1 迁移。
+以下完整编译已通过：
+
+```bash
+bazelisk build //rtp_llm:rtp_llm \
+  --verbose_failures \
+  --config=cuda13 \
+  --test_output=errors \
+  --test_env="LOG_LEVEL=INFO" \
+  --jobs=64
+```
+
+使用本地 `cuda_extension@4c70d40` 和 Bazel CUDA13 依赖路径执行 adapter ABI 检查已通过，
+geometry 为 main `65536`、index `8192`、merged `73728`、main heads `128`、index heads `64`。
+
+这些结果证明 Python 接口、选路和完整目标可以编译，但不证明真实数据上的算子链正确性或性能。
+
+## 6. 端到端剩余缺口
+
+按阻塞顺序还需要：
+
+1. 发布 `4c70d40` 的 CUDA13 x86_64 wheel，并更新开源/内源实际使用的依赖入口和 lock；
+2. 在隔离环境加载新 wheel，跑一个 CSA layer 的 eager RTP 调用；
+3. 校验非平凡 block id、slot reuse、负 slot 和 compression boundary；
+4. 校验 normal prefill -> Mega decode -> normal target verify -> Mega decode；
+5. 对固定 batch graph 做 warmup、capture 和多次 replay，确认地址与 schedule 生命周期；
+6. 跑完整 TP1 模型正确性；
+7. 对 normal FP8 与 Mega FP8 做 attention sublayer 和整模型性能 A/B。
+
+当前 GPU 0..3 仍各占用约 216 GiB，GPU 4..7 约 267 GiB，未启动新的 GPU kernel，避免影响
+其他任务。显存可用后优先执行第 2..5 项，再进入完整模型。
+
+性能报告至少应单列：
+
+- 五次 slot int64 -> int32 转换；
+- mHC pre 到 front、WQ-B 到 MQA 的 PDL 收益；
+- MQA schedule 生成；
+- TopK + 原生 FlashMLA；
+- 完整 attention sublayer；
+- 开关关闭的普通 FP8 路径；
+- eager 与 CUDA Graph；
+- batch 1/8/16/32/64/128 和代表性 context length。
+
+## 7. 内源合入方案
+
+目标内源分支为 `develop/wangyin_ds_v4_20260424`。在开源提交稳定后：
+
+1. 将目标内源 worktree 对齐远端分支，保留现有用户修改和 gitlink；
+2. 迁移本提交的七个源码/测试改动，不迁移 Wuda TPDP 或改造版 FlashMLA 逻辑；
+3. 新 wheel 发布后，同时更新内源 CUDA13 requirements lock 和实际 Bazel 依赖选择；
+4. 先跑与开源相同的 CPU tests 和 `//rtp_llm:rtp_llm` 完整编译；
+5. 再在内源服务配置中只对 TP1 FP8 `DECODE/PDFUSION` 打开 `DSV4_MEGA_CSA=1`；
+6. 完成第 6 节 GPU 矩阵后，才能把开关从实验配置提升为默认配置。
+
+不需要修改 HCA、SWA、prefill、TP2/DP2 或 FlashMLA 通用接口。若后续接入这些场景，应分别
+新增受支持的完整 sublayer adapter，不能放宽当前 CSA TP1 adapter 的 geometry 检查。

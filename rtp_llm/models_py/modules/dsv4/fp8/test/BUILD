@@ -61,6 +61,7 @@ _DSV4_FP8_CPU_TESTS = [
     "test_compressor_start_finish_prefill",
     "test_decode_topk_length",
     "test_indexer_forward_with_pending_nested",
+    "test_mega_csa_adapter",
     "test_prefill_mixed_layer_cache_store",
 ]
 
