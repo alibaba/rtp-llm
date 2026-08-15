@@ -10,7 +10,9 @@ independent but identically initialized cache.
 
 from __future__ import annotations
 
+import json
 import os
+import tempfile
 import unittest
 from dataclasses import dataclass
 
@@ -330,6 +332,68 @@ def _bench_cuda_event(
     return timings[len(timings) // 2]
 
 
+def _bench_graph_kernel_envelope(
+    graph: torch.cuda.CUDAGraph,
+    *,
+    label: str,
+    start_kernel: str | None = None,
+    samples: int = 5,
+) -> float:
+    """Measure first-kernel to last-kernel span, matching Wuda's graph column."""
+    from torch.profiler import ProfilerActivity, profile
+
+    traces = []
+    trace_dir = os.environ.get("TEST_TMPDIR")
+    for _ in range(samples):
+        fd, trace_path = tempfile.mkstemp(
+            prefix="mega_csa_graph_", suffix=".json", dir=trace_dir
+        )
+        os.close(fd)
+        try:
+            with profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]
+            ) as prof:
+                graph.replay()
+                torch.cuda.synchronize()
+            prof.export_chrome_trace(trace_path)
+            with open(trace_path, encoding="utf-8") as trace_file:
+                trace = json.load(trace_file)
+            kernels = [
+                event
+                for event in trace["traceEvents"]
+                if event.get("ph") == "X" and event.get("cat") == "kernel"
+            ]
+            if not kernels:
+                raise RuntimeError("graph trace contains no CUDA kernels")
+            first_kernels = (
+                kernels
+                if start_kernel is None
+                else [
+                    event for event in kernels if start_kernel in event.get("name", "")
+                ]
+            )
+            if not first_kernels:
+                raise RuntimeError(
+                    f"graph trace has no kernel containing {start_kernel!r}"
+                )
+            first = min(event["ts"] for event in first_kernels)
+            last = max(event["ts"] + event["dur"] for event in kernels)
+            visible_kernels = [event for event in kernels if event["ts"] >= first]
+            traces.append((last - first, first, visible_kernels))
+        finally:
+            os.unlink(trace_path)
+    traces.sort(key=lambda item: item[0])
+    span, first, kernels = traces[len(traces) // 2]
+    if os.environ.get("DSV4_MEGA_PRINT_GRAPH_KERNELS", "0") == "1":
+        print(f"{label} graph kernel timeline ({span:.2f} us):")
+        for event in sorted(kernels, key=lambda item: item["ts"]):
+            name = event.get("name", "").split("(", 1)[0]
+            print(
+                f"  +{event['ts'] - first:8.2f} us " f"{event['dur']:8.2f} us  {name}"
+            )
+    return span
+
+
 def _fill_random_context(pools: _Pools, device: torch.device, seed: int) -> None:
     generator = torch.Generator(device=device).manual_seed(seed)
     batch_size = int(pools.block_tables[CSA_KV].shape[0])
@@ -507,6 +571,75 @@ class MegaCSARTPEagerTest(unittest.TestCase):
         self.assertEqual(tuple(output.shape), tuple(hidden.shape))
         self.assertTrue(torch.isfinite(output).all().item())
         return output, metadata
+
+    def _assert_written_pools_match(
+        self,
+        mega_metadata: object,
+        reference_metadata: object,
+        mega_pools: _Pools,
+        reference_pools: _Pools,
+        *,
+        label: str,
+    ) -> None:
+        cache_specs = (
+            ("CSA KV", CSA_KV, _KV_ENTRY_BYTES, dequantize_slots_to_bf16),
+            (
+                "Indexer KV",
+                INDEXER_KV,
+                _INDEXER_ENTRY_BYTES,
+                dequantize_indexer_k,
+            ),
+            ("SWA KV", SWA_KV, _KV_ENTRY_BYTES, dequantize_slots_to_bf16),
+        )
+        for name, attn_type, entry_bytes, dequantize in cache_specs:
+            mega_slots = mega_metadata.pool_write_slot_mappings[attn_type]
+            reference_slots = reference_metadata.pool_write_slot_mappings[attn_type]
+            torch.testing.assert_close(mega_slots, reference_slots, rtol=0.0, atol=0.0)
+            self.assertTrue((mega_slots >= 0).all().item(), msg=f"{label} {name}")
+            mega_value = dequantize(
+                mega_pools.packed_view(
+                    attn_type, mega_pools.entries_per_block[attn_type], entry_bytes
+                ),
+                mega_slots.to(torch.int64),
+            )
+            reference_value = dequantize(
+                reference_pools.packed_view(
+                    attn_type,
+                    reference_pools.entries_per_block[attn_type],
+                    entry_bytes,
+                ),
+                reference_slots.to(torch.int64),
+            )
+            value_diff = calc_diff(mega_value.float(), reference_value.float())
+            print(f"{label} Mega/reference {name} calc_diff: {value_diff:.6e}")
+            self.assertLess(value_diff, 1.0e-3, msg=f"{label} {name}")
+
+        for name, attn_type in (
+            ("CSA state", CSA_STATE),
+            ("Indexer state", INDEXER_STATE),
+        ):
+            mega_slots = mega_metadata.compressor_state_slot_mappings[attn_type]
+            reference_slots = reference_metadata.compressor_state_slot_mappings[
+                attn_type
+            ]
+            torch.testing.assert_close(mega_slots, reference_slots, rtol=0.0, atol=0.0)
+            state_dim = HEAD_DIM if attn_type == CSA_STATE else INDEX_HEAD_DIM
+            mega_state_rows = mega_pools.tensors[attn_type].view(-1, 4 * state_dim)
+            reference_state_rows = reference_pools.tensors[attn_type].view(
+                -1, 4 * state_dim
+            )
+            mega_state = mega_state_rows[mega_slots.long()]
+            reference_state = reference_state_rows[reference_slots.long()]
+            mega_finite = torch.isfinite(mega_state)
+            reference_finite = torch.isfinite(reference_state)
+            torch.testing.assert_close(
+                mega_finite, reference_finite, rtol=0.0, atol=0.0
+            )
+            value_diff = calc_diff(
+                mega_state[mega_finite], reference_state[reference_finite]
+            )
+            print(f"{label} Mega/reference {name} calc_diff: {value_diff:.6e}")
+            self.assertLess(value_diff, 1.0e-4, msg=f"{label} {name}")
 
     @torch.inference_mode()
     def _run_until_boundary(self, hidden_seed: int) -> torch.Tensor:
@@ -778,6 +911,12 @@ class MegaCSARTPEagerTest(unittest.TestCase):
                 hidden.clone(), mega_metadata, mega_pools
             ).clone()
             check_diff = calc_diff(mega_check.float(), reference_check.float())
+            check_max_abs = (
+                mega_check.float().sub(reference_check.float()).abs().max().item()
+            )
+            check_cos = torch.nn.functional.cosine_similarity(
+                mega_check.float().flatten(), reference_check.float().flatten(), dim=0
+            ).item()
             mega_topk = mega_metadata.topk_buffer_compressed.view(batch_size, -1)
             reference_topk = reference_metadata.topk_buffer_compressed.view(
                 batch_size, -1
@@ -802,14 +941,23 @@ class MegaCSARTPEagerTest(unittest.TestCase):
             print(
                 "Mega/reference performance-case correctness "
                 f"B={batch_size}, ctx={context_length}: calc_diff={check_diff:.6e}, "
+                f"max_abs={check_max_abs:.6e}, cos={check_cos:.9f}, "
                 "valid TopK overlap "
                 f"min/mean/max={min_overlap}/{mean_overlap:.1f}/{max_overlap} "
                 f"of {min_valid_topk}..{max_valid_topk}"
             )
             self.assertLess(check_diff, 1.0e-3)
+            self.assertGreater(check_cos, 0.999)
             self.assertEqual([len(mega_set) for mega_set in mega_sets], valid_topks)
             for overlap, valid_topk in zip(overlaps, valid_topks):
                 self.assertGreaterEqual(overlap, int(0.97 * valid_topk))
+            self._assert_written_pools_match(
+                mega_metadata,
+                reference_metadata,
+                mega_pools,
+                reference_pools,
+                label=f"B={batch_size}, ctx={context_length}",
+            )
 
             reference_hidden = hidden.clone()
             mega_hidden = hidden.clone()
@@ -865,11 +1013,68 @@ class MegaCSARTPEagerTest(unittest.TestCase):
             mega_graph_us = _bench_cuda_event(
                 mega_graph.replay, warmup=5, iterations=50
             )
+            reference_graph_envelope_us = _bench_graph_kernel_envelope(
+                reference_graph, label="reference"
+            )
+            mega_graph_envelope_us = _bench_graph_kernel_envelope(
+                mega_graph, label="mega"
+            )
+
+            # Wuda's graph column measures the operator chain with static input,
+            # int32 slot mappings and FlashMLA scheduling prepared before capture.
+            # Capture that same scope for both RTP paths while retaining the
+            # production graph above, which includes framework preparation.
+            reference_metadata.sched_meta_cache.clear()
+            reference_metadata._sched_meta_capturing = False
+            reference_fn()
+            torch.cuda.synchronize(self.device)
+            reference_metadata._sched_meta_capturing = True
+            reference_operator_graph = torch.cuda.CUDAGraph()
+            reference_operator_work = torch.empty_like(reference_graph_input)
+            with torch.cuda.graph(reference_operator_graph):
+                reference_operator_work.copy_(reference_graph_input)
+                reference_operator_output = self._forward_reference(
+                    reference_operator_work, reference_metadata, reference_pools
+                )
+
+            mega_metadata.sched_meta_cache.clear()
+            mega_metadata._sched_meta_capturing = False
+            self.runtime.begin_decode(mega_metadata)
+            self.runtime.mqa_schedule(
+                mega_metadata.compressed_lens[4], _COMPRESSED_ENTRIES_PER_BLOCK
+            )
+            mega_fn()
+            torch.cuda.synchronize(self.device)
+            mega_metadata._sched_meta_capturing = True
+            self.runtime.begin_decode(mega_metadata)
+            self.runtime.mqa_schedule(
+                mega_metadata.compressed_lens[4], _COMPRESSED_ENTRIES_PER_BLOCK
+            )
+            mega_operator_graph = torch.cuda.CUDAGraph()
+            mega_operator_work = torch.empty_like(mega_graph_input)
+            with torch.cuda.graph(mega_operator_graph):
+                mega_operator_work.copy_(mega_graph_input)
+                mega_operator_output = self._forward_mega(
+                    mega_operator_work, mega_metadata, mega_pools
+                )
+
+            reference_operator_us = _bench_graph_kernel_envelope(
+                reference_operator_graph,
+                label="reference operator",
+                start_kernel="tf32_hc_prenorm_gemm",
+            )
+            mega_operator_us = _bench_graph_kernel_envelope(
+                mega_operator_graph,
+                label="mega operator",
+                start_kernel="tf32_hc_prenorm_gemm",
+            )
             reference_graph.replay()
             mega_graph.replay()
             torch.cuda.synchronize(self.device)
             self.assertTrue(torch.isfinite(reference_graph_output).all().item())
             self.assertTrue(torch.isfinite(mega_graph_output).all().item())
+            self.assertTrue(torch.isfinite(reference_operator_output).all().item())
+            self.assertTrue(torch.isfinite(mega_operator_output).all().item())
 
             row = {
                 "batch": batch_size,
@@ -878,6 +1083,10 @@ class MegaCSARTPEagerTest(unittest.TestCase):
                 "mega_eager_us": mega_eager_us,
                 "reference_graph_us": reference_graph_us,
                 "mega_graph_us": mega_graph_us,
+                "reference_graph_envelope_us": reference_graph_envelope_us,
+                "mega_graph_envelope_us": mega_graph_envelope_us,
+                "reference_operator_us": reference_operator_us,
+                "mega_operator_us": mega_operator_us,
             }
             print(
                 "Mega/reference performance "
@@ -885,7 +1094,13 @@ class MegaCSARTPEagerTest(unittest.TestCase):
                 f"eager {mega_eager_us:.2f}/{reference_eager_us:.2f} us "
                 f"({(mega_eager_us / reference_eager_us - 1.0) * 100.0:+.1f}%), "
                 f"graph {mega_graph_us:.2f}/{reference_graph_us:.2f} us "
-                f"({(mega_graph_us / reference_graph_us - 1.0) * 100.0:+.1f}%)"
+                f"({(mega_graph_us / reference_graph_us - 1.0) * 100.0:+.1f}%), "
+                "kernel envelope "
+                f"{mega_graph_envelope_us:.2f}/{reference_graph_envelope_us:.2f} us "
+                f"({(mega_graph_envelope_us / reference_graph_envelope_us - 1.0) * 100.0:+.1f}%), "
+                "prebound operator "
+                f"{mega_operator_us:.2f}/{reference_operator_us:.2f} us "
+                f"({(mega_operator_us / reference_operator_us - 1.0) * 100.0:+.1f}%)"
             )
 
             self.assertLessEqual(
@@ -898,8 +1113,14 @@ class MegaCSARTPEagerTest(unittest.TestCase):
                 reference_graph_us * 1.05,
                 msg=f"CUDA Graph regression at B={batch_size}: {row}",
             )
+            self.assertLessEqual(
+                mega_operator_us,
+                reference_operator_us * 1.05,
+                msg=f"operator graph regression at B={batch_size}: {row}",
+            )
 
             del reference_graph, mega_graph
+            del reference_operator_graph, mega_operator_graph
             del reference_pools, mega_pools, reference_metadata, mega_metadata
             torch.cuda.empty_cache()
 
