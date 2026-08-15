@@ -76,6 +76,39 @@ arch_with_version_dep = select({
     "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
 })
 
+# The internal PPU and ROCm locks omit watchdog, so those platforms use the
+# manager's polling fallback. ROCm also omits zstandard and uses gzip snapshots;
+# PPU reuses the CUDA 12 zstandard wheel, which has no CUDA runtime dependency.
+py_library(
+    name = "watchdog",
+    deps = select({
+        "@//:using_ppu": [],
+        "@//:cuda_pre_12_9": ["@pip_gpu_cuda12_torch//watchdog"],
+        "@//:using_cuda13_x86": ["@pip_gpu_cuda13_torch//watchdog"],
+        "@//:using_cuda12_9_x86": ["@pip_gpu_cuda12_9_torch//watchdog"],
+        "@//:using_cuda13_arm": ["@pip_cuda13_arm_torch//watchdog"],
+        "@//:using_cuda12_arm": ["@pip_cuda12_arm_torch//watchdog"],
+        "@//:using_rocm": [],
+        "@//:using_arm": ["@pip_arm_torch//watchdog"],
+        "//conditions:default": ["@pip_cpu_torch//watchdog"],
+    }),
+)
+
+py_library(
+    name = "zstandard",
+    deps = select({
+        "@//:using_ppu": ["@pip_gpu_cuda12_torch//zstandard"],
+        "@//:cuda_pre_12_9": ["@pip_gpu_cuda12_torch//zstandard"],
+        "@//:using_cuda13_x86": ["@pip_gpu_cuda13_torch//zstandard"],
+        "@//:using_cuda12_9_x86": ["@pip_gpu_cuda12_9_torch//zstandard"],
+        "@//:using_cuda13_arm": ["@pip_cuda13_arm_torch//zstandard"],
+        "@//:using_cuda12_arm": ["@pip_cuda12_arm_torch//zstandard"],
+        "@//:using_rocm": [],
+        "@//:using_arm": ["@pip_arm_torch//zstandard"],
+        "//conditions:default": ["@pip_cpu_torch//zstandard"],
+    }),
+)
+
 requirement([
     "sentencepiece",
     "transformers",
@@ -137,8 +170,6 @@ requirement([
     "aiter",
     "fastsafetensors",
     "pybind11_stubgen",
-    "watchdog",
-    "zstandard",
     "xgrammar",
 ] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
 
