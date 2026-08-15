@@ -204,9 +204,23 @@ geometry 为 main `65536`、index `8192`、merged `73728`、main heads `128`、i
 //rtp_llm/models_py/modules/dsv4/fp8/test:test_mega_csa_rtp_eager
 ```
 
-该测试显式固定 DSV4 Pro geometry：`index_topk=1024`、`o_groups=16`、
-`o_lora_rank=1024`。2026-08-15 纠正：提交 `792fd721d` 中的合成测试误用了
-`index_topk=512`、`o_groups=8`；该提交记录的性能数字不是 Pro 配置，已全部作废并由下表替换。
+该测试显式固定 Wuda `origin/config.json` 中的 DSV4 Pro attention geometry：
+
+```text
+dim=7168, n_heads=128, q_lora_rank=1536
+head_dim=512, rope_head_dim=64
+o_groups=16, o_lora_rank=1024
+window_size=128, compress_ratio=4 (CSA)
+index_n_heads=64, index_head_dim=128, index_topk=1024
+original_seq_len=65536, max_seq_len=65536
+rope_theta=10000, rope_factor=16, beta_fast=32, beta_slow=1
+compress_rope_theta=160000, hc_mult=4, hc_sinkhorn_iters=20
+FP8 indexer, TP1, RTP persistent TopK, RTP output projection, official FlashMLA
+```
+
+Mega 和 reference 都调用 RTP 现有 persistent TopK；没有迁移或选择 Wuda TopK。2026-08-15
+纠正：提交 `792fd721d` 中的合成测试误用了 `index_topk=512`、`o_groups=8`，该提交记录的
+性能数字不是 Pro 配置，已全部作废并由下表替换。
 
 测试使用一个真实 `AttentionFP8` 层、确定性合成权重和两套相同初态的 RTP pybind `KVCache`。
 reference 严格执行 `Block.forward_decode` 的原 attention 分支：
@@ -233,26 +247,48 @@ Mega 与 reference 分别写独立 cache，连续执行 position `0..3` 到首�
 候选中选择 Top-1024：Mega/reference 有效 TopK overlap 为 `1024/1024`，最终输出
 `calc_diff=3.098951e-09`。
 
-reference 使用 RTP 默认 TileLang mHC，并使用预热后的 CUDA Event 中位数计时；metadata 构造、
-首次 JIT 和每个 model step 只调用一次的 `runtime.begin_decode` 不计入单层时间：
+reference 使用 RTP 默认 TileLang mHC。以下 CUDA Event 是五组预热样本的中位数；首次 JIT、
+metadata 构造和每个 model step 只调用一次的 `runtime.begin_decode` 不计入单层时间。生产 graph
+保留 adapter 在 graph 内实际执行的五路 slot dtype conversion 和动态 FlashMLA metadata planner：
 
-| Batch | Context | 原路径 eager | Mega eager | 变化 | 原路径 graph | Mega graph | 变化 |
+| Batch | Context | 原路径 eager | Mega eager | 变化 | 原路径生产 graph | Mega 生产 graph | 变化 |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 2048 | `1949.50 us` | `694.50 us` | `-64.4%` | `222.67 us` | `154.14 us` | `-30.8%` |
-| 8 | 2048 | `1933.53 us` | `702.34 us` | `-63.7%` | `228.62 us` | `155.05 us` | `-32.2%` |
-| 16 | 2048 | `1945.50 us` | `699.06 us` | `-64.1%` | `241.46 us` | `163.92 us` | `-32.1%` |
-| 128 | 65536 | `1994.41 us` | `714.86 us` | `-64.2%` | `381.14 us` | `300.27 us` | `-21.2%` |
+| 1 | 2048 | `1965.04 us` | `686.58 us` | `-65.1%` | `223.83 us` | `156.47 us` | `-30.1%` |
+| 8 | 2048 | `2146.59 us` | `771.39 us` | `-64.1%` | `232.32 us` | `158.37 us` | `-31.8%` |
+| 16 | 2048 | `2155.24 us` | `773.68 us` | `-64.1%` | `243.60 us` | `166.74 us` | `-31.6%` |
+| 128 | 65536 | `2159.37 us` | `770.76 us` | `-64.3%` | `383.64 us` | `302.44 us` | `-21.2%` |
+
+Wuda 的 `graph` 列不是上述生产 graph 口径，而是输入和 int32 slot 已绑定、FlashMLA schedule 已在
+capture 前生成的纯算子链。测试另外对 Mega 和原 RTP 路径都按该口径 capture，并用 profiler 的
+首个 mHC kernel 到最后一个 mHC post kernel 的 envelope 计时：
+
+| Batch | Context | 原路径纯算子链 | Mega 纯算子链 | 变化 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 2048 | `209.56 us` | `136.38 us` | `-34.9%` |
+| 8 | 2048 | `216.16 us` | `133.15 us` | `-38.4%` |
+| 16 | 2048 | `225.66 us` | `139.39 us` | `-38.2%` |
+| 128 | 65536 | `356.99 us` | `265.29 us` | `-25.7%` |
+
+因此 B128/64K 的 Mega 算子链是约 `265 us`；约 `300 us` 是当前 RTP 生产 graph。两者约
+`34 us` 的差额主要来自五路 slot conversion 和约 `25 us` 的 FlashMLA metadata planner，不能
+归因于 RTP TopK。RTP persistent TopK 在该次生产 graph timeline 中为 `14.5 us`。
 
 B128/64K 使用两套相同的随机有效 FP8 packed CSA/Indexer/SWA cache。最终 attention sublayer
-输出 `calc_diff=2.682290e-07`；每个请求从 16384 个 compressed 候选中选择 Top-1024，有效
+输出 `calc_diff=2.682161e-07`、最大绝对误差 `2.944946e-02`、cosine `0.999789715`。每个请求
+从 16384 个 compressed 候选中选择 Top-1024，有效
 overlap min/mean/max 为 `1000/1023.7/1024`。测试门限为每个请求至少 97% 有效 overlap；差异
 集中在 TopK 截断边界，最终输出仍满足数值门限。ctx=2048 时只有 512 个有效 compressed 候选，
 因此固定宽度 1024 的 TopK buffer 表现为 512 个有效索引和 512 个 padding；这三个 case 的有效
 overlap 均为 `512/512`。
 
+B128/64K 同步校验本步写入内容，而不只校验最终输出：CSA KV、Indexer KV、SWA KV 的
+`calc_diff` 分别为 `2.986297e-05`、`3.371339e-04`、`2.818445e-07`，CSA state 和 Indexer state
+分别为 `6.308681e-10`、`7.094991e-10`，均通过各自数值门限。
+
 性能模式通过 `--test_env=DSV4_MEGA_RUN_PERF=1` 显式开启，并对每个 batch 设置不高于原路径
-`1.05x` 的回归门。它覆盖真实 RTP 单层算子链，但 typed pool/block table 仍由测试按生产 geometry
-构造，不是 `KVCacheManager` 分配；也未使用真实 checkpoint，不能替代整模型端到端验证。
+`1.05x` 的 eager、生产 CUDA Graph 和预绑定算子链回归门。它覆盖真实 RTP 单层算子链，但
+typed pool/block table 仍由测试按生产 geometry 构造，不是 `KVCacheManager` 分配；也未使用
+真实 checkpoint，不能替代整模型端到端验证。
 
 ## 6. 端到端剩余缺口
 
