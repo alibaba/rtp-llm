@@ -2,12 +2,14 @@
 
 The production wo_a projection is one
 ``deep_gemm.fp8_einsum("bhr,hdr->bhd", ..., recipe=(1, 1, 128))`` launch.
-That kernel is Blackwell-only: with the int32-packed UE8M0 scale layout it
-raises ``csrc/apis/layout.hpp:46: Unknown SF transformation``, and once the
-scales are handed over in a layout the dispatcher *does* recognise it
-raises ``csrc/apis/einsum.hpp:174: Unsupported architecture`` instead
-(probed on H20 in ``dsv4_fp8/probe_fp8_einsum_sf.py``).  There is no SM90
-``fp8_einsum``, so the einsum has to be expressed as GEMMs.
+That kernel is Blackwell-only.  On a device of compute capability 9.0 it
+fails twice over: handed the int32-packed UE8M0 scale layout it raises
+``csrc/apis/layout.hpp:46: Unknown SF transformation``, and handed a layout
+the dispatcher *does* recognise it raises
+``csrc/apis/einsum.hpp:174: Unsupported architecture``.  There is no SM90
+``fp8_einsum``, so the einsum has to be expressed as GEMMs.  Both messages
+reproduce by calling ``fp8_einsum`` directly with this module's operands --
+see ``wo_a_sm90_gemm_test.py`` for the shapes.
 
 ``"bhr,hdr->bhd"`` with ``G`` groups is ``G`` independent
 ``[M, K] x [R, K]^T`` GEMMs that share the token axis, so this module runs
@@ -39,11 +41,15 @@ Two layout consequences, both of which *simplify* the init path:
 from typing import Optional, Tuple
 
 import torch
-from deep_gemm.utils.layout import get_mn_major_tma_aligned_tensor
 
-import deep_gemm
-
+# ``deep_gemm`` is imported inside :func:`wo_a_grouped_gemm` rather than here: the
+# scale unpack and the weight regrouping below are plain tensor algebra, and
+# keeping them importable without DeepGEMM (or a GPU) is what lets them be covered
+# by a host test.
 _UE8M0_BIAS = 127.0
+
+# Bytes per int32 word in the packed UE8M0 scale layout.
+_UE8M0_BYTES_PER_WORD = 4
 
 
 def prepare_wo_a_grouped(
@@ -68,21 +74,42 @@ def prepare_wo_a_grouped(
     return w, s
 
 
-def unpack_ue8m0_int32_scale(packed: torch.Tensor, k_blocks: int) -> torch.Tensor:
-    """``[..., K/512]`` int32 UE8M0 -> ``[..., K/128]`` fp32.
+def unpack_ue8m0_int32_scale(
+    packed: torch.Tensor,
+    k_blocks: int,
+    *,
+    bytes_per_word: int = _UE8M0_BYTES_PER_WORD,
+) -> torch.Tensor:
+    """Packed int32 UE8M0 exponents -> ``[..., k_blocks]`` fp32.
 
-    Each int32 word packs four UE8M0 bytes — the biased exponents of four
-    consecutive K-blocks, least-significant byte first — so the fp32 scale
-    is ``2 ** (byte - 127)``.  Written with shifts rather than a
-    ``view(torch.uint8)`` because the packed tensor is MN-major (stride
-    ``(1, K/512 * tma_M, tma_M)``) and a bit-view would require contiguity.
+    Each int32 word carries ``bytes_per_word`` biased exponents,
+    least-significant byte first, so the fp32 scale is ``2 ** (byte - 127)``.
+    Written with shifts rather than a ``view(torch.uint8)`` because the packed
+    tensor is MN-major (stride ``(1, K/512 * tma_M, tma_M)``) and a bit-view
+    would require contiguity.  The shift is arithmetic, so a word whose top byte
+    is ``>= 0x80`` reads back negative; the ``& 0xFF`` after it is what makes the
+    byte extraction correct in that case rather than incidental.
 
-    ``k_blocks`` trims the trailing bytes when ``K/128`` is not a multiple
-    of 4 (the packer rounds up).
+    ``k_blocks`` trims the trailing bytes of the last word, which the packer
+    rounds up to a whole word.
+
+    ``bytes_per_word`` is explicit because two packers with *different* grouping
+    semantics feed this function.  The shared-expert packer groups four
+    consecutive K-blocks per word; the wo_a activation packer groups per head,
+    and only coincides with the first because DSV4-Flash's ``head_dim`` of 512
+    makes ``chunks_per_head`` exactly 4.  The assertion below is what keeps a
+    change to either shape from silently producing wrong scales.
     """
+    words_present = packed.shape[-1]
+    expected_words = -(-int(k_blocks) // int(bytes_per_word))  # ceil
+    assert words_present == expected_words, (
+        f"packed last dim {words_present} cannot hold {k_blocks} blocks at "
+        f"{bytes_per_word} bytes/word (expected {expected_words}); the packer's "
+        "grouping and this unpack disagree"
+    )
     words = torch.stack(
-        [(packed >> (8 * i)) & 0xFF for i in range(4)], dim=-1
-    )  # [..., K/512, 4]
+        [(packed >> (8 * i)) & 0xFF for i in range(bytes_per_word)], dim=-1
+    )  # [..., words, bytes_per_word]
     exps = words.reshape(*packed.shape[:-1], -1)[..., :k_blocks]
     return torch.exp2(exps.float() - _UE8M0_BIAS)
 
@@ -101,6 +128,10 @@ def wo_a_grouped_gemm(
     the pair from :func:`prepare_wo_a_grouped`.  Returns ``[M, G, R]``
     bf16.
     """
+    from deep_gemm.utils.layout import get_mn_major_tma_aligned_tensor
+
+    import deep_gemm
+
     M, G, K = o_fp8.shape
     R = weight.shape[1]
     assert weight.shape == (G, R, K), f"weight {tuple(weight.shape)} vs o {(M, G, K)}"
