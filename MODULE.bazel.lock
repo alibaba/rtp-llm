@@ -74,7 +74,7 @@
   "moduleExtensions": {
     "//deps/extensions:defs.bzl%rtp_non_module_deps": {
       "general": {
-        "bzlTransitiveDigest": "y3YTzDQiKBAUMv/xcOkEiMaGV9kuaW5MRC4wrfUZMdQ=",
+        "bzlTransitiveDigest": "66iNdjSrNcSjMPMU975KfxsWHKm5tda+eJpQTRmQhHQ=",
         "usagesDigest": "77qr3jjkUtwYjrwU5CQr9HMhuzgc76P42pqMwHwZqTE=",
         "recordedFileInputs": {
           "@@//deps/deps.json": "8be8ff5298cb434375ea8ec29acf6bf16a9bb83450a4ba45efd268640ea88d45"

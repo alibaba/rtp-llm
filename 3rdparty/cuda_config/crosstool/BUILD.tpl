@@ -7,15 +7,40 @@ licenses(["restricted"])
 
 package(default_visibility = ["//visibility:public"])
 
+# target_compatible_with appends @rtp_llm//platforms:cuda_compiler so this nvcc wrapper
+# toolchain wins resolution only when the target platform explicitly carries the cuda_compiler
+# constraint (--config=cuda selects @rtp_llm//platforms:cuda_linux_x86_64 via --platforms);
+# the default host platform of CPU builds has no such constraint → falls back to
+# local_config_cc gcc, not hijacked.
+# exec_compatible_with adds no gpu constraint: on the host (exec) platform this toolchain can
+# still serve as the exec-side cc, but it is only selected when the target hits cuda_compiler.
 toolchain(
     name = "toolchain-linux-x86_64",
     exec_compatible_with = [
-        "@bazel_tools//platforms:linux",
-        "@bazel_tools//platforms:x86_64",
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
     ],
     target_compatible_with = [
-        "@bazel_tools//platforms:linux",
-        "@bazel_tools//platforms:x86_64",
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+        "@rtp_llm//platforms:cuda_compiler",
+    ],
+    toolchain = ":cc-compiler-local",
+    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+)
+
+# Used by cuda12_9_arm: nvcc wrapper toolchain on native aarch64 hosts. Reuses the same
+# :cc-compiler-local (cpu="local", architecture-agnostic). target is gated by cuda_compiler.
+toolchain(
+    name = "toolchain-linux-aarch64",
+    exec_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+        "@rtp_llm//platforms:cuda_compiler",
     ],
     toolchain = ":cc-compiler-local",
     toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
