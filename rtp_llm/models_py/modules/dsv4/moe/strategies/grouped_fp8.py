@@ -101,7 +101,7 @@ _HOPPER_MAJOR = 9
 _MASKED_ENV = "DSV4_MOE_MASKED"
 
 # The masked GEMM's M tile: it writes whole tiles of this many rows, clipped to the
-# tensor's own max_m (measured on 11.24.224.84 -- with masked_m=1 it writes rows 0..63 for
+# tensor's own max_m (measured on H20, DeepGEMM 2.2.0 -- with masked_m=1 it writes rows 0..63 for
 # max_m in {64, 128}, and 0..max_m-1 below that). Everything after the first GEMM can
 # therefore work on align(N, _MASKED_TILE) rows per group instead of max_m.
 _MASKED_TILE = 64
@@ -117,10 +117,16 @@ _MASKED_MAX_N = 1024
 # The fused swiglu+quant kernel below replaces ~8 kernels per MoE layer with 1 and is
 # 6.3x faster on the decode shape (238.5 -> 37.8 us, measured), but it is NOT bit-identical
 # to the sequence it replaces: 7623 of 8388608 quantised activation elements (0.09%) differ
-# by exactly one fp8 e4m3 ULP, deterministically, with the per-group scales bit-identical.
-# The reference quantiser is a CUDA op, so the residual difference is its rounding at the
-# halfway boundary and could not be matched from Triton (matching torch's x*sigmoid(x) form
-# of silu removed the rest). One fp8 ULP on an activation that was just quantised to fp8 is
+# by exactly one fp8 e4m3 ULP, deterministically. The per-group scales are not
+# bit-identical either, though the difference is smaller than it sounds and runs
+# the other way: this kernel produces exactly max(absmax_fp32, eps)/448, the fp32
+# definition, while the reference quantiser lands one fp32 ULP off it on roughly
+# half the groups (measured over three input distributions in
+# grouped_fp8_swiglu_fusion_test). So the fused path is the more faithful of the
+# two, and the residual byte difference is that one-ULP scale plus the reference's
+# rounding at the halfway boundary, which could not be matched from Triton because
+# the reference is a CUDA op (matching torch's x*sigmoid(x) form of silu removed the
+# rest). One fp8 ULP on an activation that was just quantised to fp8 is
 # far below the model's numerical noise -- and this engine is not run-to-run reproducible at
 # token granularity anyway -- but it is a real difference, so it gets its own switch.
 _FUSED_SWIGLU_ENV = "DSV4_MOE_FUSED_SWIGLU"
@@ -194,18 +200,44 @@ def _has_grouped_fp8_kernel() -> bool:
     return torch.cuda.get_device_capability()[0] == _HOPPER_MAJOR
 
 
+_ep_group_unavailable_reason: str = ""
+
+
 def _ep_group():
-    """The process group the EP combine runs over, or None if unavailable."""
+    """The process group the EP combine runs over, or None if unavailable.
+
+    "Unavailable" means one of two expected things: ``torch.distributed`` or the
+    collective helper is not importable, or the group has not been initialised
+    yet. Anything else -- a renamed group, a lookup that raises -- is a real
+    configuration fault and propagates, because swallowing it produced a
+    ``can_handle`` of False whose reason never reached the operator: the error
+    ``select_strategy`` raised named only Mega's reason, and a ``Group.TP`` that
+    could not be resolved looked like an unrelated failure.
+    """
+    global _ep_group_unavailable_reason
     try:
         import torch.distributed as dist
 
-        if not dist.is_initialized():
-            return None
         from rtp_llm.models_py.distributed.collective_torch import Group, _get_group
-
-        return _get_group(Group.TP)
-    except Exception:
+    except (ImportError, ModuleNotFoundError) as exc:
+        _ep_group_unavailable_reason = f"torch.distributed unavailable: {exc}"
         return None
+
+    if not dist.is_initialized():
+        _ep_group_unavailable_reason = "torch.distributed is not initialized"
+        return None
+
+    group = _get_group(Group.TP)
+    if group is None:
+        _ep_group_unavailable_reason = "collective_torch has no Group.TP"
+    else:
+        _ep_group_unavailable_reason = ""
+    return group
+
+
+def ep_group_unavailable_reason() -> str:
+    """Why :func:`_ep_group` last returned None, for inclusion in error text."""
+    return _ep_group_unavailable_reason
 
 
 def _ep_group_size() -> int:
@@ -227,7 +259,7 @@ def _ll_max_tokens(ep: int) -> int:
     conservative. Rounding to ``_MASKED_TILE / gcd(_MASKED_TILE, ep)`` instead keeps
     ``max_tokens * ep`` a multiple of the tile while making it as small as the tile
     allows: at ep=4 that is 16 rather than 64, so the recv buffer is 64 rows -- the
-    fewest the GEMM can use -- instead of 256. Measured on 11.24.224.84 at 8
+    fewest the GEMM can use -- instead of 256. Measured on 8x H20 at 8
     tokens/rank: 0.666 -> 0.609 ms per MoE layer, because everything between the two
     GEMMs (the swiglu, the quant, and 67 MB of buffer per layer) shrinks 4x while the
     GEMMs themselves compute the same tiles.
@@ -281,7 +313,7 @@ def _ll_buffer(ep: int, dim: int, n_experts: int):
         num_qps_per_rank=n_experts // ep,
         # The kernels' docstrings say IBGDA; on a single NVLink node there is no NIC
         # to go through and this makes them use NVLink peer stores instead. Verified
-        # working on 11.24.224.84 (8x H20, no IB fabric between the ranks).
+        # working on a single 8x H20 host (no IB fabric between the ranks).
         allow_nvlink_for_low_latency_mode=True,
         allow_mnnvl=False,
     )
@@ -571,17 +603,30 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         # and a short enough prefill request would fall into ``_ll_buffer`` and do
         # that allocation *mid-request*, since the forward branch tests the runtime
         # token count rather than the bound.
-        self._ll_ok = (
-            cfg.ep_size > 1
-            and _deepep_ll_enabled()
-            and cfg.max_tokens_per_rank <= _ll_max_tokens(cfg.ep_size)
-        )
+        self._ll_ok = self._ll_gate(cfg)
         if self._ll_ok:
             _ll_buffer(cfg.ep_size, D, cfg.n_routed_experts)
 
         # Hand the loader's freed blocks back to the driver so KV-pool sizing
         # sees real residual HBM instead of allocator-cached blocks.
         torch.cuda.empty_cache()
+
+    @staticmethod
+    def _ll_gate(cfg: MoeCfg) -> bool:
+        """Whether this role can ever reach the low-latency exchange.
+
+        Extracted so it is callable without standing up NVSHMEM: it decides
+        whether a 136 MB RDMA buffer gets allocated, and the only way to test that
+        decision through ``setup_weights`` is to allocate one.
+
+        Every term is known at load time, which is what keeps the forward branch
+        rank-uniform.
+        """
+        return (
+            cfg.ep_size > 1
+            and _deepep_ll_enabled()
+            and cfg.max_tokens_per_rank <= _ll_max_tokens(cfg.ep_size)
+        )
 
     def forward(
         self,
@@ -633,8 +678,25 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
 
         if self._ll_ok and N > 0:
             buf, ll_max_tokens = _ll_buffer(ep, D, cfg.n_routed_experts)
-            if N <= ll_max_tokens:
-                return self._local_experts_ll(x, weights, indices, buf, ll_max_tokens).float()
+            if N > ll_max_tokens:
+                # _ll_gate already established max_tokens_per_rank <=
+                # ll_max_tokens, so reaching here means the scheduler handed this
+                # rank more tokens than its own declared bound. Falling back to
+                # the all-gather path -- what this used to do -- is the one
+                # outcome worse than stopping: a rank at or under the bound would
+                # still take the low-latency branch, the two sets of EP
+                # collectives would not match, and the symptom would be an NCCL
+                # hang followed by the P/D timeout rather than an error here.
+                raise RuntimeError(
+                    f"grouped_fp8: {N} tokens on this rank exceeds the "
+                    f"low-latency buffer's {ll_max_tokens} per-rank capacity "
+                    f"(cfg.max_tokens_per_rank={cfg.max_tokens_per_rank}). Raise "
+                    "DSV4_MOE_LL_MAX_TOKENS to cover the scheduler's bound, or "
+                    "set DSV4_MOE_DEEPEP_LL=0 to use the all-gather exchange."
+                )
+            return self._local_experts_ll(
+                x, weights, indices, buf, ll_max_tokens
+            ).float()
 
         x_full = _all_gather_cat(x.contiguous(), ep, group)
         w_full = _all_gather_cat(weights.contiguous(), ep, group)
@@ -936,7 +998,7 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         ``max_m`` must be a multiple of 128, and that is load-bearing rather than
         cosmetic: ``ep_scatter`` tiles ``m_indices`` in ``BLOCK_E=128`` row blocks, so
         per-expert segments shorter than that overrun the end of the buffer and corrupt
-        whatever the caching allocator handed out next. Measured on 11.24.224.84: at
+        whatever the caching allocator handed out next. Measured on H20: at
         ``max_m=32`` the MoE output is ~45% wrong with the damage landing in unrelated
         tensors (and the first call in a fresh process looking fine, because the stomped
         page was still untouched); at 128 and 256 the result is bit-identical to the
@@ -1120,7 +1182,7 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
 
         # topk_idx carries GLOBAL expert ids and -1 for "no expert": no remapping to
         # a local range, and no padding of top-6 to a power of two (top-6 is accepted
-        # as-is; verified on 11.24.224.84).
+        # as-is; verified on H20).
         (recv_x, recv_scale), recv_count, handle, _, _ = buf.low_latency_dispatch(
             x.contiguous(),
             indices.contiguous(),

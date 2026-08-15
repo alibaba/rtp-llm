@@ -67,6 +67,12 @@ class ModelConfig(CppModelConfig):
     # Python-only fields that are allowed to be set
     _python_fields = {
         "is_mtp",
+        # Routed-expert storage: "fp4" (released ckpt) or "fp8" (rewritten for
+        # SM90). Python-only -- there is no ModelConfig.h field and no
+        # def_readwrite for it, and nothing in the C++ engine reads it. If the
+        # engine ever needs it (buffer sizing, operator selection), add the field
+        # and its binding first, then move this name to _cpp_members.
+        "expert_dtype",
         "dspark_noise_token_id",
         "dspark_target_layer_ids",
         "dspark_markov_rank",
@@ -147,8 +153,6 @@ class ModelConfig(CppModelConfig):
         "hc_eps",
         "swiglu_limit",
         "num_hash_layers",
-        # "fp4" (released ckpt) or "fp8" (routed experts rewritten for SM90).
-        "expert_dtype",
         "has_positional_encoding",
         "has_pre_decoder_layernorm",
         "has_post_decoder_layernorm",

@@ -332,11 +332,22 @@ def select_strategy(
             _mega_moe_disabled_or_unavailable_reason,
         )
 
+        from rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp8 import (
+            ep_group_unavailable_reason,
+        )
+
+        grouped_fp8_reason = (
+            ep_group_unavailable_reason()
+            or "SM90 FP8 grouped kernel probe returned False "
+            "(needs DSV4_USE_GROUPED_FP8!=0, CUDA, a Hopper device and a "
+            "DeepGEMM exporting m_grouped_fp8_gemm_nt_contiguous)"
+        )
         raise RuntimeError(
             f"DSV4 EP MoE requires one of {_EP_CAPABLE}; fallback to "
             "DeepEP/LocalLoop is disabled. "
             f"layer_id={cfg.layer_id}, ep_size={cfg.ep_size}. "
-            f"Mega reason: {_mega_moe_disabled_or_unavailable_reason()}."
+            f"Mega reason: {_mega_moe_disabled_or_unavailable_reason()}. "
+            f"grouped_fp8 reason: {grouped_fp8_reason}."
         )
 
     for cls in _STRATEGY_PRIORITY:
