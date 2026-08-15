@@ -57,6 +57,11 @@ def register_hf_repo(name: str, model_type: str):
 
 class ModelDict:
     @staticmethod
+    def get_model_cls(model_type: str) -> Optional[Type[Any]]:
+        global _model_factory
+        return _model_factory.get(model_type)
+
+    @staticmethod
     def get_ft_model_type_by_hf_repo(repo: str) -> Optional[str]:
         global _hf_repo_2_ft
         model_type = _hf_repo_2_ft.get(repo, None)

@@ -338,9 +338,17 @@ def set_parallelism_config(
         )
 
     if py_prefill_cp_config:
+        if py_prefill_cp_config.segment_size_alignment <= 0:
+            raise ValueError(
+                "CP segment_size_alignment must be greater than 0, got "
+                f"{py_prefill_cp_config.segment_size_alignment}"
+            )
         parallelism_config.prefill_cp_config.method = py_prefill_cp_config.method
         parallelism_config.prefill_cp_config.comm_buffer_size = (
             py_prefill_cp_config.comm_buffer_size
+        )
+        parallelism_config.prefill_cp_config.segment_size_alignment = (
+            py_prefill_cp_config.segment_size_alignment
         )
     logging.info(
         f"set_parallelism_config: rank {world_rank}\nparallelism_config={parallelism_config.to_string()}world_rank={world_rank}\n"
@@ -369,11 +377,69 @@ def _infer_model_type(ckpt_path: str) -> Optional[str]:
         return None
 
 
-def setup_default_args(py_env_configs):
-    set_parallelism_config(
-        py_env_configs.parallelism_config,
-        py_prefill_cp_config=py_env_configs.prefill_cp_config,
+def _configure_model_prefill_cp(py_env_configs: PyEnvConfigs) -> None:
+    prefill_cp_config = py_env_configs.prefill_cp_config
+    if not prefill_cp_config.is_enabled():
+        return
+
+    # These processes do not execute the language-model forward and may share
+    # the backend's environment without participating in context parallelism.
+    if py_env_configs.role_config.role_type in (RoleType.FRONTEND, RoleType.VIT):
+        return
+
+    if py_env_configs.device_resource_config.enable_layer_micro_batch:
+        raise ValueError(
+            "Context parallelism cannot be combined with layer micro-batching: "
+            "the layer micro-batch forward path does not apply CP input/output "
+            "processing. "
+            "Set ENABLE_LAYER_MICRO_BATCH=0 when CP_ROTATE_METHOD is enabled."
+        )
+
+    model_cls = ModelDict.get_model_cls(py_env_configs.model_args.model_type)
+    if model_cls is None:
+        import rtp_llm.models  # noqa: F401 - populate the model registry
+
+        model_cls = ModelDict.get_model_cls(py_env_configs.model_args.model_type)
+    if model_cls is None:
+        raise ValueError(
+            "Cannot configure context parallelism for unknown model_type="
+            f"{py_env_configs.model_args.model_type}"
+        )
+
+    required_alignment = model_cls.prefill_cp_segment_size_alignment()
+    if required_alignment <= 0:
+        raise ValueError(
+            f"Model {py_env_configs.model_args.model_type} returned invalid CP "
+            f"segment alignment {required_alignment}"
+        )
+    # This is an internal model requirement, not a user-tunable setting.
+    prefill_cp_config.segment_size_alignment = required_alignment
+    py_env_configs.parallelism_config.prefill_cp_config.segment_size_alignment = (
+        required_alignment
     )
+
+    required_block_alignment = model_cls.prefill_cp_cache_block_size_alignment()
+    if required_block_alignment <= 0:
+        raise ValueError(
+            f"Model {py_env_configs.model_args.model_type} returned invalid CP "
+            f"cache block alignment {required_block_alignment}"
+        )
+    cache_block_size = py_env_configs.kv_cache_config.seq_size_per_block
+    if cache_block_size > 0 and cache_block_size % required_block_alignment != 0:
+        raise ValueError(
+            f"KV cache block size {cache_block_size} is incompatible with CP for "
+            f"{py_env_configs.model_args.model_type}, which requires a multiple of "
+            f"{required_block_alignment}"
+        )
+
+    model_cls.validate_prefill_cp_topology(
+        py_env_configs.parallelism_config,
+        py_env_configs.role_config.role_type,
+        py_env_configs.ffn_disaggregate_config.enable_ffn_disaggregate,
+    )
+
+
+def setup_default_args(py_env_configs):
     if not py_env_configs.model_args.tokenizer_path:
         py_env_configs.model_args.tokenizer_path = py_env_configs.model_args.ckpt_path
 
@@ -415,6 +481,12 @@ def setup_default_args(py_env_configs):
         logging.info("set SEQ_SIZE_PER_BLOCK 256 by default")
     if py_env_configs.kv_cache_config.seq_size_per_block == 0:
         py_env_configs.kv_cache_config.seq_size_per_block = 64
+
+    set_parallelism_config(
+        py_env_configs.parallelism_config,
+        py_prefill_cp_config=py_env_configs.prefill_cp_config,
+    )
+    _configure_model_prefill_cp(py_env_configs)
 
     # Set NCCL_P2P_DISABLE for RTX GPUs or when CUDA is not available
     # Frontend doesn't need this setting

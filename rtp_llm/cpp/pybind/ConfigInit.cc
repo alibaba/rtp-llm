@@ -1601,20 +1601,27 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("method", &PrefillCPConfig::method)
         .def_readwrite("comm_buffer_size", &PrefillCPConfig::comm_buffer_size)
+        .def_readwrite("segment_size_alignment", &PrefillCPConfig::segment_size_alignment)
         .def("to_string", &PrefillCPConfig::to_string)
         .def("is_enabled", &PrefillCPConfig::is_enabled)
         .def("is_prefill_enabled", &PrefillCPConfig::is_prefill_enabled)
-        .def(py::pickle([](const PrefillCPConfig& self) { return py::make_tuple(self.method, self.comm_buffer_size); },
-                        [](py::tuple t) {
-                            if (t.size() != 2)
-                                throw std::runtime_error("Invalid state!");
-                            PrefillCPConfig c;
-                            try {
-                                c.method           = t[0].cast<CPRotateMethod>();
-                                c.comm_buffer_size = t[1].cast<size_t>();
-                            } catch (const std::exception& e) {
-                                throw std::runtime_error(std::string("PrefillCPConfig unpickle error: ") + e.what());
-                            }
-                            return c;
-                        }));
+        .def(py::pickle(
+            [](const PrefillCPConfig& self) {
+                return py::make_tuple(self.method, self.comm_buffer_size, self.segment_size_alignment);
+            },
+            [](py::tuple t) {
+                // Runtime process-transfer format; producer and consumer use
+                // the same binary, so accepting partial states is unsafe.
+                if (t.size() != 3)
+                    throw std::runtime_error("Invalid state!");
+                PrefillCPConfig c;
+                try {
+                    c.method                 = t[0].cast<CPRotateMethod>();
+                    c.comm_buffer_size       = t[1].cast<size_t>();
+                    c.segment_size_alignment = t[2].cast<size_t>();
+                } catch (const std::exception& e) {
+                    throw std::runtime_error(std::string("PrefillCPConfig unpickle error: ") + e.what());
+                }
+                return c;
+            }));
 }

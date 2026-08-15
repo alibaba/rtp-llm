@@ -1372,6 +1372,7 @@ class ParallelismConfig:
 class PrefillCPConfig:
     comm_buffer_size: int
     method: CPRotateMethod
+    segment_size_alignment: int
 
     def __getstate__(self) -> tuple:
         ...

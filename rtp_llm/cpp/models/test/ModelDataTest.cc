@@ -3,6 +3,7 @@
 
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 
 using namespace std;
@@ -57,6 +58,36 @@ TEST_F(ModelDataTest, testConstruct) {
     builder.setSequenceLengths(sampler_inputs, sequence_lengths);
     auto sl = sampler_inputs.sequence_lengths;
     EXPECT_EQ(std::vector<int>(sl.data_ptr<int>(), sl.data_ptr<int>() + sl.numel()), std::vector<int>({1, 2, 3, 4}));
+}
+
+TEST(PyWrappedModelTest, ContextParallelRequiresPurePrefill) {
+    GptModelInputs inputs;
+    inputs.input_lengths    = torch::empty({1}, torch::kInt32);
+    inputs.sequence_lengths = torch::empty({0}, torch::kInt32);
+
+    EXPECT_TRUE(PyWrappedModel::shouldUseContextParallel(inputs, true));
+    EXPECT_FALSE(PyWrappedModel::shouldUseContextParallel(inputs, false));
+
+    inputs.is_target_verify = true;
+    EXPECT_FALSE(PyWrappedModel::shouldUseContextParallel(inputs, true));
+    inputs.is_target_verify = false;
+
+    inputs.last_hidden_states = torch::empty({1, 1});
+    EXPECT_FALSE(PyWrappedModel::shouldUseContextParallel(inputs, true));
+}
+
+TEST(PyWrappedModelTest, ContextParallelRejectsDecodeAndMixedBatches) {
+    GptModelInputs inputs;
+    inputs.input_lengths    = torch::empty({0}, torch::kInt32);
+    inputs.sequence_lengths = torch::empty({0}, torch::kInt32);
+    EXPECT_FALSE(PyWrappedModel::shouldUseContextParallel(inputs, true));
+
+    inputs.input_lengths    = torch::empty({1}, torch::kInt32);
+    inputs.sequence_lengths = torch::empty({1}, torch::kInt32);
+    EXPECT_FALSE(PyWrappedModel::shouldUseContextParallel(inputs, true));
+
+    inputs.input_lengths = torch::empty({2}, torch::kInt32);
+    EXPECT_FALSE(PyWrappedModel::shouldUseContextParallel(inputs, true));
 }
 
 }  // namespace rtp_llm

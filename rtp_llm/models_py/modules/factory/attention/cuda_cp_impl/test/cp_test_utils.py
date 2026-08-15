@@ -68,8 +68,28 @@ def build_restore_indices(cp_chunk_lengths: List[int], cp_size: int) -> torch.Te
     return torch.tensor(restore, dtype=torch.int32)
 
 
-def build_padding_mask(cp_chunk_lengths: List[int], cp_size: int) -> torch.Tensor:
-    return torch.ones(sum(cp_chunk_lengths) * cp_size, dtype=torch.int32)
+def build_padding_mask(
+    cp_chunk_lengths: List[int],
+    cp_size: int,
+    padding_lengths: List[int] | None = None,
+) -> torch.Tensor:
+    if padding_lengths is None:
+        padding_lengths = [0] * len(cp_chunk_lengths)
+    masks = []
+    for chunk_length, padding_length in zip(cp_chunk_lengths, padding_lengths):
+        padded_length = chunk_length * cp_size
+        valid_length = padded_length - padding_length
+        if valid_length < 0:
+            raise ValueError("padding length exceeds padded sequence length")
+        masks.append(
+            torch.cat(
+                [
+                    torch.ones(valid_length, dtype=torch.int32),
+                    torch.zeros(padding_length, dtype=torch.int32),
+                ]
+            )
+        )
+    return torch.cat(masks)
 
 
 # ---------------------------------------------------------------------------
@@ -203,13 +223,21 @@ def build_cp_attn_inputs(
 
     # new_lengths = sequence_lengths - prefix_lengths (total new tokens per batch)
     new_lengths = [sl - pl for sl, pl in zip(sequence_lengths, prefix_lengths)]
+    padded_new_lengths = [cl * cp_size for cl in cp_chunk_lengths]
+    padding_lengths = [
+        padded - actual for padded, actual in zip(padded_new_lengths, new_lengths)
+    ]
+    if any(padding < 0 for padding in padding_lengths):
+        raise ValueError("CP chunk length is smaller than the real input length")
 
     cp_info = PyContextParallelParams()
     cp_info.prefill_cp_chunk_lengths = torch.tensor(cp_chunk_lengths, dtype=torch.int32)
-    cp_info.prefill_cp_padding_lengths = torch.zeros(batch_size, dtype=torch.int32)
-    cp_info.prefill_qkv_padding_mask = build_padding_mask(cp_chunk_lengths, cp_size).to(
-        device
+    cp_info.prefill_cp_padding_lengths = torch.tensor(
+        padding_lengths, dtype=torch.int32
     )
+    cp_info.prefill_qkv_padding_mask = build_padding_mask(
+        cp_chunk_lengths, cp_size, padding_lengths
+    ).to(device)
     cp_info.prefill_qkv_restore_indice = build_restore_indices(
         cp_chunk_lengths, cp_size
     ).to(device)

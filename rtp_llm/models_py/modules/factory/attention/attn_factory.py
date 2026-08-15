@@ -35,6 +35,8 @@ def get_mla_impl(
 ) -> MlaImplBase:
 
     mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
+    # CP is process-wide, but decode/MTP/verify forwards do not carry CP metadata.
+    uses_context_parallel = attn_inputs.context_parallel_info is not None
     for impl in mla_impls:
         # Check support before creating instance
         if not impl.support(attn_configs, attn_inputs):
@@ -50,7 +52,7 @@ def get_mla_impl(
             )
         )
 
-        if not use_fast_path and not impl.support_parallelism_config(
+        if uses_context_parallel and not impl.support_parallelism_config(
             parallelism_config
         ):
             continue
@@ -149,6 +151,8 @@ def get_fmha_impl(
     attn_inputs.is_cuda_graph = is_cuda_graph
 
     mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
+    # CP is process-wide, but decode/MTP/verify forwards do not carry CP metadata.
+    uses_context_parallel = attn_inputs.context_parallel_info is not None
 
     for impl in mha_impls:
         # Check if this FMHA implementation is disabled before creating instance
@@ -163,7 +167,9 @@ def get_fmha_impl(
             continue
 
         # Check if implementation supports parallelism config
-        if not impl.support_parallelism_config(parallelism_config):
+        if uses_context_parallel and not impl.support_parallelism_config(
+            parallelism_config
+        ):
             continue
         try:
             instance = impl(attn_configs, attn_inputs, parallelism_config)

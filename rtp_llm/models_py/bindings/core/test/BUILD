@@ -34,6 +34,16 @@ cc_test(
 )
 
 cc_test_wrapper(
+    name = "device_data_test",
+    srcs = ["DeviceDataTest.cc"],
+    deps = [
+        "//rtp_llm/models_py/bindings/core:device_data",
+        "@com_google_googletest//:gtest_main",
+    ],
+    copts = copts(),
+)
+
+cc_test_wrapper(
     name = "cache_store_async_writer_test",
     srcs = ["CacheStoreAsyncWriterTest.cpp"],
     deps = [

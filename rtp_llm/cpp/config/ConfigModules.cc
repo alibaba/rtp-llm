@@ -5,7 +5,9 @@
 #include <algorithm>
 #include <string>
 #include <cctype>
+#include <limits>
 #include <regex>
+#include <stdexcept>
 
 namespace rtp_llm {
 
@@ -20,6 +22,28 @@ std::string NcclCommConfig::to_string() const {
 }
 
 // PrefillCPConfig
+size_t PrefillCPConfig::padded_sequence_length(size_t input_length, size_t cp_size) const {
+    if (cp_size == 0) {
+        throw std::invalid_argument("cp_size must be greater than 0");
+    }
+    if (segment_size_alignment == 0) {
+        throw std::invalid_argument("CP segment_size_alignment must be greater than 0");
+    }
+    if (cp_size > std::numeric_limits<size_t>::max() / 2 / segment_size_alignment) {
+        throw std::overflow_error("CP sequence alignment exceeds size_t range");
+    }
+    const size_t alignment = 2 * cp_size * segment_size_alignment;
+    const size_t remainder = input_length % alignment;
+    if (remainder == 0) {
+        return input_length;
+    }
+    const size_t padding = alignment - remainder;
+    if (input_length > std::numeric_limits<size_t>::max() - padding) {
+        throw std::overflow_error("CP padded sequence length exceeds size_t range");
+    }
+    return input_length + padding;
+}
+
 std::string PrefillCPConfig::to_string() const {
     std::ostringstream oss;
     oss << "method: ";
@@ -43,7 +67,8 @@ std::string PrefillCPConfig::to_string() const {
             oss << "UNKNOWN";
             break;
     }
-    oss << "\n comm_buffer_size: " << comm_buffer_size << "\n";
+    oss << "\n comm_buffer_size: " << comm_buffer_size << "\n segment_size_alignment: " << segment_size_alignment
+        << "\n";
     return oss.str();
 }
 

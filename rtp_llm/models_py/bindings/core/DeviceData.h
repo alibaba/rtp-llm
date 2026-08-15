@@ -18,9 +18,10 @@ struct ExecProperties {
     size_t tp_rank = 0;
     size_t tp_size = 1;
 
-    bool   enable_sp         = false;
-    size_t overlap_comm_type = 0;
-    size_t m_split           = 0;
+    bool   enable_sp             = false;
+    bool   lm_head_is_replicated = true;
+    size_t overlap_comm_type     = 0;
+    size_t m_split               = 0;
 
     MicroBatchType enable_layer_micro_batch = MicroBatchType::NONE;
 
@@ -45,9 +46,14 @@ struct ExecStatus {
 inline ExecProperties buildExecProperties(const ParallelismConfig&    parallelism_config,
                                           const DeviceResourceConfig& device_resource_config) {
     ExecProperties props;
-    props.tp_rank                  = parallelism_config.tp_rank;
-    props.tp_size                  = parallelism_config.tp_size;
-    props.enable_sp                = parallelism_config.enable_sp;
+    props.tp_rank   = parallelism_config.tp_rank;
+    props.tp_size   = parallelism_config.tp_size;
+    props.enable_sp = parallelism_config.enable_sp;
+    // lm_head splits only across physical TP. It stays replicated for TP=1 or
+    // when AtomicWeight::_split bypasses parallel splitting altogether.
+    const bool bypasses_weight_split = parallelism_config.get_attn_tp_size() <= 1 && parallelism_config.dp_size <= 1
+                                       && parallelism_config.ep_size <= 1;
+    props.lm_head_is_replicated    = parallelism_config.tp_size <= 1 || bypasses_weight_split;
     props.enable_prefill_cp        = parallelism_config.prefill_cp_config.is_enabled();
     props.ffn_as_service           = parallelism_config.ffn_disaggregate_config.is_ffn_service();
     props.enable_layer_micro_batch = static_cast<MicroBatchType>(device_resource_config.enable_layer_micro_batch);
