@@ -9,13 +9,19 @@ import tempfile
 import threading
 import time
 from collections import namedtuple
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from pathlib import Path
 from urllib.parse import urlparse
 
-import zstandard as zstd
+try:
+    import zstandard as zstd
+except ImportError:
+    zstd = None
 
-SNAPSHOT_SUFFIX, MTIME_MANIFEST = ".jit_snapshot.tar.zst", ".jit_mtime_ns.json"
+SNAPSHOT_SUFFIX = (
+    ".jit_snapshot.tar.zst" if zstd is not None else ".jit_snapshot.tar.gz"
+)
+MTIME_MANIFEST = ".jit_mtime_ns.json"
 SNAPSHOT_KEEP, STALE_REMOTE_TMP_S, STALE_BATON_S = 20, 1800.0, 7200.0
 Restored = namedtuple("Restored", "staging snapshot")
 
@@ -28,20 +34,30 @@ def file_sig(path: Path) -> tuple[int, int, int, int]:
     return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
 
 
-def pack_zstd_tar(archive: Path, files: dict[str, Path]) -> None:
+def _add_snapshot_members(tar, files, before) -> None:
+    for name, path in sorted(files.items()):
+        tar.add(path, arcname=name, recursive=False)
+    if any(file_sig(files[name]) != sig for name, sig in before.items()):
+        raise SnapshotRaced("files changed while packing")
+    manifest = json.dumps({n: s[3] for n, s in before.items()}).encode()
+    info = tarfile.TarInfo(MTIME_MANIFEST)
+    info.size = len(manifest)
+    tar.addfile(info, io.BytesIO(manifest))
+
+
+def pack_snapshot(archive: Path, files: dict[str, Path]) -> None:
     try:
         before = {name: file_sig(path) for name, path in files.items()}
-        with zstd.open(
-            archive, "wb", cctx=zstd.ZstdCompressor(write_checksum=True)
-        ) as body, tarfile.open(fileobj=body, mode="w|", dereference=True) as tar:
-            for name, path in sorted(files.items()):
-                tar.add(path, arcname=name, recursive=False)
-            if any(file_sig(files[name]) != sig for name, sig in before.items()):
-                raise SnapshotRaced("files changed while packing")
-            manifest = json.dumps({n: s[3] for n, s in before.items()}).encode()
-            info = tarfile.TarInfo(MTIME_MANIFEST)
-            info.size = len(manifest)
-            tar.addfile(info, io.BytesIO(manifest))
+        if zstd is not None:
+            with zstd.open(
+                archive, "wb", cctx=zstd.ZstdCompressor(write_checksum=True)
+            ) as body, tarfile.open(
+                fileobj=body, mode="w|", dereference=True
+            ) as tar:
+                _add_snapshot_members(tar, files, before)
+        else:
+            with tarfile.open(archive, mode="w:gz", dereference=True) as tar:
+                _add_snapshot_members(tar, files, before)
     except FileNotFoundError as error:
         raise SnapshotRaced("files changed while packing") from error
 
@@ -60,9 +76,14 @@ def _safe_members(archive, target: Path):
         yield member
 
 
-def extract_zstd_tar(archive: Path, target: Path) -> None:
+def extract_snapshot(archive: Path, target: Path) -> None:
     target = target.resolve()
-    with zstd.open(archive, "rb") as body, tarfile.open(fileobj=body, mode="r|") as tar:
+    with ExitStack() as stack:
+        if zstd is not None:
+            body = stack.enter_context(zstd.open(archive, "rb"))
+            tar = stack.enter_context(tarfile.open(fileobj=body, mode="r|"))
+        else:
+            tar = stack.enter_context(tarfile.open(archive, mode="r:gz"))
         kwargs = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
         tar.extractall(target, members=_safe_members(tar, target), **kwargs)
     for name, ns in json.loads((target / MTIME_MANIFEST).read_text()).items():
@@ -142,7 +163,7 @@ class RemoteSnapshotStore:
         for snap in sorted(self.remote_root.glob(f"*{SNAPSHOT_SUFFIX}"), reverse=True):
             staging = Path(tempfile.mkdtemp(prefix="stage.", dir=staging_root))
             try:
-                extract_zstd_tar(snap, staging)
+                extract_snapshot(snap, staging)
                 return Restored(staging, snap)
             except Exception:
                 logging.warning("JIT snapshot unusable: %s", snap)
@@ -153,8 +174,8 @@ class RemoteSnapshotStore:
             if self._closed or not files:
                 return
             with tempfile.TemporaryDirectory(prefix=".jit_snapshot.") as tmp:
-                archive = Path(tmp) / "candidate.tar.zst"
-                pack_zstd_tar(archive, files)
+                archive = Path(tmp) / f"candidate{SNAPSHOT_SUFFIX}"
+                pack_snapshot(archive, files)
                 if rescan and files.keys() != rescan().keys():
                     raise SnapshotRaced("file set changed while packing")
                 name = f"{time.time_ns():020d}-{os.uname().nodename}{SNAPSHOT_SUFFIX}"
