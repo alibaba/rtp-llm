@@ -374,7 +374,7 @@ def forward_layers(
         write_cache_store_impl = create_write_cache_store_impl(attn_inputs, kv_cache)
 
     if prepare_hidden_fn is None:
-        h = v4.embed(input_ids)  # [T_total, dim]
+        h = v4.embed_full(input_ids)  # [T_total, dim]
         if _rt_on:
             _rt.record("prefill_embed_out", h)
         h = h.unsqueeze(-2).repeat(1, v4.hc_mult, 1)  # [T_total, hc, dim]
