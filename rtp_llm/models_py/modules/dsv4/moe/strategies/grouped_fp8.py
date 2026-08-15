@@ -11,9 +11,14 @@ block-quantised layout, via ``deepgemm_wrapper.m_grouped_fp8_gemm_nt_contiguous`
 (the wrapper because DeepGEMM renamed this kernel between 1.x and 2.x, and the
 SM90 FP8 impl only ships in 2.x). It
 expects a checkpoint whose experts were rewritten from FP4 to FP8 by
-``dsv4_fp8/convert_fp4_experts_to_fp8.py``; that rewrite is value-exact, so this
+``dsv4_fp8/convert_fp4_experts_to_fp8.py``. That rewrite is exact for every block
+whose dynamic range fits e4m3's normal range (2^14) -- the block scale guarantees
+the top end, the data has to supply the bottom -- and on the released checkpoint
+the largest in-block range is 2^5.58 with no subnormal weight anywhere, so this
 path computes on the same numbers the FP4 path would, just with a wider weight
-container and a coarser (128x128 rather than group-32) scale granularity.
+container and a coarser (128x128 rather than group-32) scale granularity. The
+converter verifies this per tensor by default and fails the run otherwise; see
+its module docstring and ``dsv4_fp8/measure_expert_block_span.py``.
 
 Structurally it mirrors :class:`GroupedFP4Strategy` — quant once pre-permute,
 Triton ``ep_scatter``, grouped gate/up GEMM, SwiGLU, grouped down GEMM, Triton
@@ -29,8 +34,11 @@ CUDA graph capture goes through the masked layout (``_local_experts_masked``). T
 contiguous path cannot be captured: its buffer is ``sum_e align(count_e, 128)``, which
 is device-resident, and reading it back is the per-layer ``num_recv.cpu()`` sync. The
 masked layout fixes the shapes at capture time and leaves the per-expert row count on
-the device in ``masked_m``, so the work still follows the routing. Set
-``DSV4_MOE_MASKED=1`` to use it in eager decode as well; capture always uses it.
+the device in ``masked_m``, so the work still follows the routing. Capture always
+uses it, and so does the eager forward the engine runs immediately before capture
+(``RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD``), which is where DeepGEMM compiles the
+masked kernel -- a JIT compile cannot happen inside a capture. Set
+``DSV4_MOE_MASKED=1`` to use it in ordinary eager decode as well.
 
 EP > 1
 ------
@@ -78,6 +86,7 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
 )
 from rtp_llm.models_py.utils.math import align
 
+from ..warmup_sync import cuda_graph_warmup_forward_enabled
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 from ...quant_layouts import FP8_BLOCK
 
@@ -949,9 +958,18 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         collective, so this reads a shape and an environment variable and never the
         data. ``n_tokens`` is the row count this call will process (post-all-gather
         under EP), which is a shape on every rank and equal across them.
+
+        The pre-capture forward counts as capturing for this decision.
+        ``CudaGraphRunner::initCapture`` runs one eager forward with
+        ``RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD=1`` immediately before
+        ``captureDecode()``, and that forward is where the masked GEMM's DeepGEMM
+        JIT has to compile: a compile cannot happen inside a capture. Keying only
+        on ``is_current_stream_capturing()`` left that guarantee resting on
+        ``DSV4_MOE_MASKED=1`` being set -- with it unset the warmup forward took
+        the contiguous path and the first masked launch was the captured one.
         """
         capturing = torch.cuda.is_current_stream_capturing()
-        if capturing or _masked_enabled():
+        if capturing or cuda_graph_warmup_forward_enabled() or _masked_enabled():
             if n_tokens > _MASKED_MAX_N:
                 if capturing:
                     raise RuntimeError(

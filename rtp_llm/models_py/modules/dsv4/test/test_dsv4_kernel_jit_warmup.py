@@ -46,7 +46,11 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     _dense_gemm_m_grid,
     _dist_rank,
     _generate_dense_gemm_warmup_m_grid,
+    _align_up,
+    _collect_dsv4_grouped_fp8_moe_shapes,
+    _collect_dsv4_wo_a_grouped_shapes,
     _generate_mhc_prenorm_warmup_specs,
+    _grouped_fp8_masked_m_values,
     _mhc_prenorm_backend,
     _run_deepgemm_warmup_launch_with_retry,
     _run_tilelang_warmup_launch_with_retry,
@@ -59,6 +63,8 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     warmup_dense_gemm_jit,
     warmup_dsv4_fp8_swa_slot_dequant_jit,
     warmup_fp8_mqa_logits_jit,
+    warmup_grouped_fp8_moe_jit,
+    warmup_wo_a_grouped_jit,
     warmup_mhc_head_fused_jit,
     warmup_mhc_prenorm_gemm_jit,
     resolve_dense_gemm_warmup_max_m,
@@ -1274,35 +1280,55 @@ class MhcPrenormBackendResolutionTest(unittest.TestCase):
         mhc_prenorm_backend.has_deepgemm_prenorm = lambda: available
         self.addCleanup(setattr, mhc_prenorm_backend, "has_deepgemm_prenorm", original)
 
-    def test_warmup_and_runtime_resolve_identically(self):
-        for probe in (True, False):
-            for value in (
-                None,
-                "",
-                "   ",
-                "auto",
-                "AUTO",
-                "  auto  ",
-                "deepgemm",
-                "dg",
-                "tilelang",
-                "single",
-                "tilelang_single",
-                "splitk",
-                "tilelang_splitk",
-                "bogus",
-            ):
-                with self.subTest(probe=probe, value=value):
+    # (env value, backend when the DeepGEMM symbol is present, and when it is not).
+    # Spelled out rather than compared against resolve_backend(): asserting the two
+    # agree would hold no matter what either did, and would not pin the alias table
+    # or the case/whitespace normalisation at all.
+    _RESOLUTION_TABLE = (
+        (None, mhc_prenorm_backend.DEEPGEMM, mhc_prenorm_backend.TILELANG_SPLITK),
+        ("", mhc_prenorm_backend.DEEPGEMM, mhc_prenorm_backend.TILELANG_SPLITK),
+        ("   ", mhc_prenorm_backend.DEEPGEMM, mhc_prenorm_backend.TILELANG_SPLITK),
+        ("auto", mhc_prenorm_backend.DEEPGEMM, mhc_prenorm_backend.TILELANG_SPLITK),
+        ("AUTO", mhc_prenorm_backend.DEEPGEMM, mhc_prenorm_backend.TILELANG_SPLITK),
+        ("  auto  ", mhc_prenorm_backend.DEEPGEMM, mhc_prenorm_backend.TILELANG_SPLITK),
+        ("deepgemm", mhc_prenorm_backend.DEEPGEMM, mhc_prenorm_backend.DEEPGEMM),
+        ("DeepGEMM", mhc_prenorm_backend.DEEPGEMM, mhc_prenorm_backend.DEEPGEMM),
+        ("dg", mhc_prenorm_backend.DEEPGEMM, mhc_prenorm_backend.DEEPGEMM),
+        ("tilelang", mhc_prenorm_backend.TILELANG_SINGLE, mhc_prenorm_backend.TILELANG_SINGLE),
+        ("single", mhc_prenorm_backend.TILELANG_SINGLE, mhc_prenorm_backend.TILELANG_SINGLE),
+        (" TileLang_Single ", mhc_prenorm_backend.TILELANG_SINGLE, mhc_prenorm_backend.TILELANG_SINGLE),
+        ("splitk", mhc_prenorm_backend.TILELANG_SPLITK, mhc_prenorm_backend.TILELANG_SPLITK),
+        ("tilelang_splitk", mhc_prenorm_backend.TILELANG_SPLITK, mhc_prenorm_backend.TILELANG_SPLITK),
+        ("bogus", "bogus", "bogus"),
+    )
+
+    def test_resolution_table(self):
+        for value, with_symbol, without_symbol in self._RESOLUTION_TABLE:
+            for probe, expected in ((True, with_symbol), (False, without_symbol)):
+                with self.subTest(value=value, probe=probe):
                     self._with_probe(probe)
                     mhc_prenorm_backend._log_backend_choice.cache_clear()
                     if value is None:
                         os.environ.pop(mhc_prenorm_backend.BACKEND_ENV, None)
                     else:
                         os.environ[mhc_prenorm_backend.BACKEND_ENV] = value
-                    self.assertEqual(
-                        _mhc_prenorm_backend(),
-                        mhc_prenorm_backend.resolve_backend(),
-                    )
+                    self.assertEqual(_mhc_prenorm_backend(), expected)
+
+    def test_warmup_does_not_resolve_the_env_itself(self):
+        """Structural: the warmup entry point must be the shared resolver.
+
+        The table above already fails if this module re-implements resolution and
+        drifts; this pins the intent directly, so a re-implementation that happens
+        to agree today still shows up as a change here.
+        """
+        sentinel = "sentinel_backend"
+        original = mhc_prenorm_backend.resolve_backend
+        mhc_prenorm_backend.resolve_backend = lambda: sentinel
+        self.addCleanup(
+            setattr, mhc_prenorm_backend, "resolve_backend", original
+        )
+        os.environ[mhc_prenorm_backend.BACKEND_ENV] = "tilelang_single"
+        self.assertEqual(_mhc_prenorm_backend(), sentinel)
 
     def test_auto_follows_the_symbol_probe(self):
         for value in (None, "", "auto"):
@@ -1336,6 +1362,149 @@ class MhcPrenormBackendResolutionTest(unittest.TestCase):
         """The real probe answers False on a build/box without the symbol."""
         mhc_prenorm_backend.has_deepgemm_prenorm.cache_clear()
         self.assertIsInstance(mhc_prenorm_backend.has_deepgemm_prenorm(), bool)
+
+
+class GroupedFp8AndWoAWarmupCollectorTest(unittest.TestCase):
+    """The two SM90 collectors and the masked ``expected_m`` plan.
+
+    Pure host: the collectors only read shapes off registered tensors, and the plan
+    is arithmetic. What they feed -- the actual DeepGEMM launches -- needs a Hopper
+    GPU and is exercised by bringing a role up with WARM_UP=1.
+    """
+
+    def _grouped_fp8_module(self, *, experts=8, inter=256, dim=512, ep_size=4):
+        cls = _module_type(
+            "GroupedFP8Strategy",
+            {
+                "_w13": torch.empty(
+                    (experts, 2 * inter, dim), dtype=torch.float8_e4m3fn
+                ),
+                "_s13": torch.empty((experts, 2 * inter // 128, dim // 128)),
+                "_w2": torch.empty((experts, dim, inter), dtype=torch.float8_e4m3fn),
+                "_s2": torch.empty((experts, dim // 128, inter // 128)),
+                "cfg": SimpleNamespace(ep_size=ep_size),
+            },
+        )
+        return cls()
+
+    def test_align_up(self):
+        self.assertEqual(_align_up(1, 128), 128)
+        self.assertEqual(_align_up(128, 128), 128)
+        self.assertEqual(_align_up(129, 128), 256)
+        self.assertEqual(_align_up(0, 128), 0)
+        self.assertEqual(_align_up(65, 64), 128)
+
+    def test_masked_m_values_are_the_two_the_strategy_computes(self):
+        # N = tokens_per_rank * ep_size; max_m = align(N, 128) and
+        # t_rows = min(max_m, align(N, 64)).
+        # conc 8 over ep 4: N=32, max_m=align(32,128)=128, t_rows=align(32,64)=64
+        self.assertEqual(
+            _grouped_fp8_masked_m_values(tokens_per_rank=8, ep_size=4), (64, 128)
+        )
+        # N=128: both land on 128, so one launch covers the pair
+        self.assertEqual(
+            _grouped_fp8_masked_m_values(tokens_per_rank=32, ep_size=4), (128,)
+        )
+        # N=64: max_m still rounds to 128 while t_rows stays 64
+        self.assertEqual(
+            _grouped_fp8_masked_m_values(tokens_per_rank=8, ep_size=8), (64, 128)
+        )
+
+    def test_masked_m_values_empty_past_the_refusal_cap(self):
+        """Prefill never masks, so there is nothing to warm for it."""
+        self.assertEqual(
+            _grouped_fp8_masked_m_values(tokens_per_rank=16384, ep_size=4), ()
+        )
+        self.assertEqual(
+            _grouped_fp8_masked_m_values(tokens_per_rank=1024, ep_size=1), (1024,)
+        )
+        self.assertEqual(
+            _grouped_fp8_masked_m_values(tokens_per_rank=1025, ep_size=1), ()
+        )
+
+    def test_collect_grouped_fp8_shapes(self):
+        root = nn.Module()
+        root.add_module("layer0", self._grouped_fp8_module())
+        root.add_module("layer1", self._grouped_fp8_module())
+        shapes = _collect_dsv4_grouped_fp8_moe_shapes(root)
+        # Both layers share a shape, so one entry with all four operands.
+        self.assertEqual(len(shapes), 1)
+        (key,) = list(shapes)
+        self.assertEqual(key, (8, 512, 512, 512, 256, 4))
+        info = shapes[key]
+        self.assertEqual(info["ep_size"], 4)
+        for attr in ("_w13", "_s13", "_w2", "_s2"):
+            self.assertIn(attr, info)
+
+    def test_collect_grouped_fp8_shapes_skips_incomplete_modules(self):
+        """A strategy whose weights are not set up yet must not be collected."""
+        root = nn.Module()
+        partial = _module_type(
+            "GroupedFP8Strategy",
+            {"_w13": torch.empty((8, 512, 512), dtype=torch.float8_e4m3fn)},
+        )()
+        root.add_module("partial", partial)
+        self.assertEqual(_collect_dsv4_grouped_fp8_moe_shapes(root), {})
+
+    def test_collect_grouped_fp8_shapes_ignores_other_strategies(self):
+        root = nn.Module()
+        root.add_module(
+            "fp4",
+            _module_type(
+                "GroupedFP4Strategy",
+                {
+                    "_w13": torch.empty((8, 512, 256), dtype=torch.float8_e4m3fn),
+                    "_s13": torch.empty((8, 4, 2)),
+                    "_w2": torch.empty((8, 512, 128), dtype=torch.float8_e4m3fn),
+                    "_s2": torch.empty((8, 4, 1)),
+                    "cfg": SimpleNamespace(ep_size=4),
+                },
+            )(),
+        )
+        self.assertEqual(_collect_dsv4_grouped_fp8_moe_shapes(root), {})
+
+    def test_collect_wo_a_grouped_shapes(self):
+        root = nn.Module()
+        attn = nn.Module()
+        attn.register_buffer(
+            "_wo_a_grp_w", torch.empty((9, 256, 512), dtype=torch.float8_e4m3fn)
+        )
+        attn.register_buffer("_wo_a_grp_s", torch.empty((9, 2, 4)))
+        root.add_module("attn", attn)
+        shapes = _collect_dsv4_wo_a_grouped_shapes(root)
+        self.assertEqual(list(shapes), [(9, 256, 512)])
+        self.assertEqual(shapes[(9, 256, 512)]["name"], "attn")
+
+    def test_collect_wo_a_grouped_shapes_ignores_the_sm100_buffers(self):
+        """SM100 registers ``_wo_a_stk_*``; this collector must not match them."""
+        root = nn.Module()
+        attn = nn.Module()
+        attn.register_buffer(
+            "_wo_a_stk_w", torch.empty((9, 256, 512), dtype=torch.float8_e4m3fn)
+        )
+        attn.register_buffer("_wo_a_stk_s", torch.empty((9, 256, 4)))
+        root.add_module("attn", attn)
+        self.assertEqual(_collect_dsv4_wo_a_grouped_shapes(root), {})
+
+    def test_warmups_are_noops_when_model_warmup_is_disabled(self):
+        with mock.patch.object(
+            warmup_module, "model_warm_up_enabled", return_value=False
+        ):
+            warmup_grouped_fp8_moe_jit(
+                {(8, 512, 512, 512, 256, 4): {"name": "x", "ep_size": 4}},
+                tokens_per_rank=8,
+                device=torch.device("cpu"),
+            )
+            warmup_wo_a_grouped_jit(
+                {(9, 256, 512): {"name": "x"}},
+                max_m=8,
+                device=torch.device("cpu"),
+            )
+
+    def test_warmups_are_noops_on_a_cpu_device(self):
+        """Guards the SM100 case: the collectors return {} and this must not run."""
+        warmup_grouped_fp8_moe_jit({}, tokens_per_rank=8, device=torch.device("cpu"))
+        warmup_wo_a_grouped_jit({}, max_m=8, device=torch.device("cpu"))
 
 
 if __name__ == "__main__":

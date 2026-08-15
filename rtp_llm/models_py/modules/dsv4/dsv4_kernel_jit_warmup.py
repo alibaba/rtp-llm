@@ -2341,3 +2341,386 @@ def _launch_dummy_fp8_mqa_logits(
         0,
     )
     del q, k, k_scale, weights, ks, ke, logits
+
+
+# ---------------------------------------------------------------------------
+# SM90 grouped MoE and wo_a per-group GEMM.
+#
+# Both are DeepGEMM kernels this build reaches only on Hopper, and neither was
+# covered by the pools above. The dense pool compiles ``fp8_gemm_nt``, which is a
+# different JIT key from ``m_grouped_fp8_gemm_nt_contiguous`` / ``_masked``, so
+# registering the MoE weights as dense shapes -- the shape the GroupedFP4
+# collector takes for its own strategy -- would compile a kernel these paths
+# never launch. The wo_a side had a live gap: the SM100 einsum prewarm keys off
+# ``_wo_a_stk_*``, which SM90 does not register, so it silently warmed nothing.
+# ---------------------------------------------------------------------------
+
+_GROUPED_FP8_MOE_JIT_WARMED_KEYS: set[tuple] = set()
+_WO_A_GROUPED_JIT_WARMED_KEYS: set[tuple] = set()
+
+# Matches _GROUPED_ALIGNMENT / _MASKED_TILE in the strategy. Duplicated as plain
+# ints rather than imported because this module must stay importable without a
+# GPU, and the strategy pulls in DeepGEMM and Triton at module scope.
+_GROUPED_FP8_ALIGNMENT = 128
+_GROUPED_FP8_MASKED_TILE = 64
+_GROUPED_FP8_MASKED_MAX_N = 1024
+
+
+def _align_up(value: int, alignment: int) -> int:
+    alignment = max(int(alignment), 1)
+    return ((max(int(value), 0) + alignment - 1) // alignment) * alignment
+
+
+def _collect_dsv4_grouped_fp8_moe_shapes(model: Any) -> Dict[tuple[int, ...], dict]:
+    """Collect GroupedFP8Strategy operands for the SM90 grouped MoE GEMMs."""
+
+    shapes: Dict[tuple[int, ...], dict] = {}
+    for module_name, module in model.named_modules():
+        if module.__class__.__name__ != "GroupedFP8Strategy":
+            continue
+        operands: Dict[str, torch.Tensor] = {}
+        for attr in ("_w13", "_s13", "_w2", "_s2"):
+            tensor = getattr(module, attr, None)
+            if not isinstance(tensor, torch.Tensor) or tensor.dim() != 3:
+                operands = {}
+                break
+            operands[attr] = tensor
+        if not operands:
+            continue
+        w13, w2 = operands["_w13"], operands["_w2"]
+        cfg = getattr(module, "cfg", None)
+        ep_size = max(int(getattr(cfg, "ep_size", 1) or 1), 1)
+        key = (
+            int(w13.shape[0]),
+            int(w13.shape[1]),
+            int(w13.shape[2]),
+            int(w2.shape[1]),
+            int(w2.shape[2]),
+            ep_size,
+        )
+        if key in shapes:
+            continue
+        shapes[key] = {"name": module_name, "ep_size": ep_size, **operands}
+    return shapes
+
+
+def _grouped_fp8_masked_m_values(
+    *, tokens_per_rank: int, ep_size: int
+) -> tuple[int, ...]:
+    """The ``expected_m`` values decode reaches, or () when it never masks.
+
+    ``N`` is the post-all-gather row count -- ``_local_experts`` is handed the
+    gathered token set, so ``tokens_per_rank * ep_size``. The first masked GEMM
+    runs at ``max_m = align(N, 128)`` and the second at
+    ``t_rows = min(max_m, align(N, 64))``, which are the same two values the
+    strategy computes.
+    """
+    n_tokens = max(int(tokens_per_rank), 1) * max(int(ep_size), 1)
+    if n_tokens > _GROUPED_FP8_MASKED_MAX_N:
+        # The strategy refuses the masked layout past this, so nothing to warm.
+        return ()
+    max_m = _align_up(n_tokens, _GROUPED_FP8_ALIGNMENT)
+    t_rows = min(max_m, _align_up(n_tokens, _GROUPED_FP8_MASKED_TILE))
+    return tuple(sorted({int(max_m), int(t_rows)}))
+
+
+def _launch_dummy_grouped_fp8_contiguous(
+    *, info: dict, m_value: int, device: torch.device
+) -> None:
+    """One gate/up + down pair through ``m_grouped_fp8_gemm_nt_contiguous``.
+
+    Operand layouts copy the strategy's, including the transposed scale view --
+    the activation scale is allocated ``[K/128, M]`` and transposed, so its M
+    stride is 1, which is the column-major/TMA-aligned form the kernel wants.
+    """
+    from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+        m_grouped_fp8_gemm_nt_contiguous,
+    )
+
+    w13, s13 = info["_w13"], info["_s13"]
+    w2, s2 = info["_w2"], info["_s2"]
+    two_inter, dim = int(w13.shape[1]), int(w13.shape[2])
+    inter = int(w2.shape[2])
+    m_value = max(int(m_value), _GROUPED_FP8_ALIGNMENT)
+
+    # m_indices all-zero puts every row in expert 0, so that expert's row count is
+    # m_value: it has to be a multiple of the 128 alignment the contiguous layout
+    # requires per group, which is why m_value is rounded up to it.
+    m_indices = torch.zeros(m_value, dtype=torch.int32, device=device)
+
+    a_fp8 = torch.zeros((m_value, dim), dtype=torch.float8_e4m3fn, device=device)
+    a_scale = torch.zeros(
+        (dim // _GROUPED_FP8_ALIGNMENT, m_value), dtype=torch.float32, device=device
+    ).transpose(0, 1)
+    gate_up = torch.empty(
+        (m_value, two_inter), dtype=torch.bfloat16, device=device
+    )
+    m_grouped_fp8_gemm_nt_contiguous((a_fp8, a_scale), (w13, s13), gate_up, m_indices)
+    del a_fp8, a_scale, gate_up
+
+    h_fp8 = torch.zeros((m_value, inter), dtype=torch.float8_e4m3fn, device=device)
+    h_scale = torch.zeros(
+        (inter // _GROUPED_FP8_ALIGNMENT, m_value), dtype=torch.float32, device=device
+    ).transpose(0, 1)
+    down = torch.empty((m_value, dim), dtype=torch.bfloat16, device=device)
+    m_grouped_fp8_gemm_nt_contiguous((h_fp8, h_scale), (w2, s2), down, m_indices)
+
+
+def _launch_dummy_grouped_fp8_masked(
+    *, info: dict, m_value: int, device: torch.device
+) -> None:
+    """One gate/up + down pair through ``m_grouped_fp8_gemm_nt_masked``.
+
+    ``masked_m`` is 1 rather than 0: the kernel skips groups whose count is 0, so
+    an all-zero mask would launch nothing and compile nothing. One row still makes
+    it write a whole 64-row tile, which is why ``m_value`` is never below that.
+    """
+    from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+        m_grouped_fp8_gemm_nt_masked,
+    )
+
+    w13, s13 = info["_w13"], info["_s13"]
+    w2, s2 = info["_w2"], info["_s2"]
+    experts = int(w13.shape[0])
+    two_inter, dim = int(w13.shape[1]), int(w13.shape[2])
+    inter = int(w2.shape[2])
+    m_value = max(int(m_value), _GROUPED_FP8_MASKED_TILE)
+    rows = experts * m_value
+
+    masked_m = torch.ones((experts,), dtype=torch.int32, device=device)
+
+    scatter_out = torch.zeros((rows, dim), dtype=torch.float8_e4m3fn, device=device)
+    scatter_out_scale = torch.zeros(
+        [dim // _GROUPED_FP8_ALIGNMENT, rows], device=device, dtype=torch.float32
+    ).transpose(0, 1)
+    gate_up = torch.zeros(
+        (experts, m_value, two_inter), dtype=torch.bfloat16, device=device
+    )
+    m_grouped_fp8_gemm_nt_masked(
+        (
+            scatter_out.view(experts, m_value, dim),
+            scatter_out_scale.view(experts, m_value, dim // _GROUPED_FP8_ALIGNMENT),
+        ),
+        (w13, s13),
+        gate_up,
+        masked_m,
+        expected_m=m_value,
+    )
+    del scatter_out, scatter_out_scale, gate_up
+
+    h_fp8 = torch.zeros((rows, inter), dtype=torch.float8_e4m3fn, device=device)
+    h_scale = torch.zeros(
+        [inter // _GROUPED_FP8_ALIGNMENT, rows], device=device, dtype=torch.float32
+    ).transpose(0, 1)
+    down = torch.zeros((experts, m_value, dim), dtype=torch.bfloat16, device=device)
+    m_grouped_fp8_gemm_nt_masked(
+        (
+            h_fp8.view(experts, m_value, inter),
+            h_scale.view(experts, m_value, inter // _GROUPED_FP8_ALIGNMENT),
+        ),
+        (w2, s2),
+        down,
+        masked_m,
+        expected_m=m_value,
+    )
+
+
+@torch.inference_mode()
+def warmup_grouped_fp8_moe_jit(
+    shapes: Dict[tuple[int, ...], dict],
+    *,
+    tokens_per_rank: int,
+    device: torch.device,
+) -> None:
+    """Compile the SM90 grouped MoE GEMMs before the health gate opens.
+
+    Both layouts are warmed. The contiguous one is warmed at a single M: prefill
+    runs it at ``sum_e align(count_e, 128)``, which differs on every request and
+    does not recompile, so M is not part of its key. The masked one is warmed at
+    the two ``expected_m`` values decode reaches, which *is* a hint the kernel
+    reads.
+
+    On the decode role this overlaps with the engine's own pre-capture warmup:
+    ``CudaGraphRunner::initCapture`` runs one eager forward with
+    ``RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD=1`` before ``captureDecode()``, and
+    ``_should_mask`` takes the masked layout during it, so the masked kernel is
+    compiled outside the capture either way. This runs earlier and does not
+    depend on that ordering.
+    """
+
+    if not model_warm_up_enabled():
+        return
+    device = torch.device(device)
+    if not _is_cuda_device(device) or not shapes:
+        return
+    _assert_not_capturing()
+
+    shape_keys = tuple(sorted(shapes.keys()))
+    plans: Dict[tuple[int, ...], tuple[tuple[str, int], ...]] = {}
+    for key in shape_keys:
+        launches: list[tuple[str, int]] = [
+            ("contiguous", _GROUPED_FP8_ALIGNMENT),
+        ]
+        for m_value in _grouped_fp8_masked_m_values(
+            tokens_per_rank=tokens_per_rank, ep_size=int(shapes[key]["ep_size"])
+        ):
+            launches.append(("masked", m_value))
+        plans[key] = tuple(launches)
+
+    warmup_key = (
+        int(tokens_per_rank),
+        tuple((key, plans[key]) for key in shape_keys),
+        str(device),
+    )
+    if warmup_key in _GROUPED_FP8_MOE_JIT_WARMED_KEYS:
+        return
+
+    rank = _dist_rank()
+    if rank == 0:
+        logging.info(
+            "[DSV4 GroupedFP8] JIT warmup start: %d weight shapes, %d launches, "
+            "tokens_per_rank=%d: %s",
+            len(shape_keys),
+            sum(len(v) for v in plans.values()),
+            int(tokens_per_rank),
+            {key: plans[key] for key in shape_keys},
+        )
+
+    def _run_warmup_launches() -> None:
+        for key in shape_keys:
+            info = shapes[key]
+            for layout, m_value in plans[key]:
+                launcher = (
+                    _launch_dummy_grouped_fp8_contiguous
+                    if layout == "contiguous"
+                    else _launch_dummy_grouped_fp8_masked
+                )
+                _run_deepgemm_warmup_launch_with_retry(
+                    "DSV4 GroupedFP8",
+                    f"{info['name']} {layout} m={m_value} key={key}",
+                    partial(
+                        launcher, info=info, m_value=m_value, device=device
+                    ),
+                    device=device,
+                )
+            _sync_cuda(device)
+            _release_cuda_cache(device)
+
+    t0 = time.time()
+    _run_deepgemm_warmup_launches_serialized("DSV4 GroupedFP8", _run_warmup_launches)
+    if rank == 0:
+        logging.info(
+            "[DSV4 GroupedFP8] JIT warmup done in %.2fs", time.time() - t0
+        )
+    _GROUPED_FP8_MOE_JIT_WARMED_KEYS.add(warmup_key)
+
+
+def _collect_dsv4_wo_a_grouped_shapes(model: Any) -> Dict[tuple[int, int, int], dict]:
+    """Collect the SM90 wo_a per-group GEMM operands.
+
+    Keyed off ``_wo_a_grp_w`` / ``_wo_a_grp_s``, the buffers the SM90 branch
+    registers. The SM100 einsum collector keys off ``_wo_a_stk_*`` instead, so
+    without this the wo_a JIT compiled inside the first real request.
+    """
+
+    shapes: Dict[tuple[int, int, int], dict] = {}
+    for module_name, module in model.named_modules():
+        weight = getattr(module, "_wo_a_grp_w", None)
+        scale = getattr(module, "_wo_a_grp_s", None)
+        if not isinstance(weight, torch.Tensor) or weight.dim() != 3:
+            continue
+        if not isinstance(scale, torch.Tensor) or scale.dim() != 3:
+            continue
+        key = (int(weight.shape[0]), int(weight.shape[1]), int(weight.shape[2]))
+        if key in shapes:
+            continue
+        shapes[key] = {"name": module_name, "weight": weight, "scale": scale}
+    return shapes
+
+
+def _launch_dummy_wo_a_grouped(
+    *, info: dict, m_value: int, device: torch.device
+) -> None:
+    from rtp_llm.models_py.modules.dsv4.fp8._wo_a_sm90 import wo_a_grouped_gemm
+
+    weight, scale = info["weight"], info["scale"]
+    groups, _, k_local = (int(v) for v in weight.shape)
+    m_value = max(int(m_value), 1)
+
+    o_fp8 = torch.zeros(
+        (m_value, groups, k_local), dtype=torch.float8_e4m3fn, device=device
+    )
+    # The packed int32 UE8M0 activation scale fused_inv_rope_fp8_quant emits: one
+    # word per four K-blocks, rounded up.
+    words = -(-(k_local // _GROUPED_FP8_ALIGNMENT) // 4)
+    o_scale = torch.zeros(
+        (m_value, groups, words), dtype=torch.int32, device=device
+    )
+    wo_a_grouped_gemm(o_fp8, o_scale, weight, scale)
+
+
+@torch.inference_mode()
+def warmup_wo_a_grouped_jit(
+    shapes: Dict[tuple[int, int, int], dict],
+    *,
+    max_m: int,
+    device: torch.device,
+) -> None:
+    """Compile the SM90 wo_a per-group GEMM over the dense M grid.
+
+    Symmetric with ``warmup_batched_fp8_einsum_jit`` on SM100: same M grid, the
+    other kernel. ``recipe=(1, 128, 128)`` is fixed inside ``wo_a_grouped_gemm``.
+    """
+
+    if not model_warm_up_enabled():
+        return
+    device = torch.device(device)
+    if not _is_cuda_device(device) or not shapes:
+        return
+    _assert_not_capturing()
+
+    shape_keys = tuple(sorted(shapes.keys()))
+    m_grid = tuple(_dense_gemm_m_grid(int(max_m)))
+    if not m_grid:
+        return
+
+    warmup_key = (int(max_m), shape_keys, m_grid, str(device))
+    if warmup_key in _WO_A_GROUPED_JIT_WARMED_KEYS:
+        return
+
+    rank = _dist_rank()
+    if rank == 0:
+        logging.info(
+            "[DSV4 woA-grouped] JIT warmup start: %d shapes, %d M values, "
+            "max_m=%d: %s",
+            len(shape_keys),
+            len(m_grid),
+            int(max_m),
+            shape_keys,
+        )
+
+    def _run_warmup_launches() -> None:
+        for key in shape_keys:
+            info = shapes[key]
+            for m_value in m_grid:
+                _run_deepgemm_warmup_launch_with_retry(
+                    "DSV4 woA-grouped",
+                    f"{info['name']} m={m_value} key={key}",
+                    partial(
+                        _launch_dummy_wo_a_grouped,
+                        info=info,
+                        m_value=m_value,
+                        device=device,
+                    ),
+                    device=device,
+                )
+            _sync_cuda(device)
+            _release_cuda_cache(device)
+
+    t0 = time.time()
+    _run_deepgemm_warmup_launches_serialized("DSV4 woA-grouped", _run_warmup_launches)
+    if rank == 0:
+        logging.info(
+            "[DSV4 woA-grouped] JIT warmup done in %.2fs", time.time() - t0
+        )
+    _WO_A_GROUPED_JIT_WARMED_KEYS.add(warmup_key)
