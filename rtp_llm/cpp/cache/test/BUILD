@@ -17,7 +17,10 @@ cuda13_torch_link_deps = select({
 
 test_copts = [
     "-fno-access-control",
-] + copts()
+] + copts() + select({
+    "//:using_remote_kv_cache": ["-DUSE_REMOTE_KV_CACHE=1"],
+    "//conditions:default": [],
+})
 
 test_deps = [
     "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
@@ -33,7 +36,7 @@ test_deps = [
     "@local_config_cuda//cuda:cudart",
 ] + torch_deps() + cuda13_torch_link_deps
 
-block_cache_test_deps = [
+shared_block_cache_test_deps = [
     "//rtp_llm/cpp/testing:device_test_utils",
     "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
     "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
@@ -146,6 +149,20 @@ cc_binary(
     deps = [":cache_config_creator_py_test_lib"],
 )
 
+cc_test(
+    name = "cache_config_creator_test",
+    srcs = ["CacheConfigCreatorTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:cache_core",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {},
+    exec_properties = {"gpu": "H20"},
+)
+
 cc_library(
     name = "block_pool_test_helper",
     hdrs = [
@@ -160,25 +177,13 @@ cc_library(
 )
 
 cc_test(
-    name = "block_cache_test",
-    srcs = [
-        "BlockCacheTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = block_cache_test_deps,
-    env = {},
-    exec_properties = {'gpu':'H20'},
-)
-
-cc_test(
     name = "shared_block_cache_test",
     srcs = [
         "SharedBlockCacheTest.cc",
     ],
     data = [],
     copts = test_copts,
-    deps = block_cache_test_deps,
+    deps = shared_block_cache_test_deps,
     env = {},
     exec_properties = {'gpu':'H20'},
 )
@@ -210,9 +215,9 @@ cc_test(
 )
 
 cc_test(
-    name = "full_kv_cache_group_test",
+    name = "full_kv_cache_manager_test",
     srcs = [
-        "FullKVCacheGroupTest.cc",
+        "FullKVCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -224,9 +229,9 @@ cc_test(
 )
 
 cc_test(
-    name = "single_type_kv_cache_allocator_test",
+    name = "hybrid_pool_coordinator_kv_cache_manager_single_group_test",
     srcs = [
-        "SingleTypeKVCacheAllocatorTest.cc",
+        "HybridPoolCoordinatorKVCacheManagerSingleGroupTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -246,7 +251,7 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
-        "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
+        "//rtp_llm/cpp/cache/test/mock:mock_coordinator_kv_cache_manager_lib",
         "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
     ],
@@ -271,9 +276,9 @@ cc_test(
 )
 
 cc_test(
-    name = "linear_kv_cache_group_test",
+    name = "linear_kv_cache_manager_test",
     srcs = [
-        "LinearKVCacheGroupTest.cc",
+        "LinearKVCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -285,9 +290,9 @@ cc_test(
 )
 
 cc_test(
-    name = "hybrid_kv_cache_allocator_test",
+    name = "hybrid_pool_coordinator_kv_cache_manager_behavior_test",
     srcs = [
-        "HybridTypeKVCacheAllocatorTest.cc",
+        "HybridPoolCoordinatorKVCacheManagerBehaviorTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -299,9 +304,9 @@ cc_test(
 )
 
 cc_test(
-    name = "hybrid_kv_cache_allocator_cp_shard_test",
+    name = "hybrid_pool_coordinator_kv_cache_manager_cp_shard_test",
     srcs = [
-        "HybridKVCacheAllocatorCPShardTest.cc",
+        "HybridPoolCoordinatorKVCacheManagerCPShardTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -313,9 +318,9 @@ cc_test(
 )
 
 cc_test(
-    name = "hybrid_pool_kv_cache_allocator_test",
+    name = "hybrid_pool_coordinator_kv_cache_manager_test",
     srcs = [
-        "HybridPoolKVCacheAllocatorTest.cc",
+        "HybridPoolCoordinatorKVCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -327,9 +332,9 @@ cc_test(
 )
 
 cc_test(
-    name = "swa_kv_cache_group_test",
+    name = "swa_kv_cache_manager_test",
     srcs = [
-        "SWAKVCacheGroupTest.cc",
+        "SWAKVCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,

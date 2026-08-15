@@ -12,7 +12,7 @@
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorKVCacheManager.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
@@ -63,39 +63,25 @@ public:
                                int                            target_batch_size) const;
 
     // 块操作相关
-    void blockCopy(int src_block_index, int dest_block_index);
-    void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
-    void blockBatchCopy(const torch::Tensor& copy_mapping);
-    void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
-    void blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping);
+    void blockBatchCopy(const std::vector<GroupBlockIdPair>& copy_mapping);
 
-    bool updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
-                       const std::vector<int>&         block_src_batch,
-                       bool                            copy_last_block,
-                       std::vector<TaggedBlockIdPair>& block_update_mapping);
+    bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                       const std::vector<int>&        block_src_batch,
+                       bool                           copy_last_block,
+                       std::vector<GroupBlockIdPair>& block_update_mapping);
 
     // 地址转换和缓冲区访问
-    BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id) const;
-    std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id) const;
-    std::vector<BlockInfo>
-                  convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const;
-    BlockAddrInfo convertIndexToAddr(int block_index, int layer_id, int group_id) const;
-    std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id, int group_id) const;
-    std::vector<BlockInfo>
-    convertIndexToBuffer(int block_index, int layer_id, int group_id, int partition_count, int partition_id) const;
-    BlockAddrInfo          convertIndexToAddrByTag(int block_index, int layer_id, const std::string& tag) const;
-    std::vector<BlockInfo> convertIndexToBufferByTag(int block_index, int layer_id, const std::string& tag) const;
-    std::vector<BlockInfo> convertIndexToBufferByTag(
-        int block_index, int layer_id, const std::string& tag, int partition_count, int partition_id) const;
+    BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id, const std::string& tag) const;
+    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, const std::string& tag, int block_index) const;
+    std::vector<BlockInfo> convertIndexToBuffer(
+        int layer_id, const std::string& tag, int block_index, int partition_count, int partition_id) const;
 
     GroupedCacheLayerLayout allLayerCacheBase() const;
 
     // for main model; grouped layout preserves layers that own multiple cache groups
     GroupedCacheLayerLayout getMainModelGroupedCacheLayerLayout() const;
-    GroupedCacheLayerLayout getMainModelCacheLayerLayout() const;
     // for mtp module
     GroupedCacheLayerLayout getMTPModuleGroupedCacheLayerLayout(int mtp_module_id) const;
-    GroupedCacheLayerLayout getMTPModuleCacheLayerLayout(int mtp_module_id) const;
 
     // 资源统计和信息查询
     size_t                  freeBlocksNum() const;
@@ -104,7 +90,6 @@ public:
     size_t                  notInUseBlocksNum() const;
     BatchKVCacheResourcePtr popBlocksFromCache(size_t min_blocks_to_free);
     void                    blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource);
-    size_t                  availableTokensNum() const;
     size_t                  totalBlocksNum() const;
     size_t                  maxAvailableTokensNum() const;
     KVCacheInfo             getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
@@ -154,27 +139,39 @@ public:
     }
 
     // Write one KV block (optionally per-layer) from host/device tensors for test
-    virtual bool
-    writeKVBlockForTest(int block_index, int layer_id, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer);
-    virtual bool writeKVBlockForTest(int block_index, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer);
+    virtual bool writeKVBlockForTest(int                  block_index,
+                                     int                  layer_id,
+                                     const std::string&   tag,
+                                     const torch::Tensor& k_buffer,
+                                     const torch::Tensor& v_buffer);
+    virtual bool writeKVBlockForTest(int                  block_index,
+                                     const std::string&   tag,
+                                     const torch::Tensor& k_buffer,
+                                     const torch::Tensor& v_buffer);
 
-    bool setKVBlockValue(int block_index, int layer_id, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer) {
-        return writeKVBlockForTest(block_index, layer_id, k_buffer, v_buffer);
+    bool setKVBlockValue(int                  block_index,
+                         int                  layer_id,
+                         const std::string&   tag,
+                         const torch::Tensor& k_buffer,
+                         const torch::Tensor& v_buffer) {
+        return writeKVBlockForTest(block_index, layer_id, tag, k_buffer, v_buffer);
     }
 
-    bool setKVBlockValue(int block_index, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer) {
-        return writeKVBlockForTest(block_index, k_buffer, v_buffer);
+    bool setKVBlockValue(int                  block_index,
+                         const std::string&   tag,
+                         const torch::Tensor& k_buffer,
+                         const torch::Tensor& v_buffer) {
+        return writeKVBlockForTest(block_index, tag, k_buffer, v_buffer);
     }
 
 private:
     void initConnectorCoordinator();
-    void allocateAndSync();
     void reportMetricsLoop();
     void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
 
     // 成员变量
-    CacheConfig         config_;
-    KVCacheAllocatorPtr allocator_;
+    CacheConfig                  config_;
+    CoordinatorKVCacheManagerPtr coordinator_cache_manager_;
 
     const kmonitor::MetricsReporterPtr metrics_reporter_;
     const KVCacheConfig                kv_cache_config_;

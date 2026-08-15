@@ -7,8 +7,15 @@ import torch
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.grammar_tokenizer_info import build_grammar_tokenizer_info_json
-from rtp_llm.config.kv_cache_config import KVCacheConfig
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.kv_cache_config import (
+    DEFAULT_KV_CACHE_TAG,
+    INDEXER_KV_CACHE_TAG,
+    KVCacheConfig,
+)
+from rtp_llm.config.model_config import (
+    ModelConfig,
+    resolve_kv_cache_kernel_seq_size_per_block,
+)
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
     BaseTokenizer,
@@ -20,6 +27,7 @@ from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo, ModelW
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.ops import (
+    DataType,
     DeviceResourceConfig,
     FMHAConfig,
     HWKernelConfig,
@@ -50,6 +58,38 @@ class _MultiModalModel(Protocol):
         tp_rank: int,
         device: str,
     ) -> None: ...
+
+
+def build_default_kv_cache_spec_descs(
+    model_config: ModelConfig,
+) -> list[list[KVCacheSpecDesc]]:
+    default_desc = KVCacheSpecDesc()
+    if model_config.attn_config.use_mla and model_config.mla_ops_type != MlaOpsType.MHA:
+        default_desc.cache_type = KVCacheSpecType.MLA
+    else:
+        default_desc.cache_type = KVCacheSpecType.MHA
+
+    default_desc.tag = DEFAULT_KV_CACHE_TAG
+    default_desc.kernel_seq_size_per_block = resolve_kv_cache_kernel_seq_size_per_block(
+        model_config
+    )
+    layer_descs = [default_desc]
+    if model_config.attn_config.is_sparse:
+        indexer_head_dim = model_config.attn_config.indexer_head_dim
+        if indexer_head_dim <= 0 or indexer_head_dim % 128 != 0:
+            raise ValueError(
+                "sparse indexer_head_dim must be positive and divisible by 128, "
+                f"got {indexer_head_dim}"
+            )
+        indexer_desc = KVCacheSpecDesc()
+        indexer_desc.tag = INDEXER_KV_CACHE_TAG
+        indexer_desc.cache_type = KVCacheSpecType.OPAQUE_KV
+        indexer_desc.entry_dtype = DataType.TYPE_UINT8
+        indexer_desc.entry_elems = indexer_head_dim + indexer_head_dim // 128 * 4
+        indexer_desc.explicit_entry_count = model_config.attn_config.tokens_per_block
+        indexer_desc.kernel_seq_size_per_block = default_desc.kernel_seq_size_per_block
+        layer_descs.append(indexer_desc)
+    return [list(layer_descs) for _ in range(model_config.num_layers)]
 
 
 class BaseModel(object):
@@ -222,20 +262,9 @@ class BaseModel(object):
     def _post_build_model_config(cls, model_config: ModelConfig) -> None:
         if model_config.kv_cache_spec_descs:
             return
-
-        desc = KVCacheSpecDesc()
-        if (
-            model_config.attn_config.use_mla
-            and model_config.mla_ops_type != MlaOpsType.MHA
-        ):
-            desc.cache_type = KVCacheSpecType.MLA
-        else:
-            desc.cache_type = KVCacheSpecType.MHA
-
-        desc.tag = "default"
-        model_config.kv_cache_spec_descs = [
-            [desc] for _ in range(model_config.num_layers)
-        ]
+        model_config.kv_cache_spec_descs = build_default_kv_cache_spec_descs(
+            model_config
+        )
 
     @classmethod
     def from_config(

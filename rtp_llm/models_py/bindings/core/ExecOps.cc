@@ -201,17 +201,13 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
     RTP_LLM_CHECK_WITH_INFO(
         group.spec != nullptr, "cache-store tag=%s has no KVCacheSpec attached", layer_kv.tag.c_str());
 
-    // Physical address stride and logical transfer length differ for a shared pool:
-    // blocks use the allocation-wide stride, while each tag transfers only its group-local bytes.
-    const bool use_group_local_storage_layout = cache_config.use_independent_block_pools;
     // LayerKVCache may expose kernel-page views; CacheStore keys and block IDs use physical pages.
-    const size_t seq_size_per_block = group.seq_size_per_block;
-    const size_t kv_block_stride_bytes =
-        use_group_local_storage_layout ? group.kv_block_stride_bytes : cache_config.kv_block_stride_bytes;
-    const size_t kv_scale_stride_bytes =
-        use_group_local_storage_layout ? group.kv_scale_stride_bytes : cache_config.kv_scale_stride_bytes;
-    const size_t kv_block_transfer_bytes         = group.kv_block_stride_bytes;
-    const size_t kv_scale_transfer_bytes         = group.kv_scale_stride_bytes;
+    // The group owns the physical row stride, while its spec describes the logical payload.
+    const size_t seq_size_per_block              = cache_config.seqSizePerBlockForGroup(layer_kv.tag);
+    const size_t kv_block_stride_bytes           = cache_config.kvBlockStrideBytesForGroup(layer_kv.tag);
+    const size_t kv_scale_stride_bytes           = cache_config.kvScaleStrideBytesForGroup(layer_kv.tag);
+    const size_t kv_block_transfer_bytes         = group.spec->block_size_bytes();
+    const size_t kv_scale_transfer_bytes         = group.spec->scale_block_size_bytes();
     const bool   use_group_cache_transfer_policy = cache_config.topology().groups().size() > 1;
 
     RTP_LLM_CHECK_WITH_INFO(
@@ -369,7 +365,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                 // full row. Dividing here would slice an already-sliced row.
             }
 
-            const bool use_opaque_key_prefix = cache_config.use_opaque_kv_cache_store || use_group_cache_transfer_policy
+            const bool use_opaque_key_prefix = cache_config.usesOpaqueKVCacheStore() || use_group_cache_transfer_policy
                                                || group.spec->type == KVCacheSpecType::MultiHeadLatentAttention;
             void*                 kv_addr = kv_cache_data + static_cast<size_t>(block_id) * kv_block_stride_bytes;
             std::shared_ptr<void> kv_block_addr(kv_cache_owner, kv_addr);
@@ -667,8 +663,9 @@ void execBroadcastCpu(const BroadcastParams& params) {
     auto& broadcaster = CpuTpBroadcaster::instance();
     if (broadcaster.isInitialized()) {
         for (auto& tensor : params.buffers) {
-            RTP_LLM_CHECK_WITH_INFO(
-                tensor.is_cpu(), "execBroadcastCpu requires CPU tensors (got device=%s)", tensor.device().str().c_str());
+            RTP_LLM_CHECK_WITH_INFO(tensor.is_cpu(),
+                                    "execBroadcastCpu requires CPU tensors (got device=%s)",
+                                    tensor.device().str().c_str());
             auto contiguous = tensor.contiguous();
             broadcaster.broadcast(contiguous.data_ptr(), contiguous.nbytes(), params.root);
             if (!contiguous.is_same(tensor)) {
@@ -684,6 +681,10 @@ void execBroadcastCpu(const BroadcastParams& params) {
 
 bool isCpuTpBroadcasterInitialized() {
     return CpuTpBroadcaster::instance().isInitialized();
+}
+
+uint64_t cpuTpBroadcasterGeneration() {
+    return CpuTpBroadcaster::instance().generation();
 }
 
 AllReduceOutput execAllReduce(const AllReduceParams& params) {
@@ -848,12 +849,10 @@ void registerExecCtxOps(pybind11::module& m) {
         py::arg("tp_size"),
         py::arg("base_path"));
 
-    m.def(
-        "destroy_cpu_tp_broadcaster",
-        []() {
-            py::gil_scoped_release release;
-            CpuTpBroadcaster::instance().reset();
-        });
+    m.def("destroy_cpu_tp_broadcaster", []() {
+        py::gil_scoped_release release;
+        CpuTpBroadcaster::instance().reset();
+    });
 }
 
 }  // namespace rtp_llm

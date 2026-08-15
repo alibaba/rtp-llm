@@ -5,7 +5,9 @@
 #include <cstdint>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -33,30 +35,103 @@ inline std::shared_ptr<MHAKVCacheSpec> makeResolvedMhaSpec(rtp_llm::DataType  dt
                                                            uint32_t           local_head_num_kv,
                                                            uint32_t           size_per_head,
                                                            uint32_t           seq_size_per_block,
-                                                           const std::string& tag = "") {
+                                                           const std::string& tag                       = "",
+                                                           uint32_t           kernel_seq_size_per_block = 0) {
     RTP_LLM_CHECK_WITH_INFO(local_head_num_kv > 0, "local_head_num_kv must be > 0");
     RTP_LLM_CHECK_WITH_INFO(size_per_head > 0, "size_per_head must be > 0");
     RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0, "seq_size_per_block must be > 0");
 
     AttentionConfigs attn{};
-    attn.kv_head_num      = static_cast<int>(local_head_num_kv);
-    attn.size_per_head    = static_cast<int>(size_per_head);
-    attn.tokens_per_block = seq_size_per_block;
+    attn.kv_head_num             = static_cast<int>(local_head_num_kv);
+    attn.size_per_head           = static_cast<int>(size_per_head);
+    attn.tokens_per_block        = seq_size_per_block;
+    attn.kernel_tokens_per_block = kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block : seq_size_per_block;
     ParallelismConfig parallelism;
     parallelism.tp_size = 1;
 
     KVCacheSpecDesc desc;
-    desc.tag        = tag.empty() ? "default" : tag;
-    desc.cache_type = KVCacheSpecType::MultiHeadAttention;
-    desc.dtype      = dtype;
+    desc.tag                       = tag.empty() ? "default" : tag;
+    desc.cache_type                = KVCacheSpecType::MultiHeadAttention;
+    desc.dtype                     = dtype;
+    desc.kernel_seq_size_per_block = kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block : seq_size_per_block;
 
     SpecBuildContext ctx;
-    ctx.dtype                   = dtype;
-    ctx.seq_size_per_block      = seq_size_per_block;
-    ctx.attn_config             = &attn;
-    ctx.parallelism_config      = &parallelism;
-    ctx.kernel_tokens_per_block = seq_size_per_block;
-    return std::dynamic_pointer_cast<MHAKVCacheSpec>(SpecBuilder::build(desc, ctx));
+    ctx.dtype              = dtype;
+    ctx.seq_size_per_block = seq_size_per_block;
+    ctx.attn_config        = &attn;
+    ctx.parallelism_config = &parallelism;
+    return std::dynamic_pointer_cast<MHAKVCacheSpec>(SpecBuilder::build(desc, ctx).first);
+}
+
+inline GroupTopology
+makeTestGroupTopology(const KVCacheSpecPtr& spec, CacheGroupPolicy policy, std::vector<int> layer_ids = {}) {
+    RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "test cache group requires a non-null spec");
+    RTP_LLM_CHECK_WITH_INFO(!spec->tag.empty(), "test cache group requires a non-empty tag");
+
+    GroupTopology group;
+    group.tag                   = spec->tag;
+    group.spec                  = spec;
+    group.policy                = policy;
+    group.layer_ids             = std::move(layer_ids);
+    group.kv_block_stride_bytes = spec->block_size_bytes();
+    group.kv_scale_stride_bytes = spec->scale_block_size_bytes();
+    return group;
+}
+
+inline GroupTopology makeTestGroupForConfig(const CacheConfig&              config,
+                                            const KVCacheSpecPtr&           spec,
+                                            std::vector<int>                layer_ids,
+                                            CacheGroupType                  type,
+                                            std::string                     tag    = {},
+                                            std::optional<CacheGroupPolicy> policy = std::nullopt) {
+    RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "test cache group requires a non-null spec");
+    if (tag.empty()) {
+        tag = spec->tag;
+    }
+    RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "test cache group requires a non-empty tag");
+
+    auto stored_spec = spec->clone();
+    stored_spec->tag = tag;
+
+    GroupTopology group;
+    group.tag    = std::move(tag);
+    group.spec   = std::move(stored_spec);
+    group.policy = policy.value_or(defaultCacheGroupPolicy(type));
+    RTP_LLM_CHECK_WITH_INFO(group.policy.group_type == type,
+                            "test cache group policy type=%d does not match requested type=%d",
+                            static_cast<int>(group.policy.group_type),
+                            static_cast<int>(type));
+    group.layer_ids             = std::move(layer_ids);
+    group.kv_block_stride_bytes = group.spec->block_size_bytes();
+    group.kv_scale_stride_bytes = group.spec->scale_block_size_bytes();
+    return group;
+}
+
+inline void setTestTopology(CacheConfig& config, std::vector<GroupTopology> groups) {
+    size_t layer_count = config.layer_num;
+    for (const auto& group : groups) {
+        for (int layer_id : group.layer_ids) {
+            if (layer_id >= 0) {
+                layer_count = std::max(layer_count, static_cast<size_t>(layer_id + 1));
+            }
+        }
+    }
+    RTP_LLM_CHECK_WITH_INFO(layer_count > 0, "test topology requires a positive layer count");
+
+    std::vector<LayerTopology> layers(layer_count);
+    for (size_t layer_id = 0; layer_id < layer_count; ++layer_id) {
+        layers[layer_id].layer_id = static_cast<int>(layer_id);
+    }
+    for (const auto& group : groups) {
+        for (int layer_id : group.layer_ids) {
+            RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layers.size(),
+                                    "test topology tag=%s has invalid layer_id=%d",
+                                    group.tag.c_str(),
+                                    layer_id);
+            layers[static_cast<size_t>(layer_id)].group_tags.push_back(group.tag);
+        }
+    }
+    config.setTopology(std::move(groups), std::move(layers));
 }
 
 inline std::shared_ptr<const CacheTopology> makeTestCacheTopology(int                                  group_num,
@@ -76,10 +151,10 @@ inline std::shared_ptr<const CacheTopology> makeTestCacheTopology(int           
                             group_num);
 
     std::vector<std::vector<int>> group_layer_ids(static_cast<size_t>(group_num));
-    std::vector<LayerBase>        layers;
+    std::vector<LayerTopology>    layers;
     layers.reserve(static_cast<size_t>(layer_num));
     for (int layer_id = 0; layer_id < layer_num; ++layer_id) {
-        LayerBase layer;
+        LayerTopology layer;
         layer.layer_id = layer_id;
         for (int group_id : layer_group_ids[static_cast<size_t>(layer_id)]) {
             RTP_LLM_CHECK_WITH_INFO(group_id >= 0 && group_id < group_num,
@@ -92,22 +167,21 @@ inline std::shared_ptr<const CacheTopology> makeTestCacheTopology(int           
         layers.push_back(std::move(layer));
     }
 
-    const size_t           blocks_per_kv_block = std::max<size_t>(1, kernel_blocks_per_kv_block);
-    std::vector<GroupBase> groups;
+    const size_t               blocks_per_kv_block = std::max<size_t>(1, kernel_blocks_per_kv_block);
+    std::vector<GroupTopology> groups;
     groups.reserve(static_cast<size_t>(group_num));
     for (int group_id = 0; group_id < group_num; ++group_id) {
-        const auto tag  = "group" + std::to_string(group_id);
-        auto       spec = makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, blocks_per_kv_block, tag);
+        const auto tag        = "group" + std::to_string(group_id);
+        const auto group_type = group_types.empty() ? CacheGroupType::FULL : group_types[static_cast<size_t>(group_id)];
+        const auto kernel_seq_size =
+            group_type == CacheGroupType::FULL ? 1 : static_cast<uint32_t>(blocks_per_kv_block);
+        auto spec = makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, blocks_per_kv_block, tag, kernel_seq_size);
 
-        GroupBase group;
-        group.tag                       = tag;
-        group.spec                      = std::move(spec);
-        group.policy                    = defaultCacheGroupPolicy(group_types.empty() ? CacheGroupType::FULL :
-                                                                     group_types[static_cast<size_t>(group_id)]);
-        group.layer_ids                 = std::move(group_layer_ids[static_cast<size_t>(group_id)]);
-        group.block_num                 = 16;
-        group.seq_size_per_block        = blocks_per_kv_block;
-        group.kernel_seq_size_per_block = 1;
+        GroupTopology group;
+        group.tag       = tag;
+        group.spec      = std::move(spec);
+        group.policy    = defaultCacheGroupPolicy(group_type);
+        group.layer_ids = std::move(group_layer_ids[static_cast<size_t>(group_id)]);
         groups.push_back(std::move(group));
     }
     return CacheTopology::create(std::move(groups), std::move(layers));
@@ -123,19 +197,22 @@ inline std::shared_ptr<MLAKVCacheSpec> makeResolvedMlaSpec(rtp_llm::DataType  dt
     RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0, "seq_size_per_block must be > 0");
 
     AttentionConfigs attn{};
-    attn.kv_lora_rank  = static_cast<int>(kv_lora_rank);
-    attn.rope_head_dim = static_cast<int>(rope_head_dim);
+    attn.kv_lora_rank            = static_cast<int>(kv_lora_rank);
+    attn.rope_head_dim           = static_cast<int>(rope_head_dim);
+    attn.tokens_per_block        = seq_size_per_block;
+    attn.kernel_tokens_per_block = seq_size_per_block;
 
     KVCacheSpecDesc desc;
-    desc.tag        = tag.empty() ? "mla" : tag;
-    desc.cache_type = KVCacheSpecType::MultiHeadLatentAttention;
-    desc.dtype      = dtype;
+    desc.tag                       = tag.empty() ? "mla" : tag;
+    desc.cache_type                = KVCacheSpecType::MultiHeadLatentAttention;
+    desc.dtype                     = dtype;
+    desc.kernel_seq_size_per_block = seq_size_per_block;
 
     SpecBuildContext ctx;
     ctx.dtype              = dtype;
     ctx.seq_size_per_block = seq_size_per_block;
     ctx.attn_config        = &attn;
-    return std::dynamic_pointer_cast<MLAKVCacheSpec>(SpecBuilder::build(desc, ctx));
+    return std::dynamic_pointer_cast<MLAKVCacheSpec>(SpecBuilder::build(desc, ctx).first);
 }
 
 inline std::shared_ptr<LinearKVCacheSpec>
@@ -163,6 +240,9 @@ makeResolvedLinearSpec(rtp_llm::DataType  dtype,
     linear.conv_state_dtype       = conv_state_dtype == rtp_llm::DataType::TYPE_INVALID ? dtype : conv_state_dtype;
     ParallelismConfig parallelism;
     parallelism.tp_size = 1;
+    AttentionConfigs attn{};
+    attn.tokens_per_block        = seq_size_per_block;
+    attn.kernel_tokens_per_block = seq_size_per_block;
 
     KVCacheSpecDesc desc;
     desc.tag        = tag.empty() ? "linear" : tag;
@@ -172,10 +252,10 @@ makeResolvedLinearSpec(rtp_llm::DataType  dtype,
     SpecBuildContext ctx;
     ctx.dtype                   = dtype;
     ctx.seq_size_per_block      = seq_size_per_block;
+    ctx.attn_config             = &attn;
     ctx.linear_attention_config = &linear;
     ctx.parallelism_config      = &parallelism;
-    ctx.kernel_tokens_per_block = seq_size_per_block;
-    return std::dynamic_pointer_cast<LinearKVCacheSpec>(SpecBuilder::build(desc, ctx));
+    return std::dynamic_pointer_cast<LinearKVCacheSpec>(SpecBuilder::build(desc, ctx).first);
 }
 
 inline KVCacheSpecPtr makeResolvedOpaqueSpec(bool               state_cache,
@@ -200,11 +280,20 @@ inline KVCacheSpecPtr makeResolvedOpaqueSpec(bool               state_cache,
     desc.explicit_entry_count        = block_elems;
     desc.block_stride_bytes_override = block_bytes;
     desc.is_state_cache              = state_cache;
+    if (!state_cache) {
+        desc.kernel_seq_size_per_block = seq_size_per_block;
+    }
 
+    AttentionConfigs  attn{};
+    ParallelismConfig parallelism;
+    attn.tokens_per_block        = seq_size_per_block;
+    attn.kernel_tokens_per_block = seq_size_per_block;
     SpecBuildContext ctx;
     ctx.dtype              = dtype;
     ctx.seq_size_per_block = seq_size_per_block;
-    return SpecBuilder::build(desc, ctx);
+    ctx.attn_config        = &attn;
+    ctx.parallelism_config = &parallelism;
+    return SpecBuilder::build(desc, ctx).first;
 }
 
 inline KVCacheSpecDesc makeDsv4Desc(const std::string& tag,
@@ -241,17 +330,16 @@ inline KVCacheSpecDesc makeDsv4Desc(const std::string& tag,
         desc.cp->prefill_slice_layout = CpPrefillSliceLayout::PAYLOAD;
         desc.cp->slice                = CpBlockSliceMode::PAYLOAD_BYTES;
     } else if (desc.tag == "hca_state") {
-        desc.compression_ratio                = 128;
-        desc.cp->align_payload                = true;
-        desc.cp->prefill_slice_layout         = CpPrefillSliceLayout::PAYLOAD;
-        desc.cp->slice                        = CpBlockSliceMode::PAYLOAD_BYTES;
-        desc.capacity                         = CacheCapacityPolicyDesc{};
-        desc.capacity->explicit_block_num     = 256;
-        desc.capacity->charge_to_paged_budget = true;
-        desc.reuse->enable_prefix_reuse       = false;
-        desc.tail                             = CacheTailPolicyDesc{};
-        desc.tail->active_tail_blocks         = 1;
-        desc.tail->validate_tail_blocks       = false;
+        desc.compression_ratio            = 128;
+        desc.cp->align_payload            = true;
+        desc.cp->prefill_slice_layout     = CpPrefillSliceLayout::PAYLOAD;
+        desc.cp->slice                    = CpBlockSliceMode::PAYLOAD_BYTES;
+        desc.capacity                     = CacheCapacityPolicyDesc{};
+        desc.capacity->explicit_block_num = 256;
+        desc.reuse->enable_prefix_reuse   = false;
+        desc.tail                         = CacheTailPolicyDesc{};
+        desc.tail->active_tail_blocks     = 1;
+        desc.tail->validate_tail_blocks   = false;
     } else if (desc.tag == "swa_kv") {
         desc.compression_ratio        = DSV4_SWA_WINDOW_ENTRIES;
         desc.cp->align_payload        = true;
@@ -262,12 +350,15 @@ inline KVCacheSpecDesc makeDsv4Desc(const std::string& tag,
         }
     }
     desc.state_ring_include_gen_num_per_cycle = true;
-    desc.cp->scale_seq_size                   = true;
+    desc.cp->mapping                          = CpBlockMappingMode::COMPACT_LAST_RANK;
     desc.block_stride_alignment_min_entries   = DSV4_SWA_WINDOW_ENTRIES;
     return desc;
 }
 
 inline void setDefaultKvCacheSpec(ModelConfig& model_config) {
+    if (model_config.attn_config.kernel_tokens_per_block <= 0) {
+        model_config.attn_config.kernel_tokens_per_block = model_config.attn_config.tokens_per_block;
+    }
     KVCacheSpecDesc desc;
     desc.tag = "default";
     if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {
@@ -275,10 +366,16 @@ inline void setDefaultKvCacheSpec(ModelConfig& model_config) {
     } else {
         desc.cache_type = KVCacheSpecType::MultiHeadAttention;
     }
+    desc.kernel_seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.kernel_tokens_per_block > 0 ?
+                                                               model_config.attn_config.kernel_tokens_per_block :
+                                                               model_config.attn_config.tokens_per_block);
     model_config.kv_cache_spec_descs.assign(static_cast<size_t>(model_config.num_layers), {desc});
 }
 
 inline void setHybridAttentionKvCacheSpecs(ModelConfig& model_config) {
+    if (model_config.attn_config.kernel_tokens_per_block <= 0) {
+        model_config.attn_config.kernel_tokens_per_block = model_config.attn_config.tokens_per_block;
+    }
     std::vector<int> full_layers;
     std::vector<int> swa_layers;
     std::vector<int> linear_layers;
@@ -303,13 +400,17 @@ inline void setHybridAttentionKvCacheSpecs(ModelConfig& model_config) {
     }
 
     KVCacheSpecDesc full_desc;
-    full_desc.tag        = "full";
-    full_desc.cache_type = KVCacheSpecType::MultiHeadAttention;
+    full_desc.tag                       = "full";
+    full_desc.cache_type                = KVCacheSpecType::MultiHeadAttention;
+    full_desc.kernel_seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.kernel_tokens_per_block > 0 ?
+                                                                    model_config.attn_config.kernel_tokens_per_block :
+                                                                    model_config.attn_config.tokens_per_block);
 
     KVCacheSpecDesc swa_desc = full_desc;
     swa_desc.tag             = "swa";
     swa_desc.cache_type      = KVCacheSpecType::OpaqueState;
-    swa_desc.entry_elems     = static_cast<uint32_t>(model_config.attn_config.size_per_head)
+    swa_desc.kernel_seq_size_per_block.reset();
+    swa_desc.entry_elems = static_cast<uint32_t>(model_config.attn_config.size_per_head)
                            * static_cast<uint32_t>(model_config.attn_config.kv_head_num) * 2;
     swa_desc.explicit_entry_count = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
     swa_desc.entry_dtype          = DataType::TYPE_FP16;
@@ -331,6 +432,9 @@ inline void setHybridAttentionKvCacheSpecs(ModelConfig& model_config) {
 }
 
 inline void setDsv4KvCacheSpecs(ModelConfig& model_config, const std::vector<int>& layer_compress_ratios) {
+    if (model_config.attn_config.kernel_tokens_per_block <= 0) {
+        model_config.attn_config.kernel_tokens_per_block = model_config.attn_config.tokens_per_block;
+    }
     const int layer_num = static_cast<int>(model_config.num_layers);
     model_config.hybrid_attention_config.hybrid_attention_types.assign(static_cast<size_t>(layer_num),
                                                                        HybridAttentionType::NONE);
@@ -343,13 +447,20 @@ inline void setDsv4KvCacheSpecs(ModelConfig& model_config, const std::vector<int
     const uint32_t head_dim         = static_cast<uint32_t>(model_config.attn_config.size_per_head);
     const uint32_t indexer_head_dim = static_cast<uint32_t>(model_config.attn_config.indexer_head_dim);
 
-    auto csa_kv        = makeDsv4Desc("csa_kv", "compressed_kv", kv_entry_elems, DataType::TYPE_UINT8, 4);
-    auto hca_kv        = makeDsv4Desc("hca_kv", "compressed_kv", kv_entry_elems, DataType::TYPE_UINT8, 128);
-    auto indexer_kv    = makeDsv4Desc("indexer_kv", "compressed_kv", indexer_entry_elems, DataType::TYPE_UINT8, 4);
-    auto indexer_state = makeDsv4Desc("indexer_state", "fixed_state", 4 * indexer_head_dim, DataType::TYPE_FP32);
-    auto csa_state     = makeDsv4Desc("csa_state", "fixed_state", 4 * head_dim, DataType::TYPE_FP32);
-    auto hca_state     = makeDsv4Desc("hca_state", "fixed_state", 2 * head_dim, DataType::TYPE_FP32);
-    auto swa_kv        = makeDsv4Desc("swa_kv", "sliding_window_kv", kv_entry_elems, DataType::TYPE_UINT8);
+    auto csa_kv          = makeDsv4Desc("csa_kv", "compressed_kv", kv_entry_elems, DataType::TYPE_UINT8, 4);
+    auto hca_kv          = makeDsv4Desc("hca_kv", "compressed_kv", kv_entry_elems, DataType::TYPE_UINT8, 128);
+    auto indexer_kv      = makeDsv4Desc("indexer_kv", "compressed_kv", indexer_entry_elems, DataType::TYPE_UINT8, 4);
+    auto indexer_state   = makeDsv4Desc("indexer_state", "fixed_state", 4 * indexer_head_dim, DataType::TYPE_FP32);
+    auto csa_state       = makeDsv4Desc("csa_state", "fixed_state", 4 * head_dim, DataType::TYPE_FP32);
+    auto hca_state       = makeDsv4Desc("hca_state", "fixed_state", 2 * head_dim, DataType::TYPE_FP32);
+    auto swa_kv          = makeDsv4Desc("swa_kv", "sliding_window_kv", kv_entry_elems, DataType::TYPE_UINT8);
+    auto kernel_seq_size = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    if (model_config.attn_config.kernel_tokens_per_block > 0) {
+        kernel_seq_size = static_cast<uint32_t>(model_config.attn_config.kernel_tokens_per_block);
+    }
+    csa_kv.kernel_seq_size_per_block     = kernel_seq_size;
+    hca_kv.kernel_seq_size_per_block     = kernel_seq_size;
+    indexer_kv.kernel_seq_size_per_block = kernel_seq_size;
 
     model_config.kv_cache_spec_descs.clear();
     model_config.kv_cache_spec_descs.resize(static_cast<size_t>(layer_num));
@@ -374,8 +485,7 @@ inline void setDsv4ExplicitPoolBlocks(ModelConfig& model_config, const std::stri
                 if (!desc.capacity.has_value()) {
                     desc.capacity = CacheCapacityPolicyDesc{};
                 }
-                desc.capacity->explicit_block_num     = block_num;
-                desc.capacity->charge_to_paged_budget = block_num > 0;
+                desc.capacity->explicit_block_num = block_num;
             }
         }
     }
@@ -387,24 +497,26 @@ inline KVCacheSpecPtr makeMhaSpec(const std::string& tag,
                                   uint32_t           local_head_num_kv,
                                   uint32_t           size_per_head) {
     AttentionConfigs attn_config;
-    attn_config.kv_head_num      = local_head_num_kv;
-    attn_config.size_per_head    = size_per_head;
-    attn_config.tokens_per_block = static_cast<uint32_t>(tokens_per_block);
+    attn_config.kv_head_num             = local_head_num_kv;
+    attn_config.size_per_head           = size_per_head;
+    attn_config.tokens_per_block        = static_cast<uint32_t>(tokens_per_block);
+    attn_config.kernel_tokens_per_block = static_cast<uint32_t>(tokens_per_block);
 
     ParallelismConfig parallelism_config;
     parallelism_config.tp_size = 1;
 
     KVCacheSpecDesc desc;
-    desc.tag        = tag;
-    desc.cache_type = KVCacheSpecType::MultiHeadAttention;
-    desc.dtype      = dtype;
+    desc.tag                       = tag;
+    desc.cache_type                = KVCacheSpecType::MultiHeadAttention;
+    desc.dtype                     = dtype;
+    desc.kernel_seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
 
     SpecBuildContext ctx;
     ctx.dtype              = dtype;
     ctx.seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
     ctx.attn_config        = &attn_config;
     ctx.parallelism_config = &parallelism_config;
-    return SpecBuilder::build(desc, ctx);
+    return SpecBuilder::build(desc, ctx).first;
 }
 
 inline KVCacheSpecPtr makeLinearSpec(const std::string& tag,
@@ -421,6 +533,9 @@ inline KVCacheSpecPtr makeLinearSpec(const std::string& tag,
 
     ParallelismConfig parallelism_config;
     parallelism_config.tp_size = 1;
+    AttentionConfigs attn_config;
+    attn_config.tokens_per_block        = static_cast<uint32_t>(tokens_per_block);
+    attn_config.kernel_tokens_per_block = static_cast<uint32_t>(tokens_per_block);
 
     KVCacheSpecDesc desc;
     desc.tag        = tag;
@@ -430,50 +545,38 @@ inline KVCacheSpecPtr makeLinearSpec(const std::string& tag,
     SpecBuildContext ctx;
     ctx.dtype                   = dtype;
     ctx.seq_size_per_block      = static_cast<uint32_t>(tokens_per_block);
+    ctx.attn_config             = &attn_config;
     ctx.linear_attention_config = &linear_config;
     ctx.parallelism_config      = &parallelism_config;
-    return SpecBuilder::build(desc, ctx);
+    return SpecBuilder::build(desc, ctx).first;
 }
 
 inline CacheConfig
 makeSingleGroupCacheConfig(KVCacheSpecPtr spec, CacheGroupType group_type, int layer_num, int block_num) {
     CacheConfig config;
-    config.dtype                     = spec->memoryLayoutDType();
-    config.layer_num                 = static_cast<uint32_t>(layer_num);
-    config.layer_all_num             = static_cast<uint32_t>(layer_num);
-    config.block_num                 = static_cast<uint32_t>(block_num);
-    config.seq_size_per_block        = spec->seq_size_per_block;
-    config.kernel_seq_size_per_block = spec->seq_size_per_block;
+    config.layer_num          = static_cast<uint32_t>(layer_num);
+    config.seq_size_per_block = spec->seq_size_per_block;
 
     std::vector<int> layer_ids(static_cast<size_t>(layer_num));
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
-    config.fromGroupedSpecs({spec}, {layer_ids}, {group_type}, {spec->tag});
-
-    config.kv_block_stride_bytes = spec->block_size_bytes();
-    config.kv_block_size_bytes   = static_cast<size_t>(layer_num) * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes = spec->scale_block_size_bytes();
-    config.kv_scale_size_bytes   = static_cast<size_t>(layer_num) * config.kv_scale_stride_bytes;
-    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-
-    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
-                                              static_cast<int>(per_layer_stride_bytes));
+    auto group = makeTestGroupForConfig(config, spec, std::move(layer_ids), group_type);
+    setTestTopology(config, {std::move(group)});
+    config.finalizeBlockNums(static_cast<uint32_t>(block_num), RuntimeConfig{});
     return config;
 }
 
 inline CacheConfig makeSingleLayerCacheConfig(KVCacheSpecPtr spec, CacheGroupType group_type, int block_num = 4) {
-    auto config            = makeSingleGroupCacheConfig(std::move(spec), group_type, /*layer_num=*/1, block_num);
-    config.group_layer_num = 1;
-    return config;
+    return makeSingleGroupCacheConfig(std::move(spec), group_type, /*layer_num=*/1, block_num);
 }
 
-inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
-                                            int               block_num,
-                                            size_t            tokens_per_block,
-                                            rtp_llm::DataType dtype,
-                                            uint32_t          local_head_num_kv = 1,
-                                            uint32_t          size_per_head     = 1) {
-    auto spec = makeMhaSpec("default", tokens_per_block, dtype, local_head_num_kv, size_per_head);
+inline CacheConfig makeSimpleMhaCacheConfig(int                layer_num,
+                                            int                block_num,
+                                            size_t             tokens_per_block,
+                                            rtp_llm::DataType  dtype,
+                                            uint32_t           local_head_num_kv = 1,
+                                            uint32_t           size_per_head     = 1,
+                                            const std::string& tag               = "default") {
+    auto spec = makeMhaSpec(tag, tokens_per_block, dtype, local_head_num_kv, size_per_head);
     return makeSingleGroupCacheConfig(std::move(spec), CacheGroupType::FULL, layer_num, block_num);
 }
 
@@ -495,62 +598,41 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
                                                   uint32_t          local_head_num_kv = 1,
                                                   uint32_t          size_per_head     = 1) {
     CacheConfig config;
-    config.dtype                     = dtype;
-    config.layer_num                 = static_cast<uint32_t>(layer_num);
-    config.layer_all_num             = static_cast<uint32_t>(layer_num);
-    config.block_num                 = static_cast<uint32_t>(block_num);
-    config.seq_size_per_block        = tokens_per_block;
-    config.kernel_seq_size_per_block = tokens_per_block;
-    config.group_layer_num           = std::max(group_layer_num, 1);
-    config.linear_step               = 2;
+    config.layer_num               = static_cast<uint32_t>(layer_num);
+    config.seq_size_per_block      = tokens_per_block;
+    config.linear_step             = 1;
+    config.enable_hybrid_attention = true;
+    RTP_LLM_CHECK_WITH_INFO(group_layer_num > 0 && layer_num > 0 && (layer_num % group_layer_num) == 0
+                                && (layer_num / group_layer_num) >= 2,
+                            "makeSimpleHybridMhaCacheConfig requires layer_num divisible by group_layer_num into at "
+                            "least 2 groups, got layer_num=%d group_layer_num=%d",
+                            layer_num,
+                            group_layer_num);
 
-    if (layer_num <= 0 || (layer_num % config.group_layer_num) != 0 || (layer_num / config.group_layer_num) < 2) {
-        return makeSimpleMhaCacheConfig(
-            layer_num, block_num, tokens_per_block, dtype, local_head_num_kv, size_per_head);
-    }
-
-    const int group_cnt = layer_num / config.group_layer_num;
+    const int group_cnt = layer_num / group_layer_num;
 
     auto linear_spec = makeLinearSpec("linear", tokens_per_block, dtype, local_head_num_kv, size_per_head);
     auto full_spec   = makeMhaSpec("full", tokens_per_block, dtype, local_head_num_kv, size_per_head);
 
-    std::vector<KVCacheSpecPtr>   specs;
-    std::vector<std::vector<int>> layers_by_group;
-    std::vector<CacheGroupType>   types;
-    std::vector<std::string>      tags;
-    specs.reserve(static_cast<size_t>(group_cnt));
-    layers_by_group.reserve(static_cast<size_t>(group_cnt));
-    types.reserve(static_cast<size_t>(group_cnt));
-    tags.reserve(static_cast<size_t>(group_cnt));
+    std::vector<GroupTopology> groups;
+    groups.reserve(static_cast<size_t>(group_cnt));
 
     for (int gid = 0; gid < group_cnt; ++gid) {
         std::vector<int> group_layers;
-        group_layers.reserve(static_cast<size_t>(config.group_layer_num));
-        for (int local = 0; local < config.group_layer_num; ++local) {
-            group_layers.push_back(gid * config.group_layer_num + local);
+        group_layers.reserve(static_cast<size_t>(group_layer_num));
+        for (int local = 0; local < group_layer_num; ++local) {
+            group_layers.push_back(gid * group_layer_num + local);
         }
         if (gid == 0) {
-            specs.push_back(linear_spec);
-            types.push_back(CacheGroupType::LINEAR);
-            tags.push_back("linear");
+            groups.push_back(
+                makeTestGroupForConfig(config, linear_spec, std::move(group_layers), CacheGroupType::LINEAR, "linear"));
         } else {
-            specs.push_back(full_spec);
-            types.push_back(CacheGroupType::FULL);
-            tags.push_back("full" + std::to_string(gid));
+            groups.push_back(makeTestGroupForConfig(
+                config, full_spec, std::move(group_layers), CacheGroupType::FULL, "full" + std::to_string(gid)));
         }
-        layers_by_group.push_back(std::move(group_layers));
     }
-    config.fromGroupedSpecs(specs, layers_by_group, types, tags);
-
-    config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
-    config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
-    config.kv_scale_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_scale_stride_bytes;
-    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-
-    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
-                                              static_cast<int>(per_layer_stride_bytes));
+    setTestTopology(config, std::move(groups));
+    config.finalizeBlockNums(static_cast<uint32_t>(block_num), RuntimeConfig{});
     return config;
 }
 

@@ -84,30 +84,71 @@ private:
 
 class CacheStoreAsyncWriterTest: public ::testing::Test {};
 
+class WriterTestSpec: public KVCacheSpec {
+public:
+    WriterTestSpec(size_t tokens_per_block, size_t kv_bytes):
+        KVCacheSpec(static_cast<uint32_t>(tokens_per_block)), kv_bytes_(kv_bytes) {
+        type = KVCacheSpecType::MultiHeadAttention;
+    }
+
+    size_t block_size() const override {
+        return kv_bytes_;
+    }
+    size_t k_block_size() const override {
+        return kv_bytes_ / 2;
+    }
+    size_t v_block_size() const override {
+        return kv_bytes_ - k_block_size();
+    }
+    size_t block_size_bytes() const override {
+        return kv_bytes_;
+    }
+    size_t k_block_size_bytes() const override {
+        return k_block_size();
+    }
+    size_t v_block_size_bytes() const override {
+        return v_block_size();
+    }
+    size_t scale_block_size_bytes() const override {
+        return 0;
+    }
+    size_t k_scale_block_size_bytes() const override {
+        return 0;
+    }
+    size_t v_scale_block_size_bytes() const override {
+        return 0;
+    }
+    DataType memoryLayoutDType() const override {
+        return DataType::TYPE_UINT8;
+    }
+    KVCacheSpecPtr clone() const override {
+        return std::make_shared<WriterTestSpec>(*this);
+    }
+    std::string debugString(size_t indent = 0) const override {
+        return std::string(indent, ' ') + "WriterTestSpec{}";
+    }
+
+private:
+    size_t kv_bytes_;
+};
+
 static CacheConfig makeWriterTestCacheConfig(const std::string& tag, size_t kv_stride) {
     CacheConfig config;
-    config.layer_num                 = 1;
-    config.layer_all_num             = 1;
-    config.block_num                 = 1;
-    config.seq_size_per_block        = 1;
-    config.kernel_seq_size_per_block = 1;
-    config.kv_block_stride_bytes     = kv_stride;
+    config.layer_num          = 1;
+    config.layer_all_num      = 1;
+    config.seq_size_per_block = 1;
 
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->tag                = tag;
-    spec->seq_size_per_block = 1;
+    auto spec = std::make_shared<WriterTestSpec>(/*tokens_per_block=*/1, kv_stride);
+    spec->tag = tag;
 
-    GroupBase group;
-    group.tag                       = tag;
-    group.spec                      = spec;
-    group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    group.layer_ids                 = {0};
-    group.block_num                 = 1;
-    group.seq_size_per_block        = 1;
-    group.kernel_seq_size_per_block = 1;
-    group.kv_block_stride_bytes     = kv_stride;
+    GroupTopology group;
+    group.tag       = tag;
+    group.spec      = spec;
+    group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    group.layer_ids = {0};
 
     config.setTopology({std::move(group)}, {{0, {tag}}});
+    config.finalizeBlockNums(/*global_block_num=*/2, RuntimeConfig{});
     return config;
 }
 
@@ -240,7 +281,7 @@ TEST_F(CacheStoreAsyncWriterTest, SelectsRequestedMtpCacheConfig) {
         /*device_id=*/-1, cache_manager, /*cache_model_id=*/7, /*mtp_cache_config_index=*/0);
 
     EXPECT_EQ(writer.cache_manager_, cache_manager);
-    EXPECT_EQ(writer.cache_config_->tagForGroup(0), "draft");
+    EXPECT_EQ(writer.cache_config_->topology().groups().at(0).tag, "draft");
     EXPECT_EQ(writer.cache_model_id_, 7);
     EXPECT_EQ(writer.cp_rank_, 0);
     EXPECT_EQ(writer.cp_size_, 1);

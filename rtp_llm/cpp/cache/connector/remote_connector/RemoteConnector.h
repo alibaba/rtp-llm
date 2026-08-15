@@ -21,22 +21,26 @@
 
 namespace rtp_llm {
 
-class KVCacheAllocator;
+class CoordinatorKVCacheManager;
 class RemoteAsyncMatchContext;
 class RemoteConnectorAsyncContext;
 
 class RemoteConnector: public KVCacheConnector {
 public:
-    RemoteConnector(const CacheConfig&                        cache_config,
-                    const KVCacheConfig&                      kv_cache_config,
-                    const RuntimeConfig&                      runtime_config,
-                    const ParallelismConfig&                  parallelism_config,
-                    const SpeculativeExecutionConfig&         sp_config,
-                    void*                                     register_buffer_addr,
-                    size_t                                    register_buffer_size,
-                    std::shared_ptr<KVCacheAllocator>         allocator,
-                    const kmonitor::MetricsReporterPtr        metrics_reporter = nullptr,
-                    const std::map<std::string, std::string>& lora_info_map    = {});
+    // Production remote cache currently supports exactly one FULL group. Multi-group policies are retained only as
+    // future restoration scaffolding and are intentionally unreachable through RemoteConnector.
+    static void validateConfig(const CacheConfig& cache_config);
+
+    RemoteConnector(const CacheConfig&                         cache_config,
+                    const KVCacheConfig&                       kv_cache_config,
+                    const RuntimeConfig&                       runtime_config,
+                    const ParallelismConfig&                   parallelism_config,
+                    const SpeculativeExecutionConfig&          sp_config,
+                    void*                                      register_buffer_addr,
+                    size_t                                     register_buffer_size,
+                    std::shared_ptr<CoordinatorKVCacheManager> coordinator_cache_manager,
+                    const kmonitor::MetricsReporterPtr         metrics_reporter = nullptr,
+                    const std::map<std::string, std::string>&  lora_info_map    = {});
     ~RemoteConnector() override;
 
     bool init();

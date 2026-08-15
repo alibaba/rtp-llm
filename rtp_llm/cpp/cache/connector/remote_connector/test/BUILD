@@ -55,20 +55,6 @@ cc_test(
 )
 
 cc_test(
-    name = "remote_connector_mock_full_linear_test",
-    srcs = [
-        "RemoteConnectorMockFullLinearTest.cc",
-    ],
-    copts = test_copts,
-    exec_properties = {"gpu": "H20"},
-    # tags = ["H20"],
-    target_compatible_with = cuda13_target_compatibility,
-    deps = test_deps + [
-        ":remote_connector_mock_base",
-    ],
-)
-
-cc_test(
     name = "remote_connector_mock_only_full_test",
     srcs = [
         "RemoteConnectorMockOnlyFullTest.cc",

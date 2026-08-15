@@ -2,31 +2,18 @@
 
 #include <memory>
 
-#include "rtp_llm/cpp/cache/KVCacheGroup.h"
+#include "rtp_llm/cpp/cache/SingleTypeKVCacheManager.h"
 
 namespace rtp_llm {
 
-class SWAKVCacheGroup: public KVCacheGroup {
+class SWAKVCacheManager: public SingleTypeKVCacheManager {
 public:
-    SWAKVCacheGroup(GroupBase                           cache_group,
-                    BlockPoolPtr                        block_pool,
-                    int                                 group_id,
-                    int                                 linear_step      = 0,
-                    SharedBlockCache*                   shared_cache     = nullptr,
-                    const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        KVCacheGroup(std::move(cache_group), std::move(block_pool), group_id, shared_cache, metrics_reporter),
-        linear_step_(linear_step) {}
-
-    // Transition-only overload.
-    SWAKVCacheGroup(const LayerIdsType&                 layer_ids,
-                    std::shared_ptr<KVCacheSpec>        kvcache_spec,
-                    BlockPoolPtr                        block_pool,
-                    int                                 group_id,
-                    int                                 linear_step      = 0,
-                    SharedBlockCache*                   shared_cache     = nullptr,
-                    const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr,
-                    CacheGroupPolicy                    policy = defaultCacheGroupPolicy(CacheGroupType::SWA)):
-        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, policy, shared_cache, metrics_reporter),
+    SWAKVCacheManager(GroupTopology                       group_topology,
+                      BlockPoolPtr                        block_pool,
+                      int                                 linear_step      = 0,
+                      SharedBlockCache*                   shared_cache     = nullptr,
+                      const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
+        SingleTypeKVCacheManager(std::move(group_topology), std::move(block_pool), shared_cache, metrics_reporter),
         linear_step_(linear_step) {}
 
     MatchResult matchSingleKey(CacheKeyType cache_key) const override;
@@ -66,6 +53,6 @@ private:
     int linear_step_ = 0;
 };
 
-using SWAKVCacheGroupPtr = std::shared_ptr<SWAKVCacheGroup>;
+using SWAKVCacheManagerPtr = std::shared_ptr<SWAKVCacheManager>;
 
 }  // namespace rtp_llm

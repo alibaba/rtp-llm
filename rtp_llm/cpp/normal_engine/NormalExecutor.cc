@@ -119,9 +119,12 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
 
     const size_t runtime_tokens_per_block        = cache_manager ? cache_manager->cacheConfig().seq_size_per_block :
                                                                    params.model_config_.attn_config.tokens_per_block;
-    const size_t runtime_kernel_tokens_per_block = cache_manager ?
-                                                       cache_manager->cacheConfig().kernel_seq_size_per_block :
-                                                       params.model_config_.attn_config.kernel_tokens_per_block;
+    size_t       runtime_kernel_tokens_per_block = params.model_config_.attn_config.kernel_tokens_per_block > 0 ?
+                                                       params.model_config_.attn_config.kernel_tokens_per_block :
+                                                       runtime_tokens_per_block;
+    if (cache_manager) {
+        runtime_kernel_tokens_per_block = cache_manager->cacheConfig().kernelSeqSizePerBlockForModel();
+    }
 
     GptModelInitParams model_init_params(
         {params.gpt_weights,
@@ -254,7 +257,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
 
     {
         // update kv cache
-        if (model_input.kv_cache_update_mapping.defined()) {
+        if (!model_input.kv_cache_update_mapping.empty()) {
             RTP_LLM_PROFILE_SCOPE("executor.kv_cache_update");
             cache_manager_->blockBatchCopy(model_input.kv_cache_update_mapping);
         }
@@ -334,7 +337,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         // Metrics and KV release stay on the main thread; dispatch_output_us
         // now measures launch cost, while worker time is in async_runner.thread.
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }
@@ -356,7 +359,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         }
         auto result                           = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }

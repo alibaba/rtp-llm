@@ -35,16 +35,14 @@ inline ModelConfig makeSingleLayerMTPModelConfig(const ModelConfig& model_config
     single_layer_config.kv_cache_spec_descs = {model_config.kv_cache_spec_descs[source_layer]};
 
     const auto& attention_types = model_config.hybrid_attention_config.hybrid_attention_types;
+    RTP_LLM_CHECK_WITH_INFO(!model_config.hybrid_attention_config.enable_hybrid_attention || !attention_types.empty(),
+                            "MTP hybrid attention is enabled but hybrid_attention_types is empty");
     if (!attention_types.empty()) {
         RTP_LLM_CHECK_WITH_INFO(source_layer < attention_types.size(),
                                 "MTP source layer %zu has no hybrid attention type (type count %zu)",
                                 source_layer,
                                 attention_types.size());
         single_layer_config.hybrid_attention_config.hybrid_attention_types = {attention_types[source_layer]};
-    } else {
-        RTP_LLM_CHECK_WITH_INFO(!model_config.hybrid_attention_config.enable_hybrid_attention
-                                    || model_config.hybrid_attention_config.enable_independent_kv_cache_pools,
-                                "MTP legacy hybrid attention config requires one attention type per layer");
     }
     return single_layer_config;
 }

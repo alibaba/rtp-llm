@@ -1,20 +1,29 @@
 import logging
-from typing import Any, Dict, Optional
+from collections.abc import Mapping
+from typing import Dict, Optional
 
 import torch
 from torch import nn
 
+from rtp_llm.config.kv_cache_config import DEFAULT_KV_CACHE_TAG, SPARSE_KV_CACHE_TAGS
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-from rtp_llm.models_py.model_desc.block_map import select_fmha_impl_for_layer
+from rtp_llm.models_py.model_desc.block_map import (
+    get_attention_inputs_value,
+    get_layer_caches_for_tags,
+    get_single_layer_cache,
+    select_attention_inputs_for_tag,
+    select_fmha_impl_for_layer,
+    select_fmha_impl_for_tag,
+)
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
+    AttnImplFactory,
     CausalAttention,
     DenseMLP,
     Embedding,
     FakeBalanceExpert,
-    FMHAImplBase,
     FusedMoeFactory,
     GroupTopK,
     LinearFactory,
@@ -24,6 +33,10 @@ from rtp_llm.models_py.modules import (
     SelectTopk,
     SigmoidGateScaleAdd,
 )
+from rtp_llm.models_py.modules.factory.attention.attn_factory import (
+    AttentionImpl,
+    resolve_mla_use_fast_path,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -32,6 +45,8 @@ from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 logger = logging.getLogger(__name__)
+AttentionRoute = AttentionImpl | Mapping[str, AttentionImpl]
+LayerCacheRoute = LayerKVCache | Mapping[str, LayerKVCache] | None
 
 
 class GenericMoeLayer(nn.Module):
@@ -342,8 +357,8 @@ class GenericMoeDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
-        fmha_impl: FMHAImplBase,
-        kv_cache: Optional[LayerKVCache] = None,
+        fmha_impl: AttentionRoute,
+        kv_cache: LayerCacheRoute = None,
     ) -> DecodeLayerOutput:
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
@@ -413,7 +428,43 @@ class GenericMoeModel(GptModelBase):
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
 
-    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+    def prepare_fmha_impl(
+        self, inputs: PyModelInputs, is_cuda_graph: bool = False
+    ) -> AttentionRoute:
+        if not self.config.attn_config.is_sparse:
+            return super().prepare_fmha_impl(inputs, is_cuda_graph)
+
+        attention_inputs = get_attention_inputs_value(inputs)
+        if not isinstance(attention_inputs, Mapping):
+            raise RuntimeError("sparse attention requires tagged attention inputs")
+        group_inputs = {
+            tag: select_attention_inputs_for_tag(attention_inputs, tag)
+            for tag in SPARSE_KV_CACHE_TAGS
+        }
+        attn_configs = self.config.getAttentionConfigs(
+            self.parallelism_config.get_attn_tp_size()
+        )
+        use_fast_path = resolve_mla_use_fast_path(
+            attn_configs,
+            group_inputs[DEFAULT_KV_CACHE_TAG],
+            self.parallelism_config,
+        )
+        return {
+            tag: AttnImplFactory.get_fmha_impl(
+                self.config,
+                self.parallelism_config,
+                self.weight,
+                tagged_inputs,
+                self.fmha_config,
+                is_cuda_graph,
+                mla_use_fast_path=use_fast_path,
+            )
+            for tag, tagged_inputs in group_inputs.items()
+        }
+
+    def forward(
+        self, inputs: PyModelInputs, fmha_impl: AttentionRoute | None = None
+    ) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         hidden_states = self.embed_tokens(input_ids)
         if fmha_impl is None:
@@ -421,13 +472,27 @@ class GenericMoeModel(GptModelBase):
                 inputs
             )  # pyright: ignore[reportUnreachable]
         residual = torch.zeros_like(hidden_states)
+        is_sparse = self.config.attn_config.is_sparse
+        if is_sparse:
+            layer_fmha_impl = {
+                tag: select_fmha_impl_for_tag(fmha_impl, tag)
+                for tag in SPARSE_KV_CACHE_TAGS
+            }
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            layer_fmha_impl = select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
+            if is_sparse:
+                layer_kv_cache = get_layer_caches_for_tags(
+                    self.kv_cache, i, SPARSE_KV_CACHE_TAGS
+                )
+            else:
+                layer_fmha_impl = select_fmha_impl_for_layer(
+                    fmha_impl, self.kv_cache, i
+                )
+                layer_kv_cache = get_single_layer_cache(self.kv_cache, i)
             output = decoder_layer(
                 hidden_states,
                 residual,
                 layer_fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                kv_cache=layer_kv_cache,
             )
             hidden_states = output.hidden_states
             residual = output.residual

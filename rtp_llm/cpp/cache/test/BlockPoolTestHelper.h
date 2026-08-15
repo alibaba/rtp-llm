@@ -7,6 +7,7 @@
 #include <string>
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
@@ -15,6 +16,8 @@
 namespace rtp_llm {
 
 struct TestKVCacheSpec: public KVCacheSpec {
+    using KVCacheSpec::KVCacheSpec;
+
     DataType dtype             = DataType::TYPE_INVALID;
     size_t   k_block_bytes     = 0;
     size_t   v_block_bytes     = 0;
@@ -84,15 +87,14 @@ inline KVCacheSpecPtr createTestKvCacheSpec(uint32_t          layer_num,
                             v_block_stride_bytes,
                             type_sz);
 
-    auto spec                = std::make_shared<TestKVCacheSpec>();
-    spec->tag                = "default";
-    spec->type               = k_block_stride_bytes == v_block_stride_bytes ? KVCacheSpecType::MultiHeadAttention :
-                                                                              KVCacheSpecType::MultiHeadLatentAttention;
-    spec->seq_size_per_block = seq_size_per_block;
-    spec->dtype              = dtype;
-    spec->k_block_bytes      = k_block_stride_bytes;
-    spec->v_block_bytes      = v_block_stride_bytes;
-    spec->local_kv_head_num  = local_head_num_kv;
+    auto spec               = std::make_shared<TestKVCacheSpec>(seq_size_per_block, seq_size_per_block);
+    spec->tag               = "default";
+    spec->type              = k_block_stride_bytes == v_block_stride_bytes ? KVCacheSpecType::MultiHeadAttention :
+                                                                             KVCacheSpecType::MultiHeadLatentAttention;
+    spec->dtype             = dtype;
+    spec->k_block_bytes     = k_block_stride_bytes;
+    spec->v_block_bytes     = v_block_stride_bytes;
+    spec->local_kv_head_num = local_head_num_kv;
     return spec;
 }
 
@@ -113,22 +115,25 @@ inline BlockPoolConfig createTestConfig(size_t            k_block_stride_bytes =
     test_spec->v_scale_bytes = v_scale_stride_bytes;
 
     rtp_llm::CacheConfig cache_config;
-    cache_config.layer_num             = kLayerNum;
-    cache_config.layer_all_num         = kLayerNum;
-    cache_config.block_num             = kBlockNum;
-    cache_config.dtype                 = dtype;
-    cache_config.seq_size_per_block    = seq_size_per_block;
-    cache_config.kv_block_stride_bytes = k_block_stride_bytes + v_block_stride_bytes;
-    cache_config.kv_scale_stride_bytes = k_scale_stride_bytes + v_scale_stride_bytes;
+    cache_config.layer_num          = kLayerNum;
+    cache_config.seq_size_per_block = seq_size_per_block;
 
     std::vector<int> layer_ids(kLayerNum);
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
-    cache_config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
-    auto groups                 = cache_config.topology().groups();
-    groups[0].local_kv_head_num = test_spec->local_kv_head_num;
+    auto group =
+        test::makeTestGroupForConfig(cache_config, spec, std::move(layer_ids), CacheGroupType::FULL, "default");
+    group.policy.explicit_block_num = kBlockNum;
+    group.kv_block_stride_bytes     = k_block_stride_bytes + v_block_stride_bytes;
+    group.kv_scale_stride_bytes     = k_scale_stride_bytes + v_scale_stride_bytes;
+    test::setTestTopology(cache_config, {std::move(group)});
+    std::vector<GroupTopology> groups;
+    for (const auto& group : cache_config.topology().groups()) {
+        groups.push_back(group);
+    }
+    groups.at(0).local_kv_head_num = test_spec->local_kv_head_num;
     cache_config.setTopology(std::move(groups), cache_config.topology().layers());
 
-    return BlockPoolConfigHelper::createConfig(cache_config);
+    return BlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.topology().groups().front().tag);
 }
 
 inline void createDevice() {

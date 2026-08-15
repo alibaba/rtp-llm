@@ -361,7 +361,6 @@ class EnvArgumentParser(argparse.ArgumentParser):
                                 except argparse.ArgumentTypeError as error:
                                     self.error(f"{env_name} ({dest}): {error}")
                                 except (ValueError, TypeError):
-                                    # If conversion fails, skip this value
                                     pass
                             else:
                                 # No type converter, use as string

@@ -10,7 +10,6 @@
 #include <torch/torch.h>
 
 #include "rtp_llm/cpp/cache/BlockRefCounter.h"
-#include "rtp_llm/cpp/cache/BlockCache.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
@@ -25,13 +24,10 @@ class BlockPool {
 public:
     BlockPool(const BlockPoolConfig& config,
               AllocationType         allocation_type         = AllocationType::DEVICE,
-              bool                   use_pinned_cpu_backing  = false,
               bool                   use_cuda_malloc_backing = false);
     ~BlockPool();
 
     bool init();
-
-    BlockCachePtr blockCache();
 
     MemoryType                 where() const;
     std::vector<torch::Tensor> allLayerCacheBase() const;
@@ -91,7 +87,6 @@ private:
     // Helper functions for init()
     void validateConfig() const;
     void initializeCacheBuffer();
-    void initializePinnedCpuBuffer(const char* log_context);
     void initializeCudaMallocBuffer();
     void initializeLayerMappings();
     void initializeLayoutStrategies();
@@ -136,10 +131,7 @@ private:
     BlockRefCounter        req_cache_ref_counter_;
 
     AllocationType allocation_type_;
-    bool           use_pinned_cpu_backing_;
     bool           use_cuda_malloc_backing_;
-
-    BlockCachePtr block_cache_;
 
     torch::Tensor               cache_aligned_buffer_;
     void*                       cache_base_ptr_  = nullptr;

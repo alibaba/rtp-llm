@@ -27,7 +27,7 @@
 
 namespace rtp_llm {
 namespace {
-constexpr int64_t     kSchemaVersion   = 1;
+constexpr int64_t     kSchemaVersion   = 2;
 constexpr size_t      kChunkMaxBytes   = 64ULL * 1024ULL * 1024ULL;
 constexpr size_t      kChunkMaxRecords = 256;
 constexpr size_t      kQueueMaxBytes   = 256ULL * 1024ULL * 1024ULL;
@@ -36,13 +36,20 @@ std::atomic<uint64_t> g_file_sequence{0};
 #define MODEL_INPUT_TENSORS(X)                                                                                       \
     X(combo_tokens) X(input_lengths) X(sequence_lengths) X(lm_output_indexes) X(lm_output_lengths) X(prefix_lengths) \
     X(combo_tokens_type_ids) X(combo_position_ids) X(last_hidden_states) X(attention_mask)                           \
-    X(kv_cache_block_id) X(kv_cache_kernel_block_id) X(kv_cache_group_types) X(kv_cache_update_mapping)             \
     X(text_tokens_mask) X(mm_features_locs) X(input_embeddings_locs)                                                 \
     X(request_id) X(request_pd_separation) X(cache_keys)
 // clang-format on
 const char* roleName(ModelInputsModelRole role) {
     static constexpr const char* names[] = {"normal", "target", "draft", "draft_prefill"};
     return names[static_cast<size_t>(role)];
+}
+void addSizeMap(c10::impl::GenericDict& payload, const char* name, const std::map<std::string, size_t>& values) {
+    c10::impl::GenericDict snapshot(c10::StringType::get(), c10::IntType::get());
+    snapshot.reserve(values.size());
+    for (const auto& [tag, value] : values) {
+        snapshot.insert(tag, static_cast<int64_t>(value));
+    }
+    payload.insert(name, std::move(snapshot));
 }
 const char* executionStage(const GptModelInputs& inputs) {
     if (inputs.is_target_verify) {
@@ -154,8 +161,10 @@ c10::impl::GenericDict snapshotPayload(const GptModelInputs&     inputs,
     addTensorList(payload, "mm_extra_input", inputs.mm_extra_input, devices, float8_dtypes);
     addTensorList(payload, "input_embeddings", inputs.input_embeddings, devices, float8_dtypes);
     payload.insert("float8_dtypes", std::move(float8_dtypes));
-    payload.insert("kv_block_stride_bytes", static_cast<int64_t>(inputs.kv_block_stride_bytes));
-    payload.insert("kv_scale_stride_bytes", static_cast<int64_t>(inputs.kv_scale_stride_bytes));
+    addSizeMap(payload, "group_kv_block_stride_bytes", inputs.group_kv_block_stride_bytes);
+    addSizeMap(payload, "group_kv_scale_stride_bytes", inputs.group_kv_scale_stride_bytes);
+    addSizeMap(payload, "group_kv_block_transfer_bytes", inputs.group_kv_block_transfer_bytes);
+    addSizeMap(payload, "group_kv_scale_transfer_bytes", inputs.group_kv_scale_transfer_bytes);
     payload.insert("seq_size_per_block", static_cast<int64_t>(inputs.seq_size_per_block));
     payload.insert("kernel_seq_size_per_block", static_cast<int64_t>(inputs.kernel_seq_size_per_block));
     payload.insert("pd_separation", inputs.pd_separation);

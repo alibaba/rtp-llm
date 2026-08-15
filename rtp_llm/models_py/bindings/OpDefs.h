@@ -31,7 +31,6 @@ struct LayerKVCache {
     torch::Tensor kv_scale_base;
     int           seq_size_per_block = 0;
     int           layer_id           = -1;
-    int           group_id           = -1;
     std::string   tag                = "default";
 
     LayerKVCache() = default;
@@ -39,14 +38,12 @@ struct LayerKVCache {
     LayerKVCache(torch::Tensor kv_cache_base,
                  int           seq_size_per_block,
                  int           layer_id      = -1,
-                 int           group_id      = -1,
                  std::string   tag           = "default",
                  torch::Tensor kv_scale_base = {}):
         kv_cache_base(std::move(kv_cache_base)),
         kv_scale_base(std::move(kv_scale_base)),
         seq_size_per_block(seq_size_per_block),
         layer_id(layer_id),
-        group_id(group_id),
         tag(std::move(tag)) {}
 };
 
@@ -55,12 +52,6 @@ struct LayerKVCache {
 class KVCache {
 public:
     explicit KVCache(rtp_llm::GroupedCacheLayerLayout grouped_layout): grouped_layout_(std::move(grouped_layout)) {}
-
-    LayerKVCache getLayerCache(int layer_id) const {
-        validateLayer(layer_id);
-        const auto& group = grouped_layout_.topology().soleGroupForLayer(layer_id);
-        return getLayerCache(layer_id, group.tag);
-    }
 
     LayerKVCache getLayerCache(int layer_id, const std::string& tag) const {
         validateLayer(layer_id);
@@ -75,23 +66,16 @@ public:
 
     std::vector<LayerKVCache> getLayerCacheGroups(int layer_id) const {
         validateLayer(layer_id);
-        const auto  layer = static_cast<size_t>(layer_id);
-        const auto& tags  = grouped_layout_.topology().layer(layer_id).group_tags;
+        const auto& tags = grouped_layout_.groupTagsForLayer(layer_id);
 
         std::vector<LayerKVCache> layer_caches;
         layer_caches.reserve(tags.size());
         for (const auto& tag : tags) {
-            const auto& group_layout = grouped_layout_.group(tag);
-            if (group_layout.empty() || !group_layout.hasLayer(layer)) {
-                continue;
-            }
-            layer_caches.push_back(getLayerCache(layer_id, tag));
+            const auto& group  = grouped_layout_.topology().group(tag);
+            const auto& buffer = grouped_layout_.group(tag).at(static_cast<size_t>(layer_id));
+            layer_caches.push_back(makeLayerCache(layer_id, group, buffer));
         }
         return layer_caches;
-    }
-
-    const std::vector<std::string>& groupTags() const {
-        return grouped_layout_.topology().groupTagsSnapshot();
     }
 
     size_t layerCount() const {
@@ -99,11 +83,11 @@ public:
     }
 
     int getSeqSizePerBlock(const std::string& tag) const {
-        return static_cast<int>(grouped_layout_.topology().group(tag).seq_size_per_block);
+        return static_cast<int>(physicalSeqSize(grouped_layout_.topology().group(tag)));
     }
 
     int getKernelSeqSizePerBlock(const std::string& tag) const {
-        return static_cast<int>(grouped_layout_.topology().group(tag).kernel_seq_size_per_block);
+        return static_cast<int>(grouped_layout_.topology().group(tag).spec->kernel_seq_size_per_block);
     }
 
 private:
@@ -113,14 +97,20 @@ private:
         }
     }
 
-    static int64_t kernelBlocksPerPhysicalBlock(const rtp_llm::GroupBase& group) {
-        RTP_LLM_CHECK_WITH_INFO(group.kernel_seq_size_per_block > 0
-                                    && group.seq_size_per_block % group.kernel_seq_size_per_block == 0,
+    size_t physicalSeqSize(const rtp_llm::GroupTopology& group) const {
+        return group.spec->seq_size_per_block;
+    }
+
+    int64_t kernelBlocksPerPhysicalBlock(const rtp_llm::GroupTopology& group) const {
+        const auto physical_seq_size = physicalSeqSize(group);
+        const auto kernel_seq_size   = group.spec->kernel_seq_size_per_block;
+        RTP_LLM_CHECK_WITH_INFO(kernel_seq_size > 0 && physical_seq_size >= kernel_seq_size
+                                    && physical_seq_size % kernel_seq_size == 0,
                                 "invalid block subdivision for tag=%s physical=%zu kernel=%zu",
                                 group.tag.c_str(),
-                                group.seq_size_per_block,
-                                group.kernel_seq_size_per_block);
-        return static_cast<int64_t>(group.seq_size_per_block / group.kernel_seq_size_per_block);
+                                physical_seq_size,
+                                kernel_seq_size);
+        return static_cast<int64_t>(physical_seq_size / kernel_seq_size);
     }
 
     static torch::Tensor reshapeMlaTensor(const torch::Tensor& tensor,
@@ -149,20 +139,16 @@ private:
         return tensor.view({kernel_block_num, kernel_seq_size, tensor.numel() / page_elements});
     }
 
-    LayerKVCache
-    makeLayerCache(int layer_id, const rtp_llm::GroupBase& group, const rtp_llm::BlockBufferPtrInfo& buffers) const {
+    LayerKVCache makeLayerCache(int                                layer_id,
+                                const rtp_llm::GroupTopology&      group,
+                                const rtp_llm::BlockBufferPtrInfo& buffers) const {
         RTP_LLM_CHECK_WITH_INFO(buffers.kv_addr.defined(),
                                 "KV cache tensor must be defined for layer=%d tag=%s",
                                 layer_id,
                                 group.tag.c_str());
 
-        const int    group_id = static_cast<int>(grouped_layout_.topology().groupIdForTag(group.tag));
-        LayerKVCache result(buffers.kv_addr,
-                            static_cast<int>(group.seq_size_per_block),
-                            layer_id,
-                            group_id,
-                            group.tag,
-                            buffers.kv_scale_addr);
+        LayerKVCache result(
+            buffers.kv_addr, static_cast<int>(physicalSeqSize(group)), layer_id, group.tag, buffers.kv_scale_addr);
 
         const auto spec_type = group.spec->type;
         if (group.policy.group_type != rtp_llm::CacheGroupType::FULL
@@ -174,13 +160,13 @@ private:
         const int64_t physical_block_num  = buffers.kv_addr.size(0);
         const int64_t blocks_per_physical = kernelBlocksPerPhysicalBlock(group);
         const int64_t kernel_block_num    = physical_block_num * blocks_per_physical;
-        const int64_t kernel_seq_size     = static_cast<int64_t>(group.kernel_seq_size_per_block);
+        const int64_t kernel_seq_size     = static_cast<int64_t>(group.spec->kernel_seq_size_per_block);
         result.seq_size_per_block         = static_cast<int>(kernel_seq_size);
 
         if (spec_type == rtp_llm::KVCacheSpecType::MultiHeadAttention) {
             const int64_t local_kv_heads = static_cast<int64_t>(group.local_kv_head_num);
             RTP_LLM_CHECK_WITH_INFO(local_kv_heads > 0, "MHA tag=%s has no local KV heads", group.tag.c_str());
-            const int64_t physical_seq_size = static_cast<int64_t>(group.seq_size_per_block);
+            const int64_t physical_seq_size = static_cast<int64_t>(physicalSeqSize(group));
             const int64_t k_block_elems     = static_cast<int64_t>(group.spec->k_block_size());
             RTP_LLM_CHECK_WITH_INFO(k_block_elems > 0 && k_block_elems % (local_kv_heads * physical_seq_size) == 0,
                                     "MHA tag=%s cannot derive head dimension from k_block_size=%ld heads=%ld seq=%ld",
@@ -345,7 +331,7 @@ struct PyMultimodalInputs {
     std::vector<torch::Tensor> mm_extra_input;
 };
 
-using AttentionInputsByTag = std::map<std::string, PyAttentionInputs>;
+using GroupAttentionInputs = std::map<std::string, PyAttentionInputs>;
 
 struct PyModelInputs {
     torch::Tensor      input_ids;
@@ -354,13 +340,13 @@ struct PyModelInputs {
     PyEmbeddingInputs  embedding_inputs;
     PyMultimodalInputs multimodal_inputs;
     // C++ common/single-group fast path. Python sees this field through a
-    // property which returns either this object or attention_inputs_by_tag.
+    // property which returns either this object or group_attention_inputs.
     PyAttentionInputs    attention_inputs;
-    AttentionInputsByTag attention_inputs_by_tag;
+    GroupAttentionInputs group_attention_inputs;
     BertEmbeddingInputs  bert_embedding_inputs;
 
-    bool hasAttentionInputsByTag() const {
-        return !attention_inputs_by_tag.empty();
+    bool hasGroupedAttentionInputs() const {
+        return !group_attention_inputs.empty();
     }
 };
 

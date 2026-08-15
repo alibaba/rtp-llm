@@ -11,11 +11,19 @@
 namespace rtp_llm {
 
 struct LinearKVCacheSpec: public KVCacheSpec {
-    LinearKVCacheSpec() {
+    explicit LinearKVCacheSpec(uint32_t seq_size_per_block = 1): KVCacheSpec(seq_size_per_block) {
         type = KVCacheSpecType::LinearAttention;
     }
 
-    static KVCacheSpecPtr build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
+    LinearKVCacheSpec(uint32_t seq_size_per_block, uint32_t kernel_seq_size_per_block):
+        KVCacheSpec(seq_size_per_block, kernel_seq_size_per_block) {
+        type = KVCacheSpecType::LinearAttention;
+    }
+
+    static KVCacheSpecPtr build(const KVCacheSpecDesc&  desc,
+                                const SpecBuildContext& ctx,
+                                uint32_t                seq_size_per_block,
+                                uint32_t                kernel_seq_size_per_block) {
         RTP_LLM_CHECK_WITH_INFO(
             ctx.linear_attention_config != nullptr,
             "KVCacheSpecDesc tag=%s cache_type=%d requires SpecBuildContext.linear_attention_config",
@@ -43,9 +51,8 @@ struct LinearKVCacheSpec: public KVCacheSpec {
                                 linear.linear_key_head_dim,
                                 linear.linear_value_head_dim);
 
-        auto spec                  = std::make_shared<LinearKVCacheSpec>();
+        auto spec                  = std::make_shared<LinearKVCacheSpec>(seq_size_per_block, kernel_seq_size_per_block);
         spec->tag                  = desc.tag;
-        spec->seq_size_per_block   = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
         spec->memory_layout_dtype_ = desc.dtype != DataType::TYPE_INVALID ? desc.dtype : ctx.dtype;
         RTP_LLM_CHECK_WITH_INFO(spec->memory_layout_dtype_ != DataType::TYPE_INVALID,
                                 "KVCacheSpecDesc tag=%s cache_type=%d requires valid dtype",

@@ -11,7 +11,7 @@
 
 namespace rtp_llm {
 
-class KVCacheAllocator;
+class CoordinatorKVCacheManager;
 
 namespace remote_connector {
 
@@ -44,20 +44,19 @@ public:
         std::string tag;
         size_t      block_size_bytes = 0;
     };
-    using GroupIdMap = std::map<int32_t, Group>;
+    using GroupMap = std::map<std::string, Group, std::less<>>;
     struct SpecInfo {
-        int32_t     group_id;
         int32_t     tp_rank;
         std::string tag;
     };
     using SpecInfoMap = std::map<std::string, SpecInfo, std::less<>>;
 
-    GroupPolicy(std::shared_ptr<KVCacheAllocator> allocator,
-                const std::vector<int32_t>&       full_group_ids,
-                const std::vector<int32_t>&       other_group_ids):
-        allocator_(allocator),
-        full_group_ids_(full_group_ids.begin(), full_group_ids.end()),
-        other_group_ids_(other_group_ids.begin(), other_group_ids.end()) {}
+    GroupPolicy(std::shared_ptr<CoordinatorKVCacheManager> coordinator_cache_manager,
+                const std::vector<std::string>&            full_group_tags,
+                const std::vector<std::string>&            other_group_tags):
+        coordinator_cache_manager_(coordinator_cache_manager),
+        full_group_tags_(full_group_tags.begin(), full_group_tags.end()),
+        other_group_tags_(other_group_tags.begin(), other_group_tags.end()) {}
     virtual ~GroupPolicy() = default;
 
     virtual bool init() = 0;
@@ -69,14 +68,11 @@ public:
     virtual bool getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
                                     std::vector<std::string>&               location_spec_group_names) const = 0;
 
-    virtual bool genBlockBuffers(const std::vector<int32_t>&     group_ids,
+    virtual bool genBlockBuffers(const std::vector<std::string>& tags,
                                  const std::vector<int32_t>&     block_ids,
                                  kv_cache_manager::BlockBuffers& block_buffers) const = 0;
-    bool         genBlockBuffersByTag(const std::vector<std::string>& tags,
-                                      const std::vector<int32_t>&     block_ids,
-                                      kv_cache_manager::BlockBuffers& block_buffers) const;
 
-    const GroupIdMap& groups() const {
+    const GroupMap& groups() const {
         return groups_;
     }
 
@@ -89,21 +85,18 @@ public:
     void addLocationSpecGroup(uint64_t bithash, const std::string& location_spec_group_name) {
         location_spec_group_map_[bithash] = location_spec_group_name;
     }
-    virtual bool       addSpecInfo(const std::string& spec_name, int32_t group_id, int32_t tp_rank);
+    virtual bool       addSpecInfo(const std::string& spec_name, std::string_view tag, int32_t tp_rank);
     const SpecInfoMap& spec_info_map() const {
         return spec_name_to_info_;
     }
     virtual std::string debugString() const;
 
 protected:
-    std::shared_ptr<KVCacheAllocator> allocator_;
-    std::set<int32_t>                 full_group_ids_;
-    std::set<int32_t>                 other_group_ids_;
+    std::shared_ptr<CoordinatorKVCacheManager> coordinator_cache_manager_;
+    std::set<std::string>                      full_group_tags_;
+    std::set<std::string>                      other_group_tags_;
 
-    // group_id -> group
-    GroupIdMap groups_;
-    // Stable semantic identity resolved once during policy initialization.
-    std::unordered_map<std::string, int32_t> tag_to_group_id_;
+    GroupMap groups_;
     // max support 64 groups, contains all group combinations
     std::unordered_map<uint64_t, std::string> location_spec_group_map_;
     // spec_name -> spec_info
@@ -112,10 +105,10 @@ protected:
 
 class DefaultLayerGroupPolicy: public GroupPolicy {
 public:
-    DefaultLayerGroupPolicy(std::shared_ptr<KVCacheAllocator> allocator,
-                            const std::vector<int32_t>&       full_group_ids,
-                            const std::vector<int32_t>&       other_group_ids):
-        GroupPolicy(allocator, full_group_ids, other_group_ids) {}
+    DefaultLayerGroupPolicy(std::shared_ptr<CoordinatorKVCacheManager> coordinator_cache_manager,
+                            const std::vector<std::string>&            full_group_tags,
+                            const std::vector<std::string>&            other_group_tags):
+        GroupPolicy(coordinator_cache_manager, full_group_tags, other_group_tags) {}
 
     virtual bool init() override;
 
@@ -126,9 +119,9 @@ public:
     virtual bool getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
                                     std::vector<std::string>&               location_spec_group_names) const override;
 
-    bool genBlockBuffers(const std::vector<int32_t>&     group_ids,
+    bool genBlockBuffers(const std::vector<std::string>& tags,
                          const std::vector<int32_t>&     block_ids,
-                         kv_cache_manager::BlockBuffers& block_buffers) const override;
+                         kv_cache_manager::BlockBuffers& output_block_buffers) const override;
 
     std::string debugString() const override;
 
@@ -137,15 +130,17 @@ protected:
         return "G";
     }
 
-    std::map<int32_t, std::vector<int>> group_to_layer_ids_;
+    std::map<std::string, std::vector<int>, std::less<>> group_to_layer_ids_;
 };
 
+// RemoteConnector constructs this policy with one FULL tag. Its multi-FULL behavior and direct tests are retained
+// only as future restoration scaffolding and are unreachable through the production connector today.
 class FullLayerGroupPolicy: public DefaultLayerGroupPolicy {
 public:
-    FullLayerGroupPolicy(std::shared_ptr<KVCacheAllocator> allocator,
-                         const std::vector<int32_t>&       full_group_ids,
-                         const std::vector<int32_t>&       other_group_ids):
-        DefaultLayerGroupPolicy(allocator, full_group_ids, other_group_ids) {}
+    FullLayerGroupPolicy(std::shared_ptr<CoordinatorKVCacheManager> coordinator_cache_manager,
+                         const std::vector<std::string>&            full_group_tags,
+                         const std::vector<std::string>&            other_group_tags):
+        DefaultLayerGroupPolicy(coordinator_cache_manager, full_group_tags, other_group_tags) {}
     bool init() override;
 
     bool getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
@@ -154,11 +149,13 @@ public:
     std::vector<uint64_t> reachableAggregateMasks() const override;
 };
 
+// Future-only multi-group policy scaffolding. RemoteConnector rejects these topologies before policy construction;
+// these policies and their direct tests are retained for a separately reviewed capability restoration.
 class FullOtherGroupPolicy: public DefaultLayerGroupPolicy {
 public:
     bool init() override;
 
-    bool addSpecInfo(const std::string& spec_name, int32_t group_id, int32_t tp_rank) override;
+    bool addSpecInfo(const std::string& spec_name, std::string_view tag, int32_t tp_rank) override;
 
     bool getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
                             std::vector<std::string>&               location_spec_group_names) const override;
@@ -168,11 +165,12 @@ public:
     std::vector<uint64_t> reachableAggregateMasks() const override;
 
 protected:
-    FullOtherGroupPolicy(std::shared_ptr<KVCacheAllocator> allocator,
-                         const std::vector<int32_t>&       full_group_ids,
-                         const std::vector<int32_t>&       other_group_ids,
-                         uint32_t                          write_interval):
-        DefaultLayerGroupPolicy(allocator, full_group_ids, other_group_ids), write_interval_(write_interval) {}
+    FullOtherGroupPolicy(std::shared_ptr<CoordinatorKVCacheManager> coordinator_cache_manager,
+                         const std::vector<std::string>&            full_group_tags,
+                         const std::vector<std::string>&            other_group_tags,
+                         uint32_t                                   write_interval):
+        DefaultLayerGroupPolicy(coordinator_cache_manager, full_group_tags, other_group_tags),
+        write_interval_(write_interval) {}
     bool IsValidFullLocation(const kv_cache_manager::Location& location) const;
     bool CheckInvalidFullLocationAndSetView(const kv_cache_manager::Location& location,
                                             LocationView&                     location_view) const;
@@ -194,11 +192,12 @@ protected:
 
 class FullLinearLayerGroupPolicy: public FullOtherGroupPolicy {
 public:
-    FullLinearLayerGroupPolicy(std::shared_ptr<KVCacheAllocator> allocator,
-                               const std::vector<int32_t>&       full_group_ids,
-                               const std::vector<int32_t>&       other_group_ids,
-                               uint32_t                          linear_attention_write_interval):
-        FullOtherGroupPolicy(allocator, full_group_ids, other_group_ids, linear_attention_write_interval) {}
+    FullLinearLayerGroupPolicy(std::shared_ptr<CoordinatorKVCacheManager> coordinator_cache_manager,
+                               const std::vector<std::string>&            full_group_tags,
+                               const std::vector<std::string>&            other_group_tags,
+                               uint32_t                                   linear_attention_write_interval):
+        FullOtherGroupPolicy(
+            coordinator_cache_manager, full_group_tags, other_group_tags, linear_attention_write_interval) {}
 
     bool filterNeedLoadLocations(const kv_cache_manager::Locations& locations,
                                  LocationsView&                     locations_view,

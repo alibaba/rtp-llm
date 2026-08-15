@@ -40,22 +40,25 @@ namespace {
 
 static rtp_llm::ModelConfig makeTestModelConfig(uint32_t num_layers) {
     rtp_llm::ModelConfig m;
-    m.num_layers                   = static_cast<int>(num_layers);
-    m.max_seq_len                  = 128;
-    m.hidden_size                  = 1;
-    m.vocab_size                   = 1;
-    m.data_type                    = rtp_llm::DataType::TYPE_FP16;
-    m.attn_config.use_mla          = false;
-    m.attn_config.tokens_per_block = 4;
-    m.attn_config.kv_head_num      = 2;
-    m.attn_config.size_per_head    = 1;
-    m.attn_config.kv_cache_dtype   = KvCacheDataType::FP8;  // enable quantized kv cache
-    m.attn_config.kv_lora_rank     = 0;
-    m.attn_config.rope_head_dim    = 0;
-    m.attn_config.head_num         = 2;
+    m.num_layers                          = static_cast<int>(num_layers);
+    m.max_seq_len                         = 128;
+    m.hidden_size                         = 1;
+    m.vocab_size                          = 1;
+    m.data_type                           = rtp_llm::DataType::TYPE_FP16;
+    m.attn_config.use_mla                 = false;
+    m.attn_config.tokens_per_block        = 4;
+    m.attn_config.kernel_tokens_per_block = 4;
+    m.attn_config.kv_head_num             = 2;
+    m.attn_config.size_per_head           = 1;
+    m.attn_config.kv_cache_dtype          = KvCacheDataType::FP8;  // enable quantized kv cache
+    m.attn_config.kv_lora_rank            = 0;
+    m.attn_config.rope_head_dim           = 0;
+    m.attn_config.head_num                = 2;
     m.kv_cache_spec_descs.resize(num_layers);
     for (auto& descs : m.kv_cache_spec_descs) {
-        descs.push_back(KVCacheSpecDesc{"full", KVCacheSpecType::MultiHeadAttention});
+        KVCacheSpecDesc desc{"full", KVCacheSpecType::MultiHeadAttention};
+        desc.kernel_seq_size_per_block = static_cast<uint32_t>(m.attn_config.kernel_tokens_per_block);
+        descs.push_back(desc);
     }
     return m;
 }
@@ -71,7 +74,9 @@ makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers, int mtp_module_num, uin
     rtp_llm::RuntimeConfig runtime_config;
 
     rtp_llm::KVCacheConfig kv_cache_config;
-    kv_cache_config.test_block_num = static_cast<int>(block_num);
+    kv_cache_config.seq_size_per_block        = 4;
+    kv_cache_config.kernel_seq_size_per_block = 4;
+    kv_cache_config.test_block_num            = static_cast<int>(block_num);
 
     rtp_llm::SpeculativeExecutionConfig sp_config;
     sp_config.type              = SP_TYPE_MTP;
@@ -110,41 +115,38 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/4);
 
     ASSERT_GT(cache_cfg.groupNums(), 0);
-    ASSERT_EQ(cache_cfg.layerIdsForGroup(0).size(), static_cast<size_t>(cache_cfg.layer_all_num));
+    ASSERT_EQ(cache_cfg.layerIdsForGroup("full").size(), static_cast<size_t>(cache_cfg.totalLayerNum()));
 
     ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 2u);
     ASSERT_NE(cache_cfg.mtp_sub_configs[0], nullptr);
     ASSERT_NE(cache_cfg.mtp_sub_configs[1], nullptr);
     ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->groupNums(), 1);
     ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->groupNums(), 1);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->specForGroup(0)->block_size_bytes(),
-              cache_cfg.mtp_sub_configs[1]->specForGroup(0)->block_size_bytes());
+    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->specForGroup("full")->block_size_bytes(),
+              cache_cfg.mtp_sub_configs[1]->specForGroup("full")->block_size_bytes());
 
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->layerIdsForGroup(0).size(), 1u);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->layerIdsForGroup(0).size(), 1u);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->layerIdsForGroup(0)[0], 0);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->layerIdsForGroup(0)[0], 0);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->layerIdsForGroup("full").size(), 1u);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->layerIdsForGroup("full").size(), 1u);
+    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->layerIdsForGroup("full")[0], 0);
+    EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->layerIdsForGroup("full")[0], 0);
 
     RuntimeConfig runtime_config;
     cache_cfg.finalizeBlockNums(/*global_block_num=*/3, runtime_config);
-    EXPECT_EQ(cache_cfg.block_num, 3u);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->block_num, 3u);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->block_num, 3u);
+    EXPECT_EQ(cache_cfg.blockNum(), 3u);
+    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->blockNum(), 3u);
+    EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->blockNum(), 3u);
 
-    auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
-    ASSERT_EQ(pool_cfg.memory_layouts.size(), 3u);
-    ASSERT_EQ(pool_cfg.memory_layouts[0].layer_num, 2u);
-    ASSERT_EQ(pool_cfg.memory_layouts[1].layer_num, 1u);
-    ASSERT_EQ(pool_cfg.memory_layouts[2].layer_num, 1u);
+    auto pool_cfg =
+        rtp_llm::BlockPoolConfigHelper::createConfigForGroup(cache_cfg, cache_cfg.topology().groups().front().tag);
+    ASSERT_EQ(pool_cfg.memory_layouts.size(), 1u);
+    ASSERT_EQ(pool_cfg.memory_layouts[0].layer_num, 4u);
     EXPECT_EQ(pool_cfg.memory_layouts[0].block_num, 3u);
-    EXPECT_EQ(pool_cfg.memory_layouts[1].block_num, 3u);
-    EXPECT_EQ(pool_cfg.memory_layouts[2].block_num, 3u);
 
     block_pool_ = std::make_shared<BlockPool>(pool_cfg);
     ASSERT_TRUE(block_pool_->init());
 
     const int global_main = 0;
-    const int global_mtp1 = static_cast<int>(pool_cfg.memory_layouts[0].layer_num);
+    const int global_mtp1 = 2;
     const int global_mtp2 = global_mtp1 + 1;
 
     const int block_id  = 1;
@@ -180,11 +182,11 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     };
 
     verify_one(global_main, /*expect_layout_idx=*/0, /*expect_local_layer=*/0);
-    verify_one(global_mtp1, /*expect_layout_idx=*/1, /*expect_local_layer=*/0);
-    verify_one(global_mtp2, /*expect_layout_idx=*/2, /*expect_local_layer=*/0);
+    verify_one(global_mtp1, /*expect_layout_idx=*/0, /*expect_local_layer=*/2);
+    verify_one(global_mtp2, /*expect_layout_idx=*/0, /*expect_local_layer=*/3);
 
     // Partitioned buffer correctness on mtp layer (heads=2, partition_count=2, partition_id=1)
-    const auto& mtp_layout_cfg = pool_cfg.memory_layouts[1];
+    const auto& mtp_layout_cfg = pool_cfg.memory_layouts[0];
     auto        addr_mtp1      = block_pool_->convertIndexToAddr(global_mtp1, block_id);
     ASSERT_NE(addr_mtp1.kv_addr, nullptr);
     ASSERT_NE(addr_mtp1.kv_scale_addr, nullptr);
@@ -217,25 +219,29 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
 
 // Allocation Test
 
-TEST_F(BlockPoolTest, SharedPoolMTPLayoutsUseMainBlockNumAfterTpSync) {
+TEST_F(BlockPoolTest, IndependentGroupPoolUsesGlobalLayerMembershipAndBlockNumAfterTpSync) {
     auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/4);
 
     ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 2u);
     ASSERT_NE(cache_cfg.mtp_sub_configs[0], nullptr);
     ASSERT_NE(cache_cfg.mtp_sub_configs[1], nullptr);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->block_num, 4u);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->block_num, 4u);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->blockNum(), 4u);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->blockNum(), 4u);
 
-    // Shared default pool follows the main cache_config.block_num after TP sync.
-    // MTP sub-config block_num may still contain the pre-sync local value.
-    cache_cfg.block_num = 3;
+    // The group-owned pool follows the topology's global layer membership and
+    // block count after TP sync, including the merged MTP layers.
+    cache_cfg.finalizeBlockNums(3, RuntimeConfig{});
+    cache_cfg.mtp_sub_configs[0]->finalizeBlockNums(2, RuntimeConfig{});
+    ASSERT_EQ(cache_cfg.blockNum(), 3u);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->blockNum(), 2u);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->blockNum(), 3u);
 
-    auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
+    auto pool_cfg =
+        rtp_llm::BlockPoolConfigHelper::createConfigForGroup(cache_cfg, cache_cfg.topology().groups().front().tag);
     ASSERT_EQ(pool_cfg.block_num, 3u);
-    ASSERT_EQ(pool_cfg.memory_layouts.size(), 3u);
+    ASSERT_EQ(pool_cfg.memory_layouts.size(), 1u);
     EXPECT_EQ(pool_cfg.memory_layouts[0].block_num, 3u);
-    EXPECT_EQ(pool_cfg.memory_layouts[1].block_num, 3u);
-    EXPECT_EQ(pool_cfg.memory_layouts[2].block_num, 3u);
+    EXPECT_EQ(pool_cfg.memory_layouts[0].layer_num, 4u);
 }
 
 TEST_F(BlockPoolTest, AllocSingleBlock) {

@@ -11,7 +11,7 @@ namespace rtp_llm {
 //
 // Sizing rationale (worst-case callers as of 2026):
 //   * cuda_graph_runner.cc::prepareInputs accumulates ~8 contiguous copies
-//     plus 1 + group_count strided copies per launch (one launch per replay).
+//     plus max(1, 2 * group_count) strided copies per launch (one launch per replay).
 //   * PyWrappedModel.cc::forwardMicroBatched is the tightest path: it
 //     accumulates across ALL micro-batches before a single flush. Per
 //     micro-batch it adds ~6 contiguous copies (5 from buildPyAttentionInputs
@@ -19,7 +19,7 @@ namespace rtp_llm {
 //     With the current planMicroBatches cap of 2 micro-batches and a hybrid
 //     KV-cache group_count of 4 that's (6 + 4) * 2 = 20 contiguous copies.
 //
-// 64 entries gives ~3x headroom over today's worst case (20 contiguous, 5
+// 64 entries gives ~3x headroom over today's worst case (20 contiguous, 8
 // strided) and accommodates ~30 KV-cache groups before hitting the cap. Each
 // FusedStridedCopyParams is 6 * 8 * 64 + 4 = 3076 bytes, well under the 32 KB
 // kernel parameter buffer available on Volta and newer GPUs (all currently

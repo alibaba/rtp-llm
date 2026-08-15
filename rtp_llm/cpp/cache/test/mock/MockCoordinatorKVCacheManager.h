@@ -2,24 +2,30 @@
 
 #include <gmock/gmock.h>
 
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorKVCacheManager.h"
 
 namespace rtp_llm {
 
-class MockKVCacheAllocator: public KVCacheAllocator {
+class MockCoordinatorKVCacheManager: public CoordinatorKVCacheManager {
 public:
-    explicit MockKVCacheAllocator(const CacheConfig& config, AllocationType atype = AllocationType::DEVICE):
-        KVCacheAllocator(config, atype) {}
-    ~MockKVCacheAllocator() override = default;
+    explicit MockCoordinatorKVCacheManager(const CacheConfig& config, AllocationType atype = AllocationType::DEVICE):
+        CoordinatorKVCacheManager(config, atype) {}
+    ~MockCoordinatorKVCacheManager() override = default;
 
 public:
     MOCK_METHOD(void, free, (const FreeInfo&), (override));
     MOCK_METHOD(void, insertIntoCache, (const InsertInfo&), (override));
-    MOCK_METHOD(BlockAddrInfo, convertIndexToAddr, (int layer_id, int block_id), (const, override));
-    MOCK_METHOD(std::vector<BlockInfo>, convertIndexToBuffer, (int layer_id, int block_id), (const, override));
+    MOCK_METHOD(BlockAddrInfo,
+                convertIndexToAddr,
+                (int layer_id, const std::string& tag, int block_id),
+                (const, override));
     MOCK_METHOD(std::vector<BlockInfo>,
                 convertIndexToBuffer,
-                (int layer_id, int block_id, int partition_count, int partition_id),
+                (int layer_id, const std::string& tag, int block_id),
+                (const, override));
+    MOCK_METHOD(std::vector<BlockInfo>,
+                convertIndexToBuffer,
+                (int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id),
                 (const, override));
     MOCK_METHOD(std::shared_ptr<KVCacheResource>,
                 incrKVCacheRef,
@@ -29,16 +35,17 @@ public:
     MOCK_METHOD(GroupedCacheLayerLayout, allLayerCacheBase, (), (const, override));
     MOCK_METHOD(bool,
                 updateKVBlock,
-                (const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
-                 const std::vector<int>&         block_src_batch,
-                 bool                            copy_last_block,
-                 std::vector<TaggedBlockIdPair>& block_update_mapping),
+                (const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                 const std::vector<int>&        block_src_batch,
+                 bool                           copy_last_block,
+                 std::vector<GroupBlockIdPair>& block_update_mapping),
                 (override));
     MOCK_METHOD(int, seqSizePerBlock, (), (const, override));
     MOCK_METHOD(int,
                 singleBatchNeedBlocks,
                 (const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step),
                 (const, override));
+    MOCK_METHOD(BlockPoolPtr, getBlockPool, (std::string_view tag), (const, override));
     MOCK_METHOD(int,
                 estimatePeakNeedBlocks,
                 (const KVCacheResource& kv_cache_resource,
@@ -52,7 +59,6 @@ protected:
     MOCK_METHOD(bool, doInit, (), (override));
     MOCK_METHOD(MallocResult, incrMalloc, (const MallocInfo&), (override));
     MOCK_METHOD(MallocResult, initMallocForCommonLen, (const MallocInfo&), (override));
-    MOCK_METHOD(int, getNeedBlocks, (const MallocInfo&), (const, override));
     MOCK_METHOD(int,
                 estimateInitialBatchPeakNeedBlocks,
                 (int  seq_len,

@@ -166,7 +166,7 @@ class AutoModel:
         )
         attention_inputs.kv_cache_kernel_block_id = attention_inputs.kv_cache_block_id
         attention_inputs.dtype = get_typemeta(
-            self.kv_cache.get_layer_cache(0).kv_cache_base
+            self.kv_cache.get_layer_cache(0, "default").kv_cache_base
         )
         attention_inputs.is_prefill = True
         return attention_inputs
@@ -205,7 +205,7 @@ class AutoModel:
         )
         attention_inputs.kv_cache_kernel_block_id = attention_inputs.kv_cache_block_id
         attention_inputs.dtype = get_typemeta(
-            self.kv_cache.get_layer_cache(0).kv_cache_base
+            self.kv_cache.get_layer_cache(0, "default").kv_cache_base
         )
         return attention_inputs
 

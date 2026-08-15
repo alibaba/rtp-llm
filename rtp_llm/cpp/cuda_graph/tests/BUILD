@@ -2,6 +2,15 @@ load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_test(
+    name = "cache_block_table_capacity_test",
+    srcs = ["cache_block_table_capacity_test.cc"],
+    deps = [
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "combo_position_ids_validation_test",
     srcs = ["combo_position_ids_validation_test.cc"],
     copts = copts(),
@@ -97,8 +106,8 @@ py_test(
 )
 
 py_test(
-    name = "cuda_graph_tagged_cache_test",
-    srcs = ["cuda_graph_tagged_cache_test.py"],
+    name = "cuda_graph_grouped_cache_test",
+    srcs = ["cuda_graph_grouped_cache_test.py"],
     data = [
         ":test_cuda_graph_runner",
         "//:th_transformer",

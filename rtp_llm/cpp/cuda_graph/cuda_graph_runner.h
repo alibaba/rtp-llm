@@ -36,7 +36,7 @@ public:
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         model_data_type_(graph_params.model_data_type),
-        kv_cache_group_tags_(graph_params.kv_cache_group_tags),
+        kv_cache_block_table_capacities_(graph_params.kv_cache_block_table_capacities),
         position_id_len_factor_(graph_params.position_id_len_factor) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
@@ -71,21 +71,24 @@ public:
         py_instance_.release();
         RTP_LLM_LOG_INFO("Release CudaGraphRunner Successfully");
     }
-    void           captureDecode();
-    void           capturePrefill();
-    void           captureDecodeOneBatchSize(int bs);
-    void           capturePrefillOneSeqLen(int seq_len);
-    void           prepareInputs(const PyModelInputs& inputs, CudaGraphState& state);
-    void           prepareInputData(const PyModelInputs& inputs, CudaGraphState& state);
-    void           prepareAttentionInputs(const PyModelInputs& inputs,
-                                          CudaGraphState&      state,
-                                          bool                 skip_forward_event_sync = false) override;
-    void           updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) override;
-    bool           canRun(const PyModelInputs& inputs, CudaGraphState& state) override;
-    void           replayGraph(int key);
-    void           replayDecode(int bs);
-    void           replayPrefill(int seq_len);
-    int            getCurrentRealGraphBs(const CudaGraphState& state) const;
+    void     captureDecode();
+    void     capturePrefill();
+    void     captureDecodeOneBatchSize(int bs);
+    void     capturePrefillOneSeqLen(int seq_len);
+    void     prepareInputs(const PyModelInputs& inputs, CudaGraphState& state);
+    void     prepareInputData(const PyModelInputs& inputs, CudaGraphState& state);
+    void     prepareAttentionInputs(const PyModelInputs& inputs,
+                                    CudaGraphState&      state,
+                                    bool                 skip_forward_event_sync = false) override;
+    void     updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) override;
+    bool     canRun(const PyModelInputs& inputs, CudaGraphState& state) override;
+    void     replayGraph(int key);
+    void     replayDecode(int bs);
+    void     replayPrefill(int seq_len);
+    int      getCurrentRealGraphBs(const CudaGraphState& state) const;
+    uint64_t groupedCacheFallbackCount() const {
+        return grouped_cache_fallback_count_.load(std::memory_order_relaxed);
+    }
     PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
     void           initCapture() override;
 
@@ -124,12 +127,24 @@ private:
     /// Select graph key for decode; false if no captured graph can serve current_batch_size (e.g. lower_bound hit end).
     bool tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs, CudaGraphState& state);
     /// Select graph key for prefill; false if capture_range_ empty or seq_len above max captured (lower_bound hit end).
-    bool                    tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, CudaGraphState& state);
-    bool                    validateComboPositionIds(const PyModelInputs&  inputs,
-                                                     const CudaGraphState& state,
-                                                     const torch::Tensor&  captured_position_ids,
-                                                     size_t&               copy_numel) const;
-    bool                    canReplaySelectedGraph(const PyModelInputs& inputs, const CudaGraphState& state) const;
+    bool tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, CudaGraphState& state);
+    bool validateComboPositionIds(const PyModelInputs&  inputs,
+                                  const CudaGraphState& state,
+                                  const torch::Tensor&  captured_position_ids,
+                                  size_t&               copy_numel) const;
+    bool canReplaySelectedGraph(const PyModelInputs& inputs, const CudaGraphState& state) const;
+    template<typename ReasonFn>
+    bool groupedCacheFallback(ReasonFn&& reason_fn) const {
+        const uint64_t count = grouped_cache_fallback_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+        if ((count & (count - 1)) == 0) {
+            const std::string reason = std::forward<ReasonFn>(reason_fn)();
+            RTP_LLM_LOG_WARNING("Grouped kv cache is incompatible with CUDA graph capture: %s; fallback to normal "
+                                "run (fallback_count=%llu)",
+                                reason.c_str(),
+                                static_cast<unsigned long long>(count));
+        }
+        return false;
+    }
     void                    initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
     void                    initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
     void                    initCaptureAttentionInputsPost();
@@ -165,9 +180,10 @@ private:
     at::TensorOptions                      options_cuda_float_;
     cuda_graph::GraphPoolHandle            shared_graph_pool_{};
 
-    std::vector<std::string>      kv_cache_group_tags_;
-    int                           position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
-    mutable std::atomic<uint64_t> combo_position_fallback_count_{0};
+    std::map<std::string, CacheBlockTableCapacity> kv_cache_block_table_capacities_;
+    int                                            position_id_len_factor_ = 0;  // 0 = no combo_position_ids
+    mutable std::atomic<uint64_t>                  combo_position_fallback_count_{0};
+    mutable std::atomic<uint64_t>                  grouped_cache_fallback_count_{0};
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();

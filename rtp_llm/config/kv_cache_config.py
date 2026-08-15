@@ -3,7 +3,10 @@
 import json
 from typing import Any, Optional
 
+from rtp_llm.ops import DEFAULT_KV_CACHE_TAG, INDEXER_KV_CACHE_TAG
 from rtp_llm.ops import KVCacheConfig as CppKVCacheConfig
+
+SPARSE_KV_CACHE_TAGS = (DEFAULT_KV_CACHE_TAG, INDEXER_KV_CACHE_TAG)
 
 
 class KVCacheConfig(CppKVCacheConfig):

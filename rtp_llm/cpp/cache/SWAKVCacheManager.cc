@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/SWAKVCacheManager.h"
 
 #include <algorithm>
 
@@ -25,19 +25,19 @@ bool shouldAllocateBlock(
 
 }  // namespace
 
-bool SWAKVCacheGroup::shouldCheckSWATailBlockIds() const {
+bool SWAKVCacheManager::shouldCheckSWATailBlockIds() const {
     return policy().validate_tail_blocks;
 }
 
-bool SWAKVCacheGroup::effectiveReuseCacheForAllocation(bool enable_reuse_cache) const {
+bool SWAKVCacheManager::effectiveReuseCacheForAllocation(bool enable_reuse_cache) const {
     return enable_reuse_cache && policy().enable_prefix_reuse;
 }
 
-int SWAKVCacheGroup::activeTailBlockCount() const {
+int SWAKVCacheManager::activeTailBlockCount() const {
     return static_cast<int>(std::max(1u, policy().active_tail_blocks));
 }
 
-void SWAKVCacheGroup::checkSWATailBlockIds(const BlockIds& block_ids, const char* caller) const {
+void SWAKVCacheManager::checkSWATailBlockIds(const BlockIds& block_ids, const char* caller) const {
     if (!shouldCheckSWATailBlockIds()) {
         return;
     }
@@ -60,7 +60,7 @@ void SWAKVCacheGroup::checkSWATailBlockIds(const BlockIds& block_ids, const char
     }
 }
 
-void SWAKVCacheGroup::filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const {
+void SWAKVCacheManager::filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const {
     out.clear();
     out.reserve(in.size());
     for (auto b : in) {
@@ -70,17 +70,17 @@ void SWAKVCacheGroup::filterValidBlocks(const BlockIndicesType& in, BlockIndices
     }
 }
 
-int SWAKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
+int SWAKVCacheManager::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
     const int block_size = seqSizePerBlock();
     return std::max((seq_len + reserve_step + block_size - 1) / block_size - current_blocks, 0);
 }
 
 // Conservative upper bound: sliding-window peak usage never exceeds full-attention usage.
-int SWAKVCacheGroup::estimatePeakNeedBlocks(int                     seq_len,
-                                            const BlockIndicesType& current_block_indices,
-                                            int                     remaining_tokens,
-                                            int                     reserve_step,
-                                            bool                    enable_reuse_cache) const {
+int SWAKVCacheManager::estimatePeakNeedBlocks(int                     seq_len,
+                                              const BlockIndicesType& current_block_indices,
+                                              int                     remaining_tokens,
+                                              int                     reserve_step,
+                                              bool                    enable_reuse_cache) const {
     (void)enable_reuse_cache;
     int allocated_blocks = 0;
     for (const auto block_index : current_block_indices) {
@@ -89,12 +89,12 @@ int SWAKVCacheGroup::estimatePeakNeedBlocks(int                     seq_len,
     return std::max(needBlocksNum(seq_len + remaining_tokens, 0, reserve_step) - allocated_blocks, 0);
 }
 
-int SWAKVCacheGroup::estimateInitialBatchPeakNeedBlocks(int  seq_len,
-                                                        int  common_seq_len,
-                                                        int  remaining_tokens,
-                                                        int  reserve_step,
-                                                        bool enable_reuse_cache,
-                                                        int  target_batch_size) const {
+int SWAKVCacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
+                                                          int  common_seq_len,
+                                                          int  remaining_tokens,
+                                                          int  reserve_step,
+                                                          bool enable_reuse_cache,
+                                                          int  target_batch_size) const {
     (void)enable_reuse_cache;
     const int batch_size    = std::max(target_batch_size, 1);
     const int common_blocks = needBlocksNum(common_seq_len, 0);
@@ -102,7 +102,7 @@ int SWAKVCacheGroup::estimateInitialBatchPeakNeedBlocks(int  seq_len,
     return common_blocks + batch_size * std::max(peak_blocks - common_blocks, 0);
 }
 
-NeedBlocksInfo SWAKVCacheGroup::getNeedBlocks(
+NeedBlocksInfo SWAKVCacheManager::getNeedBlocks(
     int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
     (void)common_seq_len;
     const int  step                    = std::max(1, linear_step_);
@@ -126,23 +126,23 @@ NeedBlocksInfo SWAKVCacheGroup::getNeedBlocks(
     return info;
 }
 
-MatchResult SWAKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
+MatchResult SWAKVCacheManager::matchSingleKey(CacheKeyType cache_key) const {
     MatchResult result;
     if (!shared_cache_) {
         return result;
     }
-    auto block_idx = shared_cache_->matchGroup(cache_key, group_id());
+    auto block_idx = shared_cache_->matchGroup(cache_key, tag());
     if (!isNullBlockIdx(block_idx)) {
         result.block_indices = {block_idx};
     }
     return result;
 }
 
-bool SWAKVCacheGroup::malloc(BlockIds&            block_ids,
-                             int                  seq_len,
-                             bool                 enable_reuse_cache,
-                             int                  reserve_step,
-                             std::vector<size_t>* backfilled_positions) {
+bool SWAKVCacheManager::malloc(BlockIds&            block_ids,
+                               int                  seq_len,
+                               bool                 enable_reuse_cache,
+                               int                  reserve_step,
+                               std::vector<size_t>* backfilled_positions) {
     if (backfilled_positions != nullptr) {
         backfilled_positions->clear();
     }
@@ -154,7 +154,7 @@ bool SWAKVCacheGroup::malloc(BlockIds&            block_ids,
     const int  new_blocks_len          = needBlocksNum(seq_len, current_blocks_len, reserve_step);
 
     if (new_blocks_len == 0) {
-        checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::malloc");
+        checkSWATailBlockIds(block_ids, "SWAKVCacheManager::malloc");
         return true;
     }
 
@@ -169,7 +169,7 @@ bool SWAKVCacheGroup::malloc(BlockIds&            block_ids,
         const auto free_blocks_num = freeBlocksNum();
         if (free_blocks_num < static_cast<size_t>(need_alloc_blocks)) {
             if (!ensureFreeBlocks(need_alloc_blocks)) {
-                RTP_LLM_LOG_WARNING("Insufficient free blocks for SWAKVCacheGroup: need %d, have %zu",
+                RTP_LLM_LOG_WARNING("Insufficient free blocks for SWAKVCacheManager: need %d, have %zu",
                                     need_alloc_blocks,
                                     free_blocks_num);
                 return false;
@@ -205,14 +205,14 @@ bool SWAKVCacheGroup::malloc(BlockIds&            block_ids,
                             allocated_idx,
                             allocated_blocks.size());
     block_ids.add(new_ids);
-    checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::malloc");
+    checkSWATailBlockIds(block_ids, "SWAKVCacheManager::malloc");
     return true;
 }
 
-void SWAKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
+void SWAKVCacheManager::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
     const auto& block_indices = block_ids.blocks();
     if (block_indices.empty()) {
-        checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::removeSkippedBlocks");
+        checkSWATailBlockIds(block_ids, "SWAKVCacheManager::removeSkippedBlocks");
         return;
     }
     const int  step                    = std::max(1, linear_step_);
@@ -236,10 +236,10 @@ void SWAKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse
         block_pool_->requestFree(blocks_to_free);
         block_ids.remove(pos_to_remove);
     }
-    checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::removeSkippedBlocks");
+    checkSWATailBlockIds(block_ids, "SWAKVCacheManager::removeSkippedBlocks");
 }
 
-void SWAKVCacheGroup::free(const BlockIndicesType& block_indices) {
+void SWAKVCacheManager::free(const BlockIndicesType& block_indices) {
     if (block_indices.empty()) {
         return;
     }
@@ -250,7 +250,7 @@ void SWAKVCacheGroup::free(const BlockIndicesType& block_indices) {
     }
 }
 
-void SWAKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
+void SWAKVCacheManager::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
     block_ids.add(new_block_indices);
     BlockIndicesType valid;
     filterValidBlocks(new_block_indices, valid);

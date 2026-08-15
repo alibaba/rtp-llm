@@ -22,12 +22,12 @@ from rtp_llm.model_loader.model_weight_info import (
     ModelWeightInfo,
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
-from rtp_llm.models.base_model import BaseModel
+from rtp_llm.models.base_model import BaseModel, build_default_kv_cache_spec_descs
 from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
     DeepseekV3RotaryEmbedding,
     DeepseekV3YarnRotaryEmbedding,
 )
-from rtp_llm.ops import KVCacheSpecDesc, KVCacheSpecType, MlaOpsType
+from rtp_llm.ops import MlaOpsType
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -807,15 +807,9 @@ class DeepSeekV3Mtp(DeepSeekV2):
 
     @classmethod
     def _post_build_model_config(cls, model_config: ModelConfig) -> None:
-        desc = KVCacheSpecDesc()
-        if model_config.attn_config.use_mla and model_config.mla_ops_type != MlaOpsType.MHA:
-            desc.cache_type = KVCacheSpecType.MLA
-        else:
-            desc.cache_type = KVCacheSpecType.MHA
-        desc.tag = "default"
-        model_config.kv_cache_spec_descs = [
-            [desc] for _ in range(model_config.num_layers)
-        ]
+        model_config.kv_cache_spec_descs = build_default_kv_cache_spec_descs(
+            model_config
+        )
 
     @staticmethod
     def get_weight_cls():

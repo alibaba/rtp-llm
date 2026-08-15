@@ -20,6 +20,60 @@ class ServerArgsSetTest(TestCase):
         os.environ.update(self._environ_backup)
         sys.argv = self._argv_backup
 
+    def test_linear_step_accepts_two(self):
+        from rtp_llm.config.kv_cache_config import KVCacheConfig
+
+        config = KVCacheConfig()
+        self.assertEqual(config.linear_step, 1)
+        config.linear_step = 2
+        self.assertEqual(config.linear_step, 2)
+
+    def test_linear_step_pickle_restores_two(self):
+        from rtp_llm.config.kv_cache_config import KVCacheConfig
+
+        config = KVCacheConfig()
+        state = list(config.__getstate__())
+        state[8] = 2
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__(tuple(state))
+        self.assertEqual(restored.linear_step, 2)
+
+    def _reload_server_args(self):
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        return rtp_llm.server.server_args.server_args
+
+    def test_empty_env_fails_pure_env(self):
+        os.environ["MAX_SEQ_LEN"] = ""
+        sys.argv = ["prog"]
+        with self.assertRaises(SystemExit):
+            self._reload_server_args().setup_args()
+
+    def test_empty_env_is_skipped_in_mixed_cli_env(self):
+        os.environ["MAX_SEQ_LEN"] = ""
+        sys.argv = ["prog", "--model_type", "qwen"]
+        configs = self._reload_server_args().setup_args()
+        self.assertIsNotNone(configs)
+
+    def test_non_empty_invalid_env_is_skipped_in_mixed_cli_env(self):
+        os.environ["MAX_SEQ_LEN"] = "abc"
+        sys.argv = ["prog", "--model_type", "qwen"]
+        configs = self._reload_server_args().setup_args()
+        self.assertIsNotNone(configs)
+
+    def test_env_injected_choice_is_not_revalidated_in_mixed_cli_env(self):
+        os.environ["SSM_STATE_DTYPE"] = "fp64"
+        sys.argv = ["prog", "--model_type", "qwen"]
+        configs = self._reload_server_args().setup_args()
+        self.assertEqual(configs.kv_cache_config.ssm_state_dtype, "fp64")
+
+    def test_linear_step_two_from_mixed_env(self):
+        os.environ["LINEAR_STEP"] = "2"
+        sys.argv = ["prog", "--model_type", "qwen"]
+        configs = self._reload_server_args().setup_args()
+        self.assertEqual(configs.kv_cache_config.linear_step, 2)
+
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
         # Set environment variables

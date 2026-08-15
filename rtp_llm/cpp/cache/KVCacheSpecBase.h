@@ -1,13 +1,16 @@
 #pragma once
 
+#include <algorithm>
 #include <memory>
 #include <vector>
 #include <map>
 #include <sstream>
 #include <string>
 #include <utility>
+#include <numeric>
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -22,6 +25,45 @@ enum KVCacheSpecType {
     OpaqueKV,                  // Byte-addressed opaque paged KV pool
     OpaqueState,               // Fixed-allocation opaque state cache
 };
+
+inline uint32_t resolveMhaLocalKVHeadNum(const AttentionConfigs& attn, const ParallelismConfig& parallelism) {
+    const auto     attn_tp = std::max<int64_t>(1, parallelism.get_attn_tp_size());
+    const uint32_t tp      = static_cast<uint32_t>(attn_tp);
+    const uint32_t kv      = static_cast<uint32_t>(attn.kv_head_num);
+    RTP_LLM_CHECK_WITH_INFO(kv > 0, "local kv head num requires positive kv_head_num");
+    return (kv % tp == 0) ? kv / tp : kv / std::gcd(kv, tp);
+}
+
+inline uint32_t resolveLinearLocalKVHeadNum(const LinearAttentionConfig& linear, const ParallelismConfig& parallelism) {
+    const auto     attn_tp     = std::max<int64_t>(1, parallelism.get_attn_tp_size());
+    const uint32_t tp          = static_cast<uint32_t>(attn_tp);
+    const uint32_t value_heads = static_cast<uint32_t>(linear.linear_num_value_heads);
+    RTP_LLM_CHECK_WITH_INFO(value_heads > 0, "local kv head num requires positive linear_num_value_heads");
+    RTP_LLM_CHECK_WITH_INFO(value_heads % tp == 0,
+                            "linear_num_value_heads must be divisible by attention TP, global=%u tp=%u",
+                            value_heads,
+                            tp);
+    return value_heads / tp;
+}
+
+inline uint32_t resolveLocalKVHeadNum(KVCacheSpecType              type,
+                                      const AttentionConfigs&      attn,
+                                      const LinearAttentionConfig& linear,
+                                      const ParallelismConfig&     parallelism) {
+    switch (type) {
+        case KVCacheSpecType::MultiHeadAttention:
+            return resolveMhaLocalKVHeadNum(attn, parallelism);
+        case KVCacheSpecType::LinearAttention:
+            return resolveLinearLocalKVHeadNum(linear, parallelism);
+        case KVCacheSpecType::MultiHeadLatentAttention:
+        case KVCacheSpecType::OpaqueKV:
+        case KVCacheSpecType::OpaqueState:
+            return 1;
+        default:
+            RTP_LLM_FAIL("unknown KVCacheSpecType=%d", static_cast<int>(type));
+    }
+    return 1;
+}
 
 inline KVPartitionBytes splitKVPartitionBytes(size_t      full_block_bytes,
                                               size_t      k_block_bytes,
@@ -88,15 +130,33 @@ inline const char* KVCacheSpecTypeToString(KVCacheSpecType t) {
 }
 
 struct KVCacheSpec;
-using KVCacheSpecPtr    = std::shared_ptr<KVCacheSpec>;
-using LayerKVCacheSpecs = std::vector<std::vector<KVCacheSpecPtr>>;
+using KVCacheSpecPtr               = std::shared_ptr<KVCacheSpec>;
+using KVCacheSpecBuildResult       = std::pair<KVCacheSpecPtr, CacheGroupPolicy>;
+using LayerKVCacheSpecBuildResults = std::vector<std::vector<KVCacheSpecBuildResult>>;
 
 struct KVCacheSpec {
-    std::string tag;
-    uint32_t    seq_size_per_block = 1;
-
+    std::string     tag;
     KVCacheSpecType type = KVCacheSpecType::MultiHeadAttention;
 
+    const uint32_t seq_size_per_block;
+    const uint32_t kernel_seq_size_per_block;
+
+    explicit KVCacheSpec(uint32_t seq_size_per_block = 1): KVCacheSpec(seq_size_per_block, seq_size_per_block) {}
+
+    KVCacheSpec(uint32_t seq_size_per_block, uint32_t kernel_seq_size_per_block):
+        seq_size_per_block(seq_size_per_block), kernel_seq_size_per_block(kernel_seq_size_per_block) {
+        RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0, "spec seq_size_per_block must be positive");
+        RTP_LLM_CHECK_WITH_INFO(kernel_seq_size_per_block > 0, "spec kernel_seq_size_per_block must be positive");
+        RTP_LLM_CHECK_WITH_INFO(
+            seq_size_per_block >= kernel_seq_size_per_block && seq_size_per_block % kernel_seq_size_per_block == 0,
+            "spec seq_size_per_block=%u must be >= kernel_seq_size_per_block=%u and divisible by it",
+            seq_size_per_block,
+            kernel_seq_size_per_block);
+    }
+
+    // All block sizes describe one physical block-table row spanning
+    // seq_size_per_block tokens. kernel_seq_size_per_block only controls how that
+    // row is subdivided for kernel block IDs and views.
     virtual size_t block_size() const   = 0;
     virtual size_t k_block_size() const = 0;
     virtual size_t v_block_size() const = 0;
@@ -129,18 +189,22 @@ struct KVCacheSpec {
 
     virtual KVCacheSpecPtr clone() const = 0;
 
-    std::string fingerprint() const {
+    std::string layoutFingerprint() const {
         std::ostringstream os;
-        os << "tag=" << tag << ";type=" << static_cast<int>(type) << ";dtype=" << static_cast<int>(memoryLayoutDType())
-           << ";seq_size_per_block=" << seq_size_per_block << ";block_elems=" << block_size()
-           << ";k_block_elems=" << k_block_size() << ";v_block_elems=" << v_block_size()
-           << ";block_bytes=" << block_size_bytes() << ";k_block_bytes=" << k_block_size_bytes()
-           << ";v_block_bytes=" << v_block_size_bytes() << ";block_payload_bytes=" << block_payload_bytes()
-           << ";k_block_payload_bytes=" << k_block_payload_bytes()
+        os << "type=" << static_cast<int>(type) << ";dtype=" << static_cast<int>(memoryLayoutDType())
+           << ";seq_size_per_block=" << seq_size_per_block << ";kernel_seq_size_per_block=" << kernel_seq_size_per_block
+           << ";block_elems=" << block_size() << ";k_block_elems=" << k_block_size()
+           << ";v_block_elems=" << v_block_size() << ";block_bytes=" << block_size_bytes()
+           << ";k_block_bytes=" << k_block_size_bytes() << ";v_block_bytes=" << v_block_size_bytes()
+           << ";block_payload_bytes=" << block_payload_bytes() << ";k_block_payload_bytes=" << k_block_payload_bytes()
            << ";v_block_payload_bytes=" << v_block_payload_bytes() << ";scale_block_bytes=" << scale_block_size_bytes()
            << ";k_scale_block_bytes=" << k_scale_block_size_bytes()
            << ";v_scale_block_bytes=" << v_scale_block_size_bytes();
         return os.str();
+    }
+
+    std::string fingerprint() const {
+        return "tag=" + tag + ";" + layoutFingerprint();
     }
 
     virtual std::string debugString(size_t indent = 0) const = 0;
@@ -156,6 +220,7 @@ protected:
         os << indent1 << "type=" << KVCacheSpecTypeToString(type) << "(" << static_cast<int>(type) << ")\n";
         os << indent1 << "dtype=" << static_cast<int>(memoryLayoutDType()) << "\n";
         os << indent1 << "seq_size_per_block=" << seq_size_per_block << "\n";
+        os << indent1 << "kernel_seq_size_per_block=" << kernel_seq_size_per_block << "\n";
         os << indent1 << "block_size=" << block_size() << "\n";
         os << indent1 << "k_block_size=" << k_block_size() << "\n";
         os << indent1 << "v_block_size=" << v_block_size() << "\n";

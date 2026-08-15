@@ -4,8 +4,11 @@ import typing
 
 import torch
 
-__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
+__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DEFAULT_KV_CACHE_TAG', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'INDEXER_KV_CACHE_TAG', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
                       'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'PREFILL_CP', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_rope_cache', 'get_rope_cache_once']
+
+DEFAULT_KV_CACHE_TAG: str
+INDEXER_KV_CACHE_TAG: str
 
 
 class ActivationType:
@@ -628,13 +631,12 @@ class HWKernelConfig:
         ...
 class HybridAttentionConfig:
     enable_hybrid_attention: bool
-    enable_independent_kv_cache_pools: bool
     hybrid_attention_types: list[HybridAttentionType]
     @typing.overload
     def __init__(self) -> None:
         ...
     @typing.overload
-    def __init__(self, enable_hybrid_attention: bool, enable_independent_kv_cache_pools: bool, hybrid_attention_types: list[HybridAttentionType]) -> None:
+    def __init__(self, enable_hybrid_attention: bool, hybrid_attention_types: list[HybridAttentionType]) -> None:
         ...
     def to_string(self) -> str:
         ...
@@ -937,11 +939,6 @@ class CacheEvictPolicy:
     INDEPENDENT: typing.ClassVar[CacheEvictPolicy]
     NONE: typing.ClassVar[CacheEvictPolicy]
 
-class CacheMemoryPlacement:
-    DEVICE: typing.ClassVar[CacheMemoryPlacement]
-    HOST: typing.ClassVar[CacheMemoryPlacement]
-    HOST_PINNED: typing.ClassVar[CacheMemoryPlacement]
-
 class CpBlockMappingMode:
     NONE: typing.ClassVar[CpBlockMappingMode]
     BLOCK_ROUND_ROBIN: typing.ClassVar[CpBlockMappingMode]
@@ -970,11 +967,6 @@ class CacheReusePolicyDesc:
 class CacheCapacityPolicyDesc:
     reservable: typing.Any
     explicit_block_num: typing.Any
-    charge_to_paged_budget: typing.Any
-    def __init__(self) -> None: ...
-
-class CacheMemoryPolicyDesc:
-    placement: typing.Any
     def __init__(self) -> None: ...
 
 class CacheTailPolicyDesc:
@@ -985,7 +977,6 @@ class CacheTailPolicyDesc:
 class CacheCpPolicyDesc:
     mapping: typing.Any
     slice: typing.Any
-    scale_seq_size: typing.Any
     align_payload: typing.Any
     prefill_slice_layout: typing.Any
     def __init__(self) -> None: ...
@@ -995,6 +986,7 @@ class KVCacheSpecDesc:
     cache_type: KVCacheSpecType
     dtype: DataType
     is_state_cache: bool
+    kernel_seq_size_per_block: typing.Optional[int]
     entry_elems: int
     entry_dtype: DataType
     entry_count_mode: OpaqueBlockEntryCountMode
@@ -1008,7 +1000,6 @@ class KVCacheSpecDesc:
     group_type: typing.Any
     reuse: typing.Any
     capacity: typing.Any
-    memory: typing.Any
     tail: typing.Any
     cp: typing.Any
     def __init__(self) -> None: ...

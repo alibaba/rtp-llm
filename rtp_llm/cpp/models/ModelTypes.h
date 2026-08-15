@@ -8,9 +8,13 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
-#include <string>
-#include <utility>
+#include <map>
+#include <mutex>
 #include <memory>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
 
 namespace rtp_llm {
 
@@ -85,6 +89,12 @@ enum GptModelInputIndex : size_t {
     // Per-tensor device hint bitmap from root so non-root ranks allocate
     // matching GPU buffers and keep tpSync broadcast lanes consistent.
     tensorDeviceMap,
+    cacheGroupSchemaGenerationLow,
+    cacheGroupSchemaGenerationHigh,
+    cacheGroupSchemaHashLow,
+    cacheGroupSchemaHashHigh,
+    cacheGroupSchemaWireWords,
+    cacheGroupSchemaPayloadFollows,
     gptModelInputLength,
 };
 
@@ -98,6 +108,63 @@ enum GptModelInputDeviceBit : uint32_t {
     kDeviceBitLmOutputIndexes = 1u << 4,
     kDeviceBitKernelBlockId   = 1u << 5,
 };
+
+struct CacheGroupHint {
+    std::string    tag;
+    CacheGroupType type               = CacheGroupType::FULL;
+    size_t         block_width        = 0;
+    size_t         kernel_block_width = 0;
+};
+
+struct CacheGroupHintWireFormat {
+    static constexpr size_t kMaxGroups          = 64;
+    static constexpr size_t kMaxTagBytes        = 128;
+    static constexpr size_t kSchemaHeaderWords  = 2;
+    static constexpr size_t kWidthWordsPerGroup = 2;
+    static constexpr size_t kMaxTagWords        = kMaxTagBytes / sizeof(int32_t);
+    static constexpr size_t kMaxSchemaWords     = kMaxGroups * (kSchemaHeaderWords + kMaxTagWords);
+    static constexpr size_t kShapeHintWords =
+        GptModelInputIndex::gptModelInputLength + kMaxGroups * kWidthWordsPerGroup;
+
+    static constexpr size_t tagWords(size_t tag_bytes) {
+        return (tag_bytes + sizeof(int32_t) - 1) / sizeof(int32_t);
+    }
+};
+
+struct CacheGroupSchemaKey {
+    uint64_t hash                    = 0;
+    size_t   group_count             = 0;
+    uint64_t communicator_generation = 0;
+
+    bool operator<(const CacheGroupSchemaKey& other) const {
+        return std::tie(hash, group_count, communicator_generation)
+               < std::tie(other.hash, other.group_count, other.communicator_generation);
+    }
+};
+
+class CacheGroupSchemaCache {
+public:
+    // Root uses this before the shape broadcast to authoritatively decide
+    // whether every rank must consume a schema payload this step.
+    bool rootPayloadFollows(const CacheGroupSchemaKey& key, const std::vector<CacheGroupHint>& schema) const;
+    void refresh(const CacheGroupSchemaKey& key, const std::vector<CacheGroupHint>& schema);
+    std::vector<CacheGroupHint> lookup(const CacheGroupSchemaKey& key) const;
+
+private:
+    mutable std::mutex                                         mutex_;
+    std::map<CacheGroupSchemaKey, std::vector<CacheGroupHint>> schemas_;
+};
+
+std::vector<int32_t>        encodeCacheGroupHintSchema(const std::vector<CacheGroupHint>& hints);
+std::vector<CacheGroupHint> applyCacheGroupHintWidths(const std::vector<CacheGroupHint>& schema,
+                                                      const std::vector<int32_t>&        widths);
+std::vector<CacheGroupHint> decodeCacheGroupHints(const std::vector<int32_t>& schema_wire,
+                                                  size_t                      expected_group_count,
+                                                  const std::vector<int32_t>& widths);
+BlockTablesByGroup          reconstructCacheGroupBlockTables(const std::vector<CacheGroupHint>& hints,
+                                                             size_t                             batch_size,
+                                                             const torch::Tensor&               physical_backing,
+                                                             const torch::Tensor&               kernel_backing);
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);
 

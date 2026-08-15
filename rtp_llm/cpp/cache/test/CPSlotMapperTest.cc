@@ -150,11 +150,10 @@ TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
     CacheConfig config;
     config.seq_size_per_block = 8;
     config.layer_num          = 1;
-    config.layer_all_num      = 1;
 
-    auto full_spec = std::make_shared<MHAKVCacheSpec>();
+    auto full_spec = std::make_shared<MHAKVCacheSpec>(8, 8);
     full_spec->tag = "full";
-    GroupBase full_group;
+    GroupTopology full_group;
     full_group.tag               = full_spec->tag;
     full_group.spec              = full_spec;
     full_group.layer_ids         = {0};
@@ -162,9 +161,9 @@ TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
     full_group.policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
     full_group.policy.cp_slice   = CpBlockSliceMode::EQUAL_BYTES;
 
-    auto swa_spec = std::make_shared<MHAKVCacheSpec>();
+    auto swa_spec = std::make_shared<MHAKVCacheSpec>(8, 8);
     swa_spec->tag = "swa";
-    GroupBase swa_group;
+    GroupTopology swa_group;
     swa_group.tag             = swa_spec->tag;
     swa_group.spec            = swa_spec;
     swa_group.layer_ids       = {0};
@@ -174,9 +173,50 @@ TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
 
     CPSlotMapper mapper(0, 2, 8);
 
-    EXPECT_EQ(mapper.layoutForGroup(config, 0).mapping, CpBlockMappingMode::BLOCK_ROUND_ROBIN);
-    EXPECT_EQ(mapper.layoutForGroup(config, 0).slice, CpBlockSliceMode::NONE);
-    EXPECT_EQ(mapper.layoutForGroup(config, 1).slice, CpBlockSliceMode::EQUAL_BYTES);
+    EXPECT_EQ(mapper.layoutForGroup(config, "full").mapping, CpBlockMappingMode::BLOCK_ROUND_ROBIN);
+    EXPECT_EQ(mapper.layoutForGroup(config, "full").slice, CpBlockSliceMode::NONE);
+    EXPECT_EQ(mapper.layoutForGroup(config, "swa").slice, CpBlockSliceMode::EQUAL_BYTES);
+}
+
+TEST_F(CPSlotMapperTest, ConnectorProjectionUsesRawKeysWithoutMutatingSourceTimeline) {
+    CacheConfig config;
+    config.seq_size_per_block = 8;
+    config.layer_num          = 1;
+
+    auto full_spec = std::make_shared<MHAKVCacheSpec>(8, 8);
+    full_spec->tag = "full";
+    GroupTopology full_group;
+    full_group.tag               = full_spec->tag;
+    full_group.spec              = full_spec;
+    full_group.layer_ids         = {0};
+    full_group.policy            = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    full_group.policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+    config.setTopology({std::move(full_group)}, {{0, {"full"}}});
+
+    KVCacheResource source;
+    source.initGroups(config.topologyPtr());
+    source.setCacheKeys({10, 20, 30});
+    source.mutableBlockIds("full").assign(BlockIndicesType{100, 101, 102});
+    source.setLastBlockAligned(false);
+    const auto source_dependencies = source.blockDependencies();
+
+    CPSlotMapper mapper(/*cp_rank=*/1, /*cp_size=*/2, /*block_size=*/8);
+    auto         projected = mapper.projectConnectorResource(source, config, CacheKeysType{20});
+
+    // Key 20 is selected from the raw request timeline. Key 30 is only the transfer-view dummy partial tail.
+    EXPECT_EQ(projected.cacheKeys(), (CacheKeysType{20, 30}));
+    EXPECT_EQ(projected.blocks("full"), (BlockIndicesType{101}));
+    EXPECT_FALSE(projected.lastBlockAligned());
+
+    EXPECT_EQ(source.cacheKeys(), (CacheKeysType{10, 20, 30}));
+    EXPECT_EQ(source.blocks("full"), (BlockIndicesType{100, 101, 102}));
+    EXPECT_EQ(source.blockDependencies().size(), source_dependencies.size());
+    for (size_t i = 0; i < source_dependencies.size(); ++i) {
+        EXPECT_EQ(source.blockDependencies()[i].has_parent, source_dependencies[i].has_parent);
+        EXPECT_EQ(source.blockDependencies()[i].parent_key, source_dependencies[i].parent_key);
+        EXPECT_EQ(source.blockDependencies()[i].ordinal, source_dependencies[i].ordinal);
+    }
+    EXPECT_FALSE(source.lastBlockAligned());
 }
 
 }  // namespace test

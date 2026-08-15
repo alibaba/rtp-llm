@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <vector>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -17,26 +18,26 @@ namespace rtp_llm {
 struct TensorHolder;
 
 struct NormalModelInputGathererConfig {
-    size_t                      num_layers{};
-    size_t                      vocab_size{};
-    size_t                      input_vocab_size{};
-    bool                        has_positional_encoding{};
-    bool                        is_multimodal{};
-    PositionIdsStyle            mm_position_ids_style{};
-    size_t                      position_id_len_factor{};
-    RoleType                    role_type{};
-    bool                        decode_entrance{};
-    size_t                      block_stride_bytes{};
-    size_t                      scale_stride_bytes{};
-    size_t                      seq_size_per_block{};
-    size_t                      kernel_seq_size_per_block{};
-    size_t                      kernel_blocks_per_kv_block = 1;
-    size_t                      kv_cache_group_nums        = 1;
-    bool                        use_opaque_kv_cache_store  = false;
-    std::vector<CacheGroupType> kv_cache_group_types;
-    std::vector<std::string>    kv_cache_group_tags;
-    bool                        warm_up{};
-    bool                        enable_detail_log{};
+    size_t                                num_layers{};
+    size_t                                vocab_size{};
+    size_t                                input_vocab_size{};
+    bool                                  has_positional_encoding{};
+    bool                                  is_multimodal{};
+    PositionIdsStyle                      mm_position_ids_style{};
+    size_t                                position_id_len_factor{};
+    RoleType                              role_type{};
+    bool                                  decode_entrance{};
+    std::map<std::string, size_t>         group_kv_block_stride_bytes;
+    std::map<std::string, size_t>         group_kv_scale_stride_bytes;
+    std::map<std::string, size_t>         group_kv_block_transfer_bytes;
+    std::map<std::string, size_t>         group_kv_scale_transfer_bytes;
+    size_t                                seq_size_per_block{};
+    size_t                                kernel_seq_size_per_block{};
+    bool                                  use_opaque_kv_cache_store = false;
+    std::map<std::string, CacheGroupType> kv_cache_group_types;
+    std::map<std::string, size_t>         group_kernel_blocks_per_kv_block;
+    bool                                  warm_up{};
+    bool                                  enable_detail_log{};
 };
 
 class NormalModelInputGatherer {
@@ -45,15 +46,14 @@ public:
 
     absl::StatusOr<GptModelInputs> gather(const StreamGroups& stream_groups, TensorHolder& host_holder) const;
 
-    // Build only the CUDA kv_cache_kernel_block_id tensor in 3-D layout.
-    // Read-only over streams: no step(), no sibling kv_cache_block_id, no
-    // other gather sub-step. Empty input returns an undefined tensor.
-    absl::StatusOr<torch::Tensor> gatherKvCacheKernelBlockId(const StreamGroups& stream_groups,
-                                                             TensorHolder&       host_holder) const;
+    // Refresh only the per-group CUDA kernel block tables. Read-only over
+    // streams: no step(), no physical block tables, and no other gather step.
+    absl::Status gatherKvCacheKernelBlockIds(GptModelInputs&     model_input,
+                                             const StreamGroups& stream_groups,
+                                             TensorHolder&       host_holder) const;
 
 private:
     GptModelInputs allocateModelInputBuffers(const StreamGroups& stream_groups) const;
-    void           initializeKvCacheMetadata(GptModelInputs& model_input) const;
     absl::Status   processDecodeStreams(GptModelInputs& model_input, const StreamGroups& stream_groups) const;
     absl::Status   processContextStreams(GptModelInputs&     model_input,
                                          const StreamGroups& stream_groups,
