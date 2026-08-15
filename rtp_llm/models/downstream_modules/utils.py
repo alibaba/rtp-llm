@@ -91,9 +91,11 @@ def create_post_layers_module(
     CUSTOM_OUTPUT_PROCESSOR names a python module (dotted path, or a .py file
     path) that defines `create_custom_module(config, tokenizer)` returning a
     CustomModule whose handler runs on the generate path (see
-    CustomHandler.trigger_mode). Unset means the deployment has no handler and
-    the engine code path is unchanged. Any load failure fails startup — a
-    deployment that declares a processor it cannot load must not come up.
+    CustomHandler.trigger_mode). Relative .py paths are resolved from the
+    checkpoint directory so the processor can be shipped with the model.
+    Unset means the deployment has no handler and the engine code path is
+    unchanged. Any load failure fails startup — a deployment that declares a
+    processor it cannot load must not come up.
     """
     target = os.environ.get("CUSTOM_OUTPUT_PROCESSOR")
     if not target:
@@ -106,12 +108,25 @@ def create_post_layers_module(
             "only 'eager' and 'compiled' are"
         )
 
+    resolved_target = target
     if target.endswith(".py"):
+        processor_path = target
+        if not os.path.isabs(processor_path):
+            ckpt_path = getattr(config, "ckpt_path", None)
+            if not ckpt_path:
+                raise RuntimeError(
+                    "relative CUSTOM_OUTPUT_PROCESSOR .py path requires "
+                    "a configured checkpoint path"
+                )
+            processor_path = os.path.join(ckpt_path, processor_path)
+        resolved_target = processor_path
         spec = importlib.util.spec_from_file_location(
-            "rtp_llm_custom_output_processor", target
+            "rtp_llm_custom_output_processor", processor_path
         )
         if spec is None or spec.loader is None:
-            raise RuntimeError(f"cannot load CUSTOM_OUTPUT_PROCESSOR file: {target}")
+            raise RuntimeError(
+                f"cannot load CUSTOM_OUTPUT_PROCESSOR file: {processor_path}"
+            )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
     else:
@@ -133,5 +148,7 @@ def create_post_layers_module(
         # init(tensor_map) has loaded the real weights — see
         # CustomHandler.ensure_aoti_package
         handler._aoti_requested = True
-    logging.info(f"loaded post-layers custom module from {target}, mode={mode}")
+    logging.info(
+        f"loaded post-layers custom module from {resolved_target}, mode={mode}"
+    )
     return custom_module

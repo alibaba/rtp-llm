@@ -88,16 +88,19 @@ void PostLayersProcessor::setHandler(py::object handler) {
     }
     if (HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::SELECTED_HIDDEN_STATES)) {
         const bool has_position = std::getenv("CUSTOM_OUTPUT_TOKEN_POSITION") != nullptr;
-        const bool has_token_id = std::getenv("CUSTOM_OUTPUT_TRACKED_TOKEN_ID") != nullptr;
-        if (has_position == has_token_id) {
+        if (std::getenv("CUSTOM_OUTPUT_TRACKED_TOKEN_ID") != nullptr) {
             throw std::runtime_error(
-                "selected_hidden_states requires exactly one of CUSTOM_OUTPUT_TOKEN_POSITION or "
-                "CUSTOM_OUTPUT_TRACKED_TOKEN_ID");
+                "CUSTOM_OUTPUT_TRACKED_TOKEN_ID is not supported; use CUSTOM_OUTPUT_TOKEN_POSITION=-2 and optional "
+                "CUSTOM_OUTPUT_EXPECTED_TOKEN_ID");
         }
-        if (has_position) {
-            parseSelectorEnv("CUSTOM_OUTPUT_TOKEN_POSITION", true);
-        } else {
-            parseSelectorEnv("CUSTOM_OUTPUT_TRACKED_TOKEN_ID", false);
+        if (!has_position) {
+            throw std::runtime_error("selected_hidden_states requires CUSTOM_OUTPUT_TOKEN_POSITION=-2");
+        }
+        if (parseSelectorEnv("CUSTOM_OUTPUT_TOKEN_POSITION", true) != -2) {
+            throw std::runtime_error("CUSTOM_OUTPUT_TOKEN_POSITION must be -2");
+        }
+        if (std::getenv("CUSTOM_OUTPUT_EXPECTED_TOKEN_ID") != nullptr) {
+            parseSelectorEnv("CUSTOM_OUTPUT_EXPECTED_TOKEN_ID", false);
         }
     }
 

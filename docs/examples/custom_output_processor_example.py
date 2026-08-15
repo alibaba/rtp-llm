@@ -1,12 +1,17 @@
 """CUSTOM_OUTPUT_PROCESSOR 业务接入示例。
 
-场景：LANGUAGE_MODEL 部署，prefill 阶段取每条请求 prompt 最后一个 token 的
+场景：LANGUAGE_MODEL 部署，prefill 阶段取每条请求 prompt 倒数第二个 token 的
 last-layer hidden states，过自定义 MLP 打分，打分随生成结果一起返回，
 不影响生成过程。
 
 部署方式（部署级门控，设了即整个部署开启）:
     TASK_TYPE=LANGUAGE_MODEL
-    CUSTOM_OUTPUT_PROCESSOR=/path/to/this_file.py   # 或 python 模块 dotted path
+    # 相对 .py 路径从 CHECKPOINT_PATH 解析，可随 ckpt 一起发布
+    CUSTOM_OUTPUT_PROCESSOR=custom_output_processor.py
+    # 也支持绝对 .py 路径或 Python 模块 dotted path
+    CUSTOM_OUTPUT_TOKEN_POSITION=-2
+    # 可选：校验倒数第二个 token，不扫描 prompt
+    CUSTOM_OUTPUT_EXPECTED_TOKEN_ID=151644
     CUSTOM_PROCESSOR_MODE=eager                     # 默认 eager；compiled 见下
 
 CUSTOM_PROCESSOR_MODE=compiled（AOT 档，生产推荐）:
@@ -77,8 +82,7 @@ class ScoreHandler(CustomHandler):
         self.mlp = self.mlp.to(data_type).eval().to(self.device)
 
     def extend_forward_args(self) -> List[str]:
-        # v1 生成路径仅支持 last_hidden_states；声明其他参数会启动失败
-        return ["last_hidden_states"]
+        return ["selected_hidden_states"]
 
     def trigger_mode(self) -> Trigger:
         return Trigger.CONTEXT  # 基类默认值，显式写出便于阅读
@@ -90,11 +94,11 @@ class ScoreHandler(CustomHandler):
         return self.mlp
 
     def extend_forward(self, **kwargs: Any) -> torch.Tensor:
-        # last_hidden_states: [context_batch, hidden]，每条请求 prompt 最后
-        # 一个 token 的 hidden（与引擎喂 lm_head 的行完全一致，零额外采集）
-        last_hidden = kwargs["last_hidden_states"]
+        # selected_hidden_states: [context_batch, hidden]，每条请求倒数
+        # 第二个 token 的 hidden；如果配了 expected token ID，请求入口已校验。
+        selected_hidden = kwargs["selected_hidden_states"]
         with torch.no_grad():
-            return self.mlp(last_hidden)  # [context_batch, 1]
+            return self.mlp(selected_hidden)  # [context_batch, 1]
 
 
 class ScoreModule(CustomModule):
