@@ -153,3 +153,27 @@ dsv4_sm100_py_test(
     name = "test_mega_inv_rope_fp8_quant",
     deps = _DSV4_TEST_DEPS,
 )
+
+py_test(
+    name = "mhc_prenorm_splitk_test",
+    srcs = ["mhc_prenorm_splitk_test.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    # Needs a CUDA GPU and the vendored tilelang; skips otherwise.
+    tags = ["manual", "H20"],
+)
+
+py_test(
+    name = "grouped_fp8_masked_equivalence_test",
+    srcs = ["grouped_fp8_masked_equivalence_test.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    # Needs a Hopper GPU and a DeepGEMM carrying the SM90 FP8 grouped kernels; the
+    # module skips rather than fails when either is absent, but marking it manual
+    # keeps it out of the default CPU run.
+    tags = ["manual", "H20"],
+)
