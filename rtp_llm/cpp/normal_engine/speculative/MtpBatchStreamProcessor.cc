@@ -47,6 +47,26 @@ torch::Tensor clonePrefillLastHiddenSlice(const torch::Tensor& hidden_states,
     return cloneHiddenSlice(hidden_states, start, 1);
 }
 
+torch::Tensor copyToPinnedCpuAsync(const torch::Tensor& tensor, bool& need_sync) {
+    if (!tensor.defined() || !tensor.is_cuda()) {
+        return tensor;
+    }
+
+    auto cpu_tensor = torch::empty(
+        tensor.sizes(), torch::TensorOptions().dtype(tensor.scalar_type()).device(torch::kCPU).pinned_memory(true));
+    cpu_tensor.copy_(tensor, /*non_blocking=*/true);
+    need_sync = true;
+    return cpu_tensor;
+}
+
+void syncPinnedCpuCopies(bool need_sync) {
+    if (need_sync) {
+        // Sampler kernels may run on the graph/current stream. Make the D2H
+        // completion explicit before CPU stream bookkeeping consumes it.
+        cuda_graph::graphGetCurrentStream().synchronize();
+    }
+}
+
 }  // namespace
 
 namespace {
@@ -884,14 +904,15 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
 
     const size_t total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
     RTP_LLM_CHECK(total_batch_size_out == (size_t)new_all_token_ids.size(0));
-    const size_t token_stride = new_all_token_ids.size(1);
-
-    // TODO(async): stream bookkeeping below still iterates token_ids/success
-    // on CPU. Keep the .cpu() explicit until spec-update assembly is
-    // device-native.
-    const torch::Tensor new_all_token_ids_cpu =
-        new_all_token_ids.is_cuda() ? new_all_token_ids.cpu() : new_all_token_ids;
-    const torch::Tensor success_cpu = sampler_output.success.defined() ? sampler_output.success.cpu() : torch::Tensor();
+    // Only the sampled last column is consumed below. Stage that narrow slice
+    // through pinned memory and explicitly wait for the sampler/current stream;
+    // Tensor::cpu() alone does not express the custom-stream dependency.
+    const int64_t last_col              = new_all_token_ids.size(1) - 1;
+    const auto    token_ids_for_copy    = new_all_token_ids.narrow(1, last_col, 1).contiguous();
+    bool          need_d2h_sync         = false;
+    const auto    new_all_token_ids_cpu = copyToPinnedCpuAsync(token_ids_for_copy, need_d2h_sync);
+    const auto    success_cpu           = copyToPinnedCpuAsync(sampler_output.success, need_d2h_sync);
+    syncPinnedCpuCopies(need_d2h_sync);
 
     int batch_idx_in  = 0;
     int batch_idx_out = 0;
@@ -905,10 +926,8 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
         // normal stream info
         auto new_tokens = new_tokens_all.narrow(0, batch_idx_out, next_batch_size);
         for (size_t i = 0; i < next_batch_size; ++i) {
-            new_tokens.data_ptr<int32_t>()[i] =
-                new_all_token_ids_cpu.data_ptr<int32_t>()[(batch_idx_out + i) * token_stride + token_stride - 1];
+            new_tokens.data_ptr<int32_t>()[i] = new_all_token_ids_cpu.data_ptr<int32_t>()[batch_idx_out + i];
         }
-
         for (int i = 0; i < cur_batch_size; ++i) {
             if (success_cpu.defined() && !(success_cpu.data_ptr<bool>()[batch_idx_in + i])) {
                 stream->reportError(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");

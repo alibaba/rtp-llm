@@ -183,6 +183,69 @@ def _create_reuse_cache_query_worker(
     )
 
 
+def _create_reuse_cache_query_for_length_worker(
+    args: Tuple[str, int, int, int, int]
+) -> Tuple[int, ReuseCacheQuery]:
+    tokenizer_path, input_len, target_reuse_len, num_variants, prefix_variant = args
+    tokenizer = _load_tokenizer(tokenizer_path)
+    if not 0 <= target_reuse_len < input_len:
+        raise ValueError(
+            "target_reuse_len must be in [0, input_len): "
+            f"target_reuse_len={target_reuse_len}, input_len={input_len}"
+        )
+
+    candidates = [
+        " hello",
+        " cache",
+        " data",
+        " query",
+        " token",
+        " alpha",
+        " beta",
+        " gamma",
+        " delta",
+        " value",
+        " prefix",
+        " suffix",
+        " reuse",
+        " tensor",
+        " batch",
+        " model",
+    ]
+    rotated_candidates = (
+        candidates[prefix_variant % len(candidates) :]
+        + candidates[: prefix_variant % len(candidates)]
+    )
+    prefix_token = _stable_single_token_id(tokenizer, rotated_candidates)
+    # Keep every variant distinct. This makes target_reuse_len=0 a real cold
+    # measurement instead of warming and measuring the same full prompt.
+    used = {prefix_token}
+    variant_tokens = []
+    for _ in range(max(1, num_variants)):
+        token_id = _stable_single_token_id(tokenizer, rotated_candidates, used)
+        variant_tokens.append(token_id)
+        used.add(token_id)
+
+    prefix_ids = [prefix_token] * target_reuse_len
+    seed_query = (
+        _decode_exact_token_ids(tokenizer, prefix_ids) if target_reuse_len else ""
+    )
+    suffix_len = input_len - target_reuse_len
+    hit_queries = [
+        _decode_exact_token_ids(tokenizer, prefix_ids + [variant_token] * suffix_len)
+        for variant_token in variant_tokens
+    ]
+    return (
+        input_len,
+        ReuseCacheQuery(
+            seed_query=seed_query,
+            hit_queries=hit_queries,
+            target_reuse_len=target_reuse_len,
+            target_hit_rate=target_reuse_len / input_len,
+        ),
+    )
+
+
 def create_query(
     tokenizer_path: str = "",
     input_len_list: Optional[List[int]] = None,
@@ -248,3 +311,32 @@ def create_reuse_cache_queries(
     with ProcessPoolExecutor(max_workers=effective_workers) as executor:
         results = list(executor.map(_create_reuse_cache_query_worker, worker_args))
     return dict(results)
+
+
+def create_reuse_cache_queries_for_length(
+    tokenizer_path: str,
+    input_len: int,
+    target_reuse_len: int,
+    num_variants: int,
+    prefix_variant: int = 0,
+) -> Dict[int, ReuseCacheQuery]:
+    """Build exact-length, round-trippable prompts for a resident reuse sweep."""
+    tokenizer_path = tokenizer_path or os.environ.get(
+        "TOKENIZER_PATH", os.environ.get("CHECKPOINT_PATH", "")
+    )
+    tokenizer_path = fetch_remote_file_to_local(
+        os.path.expanduser(tokenizer_path.strip())
+    )
+    return dict(
+        [
+            _create_reuse_cache_query_for_length_worker(
+                (
+                    tokenizer_path,
+                    input_len,
+                    target_reuse_len,
+                    num_variants,
+                    prefix_variant,
+                )
+            )
+        ]
+    )

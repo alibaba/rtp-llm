@@ -172,7 +172,10 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
 
     BatchCopyParams copy_params;
 
-    const size_t copy_num = (end_ptr - begin_ptr) * config_.layer_num;
+    // A logical block owns every target and speculative-model layout.  Reserve
+    // for the usual KV + scale/index buffers per layer; BatchCopyParams grows
+    // dynamically if a future opaque layout exposes more buffers.
+    const size_t copy_num = (end_ptr - begin_ptr) * static_cast<size_t>(config_.layer_all_num) * 2;
 
     size_t copy_nums[CopyType::TYPE_SIZE] = {};
     auto   copy_type                      = BatchCopyParams::get_copy_type(
@@ -184,31 +187,40 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
         copy_params.reserve(static_cast<CopyType>(i), copy_nums[i]);
     }
 
-    auto&  spec                = config_.cache_specs[0];
-    size_t kv_block_size_bytes = spec->block_size_bytes();
-
     for (auto it = begin_ptr; it != end_ptr; ++it) {
         auto [src_block_index, dest_block_index] = *it;
 
-        for (int layer_id = 0; layer_id < config_.layer_num; layer_id++) {
-            auto src_addr_info = convertIndexToAddr(layer_id, src_block_index);
-            auto dst_addr_info = convertIndexToAddr(layer_id, dest_block_index);
+        for (int layer_id = 0; layer_id < static_cast<int>(config_.layer_all_num); ++layer_id) {
+            const auto src_buffers = convertIndexToBuffer(layer_id, src_block_index);
+            const auto dst_buffers = convertIndexToBuffer(layer_id, dest_block_index);
+            RTP_LLM_CHECK_WITH_INFO(!src_buffers.empty(),
+                                    "block-copy buffers are empty for layer %d, src_block %d, dst_block %d",
+                                    layer_id,
+                                    src_block_index,
+                                    dest_block_index);
+            RTP_LLM_CHECK_WITH_INFO(src_buffers.size() == dst_buffers.size(),
+                                    "block-copy buffer count mismatch for layer %d: src=%zu dst=%zu",
+                                    layer_id,
+                                    src_buffers.size(),
+                                    dst_buffers.size());
 
-            if (!src_addr_info.kv_addr || !dst_addr_info.kv_addr) {
-                RTP_LLM_LOG_ERROR("Failed to get block address for layer %d, src_block %d, dst_block %d",
-                                  layer_id,
-                                  src_block_index,
-                                  dest_block_index);
-                continue;
-            }
-
-            copy_params.add(dst_addr_info.kv_addr, src_addr_info.kv_addr, kv_block_size_bytes, copy_type);
-
-            if (src_addr_info.kv_scale_addr && dst_addr_info.kv_scale_addr) {
-                copy_params.add(dst_addr_info.kv_scale_addr,
-                                src_addr_info.kv_scale_addr,
-                                static_cast<size_t>(config_.kv_scale_stride_bytes),
-                                copy_type);
+            for (size_t buffer_id = 0; buffer_id < src_buffers.size(); ++buffer_id) {
+                const auto& src = src_buffers[buffer_id];
+                const auto& dst = dst_buffers[buffer_id];
+                RTP_LLM_CHECK_WITH_INFO(src.addr != nullptr && dst.addr != nullptr,
+                                        "block-copy buffer is null for layer %d buffer %zu, src_block %d, "
+                                        "dst_block %d",
+                                        layer_id,
+                                        buffer_id,
+                                        src_block_index,
+                                        dest_block_index);
+                RTP_LLM_CHECK_WITH_INFO(src.size_bytes == dst.size_bytes,
+                                        "block-copy byte size mismatch for layer %d buffer %zu: src=%zu dst=%zu",
+                                        layer_id,
+                                        buffer_id,
+                                        src.size_bytes,
+                                        dst.size_bytes);
+                copy_params.add(dst.addr, src.addr, src.size_bytes, copy_type);
             }
         }
     }
@@ -263,8 +275,8 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
         batch_resource->mutableBlockIds(0, gid).resize(evict_result.evicted_keys.size(), NULL_BLOCK_IDX);
     }
 
-    CacheKeysType          evicted_keys;
-    BlockDependenciesType  evicted_dependencies;
+    CacheKeysType         evicted_keys;
+    BlockDependenciesType evicted_dependencies;
     evicted_keys.reserve(evict_result.evicted_keys.size());
     evicted_dependencies.reserve(evict_result.evicted_keys.size());
     for (size_t evicted_idx = 0; evicted_idx < evict_result.evicted_keys.size(); ++evicted_idx) {

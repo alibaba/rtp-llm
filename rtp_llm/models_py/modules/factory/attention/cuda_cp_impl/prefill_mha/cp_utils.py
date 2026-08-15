@@ -1,7 +1,119 @@
+import logging
+import os
+
 import torch
 from flashinfer import BatchPrefillWithPagedKVCacheWrapper
 
 from rtp_llm.ops import KvCacheDataType
+
+logger = logging.getLogger(__name__)
+_LOGGED_SHARDED_PREFIX_LAYOUTS = set()
+
+
+def gather_cp_sharded_prefix_pool(
+    local_pool: torch.Tensor,
+    local_block_table: torch.Tensor,
+    prefix_lengths: torch.Tensor,
+    *,
+    page_size: int,
+    cp_size: int,
+    cp_rank: int,
+    debug_label: str = "prefix",
+) -> torch.Tensor:
+    """Reconstruct page-RR-sharded request prefixes in logical page order.
+
+    ``local_block_table`` is the cache manager's compact, rank-local physical
+    table. Logical page ``p`` belongs to rank ``p % cp_size`` and is stored at
+    local table column ``p // cp_size``. Each request therefore contributes
+    ``ceil(prefix_pages / cp_size)`` physical pages per rank to the collective.
+
+    The returned pool concatenates requests and has logical pages in the order
+    expected by a contiguous synthetic FlashInfer page table. The same helper
+    also works for MSA's main ``[2,H,P,D]`` blocks and idx_K ``[P,D]`` blocks.
+    """
+    if page_size <= 0:
+        raise ValueError(f"page_size must be positive, got {page_size}")
+    if cp_size <= 1:
+        raise ValueError(f"sharded prefix gather requires cp_size > 1, got {cp_size}")
+    if local_block_table.dim() != 2:
+        raise ValueError(
+            "local_block_table must be [batch,max_local_pages], got "
+            f"{tuple(local_block_table.shape)}"
+        )
+
+    prefix_cpu = prefix_lengths.detach().cpu().to(torch.int64)
+    if prefix_cpu.numel() != local_block_table.shape[0]:
+        raise ValueError(
+            f"prefix batch {prefix_cpu.numel()} != block-table batch "
+            f"{local_block_table.shape[0]}"
+        )
+    if bool((prefix_cpu % page_size != 0).any().item()):
+        raise ValueError(
+            f"prefix lengths must be multiples of page_size({page_size}), "
+            f"got {prefix_cpu.tolist()}"
+        )
+
+    # Keep the generic CP collective/interleave implementation in one place.
+    # Import lazily to avoid pulling the full DSV4 module into non-sharded CP.
+    from rtp_llm.models_py.modules.dsv4.cp import cp_gather_request_pool_blocks
+
+    request_pools = []
+    local_page_counts = []
+    local_block_summaries = []
+    debug_enabled = os.environ.get("RTP_LLM_DEBUG_CP_SHARDED_PREFIX", "0") == "1"
+    for batch_idx, prefix_len in enumerate(prefix_cpu.tolist()):
+        logical_pages = int(prefix_len) // page_size
+        if logical_pages == 0:
+            local_page_counts.append(0)
+            if debug_enabled:
+                local_block_summaries.append([])
+            continue
+        local_pages = (logical_pages + cp_size - 1) // cp_size
+        if local_pages > local_block_table.shape[1]:
+            raise ValueError(
+                f"request {batch_idx} needs {local_pages} local prefix pages, "
+                f"but block table has width {local_block_table.shape[1]}"
+            )
+        local_page_counts.append(local_pages)
+        if debug_enabled:
+            block_ids = (
+                local_block_table[batch_idx, :local_pages]
+                .detach()
+                .cpu()
+                .to(torch.int64)
+                .tolist()
+            )
+            local_block_summaries.append(
+                block_ids
+                if len(block_ids) <= 16
+                else block_ids[:8] + ["..."] + block_ids[-8:]
+            )
+        request_pools.append(
+            cp_gather_request_pool_blocks(
+                local_pool,
+                local_block_table[batch_idx, :local_pages],
+                cp_size,
+                cp_rank,
+                logical_pages,
+            )
+        )
+    debug_key = (debug_label, cp_rank)
+    if debug_enabled and debug_key not in _LOGGED_SHARDED_PREFIX_LAYOUTS:
+        _LOGGED_SHARDED_PREFIX_LAYOUTS.add(debug_key)
+        logger.info(
+            "[cp-sharded-prefix] label=%s cp_rank=%d cp_size=%d "
+            "owner_rule=logical_page%%cp_size prefix_tokens=%s "
+            "local_page_counts=%s local_physical_block_ids_head_tail=%s",
+            debug_label,
+            cp_rank,
+            cp_size,
+            prefix_cpu.tolist(),
+            local_page_counts,
+            local_block_summaries,
+        )
+    if not request_pools:
+        return local_pool[:0]
+    return torch.cat(request_pools, dim=0)
 
 
 def cast_kv_for_cache_append(
@@ -41,9 +153,8 @@ def fill_fp8_kv_cache_scale(
 
     batch_indices_l = batch_indices.to(dtype=torch.long)
     positions_l = positions.to(dtype=torch.long)
-    page_offsets = (
-        params.decode_page_indptr_d[batch_indices_l]
-        + torch.div(positions_l, page_size, rounding_mode="floor")
+    page_offsets = params.decode_page_indptr_d[batch_indices_l] + torch.div(
+        positions_l, page_size, rounding_mode="floor"
     )
     block_ids = params.page_indice_d[page_offsets.to(dtype=torch.long)].to(
         dtype=torch.long
@@ -66,6 +177,7 @@ def plan_prefix_paged_attention(
     page_size: int,
     device,
     kv_data_type: torch.dtype = torch.bfloat16,
+    contiguous_page_indices: bool = False,
 ) -> None:
     """Plan paged attention for the prefix portion of KV cache.
 
@@ -83,11 +195,14 @@ def plan_prefix_paged_attention(
     page_indptr = torch.zeros(batch_size + 1, dtype=torch.int32)
     page_indptr[1:] = prefix_pages.cumsum(0)
 
-    full_page_starts = params.decode_page_indptr_h[:batch_size].to(torch.int32)
-    all_page_indices = params.page_indice_d
-
     total_pages = page_indptr[-1].item()
-    if total_pages > 0:
+    if contiguous_page_indices:
+        prefix_page_indices = torch.arange(
+            total_pages, dtype=torch.int32, device=device
+        )
+    elif total_pages > 0:
+        full_page_starts = params.decode_page_indptr_h[:batch_size].to(torch.int32)
+        all_page_indices = params.page_indice_d
         expanded_starts = torch.repeat_interleave(full_page_starts, prefix_pages)
         local_offsets = torch.arange(
             total_pages, dtype=torch.int32

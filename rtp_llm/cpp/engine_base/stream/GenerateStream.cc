@@ -803,6 +803,26 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     }
 
     const auto& new_tokens = update_info.new_tokens;
+    const auto  remaining_tokens =
+        maxTokenNum() > static_cast<size_t>(seqLength()) ? maxTokenNum() - static_cast<size_t>(seqLength()) : 0;
+    const auto num_new_tokens = std::clamp(update_info.num_new_tokens, 0, static_cast<int>(remaining_tokens));
+
+    if (num_new_tokens <= 0) {
+        updateOutput({new_tokens,
+                      0,
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      update_info.update_remote_generate,
+                      update_info.force_update_info});
+        return;
+    }
+
     // Perf tests suppress EOS/stop behavior with zero response tokens, but the
     // speculative recurrent state must still consume the real committed token.
     // Never mutate the caller-owned tensor: MTP also exposes a view of it as
@@ -810,7 +830,6 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     auto output_tokens = isPerfTest() ? torch::zeros_like(new_tokens) : new_tokens;
 
     const int old_seq_length = seqLength();
-    auto      num_new_tokens = update_info.num_new_tokens;
     int       cur_cached_len = seqLength() - 1;
 
     int error_token_id = 0;
@@ -911,11 +930,12 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
         return;
     }
 
-    const auto& new_tokens     = update_info.new_tokens;
-    auto        num_new_tokens = update_info.num_new_tokens;
-
-    const int old_seq_length = seqLength();
-    int       error_token_id = 0;
+    const auto& new_tokens = update_info.new_tokens;
+    const auto  remaining_tokens =
+        maxTokenNum() > static_cast<size_t>(seqLength()) ? maxTokenNum() - static_cast<size_t>(seqLength()) : 0;
+    const auto num_new_tokens = std::clamp(update_info.num_new_tokens, 0, static_cast<int>(remaining_tokens));
+    const int  old_seq_length = seqLength();
+    int        error_token_id = 0;
     if (!complete_token_ids_->update(new_tokens,
                                      begin_time_us_,
                                      num_new_tokens,
@@ -935,7 +955,9 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     resizeSubGenerateStatus(update_info.new_tokens.size(0));
 
     // TODO(xinfei.sxf) fix this (update_queue)
-    updateOutput(update_info);
+    auto bounded_update_info           = update_info;
+    bounded_update_info.num_new_tokens = num_new_tokens;
+    updateOutput(bounded_update_info);
 
     bool is_done = getStatus() == StreamState::FINISHED;
 

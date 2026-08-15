@@ -103,10 +103,12 @@ class BackendRPCServerVisitor:
                 parallelism_config, "prefill_cp_config", None
             )
             tp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
+            configured_cp_size = int(getattr(cp_config, "prefill_cp_size", 0) or 0)
+            page_rr_cp_size = configured_cp_size or tp_size
             kv_cache_sharded = bool(getattr(cp_config, "kv_cache_sharded", False))
-            if kv_cache_sharded and tp_size > 1:
+            if kv_cache_sharded and page_rr_cp_size > 1:
                 self._page_rr_route_cache_keys = True
-                self._page_rr_cp_size = tp_size
+                self._page_rr_cp_size = page_rr_cp_size
         self.master_client = MasterClient(
             host_service=self.host_service,
             server_config=server_config,

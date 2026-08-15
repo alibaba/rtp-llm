@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
+#include <algorithm>
 #include <sstream>
 
 namespace rtp_llm {
@@ -156,9 +157,11 @@ bool CompleteTokenIds::update(const torch::Tensor& new_tokens,
         first_token_latency_us_ = first_token_time_us_ - begin_time_us;
     }
 
-    if (seq_length_ + num_new_tokens > max_token_num) {
-        num_new_tokens = max_token_num - seq_length_;
-    }
+    // A stream can reach its effective model limit before this bookkeeping
+    // update (for example, speculative async reserves extra tail tokens).
+    // Never let a negative remainder turn into a huge size_t loop bound.
+    const int remaining_tokens = std::max(max_token_num - seq_length_, 0);
+    num_new_tokens             = std::clamp(num_new_tokens, 0, remaining_tokens);
 
     // # NOTE: new tokens indicate num of newly genearted tokens
     // # typically 1 but can be > 1 under speculative decoding

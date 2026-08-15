@@ -14,6 +14,18 @@ flashinfer_deps = [
     "//rtp_llm:flashinfer-python",
 ]
 
+py_test(
+    name = "test_msa_cp_sharded_prefix",
+    srcs = ["test_msa_cp_sharded_prefix.py"],
+    deps = py_test_deps + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:cuda_pre_12_9": flashinfer_deps,
+        "//conditions:default": []
+    }),
+    tags = ["H20"],
+    exec_properties = {'gpu': 'H20'},
+)
+
 py_test (
     name = "mla_attention_test",
     srcs = ["mla_attention_test.py", "mla_attention_ref.py"],

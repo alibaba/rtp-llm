@@ -250,7 +250,11 @@ def _maxscore_transpose_kernel(
     ``maxscore.transpose(1, 2)[:, :, :K_out].contiguous()``, whose aten copy runs
     at ~1.7 TB/s on this shape vs ~6.2 TB/s here (~3.6x, bit-identical).
     """
-    pid_h = tl.program_id(0)
+    # At 1M context, one FP32 score head contains roughly
+    # Q * ceil(K / page_size) ~= 8e9 elements.  Triton otherwise evaluates
+    # ``pid_h * stride_h`` in int32 and wraps the base pointer for heads 1+.
+    # Promote the head id before both source and destination slab arithmetic.
+    pid_h = tl.program_id(0).to(tl.int64)
     off_k = tl.program_id(1) * BK + tl.arange(0, BK)
     off_q = tl.program_id(2) * BQ + tl.arange(0, BQ)
     mask_k = off_k < K_out
@@ -937,9 +941,7 @@ def _flash_prefill_topk_to_block_tables_chunked(
         maxscore = maxscore_storage[:maxscore_numel].view(
             num_heads, max_k_tiles, chunk_q
         )
-        score = score_storage[:score_numel].view(
-            num_heads, chunk_q, max_seqblock_k
-        )
+        score = score_storage[:score_numel].view(num_heads, chunk_q, max_seqblock_k)
 
         _o, maxscore = _fmha_sm100(
             idx_q[q_start:q_end],
@@ -1218,8 +1220,9 @@ def _build_group_page_table(group, seg_pages, kv_indices, dev):
     return pt
 
 
-def _build_chunk(group, qo_lens, seqused, seg_q_starts, seg_pages, kv_indices,
-                 block_size_k, dev):
+def _build_chunk(
+    group, qo_lens, seqused, seg_q_starts, seg_pages, kv_indices, block_size_k, dev
+):
     """Geometry for ONE packed varlen call: per-entry cu_seqlens / seqused_k /
     page-table rows keep the segments independent, exactly like the
     non-chunked ``_csr_direct`` path."""
@@ -1253,8 +1256,17 @@ def _build_chunk(group, qo_lens, seqused, seg_q_starts, seg_pages, kv_indices,
     )
 
 
-def _build_chunk_meta(p, kv_indices, topk, block_size_k, chunk_size,
-                      num_q_heads, head_dim, partial_dtype, dev):
+def _build_chunk_meta(
+    p,
+    kv_indices,
+    topk,
+    block_size_k,
+    chunk_size,
+    num_q_heads,
+    head_dim,
+    partial_dtype,
+    dev,
+):
     """Per-forward host metadata for ``_sparse_attn_chunked``: per-chunk
     aligned page tables + geometry/cu_seqlens tensors, built by the first
     sparse layer and reused by the rest (the plan is per-forward, so is
@@ -1285,8 +1297,16 @@ def _build_chunk_meta(p, kv_indices, topk, block_size_k, chunk_size,
         seg_q_starts.append(seg_q_starts[-1] + q_len)
 
     chunks = [
-        _build_chunk(group, qo_lens, seqused, seg_q_starts, seg_pages,
-                     kv_indices, block_size_k, dev)
+        _build_chunk(
+            group,
+            qo_lens,
+            seqused,
+            seg_q_starts,
+            seg_pages,
+            kv_indices,
+            block_size_k,
+            dev,
+        )
         for group in _pack_segments_into_chunks(qo_lens, chunk_size)
     ]
 
@@ -1365,8 +1385,15 @@ def _sparse_attn_chunked(
     meta = p.get("_chunk_meta")
     if meta is None:
         meta = _build_chunk_meta(
-            p, kv_indices, topk, block_size_k, chunk_size,
-            num_q_heads, head_dim, partial_dtype, dev,
+            p,
+            kv_indices,
+            topk,
+            block_size_k,
+            chunk_size,
+            num_q_heads,
+            head_dim,
+            partial_dtype,
+            dev,
         )
         p["_chunk_meta"] = meta
         global _CHUNKED_SPARSE_ATTN_LOGGED
@@ -1786,9 +1813,7 @@ def _flash_prefill_with_fused_topk_index_chunked(
         * triton.cdiv(chunk.max_seqlen_k, block_size_k)
         for chunk in chunks
     )
-    (score_storage,) = get_float32_workspace_views(
-        idx_q.device, ((score_capacity,),)
-    )
+    (score_storage,) = get_float32_workspace_views(idx_q.device, ((score_capacity,),))
     topk_idx = torch.full(
         (num_heads, total_q, topk),
         fill_value=-1,
@@ -1815,9 +1840,7 @@ def _flash_prefill_with_fused_topk_index_chunked(
         chunk_q = q_end - q_start
         max_seqblock_k = triton.cdiv(chunk.max_seqlen_k, block_size_k)
         score_numel = num_heads * chunk_q * max_seqblock_k
-        score = score_storage[:score_numel].view(
-            num_heads, chunk_q, max_seqblock_k
-        )
+        score = score_storage[:score_numel].view(num_heads, chunk_q, max_seqblock_k)
 
         def grid(meta):
             return (

@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -91,6 +92,39 @@ TEST_F(GenerateStreamTest, testConstruct) {
     auto builder = GenerateStreamBuilder();
     auto stream1 = builder.createContextStream({{1, 2, 3, 4, 5}, {}});
     auto stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
+}
+
+TEST(CompleteTokenIdsTest, ClampsExhaustedAndPartialBudget) {
+    auto input             = std::make_shared<GenerateInput>();
+    input->generate_config = std::make_shared<GenerateConfig>();
+    input->input_ids       = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
+
+    CompleteTokenIds token_ids(/*batch_size=*/1, /*max_batch_size=*/1, /*max_seq_len=*/10, /*block_size=*/2);
+    token_ids.init(input, /*extra_reserve_token_num=*/0);
+
+    int error_token = -1;
+    ASSERT_TRUE(token_ids.update(torch::tensor({{7}}, torch::kInt32),
+                                 /*begin_time_us=*/0,
+                                 /*num_new_tokens=*/1,
+                                 /*input_length=*/5,
+                                 /*max_token_num=*/3,
+                                 /*vocab_size=*/100,
+                                 /*is_beam_search=*/false,
+                                 /*stream_id=*/1,
+                                 error_token));
+    EXPECT_EQ(token_ids.seqLength(), 5);
+
+    ASSERT_TRUE(token_ids.update(torch::tensor({{7, 8}}, torch::kInt32),
+                                 /*begin_time_us=*/0,
+                                 /*num_new_tokens=*/2,
+                                 /*input_length=*/5,
+                                 /*max_token_num=*/6,
+                                 /*vocab_size=*/100,
+                                 /*is_beam_search=*/false,
+                                 /*stream_id=*/1,
+                                 error_token));
+    EXPECT_EQ(token_ids.seqLength(), 6);
+    EXPECT_EQ(token_ids.completeTokenIds().data_ptr<int32_t>()[5], 7);
 }
 
 TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {

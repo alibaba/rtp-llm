@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <memory>
 #include <vector>
 #include <set>
@@ -314,6 +315,141 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseRefere
         EXPECT_EQ(batch_resource->curBlocksNum(), 0);
 
         EXPECT_EQ(allocator_->availableBlocksNum(), 5);
+    }
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, NativeMtpPrefixCacheReusesCompoundTargetAndDraftBlock) {
+    auto config = makeMtpCacheConfigByCreateSpConfig(
+        /*main_layers=*/2, /*mtp_module_num=*/1, /*block_num=*/10);
+    allocator_ = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::HOST);
+    allocator_->setSharedBlockCache(std::make_shared<SharedBlockCache>());
+    ASSERT_TRUE(allocator_->init());
+
+    auto seed_resource = createBatchKVCacheResource(/*batch_size=*/1, config.layer_all_num);
+    seed_resource->setBatchCacheKeys(0, CacheKeysType{100, 101, 102});
+    auto seed_token_ids = createCompleteTokenIds(
+        /*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+
+    MallocInfo seed_malloc_info{seed_resource, seed_token_ids};
+    auto       seed_malloc_result = allocator_->malloc(seed_malloc_info);
+    ASSERT_TRUE(seed_malloc_result.success);
+    ASSERT_EQ(seed_resource->blocksNum(0), 3);
+    const auto seed_blocks = seed_resource->blocks(0);
+    for (int layer_id = 0; layer_id < static_cast<int>(config.layer_all_num); ++layer_id) {
+        const auto buffers = allocator_->convertIndexToBuffer(layer_id, seed_blocks[0]);
+        ASSERT_FALSE(buffers.empty());
+        for (size_t buffer_id = 0; buffer_id < buffers.size(); ++buffer_id) {
+            const auto pattern = static_cast<uint8_t>(17 + layer_id * 13 + buffer_id);
+            memset(buffers[buffer_id].addr, pattern, buffers[buffer_id].size_bytes);
+        }
+    }
+
+    InsertInfo seed_insert_info{seed_resource, seed_token_ids, /*is_resident=*/true};
+    allocator_->insertIntoCache(seed_insert_info);
+    allocator_->free(FreeInfo{seed_resource, seed_token_ids});
+
+    auto hit_resource = createBatchKVCacheResource(/*batch_size=*/1, config.layer_all_num);
+    hit_resource->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 200});
+    auto hit_token_ids = createCompleteTokenIds(
+        /*batch_size=*/1, /*seq_length=*/16, /*seq_size_per_block=*/4);
+
+    MallocInfo hit_malloc_info{hit_resource, hit_token_ids};
+    hit_malloc_info.reuse_cache         = true;
+    hit_malloc_info.enable_device_cache = true;
+    auto hit_malloc_result              = allocator_->malloc(hit_malloc_info);
+
+    ASSERT_TRUE(hit_malloc_result.success);
+    EXPECT_EQ(hit_malloc_result.reuse_len, 12);
+    ASSERT_EQ(hit_resource->cacheResource(0).reuseBlockNum(), 3);
+    ASSERT_GE(hit_resource->blocksNum(0), 3);
+    EXPECT_EQ(hit_resource->blocks(0)[0], seed_blocks[0]);
+    EXPECT_EQ(hit_resource->blocks(0)[1], seed_blocks[1]);
+    EXPECT_EQ(hit_resource->blocks(0)[2], seed_blocks[2]);
+    for (int layer_id = 0; layer_id < static_cast<int>(config.layer_all_num); ++layer_id) {
+        const auto buffers = allocator_->convertIndexToBuffer(layer_id, hit_resource->blocks(0)[0]);
+        ASSERT_FALSE(buffers.empty());
+        for (size_t buffer_id = 0; buffer_id < buffers.size(); ++buffer_id) {
+            const auto  pattern = static_cast<uint8_t>(17 + layer_id * 13 + buffer_id);
+            const auto* data    = static_cast<const uint8_t*>(buffers[buffer_id].addr);
+            ASSERT_NE(data, nullptr);
+            EXPECT_TRUE(std::all_of(
+                data, data + buffers[buffer_id].size_bytes, [pattern](uint8_t value) { return value == pattern; }));
+        }
+    }
+
+    const auto target_layer = allocator_->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/0);
+    const auto draft_layer  = allocator_->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/0);
+    ASSERT_NE(target_layer, std::numeric_limits<uint32_t>::max());
+    ASSERT_NE(draft_layer, std::numeric_limits<uint32_t>::max());
+    EXPECT_NE(target_layer, draft_layer);
+
+    const auto target_addr = allocator_->convertIndexToAddr(target_layer, hit_resource->blocks(0)[0]);
+    const auto draft_addr  = allocator_->convertIndexToAddr(draft_layer, hit_resource->blocks(0)[0]);
+    ASSERT_NE(target_addr.kv_addr, nullptr);
+    ASSERT_NE(draft_addr.kv_addr, nullptr);
+    EXPECT_NE(target_addr.kv_addr, draft_addr.kv_addr);
+
+    allocator_->free(FreeInfo{hit_resource, hit_token_ids});
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, NativeMtpBlockCopyCopiesEveryTargetAndDraftBuffer) {
+    auto score_model_config                         = makeTestModelConfig(/*num_layers=*/2);
+    auto propose_model_config                       = makeTestModelConfig(/*num_layers=*/1);
+    score_model_config.data_type                    = rtp_llm::DataType::TYPE_BF16;
+    propose_model_config.data_type                  = rtp_llm::DataType::TYPE_BF16;
+    score_model_config.attn_config.kv_cache_dtype   = KvCacheDataType::FP8;
+    propose_model_config.attn_config.kv_cache_dtype = KvCacheDataType::BASE;
+    propose_model_config.physical_mtp_module_num    = 1;
+
+    rtp_llm::ParallelismConfig parallelism_config;
+    parallelism_config.tp_size = 1;
+    rtp_llm::RuntimeConfig runtime_config;
+    rtp_llm::KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num = 4;
+    rtp_llm::SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_MTP;
+    sp_config.gen_num_per_cycle = 4;
+
+    auto config = rtp_llm::CacheConfigCreator::createSpConfig(score_model_config,
+                                                              propose_model_config,
+                                                              parallelism_config,
+                                                              runtime_config,
+                                                              kv_cache_config,
+                                                              sp_config,
+                                                              /*warm_up_result=*/std::nullopt,
+                                                              /*is_mtp=*/true);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+    ASSERT_EQ(config.layer_all_num, 3u);
+
+    allocator_ = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator_->init());
+
+    constexpr int src_block = 1;
+    constexpr int dst_block = 2;
+    for (int layer_id = 0; layer_id < static_cast<int>(config.layer_all_num); ++layer_id) {
+        const auto src_buffers = allocator_->convertIndexToBuffer(layer_id, src_block);
+        const auto dst_buffers = allocator_->convertIndexToBuffer(layer_id, dst_block);
+        ASSERT_EQ(src_buffers.size(), dst_buffers.size());
+        ASSERT_FALSE(src_buffers.empty());
+        for (size_t buffer_id = 0; buffer_id < src_buffers.size(); ++buffer_id) {
+            ASSERT_EQ(src_buffers[buffer_id].size_bytes, dst_buffers[buffer_id].size_bytes);
+            const auto pattern = static_cast<uint8_t>(31 + layer_id * 17 + buffer_id);
+            memset(src_buffers[buffer_id].addr, pattern, src_buffers[buffer_id].size_bytes);
+            memset(dst_buffers[buffer_id].addr, 0, dst_buffers[buffer_id].size_bytes);
+        }
+    }
+
+    allocator_->blockCopy(src_block, dst_block);
+
+    for (int layer_id = 0; layer_id < static_cast<int>(config.layer_all_num); ++layer_id) {
+        const auto src_buffers = allocator_->convertIndexToBuffer(layer_id, src_block);
+        const auto dst_buffers = allocator_->convertIndexToBuffer(layer_id, dst_block);
+        ASSERT_EQ(src_buffers.size(), dst_buffers.size());
+        for (size_t buffer_id = 0; buffer_id < src_buffers.size(); ++buffer_id) {
+            EXPECT_EQ(
+                memcmp(dst_buffers[buffer_id].addr, src_buffers[buffer_id].addr, src_buffers[buffer_id].size_bytes), 0)
+                << "buffer mismatch at layer " << layer_id << ", buffer " << buffer_id;
+        }
     }
 }
 
@@ -884,6 +1020,55 @@ TEST_F(SingleTypeKVCacheAllocatorTest, CapacityAndNeedBlocksUseCPVirtualBlockSiz
 
     auto batch_resource = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
     EXPECT_EQ(allocator_->singleBatchNeedBlocks(batch_resource, /*seq_len=*/65, /*reserve_step=*/0), 5);
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, CPShardedReuseKeepsCompleteVirtualBlocksAtTailBoundaries) {
+    constexpr int kPhysicalBlockSize = 4;
+    constexpr int kCPSize            = 4;
+    constexpr int kVirtualBlockSize  = kPhysicalBlockSize * kCPSize;
+
+    auto config = createSingleTypeTestConfig(
+        /*layer_num=*/4, /*block_num=*/16, /*seq_size_per_block=*/kPhysicalBlockSize);
+    allocator_ = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::HOST);
+    allocator_->setSharedBlockCache(std::make_shared<SharedBlockCache>());
+    ASSERT_TRUE(allocator_->init());
+    allocator_->setCPSlotMapper(
+        std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/kCPSize, /*block_size=*/kPhysicalBlockSize));
+
+    CacheKeysType cache_keys;
+    for (CacheKeyType key = 100; key < 109; ++key) {
+        cache_keys.push_back(key);
+    }
+
+    // Seed two complete virtual blocks plus one token. The canonical CP keys
+    // are K3 and K7; the partial physical tail K8 belongs to rank 0.
+    auto seed_resource = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
+    seed_resource->setBatchCacheKeys(0, cache_keys);
+    auto seed_token_ids = createCompleteTokenIds(
+        /*batch_size=*/1, /*seq_length=*/2 * kVirtualBlockSize + 1, /*seq_size_per_block=*/kPhysicalBlockSize);
+    ASSERT_TRUE(allocator_->malloc(MallocInfo{seed_resource, seed_token_ids}).success);
+    allocator_->insertIntoCache(InsertInfo{seed_resource, seed_token_ids, /*is_resident=*/true});
+    allocator_->free(FreeInfo{seed_resource, seed_token_ids});
+
+    const auto expect_reuse = [&](int seq_len, int expected_reuse_len) {
+        auto         resource           = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
+        const size_t physical_key_count = static_cast<size_t>((seq_len + kPhysicalBlockSize - 1) / kPhysicalBlockSize);
+        resource->setBatchCacheKeys(0, CacheKeysType(cache_keys.begin(), cache_keys.begin() + physical_key_count));
+        auto token_ids = createCompleteTokenIds(
+            /*batch_size=*/1, seq_len, /*seq_size_per_block=*/kPhysicalBlockSize);
+        MallocInfo malloc_info{resource, token_ids};
+        malloc_info.enable_device_cache = true;
+        malloc_info.reuse_cache         = true;
+        const auto result               = allocator_->malloc(malloc_info);
+        ASSERT_TRUE(result.success) << "seq_len=" << seq_len;
+        EXPECT_EQ(result.reuse_len, expected_reuse_len) << "seq_len=" << seq_len;
+        allocator_->free(FreeInfo{resource, token_ids});
+    };
+
+    expect_reuse(kVirtualBlockSize, 0);
+    expect_reuse(kVirtualBlockSize + 1, kVirtualBlockSize);
+    expect_reuse(2 * kVirtualBlockSize, kVirtualBlockSize);
+    expect_reuse(2 * kVirtualBlockSize + 1, 2 * kVirtualBlockSize);
 }
 
 // Test boundary conditions

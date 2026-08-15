@@ -105,10 +105,11 @@ bool SingleTypeKVCacheAllocator::doInit() {
 }
 
 MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo& malloc_info) {
-    auto& kv_resource = malloc_info.batch_kv_cache_resource;
-    int   reuse_len   = 0;
-    int   common_seq_len =
+    auto&     kv_resource = malloc_info.batch_kv_cache_resource;
+    int       reuse_len   = 0;
+    const int actual_common_seq_len =
         std::min(malloc_info.complete_token_ids->commonSeqLength(), malloc_info.complete_token_ids->totalSeqLength());
+    int common_seq_len = actual_common_seq_len;
 
     if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
         common_seq_len = cp_slot_mapper_->effectiveSeqLenForAlloc(common_seq_len);
@@ -130,12 +131,20 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     if (malloc_info.enable_device_cache) {
         CacheKeysType match_keys;
         if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
-            // Drop the last virtual-block key (same reasoning as non-CP) to avoid
-            // a full-len reuse / empty-block crash. Use last-rank stride so all
-            // ranks share one canonical key namespace.
-            int  cp_size     = cp_slot_mapper_->cpSize();
-            auto vblock_keys = kv_resource->cacheResource(0).localCacheKeys(cp_size - 1, cp_size);
-            match_keys.assign(vblock_keys.begin(), vblock_keys.empty() ? vblock_keys.end() : vblock_keys.end() - 1);
+            // Use last-rank stride so all ranks share one canonical key namespace.
+            // Unlike the non-CP list, its last key is not necessarily the partial
+            // tail: for 513 tokens with 128-token pages and CP4 it is K3, which is
+            // the first complete 512-token virtual block. Bound matching by the
+            // number of complete virtual blocks while still reserving one input
+            // token, so exact-full requests cannot become full-length reuse.
+            const int    cp_size     = cp_slot_mapper_->cpSize();
+            auto         vblock_keys = kv_resource->cacheResource(0).localCacheKeys(cp_size - 1, cp_size);
+            const size_t safe_key_count =
+                actual_common_seq_len > 0 ?
+                    static_cast<size_t>((actual_common_seq_len - 1) / cp_slot_mapper_->virtualBlockSize()) :
+                    0;
+            const size_t match_key_count = std::min(vblock_keys.size(), safe_key_count);
+            match_keys.assign(vblock_keys.begin(), vblock_keys.begin() + match_key_count);
         } else {
             match_keys.assign(cache_keys.begin(), cache_keys.empty() ? cache_keys.end() : cache_keys.end() - 1);
         }
@@ -268,11 +277,11 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
         // Under CP sharding, use the same last-rank-key namespace as match()
         // (see initMallocForCommonLen) so the device cache stays consistent
         // across ranks without any cross-rank coordination.
-        CacheKeysType insert_keys;
+        CacheKeysType                 insert_keys;
         SharedBlockCache::NamespaceId namespace_id = SharedBlockCache::kGpuLogicalNamespace;
         if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
-            int cp_size = cp_slot_mapper_->cpSize();
-            insert_keys = kv_resource->cacheResource(batch_id).localCacheKeys(cp_size - 1, cp_size);
+            int cp_size  = cp_slot_mapper_->cpSize();
+            insert_keys  = kv_resource->cacheResource(batch_id).localCacheKeys(cp_size - 1, cp_size);
             namespace_id = SharedBlockCache::kGpuCpCanonicalNamespace;
         } else {
             insert_keys = kv_resource->cacheKeys(batch_id);
@@ -371,21 +380,21 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
     selected_resource->initGroups(
         1, config_.layer_all_num, config_.layer_to_group_id, config_.kernelBlocksPerKvBlock());
 
-    CacheKeysType          selected_cache_keys;
-    BlockDependenciesType  selected_dependencies;
-    BlockIndicesType       selected_blocks;
-    BlockIndicesType       referenced_blocks;
+    CacheKeysType         selected_cache_keys;
+    BlockDependenciesType selected_dependencies;
+    BlockIndicesType      selected_blocks;
+    BlockIndicesType      referenced_blocks;
 
-    const auto& src_blocks           = kvcache_resource.blocks(0);
-    const auto& source_dependencies  = kvcache_resource.blockDependencies();
+    const auto& src_blocks          = kvcache_resource.blocks(0);
+    const auto& source_dependencies = kvcache_resource.blockDependencies();
 
     for (auto key : cache_keys) {
         auto it = key_to_pos.find(key);
         if (it == key_to_pos.end()) {
             continue;
         }
-        const size_t pos = it->second;
-        const bool preserve_connector_tail = is_connector && !kvcache_resource.lastBlockAligned()
+        const size_t pos                     = it->second;
+        const bool   preserve_connector_tail = is_connector && !kvcache_resource.lastBlockAligned()
                                              && pos + 1 == resource_keys.size() && !selected_cache_keys.empty();
         if (pos >= src_blocks.size() && !preserve_connector_tail) {
             continue;

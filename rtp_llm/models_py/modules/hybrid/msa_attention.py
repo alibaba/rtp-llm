@@ -62,6 +62,9 @@ import torch.nn.functional as F
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
 from rtp_llm.models_py.modules.factory import LinearFactory
+from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
+    gather_cp_sharded_prefix_pool,
+)
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.mxfp8_linear import (
     CudaMxfp8Linear,
 )
@@ -791,7 +794,11 @@ def _fused_unpack_packed_cp(
 def _rows_to_contig_kernel(
     src, out, T, row_stride, ROW: tl.constexpr, BLK: tl.constexpr
 ):
-    t = tl.program_id(0)
+    # CP keeps only the local query rows, but their source stride is the full
+    # fused-QKV width.  At 1M context / CP4, t * row_stride exceeds INT32 even
+    # though both operands fit individually.  Promote the row id before either
+    # source or destination address arithmetic.
+    t = tl.program_id(0).to(tl.int64)
     if t >= T:
         return
     s = t * row_stride
@@ -1271,20 +1278,14 @@ def _fused_cp_paged_write_kernel(
         paged_k = block_id * 2 * kv_stride + page_off * HEAD_DIM
 
         for h in tl.range(0, NUM_KV_HEADS):
-            k = tl.load(
-                packed_ptr + src_row + h * HEAD_DIM + d, mask=dmask, other=0.0
-            )
+            k = tl.load(packed_ptr + src_row + h * HEAD_DIM + d, mask=dmask, other=0.0)
             v = tl.load(
                 packed_ptr + src_row + NK + h * HEAD_DIM + d,
                 mask=dmask,
                 other=0.0,
             )
-            tl.store(
-                scratch_k_ptr + dst_slot * NK + h * HEAD_DIM + d, k, mask=dmask
-            )
-            tl.store(
-                scratch_v_ptr + dst_slot * NK + h * HEAD_DIM + d, v, mask=dmask
-            )
+            tl.store(scratch_k_ptr + dst_slot * NK + h * HEAD_DIM + d, k, mask=dmask)
+            tl.store(scratch_v_ptr + dst_slot * NK + h * HEAD_DIM + d, v, mask=dmask)
             tl.store(
                 base_flat_ptr + paged_k + h * head_stride + d,
                 k,
@@ -1309,9 +1310,7 @@ def _fused_cp_paged_write_kernel(
         kv_len = tl.load(kv_lens_ptr + batch_idx).to(tl.int64)
         tail = (PAGE_SIZE - kv_len % PAGE_SIZE) % PAGE_SIZE
         scratch_row = batch_idx * SCRATCH_SEQ_LEN + kv_len + page_offset
-        clear = (page_offset < tail) & (
-            scratch_row < (batch_idx + 1) * SCRATCH_SEQ_LEN
-        )
+        clear = (page_offset < tail) & (scratch_row < (batch_idx + 1) * SCRATCH_SEQ_LEN)
         for h in tl.range(0, NUM_KV_HEADS):
             tl.store(
                 scratch_k_ptr + scratch_row * NK + h * HEAD_DIM + d,
@@ -2806,6 +2805,78 @@ class MSAAttention(nn.Module):
                 idx_scratch[dst_full, 0] = scale_flat[gf]
         self._scratch_idx_k = idx_scratch
 
+    def _restore_cp_sharded_prefix_scratch(
+        self,
+        kv_cache: LayerKVCache,
+        prefix_lengths: Any,
+        req_to_token: torch.Tensor,
+        attn_inputs: PyAttentionInputs,
+    ) -> None:
+        """Restore cached prefix K/V/idx_K from page-RR owner ranks.
+
+        The current-step CP all-gather contains only the suffix, while the MSA
+        kernels consume ``prefix + suffix`` from flat scratch. Under physical
+        page-RR sharding no rank can reconstruct that prefix from its local
+        pool alone, so gather owned pages and interleave them into logical page
+        order before filling each request's prefix scratch rows.
+        """
+        if not self._kv_sharded:
+            return
+        if isinstance(prefix_lengths, torch.Tensor):
+            prefix_cpu = prefix_lengths.detach().cpu().to(torch.int64)
+        else:
+            prefix_cpu = torch.tensor(list(prefix_lengths), dtype=torch.int64)
+        if not bool((prefix_cpu > 0).any().item()):
+            return
+        if self._scratch_k is None or self._scratch_idx_k is None:
+            raise RuntimeError("MSA sharded prefix restore requires allocated scratch")
+
+        block_table = self._physical_block_table(attn_inputs)
+        main_pages = gather_cp_sharded_prefix_pool(
+            self._paged_kv_base_view(kv_cache),
+            block_table,
+            prefix_cpu,
+            page_size=self.page_size,
+            cp_size=self._cp_size,
+            cp_rank=self._cp_rank,
+            debug_label="msa-main-kv",
+        )
+        idx_pages = gather_cp_sharded_prefix_pool(
+            self._idx_k_paged_view(kv_cache),
+            block_table,
+            prefix_cpu,
+            page_size=self.page_size,
+            cp_size=self._cp_size,
+            cp_rank=self._cp_rank,
+            debug_label="msa-idx-k",
+        )
+
+        # Main pool is HND: [page,2,head,token,dim]. Convert to token-major
+        # logical history; idx_K is already [page,token,dim].
+        prefix_k = (
+            main_pages[:, 0]
+            .permute(0, 2, 1, 3)
+            .reshape(-1, self.kv_head_num, self.head_dim)
+        )
+        prefix_v = (
+            main_pages[:, 1]
+            .permute(0, 2, 1, 3)
+            .reshape(-1, self.kv_head_num, self.head_dim)
+        )
+        prefix_idx = idx_pages.reshape(-1, self.idx_head_dim)
+
+        token_offset = 0
+        for batch_idx, prefix_len in enumerate(prefix_cpu.tolist()):
+            prefix_len = int(prefix_len)
+            if prefix_len == 0:
+                continue
+            dst = req_to_token[batch_idx, :prefix_len].to(torch.long)
+            src = slice(token_offset, token_offset + prefix_len)
+            self._scratch_k[dst] = prefix_k[src].to(self._scratch_k.dtype)
+            self._scratch_v[dst] = prefix_v[src].to(self._scratch_v.dtype)
+            self._scratch_idx_k[dst, 0] = prefix_idx[src].to(self._scratch_idx_k.dtype)
+            token_offset += prefix_len
+
     def _write_kv_cache_and_idx_k_for_decode(
         self,
         kv_cache: LayerKVCache,
@@ -3062,6 +3133,9 @@ class MSAAttention(nn.Module):
             attn_inputs,
             device,
         )
+        self._restore_cp_sharded_prefix_scratch(
+            kv_cache, prefix_cpu, req_to_token, attn_inputs
+        )
         self._zero_scratch_padding_tail(kv_lens_cpu, bsz)
 
         # PD separation: register this MSA layer's paged K/V (and idx_K on the
@@ -3148,7 +3222,6 @@ class MSAAttention(nn.Module):
         output = self.o_proj(o.reshape(local_tokens, -1).contiguous())
         return output
 
-    # ------------------------------------------------------------------
     def _forward_cp_prefill_v2(
         self,
         hidden_states: torch.Tensor,
@@ -3350,15 +3423,11 @@ class MSAAttention(nn.Module):
                 index_score_plan = {}
                 segment_req_ids_host = [int(value) for value in segment_req_ids_np]
                 index_score_host_metadata = PrefillScoreHostMetadata(
-                    query_lens=tuple(
-                        int(value) for value in segment_lengths_np
-                    ),
+                    query_lens=tuple(int(value) for value in segment_lengths_np),
                     seq_lens=tuple(
                         kv_lens_cpu_list[req_id] for req_id in segment_req_ids_host
                     ),
-                    prefix_lens=tuple(
-                        int(value) for value in segment_starts_np
-                    ),
+                    prefix_lens=tuple(int(value) for value in segment_starts_np),
                     slot_ids=tuple(range(n_seg)),
                 )
             else:
@@ -3560,7 +3629,10 @@ class MSAAttention(nn.Module):
         # payload. The fused paged writer unpads directly into scratch and the
         # scheduler-provided paged caches, avoiding full_* temporaries,
         # mha_kv_write_cache, and the separate unpack+scatter launches.
-        if _USE_FUSED_CP_PAGED_WRITE and (self._kv_sharded or prefix_sum == 0):
+        used_fused_cp_paged_write = _USE_FUSED_CP_PAGED_WRITE and (
+            self._kv_sharded or prefix_sum == 0
+        )
+        if used_fused_cp_paged_write:
             self._source_cp_from_packed(
                 kv_cache,
                 all_packed,
@@ -3628,6 +3700,10 @@ class MSAAttention(nn.Module):
                     device,
                     slot_mapping=slot_mapping,
                 )
+        self._restore_cp_sharded_prefix_scratch(
+            kv_cache, prefix_cpu_list, req_to_token, attn_inputs
+        )
+        if not used_fused_cp_paged_write:
             self._zero_scratch_padding_tail(kv_lens_cpu_list, bsz)
 
         if (

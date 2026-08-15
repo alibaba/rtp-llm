@@ -184,7 +184,10 @@ class BatchPerfImpl(object):
 
     def _normalize_seed_queries(self, query: Union[str, List[str]]) -> List[str]:
         if isinstance(query, str):
-            return [query]
+            # The fixed-batch scheduler waits for the configured global batch.
+            # Seed with the same batch size so every DP worker receives its
+            # local batch instead of waiting forever on a single request.
+            return [query] * self.batch_size
         assert query, "reuse-cache seed query list must not be empty"
         return query
 

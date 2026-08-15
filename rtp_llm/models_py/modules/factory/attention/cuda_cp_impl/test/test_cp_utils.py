@@ -13,14 +13,20 @@ that computes zigzag positions from first principles.
 """
 
 import unittest
+from types import SimpleNamespace
 from typing import List, Set, Tuple
+from unittest.mock import patch
+
+import torch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
+    gather_cp_sharded_prefix_pool,
     generate_full_causal_kv_indices,
     generate_half_kv_indices,
     generate_half_q_indices,
     generate_nonlocal_causal_kv_indices,
     generate_q_indices,
+    plan_prefix_paged_attention,
 )
 
 # ---------------------------------------------------------------------------
@@ -71,6 +77,110 @@ def _ref_nonlocal_causal(
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+class TestGatherCpShardedPrefixPool(unittest.TestCase):
+
+    @patch("rtp_llm.models_py.modules.dsv4.cp.cp_gather_request_pool_blocks")
+    def test_per_request_local_page_slices_and_concatenates(self, gather):
+        gather.side_effect = [
+            torch.tensor([[10.0], [11.0], [12.0], [13.0]]),
+            torch.tensor([[20.0], [21.0]]),
+        ]
+        local_pool = torch.arange(16, dtype=torch.float32).view(8, 2)
+        block_table = torch.tensor([[4, 5], [6, 7]], dtype=torch.int32)
+
+        out = gather_cp_sharded_prefix_pool(
+            local_pool,
+            block_table,
+            torch.tensor([4, 2]),
+            page_size=1,
+            cp_size=2,
+            cp_rank=1,
+        )
+
+        self.assertTrue(
+            torch.equal(
+                out, torch.tensor([[10.0], [11.0], [12.0], [13.0], [20.0], [21.0]])
+            )
+        )
+        self.assertTrue(
+            torch.equal(gather.call_args_list[0].args[1], block_table[0, :2])
+        )
+        self.assertEqual(gather.call_args_list[0].args[4], 4)
+        self.assertTrue(
+            torch.equal(gather.call_args_list[1].args[1], block_table[1, :1])
+        )
+        self.assertEqual(gather.call_args_list[1].args[4], 2)
+
+    @patch("rtp_llm.models_py.modules.dsv4.cp.cp_gather_request_pool_blocks")
+    def test_zero_prefix_skips_collective(self, gather):
+        local_pool = torch.empty(3, 2)
+        out = gather_cp_sharded_prefix_pool(
+            local_pool,
+            torch.tensor([[1, 2]], dtype=torch.int32),
+            torch.tensor([0]),
+            page_size=128,
+            cp_size=4,
+            cp_rank=0,
+        )
+        self.assertEqual(tuple(out.shape), (0, 2))
+        gather.assert_not_called()
+
+    def test_rejects_non_page_aligned_prefix(self):
+        with self.assertRaisesRegex(ValueError, "multiples of page_size"):
+            gather_cp_sharded_prefix_pool(
+                torch.empty(3, 2),
+                torch.tensor([[1]], dtype=torch.int32),
+                torch.tensor([127]),
+                page_size=128,
+                cp_size=4,
+                cp_rank=0,
+            )
+
+
+class TestPlanShardedPrefixAttention(unittest.TestCase):
+
+    def test_contiguous_page_table_matches_gathered_pool_order(self):
+        class Wrapper:
+            kwargs = None
+
+            def plan(self, **kwargs):
+                self.kwargs = kwargs
+
+        wrapper = Wrapper()
+        params = SimpleNamespace(kvlen_h=torch.tensor([384, 256]))
+        plan_prefix_paged_attention(
+            wrapper,
+            qo_indptr=torch.tensor([0, 2, 3], dtype=torch.int32),
+            prefix_lengths=torch.tensor([256, 128], dtype=torch.int32),
+            params=params,
+            num_qo_heads=8,
+            num_kv_heads=1,
+            head_dim=128,
+            page_size=128,
+            device=torch.device("cpu"),
+            contiguous_page_indices=True,
+        )
+
+        self.assertTrue(
+            torch.equal(
+                wrapper.kwargs["paged_kv_indptr"],
+                torch.tensor([0, 2, 3], dtype=torch.int32),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                wrapper.kwargs["paged_kv_indices"],
+                torch.tensor([0, 1, 2], dtype=torch.int32),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                wrapper.kwargs["paged_kv_last_page_len"],
+                torch.tensor([128, 128], dtype=torch.int32),
+            )
+        )
 
 
 class TestGenerateQIndices(unittest.TestCase):

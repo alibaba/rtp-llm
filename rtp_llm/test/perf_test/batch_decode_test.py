@@ -16,7 +16,11 @@ from rtp_llm.test.perf_test.hub_download import (
 )
 from rtp_llm.test.perf_test.sampling import prepare_distribution_config
 from rtp_llm.test.perf_test.server import EngineServer
-from rtp_llm.test.perf_test.test_util import create_query, create_reuse_cache_queries
+from rtp_llm.test.perf_test.test_util import (
+    create_query,
+    create_reuse_cache_queries,
+    create_reuse_cache_queries_for_length,
+)
 
 
 def run_single(
@@ -128,6 +132,15 @@ def parse_args():
         help=(
             "When >0, prefill grid mode seeds a shared prefix before each run and "
             "measures prompts whose target prefix-cache hit rate is this value."
+        ),
+    )
+    perf.add_argument(
+        "--prefill_reuse_cache_lengths",
+        type=str,
+        default="",
+        help=(
+            "Comma-separated exact prefix-cache hit lengths. Runs all lengths "
+            "against one resident prefill server and stores each result separately."
         ),
     )
 
@@ -281,6 +294,21 @@ def _reuse_query_variant_count(profile: bool = True) -> int:
     return max(1, warmup_runs + measure_runs + profile_runs)
 
 
+def _parse_reuse_cache_lengths(value: str, input_len: int) -> List[int]:
+    lengths = [int(item.strip()) for item in value.split(",") if item.strip()]
+    if not lengths:
+        raise ValueError("--prefill_reuse_cache_lengths is empty")
+    if len(set(lengths)) != len(lengths):
+        raise ValueError("--prefill_reuse_cache_lengths contains duplicates")
+    invalid = [length for length in lengths if not 0 <= length < input_len]
+    if invalid:
+        raise ValueError(
+            "reuse lengths must be in [0, input_len): "
+            f"input_len={input_len}, invalid={invalid}"
+        )
+    return lengths
+
+
 def main() -> str:
     from rtp_llm.config.log_config import setup_logging
 
@@ -288,6 +316,7 @@ def main() -> str:
 
     args, remaining = parse_args()
     remaining = resolve_perf_engine_paths(remaining)
+    tp_size = _positive_int_arg(remaining, "tp_size", 1)
     generate_config = json.loads(args.generate_config)
     os.makedirs(args.result_dir, exist_ok=True)
     EngineServer.propagate_engine_env(remaining)
@@ -356,6 +385,55 @@ def main() -> str:
         )
 
         input_query_dict = create_query(input_len_list=input_len_list)
+        if args.prefill_reuse_cache_lengths:
+            if args.prefill_reuse_cache_hit_rate > 0.0:
+                raise ValueError(
+                    "exact reuse lengths and reuse hit rate are mutually exclusive"
+                )
+            if args.partial != 2:
+                raise ValueError("exact reuse-length sweep requires --partial 2")
+            if len(input_len_list) != 1 or grid_cases:
+                raise ValueError(
+                    "exact reuse-length sweep requires exactly one --input_len "
+                    "and no --grid_cases"
+                )
+            input_len = input_len_list[0]
+            reuse_lengths = _parse_reuse_cache_lengths(
+                args.prefill_reuse_cache_lengths, input_len
+            )
+            tokenizer_path = (
+                extract_arg(remaining, "tokenizer_path")
+                or extract_arg(remaining, "checkpoint_path")
+                or os.environ.get("TOKENIZER_PATH", "")
+            )
+            for prefix_variant, reuse_len in enumerate(reuse_lengths):
+                case_dir = os.path.join(args.result_dir, f"reuse_{reuse_len}")
+                os.makedirs(case_dir, exist_ok=True)
+                reuse_query_dict = create_reuse_cache_queries_for_length(
+                    tokenizer_path=tokenizer_path,
+                    input_len=input_len,
+                    target_reuse_len=reuse_len,
+                    num_variants=_reuse_query_variant_count(),
+                    prefix_variant=prefix_variant,
+                )
+                GridRunner(
+                    server.port,
+                    args.dp_size,
+                    batch_size_list,
+                    input_len_list,
+                    input_query_dict,
+                    is_decode=False,
+                    dump_json_path=case_dir,
+                    decode_test_length=args.decode_test_length,
+                    tp_size=tp_size,
+                    generate_config=generate_config,
+                    reuse_cache_query_dict=reuse_query_dict,
+                ).run()
+            _collect_timeline_files(args.result_dir)
+            server.stop()
+            _write_test_info(args, remaining)
+            return args.result_dir
+
         reuse_cache_query_dict = None
         if args.prefill_reuse_cache_hit_rate > 0.0 and args.partial in (0, 2):
             tokenizer_path = (
@@ -383,6 +461,7 @@ def main() -> str:
                 is_decode=True,
                 dump_json_path=args.result_dir,
                 decode_test_length=args.decode_test_length,
+                tp_size=tp_size,
                 generate_config=generate_config,
                 grid_cases=grid_cases,
             ).run()
@@ -396,6 +475,7 @@ def main() -> str:
                 is_decode=False,
                 dump_json_path=args.result_dir,
                 decode_test_length=args.decode_test_length,
+                tp_size=tp_size,
                 generate_config=generate_config,
                 grid_cases=grid_cases,
                 reuse_cache_query_dict=reuse_cache_query_dict,
