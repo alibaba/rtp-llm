@@ -233,7 +233,7 @@ class ModelRpcClientTest(TestCase):
             {"CUSTOM_OUTPUT_TOKEN_POSITION": "0"},
             clear=True,
         ):
-            with self.assertRaisesRegex(ValueError, "must be between"):
+            with self.assertRaisesRegex(ValueError, "must be -2"):
                 trans_input(input_py)
 
     def test_trans_input_validates_expected_token_at_minus_two(self):
