@@ -136,3 +136,14 @@ py_test(
     tags = ["H20"],
     exec_properties = {"gpu": "H20"},
 )
+
+py_test(
+    name = "test_mega_csa_rtp_eager",
+    srcs = ["test_mega_csa_rtp_eager.py"],
+    deps = _DSV4_FP8_TEST_DEPS + [
+        "//rtp_llm:deep_gemm",
+    ],
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    timeout = "long",
+)
