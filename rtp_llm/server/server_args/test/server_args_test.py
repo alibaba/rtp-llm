@@ -41,6 +41,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["MM_IMAGE_MAX_FILE_SIZE_KB"] = "2048"
         os.environ["MM_VIDEO_MAX_FILE_SIZE_KB"] = "4096"
         os.environ["THINK_MODE"] = "adaptive"
+        os.environ["DISABLE_FLASHINFER_HYBRID_PREFILL"] = "1"
 
         sys.argv = ["prog"]
 
@@ -94,6 +95,9 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.vit_config.mm_video_max_file_size_kb, 4096)
         self.assertEqual(py_env_configs.generate_env_config.think_mode, "adaptive")
 
+        # Verify disable_flashinfer_hybrid_prefill
+        self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)
+
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""
         sys.argv = [
@@ -131,6 +135,8 @@ class ServerArgsSetTest(TestCase):
             "--enable_paged_flashinfer_trt_fmha_v2",
             "false",
             "--disable_flashinfer_native",
+            "true",
+            "--disable_flashinfer_hybrid_prefill",
             "true",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
@@ -189,6 +195,7 @@ class ServerArgsSetTest(TestCase):
         self.assertFalse(py_env_configs.fmha_config.enable_flashinfer_trt_fmha_v2)
         self.assertFalse(py_env_configs.fmha_config.enable_paged_flashinfer_trt_fmha_v2)
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_native)
+        self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)
 
     def test_cmd_args_override_env_vars(self):
         """Test that command line arguments override environment variables."""
@@ -198,6 +205,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["ACT_TYPE"] = "BF16"
         os.environ["TP_SIZE"] = "4"
         os.environ["CONCURRENCY_LIMIT"] = "32"
+        os.environ["DISABLE_FLASHINFER_HYBRID_PREFILL"] = "1"
 
         # Set command line arguments (should override env vars)
         sys.argv = [
@@ -212,6 +220,8 @@ class ServerArgsSetTest(TestCase):
             "8",
             "--concurrency_limit",
             "64",
+            "--disable_flashinfer_hybrid_prefill",
+            "false",
         ]
 
         # Import and setup args
@@ -229,6 +239,9 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.parallelism_config.tp_size, 8)  # Overridden
         self.assertEqual(
             py_env_configs.concurrency_config.concurrency_limit, 64
+        )  # Overridden
+        self.assertFalse(
+            py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill
         )  # Overridden
 
     def test_mixed_env_and_cmd_args(self):
@@ -273,6 +286,9 @@ class ServerArgsSetTest(TestCase):
             py_env_configs.runtime_config.fifo_scheduler_config.max_context_batch_size,
             32,
         )
+
+        # Not set via env or cmd args: verify the default value
+        self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)
 
     def test_batch_decode_scheduler_config(self):
         """Test that batch_decode_scheduler_config is correctly set."""

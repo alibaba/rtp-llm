@@ -432,6 +432,7 @@ class GrammarConfig:
 
 class FMHAConfig:
     absorb_opt_len: int
+    disable_flashinfer_hybrid_prefill: bool
     disable_flashinfer_native: bool
     enable_flashinfer_trtllm_gen: bool
     enable_flashinfer_trt_fmha_v2: bool
