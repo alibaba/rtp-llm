@@ -24,6 +24,7 @@ struct ResourceContext {
     bool    enable_host_cache{false};
     bool    enable_disk_cache{false};
     bool    enable_remote_cache{false};
+    bool    ignore_request_cache_switches{false};
 
     void initCacheConfig(const KVCacheConfig& kv_cache_config);
 };
