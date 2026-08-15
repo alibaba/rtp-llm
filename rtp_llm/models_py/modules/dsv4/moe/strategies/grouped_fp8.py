@@ -98,6 +98,12 @@ _HOPPER_MAJOR = 9
 # every banked number was measured under, so it stays byte-identical unless asked.
 _MASKED_ENV = "DSV4_MOE_MASKED"
 
+# The masked GEMM's M tile: it writes whole tiles of this many rows, clipped to the
+# tensor's own max_m (measured on 11.24.224.84 -- with masked_m=1 it writes rows 0..63 for
+# max_m in {64, 128}, and 0..max_m-1 below that). Everything after the first GEMM can
+# therefore work on align(N, _MASKED_TILE) rows per group instead of max_m.
+_MASKED_TILE = 64
+
 # Above this many tokens per MoE call the masked layout is refused, because its buffer is
 # E * align(N, 128) rows: decode's N (batch x ep, <=256 here) gives 8-16k rows, while a
 # 16k-token prefill chunk would ask for E * 16384 = a million rows. The contiguous layout
@@ -553,6 +559,16 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         max_m = align(N, _GROUPED_ALIGNMENT)
         rows = E * max_m
 
+        # ...but only ep_scatter needs those 128-row segments. The first masked GEMM writes
+        # whole 64-row tiles and at most ceil(count_e/64)*64 <= align(N, 64) rows per group,
+        # so every row above that is provably dead and no stage after the GEMM has to touch
+        # it. At decode batch that is the difference between 8192 and 4096 rows through
+        # swiglu, the quant, the second GEMM and the gather -- and those move 67 MB per
+        # buffer per layer, which the capture-mode profile showed as ~20 ms/step of copies,
+        # fills and elementwise work in service of 32 rows of real output. Verified
+        # bit-identical to the contiguous path at N=4/24/96 and max_m=128/256.
+        t_rows = min(max_m, align(N, _MASKED_TILE))
+
         a_fp8, a_scale = sgl_per_token_group_quant_fp8(
             x.contiguous(),
             group_size=FP8_BLOCK,
@@ -600,7 +616,12 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         # No m_indices.clamp_ here: in the masked layout the group of a row is its
         # position, not a tag, so the GEMM never reads m_indices at all. ep_scatter still
         # writes it, so it still has to be allocated.
-        gate_up = torch.zeros(E, max_m, 2 * inter, device=device, dtype=torch.bfloat16)
+        #
+        # Only the live prefix is zeroed. The GEMM skips groups whose masked_m is 0 and
+        # writes one tile of the rest, so rows in [0, t_rows) are either written by it or
+        # read by swiglu below; rows above t_rows are read by nothing.
+        gate_up = torch.empty(E, max_m, 2 * inter, device=device, dtype=torch.bfloat16)
+        gate_up[:, :t_rows].zero_()
         m_grouped_fp8_gemm_nt_masked(
             (scatter_out.view(E, max_m, D), scatter_out_scale.view(E, max_m, D // FP8_BLOCK)),
             (self._w13, self._s13),
@@ -610,15 +631,19 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         )
         del scatter_out, scatter_out_scale
 
-        # Identical arithmetic to the contiguous path, on a [rows, 2*inter] view.
-        gate_up_2d = gate_up.view(rows, 2 * inter)
-        gate, up = gate_up_2d[:, :inter], gate_up_2d[:, inter:]
+        # Identical arithmetic to the contiguous path, on the live prefix. The slice is a
+        # strided view, so the clamps and silu read 2x less; the single copy that does
+        # happen (the .to(bfloat16) result) is already only t_rows tall.
+        gu = gate_up[:, :t_rows]
+        gate, up = gu[..., :inter], gu[..., inter:]
         limit = cfg.swiglu_limit
         if limit > 0:
             gate = gate.clamp(max=limit)
             up = up.clamp(min=-limit, max=limit)
-        hidden = (F.silu(gate.float()) * up.float()).to(torch.bfloat16)
-        del gate_up, gate_up_2d, gate, up
+        hidden = (F.silu(gate.float()) * up.float()).to(torch.bfloat16).reshape(
+            E * t_rows, inter
+        )
+        del gate_up, gu, gate, up
 
         h_fp8, h_scale = sgl_per_token_group_quant_fp8(
             hidden.contiguous(),
@@ -630,18 +655,28 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         )
         del hidden
 
-        down_out = torch.zeros(E, max_m, D, device=device, dtype=torch.bfloat16)
+        down_out = torch.zeros(E, t_rows, D, device=device, dtype=torch.bfloat16)
         m_grouped_fp8_gemm_nt_masked(
-            (h_fp8.view(E, max_m, inter), h_scale.view(E, max_m, inter // FP8_BLOCK)),
+            (h_fp8.view(E, t_rows, inter), h_scale.view(E, t_rows, inter // FP8_BLOCK)),
             (self._w2, self._s2),
             down_out,
             num_recv,
-            expected_m=max_m,
+            expected_m=t_rows,
         )
         del h_fp8, h_scale
 
+        # ep_scatter wrote output_index in units of max_m; down_out is in units of t_rows.
+        # Two integer ops on an [N, topk] tensor, on the device, so the branch stays free of
+        # host reads. A no-op when t_rows == max_m.
+        if t_rows != max_m:
+            output_index = (output_index // max_m) * t_rows + (output_index % max_m)
+
         gather_out = torch.empty((N, D), dtype=torch.bfloat16, device=device)
         ep_gather(
-            down_out.view(rows, D), adjusted_topk_ids, weights, output_index, gather_out
+            down_out.view(E * t_rows, D),
+            adjusted_topk_ids,
+            weights,
+            output_index,
+            gather_out,
         )
         return gather_out
