@@ -55,7 +55,8 @@ from rtp_llm.ops.compute_ops import CacheGroupType, KVCache, KVCacheRegionName
 from rtp_llm.test.utils.numeric_util import calc_diff
 from rtp_llm.utils.model_weight import W
 
-_MAX_SEQ_LEN = 4096
+_TEST_MAX_SEQ_LEN = 4096
+_MODEL_MAX_SEQ_LEN = 65536
 _TOKENS_PER_BLOCK = 256
 _COMPRESSED_ENTRIES_PER_BLOCK = _TOKENS_PER_BLOCK // 4
 _SWA_ENTRIES_PER_BLOCK = 128
@@ -180,6 +181,7 @@ class _Pools:
     block_tables: dict[int, torch.Tensor]
     entries_per_block: dict[int, int]
     tokens_per_block: dict[int, int]
+    max_seq_len: int
 
     def reset(self) -> None:
         self.tensors[CSA_KV].zero_()
@@ -208,8 +210,12 @@ class _Pools:
         )
 
 
-def _make_pools(device: torch.device, batch_size: int) -> _Pools:
-    compressed_pages_per_request = _MAX_SEQ_LEN // _TOKENS_PER_BLOCK
+def _make_pools(
+    device: torch.device,
+    batch_size: int,
+    max_seq_len: int = _TEST_MAX_SEQ_LEN,
+) -> _Pools:
+    compressed_pages_per_request = max_seq_len // _TOKENS_PER_BLOCK
     compressed_blocks = 1 + batch_size * compressed_pages_per_request
     fixed_blocks = 1 + batch_size
     csa_stride = _align_up(
@@ -298,7 +304,7 @@ def _make_pools(device: torch.device, batch_size: int) -> _Pools:
     kv_cache.kv_cache_base_by_layer_region = [by_region]
     kv_cache.kv_cache_base_by_layer = [tensors[SWA_KV]]
 
-    pools = _Pools(kv_cache, tensors, block_tables, entries, tokens)
+    pools = _Pools(kv_cache, tensors, block_tables, entries, tokens, max_seq_len)
     pools.reset()
     return pools
 
@@ -325,7 +331,8 @@ def _bench_cuda_event(
 
 def _fill_random_context(pools: _Pools, device: torch.device, seed: int) -> None:
     generator = torch.Generator(device=device).manual_seed(seed)
-    compressed_count = _MAX_SEQ_LEN // 4
+    batch_size = int(pools.block_tables[CSA_KV].shape[0])
+    compressed_count = batch_size * (pools.max_seq_len // 4)
     compressed_slots = torch.arange(
         _COMPRESSED_ENTRIES_PER_BLOCK,
         _COMPRESSED_ENTRIES_PER_BLOCK + compressed_count,
@@ -334,7 +341,7 @@ def _fill_random_context(pools: _Pools, device: torch.device, seed: int) -> None
     )
     swa_slots = torch.arange(
         _SWA_ENTRIES_PER_BLOCK,
-        2 * _SWA_ENTRIES_PER_BLOCK,
+        _SWA_ENTRIES_PER_BLOCK + batch_size * _SWA_ENTRIES_PER_BLOCK,
         dtype=torch.int64,
         device=device,
     )
@@ -353,7 +360,7 @@ def _fill_random_context(pools: _Pools, device: torch.device, seed: int) -> None
         device=device,
     ).mul_(0.05)
     swa = torch.randn(
-        _SWA_ENTRIES_PER_BLOCK,
+        batch_size * _SWA_ENTRIES_PER_BLOCK,
         HEAD_DIM,
         generator=generator,
         dtype=torch.bfloat16,
@@ -415,7 +422,7 @@ class MegaCSARTPEagerTest(unittest.TestCase):
             beta_slow=1,
             original_seq_len=65536,
             max_batch_size=128,
-            max_seq_len=_MAX_SEQ_LEN,
+            max_seq_len=_MODEL_MAX_SEQ_LEN,
             index_n_heads=INDEX_HEADS,
             index_head_dim=INDEX_HEAD_DIM,
             index_topk=512,
@@ -440,7 +447,7 @@ class MegaCSARTPEagerTest(unittest.TestCase):
             q_len=1,
             window_size=128,
             head_dim=HEAD_DIM,
-            max_seq_len=_MAX_SEQ_LEN,
+            max_seq_len=pools.max_seq_len,
             compress_ratios=[4],
             index_topk=512,
             device=self.device,
@@ -692,10 +699,14 @@ class MegaCSARTPEagerTest(unittest.TestCase):
         ).mul_(0.05)
 
         reference_output, reference_metadata = self._run_reference_step(
-            _MAX_SEQ_LEN - 1, hidden.clone(), self.reference_pools
+            self.reference_pools.max_seq_len - 1,
+            hidden.clone(),
+            self.reference_pools,
         )
         mega_output, mega_metadata = self._run_mega_step(
-            _MAX_SEQ_LEN - 1, hidden.clone(), self.mega_pools
+            self.mega_pools.max_seq_len - 1,
+            hidden.clone(),
+            self.mega_pools,
         )
         output_diff = calc_diff(mega_output.float(), reference_output.float())
         mega_topk = mega_metadata.topk_buffer_compressed.flatten()
@@ -713,9 +724,26 @@ class MegaCSARTPEagerTest(unittest.TestCase):
         "set DSV4_MEGA_RUN_PERF=1 for the single-card performance comparison",
     )
     def test_performance_against_original_rtp_attention_sublayer(self) -> None:
-        for batch_size in (1, 8, 16):
-            reference_pools = _make_pools(self.device, batch_size)
-            mega_pools = _make_pools(self.device, batch_size)
+        cases = (
+            (1, 2048),
+            (8, 2048),
+            (16, 2048),
+            (128, 65536),
+        )
+        selected_cases = os.environ.get("DSV4_MEGA_PERF_CASES")
+        if selected_cases:
+            cases = tuple(
+                tuple(int(value) for value in item.split(":"))
+                for item in selected_cases.split(",")
+            )
+        for batch_size, context_length in cases:
+            pool_max_seq_len = max(_TEST_MAX_SEQ_LEN, context_length)
+            reference_pools = _make_pools(
+                self.device, batch_size, max_seq_len=pool_max_seq_len
+            )
+            mega_pools = _make_pools(
+                self.device, batch_size, max_seq_len=pool_max_seq_len
+            )
             generator = torch.Generator(device=self.device).manual_seed(
                 9000 + batch_size
             )
@@ -725,8 +753,41 @@ class MegaCSARTPEagerTest(unittest.TestCase):
                 device=self.device,
                 dtype=torch.bfloat16,
             ).mul_(0.05)
-            reference_metadata = self._metadata(2047, reference_pools)
-            mega_metadata = self._metadata(2047, mega_pools)
+            reference_metadata = self._metadata(context_length - 1, reference_pools)
+            mega_metadata = self._metadata(context_length - 1, mega_pools)
+            if context_length == _MODEL_MAX_SEQ_LEN:
+                _fill_random_context(reference_pools, self.device, seed=4242)
+                _fill_random_context(mega_pools, self.device, seed=4242)
+            reference_check = self._forward_reference(
+                hidden.clone(), reference_metadata, reference_pools
+            ).clone()
+            self.runtime.begin_decode(mega_metadata)
+            mega_check = self._forward_mega(
+                hidden.clone(), mega_metadata, mega_pools
+            ).clone()
+            check_diff = calc_diff(mega_check.float(), reference_check.float())
+            mega_topk = mega_metadata.topk_buffer_compressed.view(batch_size, -1)
+            reference_topk = reference_metadata.topk_buffer_compressed.view(
+                batch_size, -1
+            )
+            overlaps = [
+                len(set(mega_row) & set(reference_row))
+                for mega_row, reference_row in zip(
+                    mega_topk.tolist(), reference_topk.tolist()
+                )
+            ]
+            min_overlap = min(overlaps)
+            mean_overlap = sum(overlaps) / len(overlaps)
+            max_overlap = max(overlaps)
+            print(
+                "Mega/reference performance-case correctness "
+                f"B={batch_size}, ctx={context_length}: calc_diff={check_diff:.6e}, "
+                "TopK overlap "
+                f"min/mean/max={min_overlap}/{mean_overlap:.1f}/{max_overlap} of 512"
+            )
+            self.assertLess(check_diff, 1.0e-3)
+            self.assertGreaterEqual(min_overlap, int(0.97 * 512))
+
             reference_hidden = hidden.clone()
             mega_hidden = hidden.clone()
 
@@ -789,6 +850,7 @@ class MegaCSARTPEagerTest(unittest.TestCase):
 
             row = {
                 "batch": batch_size,
+                "context_length": context_length,
                 "reference_eager_us": reference_eager_us,
                 "mega_eager_us": mega_eager_us,
                 "reference_graph_us": reference_graph_us,
@@ -796,7 +858,8 @@ class MegaCSARTPEagerTest(unittest.TestCase):
             }
             print(
                 "Mega/reference performance "
-                f"B={batch_size}: eager {mega_eager_us:.2f}/{reference_eager_us:.2f} us "
+                f"B={batch_size}, ctx={context_length}: "
+                f"eager {mega_eager_us:.2f}/{reference_eager_us:.2f} us "
                 f"({(mega_eager_us / reference_eager_us - 1.0) * 100.0:+.1f}%), "
                 f"graph {mega_graph_us:.2f}/{reference_graph_us:.2f} us "
                 f"({(mega_graph_us / reference_graph_us - 1.0) * 100.0:+.1f}%)"

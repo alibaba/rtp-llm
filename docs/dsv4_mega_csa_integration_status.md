@@ -228,15 +228,20 @@ Mega 与 reference 分别写独立 cache，连续执行 position `0..3` 到首�
 另在 position `4095` 预填充 1024 个随机有效 FP8 packed CSA/Indexer cache entry，从 1024 个
 候选中选择 Top-512：Mega/reference TopK overlap 为 `512/512`，最终输出 `calc_diff=7.413731e-09`。
 
-reference 使用 RTP 默认 TileLang mHC。在 context position `2047` 上使用预热后的 CUDA Event
-中位数计时；metadata 构造、首次 JIT 和每个 model step 只调用一次的 `runtime.begin_decode`
-不计入单层时间：
+reference 使用 RTP 默认 TileLang mHC，并使用预热后的 CUDA Event 中位数计时；metadata 构造、
+首次 JIT 和每个 model step 只调用一次的 `runtime.begin_decode` 不计入单层时间：
 
-| Batch | 原路径 eager | Mega eager | 变化 | 原路径 graph | Mega graph | 变化 |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | `2132.31 us` | `755.53 us` | `-64.6%` | `215.49 us` | `144.47 us` | `-33.0%` |
-| 8 | `2116.03 us` | `749.21 us` | `-64.6%` | `221.59 us` | `147.25 us` | `-33.5%` |
-| 16 | `2589.91 us` | `720.48 us` | `-72.2%` | `233.75 us` | `161.67 us` | `-30.8%` |
+| Batch | Context | 原路径 eager | Mega eager | 变化 | 原路径 graph | Mega graph | 变化 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 2048 | `2132.31 us` | `755.53 us` | `-64.6%` | `215.49 us` | `144.47 us` | `-33.0%` |
+| 8 | 2048 | `2116.03 us` | `749.21 us` | `-64.6%` | `221.59 us` | `147.25 us` | `-33.5%` |
+| 16 | 2048 | `2589.91 us` | `720.48 us` | `-72.2%` | `233.75 us` | `161.67 us` | `-30.8%` |
+| 128 | 65536 | `2045.56 us` | `731.21 us` | `-64.3%` | `341.29 us` | `258.92 us` | `-24.1%` |
+
+B128/64K 使用两套相同的随机有效 FP8 packed CSA/Indexer/SWA cache。最终 attention sublayer
+输出 `calc_diff=8.914554e-07`；每个请求从 16384 个 compressed 候选中选择 Top-512，overlap
+min/mean/max 为 `498/511.7/512`。测试门限为每个请求至少 97% overlap；差异集中在 TopK 截断
+边界，最终输出仍满足数值门限。
 
 性能模式通过 `--test_env=DSV4_MEGA_RUN_PERF=1` 显式开启，并对每个 batch 设置不高于原路径
 `1.05x` 的回归门。它覆盖真实 RTP 单层算子链，但 typed pool/block table 仍由测试按生产 geometry
