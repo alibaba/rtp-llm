@@ -3,12 +3,32 @@ import os
 
 import torch
 
-from ....mhc.norm_fn_kernel import _mhc_pre_norm_fn_fwd_mul, round_to_tf32
+from ....mhc.norm_fn_kernel import (
+    _mhc_pre_norm_fn_fwd_mul,
+    _mhc_pre_norm_fn_fwd_mul_splitk,
+    round_to_tf32,
+)
 from ....mhc.pre_big_fuse_kernel import _mhc_pre_big_fuse
 
 
 def _ceil_div(x: int, y: int) -> int:
     return (x + y - 1) // y
+
+
+def _largest_divisor_le(n: int, want: int) -> int:
+    """Largest divisor of ``n`` that is <= ``want`` (>= 1).
+
+    ``_compute_num_split`` returns ``n_sms // grid_size`` capped at
+    ``num_block_k // 4``, which is not in general a divisor of the TileLang
+    kernel's K block count -- at 78 SMs and m=512 it returns 9, and the split-K
+    kernel needs the K blocks to divide evenly. Rounding down to a divisor keeps
+    every block's slice the same length, which is what lets the ``pz`` loop stay
+    a compile-time constant.
+    """
+    d = min(max(int(want), 1), n)
+    while d > 1 and n % d:
+        d -= 1
+    return max(d, 1)
 
 
 @functools.cache
@@ -53,6 +73,33 @@ def _run_tilelang_single_gemm(
         gemm_out_sqrsum[:1].view(-1, 1),
     )
     return 1
+
+
+def _run_tilelang_splitk_gemm(
+    residual_flat: torch.Tensor,
+    fn: torch.Tensor,
+    gemm_out_mul: torch.Tensor,
+    gemm_out_sqrsum: torch.Tensor,
+    mhc_mult3: int,
+    mhc_hidden_size: int,
+    n_splits: int,
+) -> None:
+    """Split-K TileLang mHC pre GEMM: same math as the single-GEMM path.
+
+    Writes partials into all ``n_splits`` slots; ``_mhc_pre_big_fuse`` below
+    already sums the leading axis, so nothing else changes. Unlike
+    ``_run_tilelang_single_gemm`` this does not narrow the buffers to ``[:1]``.
+    """
+    fn = round_to_tf32(fn)
+    kernel = _mhc_pre_norm_fn_fwd_mul_splitk(
+        mhc_mult3, 1, mhc_hidden_size, n_splits
+    )
+    kernel(
+        residual_flat.view(-1, mhc_hidden_size),
+        fn,
+        gemm_out_mul.view(n_splits, -1, 1, mhc_mult3),
+        gemm_out_sqrsum.view(n_splits, -1, 1),
+    )
 
 
 def _run_deepgemm_splitk_gemm(
@@ -115,6 +162,14 @@ def mhc_pre_big_fuse(
         if backend in ("deepgemm", "tilelang_splitk")
         else 1
     )
+    if backend == "tilelang_splitk":
+        # The TileLang kernel slices K in units of its hidden_block (256), so
+        # the split count has to divide that block count evenly. At decode
+        # (num_tokens <= a couple of dozen) grid_size is 1 and this lands on the
+        # cap, 64 for a 16384-wide fn; at prefill grid_size already fills the
+        # GPU and _compute_num_split returns 1, which makes this kernel identical
+        # in shape to the single-GEMM one.
+        n_splits = _largest_divisor_le(mhc_hidden_size // 256, n_splits)
 
     post_mix = torch.empty(
         num_tokens, mhc_mult, dtype=torch.float32, device=residual.device
@@ -152,9 +207,14 @@ def mhc_pre_big_fuse(
         gemm_out_mul = gemm_out_mul[:1]
         gemm_out_sqrsum = gemm_out_sqrsum[:1]
     elif backend == "tilelang_splitk":
-        raise RuntimeError(
-            "DSV4_MHC_PRE_GEMM_BACKEND=tilelang_splitk is not wired in this "
-            "RTP TileKernels snapshot; use deepgemm or tilelang_single."
+        _run_tilelang_splitk_gemm(
+            residual_flat,
+            fn_flat,
+            gemm_out_mul,
+            gemm_out_sqrsum,
+            mhc_mult3,
+            mhc_hidden_size,
+            n_splits,
         )
     else:
         raise ValueError(
