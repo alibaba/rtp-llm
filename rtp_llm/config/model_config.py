@@ -147,6 +147,8 @@ class ModelConfig(CppModelConfig):
         "hc_eps",
         "swiglu_limit",
         "num_hash_layers",
+        # "fp4" (released ckpt) or "fp8" (routed experts rewritten for SM90).
+        "expert_dtype",
         "has_positional_encoding",
         "has_pre_decoder_layernorm",
         "has_post_decoder_layernorm",
