@@ -367,6 +367,17 @@ public class FlexlbConfig {
     private long flexlbInflightTtlMs = 300_000L;
 
     /**
+     * Ack-only release gate: when true (default), the frontend-facing fetch
+     * release completes only on the Prefill EnqueueBatch ACK semantic —
+     * a direct/late ACK or a Prefill WorkerStatus observation of the same
+     * dispatch generation, both of which happen strictly after the engine
+     * stored the deferred fetch slot. Decode WorkerStatus / DECODE_OWNED no
+     * longer triggers release. Set to false to restore the legacy
+     * Decode-owned shortcut release paths.
+     */
+    private boolean flexlbAckOnlyReleaseEnabled = true;
+
+    /**
      * Maximum threads in the batch dispatch executor pool.
      */
     private int flexlbBatchDispatchPoolSize = 64;
