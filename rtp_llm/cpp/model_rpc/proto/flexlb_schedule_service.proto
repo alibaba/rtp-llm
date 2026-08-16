@@ -57,6 +57,13 @@ message FlexlbScheduleRequestPB {
     // Auto-TPM QoS priority. Valid values: 1-100; 0 means unset and the
     // master normalizes it to the default priority (50).
     int32 priority = 14;
+    // Number of FlexLB-to-FlexLB forwarding hops already performed. Clients
+    // leave this at zero. A follower sets it to one before forwarding to the
+    // elected Master; a non-Master receiving a value >= 1 must never forward
+    // the request again. Keeping this on the protobuf (rather than only in
+    // metadata) preserves the guard through a rolling upgrade because older
+    // protobuf runtimes retain unknown fields when they relay the request.
+    uint32 forward_hop = 15;
 }
 
 message FlexlbServerStatusPB {
@@ -103,6 +110,9 @@ message FlexlbCancelResponsePB {
 message GetRequestStateRequestPB {
     int64 request_id = 1;
     int64 batch_id = 2;
+    // Same single-hop guard as Schedule. Clients leave this at zero and a
+    // FlexLB follower sets it to one before forwarding.
+    uint32 forward_hop = 3;
 }
 
 message GetRequestStateResponsePB {

@@ -36,6 +36,7 @@ public class LBStatusConsistencyService implements MasterElectService {
     private LBConsistencyConfig lbConsistencyConfig;
     private String serverPort;
     private String roleId;
+    private String localHostIp;
 
     public LBStatusConsistencyService(ZookeeperMasterElectService zookeeperMasterElectService,
                                       Environment environment) {
@@ -46,9 +47,8 @@ public class LBStatusConsistencyService implements MasterElectService {
 
     public void init() {
         log.info("start init LBStatusConsistencyService.");
-        String hostIp;
         try {
-            hostIp = InetAddress.getLocalHost().getHostAddress();
+            localHostIp = InetAddress.getLocalHost().getHostAddress();
         } catch (UnknownHostException e) {
             throw new RuntimeException(e);
         }
@@ -58,7 +58,7 @@ public class LBStatusConsistencyService implements MasterElectService {
         if (serverPort == null) {
             serverPort = System.getProperty("server.port", "7001");
         }
-        log.info("hostIp:{}, serverPort:{}.", hostIp, serverPort);
+        log.info("hostIp:{}, serverPort:{}.", localHostIp, serverPort);
         roleId = System.getenv("HIPPO_ROLE");
         if (StringUtils.isBlank(roleId)) {
             throw new RuntimeException("HIPPO_ROLE env is blank");
@@ -135,6 +135,10 @@ public class LBStatusConsistencyService implements MasterElectService {
             return null;
         }
         return masterHostIp + ":" + serverPort;
+    }
+
+    public String getLocalHostIp() {
+        return localHostIp;
     }
 
     /**

@@ -145,7 +145,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 try {
                     if (responded.compareAndSet(false, true)) {
                         if (ex != null) {
-                            Logger.debug("FlexlbService.schedule async error, request_id={}", request.getRequestId(), ex);
+                            Logger.warn("FlexlbService.schedule async error, request_id={}",
+                                    request.getRequestId(), ex);
                             completeSchedule(requestContext, buildErrorResponse(ex), responseObserver,
                                     routeOrigin);
                         } else {
@@ -153,7 +154,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                         }
                     }
                 } catch (Exception e) {
-                    Logger.debug("FlexlbService.schedule callback error, request_id={}", request.getRequestId(), e);
+                    Logger.warn("FlexlbService.schedule callback error, request_id={}",
+                            request.getRequestId(), e);
                 } finally {
                     token.close();
                 }
@@ -166,8 +168,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                     completeSchedule(ctx, buildErrorResponse(e), responseObserver, errorOrigin);
                 }
             } catch (Exception inner) {
-                Logger.debug("FlexlbService.schedule error-response send failed, request_id={}",
-                             request.getRequestId(), inner);
+                Logger.warn("FlexlbService.schedule error-response send failed, request_id={}",
+                        request.getRequestId(), inner);
             } finally {
                 token.close();
             }
