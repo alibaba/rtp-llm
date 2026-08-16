@@ -1667,7 +1667,10 @@ def warmup_mhc_prenorm_gemm_jit(
 
     backend = _mhc_prenorm_backend()
     deepgemm_enabled = backend == "deepgemm"
-    num_sms = _get_deep_gemm_num_sms(device)
+    # Same function the runtime calls, not this module's own helper: the split
+    # count is a function of the SM count, and reading it from two places let the
+    # warmup compile a count the runtime never launched.
+    num_sms = mhc_prenorm_backend.device_num_sms(device)
     shape_keys = tuple(sorted(shapes.keys()))
     # Enumerate for every backend, not just DeepGEMM. The TileLang branch used to
     # warm one hardcoded ``(1, 1)`` spec, which compiles only whatever split count

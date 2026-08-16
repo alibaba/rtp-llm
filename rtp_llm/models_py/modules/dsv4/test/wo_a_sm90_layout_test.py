@@ -158,8 +158,34 @@ class UnpackUe8m0Int32ScaleTest(unittest.TestCase):
         """Production passes ``[M, G, K/512]``; only the last dim is unpacked."""
         rows = [[127, 128, 126, 120], [121, 122, 123, 124], [125, 126, 127, 128]]
         packed = _pack(rows).reshape(3, 1, 1)
-        got = unpack_ue8m0_int32_scale(packed.expand(3, 1, 1), 4)
+        got = unpack_ue8m0_int32_scale(packed, 4)
         self.assertEqual(got.shape, (3, 1, 4))
+        want = torch.tensor(
+            [[[2.0 ** (b - _UE8M0_BIAS) for b in row]] for row in rows],
+            dtype=torch.float32,
+        )
+        self.assertTrue(torch.equal(got, want), f"{got} != {want}")
+
+    def test_non_contiguous_input(self):
+        """The reason the implementation shifts instead of ``view(torch.uint8)``.
+
+        Production hands this an MN-major scale whose last dim is not the fastest
+        axis, and a bit-view would need contiguity. An earlier version of this case
+        used ``.expand(3, 1, 1)`` on an already-(3,1,1) tensor -- a no-op that left
+        the property it was named for untested.
+        """
+        rows = [[127, 128, 126, 120], [121, 122, 123, 124], [125, 126, 127, 128]]
+        # [M, words] -> transpose to [words, M]: last dim stride is now M, not 1.
+        packed = _pack(rows)  # [3, 1]
+        wide = torch.cat([packed, packed + 1], dim=1)  # [3, 2], contiguous
+        view = wide.transpose(0, 1)  # [2, 3], stride (1, 2)
+        self.assertFalse(view.is_contiguous(), "test setup: need a strided view")
+
+        got = unpack_ue8m0_int32_scale(view, 12, bytes_per_word=4)
+        self.assertEqual(got.shape, (2, 12))
+        # Same answer as unpacking the contiguous copy, which is the claim.
+        want = unpack_ue8m0_int32_scale(view.contiguous(), 12, bytes_per_word=4)
+        self.assertTrue(torch.equal(got, want), f"{got} != {want}")
 
 
 if __name__ == "__main__":

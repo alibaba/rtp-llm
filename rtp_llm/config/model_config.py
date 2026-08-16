@@ -512,6 +512,11 @@ class ModelConfig(CppModelConfig):
         self.dspark_markov_rank: Optional[int] = None
         # Target-side decoder layer outputs exported to the DSpARK draft.
         self.capture_aux_hidden_layer_ids: Optional[list[int]] = None
+        # Routed-expert storage as declared by the checkpoint: "fp4", "fp8", or
+        # None when the key is absent. None means fp4; that mapping lives in
+        # models/deepseek_v4.py:parse_expert_dtype rather than here, because a
+        # default imported from rtp_llm/models would make config depend on models.
+        self.expert_dtype: Optional[str] = None
         self.normalize_lm_head_weight: bool = False
         self.enable_fp32_lm_head: bool = True
         self.has_lm_head_bias: bool = False

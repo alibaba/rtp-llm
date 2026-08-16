@@ -31,32 +31,16 @@ what the except clause below is for.
 
 from __future__ import annotations
 
-import logging
 from typing import Any, Optional
 
 import torch
 
-_FLASH_MLA_AVAILABLE = False
-try:
-    from flash_mla import (
-        flash_mla_with_kvcache,  # type: ignore[import-not-found]
-    )
-    from flash_mla import get_mla_metadata  # type: ignore[import-not-found]
+from rtp_llm.models_py.modules.dsv4._flash_mla_probe import flash_mla_available
 
-    _FLASH_MLA_AVAILABLE = True
-# Any import failure means unavailable. RuntimeError is in the list
-# because that is what a torch C++ extension raises on an ABI mismatch
-# or a duplicate op registration -- the exact "incompatible wheel"
-# case this gate exists for, and one that used to escape the tuple and
-# take the whole attention module's import down with it.
-except (
-    ImportError,
-    AttributeError,
-    OSError,
-    ValueError,
-    RuntimeError,
-) as e:
-    logging.warning("[dsv4-fp8] flash_mla wheel unavailable (%s)", e)
+# Availability comes from the shared probe: this file and its sibling each carried a
+# copy of the same two imports, the same except tuple and the same reasoning, so
+# widening that tuple had to be done twice.
+_FLASH_MLA_AVAILABLE = flash_mla_available()
 
 
 class SparseAttnV4DecodeFp8Op:

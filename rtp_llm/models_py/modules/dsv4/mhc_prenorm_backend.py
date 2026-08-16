@@ -107,6 +107,34 @@ def resolve_n_splits(
     return n_splits
 
 
+def device_num_sms(device=None) -> int:
+    """The SM count ``resolve_n_splits`` must be given.
+
+    DeepGEMM's own budget first, the device's physical count as the fallback. The
+    split heuristic is DeepGEMM's, and its budget is what ``set_num_sms`` /
+    ``configure_deep_gemm_num_sms`` move, so reading the physical count while the
+    warmup read the budget let the two disagree and compile a split count the
+    runtime then did not launch.
+
+    ``device=None`` means the current device, not device 0: under TP every rank but
+    rank 0 was reading another card's properties.
+    """
+    try:
+        import deep_gemm
+
+        num_sms = int(deep_gemm.get_num_sms())
+        if num_sms > 0:
+            return num_sms
+    except Exception:
+        pass
+
+    import torch
+
+    if device is None:
+        device = torch.cuda.current_device()
+    return int(torch.cuda.get_device_properties(device).multi_processor_count)
+
+
 @functools.cache
 def has_deepgemm_prenorm() -> bool:
     """Whether the installed DeepGEMM exports the mHC pre-norm GEMM.

@@ -132,9 +132,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         else:
             self._compress_ratios = self._compress_ratios[: self._num_layers]
         self._num_hash_layers = int(self.model_config.num_hash_layers)
-        self._expert_dtype = parse_expert_dtype(
-            getattr(self.model_config, "expert_dtype", None)
-        )
+        self._expert_dtype = parse_expert_dtype(self.model_config.expert_dtype)
 
     def _compress_ratio(self, layer_id: int) -> int:
         if layer_id < 0 or layer_id >= len(self._compress_ratios):
@@ -378,7 +376,9 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         # The scale stays UE8M0 in both cases; only its shape differs, and that
         # comes from the safetensors header, not from here.
         weight_dtype = (
-            torch.float8_e4m3fn if self._expert_dtype == "fp8" else torch.int8
+            torch.float8_e4m3fn
+            if self._expert_dtype == EXPERT_DTYPE_FP8
+            else torch.int8
         )
         out: List[WeightModule] = []
         for sub_w_name, sub_s_name, sub in [

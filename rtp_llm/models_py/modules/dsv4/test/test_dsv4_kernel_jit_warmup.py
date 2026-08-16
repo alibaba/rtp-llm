@@ -1358,6 +1358,43 @@ class MhcPrenormBackendResolutionTest(unittest.TestCase):
         os.environ[mhc_prenorm_backend.BACKEND_ENV] = "tilelang_splitq"
         self.assertEqual(_mhc_prenorm_backend(), "tilelang_splitq")
 
+    def test_num_sms_has_one_source(self):
+        """The warmup must read the SM count from the shared resolver.
+
+        The split count is a function of it, so two sources meant the warmup could
+        compile a count the runtime never launches -- the same class of drift as the
+        backend name. Patching the shared function has to move what the warmup sees.
+        """
+        original = mhc_prenorm_backend.device_num_sms
+        mhc_prenorm_backend.device_num_sms = lambda device=None: 137
+        self.addCleanup(
+            setattr, mhc_prenorm_backend, "device_num_sms", original
+        )
+        seen = {}
+
+        def spy(**kwargs):
+            seen.update(kwargs)
+            return 1
+
+        with mock.patch.object(
+            warmup_module, "model_warm_up_enabled", return_value=True
+        ), mock.patch.object(
+            warmup_module, "_is_cuda_device", return_value=True
+        ), mock.patch.object(
+            warmup_module, "_assert_not_capturing"
+        ), mock.patch.object(
+            mhc_prenorm_backend, "resolve_n_splits", side_effect=spy
+        ), mock.patch.object(
+            warmup_module, "_run_deepgemm_warmup_launches_serialized"
+        ):
+            warmup_module._generate_mhc_prenorm_warmup_specs.cache_clear()
+            warmup_module.warmup_mhc_prenorm_gemm_jit(
+                {(24, 16384): {"name": "probe"}},
+                max_m=1,
+                device=torch.device("cpu"),
+            )
+        self.assertEqual(seen.get("num_sms"), 137)
+
     def test_probe_never_raises_without_deep_gemm(self):
         """The real probe answers False on a build/box without the symbol."""
         mhc_prenorm_backend.has_deepgemm_prenorm.cache_clear()
@@ -1485,6 +1522,77 @@ class GroupedFp8AndWoAWarmupCollectorTest(unittest.TestCase):
         attn.register_buffer("_wo_a_stk_s", torch.empty((9, 256, 4)))
         root.add_module("attn", attn)
         self.assertEqual(_collect_dsv4_wo_a_grouped_shapes(root), {})
+
+    def test_grouped_fp8_plan_reaches_the_launcher(self):
+        """The (layout, m) sequence actually launched, not just the computed plan."""
+        root = nn.Module()
+        root.add_module("layer0", self._grouped_fp8_module(ep_size=4))
+        shapes = _collect_dsv4_grouped_fp8_moe_shapes(root)
+        seen = []
+
+        def record(_label, desc, _fn, device=None):  # noqa: ARG001
+            seen.append(desc)
+
+        with mock.patch.object(
+            warmup_module, "model_warm_up_enabled", return_value=True
+        ), mock.patch.object(
+            warmup_module, "_is_cuda_device", return_value=True
+        ), mock.patch.object(
+            warmup_module, "_assert_not_capturing"
+        ), mock.patch.object(
+            warmup_module, "_sync_cuda"
+        ), mock.patch.object(
+            warmup_module, "_release_cuda_cache"
+        ), mock.patch.object(
+            warmup_module,
+            "_run_deepgemm_warmup_launches_serialized",
+            side_effect=lambda _label, fn: fn(),
+        ), mock.patch.object(
+            warmup_module,
+            "_run_deepgemm_warmup_launch_with_retry",
+            side_effect=record,
+        ):
+            warmup_grouped_fp8_moe_jit(
+                shapes, tokens_per_rank=8, device=torch.device("cpu")
+            )
+
+        # conc 8 over ep 4: one contiguous at the 128 alignment, then the two
+        # masked expected_m values (t_rows 64 and max_m 128).
+        self.assertEqual(len(seen), 3, seen)
+        self.assertIn("contiguous m=128", seen[0])
+        self.assertIn("masked m=64", seen[1])
+        self.assertIn("masked m=128", seen[2])
+
+    def test_grouped_fp8_plan_is_contiguous_only_for_prefill_shapes(self):
+        """Past the masked cap only the contiguous launch remains."""
+        root = nn.Module()
+        root.add_module("layer0", self._grouped_fp8_module(ep_size=4))
+        shapes = _collect_dsv4_grouped_fp8_moe_shapes(root)
+        seen = []
+        with mock.patch.object(
+            warmup_module, "model_warm_up_enabled", return_value=True
+        ), mock.patch.object(
+            warmup_module, "_is_cuda_device", return_value=True
+        ), mock.patch.object(
+            warmup_module, "_assert_not_capturing"
+        ), mock.patch.object(
+            warmup_module, "_sync_cuda"
+        ), mock.patch.object(
+            warmup_module, "_release_cuda_cache"
+        ), mock.patch.object(
+            warmup_module,
+            "_run_deepgemm_warmup_launches_serialized",
+            side_effect=lambda _label, fn: fn(),
+        ), mock.patch.object(
+            warmup_module,
+            "_run_deepgemm_warmup_launch_with_retry",
+            side_effect=lambda _l, desc, _f, device=None: seen.append(desc),
+        ):
+            warmup_grouped_fp8_moe_jit(
+                shapes, tokens_per_rank=16384, device=torch.device("cpu")
+            )
+        self.assertEqual(len(seen), 1, seen)
+        self.assertIn("contiguous", seen[0])
 
     def test_warmups_are_noops_when_model_warmup_is_disabled(self):
         with mock.patch.object(

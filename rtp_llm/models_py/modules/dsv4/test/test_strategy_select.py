@@ -518,6 +518,23 @@ class GroupedFP8ShouldMaskTest(unittest.TestCase):
         "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp8."
         "torch.cuda.is_current_stream_capturing"
     )
+    WARMUP_FORWARD = "RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD"
+
+    def setUp(self):
+        # Three inputs decide this predicate and only one is named per case, so the
+        # other two are cleared here. In particular a lane that exports
+        # RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD would make every expected-False case
+        # return True.
+        for name in ("DSV4_MOE_MASKED", self.WARMUP_FORWARD):
+            saved = os.environ.get(name)
+            os.environ.pop(name, None)
+            self.addCleanup(
+                lambda n=name, v=saved: (
+                    os.environ.pop(n, None)
+                    if v is None
+                    else os.environ.__setitem__(n, v)
+                )
+            )
 
     def test_env_enabled_and_not_capturing(self):
         with _env(DSV4_MOE_MASKED="1"), mock.patch(self.CAPTURING, return_value=False):
@@ -533,6 +550,26 @@ class GroupedFP8ShouldMaskTest(unittest.TestCase):
     def test_capture_forces_the_masked_layout(self):
         with _env(DSV4_MOE_MASKED="0"), mock.patch(self.CAPTURING, return_value=True):
             self.assertTrue(GroupedFP8Strategy._should_mask(8))
+
+    def test_pre_capture_warmup_forward_takes_the_masked_layout(self):
+        """The forward ``initCapture`` runs before ``captureDecode()``.
+
+        DeepGEMM cannot JIT inside a capture, so the masked kernel has to be
+        compiled by that eager forward. Keyed only on
+        ``is_current_stream_capturing()`` this held solely when
+        ``DSV4_MOE_MASKED=1`` happened to be set, which is a guarantee resting on
+        deployment configuration.
+        """
+        with _env(DSV4_MOE_MASKED="0", RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD="1"), \
+                mock.patch(self.CAPTURING, return_value=False):
+            self.assertTrue(GroupedFP8Strategy._should_mask(8))
+            # Still refused past the cap, and without raising: not capturing yet.
+            self.assertFalse(GroupedFP8Strategy._should_mask(_MASKED_MAX_N + 1))
+
+    def test_pre_capture_flag_off_leaves_the_contiguous_path(self):
+        with _env(DSV4_MOE_MASKED="0", RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD="0"), \
+                mock.patch(self.CAPTURING, return_value=False):
+            self.assertFalse(GroupedFP8Strategy._should_mask(8))
 
     def test_capture_past_the_cap_raises(self):
         """Capture cannot express the contiguous path, so this must not fall back."""

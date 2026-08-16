@@ -416,7 +416,14 @@ class FusedSharedExpertFastPath:
             (x_fp8, self._gemm_activation_scale(x_scale, x_fp8.size(1))),
             w13,
             gate_up,
-            disable_ue8m0_cast=False,
+            # None, not False: the wrapper derives this from
+            # is_deep_gemm_e8m0_used(), so the scale's format and the flag come
+            # from one place. On SM100 that derivation gives False, exactly what
+            # was hardcoded; on SM90 it gives True, which matches the fp32 scale
+            # _gemm_activation_scale hands over. maybe_pack_ue8m0_scale is a no-op
+            # below SM100 either way, so on SM90 this only changes the value
+            # forwarded to DeepGEMM.
+            disable_ue8m0_cast=None,
         )
         silu_mul_fp8_quant_packed(
             gate_up,
@@ -429,7 +436,14 @@ class FusedSharedExpertFastPath:
             (hidden_fp8, self._gemm_activation_scale(hidden_scale, hidden_fp8.size(1))),
             w2,
             out,
-            disable_ue8m0_cast=False,
+            # None, not False: the wrapper derives this from
+            # is_deep_gemm_e8m0_used(), so the scale's format and the flag come
+            # from one place. On SM100 that derivation gives False, exactly what
+            # was hardcoded; on SM90 it gives True, which matches the fp32 scale
+            # _gemm_activation_scale hands over. maybe_pack_ue8m0_scale is a no-op
+            # below SM100 either way, so on SM90 this only changes the value
+            # forwarded to DeepGEMM.
+            disable_ue8m0_cast=None,
         )
         return out
 

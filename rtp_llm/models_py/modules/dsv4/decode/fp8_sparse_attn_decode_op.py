@@ -29,35 +29,12 @@ from rtp_llm.models_py.modules.dsv4.decode.fp8_kv_quant_decode_op import (
     dequantize_v4_kv_slot,
 )
 
-_FLASH_MLA_AVAILABLE = False
-try:
-    # Import success, not torch.version.cuda, is the availability test: the
-    # CUDA >= 12.9 requirement is on how the wheel was BUILT, and the H20
-    # DSV4 env loads a vendored flash_mla under torch 2.8.0+cu128 without
-    # trouble. See the sibling fp8/decode/fp8_sparse_attn_decode_op.py.
-    from flash_mla import (
-        flash_mla_with_kvcache,  # type: ignore[import-not-found]
-    )
-    from flash_mla import get_mla_metadata  # type: ignore[import-not-found]
+from rtp_llm.models_py.modules.dsv4._flash_mla_probe import flash_mla_available
 
-    _FLASH_MLA_AVAILABLE = True
-# Any import failure means unavailable. RuntimeError is in the list
-# because that is what a torch C++ extension raises on an ABI mismatch
-# or a duplicate op registration -- the exact "incompatible wheel"
-# case this gate exists for, and one that used to escape the tuple and
-# take the whole attention module's import down with it.
-except (
-    ImportError,
-    AttributeError,
-    OSError,
-    ValueError,
-    RuntimeError,
-) as e:
-    logging.warning(
-        "[dsv4-fp8] flash_mla not available (%s); FP8 sparse attn fast path "
-        "will fail unless reference is called explicitly",
-        e,
-    )
+# Availability comes from the shared probe: this file and its sibling each carried a
+# copy of the same two imports, the same except tuple and the same reasoning, so
+# widening that tuple had to be done twice.
+_FLASH_MLA_AVAILABLE = flash_mla_available()
 
 
 def _flash_mla_unavailable_reason(q: torch.Tensor, kv_cache: torch.Tensor) -> str:

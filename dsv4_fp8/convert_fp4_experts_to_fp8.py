@@ -120,10 +120,15 @@ def is_expert_scale(name, spec):
     )
 
 
-def convert_expert(weight_bytes, scale_bytes, n, k_packed, device):
+def convert_expert(weight_bytes, scale_bytes, n, k_packed, device, verify=True):
     """FP4 (I8 nibbles + group-32 UE8M0) -> FP8 (e4m3 + 128x128 UE8M0).
 
-    Returns (weight_e4m3_bytes, scale_ue8m0_bytes, exact_fraction, max_rel_err).
+    Returns ``(weight_e4m3_bytes, scale_ue8m0_bytes, exact_fraction, max_rel_err,
+    worst_block_span)``. The last three are ``None`` when ``verify`` is False.
+
+    ``verify`` is a parameter rather than a module global: as a global it was
+    assigned only inside ``main()``, so importing this module and calling this
+    function -- which is what its test does -- raised ``NameError``.
     """
     k = k_packed * 2
     if n % FP8_BLOCK or k % FP8_BLOCK:
@@ -158,7 +163,7 @@ def convert_expert(weight_bytes, scale_bytes, n, k_packed, device):
     quant = scaled.to(torch.float8_e4m3fn)
 
     exact_fraction, max_rel_err, worst_span = None, None, None
-    if VERIFY:
+    if verify:
         recon = quant.float() * torch.exp2(block_exp.float()).repeat_interleave(
             FP8_BLOCK, 0
         ).repeat_interleave(FP8_BLOCK, 1)
@@ -199,7 +204,7 @@ def plan_file(header):
     return plan
 
 
-def convert_file(src, dst, device, stats):
+def convert_file(src, dst, device, stats, verify=True):
     header, data_start = read_header(src)
     metadata = header.get("__metadata__")
     plan = plan_file(header)
@@ -247,16 +252,34 @@ def convert_file(src, dst, device, stats):
             if stem not in converted:
                 w_spec = weight_of[stem]
                 n, k_packed = w_spec["shape"]
-                weight_out, scale_out, exact, rel = convert_expert(
-                    raw(w_spec).copy(), raw(scale_of[stem]).copy(), n, k_packed, device
+                weight_out, scale_out, exact, rel, span = convert_expert(
+                    raw(w_spec).copy(),
+                    raw(scale_of[stem]).copy(),
+                    n,
+                    k_packed,
+                    device,
+                    verify=verify,
                 )
                 converted[stem] = {"weight": weight_out, "scale": scale_out}
                 stats["tensors"] += 1
                 if exact is not None:
+                    label = f"{os.path.basename(src)}:{stem}"
                     stats["exact_min"] = min(stats["exact_min"], exact)
                     stats["exact_sum"] += exact
                     stats["rel_max"] = max(stats["rel_max"], rel)
                     stats["verified"] += 1
+                    if span is not None and span > stats["span_max"]:
+                        stats["span_max"] = span
+                        stats["span_max_tensor"] = label
+                    if exact < 1.0:
+                        stats["inexact"].append(
+                            {
+                                "tensor": label,
+                                "exact_fraction": exact,
+                                "max_rel_err": rel,
+                                "block_span": span,
+                            }
+                        )
             return converted[stem]
 
         for name, spec, kind, _out_dtype, out_shape in plan:
@@ -286,9 +309,6 @@ def main():
     ap.add_argument("--limit", type=int, default=0,
                     help="convert only the first N shards, for a quick check")
     args = ap.parse_args()
-
-    global VERIFY
-    VERIFY = args.verify
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(args.dst, exist_ok=True)
@@ -346,8 +366,13 @@ def main():
     t0 = time.time()
     for i, shard in enumerate(shards, 1):
         t1 = time.time()
-        convert_file(os.path.join(args.src, shard), os.path.join(args.dst, shard),
-                     device, stats)
+        convert_file(
+            os.path.join(args.src, shard),
+            os.path.join(args.dst, shard),
+            device,
+            stats,
+            verify=args.verify,
+        )
         out_gb = os.path.getsize(os.path.join(args.dst, shard)) / 2**30
         print(f"[{i}/{len(shards)}] {shard}  {out_gb:.2f} GiB  "
               f"{time.time() - t1:.1f}s  (total {(time.time() - t0) / 60:.1f}m)",
@@ -421,5 +446,4 @@ def main():
 
 
 if __name__ == "__main__":
-    VERIFY = False
     sys.exit(main())
