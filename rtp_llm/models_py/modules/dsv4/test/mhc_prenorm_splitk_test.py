@@ -67,7 +67,11 @@ def _kernels():
     ops = importlib.import_module(
         "rtp_llm.models_py.3rdparty.tile_kernels.modeling.mhc.ops.pre_big_fuse"
     )
-    return nfk, ops
+    # The divisor clamp lives in the shared policy module, not in the vendored
+    # wrapper: the wrapper's pass-through shim had this test as its only consumer.
+    from rtp_llm.models_py.modules.dsv4 import mhc_prenorm_backend
+
+    return nfk, ops, mhc_prenorm_backend
 
 
 _CUDA = torch.cuda.is_available()
@@ -93,7 +97,7 @@ class MhcPrenormSplitKTest(unittest.TestCase):
                 "CUDA is present but the mHC kernels could not be imported, "
                 f"which is a build problem: {_IMPORT_ERROR!r}"
             )
-        cls.nfk, cls.ops = _kernels()
+        cls.nfk, cls.ops, cls.policy = _kernels()
         cls.device = "cuda:0"
 
     def _fn(self, mult3: int, h: int, seed: int) -> torch.Tensor:
@@ -133,7 +137,9 @@ class MhcPrenormSplitKTest(unittest.TestCase):
 
     def test_matches_single_block_and_is_no_less_accurate(self):
         fn = self._fn(_MULT3, _H, seed=20260815)
-        for tokens in (2, 8, 16):
+        # 33 and 96 cross the kernel's 32-row token block; 33 also leaves the
+        # last block partial, which is the store mask's path.
+        for tokens in (2, 8, 16, 32, 33, 96):
             for n_splits in (4, 16, 64):
                 with self.subTest(tokens=tokens, n_splits=n_splits):
                     x = self._inputs(
@@ -193,9 +199,9 @@ class MhcPrenormSplitKTest(unittest.TestCase):
         """``largest_divisor_le`` is what keeps the caller from violating this."""
         with self.assertRaisesRegex(AssertionError, r"must divide the 64 K blocks"):
             self.nfk._mhc_pre_norm_fn_fwd_mul_splitk(_MULT3, 1, _H, 9)
-        self.assertEqual(self.ops._largest_divisor_le(_K_BLOCKS, 9), 8)
-        self.assertEqual(self.ops._largest_divisor_le(_K_BLOCKS, 78), _K_BLOCKS)
-        self.assertEqual(self.ops._largest_divisor_le(_K_BLOCKS, 1), 1)
+        self.assertEqual(self.policy.largest_divisor_le(_K_BLOCKS, 9), 8)
+        self.assertEqual(self.policy.largest_divisor_le(_K_BLOCKS, 78), _K_BLOCKS)
+        self.assertEqual(self.policy.largest_divisor_le(_K_BLOCKS, 1), 1)
 
     def test_mhc_mult3_bound_is_checked(self):
         """The 32-wide store fragment is the limit, and 0 is not a shape."""

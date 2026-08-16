@@ -1,6 +1,4 @@
 import functools
-import logging
-import os
 
 import torch
 
@@ -10,13 +8,6 @@ from ....mhc.norm_fn_kernel import (
     round_to_tf32,
 )
 from ....mhc.pre_big_fuse_kernel import _mhc_pre_big_fuse
-
-
-_logger = logging.getLogger(__name__)
-
-
-def _ceil_div(x: int, y: int) -> int:
-    return (x + y - 1) // y
 
 
 @functools.cache
@@ -32,28 +23,34 @@ def _policy():
     return mhc_prenorm_backend
 
 
-def _largest_divisor_le(n: int, want: int) -> int:
-    """See :func:`mhc_prenorm_backend.largest_divisor_le`."""
-    return _policy().largest_divisor_le(n, want)
+def resolve_n_splits(
+    *, mhc_hidden_size: int, num_tokens: int, num_sms: int, backend: str
+) -> int:
+    """See :func:`mhc_prenorm_backend.resolve_n_splits`."""
+    return _policy().resolve_n_splits(
+        mhc_hidden_size=mhc_hidden_size,
+        num_tokens=num_tokens,
+        num_sms=num_sms,
+        backend=backend,
+    )
+
+
+@functools.cache
+def resolve_backend() -> str:
+    """Per-process cached :func:`mhc_prenorm_backend.resolve_backend`.
+
+    Cached here rather than in the shared module so the resolver itself stays
+    env-live for the tests that drive it: this is the hot path, called once per mHC
+    layer per step, and the value it reads cannot change within a process. Call
+    ``resolve_backend.cache_clear()`` if an ablation needs to switch mid-run.
+    """
+    return _policy().resolve_backend()
 
 
 @functools.cache
 def device_num_sms() -> int:
-    return torch.cuda.get_device_properties(0).multi_processor_count
-
-
-def resolve_n_splits(**kwargs) -> int:
-    """See :func:`mhc_prenorm_backend.resolve_n_splits`."""
-    return _policy().resolve_n_splits(**kwargs)
-
-
-def resolve_backend() -> str:
-    """See :func:`mhc_prenorm_backend.resolve_backend`."""
-    return _policy().resolve_backend()
-
-
-# Historical name, kept because the ablation scripts and tests reference it.
-_requested_backend = resolve_backend
+    """See :func:`mhc_prenorm_backend.device_num_sms`."""
+    return _policy().device_num_sms()
 
 
 def _run_tilelang_single_gemm(

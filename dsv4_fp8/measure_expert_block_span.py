@@ -55,16 +55,24 @@ def load_bytes(path, spec, data_start):
 
 
 def e4m3_to_float32(raw):
-    """Decode ``float8_e4m3fn`` bytes; numpy has no such dtype."""
+    """Decode ``float8_e4m3fn`` bytes; numpy has no such dtype.
+
+    ``fn`` means finite-and-NaN: there are no infinities, and the single NaN
+    encoding is exponent 0x0F with mantissa 0x07. Decoding that as a number gives
+    1.875 * 2^8 = 480, which would fold into a block's max and let a checkpoint
+    carrying NaN report a comfortable span.
+    """
     bits = raw.astype(np.uint32)
     sign = np.where(bits & 0x80, -1.0, 1.0).astype(np.float32)
     exponent = ((bits >> 3) & 0x0F).astype(np.int32)
-    mantissa = (bits & 0x07).astype(np.float32)
+    mantissa_bits = (bits & 0x07).astype(np.int32)
+    mantissa = mantissa_bits.astype(np.float32)
     value = np.where(
         exponent == 0,
         mantissa / 8.0 * E4M3_SMALLEST_NORMAL,
         (1.0 + mantissa / 8.0) * np.exp2((exponent - 7).astype(np.float32)),
     )
+    value = np.where((exponent == 0x0F) & (mantissa_bits == 0x07), np.nan, value)
     return (sign * value).astype(np.float32)
 
 
@@ -81,7 +89,8 @@ def main():
         raise SystemExit(f"no safetensors shards under {args.checkpoint}")
 
     worst_span, worst_name = 0.0, ""
-    blocks_seen = nonzero_total = subnormal_total = 0
+    blocks_seen = nonzero_total = subnormal_total = nan_total = 0
+    tensors_seen = 0
     for path in shards[: max(args.shards, 1)]:
         header, data_start = read_header(path)
         names = [
@@ -98,9 +107,12 @@ def main():
             rows, cols = spec["shape"]
             if rows % FP8_BLOCK or cols % FP8_BLOCK:
                 continue
-            magnitude = np.abs(
-                e4m3_to_float32(load_bytes(path, spec, data_start)).reshape(rows, cols)
+            decoded = e4m3_to_float32(load_bytes(path, spec, data_start)).reshape(
+                rows, cols
             )
+            nan_total += int(np.isnan(decoded).sum())
+            magnitude = np.abs(decoded)
+            tensors_seen += 1
             blocks = magnitude.reshape(
                 rows // FP8_BLOCK, FP8_BLOCK, cols // FP8_BLOCK, FP8_BLOCK
             )
@@ -123,20 +135,32 @@ def main():
             "checkpoint?"
         )
 
+    total_shards = len(shards)
+    used_shards = min(max(args.shards, 1), total_shards)
+    print(
+        f"sampled                : {used_shards}/{total_shards} shards, "
+        f"{tensors_seen} routed-expert tensors "
+        f"(--shards/--tensors raise this)"
+    )
     print(f"blocks measured        : {blocks_seen}")
     print(f"nonzero weights        : {nonzero_total}")
+    print(f"NaN weights            : {nan_total}")
     print(
         f"largest in-block span  : {worst_span:.4g} = "
         f"2^{np.log2(worst_span):.2f}  ({worst_name})"
     )
     print(f"exactness bound        : {EXACT_SPAN_BOUND:.0f} = 2^14")
     print(f"subnormal nonzeros     : {subnormal_total}  (0 => no mantissa loss)")
+    if nan_total:
+        print(f"\nVERDICT: {nan_total} NaN weights -- this is not a valid checkpoint.")
+        return 1
     if worst_span > EXACT_SPAN_BOUND or subnormal_total:
         print("\nVERDICT: at least one block exceeds the exact range.")
         return 1
     print(
-        f"\nVERDICT: clear by 2^{np.log2(EXACT_SPAN_BOUND / worst_span):.2f}; "
-        "every value kept its mantissa."
+        f"\nVERDICT (over the sample above): clear by "
+        f"2^{np.log2(EXACT_SPAN_BOUND / worst_span):.2f}; every value kept its "
+        "mantissa."
     )
     return 0
 

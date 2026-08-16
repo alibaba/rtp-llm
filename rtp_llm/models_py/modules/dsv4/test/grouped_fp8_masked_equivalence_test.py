@@ -128,6 +128,22 @@ def _make_weights(device: str, seed: int = 20260814) -> dict:
     }
 
 
+@contextmanager
+def _contiguous_side_pinned():
+    """Neutralise everything that would route ``_local_experts`` to the masked path.
+
+    ``DSV4_MOE_FUSED_SWIGLU=0`` removes the one-ULP kernel so the layout is the only
+    variable; the other two are what decide ``_should_mask``. Without them a lane
+    that happens to export either variable compares the masked path with itself.
+    """
+    with _env(
+        DSV4_MOE_FUSED_SWIGLU="0",
+        DSV4_MOE_MASKED="0",
+        RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD=None,
+    ):
+        yield
+
+
 def _inputs(n_tokens: int, device: str, seed: int):
     g = torch.Generator(device="cpu").manual_seed(seed)
     x = (torch.randn(n_tokens, _D, generator=g) * 0.5).to(device).to(torch.bfloat16)
@@ -172,7 +188,12 @@ class GroupedFP8MaskedEquivalenceTest(unittest.TestCase):
         which of the two paths had been converted.
         """
         for n_tokens in (4, 24, 96, 128, 129, 256, 512):
-            with self.subTest(n_tokens=n_tokens), _env(DSV4_MOE_FUSED_SWIGLU="0"):
+            with self.subTest(n_tokens=n_tokens), _contiguous_side_pinned():
+                self.assertFalse(
+                    GroupedFP8Strategy._should_mask(n_tokens),
+                    "the contiguous side would take the masked path, making this "
+                    "comparison a tautology",
+                )
                 x, w, idx = _inputs(n_tokens, self.device, seed=1000 + n_tokens)
                 y_contig = self.strategy._local_experts(x, w, idx, 0)
                 y_masked = self.strategy._local_experts_masked(x, w, idx, 0)
@@ -206,7 +227,8 @@ class GroupedFP8MaskedEquivalenceTest(unittest.TestCase):
         ``batch * ep`` post-all-gather), so the bit-exact range covers production
         and 1024 is the refusal cap rather than a size decode runs at.
         """
-        with _env(DSV4_MOE_FUSED_SWIGLU="0"):
+        with _contiguous_side_pinned():
+            self.assertFalse(GroupedFP8Strategy._should_mask(_MASKED_MAX_N))
             x, w, idx = _inputs(_MASKED_MAX_N, self.device, seed=2048)
             y_contig = self.strategy._local_experts(x, w, idx, 0).float()
             y_masked = self.strategy._local_experts_masked(x, w, idx, 0).float()
@@ -245,7 +267,7 @@ class GroupedFP8MaskedEquivalenceTest(unittest.TestCase):
         is about and is left to the multi-card smoke.
         """
         n_tokens = 24
-        with _env(DSV4_MOE_FUSED_SWIGLU="0"):
+        with _contiguous_side_pinned():
             x, w, idx = _inputs(n_tokens, self.device, seed=31337)
 
             # Compile and warm outside the capture.
@@ -286,7 +308,12 @@ class GroupedFP8MaskedEquivalenceTest(unittest.TestCase):
         most one fp8 e4m3 ULP per quantised element. The bound below is far tighter
         than a real layout or row-count bug could sneak under.
         """
-        with _env(DSV4_MOE_FUSED_SWIGLU="1"):
+        with _env(
+            DSV4_MOE_FUSED_SWIGLU="1",
+            DSV4_MOE_MASKED="0",
+            RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD=None,
+        ):
+            self.assertFalse(GroupedFP8Strategy._should_mask(24))
             x, w, idx = _inputs(24, self.device, seed=11)
             y_contig = self.strategy._local_experts(x, w, idx, 0).float()
             y_masked = self.strategy._local_experts_masked(x, w, idx, 0).float()

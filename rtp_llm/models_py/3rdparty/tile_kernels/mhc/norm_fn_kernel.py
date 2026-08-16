@@ -168,7 +168,8 @@ def _mhc_pre_norm_fn_fwd_mul_splitk(
     Body is the single-block kernel unchanged except that ``pz`` covers only
     this split's slice of the K blocks and the two stores land in slot
     ``pid_s``. ``n_splits`` must divide the K block count; the caller is
-    responsible (see ``_largest_divisor_le`` in ops/pre_big_fuse.py).
+    responsible (see ``largest_divisor_le`` in
+    ``models_py/modules/dsv4/mhc_prenorm_backend.py``).
 
     Accuracy improves rather than degrades: against an fp64 reference at
     T in {2,8,16}, relative Frobenius error of ``out`` is 3.83-4.17e-04 here
