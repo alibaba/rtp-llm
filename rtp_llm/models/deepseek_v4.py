@@ -451,7 +451,9 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         # The scale stays UE8M0 in both cases; only its shape differs, and that
         # comes from the safetensors header, not from here.
         weight_dtype = (
-            torch.float8_e4m3fn if self._expert_dtype == "fp8" else torch.int8
+            torch.float8_e4m3fn
+            if self._expert_dtype == EXPERT_DTYPE_FP8
+            else torch.int8
         )
         out: List[WeightModule] = []
         for sub_w_name, sub_s_name, sub in [

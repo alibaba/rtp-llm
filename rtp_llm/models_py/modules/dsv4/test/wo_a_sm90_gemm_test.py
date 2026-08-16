@@ -200,11 +200,18 @@ class WoASm90Test(unittest.TestCase):
             R,
             K,
         )
+        # Compared against the allocate-internally call rather than against the
+        # fill value: "some element is no longer 7.0" would pass even if the loop
+        # skipped a group or wrote the wrong row range, which is the whole point of
+        # the per-group loop this exercises.
+        fresh = wo_a_grouped_gemm(o_fp8, packed, weight, weight_scale)
         out = torch.full((M, G, R), 7.0, dtype=torch.bfloat16, device=self.device)
         returned = wo_a_grouped_gemm(o_fp8, packed, weight, weight_scale, out=out)
         self.assertIs(returned, out)
-        self.assertFalse(
-            bool((out == 7.0).all()), "out was returned untouched"
+        self.assertTrue(
+            torch.equal(out, fresh),
+            "out= differs from the internally allocated result: max|diff|="
+            f"{(out.float() - fresh.float()).abs().max().item()}",
         )
 
 
