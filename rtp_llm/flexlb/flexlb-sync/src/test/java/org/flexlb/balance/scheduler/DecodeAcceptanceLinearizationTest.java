@@ -71,6 +71,10 @@ class DecodeAcceptanceLinearizationTest {
         config.setAutoTpmEnabled(true);
         config.setFlexlbBatchFixedWaitMs(3_600_000);
         config.setFlexlbBatchSizeMax(100);
+        // This suite pins the legacy Decode-owned shortcut semantics, i.e. the
+        // rollback position of the ack-only release gate. The gate-on
+        // semantics are covered by AckOnlyReleaseGateTest.
+        config.setFlexlbAckOnlyReleaseEnabled(false);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);

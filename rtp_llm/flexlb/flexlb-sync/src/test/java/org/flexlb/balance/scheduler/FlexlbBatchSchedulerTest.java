@@ -941,6 +941,12 @@ class FlexlbBatchSchedulerTest {
 
     @Test
     void dispatchUncertain_onlyMatchingTypedCanceled8429IsTerminal() throws Exception {
+        // This test pins the legacy cancel-fence semantics where a successful
+        // Prefill terminal during reconciliation is non-authoritative, i.e.
+        // the rollback position of the ack-only release gate. The gate-on
+        // semantics (release on prefill finished success of the exact
+        // generation) are covered by AckOnlyReleaseGateTest.
+        config.setFlexlbAckOnlyReleaseEnabled(false);
         AtomicInteger cancelCalls = new AtomicInteger();
         when(cancelChannel.cancel(any(), anyLong(), anyLong())).thenAnswer(inv -> {
             cancelCalls.incrementAndGet();

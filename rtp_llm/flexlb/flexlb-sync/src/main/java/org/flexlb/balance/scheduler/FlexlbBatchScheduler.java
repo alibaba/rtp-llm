@@ -295,10 +295,15 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     return;
                 }
                 if (entry.lifecycle.hasDispatchClaim()) {
-                    if (entry.dispatchOwnership == DispatchOwnership.DECODE_OWNED) {
-                        // Decode WorkerStatus is stronger than the missing
-                        // Enqueue ACK. Publish the logical ACK now; otherwise
-                        // the admission future would remain pending forever.
+                    if (entry.dispatchOwnership == DispatchOwnership.DECODE_OWNED
+                            && !configService.loadBalanceConfig()
+                                .isFlexlbAckOnlyReleaseEnabled()) {
+                        // Legacy shortcut: Decode WorkerStatus is stronger than
+                        // the missing Enqueue ACK. Publish the logical ACK now;
+                        // otherwise the admission future would remain pending
+                        // forever. Under the ack-only gate the reconciliation
+                        // below settles this entry through the S1 semantic
+                        // (late ACK / Prefill observation) instead.
                         applyAcknowledgeLocked(entry,
                                 entry.lifecycle.snapshot().batchId());
                         return;
@@ -727,6 +732,10 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         if (isPrefill && response.getRunningTaskInfo() != null) {
             for (TaskInfo task : response.getRunningTaskInfo().values()) {
                 reconcilePreemptionActive(task.getRequestId());
+                // Ack-only release: an active Prefill observation of the same
+                // dispatch generation proves the engine stored the fetch slot
+                // even though the Enqueue ACK never fired.
+                releaseOnPrefillObserved(task.getRequestId(), task.getBatchId());
             }
         }
 
@@ -760,6 +769,21 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                         // not roll back the Master ledgers underneath it.
                         reduceOrdinaryTerminalLocked(entry, DeferredTerminal.timeout(
                                 "EnqueueBatch reconciled by typed Prefill CANCELED"));
+                    } else if (task.getErrorCode() == 0
+                            && task.getBatchId() == snapshot.batchId()
+                            && configService.loadBalanceConfig()
+                                .isFlexlbAckOnlyReleaseEnabled()) {
+                        // Ack-only release: a successful Prefill terminal of the
+                        // exact dispatch generation proves the engine accepted
+                        // and stored this batch member even though the Enqueue
+                        // ACK never fired (covers members whose running window
+                        // was skipped by polling). Release through the single
+                        // S1 semantic instead of retaining on the cancel fence.
+                        Logger.info("event=ack_only_release source=prefill_finished "
+                                        + "request_id={} batch_id={}",
+                                requestId, snapshot.batchId());
+                        clearDispatchReconciliation(entry);
+                        applyAcknowledgeLocked(entry, snapshot.batchId());
                     } else {
                         Logger.debug("Ignoring non-authoritative Prefill terminal during "
                                         + "dispatch reconciliation: request_id={} "
@@ -816,11 +840,16 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     return;
                 }
                 markDecodeAcceptedLocked(entry);
-                if (entry.dispatchReconciliation) {
-                    // Decode KV ownership is stronger than a missing Prefill
-                    // Enqueue ACK. Stop the Prefill cancel-fence retry chain
-                    // and publish the logical ACK while both ownership paths
-                    // are linearized by the same dispatch fence.
+                if (entry.dispatchReconciliation
+                        && !configService.loadBalanceConfig()
+                            .isFlexlbAckOnlyReleaseEnabled()) {
+                    // Legacy shortcut: Decode KV ownership is stronger than a
+                    // missing Prefill Enqueue ACK. Stop the Prefill cancel-fence
+                    // retry chain and publish the logical ACK while both
+                    // ownership paths are linearized by the same dispatch fence.
+                    // Under the ack-only gate Decode observations only record
+                    // ownership; release waits for the S1 semantic (late ACK /
+                    // Prefill observation).
                     clearDispatchReconciliation(entry);
                     applyAcknowledgeLocked(entry, entry.lifecycle.snapshot().batchId());
                 }
@@ -841,6 +870,38 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     }
 
     /**
+     * Ack-only release: a Prefill WorkerStatus observation (running task or
+     * successful terminal) of the exact dispatch generation happens strictly
+     * after the engine stored the deferred fetch slot, so it carries the same
+     * "prefill accepted" semantic as the EnqueueBatch ACK. It releases entries
+     * whose ACK never fired (uncertain dispatch) instead of the legacy Decode
+     * shortcut, keeping the release gate single-sourced on Prefill evidence.
+     */
+    private void releaseOnPrefillObserved(long requestId, long batchId) {
+        if (!configService.loadBalanceConfig().isFlexlbAckOnlyReleaseEnabled()) {
+            return;
+        }
+        InflightEntry entry = inflight.get(requestId);
+        if (entry == null || !entry.dispatchReconciliation) {
+            return;
+        }
+        synchronized (dispatchFence) {
+            synchronized (entry) {
+                if (inflight.get(requestId) != entry || entry.cleanupOwned
+                        || !entry.dispatchReconciliation
+                        || batchId != entry.lifecycle.snapshot().batchId()) {
+                    return;
+                }
+                Logger.info("event=ack_only_release source=prefill_observed "
+                                + "request_id={} batch_id={}",
+                        requestId, batchId);
+                clearDispatchReconciliation(entry);
+                applyAcknowledgeLocked(entry, batchId);
+            }
+        }
+    }
+
+    /**
      * Single reducer for every non-priority terminal. A live preemption claim
      * owns Decode accounting, so the first real ordinary outcome is retained
      * instead of rolling back/unregistering underneath the Cancel protocol.
@@ -854,10 +915,14 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             return;
         }
         if (entry.dispatchOwnership == DispatchOwnership.DECODE_OWNED
-                && terminal.dispatchAckFailure()) {
-            // KV_ALLOCATED/RUNNING is a stronger ownership observation than
-            // an absent/failed Enqueue ACK. Preserve the live inflight entry,
-            // Decode accounting, and public schedule success.
+                && terminal.dispatchAckFailure()
+                && !configService.loadBalanceConfig().isFlexlbAckOnlyReleaseEnabled()) {
+            // Legacy shortcut: KV_ALLOCATED/RUNNING is a stronger ownership
+            // observation than an absent/failed Enqueue ACK. Preserve the live
+            // inflight entry, Decode accounting, and public schedule success.
+            // Under the ack-only gate an explicit Enqueue failure/timeout takes
+            // its ordinary terminal below: a rejected member must not be
+            // published as schedule success (its fetch slot never exists).
             if (entry.preemption != null) {
                 PreemptionRegistration registration = entry.preemption;
                 long batchId = entry.lifecycle.snapshot().batchId();
@@ -1372,10 +1437,21 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 return;
             }
             if (entry.dispatchReconciliation) {
-                Logger.debug("Retaining late EnqueueBatch ACK during reconciliation: "
+                if (!configService.loadBalanceConfig().isFlexlbAckOnlyReleaseEnabled()) {
+                    Logger.debug("Retaining late EnqueueBatch ACK during reconciliation: "
+                                    + "request_id={} batch_id={}",
+                            item.requestId(), batchId);
+                    return;
+                }
+                // Ack-only release: the ACK is the S1 release semantic itself.
+                // It proves the engine stored the fetch slot for this exact
+                // dispatch generation (batch id already validated above), so a
+                // late arrival dissolves the reconciliation uncertainty instead
+                // of being dropped.
+                Logger.info("event=ack_only_release source=late_enqueue_ack "
                                 + "request_id={} batch_id={}",
                         item.requestId(), batchId);
-                return;
+                clearDispatchReconciliation(entry);
             }
             if (entry.preemption != null) {
                 PreemptionRegistration registration = entry.preemption;
@@ -1498,7 +1574,12 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                         || snapshot.batchId() != batchId) {
                     return;
                 }
-                if (entry.dispatchOwnership == DispatchOwnership.DECODE_OWNED) {
+                if (entry.dispatchOwnership == DispatchOwnership.DECODE_OWNED
+                        && !configService.loadBalanceConfig()
+                            .isFlexlbAckOnlyReleaseEnabled()) {
+                    // Legacy shortcut: Decode ownership settles an uncertain
+                    // dispatch without the fence. The ack-only gate instead
+                    // starts reconciliation and waits for the S1 semantic.
                     applyAcknowledgeLocked(entry, batchId);
                     return;
                 }
@@ -1520,7 +1601,10 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         if (entry.dispatchReconciliation || entry.preemption != null) {
             return false;
         }
-        if (entry.dispatchOwnership == DispatchOwnership.DECODE_OWNED) {
+        if (entry.dispatchOwnership == DispatchOwnership.DECODE_OWNED
+                && !configService.loadBalanceConfig().isFlexlbAckOnlyReleaseEnabled()) {
+            // Legacy shortcut mirror of onDispatchUncertain's DECODE_OWNED
+            // branch for callers entering reconciliation directly.
             applyAcknowledgeLocked(entry, entry.lifecycle.snapshot().batchId());
             return false;
         }
