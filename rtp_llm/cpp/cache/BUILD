@@ -66,6 +66,7 @@ cc_library(
         "BlockCache.cc",
         "BlockPool.cc",
         "MemoryLayoutStrategy.cc",
+        "NumaMemoryPolicy.cc",
         "SharedBlockCache.cc",
     ],
     hdrs = [
@@ -76,6 +77,7 @@ cc_library(
         "BlockRefCounter.h",
         "MemoryLayoutStrategy.h",
         "MemoryLayoutConfig.h",
+        "NumaMemoryPolicy.h",
         "SharedBlockCache.h",
     ],
     copts = copts(),
