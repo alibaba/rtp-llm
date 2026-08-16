@@ -1505,7 +1505,7 @@ TEST(BlockTreeEvictorCascadeTest, PrimaryFailureAbortsResourcesEvenWithCascadeSu
     environment.expectAllPoolsFree();
 }
 
-TEST(BlockTreeEvictorCascadeTest, BatchFailureAbortsFullTask) {
+TEST(BlockTreeEvictorCascadeTest, PrimaryFailureSkipsCascadesAndAbortsFullTask) {
     CascadeTestEnvironment environment;
     ASSERT_TRUE(environment.init());
     environment.setTransferResults({false, true, true});
@@ -1518,7 +1518,7 @@ TEST(BlockTreeEvictorCascadeTest, BatchFailureAbortsFullTask) {
     environment.evictor_->updatePendingReleases(*task, false);
     EXPECT_FALSE(task_result.primary_success);
     EXPECT_EQ(task_result.cascade_success, (std::vector<bool>{false, false}));
-    EXPECT_EQ(environment.transferGroupSetIds(), (std::vector<size_t>{0, 1, 2}));
+    EXPECT_EQ(environment.transferGroupSetIds(), (std::vector<size_t>{0}));
 
     environment.evictor_->settleEvictionLocked(*task, task_result);
     for (size_t group_set_id = 0; group_set_id < environment.groups_.size(); ++group_set_id) {
@@ -1535,7 +1535,7 @@ TEST(BlockTreeEvictorCascadeTest, BatchFailureAbortsFullTask) {
     environment.expectAllPoolsFree();
 }
 
-TEST(BlockTreeEvictorCascadeTest, BatchSuccessPublishesFullTask) {
+TEST(BlockTreeEvictorCascadeTest, OrderedTransferSuccessPublishesFullTask) {
     CascadeTestEnvironment environment;
     ASSERT_TRUE(environment.init());
     environment.setTransferResults({true, true, true});

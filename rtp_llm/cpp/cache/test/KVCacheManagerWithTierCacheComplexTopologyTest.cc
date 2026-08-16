@@ -440,7 +440,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
         failed_host_loads += reuse_begin <= 1 ? 1u : 0u;
     }
     ASSERT_GT(failed_host_loads, 0u);
-    engine->enqueueResult(/*success=*/true);
+    for (size_t index = 0; index < failed_host_loads; ++index) {
+        engine->enqueueResult(/*success=*/true);
+    }
     engine->enqueueResult(/*success=*/false);
 
     const size_t descriptors_before_failure = engine->submittedDescriptorCount();

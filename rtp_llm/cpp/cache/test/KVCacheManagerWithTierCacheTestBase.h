@@ -1669,7 +1669,7 @@ protected:
         EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
         const auto descriptors_after_failure = pausable_engine->descriptors();
-        EXPECT_EQ(pausable_engine->submittedBatchCount() - batches_before_failure, 1u);
+        EXPECT_EQ(pausable_engine->submittedBatchCount() - batches_before_failure, cache->groupSets().size());
         ASSERT_EQ(descriptors_after_failure.size() - descriptors_before_failure,
                   host_source_count + disk_source_count);
         for (size_t index = descriptors_before_failure; index < descriptors_after_failure.size(); ++index) {

@@ -708,7 +708,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, TieredJoinedLoadMapsTargetsAcrossFullAndL
     EXPECT_EQ(first_context->matchedBlocks(Tier::HOST), cached_keys.size());
     ASSERT_TRUE(transfer_engine->waitUntilEnteredFor(std::chrono::seconds(5)));
 
-    const size_t expected_submit_count = 1;
+    const size_t expected_submit_count = cache->groupSets().size();
 
     auto       second_resource = makeBatchResource(/*batch_size=*/1, config, request_keys);
     auto       second_tokens   = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/9, /*seq_size_per_block=*/4);
@@ -727,7 +727,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, TieredJoinedLoadMapsTargetsAcrossFullAndL
     ASSERT_TRUE(std::all_of(second_context->joinedLoads().begin(),
                             second_context->joinedLoads().end(),
                             [](bool joined) { return joined; }));
-    EXPECT_EQ(transfer_engine->submitCount(), 1u);
+    EXPECT_EQ(transfer_engine->submitCount(), expected_submit_count);
 
     for (size_t desc_index = 0; desc_index < second_context->loadDescs().size(); ++desc_index) {
         const TransferDescriptor& joined_desc = second_context->loadDescs()[desc_index];

@@ -35,11 +35,15 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
                                  BlockTreeCacheMetricsReporter& metrics_reporter,
                                  int                            disk_timeout_ms,
                                  int                            host_timeout_ms) {
+    std::vector<std::vector<TransferDescriptor>> host_batches(group_sets_.size());
+    std::vector<std::vector<TransferDescriptor>> disk_batches(group_sets_.size());
     for (const TransferDescriptor& desc : task.load_descs) {
         if (desc.source_tier == Tier::HOST) {
             task.host_to_device_descriptors.push_back(desc);
+            host_batches[desc.group_set_id].push_back(desc);
         } else {
             task.disk_to_device_descriptors.push_back(desc);
+            disk_batches[desc.group_set_id].push_back(desc);
         }
     }
     int64_t    host_transfer_begin_time_us = 0;
@@ -48,6 +52,8 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
     bool       disk_transfer_started       = false;
     BlockTreeTransferBytes host_transfer_bytes;
     BlockTreeTransferBytes disk_transfer_bytes;
+    bool                   host_success = false;
+    bool                   disk_success = false;
     const auto finish_metrics = [&](bool host_success, bool disk_success) {
         if (host_transfer_started) {
             host_transfer_started = false;
@@ -70,45 +76,50 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
                                                     disk_transfer_bytes);
         }
     };
+    const auto execute_batches = [&](const std::vector<std::vector<TransferDescriptor>>& batches, int timeout_ms) {
+        std::vector<std::shared_ptr<AsyncContext>> contexts;
+        for (const auto& batch : batches) {
+            if (!batch.empty()) {
+                contexts.push_back(transfer_dispatcher.executeMultiRank(batch, timeout_ms));
+            }
+        }
+        if (contexts.empty()) {
+            return true;
+        }
+        FusedAsyncContext context(contexts);
+        context.waitDone();
+        return context.success();
+    };
 
     try {
-        bool host_success = true;
         if (!task.host_to_device_descriptors.empty()) {
             host_transfer_begin_time_us =
                 metrics_reporter.reportTransferStarted(CacheTransferOperation::LOAD, Tier::HOST, Tier::DEVICE);
             host_transfer_started = true;
-            auto host_context =
-                transfer_dispatcher.executeMultiRank(task.host_to_device_descriptors, host_timeout_ms);
-            host_context->waitDone();
-            host_success = host_context->success();
-            if (host_success) {
-                metrics_reporter.accumulateTransferBytes(
-                    task.host_to_device_descriptors, group_sets_, host_transfer_bytes);
-            }
-            finish_metrics(host_success, false);
-            if (!host_success) {
-                return false;
-            }
+        }
+        host_success = execute_batches(host_batches, host_timeout_ms);
+        if (host_success) {
+            metrics_reporter.accumulateTransferBytes(task.host_to_device_descriptors, group_sets_, host_transfer_bytes);
+        }
+        finish_metrics(host_success, false);
+        if (!host_success) {
+            return false;
         }
 
-        bool disk_success = true;
         if (!task.disk_to_device_descriptors.empty()) {
             disk_transfer_begin_time_us =
                 metrics_reporter.reportTransferStarted(CacheTransferOperation::LOAD, Tier::DISK, Tier::DEVICE);
             disk_transfer_started = true;
-            auto disk_context =
-                transfer_dispatcher.executeMultiRank(task.disk_to_device_descriptors, disk_timeout_ms);
-            disk_context->waitDone();
-            disk_success = disk_context->success();
-            if (disk_success) {
-                metrics_reporter.accumulateTransferBytes(
-                    task.disk_to_device_descriptors, group_sets_, disk_transfer_bytes);
-            }
-            finish_metrics(host_success, disk_success);
         }
+        disk_success = execute_batches(disk_batches, disk_timeout_ms);
+        if (disk_success) {
+            metrics_reporter.accumulateTransferBytes(
+                task.disk_to_device_descriptors, group_sets_, disk_transfer_bytes);
+        }
+        finish_metrics(host_success, disk_success);
         return disk_success;
     } catch (...) {
-        finish_metrics(false, false);
+        finish_metrics(host_success, disk_success);
         throw;
     }
 }

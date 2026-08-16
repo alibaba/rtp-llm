@@ -72,6 +72,67 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
     environment->expectFullyReclaimed();
 }
 
+TEST(BlockTreeLoaderTest, DiskTransferFailureInstallsNoLoadTargets) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+
+    FullSWAEnvironmentOptions options;
+    options.path_length = 1;
+    auto environment    = FullSWAEnvironment::create(options);
+    ASSERT_NE(environment, nullptr);
+
+    environment->insertRequestPath();
+    environment->releaseRequestRefs();
+    environment->demoteAll(Tier::DEVICE);
+    environment->demoteAll(Tier::HOST);
+    ASSERT_TRUE(environment->allResourcesAtTier(Tier::DISK));
+
+    environment->scripted_per_rank_transfer_engine->clear();
+    environment->scripted_per_rank_transfer_engine->enqueue(true);
+    environment->scripted_per_rank_transfer_engine->enqueue(false);
+
+    BlockTreeMatchResult result = environment->cache->match(environment->keys);
+    auto load_context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
+    ASSERT_NE(load_context, nullptr);
+    ASSERT_EQ(load_context->loadDescs().size(), 2u);
+    std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> request_targets;
+    for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {
+        const size_t group_set_id = load_context->loadDescs()[desc_index].group_set_id;
+        std::vector<BlockIdxType> targets;
+        for (const DeviceBlockPoolPtr& pool : environment->groups[group_set_id]->devicePools()) {
+            const BlockIdList blocks = pool->malloc(1).value();
+            pool->incRef(blocks, BlockRefType::REQUEST);
+            targets.push_back(blocks.front());
+            request_targets.emplace_back(pool, blocks.front());
+        }
+        load_context->setTargetBlocks(desc_index, std::move(targets));
+    }
+
+    ASSERT_TRUE(load_context->commit());
+    load_context->waitDone();
+    EXPECT_FALSE(load_context->success());
+    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedBatchCount(), 2u);
+
+    const auto resources = environment->resourcesForPathNode(0);
+    ASSERT_EQ(resources.size(), 2u);
+    for (const GroupSetResource& resource : resources) {
+        EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
+        EXPECT_TRUE(resource.hasTier(Tier::DISK));
+        EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+    }
+    for (const auto& [pool, block] : request_targets) {
+        EXPECT_EQ(pool->refCount(block), 1u);
+        pool->decRef(block, BlockRefType::REQUEST);
+        EXPECT_EQ(pool->freeBlocksNum(), options.usable_device_blocks);
+    }
+
+    result.async_context.reset();
+    load_context.reset();
+    environment->reclaimAll();
+    environment->expectFullyReclaimed();
+}
+
 TEST(BlockTreeLoaderTest, LoadStateMachineRejectsDuplicateTransitionAndRestoresSource) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";

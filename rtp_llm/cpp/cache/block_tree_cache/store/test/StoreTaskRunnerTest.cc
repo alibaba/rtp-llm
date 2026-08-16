@@ -118,6 +118,20 @@ TEST(StoreTaskRunnerTest, ReleaseTaskResourcesDropsTemporaryHolds) {
                                  BlockRefType::REQUEST);
 }
 
+class RecordingStoreTransferEngine final: public PerRankBlockTransferEngine {
+public:
+    explicit RecordingStoreTransferEngine(const std::vector<GroupSetPtr>& group_sets):
+        PerRankBlockTransferEngine(group_sets) {}
+
+    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
+        batches.push_back(descriptors);
+        return std::make_shared<CompletedAsyncContext>(
+            ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected copy failure"));
+    }
+
+    std::vector<std::vector<TransferDescriptor>> batches;
+};
+
 TEST(StoreTaskRunnerTest, RunTransferReturnsDispatcherFailure) {
     auto policy                                         = defaultCacheGroupPolicy(CacheGroupType::FULL);
     policy.enable_prefix_reuse                          = true;
@@ -150,32 +164,47 @@ TEST(StoreTaskRunnerTest, RunTransferReturnsDispatcherFailure) {
 }
 
 TEST(StoreTaskRunnerTest, TransferSubmissionFollowsTargetTier) {
-    auto policy                                         = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    const GroupBase                            group    = makeTestGroupBase(policy);
-    const std::shared_ptr<const CacheTopology> topology = makeTestTopology({group});
-    DeviceBlockPoolPtr device_pool = makeTestDevicePool({{16, 0}}, 2, "store_task_runner_submission");
-    GroupSetPtr        group_set   = makeTestGroupSet(0, topology, {0}, {device_pool});
-    const std::vector<GroupSetPtr> group_sets{group_set};
+    const GroupBase group = makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL));
+    const auto      topology = makeTestTopology({group});
+    const std::vector<GroupSetPtr> group_sets{
+        makeTestGroupSet(0,
+                         topology,
+                         {0},
+                         {makeTestDevicePool({{16, 0}}, 2, "store_task_runner_submission_0")}),
+        makeTestGroupSet(1,
+                         topology,
+                         {0},
+                         {makeTestDevicePool({{16, 0}}, 2, "store_task_runner_submission_1")})};
     StoreTaskRunner                runner(group_sets);
     BlockTreeCacheMetricsReporter metrics_reporter;
 
     StoreTaskRunner::Task host_task;
     host_task.target_tier = Tier::HOST;
     host_task.descriptors = {TransferDescriptor::deviceToHost(0, {1}, 1),
-                             TransferDescriptor::deviceToHost(0, {2}, 2)};
-    auto host_engine = std::make_shared<ControlledPerRankBlockTransferEngine>(group_sets, TransferCopyAction::Fail);
+                             TransferDescriptor::deviceToHost(1, {2}, 2)};
+    auto host_engine = std::make_shared<RecordingStoreTransferEngine>(group_sets);
     BlockTransferDispatcher host_dispatcher(host_engine);
     EXPECT_FALSE(runner.runTransfer(host_task, host_dispatcher, metrics_reporter, 10, 20));
-    EXPECT_EQ(host_engine->submittedBatchCount(), 1u);
+    ASSERT_EQ(host_engine->batches.size(), 1u);
+    ASSERT_EQ(host_engine->batches.front().size(), 2u);
+    EXPECT_EQ(host_engine->batches.front()[0].group_set_id, 0u);
+    EXPECT_EQ(host_engine->batches.front()[1].group_set_id, 1u);
+    EXPECT_EQ(host_engine->batches.front()[0].target_tier, Tier::HOST);
+    EXPECT_EQ(host_engine->batches.front()[1].target_tier, Tier::HOST);
 
     StoreTaskRunner::Task disk_task;
     disk_task.target_tier = Tier::DISK;
     disk_task.descriptors = {TransferDescriptor::deviceToDisk(0, {1}, 1),
-                             TransferDescriptor::deviceToDisk(0, {2}, 2)};
-    auto disk_engine = std::make_shared<ControlledPerRankBlockTransferEngine>(group_sets, TransferCopyAction::Fail);
+                             TransferDescriptor::deviceToDisk(1, {2}, 2)};
+    auto disk_engine = std::make_shared<RecordingStoreTransferEngine>(group_sets);
     BlockTransferDispatcher disk_dispatcher(disk_engine);
     EXPECT_FALSE(runner.runTransfer(disk_task, disk_dispatcher, metrics_reporter, 10, 20));
-    EXPECT_EQ(disk_engine->submittedBatchCount(), 2u);
+    ASSERT_EQ(disk_engine->batches.size(), 2u);
+    for (size_t batch_index = 0; batch_index < disk_engine->batches.size(); ++batch_index) {
+        ASSERT_EQ(disk_engine->batches[batch_index].size(), 1u);
+        EXPECT_EQ(disk_engine->batches[batch_index].front().group_set_id, batch_index);
+        EXPECT_EQ(disk_engine->batches[batch_index].front().target_tier, Tier::DISK);
+    }
 }
 
 }  // namespace

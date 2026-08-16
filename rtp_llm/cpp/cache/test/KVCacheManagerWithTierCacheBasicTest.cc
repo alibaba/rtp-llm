@@ -432,7 +432,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerTierMatchPublishesAsyncContext)
     result.async_context->waitDone();
     ASSERT_TRUE(result.async_context->success()) << result.async_context->errorInfo().ToString();
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    EXPECT_EQ(transfer_engine_->submittedBatchCount(), batches_before_load + 1);
+    EXPECT_EQ(transfer_engine_->submittedBatchCount(), batches_before_load + cache->groupSets().size());
     EXPECT_EQ(transfer_engine_->submittedDescriptorCount(), descriptors_before_load + cache->groupSets().size());
     ASSERT_TRUE(
         requestReusesExpectedPath(*cache, cache_config_, seed.cache_keys, resource, /*logical_reuse_blocks=*/1));

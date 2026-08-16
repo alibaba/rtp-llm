@@ -177,7 +177,30 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, MaxBatchSizeSplitsOneLogicalBatch
     EXPECT_EQ(io->batch_sizes, (std::vector<size_t>{2, 2, 1}));
 }
 
-TEST_F(PerRankBlockTransferEngineHostDiskTest, LogicalBatchesMayShareReadOnlyEndpoint) {
+TEST_F(PerRankBlockTransferEngineHostDiskTest, SameDirectionHostToDiskTasksAreSerialized) {
+    auto owned_io = std::make_unique<BlockingBatchDiskBlockIO>(BlockingBatchDiskBlockIO::Operation::WRITE);
+    auto* io = owned_io.get();
+    auto host_pool = makeHostPool(host_block_size_, 3, false);
+    auto disk_pool = makeDiskPool(host_block_size_, 2, temp_dir_.path, std::move(owned_io), "serialized_write");
+    auto group = makeHostDiskGroup(0, host_pool, disk_pool, host_block_size_);
+    auto engine = makeEngine({group});
+    const auto first = makeDescriptor(Tier::HOST, Tier::DISK, {}, poolMalloc(*host_pool), poolMalloc(*disk_pool));
+    const auto second = makeDescriptor(Tier::HOST, Tier::DISK, {}, poolMalloc(*host_pool), poolMalloc(*disk_pool));
+
+    auto first_context = engine->submit({first});
+    ASSERT_TRUE(io->waitForBlockedCalls(1, std::chrono::seconds(5)));
+    auto second_context = engine->submit({second});
+    const bool second_started_before_release = io->waitForBlockedCalls(2, std::chrono::milliseconds(200));
+
+    io->release();
+    first_context->waitDone();
+    second_context->waitDone();
+    EXPECT_FALSE(second_started_before_release);
+    EXPECT_TRUE(first_context->success());
+    EXPECT_TRUE(second_context->success());
+}
+
+TEST_F(PerRankBlockTransferEngineHostDiskTest, SameDirectionDiskToHostTasksAreSerialized) {
     auto owned_io = std::make_unique<BlockingBatchDiskBlockIO>(BlockingBatchDiskBlockIO::Operation::READ);
     auto* io = owned_io.get();
     auto host_pool = makeHostPool(host_block_size_, 3, false);
@@ -191,12 +214,12 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, LogicalBatchesMayShareReadOnlyEnd
     auto first_context = engine->submit({first});
     ASSERT_TRUE(io->waitForBlockedCalls(1, std::chrono::seconds(5)));
     auto second_context = engine->submit({second});
-    ASSERT_TRUE(io->waitForBlockedCalls(2, std::chrono::seconds(5)));
-    EXPECT_FALSE(second_context->done());
+    const bool second_started_before_release = io->waitForBlockedCalls(2, std::chrono::milliseconds(200));
 
     io->release();
     first_context->waitDone();
     second_context->waitDone();
+    EXPECT_FALSE(second_started_before_release);
     EXPECT_TRUE(first_context->success());
     EXPECT_TRUE(second_context->success());
 }

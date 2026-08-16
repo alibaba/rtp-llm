@@ -18,7 +18,7 @@ namespace rtp_llm {
 
 namespace {
 
-constexpr size_t kTransferWorkerCount = 2;
+constexpr size_t kTransferWorkerCount = 1;
 constexpr size_t kTransferQueueSize   = 10000;
 
 ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
