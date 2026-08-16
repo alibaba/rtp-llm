@@ -1,28 +1,50 @@
 #!/usr/bin/env bash
 #
-# Recommended two-host startup (run from the RTP-LLM repository root inside
-# lhc_GPU; replace the two xx addresses with the Prefill and Decode host IPs):
+# Recommended one-command startup from a controller with SSH access to both
+# hosts (the driver enters lhc_GPU and launches both roles concurrently):
 #
-# 1. Start Decode first:
+#    PREFILL_SSH_TARGET=L20-dev-112 \
+#    DECODE_SSH_TARGET=L20-dev-113 \
+#    PREFILL_REPO_ROOT=/data3/user/RTP-LLM/github-opensource \
+#    DECODE_REPO_ROOT=/data0/user/RTP-LLM/github-opensource \
+#    PREFILL_CHECKPOINT_PATH=/data3/user/Kimi-K3 \
+#    DECODE_CHECKPOINT_PATH=/data0/user/Kimi-K3 \
+#    PREFILL_ENDPOINT=xx.xx.xx.xx:27188 \
+#    DECODE_ENDPOINT=xx.xx.xx.xx:28188 \
+#    SMOKE_RUN_ID=my-run \
+#    SMOKE_SUITE=all \
+#    python3 ./example/kimi_k3_full_model_two_host_pd_smoke_driver.py
+#
+# Manual role startup remains available for debugging. Run from the RTP-LLM
+# repository root inside lhc_GPU; both roles may now be started concurrently:
+#
+# 1. Start the Decode role (either role may now be launched first):
 #    CHECKPOINT_PATH=/ssd/2/kimi-k3 \
 #    PREFILL_ENDPOINT=xx.xx.xx.xx:27188 \
 #    DECODE_ENDPOINT=xx.xx.xx.xx:28188 \
 #    SMOKE_RUN_ID=my-run \
+#    SMOKE_SUITE=cache \
 #    ./example/kimi_k3_full_model_two_host_pd_smoke.sh decode
 #
-# 2. After Decode prints READY, start Prefill with the same endpoints and run ID:
+# 2. Start Prefill with the same endpoints and run ID (it waits for both the
+#    Decode model and Decode result listener to become ready):
 #    CHECKPOINT_PATH=/ssd/2/kimi-k3 \
 #    PREFILL_ENDPOINT=xx.xx.xx.xx:27188 \
 #    DECODE_ENDPOINT=xx.xx.xx.xx:28188 \
 #    SMOKE_RUN_ID=my-run \
+#    SMOKE_SUITE=cache \
 #    ./example/kimi_k3_full_model_two_host_pd_smoke.sh prefill
 #
 # Lightweight two-host Kimi K3 full-model (93-layer) PD smoke.
 #
-# Run this same script inside lhc_GPU on both hosts. Start Decode first, then
-# Prefill. There is no SSH orchestration and no committed machine address.
-# Prefill sends the request and reports PASS/FAIL back to Decode, so both
-# commands have a meaningful exit status and clean only their own process group.
+# Run this same role script inside lhc_GPU on both hosts. There is no committed
+# machine address; the optional driver accepts all SSH/host paths at runtime.
+# The validated profile always enables Barex RDMA on both roles; this smoke is
+# intentionally not a TCP/cache-store fallback test.
+# Prefill checks both services, runs the selected request suite, validates model
+# answers and cache metadata, then reports PASS/FAIL back to Decode. Both
+# commands therefore have a meaningful exit status and clean only their own
+# process group.
 
 set -Eeuo pipefail
 ulimit -c 0
@@ -41,9 +63,9 @@ Usage (run inside lhc_GPU as the normal user):
   SMOKE_RUN_ID=my-run \
   kimi_k3_full_model_two_host_pd_smoke.sh decode|prefill
 
-Start Decode first. Start Prefill after Decode prints READY. The default result
-channel is DECODE host at DECODE port + 100; override SMOKE_RESULT_ENDPOINT on
-both hosts when that port is unavailable.
+The two roles may start concurrently. Prefill waits for both the Decode model
+and result channel. The default result channel is DECODE host at DECODE port +
+100; override SMOKE_RESULT_ENDPOINT on both hosts when that port is unavailable.
 
 The validated BF16 1M model/runtime profile is fixed by this smoke. Only host,
 checkpoint, artifact, timeout and prebuilt-launcher settings are configurable.
@@ -54,6 +76,11 @@ Important optional variables:
   SMOKE_REQUEST_TIMEOUT_S   defaults to 900
   SMOKE_RESULT_TIMEOUT_S    defaults to 18000
   SMOKE_RESULT_ENDPOINT     defaults to decode-host:(decode-port + 100)
+  SMOKE_SUITE               quick, cache (default), or all
+                            quick: one cold single-request identity check
+                            cache: single miss/hit, partial hit, concurrent
+                                   all-miss/all-hit and mixed hit+miss batches
+                            all: cache plus >64K single and batched chunk cases
   RTP_LLM_SERVER_BINARY     use an existing Bazel launcher
   RTP_LLM_SKIP_BUILD=1      skip the CUDA13/SM10x build in the launcher
 EOF
@@ -98,6 +125,8 @@ result_host="${SMOKE_RESULT_ENDPOINT%:*}"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 launcher="${repo_root}/example/start_kimi_k3_pd.sh"
 [[ -x "${launcher}" ]] || die "missing executable launcher ${launcher}"
+case_runner="${repo_root}/example/kimi_k3_full_model_pd_cases.py"
+[[ -f "${case_runner}" ]] || die "missing smoke case runner ${case_runner}"
 
 checkpoint_real="$(realpath -e "${CHECKPOINT_PATH}")" \
     || die "checkpoint does not exist: ${CHECKPOINT_PATH}"
@@ -148,7 +177,6 @@ role_dir="${artifact_root}/${SMOKE_RUN_ID}/${role}"
     || die "artifact directory already exists: ${role_dir}"
 mkdir -p "${role_dir}"
 service_log="${role_dir}/service.log"
-response_file="${role_dir}/response.json"
 accuracy_file="${role_dir}/accuracy.json"
 result_file="${role_dir}/peer-result.txt"
 summary_file="${role_dir}/summary.txt"
@@ -233,11 +261,41 @@ wait_for_health() {
     die "timed out waiting for health at ${host}:${port}"
 }
 
+wait_for_result_listener() {
+    local deadline=$((SECONDS + startup_timeout))
+    while ((SECONDS < deadline)); do
+        if [[ -n "${service_pid}" ]] && ! kill -0 "${service_pid}" 2>/dev/null; then
+            tail -200 "${service_log}" >&2 || true
+            die "Prefill service exited while waiting for Decode result listener"
+        fi
+        if NO_PROXY="${NO_PROXY:-},${result_host}" \
+            no_proxy="${no_proxy:-},${result_host}" \
+            curl -fsS --max-time 2 \
+                "http://${SMOKE_RESULT_ENDPOINT}/ready" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 2
+    done
+    die "timed out waiting for Decode result listener at ${SMOKE_RESULT_ENDPOINT}"
+}
+
 verify_fastsafetensors_log() {
     grep -Eqi 'fastsafetensors' "${service_log}" \
         || die "startup log has no positive FastSafetensors evidence"
     if grep -Eqi '(load_method|loader).*(scratch|fallback)|fallback.*loader' "${service_log}"; then
         die "startup log contains loader fallback evidence"
+    fi
+}
+
+verify_rdma_log() {
+    local engine_log="${role_dir}/runtime/work/${role}/logs/engine.log"
+    local evidence_file="${role_dir}/rdma-evidence.txt"
+    grep -E 'rdma listen port is .*rdma_mode is \[1\]' "${engine_log}" \
+        >"${evidence_file}" \
+        || die "startup log has no positive Barex RDMA evidence"
+    if grep -Eqi 'rdma mode not supported|BarexRdma backend not supported' \
+        "${service_log}" "${engine_log}"; then
+        die "startup log reports that the RDMA backend is unavailable"
     fi
 }
 
@@ -263,10 +321,12 @@ expected = {
     "MAX_BATCH_TOKENS_SIZE": "1048576",
     "SEQ_SIZE_PER_BLOCK": "4096",
     "KERNEL_SEQ_SIZE_PER_BLOCK": "128",
-    "CONCURRENCY_LIMIT": "1",
-    "MAX_CONTEXT_BATCH_SIZE": "1",
+    "CONCURRENCY_LIMIT": "4",
+    "MAX_CONTEXT_BATCH_SIZE": "4",
     "REUSE_CACHE": "1",
     "LINEAR_STEP": "1",
+    "CACHE_STORE_RDMA_MODE": "1",
+    "CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS": "2000",
     "DSV4_MEGA_MOE_INPUT_PACKER": "fused",
     "DSV4_MEGA_MOE_INPUT_PACKER_IMPL": "optimized",
     "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
@@ -289,7 +349,7 @@ else:
         "KV_CACHE_MEM_MB": "46000",
         "MEGA_MOE_MAX_TOKENS_PER_RANK": "1",
         "ENABLE_CUDA_GRAPH": "1",
-        "DECODE_CAPTURE_CONFIG": "1",
+        "DECODE_CAPTURE_CONFIG": "1,2,3,4",
         "RTP_MLA_DECODE_KERNEL": "tokenspeed_mla",
     })
     absent.extend([
@@ -314,6 +374,9 @@ PY
 # validated BF16 1M runtime profile here instead of relying on the caller's
 # shell or on the generic launcher's conservative defaults.
 apply_validated_common_profile() {
+    local run_hash
+    run_hash="$(printf '%s' "${SMOKE_RUN_ID}" | sha256sum)"
+    run_hash="${run_hash%% *}"
     export CHECKPOINT_PATH="${checkpoint_real}"
     export TOKENIZER_PATH="${checkpoint_real}"
     export PREFILL_ENDPOINT DECODE_ENDPOINT
@@ -322,10 +385,12 @@ apply_validated_common_profile() {
     export MAX_BATCH_TOKENS_SIZE=1048576
     export SEQ_SIZE_PER_BLOCK=4096
     export KERNEL_SEQ_SIZE_PER_BLOCK=128
-    export CONCURRENCY_LIMIT=1
-    export MAX_CONTEXT_BATCH_SIZE=1
+    export CONCURRENCY_LIMIT=4
+    export MAX_CONTEXT_BATCH_SIZE=4
     export REUSE_CACHE=1
     export LINEAR_STEP=1
+    export CACHE_STORE_RDMA_MODE=1
+    export CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS=2000
     export DSV4_MEGA_MOE_INPUT_PACKER=fused
     export DSV4_MEGA_MOE_INPUT_PACKER_IMPL=optimized
     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -333,6 +398,9 @@ apply_validated_common_profile() {
     export FLASHINFER_CUDA_ARCH_LIST=10.3a
     export DEEPGEMM_JIT_COMPILER=auto
     export RTP_LLM_SERVICE_ID="kimi-k3-full-pd-${SMOKE_RUN_ID}"
+    # Keep TP Unix-domain sockets below Linux's 107-byte path limit even when
+    # the externally visible run ID is descriptive and long.
+    export RTP_LLM_TMPDIR="/tmp/k3pd-${run_hash:0:12}-${role}"
     export RUN_ROOT="${role_dir}/runtime"
 
     # Canonical smoke runs asynchronously and uses the operator versions from
@@ -354,7 +422,9 @@ apply_validated_decode_profile() {
     export MEGA_MOE_MAX_TOKENS_PER_RANK=1
     unset KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD KIMI_K3_PREFILL_CHUNK_TOKENS
     export ENABLE_CUDA_GRAPH=1
-    export DECODE_CAPTURE_CONFIG=1
+    # The smoke issues four concurrent requests. Capture every possible
+    # coalesced Decode batch size instead of aborting above batch size one.
+    export DECODE_CAPTURE_CONFIG=1,2,3,4
     export RTP_MLA_DECODE_KERNEL=tokenspeed_mla
 }
 
@@ -378,6 +448,7 @@ local_port="${prefill_port}"
 [[ "${role}" == "prefill" ]] || local_port="${decode_port}"
 wait_for_health 127.0.0.1 "${local_port}"
 verify_fastsafetensors_log
+verify_rdma_log
 verify_role_environment
 
 if [[ "${role}" == "decode" ]]; then
@@ -397,6 +468,15 @@ expected_run_id = sys.argv[3]
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_args):
         pass
+
+    def do_GET(self):
+        if self.path != "/ready":
+            self.send_response(404)
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ready\n")
 
     def do_POST(self):
         try:
@@ -438,86 +518,31 @@ PY
 fi
 
 # Prefill is the request/validation side. Confirm the remote Decode endpoint
-# before issuing the OpenAI-compatible request through local Prefill.
+# before issuing OpenAI-compatible requests through local Prefill. The runner
+# also checks local Prefill health before every sequential/concurrent stage.
 wait_for_health "${decode_host}" "${decode_port}"
+wait_for_result_listener
 max_tokens="${SMOKE_MAX_TOKENS:-32}"
 [[ "${max_tokens}" =~ ^[1-9][0-9]*$ ]] \
     || die "SMOKE_MAX_TOKENS must be a positive integer"
-payload="$(python3 - "${max_tokens}" <<'PY'
-import json
-import sys
+smoke_suite="${SMOKE_SUITE:-cache}"
+case "${smoke_suite}" in
+    quick | cache | all) ;;
+    *) die "SMOKE_SUITE must be quick, cache or all" ;;
+esac
 
-print(json.dumps({
-    "model": "kimi-k3",
-    "messages": [{"role": "user", "content": "你好，请问你是谁？"}],
-    "max_tokens": int(sys.argv[1]),
-    "temperature": 0,
-    "top_k": 1,
-    "top_p": 0.95,
-    "reasoning_effort": "none",
-    "seed": 0,
-    "stream": False,
-    "debug_info": True,
-}, ensure_ascii=False, separators=(",", ":")))
-PY
-)"
-http_code="$(
-    curl -sS --max-time "${request_timeout}" \
-        -o "${response_file}" -w '%{http_code}' \
-        -H 'Content-Type: application/json' \
-        --data-binary "${payload}" \
-        "http://127.0.0.1:${prefill_port}/v1/chat/completions"
-)"
-[[ "${http_code}" == "200" ]] \
-    || die "PD request returned HTTP ${http_code}; see ${response_file}"
+python3 "${case_runner}" \
+    --base-url "http://127.0.0.1:${prefill_port}" \
+    --decode-health-url "http://${decode_host}:${decode_port}/health" \
+    --output "${accuracy_file}" \
+    --suite "${smoke_suite}" \
+    --namespace "${SMOKE_RUN_ID}" \
+    --batch-size 4 \
+    --block-size "${SEQ_SIZE_PER_BLOCK}" \
+    --chunk-tokens "${KIMI_K3_PREFILL_CHUNK_TOKENS}" \
+    --max-tokens "${max_tokens}" \
+    --timeout "${request_timeout}"
 
-python3 - "${response_file}" "${accuracy_file}" <<'PY'
-import json
-import pathlib
-import re
-import sys
-
-response = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-content = response["choices"][0]["message"].get("content", "")
-aux = response["aux_info"]
-debug_info = response.get("debug_info") or {}
-output_ids = debug_info.get("output_ids")
-assert isinstance(content, str) and content.strip(), "empty model response"
-assert aux.get("pd_sep") is True, f"pd_sep={aux.get('pd_sep')!r}"
-assert int(aux.get("output_len", 0)) > 0, f"output_len={aux.get('output_len')!r}"
-assert int(aux.get("reuse_len", -1)) == 0, f"reuse_len={aux.get('reuse_len')!r}"
-assert (
-    isinstance(output_ids, list)
-    and output_ids
-    and all(isinstance(ids, list) and ids for ids in output_ids)
-), f"missing output token ids: {output_ids!r}"
-
-# This is a lightweight semantic accuracy gate, not a bitwise/logit comparison.
-# The deterministic identity prompt must identify the model as Kimi/Moonshot.
-expected_identity = r"\bKimi\b|Moonshot|月之暗面"
-assert re.search(expected_identity, content, flags=re.IGNORECASE), (
-    f"answer failed identity accuracy check {expected_identity!r}: {content!r}"
-)
-
-accuracy = {
-    "mode": "semantic_identity",
-    "expected_regex": expected_identity,
-    "passed": True,
-    "content": content,
-    "output_ids": output_ids,
-}
-pathlib.Path(sys.argv[2]).write_text(
-    json.dumps(accuracy, ensure_ascii=False, indent=2) + "\n",
-    encoding="utf-8",
-)
-print(f"model answer: {content}")
-print(
-    "validated response and semantic accuracy: "
-    f"pd_sep=true output_len={aux['output_len']} reuse_len=0 "
-    f"output_ids={output_ids!r}"
-)
-PY
-
-notify_decode PASS semantic-accuracy-validated
-echo "PASS: Prefill validated the PD response and semantic accuracy; artifacts=${role_dir}"
+notify_decode PASS "smoke-suite-${smoke_suite}-validated"
+echo "PASS: Prefill validated suite=${smoke_suite}; artifacts=${role_dir}"
 exit 0

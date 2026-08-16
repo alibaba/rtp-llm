@@ -62,6 +62,10 @@ Model and cache (normally change these together on both roles):
   LINEAR_STEP                            defaults to 1
   CONCURRENCY_LIMIT                      defaults to 2
   MAX_CONTEXT_BATCH_SIZE                 defaults to 1
+  CACHE_STORE_RDMA_MODE                  defaults to 0; set to 1 on both
+                                         Prefill and Decode for Barex RDMA
+  CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS    defaults to 2000; bounded wait for
+                                         the asynchronous RDMA QP pool
 
 Role-specific high-performance paths:
   KIMI_K3_PREFILL_CHUNK_TOKENS           Prefill only; defaults to 65536
@@ -165,6 +169,12 @@ decode_host="${DECODE_ENDPOINT%:*}"
 decode_topology="tp8_ep8"
 [[ "${KIMI_K3_DECODE_TOPOLOGY:-tp8_ep8}" == "tp8_ep8" ]] \
     || die "only TP8/DP1/EP8 Decode is supported"
+cache_store_rdma_mode="${CACHE_STORE_RDMA_MODE:-0}"
+[[ "${cache_store_rdma_mode}" == "0" || "${cache_store_rdma_mode}" == "1" ]] \
+    || die "CACHE_STORE_RDMA_MODE must be 0 or 1"
+cache_store_rdma_connect_timeout_ms="${CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS:-2000}"
+[[ "${cache_store_rdma_connect_timeout_ms}" =~ ^[1-9][0-9]*$ ]] \
+    || die "CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS must be a positive integer"
 # gRPC honors the standard HTTP proxy environment.  The shared CUDA image
 # enables a localhost proxy by default, so same-host P/D traffic would
 # otherwise be redirected through that proxy instead of reaching the peer
@@ -480,7 +490,8 @@ server_args=(
     --use_all_gather 0
     --enable_cuda_graph "${enable_cuda_graph}"
     --enable_cuda_graph_debug_mode "${enable_cuda_graph_debug_mode}"
-    --cache_store_rdma_mode 0
+    --cache_store_rdma_mode "${cache_store_rdma_mode}"
+    --cache_store_rdma_connect_timeout_ms "${cache_store_rdma_connect_timeout_ms}"
     --load_cache_timeout_ms 7200000
     --load_method "${LOAD_METHOD}"
     --ft_core_dump_on_exception "${FT_CORE_DUMP_ON_EXCEPTION:-0}"
