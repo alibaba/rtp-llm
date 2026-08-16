@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, Optional
+from dataclasses import dataclass
+from typing import Dict, Optional, Sequence
 
 import torch
 from torch import nn
 
 from rtp_llm.models_py.modules.kimi_k3.kda.cache import KimiK3KDACache
-from rtp_llm.models_py.modules.kimi_k3.kda.state import KimiKDAState
-from rtp_llm.models_py.modules.kimi_k3.sequence import sequence_offsets
-from rtp_llm.models_py.triton_kernels.kimi_kda import kimi_kda_short_conv_prefill
+from rtp_llm.models_py.triton_kernels.kimi_kda import (
+    KimiKDARecurrentCheckpointMetadata,
+    KimiKDAShortConvMetadata,
+    kimi_kda_short_conv_paged_prefill,
+    prepare_kimi_kda_recurrent_checkpoint_metadata,
+    prepare_kimi_kda_short_conv_metadata,
+)
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
@@ -19,85 +24,203 @@ from rtp_llm.utils.model_weight import W
 _CULA_LOGGED_DEVICES: set[int] = set()
 
 
-@torch.compiler.disable
-def _packed_causal_depthwise_conv1d_prefill(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-    initial_state: Optional[torch.Tensor] = None,
+@dataclass(frozen=True)
+class KimiKDAPrefillMetadata:
+    """Round-scoped KDA metadata and workspace shared by every KDA layer."""
+
+    cu_seqlens_cpu: torch.Tensor
+    sequence_count: int
+    page_size: int
+    required_pages: int
+    conv: KimiKDAShortConvMetadata
+    recurrent: KimiKDARecurrentCheckpointMetadata
+    recurrent_checkpoints: torch.Tensor
+    active_original_batch_indices: torch.Tensor
+    continuation_mask: torch.Tensor
+    active_original_batch_indices_host: tuple[int, ...]
+    continuation_mask_host: tuple[bool, ...]
+
+
+@dataclass
+class KimiKDACurrentLayerState:
+    """Invocation-scoped continuation state for one KDA layer."""
+
+    conv: torch.Tensor
+    recurrent: torch.Tensor
+    valid_requests: set[int]
+
+
+class KimiKDACurrentStateRegistry:
+    """Temporary per-request KDA state shared by internal Prefill rounds."""
+
+    def __init__(self, original_batch_size: int) -> None:
+        if original_batch_size <= 0:
+            raise ValueError("KDA current-state registry requires a non-empty batch")
+        self.original_batch_size = original_batch_size
+        self._layers: dict[int, KimiKDACurrentLayerState] = {}
+
+    def get_or_create(
+        self,
+        layer_idx: int,
+        *,
+        device: torch.device,
+        conv_dtype: torch.dtype,
+        history_size: int,
+        projection_size: int,
+        local_heads: int,
+        head_dim: int,
+    ) -> KimiKDACurrentLayerState:
+        state = self._layers.get(layer_idx)
+        if state is None:
+            state = KimiKDACurrentLayerState(
+                conv=torch.empty(
+                    (self.original_batch_size, history_size, 3 * projection_size),
+                    dtype=conv_dtype,
+                    device=device,
+                ),
+                recurrent=torch.empty(
+                    (
+                        self.original_batch_size,
+                        local_heads,
+                        head_dim,
+                        head_dim,
+                    ),
+                    dtype=torch.float32,
+                    device=device,
+                ),
+                valid_requests=set(),
+            )
+            self._layers[layer_idx] = state
+        return state
+
+
+def prepare_kimi_kda_prefill_metadata(
+    cu_seqlens_host: torch.Tensor,
+    input_lengths_host: torch.Tensor,
+    prefix_lengths_host: torch.Tensor,
     *,
-    use_initial_state: Optional[bool] = None,
-    sequence_ranges: Optional[list[tuple[int, int]]] = None,
-    output_target: Optional[torch.Tensor] = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Run KDA short convolution over packed Prefill sequences."""
+    page_size: int,
+    local_heads: int,
+    head_dim: int,
+    device: torch.device,
+    active_original_batch_indices: Optional[Sequence[int]] = None,
+    continuation_mask: Optional[Sequence[bool]] = None,
+    materialized_block_maps_host: Optional[Sequence[torch.Tensor]] = None,
+) -> KimiKDAPrefillMetadata:
+    """Validate host request metadata once and allocate one round workspace."""
 
-    if x.ndim != 2 or weight.ndim != 2 or x.shape[1] != weight.shape[0]:
+    host_tensors = {
+        "cu_seqlens_host": cu_seqlens_host,
+        "input_lengths_host": input_lengths_host,
+        "prefix_lengths_host": prefix_lengths_host,
+    }
+    for name, tensor in host_tensors.items():
+        if tensor is None or tensor.device.type != "cpu" or tensor.ndim != 1:
+            raise ValueError(f"KDA Prefill requires one-dimensional CPU {name}")
+    if page_size <= 0 or page_size % 64:
         raise ValueError(
-            "packed causal conv expects x=[tokens,channels] and "
-            "weight=[channels,kernel]"
+            "KDA Prefill page size must be a positive multiple of 64, "
+            f"got {page_size}"
         )
-    if not x.is_cuda:
-        raise RuntimeError("Kimi K3 short convolution requires CUDA")
-    ranges = (
-        sequence_ranges
-        if sequence_ranges is not None
-        else sequence_offsets(cu_seqlens, x.shape[0])
-    )
-    channels, kernel_size = weight.shape
-    history_size = kernel_size - 1
-    expected_state = (len(ranges), channels, history_size)
-    had_initial_state = initial_state is not None
-    if initial_state is None:
-        initial_state = x.new_zeros(expected_state)
-    elif tuple(initial_state.shape) != expected_state:
+    if local_heads <= 0 or head_dim <= 0:
         raise ValueError(
-            f"conv state must have shape {expected_state}, got "
-            f"{tuple(initial_state.shape)}"
+            f"KDA Prefill state shape must be positive, got H={local_heads} "
+            f"D={head_dim}"
         )
 
-    if output_target is not None and (
-        tuple(output_target.shape) != tuple(x.shape)
-        or output_target.dtype != x.dtype
-        or output_target.device != x.device
-        or not output_target.is_contiguous()
+    sequence_count = int(cu_seqlens_host.numel()) - 1
+    if (
+        sequence_count <= 0
+        or input_lengths_host.numel() != sequence_count
+        or prefix_lengths_host.numel() != sequence_count
     ):
         raise ValueError(
-            "KDA short conv output target must be contiguous and match "
-            f"the input: input={tuple(x.shape)}/{x.dtype}/{x.device}, "
-            f"output={tuple(output_target.shape)}/{output_target.dtype}/"
-            f"{output_target.device}"
+            "KDA Prefill host metadata batch mismatch: "
+            f"cu={tuple(cu_seqlens_host.shape)} "
+            f"input={tuple(input_lengths_host.shape)} "
+            f"prefix={tuple(prefix_lengths_host.shape)}"
+        )
+    cu_seqlens_cpu = cu_seqlens_host.to(dtype=torch.int32).contiguous()
+    input_lengths_cpu = input_lengths_host.to(dtype=torch.int64)
+    prefix_lengths_cpu = prefix_lengths_host.to(dtype=torch.int64)
+    if int(cu_seqlens_cpu[0]) != 0 or not torch.equal(
+        torch.diff(cu_seqlens_cpu).to(dtype=torch.int64), input_lengths_cpu
+    ):
+        raise ValueError(
+            "KDA Prefill cu_seqlens do not match input lengths: "
+            f"cu={cu_seqlens_cpu.tolist()} input={input_lengths_cpu.tolist()}"
+        )
+    if torch.any(input_lengths_cpu <= 0):
+        raise ValueError(
+            f"KDA Prefill input lengths must be positive: {input_lengths_cpu.tolist()}"
+        )
+    if torch.any(prefix_lengths_cpu < 0) or torch.any(
+        prefix_lengths_cpu % page_size != 0
+    ):
+        raise ValueError(
+            "KDA Prefill prefixes must be non-negative and page-aligned: "
+            f"prefixes={prefix_lengths_cpu.tolist()} page_size={page_size}"
         )
 
-    outputs: list[torch.Tensor] = []
-    final_states: list[torch.Tensor] = []
-    for sequence_idx, (start, end) in enumerate(ranges):
-        sequence = x[start:end]
-        history = initial_state[sequence_idx].to(dtype=x.dtype)
-        if end == start:
-            output = x.new_empty((0, channels))
-            combined = torch.cat((history, sequence.transpose(0, 1)), dim=-1)
-            final_state = (
-                combined[:, -history_size:] if history_size else combined[:, :0]
+    required_pages = int(
+        torch.max(
+            torch.div(
+                prefix_lengths_cpu + input_lengths_cpu + page_size - 1,
+                page_size,
+                rounding_mode="floor",
             )
-        else:
-            output, final_state = kimi_kda_short_conv_prefill(
-                sequence,
-                weight,
-                history,
-                use_history=(
-                    had_initial_state
-                    if use_initial_state is None
-                    else use_initial_state
-                ),
-                output=(None if output_target is None else output_target[start:end]),
-                final_state=None,
-            )
-        outputs.append(output)
-        final_states.append(final_state)
-    if len(outputs) == 1:
-        return outputs[0], final_states[0].unsqueeze(0)
-    return torch.cat(outputs, dim=0), torch.stack(final_states, dim=0)
+        )
+    )
+    conv = prepare_kimi_kda_short_conv_metadata(cu_seqlens_cpu, device)
+    recurrent = prepare_kimi_kda_recurrent_checkpoint_metadata(
+        input_lengths_cpu,
+        prefix_lengths_cpu,
+        page_size,
+        device,
+        materialized_block_maps_host=materialized_block_maps_host,
+    )
+    recurrent_checkpoints = torch.empty(
+        (1, recurrent.total_checkpoints, local_heads, head_dim, head_dim),
+        dtype=torch.float32,
+        device=device,
+    )
+    active_indices = list(
+        range(sequence_count)
+        if active_original_batch_indices is None
+        else active_original_batch_indices
+    )
+    continuing = list(
+        [False] * sequence_count
+        if continuation_mask is None
+        else continuation_mask
+    )
+    if len(active_indices) != sequence_count or len(continuing) != sequence_count:
+        raise ValueError(
+            "KDA active request metadata must contain one value per sequence"
+        )
+    if len(set(active_indices)) != sequence_count or any(
+        index < 0 for index in active_indices
+    ):
+        raise ValueError(
+            "KDA active original request indices must be unique and non-negative"
+        )
+    return KimiKDAPrefillMetadata(
+        cu_seqlens_cpu=cu_seqlens_cpu,
+        sequence_count=sequence_count,
+        page_size=page_size,
+        required_pages=required_pages,
+        conv=conv,
+        recurrent=recurrent,
+        recurrent_checkpoints=recurrent_checkpoints,
+        active_original_batch_indices=torch.tensor(
+            active_indices, dtype=torch.int64, device=device
+        ),
+        continuation_mask=torch.tensor(
+            continuing, dtype=torch.bool, device=device
+        ),
+        active_original_batch_indices_host=tuple(active_indices),
+        continuation_mask_host=tuple(continuing),
+    )
 
 
 class KimiK3KDAPrefill(nn.Module):
@@ -111,11 +234,8 @@ class KimiK3KDAPrefill(nn.Module):
         local_heads: int,
         head_dim: int,
         projection_size: int,
-        history_size: int,
         gate_lower_bound: Optional[float],
-        q_conv: torch.Tensor,
-        k_conv: torch.Tensor,
-        v_conv: torch.Tensor,
+        fused_conv: torch.Tensor,
     ) -> None:
         super().__init__()
         self.weights = weights
@@ -123,62 +243,39 @@ class KimiK3KDAPrefill(nn.Module):
         self.local_heads = local_heads
         self.head_dim = head_dim
         self.projection_size = projection_size
-        self.history_size = history_size
         self.gate_lower_bound = gate_lower_bound
-        self.q_conv = q_conv
-        self.k_conv = k_conv
-        self.v_conv = v_conv
-        self._segment_cu_seqlens: dict[tuple[int, int], torch.Tensor] = {}
-        self._segment_cu_seqlens_cpu: dict[int, torch.Tensor] = {}
+        self.fused_conv = fused_conv
 
-    def _cu_seqlens_for_segment(
-        self, segment_length: int, device: torch.device
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        device_index = device.index if device.index is not None else 0
-        device_key = (device_index, segment_length)
-        device_cu = self._segment_cu_seqlens.get(device_key)
-        if device_cu is None:
-            device_cu = torch.tensor(
-                [0, segment_length], dtype=torch.int32, device=device
-            )
-            self._segment_cu_seqlens[device_key] = device_cu
-        return device_cu, self._host_cu_seqlens_for_segment(segment_length)
-
-    def _host_cu_seqlens_for_segment(
-        self, segment_length: int
-    ) -> torch.Tensor:
-        host_cu = self._segment_cu_seqlens_cpu.get(segment_length)
-        if host_cu is None:
-            host_cu = torch.tensor([0, segment_length], dtype=torch.int32)
-            self._segment_cu_seqlens_cpu[segment_length] = host_cu
-        return host_cu
-
-    def _cula(
+    def _cula_checkpoint_prefill(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
         raw_gate: torch.Tensor,
         raw_beta: torch.Tensor,
-        recurrent_state: Optional[torch.Tensor],
+        recurrent_state: torch.Tensor,
         *,
         cu_seqlens: torch.Tensor,
-        cu_seqlens_cpu: Optional[torch.Tensor] = None,
-        output_target: Optional[torch.Tensor] = None,
-        checkpoint_interval: Optional[int] = None,
-        checkpoint_states: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run cuLA and return its canonical FP32 final state."""
+        cu_seqlens_cpu: torch.Tensor,
+        checkpoint_interval: int,
+        checkpoint_states: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run the cache-backed cuLA checkpoint path."""
 
         if not q.is_cuda:
             raise RuntimeError("Kimi K3 cuLA Prefill requires CUDA")
-        if checkpoint_interval is None and checkpoint_states is not None:
-            raise ValueError("checkpoint_states requires checkpoint_interval")
-        if recurrent_state is not None and (
+        if checkpoint_interval <= 0:
+            raise ValueError("K3 cuLA checkpoint interval must be positive")
+        if (
             recurrent_state.dtype != torch.float32
             or not recurrent_state.is_contiguous()
         ):
             raise ValueError("K3 cuLA state must be contiguous FP32")
+        if (
+            checkpoint_states.dtype != torch.float32
+            or not checkpoint_states.is_contiguous()
+        ):
+            raise ValueError("K3 cuLA checkpoints must be contiguous FP32")
         try:
             import cula
             from cula.kda import chunk_kda as cula_chunk_kda
@@ -202,15 +299,15 @@ class KimiK3KDAPrefill(nn.Module):
         single_sequence = int(cu_seqlens.numel()) == 2
         cula_cu_seqlens = None if single_sequence else cu_seqlens.contiguous()
         with torch.inference_mode():
-            cula_result = cula_chunk_kda(
+            output, final_state, published_checkpoints = cula_chunk_kda(
                 q.contiguous(),
                 k.contiguous(),
                 v.contiguous(),
                 raw_gate.to(dtype=q.dtype).contiguous(),
-                raw_beta.to(dtype=q.dtype),
+                raw_beta.to(dtype=q.dtype).contiguous(),
                 scale=self.head_dim**-0.5,
                 initial_state=recurrent_state,
-                output_final_state=True,
+                output_final_state=False,
                 use_qk_l2norm_in_kernel=True,
                 use_gate_in_kernel=True,
                 use_beta_sigmoid_in_kernel=True,
@@ -221,414 +318,224 @@ class KimiK3KDAPrefill(nn.Module):
                 safe_gate=True,
                 lower_bound=float(self.gate_lower_bound),
                 disable_recompute=False,
-                use_intracard_cp=(
-                    False if checkpoint_interval is not None else "auto"
-                ),
+                use_intracard_cp=False,
                 A_log=self.weights[W.linear_attn_alog].float().contiguous(),
                 dt_bias=self.weights[W.linear_attn_dt_b_kda].float().contiguous(),
                 checkpoint_interval=checkpoint_interval,
                 checkpoint_states=checkpoint_states,
             )
-            if checkpoint_interval is None:
-                output, final_state = cula_result
-            else:
-                output, final_state, published_checkpoints = cula_result
-                if (
-                    checkpoint_states is None
-                    or published_checkpoints.data_ptr() != checkpoint_states.data_ptr()
-                ):
-                    raise RuntimeError(
-                        "cuLA did not publish into the requested FP32 checkpoint buffer"
-                    )
             if (
-                final_state is None
-                or final_state.dtype != torch.float32
-                or not final_state.is_contiguous()
+                published_checkpoints is None
+                or published_checkpoints.data_ptr() != checkpoint_states.data_ptr()
             ):
-                raise RuntimeError("cuLA must return a contiguous FP32 final state")
-            if output_target is not None:
-                output_target.copy_(output)
-                output = output_target
-        return output.to(dtype=q.dtype), final_state
+                raise RuntimeError(
+                    "cuLA did not publish into the requested FP32 checkpoint buffer"
+                )
+            if final_state is not None:
+                raise RuntimeError(
+                    "cuLA returned final state when output_final_state=False"
+                )
+        return output.to(dtype=q.dtype)
 
-    def _aligned_checkpoint_prefill(
+    def _packed_checkpoint_prefill(
         self,
-        q_projected: torch.Tensor,
-        k_projected: torch.Tensor,
-        v_projected: torch.Tensor,
+        mixed_qkv: torch.Tensor,
         raw_gate: torch.Tensor,
         raw_beta: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        initial_state: KimiKDAState,
         kv_cache: LayerKVCache,
         attention_inputs: PyAttentionInputs,
+        linear_block_map: torch.Tensor,
         *,
-        past_length: int,
-        page_size: int,
-        block_map: list[list[int]],
-    ) -> tuple[torch.Tensor, KimiKDAState]:
-        """Run one long cuLA invocation and publish exact page checkpoints."""
+        metadata: KimiKDAPrefillMetadata,
+        current_state: Optional[KimiKDACurrentLayerState],
+    ) -> torch.Tensor:
+        """Run fused paged conv, packed cuLA, and recurrent-only state store."""
 
-        token_count = int(q_projected.shape[0])
+        token_count = int(mixed_qkv.shape[0])
         if token_count <= 0:
             raise ValueError("cuLA checkpoint prefill requires at least one token")
-        if page_size % 64:
+        if tuple(mixed_qkv.shape) != (token_count, 3 * self.projection_size):
             raise ValueError(
-                "cuLA checkpoint page size must be a multiple of 64 tokens, "
-                f"got {page_size}"
+                "KDA fused projection must be [tokens,3*projection_size], got "
+                f"{tuple(mixed_qkv.shape)}"
             )
-        if past_length % page_size:
-            raise ValueError(
-                "cuLA checkpoint prefill requires a page-aligned prefix, "
-                f"got past_length={past_length}, page_size={page_size}"
+        _, conv_cache = self.cache.get_views(kv_cache)
+        current_conv = (
+            current_state.conv.index_select(
+                0, metadata.active_original_batch_indices
             )
-        checkpoint_count = (token_count + page_size - 1) // page_size
-        q_conv = torch.empty_like(q_projected)
-        k_conv = torch.empty_like(k_projected)
-        v_conv = torch.empty_like(v_projected)
-        sequence_range = [(0, token_count)]
-        q_result, q_final = _packed_causal_depthwise_conv1d_prefill(
-            q_projected,
-            self.q_conv,
-            cu_seqlens,
-            initial_state.q_conv_state,
-            use_initial_state=past_length > 0,
-            sequence_ranges=sequence_range,
-            output_target=q_conv,
+            if current_state is not None
+            else None
         )
-        k_result, k_final = _packed_causal_depthwise_conv1d_prefill(
-            k_projected,
-            self.k_conv,
+        if current_state is not None:
+            missing = [
+                request_idx
+                for request_idx, continuing in zip(
+                    metadata.active_original_batch_indices_host,
+                    metadata.continuation_mask_host,
+                )
+                if continuing and request_idx not in current_state.valid_requests
+            ]
+            if missing:
+                raise RuntimeError(
+                    "KDA continuation requested before current state was written: "
+                    f"requests={missing}"
+                )
+        q_conv, k_conv, v_conv, final_conv = kimi_kda_short_conv_paged_prefill(
+            mixed_qkv,
+            self.fused_conv,
+            conv_cache,
+            linear_block_map,
+            attention_inputs.prefix_lengths,
             cu_seqlens,
-            initial_state.k_conv_state,
-            use_initial_state=past_length > 0,
-            sequence_ranges=sequence_range,
-            output_target=k_conv,
-        )
-        v_result, v_final = _packed_causal_depthwise_conv1d_prefill(
-            v_projected,
-            self.v_conv,
-            cu_seqlens,
-            initial_state.v_conv_state,
-            use_initial_state=past_length > 0,
-            sequence_ranges=sequence_range,
-            output_target=v_conv,
-        )
-        if (
-            q_result.data_ptr() != q_conv.data_ptr()
-            or k_result.data_ptr() != k_conv.data_ptr()
-            or v_result.data_ptr() != v_conv.data_ptr()
-        ):
-            raise RuntimeError("K3 short convolution did not use its output target")
-
-        recurrent_checkpoints = torch.empty(
-            (
-                1,
-                checkpoint_count,
-                self.local_heads,
-                self.head_dim,
-                self.head_dim,
+            metadata.page_size,
+            metadata.conv,
+            current_conv_state=current_conv,
+            continuation_mask=(
+                metadata.continuation_mask if current_state is not None else None
             ),
-            dtype=torch.float32,
-            device=q_projected.device,
+            return_final_state=current_state is not None,
         )
-        cu_seqlens_cpu = self._host_cu_seqlens_for_segment(token_count)
+        physical_initial_state = self.cache.load_recurrent_state(
+            kv_cache, attention_inputs, linear_block_map
+        )
+        if current_state is not None:
+            registry_initial_state = current_state.recurrent.index_select(
+                0, metadata.active_original_batch_indices
+            )
+            recurrent_state = torch.where(
+                metadata.continuation_mask[:, None, None, None],
+                registry_initial_state,
+                physical_initial_state,
+            ).contiguous()
+        else:
+            recurrent_state = physical_initial_state
         head_shape = (1, token_count, self.local_heads, self.head_dim)
-        output, recurrent_final = self._cula(
+        output = self._cula_checkpoint_prefill(
             q_conv.reshape(head_shape),
             k_conv.reshape(head_shape),
             v_conv.reshape(head_shape),
             raw_gate.reshape(head_shape),
             raw_beta.reshape(1, token_count, self.local_heads),
-            None if past_length == 0 else initial_state.recurrent_state,
+            recurrent_state,
             cu_seqlens=cu_seqlens,
-            cu_seqlens_cpu=cu_seqlens_cpu,
-            checkpoint_interval=page_size,
-            checkpoint_states=recurrent_checkpoints,
+            cu_seqlens_cpu=metadata.cu_seqlens_cpu,
+            checkpoint_interval=metadata.page_size,
+            checkpoint_states=metadata.recurrent_checkpoints,
         )
-
-        for checkpoint_index in range(checkpoint_count):
-            end = min((checkpoint_index + 1) * page_size, token_count)
-            absolute_end = past_length + end
-            if end >= self.history_size:
-                q_checkpoint = (
-                    q_projected.narrow(
-                        0, end - self.history_size, self.history_size
-                    )
-                    .transpose(0, 1)
-                    .unsqueeze(0)
-                )
-                k_checkpoint = (
-                    k_projected.narrow(
-                        0, end - self.history_size, self.history_size
-                    )
-                    .transpose(0, 1)
-                    .unsqueeze(0)
-                )
-                v_checkpoint = (
-                    v_projected.narrow(
-                        0, end - self.history_size, self.history_size
-                    )
-                    .transpose(0, 1)
-                    .unsqueeze(0)
-                )
-            else:
-                q_checkpoint = q_final
-                k_checkpoint = k_final
-                v_checkpoint = v_final
-            self.cache.store_position(
-                KimiKDAState(
-                    q_conv_state=q_checkpoint,
-                    k_conv_state=k_checkpoint,
-                    v_conv_state=v_checkpoint,
-                    recurrent_state=recurrent_checkpoints[:, checkpoint_index],
-                ),
-                0,
-                kv_cache,
-                attention_inputs,
-                0,
-                absolute_end - 1,
-                block_map=block_map,
+        self.cache.store_recurrent_checkpoints(
+            metadata.recurrent_checkpoints,
+            metadata.recurrent,
+            kv_cache,
+            attention_inputs,
+            linear_block_map,
+        )
+        if current_state is not None:
+            assert final_conv is not None
+            current_state.conv.index_copy_(
+                0, metadata.active_original_batch_indices, final_conv
+            )
+            final_recurrent = metadata.recurrent_checkpoints.squeeze(0).index_select(
+                0, metadata.recurrent.final_checkpoint_indices
+            )
+            current_state.recurrent.index_copy_(
+                0, metadata.active_original_batch_indices, final_recurrent
+            )
+            current_state.valid_requests.update(
+                metadata.active_original_batch_indices_host
             )
 
-        return output, KimiKDAState(
-            q_conv_state=q_final,
-            k_conv_state=k_final,
-            v_conv_state=v_final,
-            recurrent_state=recurrent_final,
-        )
-
-    def _paged_prefill(
-        self,
-        q_projected: torch.Tensor,
-        k_projected: torch.Tensor,
-        v_projected: torch.Tensor,
-        raw_gate: torch.Tensor,
-        raw_beta: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        initial_state: KimiKDAState,
-        kv_cache: LayerKVCache,
-        attention_inputs: PyAttentionInputs,
-    ) -> tuple[torch.Tensor, KimiKDAState]:
-        """Run cuLA page-by-page and persist every reusable boundary."""
-
-        ranges = sequence_offsets(
-            cu_seqlens,
-            q_projected.shape[0],
-            cu_seqlens_host=getattr(attention_inputs, "cu_seqlens_host", None),
-        )
-        past_lengths = self.cache.prefix_lengths(attention_inputs, cu_seqlens)
-        block_map = self.cache.block_map(attention_inputs)
-        page_size = int(kv_cache.seq_size_per_block)
-        if page_size <= 0:
-            raise ValueError("linear cache seq_size_per_block must be positive")
-        if len(ranges) == 1 and past_lengths[0] % page_size == 0:
-            return self._aligned_checkpoint_prefill(
-                q_projected,
-                k_projected,
-                v_projected,
-                raw_gate,
-                raw_beta,
-                cu_seqlens,
-                initial_state,
-                kv_cache,
-                attention_inputs,
-                past_length=past_lengths[0],
-                page_size=page_size,
-                block_map=block_map,
-            )
-
-        fused_output = q_projected.new_empty(
-            1, q_projected.shape[0], self.local_heads, self.head_dim
-        )
-        q_finals: list[torch.Tensor] = []
-        k_finals: list[torch.Tensor] = []
-        v_finals: list[torch.Tensor] = []
-        recurrent_finals: list[torch.Tensor] = []
-        for sequence_idx, ((start, end), past_length) in enumerate(
-            zip(ranges, past_lengths)
-        ):
-            q_state = initial_state.q_conv_state[sequence_idx : sequence_idx + 1]
-            k_state = initial_state.k_conv_state[sequence_idx : sequence_idx + 1]
-            v_state = initial_state.v_conv_state[sequence_idx : sequence_idx + 1]
-            recurrent_state = initial_state.recurrent_state[
-                sequence_idx : sequence_idx + 1
-            ]
-            cursor = start
-            absolute_position = past_length
-            while cursor < end:
-                tokens_to_page_end = page_size - (absolute_position % page_size)
-                segment_end = min(end, cursor + tokens_to_page_end)
-                segment_length = segment_end - cursor
-                segment_cu, segment_cu_cpu = self._cu_seqlens_for_segment(
-                    segment_length, cu_seqlens.device
-                )
-                segment_ranges = [(0, segment_length)]
-                q, q_state = _packed_causal_depthwise_conv1d_prefill(
-                    q_projected[cursor:segment_end],
-                    self.q_conv,
-                    segment_cu,
-                    q_state,
-                    use_initial_state=absolute_position > 0,
-                    sequence_ranges=segment_ranges,
-                )
-                k, k_state = _packed_causal_depthwise_conv1d_prefill(
-                    k_projected[cursor:segment_end],
-                    self.k_conv,
-                    segment_cu,
-                    k_state,
-                    use_initial_state=absolute_position > 0,
-                    sequence_ranges=segment_ranges,
-                )
-                v, v_state = _packed_causal_depthwise_conv1d_prefill(
-                    v_projected[cursor:segment_end],
-                    self.v_conv,
-                    segment_cu,
-                    v_state,
-                    use_initial_state=absolute_position > 0,
-                    sequence_ranges=segment_ranges,
-                )
-                head_shape = (
-                    1,
-                    segment_length,
-                    self.local_heads,
-                    self.head_dim,
-                )
-                segment_output, recurrent_state = self._cula(
-                    q.reshape(head_shape),
-                    k.reshape(head_shape),
-                    v.reshape(head_shape),
-                    raw_gate[cursor:segment_end].reshape(head_shape),
-                    raw_beta[cursor:segment_end].reshape(
-                        1, segment_length, self.local_heads
-                    ),
-                    recurrent_state,
-                    cu_seqlens=segment_cu,
-                    cu_seqlens_cpu=segment_cu_cpu,
-                    output_target=fused_output[:, cursor:segment_end],
-                )
-                segment_state = KimiKDAState(
-                    q_conv_state=q_state,
-                    k_conv_state=k_state,
-                    v_conv_state=v_state,
-                    recurrent_state=recurrent_state,
-                )
-                self.cache.store_position(
-                    segment_state,
-                    0,
-                    kv_cache,
-                    attention_inputs,
-                    sequence_idx,
-                    absolute_position + segment_length - 1,
-                    block_map=block_map,
-                )
-                cursor = segment_end
-                absolute_position += segment_length
-
-            q_finals.append(q_state[0])
-            k_finals.append(k_state[0])
-            v_finals.append(v_state[0])
-            recurrent_finals.append(recurrent_state[0])
-
-        if len(ranges) == 1:
-            return fused_output, KimiKDAState(
-                q_conv_state=q_state,
-                k_conv_state=k_state,
-                v_conv_state=v_state,
-                recurrent_state=recurrent_state,
-            )
-        return fused_output, KimiKDAState(
-            q_conv_state=torch.stack(q_finals),
-            k_conv_state=torch.stack(k_finals),
-            v_conv_state=torch.stack(v_finals),
-            recurrent_state=torch.stack(recurrent_finals),
-        )
+        return output
 
     def forward(
         self,
-        q_projected: torch.Tensor,
-        k_projected: torch.Tensor,
-        v_projected: torch.Tensor,
+        mixed_qkv: torch.Tensor,
         raw_gate: torch.Tensor,
         raw_beta: torch.Tensor,
         cu_seqlens: torch.Tensor,
         *,
-        state: Optional[KimiKDAState],
         kv_cache: Optional[LayerKVCache],
         attention_inputs: Optional[PyAttentionInputs],
-    ) -> tuple[torch.Tensor, KimiKDAState]:
+        metadata: Optional[KimiKDAPrefillMetadata],
+        current_state_registry: Optional[KimiKDACurrentStateRegistry] = None,
+        layer_idx: int = -1,
+    ) -> torch.Tensor:
         if attention_inputs is not None and getattr(
             attention_inputs, "is_target_verify", False
         ):
             raise RuntimeError(
                 "Kimi K3 target verify requires the direct paged Decode path"
             )
-        if kv_cache is not None:
-            if attention_inputs is None:
-                raise ValueError("attention_inputs are required with a KDA cache")
-            if state is None:
-                state = self.cache.load_state(
-                    kv_cache, attention_inputs, cu_seqlens
-                )
-            return self._paged_prefill(
-                q_projected,
-                k_projected,
-                v_projected,
-                raw_gate,
-                raw_beta,
-                cu_seqlens,
-                state,
-                kv_cache,
-                attention_inputs,
+        if kv_cache is None or attention_inputs is None:
+            raise RuntimeError(
+                "Kimi K3 Prefill requires direct paged LayerKVCache; "
+                "the legacy explicit-state path has been removed"
             )
+        if metadata is None:
+            raise RuntimeError(
+                "cache-backed KDA Prefill requires round-scoped metadata"
+            )
+        sequence_count = int(cu_seqlens.numel()) - 1
+        page_size = int(kv_cache.seq_size_per_block)
+        prefix_lengths = attention_inputs.prefix_lengths
+        if (
+            metadata.sequence_count != sequence_count
+            or metadata.page_size != page_size
+            or prefix_lengths is None
+            or prefix_lengths.ndim != 1
+            or prefix_lengths.numel() != sequence_count
+        ):
+            raise ValueError(
+                "KDA Prefill metadata does not match the active cache batch: "
+                f"metadata_sequences={metadata.sequence_count} "
+                f"active_sequences={sequence_count} "
+                f"metadata_page={metadata.page_size} cache_page={page_size}"
+            )
+        linear_block_map = self.cache.linear_state_block_map_device(attention_inputs)
+        if metadata.required_pages > linear_block_map.shape[1]:
+            raise ValueError(
+                "KDA LINEAR block table is too short for Prefill: "
+                f"required_pages={metadata.required_pages}, "
+                f"available_pages={linear_block_map.shape[1]}"
+            )
+        current_state = (
+            current_state_registry.get_or_create(
+                layer_idx,
+                device=mixed_qkv.device,
+                conv_dtype=mixed_qkv.dtype,
+                history_size=int(self.fused_conv.shape[1]) - 1,
+                projection_size=self.projection_size,
+                local_heads=self.local_heads,
+                head_dim=self.head_dim,
+            )
+            if current_state_registry is not None
+            else None
+        )
+        if current_state_registry is not None and any(
+            index >= current_state_registry.original_batch_size
+            for index in metadata.active_original_batch_indices_host
+        ):
+            raise ValueError(
+                "KDA active request index exceeds the current-state registry batch"
+            )
+        return self._packed_checkpoint_prefill(
+            mixed_qkv,
+            raw_gate,
+            raw_beta,
+            cu_seqlens,
+            kv_cache,
+            attention_inputs,
+            linear_block_map,
+            metadata=metadata,
+            current_state=current_state,
+        )
 
-        sequence_ranges = sequence_offsets(
-            cu_seqlens,
-            q_projected.shape[0],
-            cu_seqlens_host=(
-                getattr(attention_inputs, "cu_seqlens_host", None)
-                if attention_inputs is not None
-                else None
-            ),
-        )
-        q, q_final = _packed_causal_depthwise_conv1d_prefill(
-            q_projected,
-            self.q_conv,
-            cu_seqlens,
-            None if state is None else state.q_conv_state,
-            sequence_ranges=sequence_ranges,
-        )
-        k, k_final = _packed_causal_depthwise_conv1d_prefill(
-            k_projected,
-            self.k_conv,
-            cu_seqlens,
-            None if state is None else state.k_conv_state,
-            sequence_ranges=sequence_ranges,
-        )
-        v, v_final = _packed_causal_depthwise_conv1d_prefill(
-            v_projected,
-            self.v_conv,
-            cu_seqlens,
-            None if state is None else state.v_conv_state,
-            sequence_ranges=sequence_ranges,
-        )
-        token_count = q_projected.shape[0]
-        head_shape = (1, token_count, self.local_heads, self.head_dim)
-        output, recurrent_final = self._cula(
-            q.reshape(head_shape),
-            k.reshape(head_shape),
-            v.reshape(head_shape),
-            raw_gate.reshape(head_shape),
-            raw_beta.reshape(1, token_count, self.local_heads),
-            None if state is None else state.recurrent_state,
-            cu_seqlens=cu_seqlens,
-        )
-        return output, KimiKDAState(
-            q_conv_state=q_final,
-            k_conv_state=k_final,
-            v_conv_state=v_final,
-            recurrent_state=recurrent_final,
-        )
 
-
-__all__ = ["KimiK3KDAPrefill"]
+__all__ = [
+    "KimiK3KDAPrefill",
+    "KimiKDACurrentLayerState",
+    "KimiKDACurrentStateRegistry",
+    "KimiKDAPrefillMetadata",
+    "prepare_kimi_kda_prefill_metadata",
+]

@@ -292,7 +292,6 @@ struct PyCacheStoreInputs {
     bool          warmup                    = false;
     bool          use_opaque_kv_cache_store = false;
     bool          mla_kvcache               = false;
-
     // Opaque cache_store reference (C++ only; passes through Python without inspection)
     std::shared_ptr<rtp_llm::CacheStore> cache_store;
     rtp_llm::CacheStoreAsyncWriter*      cache_store_async_writer = nullptr;
@@ -416,6 +415,7 @@ struct PyModelOutputs {
     torch::Tensor          hidden_states;
     rtp_llm::ParamsBasePtr params_ptr{nullptr};
     py::object             py_attn_params{py::none()};
+    bool                   lm_output_already_selected{false};
 
     PyModelOutputs() = default;
 

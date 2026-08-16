@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 
-from rtp_llm.models_py.modules.kimi_k3.kda.state import KimiKDAState
 from rtp_llm.models_py.triton_kernels.kimi_kda import (
-    kimi_k3_store_linear_cache_state,
+    KimiKDARecurrentCheckpointMetadata,
+    kimi_kda_load_recurrent_state,
+    kimi_kda_store_recurrent_checkpoints,
 )
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
@@ -59,226 +58,72 @@ class KimiK3KDACache:
         )
 
     @staticmethod
-    def prefix_lengths(
+    def linear_state_block_map_device(
         attention_inputs: PyAttentionInputs,
-        cu_seqlens: torch.Tensor,
-    ) -> list[int]:
-        cu_host = getattr(attention_inputs, "cu_seqlens_host", None)
-        offsets = [
-            int(value)
-            for value in (
-                cu_host
-                if cu_host is not None and cu_host.numel()
-                else cu_seqlens.detach().cpu()
-            ).tolist()
-        ]
-        sequence_count = max(0, len(offsets) - 1)
-        source_host = getattr(attention_inputs, "prefix_lengths_host", None)
-        source = (
-            source_host
-            if source_host is not None and source_host.numel()
-            else attention_inputs.prefix_lengths
+    ) -> torch.Tensor:
+        """Return the selected LINEAR group's state-block map.
+
+        LINEAR cache groups use one kernel block per physical state block, so
+        their selected kernel table is also the physical index table for the
+        KDA conv and recurrent cache tensors.
+        """
+
+        block_map = getattr(
+            attention_inputs, "kv_cache_kernel_block_id_device", None
         )
-        if source is None or source.numel() == 0:
-            past_lengths = [0] * sequence_count
-        else:
-            past_lengths = [int(value) for value in source.detach().cpu().tolist()]
-        if len(past_lengths) != sequence_count:
+        if (
+            block_map is None
+            or not block_map.numel()
+            or not block_map.is_cuda
+            or block_map.ndim != 2
+        ):
             raise ValueError(
-                "KDA cache batch does not match packed sequence count: "
-                f"past={len(past_lengths)} sequences={sequence_count}"
+                "KDA cache requires a two-dimensional CUDA LINEAR block map"
             )
-        return past_lengths
-
-    @staticmethod
-    def block_map(attention_inputs: PyAttentionInputs) -> list[list[int]]:
-        block_map = attention_inputs.kv_cache_block_id_host
-        if block_map is None or block_map.numel() == 0:
-            block_map = attention_inputs.kv_cache_kernel_block_id_host
-        if block_map is None or block_map.numel() == 0 or block_map.ndim != 2:
-            raise ValueError("KDA cache requires a two-dimensional kernel block map")
-        return [
-            [int(value) for value in row]
-            for row in (
-                block_map.tolist()
-                if block_map.device.type == "cpu"
-                else block_map.detach().cpu().tolist()
-            )
-        ]
-
-    @staticmethod
-    def _block_id_or_none(
-        block_map: list[list[int]],
-        sequence_idx: int,
-        token_position: int,
-        page_size: int,
-    ) -> Optional[int]:
-        block_position = token_position // page_size
-        if block_position >= len(block_map[sequence_idx]):
+        if block_map.dtype not in (torch.int32, torch.int64):
             raise ValueError(
-                f"linear cache block map is too short for token {token_position}"
+                f"KDA LINEAR block map must be int32/int64, got {block_map.dtype}"
             )
-        block_id = block_map[sequence_idx][block_position]
-        return None if block_id <= 0 else block_id
-
-    @classmethod
-    def _block_id(
-        cls,
-        block_map: list[list[int]],
-        sequence_idx: int,
-        token_position: int,
-        page_size: int,
-    ) -> int:
-        block_id = cls._block_id_or_none(
-            block_map, sequence_idx, token_position, page_size
-        )
-        if block_id is None:
-            raise ValueError(
-                "linear cache has no materialized block at position "
-                f"{token_position // page_size}"
-            )
-        return block_id
-
-    @staticmethod
-    def _is_fake_block_row(block_row: list[int]) -> bool:
-        return bool(block_row) and all(block_id == 0 for block_id in block_row)
+        return block_map
 
     @staticmethod
     def _is_fake_stream(attention_inputs: PyAttentionInputs) -> bool:
         return bool(getattr(attention_inputs, "is_fake_stream", False))
 
-    def load_state(
+    def load_recurrent_state(
         self,
         kv_cache: LayerKVCache,
         attention_inputs: PyAttentionInputs,
-        cu_seqlens: torch.Tensor,
-    ) -> KimiKDAState:
-        ssm_cache, conv_cache = self.get_views(kv_cache)
-        page_size = int(kv_cache.seq_size_per_block)
-        if page_size <= 0:
-            raise ValueError("linear cache seq_size_per_block must be positive")
-        past_lengths = self.prefix_lengths(attention_inputs, cu_seqlens)
-        block_map = self.block_map(attention_inputs)
+        linear_block_map: torch.Tensor,
+    ) -> torch.Tensor:
+        """Gather cache-backed cuLA initial state without touching conv state."""
 
-        if len(past_lengths) == 1:
-            past_length = past_lengths[0]
-            if (
-                self._is_fake_stream(attention_inputs)
-                or past_length == 0
-                or self._is_fake_block_row(block_map[0])
-            ):
-                conv_states = conv_cache.new_zeros(
-                    3, self.projection_size, self.history_size
-                )
-                recurrent = ssm_cache.new_zeros(
-                    1, self.local_heads, self.head_dim, self.head_dim
-                )
-                return KimiKDAState(
-                    q_conv_state=conv_states[0:1],
-                    k_conv_state=conv_states[1:2],
-                    v_conv_state=conv_states[2:3],
-                    recurrent_state=recurrent,
-                )
-            block_id = self._block_id(block_map, 0, past_length - 1, page_size)
-            packed_conv = conv_cache[block_id].transpose(0, 1)
-            q_state, k_state, v_state = torch.split(
-                packed_conv, self.projection_size, dim=0
-            )
-            return KimiKDAState(
-                q_conv_state=q_state.unsqueeze(0),
-                k_conv_state=k_state.unsqueeze(0),
-                v_conv_state=v_state.unsqueeze(0),
-                recurrent_state=ssm_cache[block_id].unsqueeze(0),
-            )
-
-        recurrent_states: list[torch.Tensor] = []
-        q_states: list[torch.Tensor] = []
-        k_states: list[torch.Tensor] = []
-        v_states: list[torch.Tensor] = []
-        is_fake_stream = self._is_fake_stream(attention_inputs)
-        for sequence_idx, past_length in enumerate(past_lengths):
-            if (
-                is_fake_stream
-                or past_length == 0
-                or self._is_fake_block_row(block_map[sequence_idx])
-            ):
-                recurrent_states.append(
-                    ssm_cache.new_zeros(self.local_heads, self.head_dim, self.head_dim)
-                )
-                empty_conv = conv_cache.new_zeros(
-                    self.projection_size, self.history_size
-                )
-                q_states.append(empty_conv)
-                k_states.append(empty_conv.clone())
-                v_states.append(empty_conv.clone())
-                continue
-            block_id = self._block_id(
-                block_map, sequence_idx, past_length - 1, page_size
-            )
-            recurrent_states.append(ssm_cache[block_id])
-            packed_conv = conv_cache[block_id].transpose(0, 1)
-            q_state, k_state, v_state = torch.split(
-                packed_conv, self.projection_size, dim=0
-            )
-            q_states.append(q_state)
-            k_states.append(k_state)
-            v_states.append(v_state)
-        return KimiKDAState(
-            q_conv_state=torch.stack(q_states),
-            k_conv_state=torch.stack(k_states),
-            v_conv_state=torch.stack(v_states),
-            recurrent_state=torch.stack(recurrent_states),
+        ssm_cache, _ = self.get_views(kv_cache)
+        return kimi_kda_load_recurrent_state(
+            attention_inputs.prefix_lengths,
+            linear_block_map,
+            ssm_cache,
+            int(kv_cache.seq_size_per_block),
         )
 
-    def store_position(
+    def store_recurrent_checkpoints(
         self,
-        state: KimiKDAState,
-        state_index: int,
+        checkpoints: torch.Tensor,
+        metadata: KimiKDARecurrentCheckpointMetadata,
         kv_cache: LayerKVCache,
         attention_inputs: PyAttentionInputs,
-        sequence_idx: int,
-        absolute_position: int,
-        *,
-        block_map: Optional[list[list[int]]] = None,
+        linear_block_map: torch.Tensor,
     ) -> None:
-        if absolute_position < 0:
-            raise ValueError("KDA cache position must be non-negative")
+        """Publish cuLA checkpoints into only the physical recurrent region."""
+
         if self._is_fake_stream(attention_inputs):
             return
-        ssm_cache, conv_cache = self.get_views(kv_cache)
-        block_map = self.block_map(attention_inputs) if block_map is None else block_map
-        page_size = int(kv_cache.seq_size_per_block)
-        if page_size <= 0:
-            raise ValueError("linear cache seq_size_per_block must be positive")
-        block_id = self._block_id_or_none(
-            block_map, sequence_idx, absolute_position, page_size
-        )
-        if block_id is None:
-            return
-        self._copy_state_to_block(
-            state,
-            state_index,
-            block_id,
+        ssm_cache, _ = self.get_views(kv_cache)
+        kimi_kda_store_recurrent_checkpoints(
+            checkpoints,
+            metadata,
+            linear_block_map,
             ssm_cache,
-            conv_cache,
         )
-
-    @staticmethod
-    def _copy_state_to_block(
-        state: KimiKDAState,
-        state_index: int,
-        block_id: int,
-        ssm_cache: torch.Tensor,
-        conv_cache: torch.Tensor,
-    ) -> None:
-        kimi_k3_store_linear_cache_state(
-            state.recurrent_state[state_index],
-            state.q_conv_state[state_index],
-            state.k_conv_state[state_index],
-            state.v_conv_state[state_index],
-            ssm_cache[block_id],
-            conv_cache[block_id],
-        )
-
 
 __all__ = ["KimiK3KDACache"]

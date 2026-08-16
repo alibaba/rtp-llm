@@ -272,7 +272,10 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::arg("params_ptr"),
              "Initialize with hidden states tensor and params pointer")
         .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
-        .def_readwrite("params_ptr", &PyModelOutputs::params_ptr, "Parameters pointer");
+        .def_readwrite("params_ptr", &PyModelOutputs::params_ptr, "Parameters pointer")
+        .def_readwrite("lm_output_already_selected",
+                       &PyModelOutputs::lm_output_already_selected,
+                       "True when Python already returned one terminal row per LM output");
 }
 
 }  // namespace torch_ext

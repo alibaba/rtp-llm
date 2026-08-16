@@ -7,7 +7,7 @@ from torch import nn
 
 import rtp_llm.models_py.model_desc.kimi_k3 as kimi_k3
 import rtp_llm.models_py.modules.factory.linear.parallel as sequence_parallel
-import rtp_llm.models_py.modules.kimi_k3.kda as kimi_k3_kda
+import rtp_llm.models_py.modules.kimi_k3.kda.module as kimi_k3_kda
 import rtp_llm.models_py.modules.kimi_k3.mla as kimi_k3_mla
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
 from rtp_llm.models_py.model_desc.kimi_k3 import (
@@ -74,6 +74,7 @@ class KimiK3AllGatherMatmulUnitTest(unittest.TestCase):
                 )
                 beta_begin = module.attn_tp_rank * module.local_heads
                 expected = (
+                    packed[:, : 3 * module.projection_size],
                     q,
                     k,
                     v,
@@ -747,6 +748,7 @@ class KimiK3AllGatherMatmulUnitTest(unittest.TestCase):
         )
         beta_begin = module.attn_tp_rank * module.local_heads
         expected = (
+            expected_packed[:, : 3 * module.projection_size],
             expected_q,
             expected_k,
             expected_v,

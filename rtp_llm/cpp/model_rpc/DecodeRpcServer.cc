@@ -124,16 +124,7 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
 
     const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
     if (cache_config.use_mla && hasSegmentedLinearCacheGroup(cache_config)) {
-        constexpr size_t kK3PhysicalTokensPerBlock = 4096;
-        constexpr size_t kK3KernelTokensPerBlock   = 128;
-        constexpr int    kK3PrefillAttentionTp     = 8;
-        RTP_LLM_CHECK_WITH_INFO(
-            cache_config.seq_size_per_block == kK3PhysicalTokensPerBlock
-                && cache_config.kernel_seq_size_per_block == kK3KernelTokensPerBlock,
-            "request [%s] this K3 PD stage requires decode physical/kernel block sizes 4096/128, got %zu/%zu",
-            decode_context.request_key.c_str(),
-            cache_config.seq_size_per_block,
-            cache_config.kernel_seq_size_per_block);
+        constexpr int kK3PrefillAttentionTp = 8;
         RTP_LLM_CHECK_WITH_INFO(decode_context.prefill_seq_size_per_block > 0
                                     && static_cast<size_t>(decode_context.prefill_seq_size_per_block)
                                            == cache_config.seq_size_per_block,
@@ -197,11 +188,14 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
                                     linear_spec->local_num_k_heads,
                                     linear_spec->local_num_v_heads);
         }
-        RTP_LLM_LOG_INFO("[K3_PD] request=%s cache_mapping=P%d_to_D%d peers=%zu",
+        RTP_LLM_LOG_INFO("[K3_PD] request=%s cache_mapping=P%d_to_D%d peers=%zu physical_block=%zu "
+                         "kernel_block=%zu",
                          decode_context.request_key.c_str(),
                          decode_context.prefill_attention_tp_size,
                          decode_attention_tp,
-                         decode_context.peer_addrs.size());
+                         decode_context.peer_addrs.size(),
+                         cache_config.seq_size_per_block,
+                         cache_config.kernel_seq_size_per_block);
     }
     if (maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded
         && maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled()) {

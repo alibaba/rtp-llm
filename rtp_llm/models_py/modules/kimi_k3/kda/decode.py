@@ -65,7 +65,12 @@ class KimiK3KDADecode(nn.Module):
         sequence_lengths_plus_one = getattr(
             attention_inputs, "sequence_lengths_plus_1_d", None
         )
-        block_map = getattr(attention_inputs, "kv_cache_kernel_block_id_device", None)
+        # LINEAR cache groups use one kernel block per physical state block;
+        # select_block_map_for_layer therefore exposes the physical KDA IDs
+        # through the existing kernel-map field.
+        block_map = getattr(
+            attention_inputs, "kv_cache_kernel_block_id_device", None
+        )
         if (
             sequence_lengths_plus_one is None
             or block_map is None
@@ -79,7 +84,7 @@ class KimiK3KDADecode(nn.Module):
         ):
             raise RuntimeError(
                 "KDA paged decode requires CUDA sequence lengths and a "
-                "two-dimensional block map matching the request batch"
+                "two-dimensional LINEAR block map matching the request batch"
             )
 
         ssm_cache, conv_cache = self.cache.get_views(kv_cache)

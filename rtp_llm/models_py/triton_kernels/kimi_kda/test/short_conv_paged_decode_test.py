@@ -8,7 +8,6 @@ from rtp_llm.models_py.triton_kernels.kimi_kda.fused_recurrent import (
 from rtp_llm.models_py.triton_kernels.kimi_kda.short_conv import (
     kimi_kda_short_conv_decode,
     kimi_kda_short_conv_paged_decode,
-    kimi_kda_short_conv_prefill,
 )
 
 
@@ -107,37 +106,6 @@ class KimiKDAShortConvPagedDecodeTest(unittest.TestCase):
             page_size,
         )
 
-    def test_prefill_accepts_k3_fused_projection_leading_stride(self) -> None:
-        token_count = 257
-        channels = 256
-        fused_width = 6368
-        fused = torch.randn(
-            token_count,
-            fused_width,
-            dtype=torch.bfloat16,
-            device="cuda",
-        )
-        projected = fused[:, 2 * channels : 3 * channels]
-        self.assertEqual(projected.stride(), (fused_width, 1))
-        weight = torch.randn(channels, 4, dtype=torch.float32, device="cuda")
-        history = torch.randn(channels, 3, dtype=torch.bfloat16, device="cuda")
-
-        actual_output, actual_final = kimi_kda_short_conv_prefill(
-            projected,
-            weight,
-            history,
-            use_history=True,
-        )
-        expected_output, expected_final = kimi_kda_short_conv_prefill(
-            projected.contiguous(),
-            weight,
-            history,
-            use_history=True,
-        )
-
-        torch.testing.assert_close(actual_output, expected_output, rtol=0, atol=0)
-        torch.testing.assert_close(actual_final, expected_final, rtol=0, atol=0)
-
     def test_matches_per_request_decode_at_page_boundaries(self) -> None:
         inputs = self._inputs()
         q, k, v, weight, conv_state, block_map, lengths, page_size = inputs
@@ -177,6 +145,46 @@ class KimiKDAShortConvPagedDecodeTest(unittest.TestCase):
         )
         torch.testing.assert_close(inputs[4], expected_state, rtol=0, atol=0)
         torch.testing.assert_close(inputs[4][0], initial_state[0], rtol=0, atol=0)
+
+    def test_out_of_range_physical_block_is_zero_initialized_and_not_written(self) -> None:
+        inputs = list(self._inputs())
+        q, k, v, weight, conv_state, block_map, lengths, page_size = inputs
+        block_map = block_map[:1].clone()
+        block_map[0].fill_(conv_state.shape[0] + 17)
+        lengths = lengths[:1].clone()
+        initial_state = conv_state.clone()
+        zero_history = torch.zeros(
+            q.shape[1], weight.shape[1] - 1, dtype=q.dtype, device=q.device
+        )
+        expected = []
+        for projection, projected in enumerate((q[:1], k[:1], v[:1])):
+            begin = projection * q.shape[1]
+            end = begin + q.shape[1]
+            expected.append(
+                kimi_kda_short_conv_decode(
+                    projected[0], weight[begin:end], zero_history
+                )
+            )
+
+        actual = kimi_kda_short_conv_paged_decode(
+            q[:1],
+            k[:1],
+            v[:1],
+            weight,
+            conv_state,
+            block_map,
+            lengths,
+            page_size,
+        )
+        torch.cuda.synchronize()
+
+        torch.testing.assert_close(
+            torch.stack([item[0] for item in actual]),
+            torch.stack(expected),
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(conv_state, initial_state, rtol=0, atol=0)
 
     def test_cuda_graph_replay_uses_live_indices_and_inputs(self) -> None:
         inputs = list(self._inputs())

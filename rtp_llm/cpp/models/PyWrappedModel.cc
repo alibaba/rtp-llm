@@ -29,14 +29,14 @@ using namespace std;
 
 namespace rtp_llm {
 
-static bool kimiK3WholeChunkPrefillEnabled() {
+static int64_t kimiK3WholeChunkPrefillTokens() {
     const char* value = std::getenv("KIMI_K3_PREFILL_CHUNK_TOKENS");
     if (value == nullptr) {
-        return false;
+        return 0;
     }
-    char* end = nullptr;
+    char*      end          = nullptr;
     const long chunk_tokens = std::strtol(value, &end, 10);
-    return end != value && *end == '\0' && chunk_tokens > 0;
+    return end != value && *end == '\0' && chunk_tokens > 0 ? chunk_tokens : 0;
 }
 
 static torch::Tensor layerRegionToGroupTensor(const std::optional<CacheLayerLayout>& layout_opt) {
@@ -455,6 +455,7 @@ torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const Gp
 GptModelOutputs PyWrappedModel::callForwardPostLayers(torch::Tensor         hidden_states,
                                                       const GptModelInputs& inputs,
                                                       bool                  skip_final_layernorm,
+                                                      bool                  lm_output_already_selected,
                                                       size_t                num_valid_tokens) {
     RTP_LLM_PROFILE_SCOPE("py_model.callForwardPostLayers");
     size_t num_input_tokens = num_valid_tokens != -1 ? num_valid_tokens : inputs.combo_tokens.size(0);
@@ -466,6 +467,7 @@ GptModelOutputs PyWrappedModel::callForwardPostLayers(torch::Tensor         hidd
                              num_input_tokens,
                              inputs,
                              torch::Tensor(),
+                             lm_output_already_selected,
                              skip_final_layernorm);
 }
 
@@ -819,9 +821,23 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     try {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 
+        const auto whole_chunk_tokens = kimiK3WholeChunkPrefillTokens();
+        const bool will_run_whole_chunk =
+            whole_chunk_tokens > 0 && inputs.sequence_lengths.size(0) == 0
+            && inputs.combo_tokens.size(0) > whole_chunk_tokens;
+
         if (int(device_props_.enable_layer_micro_batch)) {
+            RTP_LLM_CHECK_WITH_INFO(
+                !will_run_whole_chunk,
+                "K3 whole-model Prefill does not support framework layer micro-batching: tokens=%ld chunk=%ld",
+                inputs.combo_tokens.size(0),
+                whole_chunk_tokens);
             return forwardMicroBatched(inputs);
         }
+        RTP_LLM_CHECK_WITH_INFO(!will_run_whole_chunk || !inputs.need_all_logits,
+                                "K3 whole-model Prefill does not support all logits");
+        RTP_LLM_CHECK_WITH_INFO(!will_run_whole_chunk || !inputs.need_all_hidden_states,
+                                "K3 whole-model Prefill does not support all hidden states");
         PyContextParallelParams cp_params;
         if (device_props_.enable_prefill_cp) {
             context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
@@ -857,7 +873,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         if (device_props_.enable_prefill_cp) {
             attention_inputs_.context_parallel_info = cp_params;
         }
-
         // No fusedCopy here: prepareAttentionInputs (above) already flushed its queue,
         // and combo_tokens above used direct .to(non_blocking=true). Both are async on
         // the current stream and will be ordered correctly with the kernels below.
@@ -925,9 +940,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 return forwardPostLayersLastHidden(hidden_states, inputs);
             }
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
-            return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
+            return callForwardPostLayers(hidden_states, inputs, true, false, num_valid_tokens);
         }
-        return callForwardPostLayers(hidden_states, inputs, true);
+        return callForwardPostLayers(
+            hidden_states, inputs, true, py_model_outputs.lm_output_already_selected);
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
@@ -994,6 +1010,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                                                   size_t                token_num,
                                                   const GptModelInputs& inputs,
                                                   torch::Tensor         merged_eagle3_hidden,
+                                                  bool                  lm_output_already_selected,
                                                   bool                  skip_final_layernorm) {
     DevicePerfWrapper wrapper(enable_device_perf_, "forwardPostLayers");
     if (enable_sp && device_props_.tp_size > 1) {
@@ -1071,20 +1088,19 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         torch::Tensor last_hidden;
         if (has_context_request && !need_all_logits) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(index_select_last_hidden)");
-            // Model-side whole-prefill chunking returns only the final
-            // contiguous chunk.  The scheduler's lm_output_indexes still use
-            // the original request coordinate, so map the one next-token row
-            // to the final row of the chunk without materialising a [1M,H]
-            // hidden tensor solely for index_select.  This opt-in capacity
-            // path rejects multi-logit requests in Python's caller contract.
-            if (kimiK3WholeChunkPrefillEnabled()) {
-                RTP_LLM_CHECK_WITH_INFO(lm_output_indexes_device.numel() == 1,
-                                        "K3 whole-prefill chunking supports exactly one LM output row, got %ld",
-                                        lm_output_indexes_device.numel());
-                lm_output_indexes_device = torch::full_like(lm_output_indexes_device, hidden.size(0) - 1);
+            if (lm_output_already_selected) {
+                RTP_LLM_CHECK_WITH_INFO(
+                    hidden.size(0) == lm_output_indexes_device.numel(),
+                    "model-selected LM rows mismatch: hidden=%ld lm_output_indexes=%ld",
+                    hidden.size(0),
+                    lm_output_indexes_device.numel());
+                last_hidden = hidden;
+            } else {
+                last_hidden = torch::index_select(hidden, 0, lm_output_indexes_device);
             }
-            last_hidden = torch::index_select(hidden, 0, lm_output_indexes_device);
         } else {
+            RTP_LLM_CHECK_WITH_INFO(!lm_output_already_selected,
+                                    "model-selected LM rows do not support all-logit/all-hidden output");
             last_hidden = hidden;
         }
 

@@ -15,11 +15,10 @@ own their operator implementations.
 
 from __future__ import annotations
 
-import copy
 import logging
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
 from torch import nn
@@ -58,7 +57,22 @@ from rtp_llm.models_py.modules.hybrid.dense_mlp import (
 from rtp_llm.models_py.modules.factory.linear.parallel import (
     should_use_fused_all_gather_matmul,
 )
-from rtp_llm.models_py.modules.kimi_k3.kda.state import KDAExecutionMode
+from rtp_llm.models_py.modules.kimi_k3.kda import KDAExecutionMode, KimiK3KDA
+from rtp_llm.models_py.modules.kimi_k3.kda.prefill import (
+    KimiKDACurrentStateRegistry,
+    KimiKDAPrefillMetadata,
+    prepare_kimi_kda_prefill_metadata,
+)
+from rtp_llm.models_py.modules.kimi_k3.chunk_prefill import (
+    KimiK3ChunkRound,
+    build_chunk_model_inputs,
+    host_lengths,
+    kda_materialized_block_maps,
+    kda_round_state_mapping,
+    plan_kimi_k3_chunk_rounds,
+    prepare_round_fmha,
+    validate_whole_chunk_prefill,
+)
 from rtp_llm.models_py.triton_kernels.common.activation import SituAndMul
 from rtp_llm.ops import HybridAttentionType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
@@ -73,45 +87,15 @@ from rtp_llm.utils.model_weight import W
 if TYPE_CHECKING:
     from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
 
-from rtp_llm.models_py.modules.kimi_k3.kda import KimiK3KDA
 from rtp_llm.models_py.modules.kimi_k3.mla import KimiK3MLA
 from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
 from rtp_llm.models_py.modules.kimi_k3.residual import KimiK3AttentionResidual
-from rtp_llm.models_py.modules.kimi_k3.sequence import sequence_offsets
-
-
-def _prefill_chunk_tokens() -> int:
-    """Return the opt-in whole-model Prefill chunk size."""
-
-    raw = os.environ.get("KIMI_K3_PREFILL_CHUNK_TOKENS", "0").strip()
-    try:
-        value = int(raw)
-    except ValueError as exc:
-        raise ValueError(
-            "KIMI_K3_PREFILL_CHUNK_TOKENS must be a non-negative integer, "
-            f"got {raw!r}"
-        ) from exc
-    if value < 0:
-        raise ValueError(
-            "KIMI_K3_PREFILL_CHUNK_TOKENS must be non-negative, " f"got {value}"
-        )
-    return value
-
-
-def _fused_ag_workspace_global_tokens(
-    max_seq_len: int,
-    max_context_batch_size: int,
-    chunk_tokens: int,
-) -> int:
-    """Bound the symmetric AG/GEMM workspace by one model invocation."""
-
-    configured_tokens = int(max_seq_len) * int(max_context_batch_size)
-    if chunk_tokens <= 0:
-        return configured_tokens
-    return min(
-        configured_tokens,
-        int(chunk_tokens) * int(max_context_batch_size),
-    )
+from rtp_llm.models_py.modules.kimi_k3.utils import (
+    fused_ag_workspace_global_tokens,
+    mask_multimodal_token_ids,
+    prefill_chunk_tokens,
+    resolve_cu_seqlens,
+)
 
 
 @dataclass(frozen=True)
@@ -122,6 +106,8 @@ class KimiK3DecoderMetadata:
     mode: KDAExecutionMode
     sequence_parallel: bool
     prefill_sp_layout: Optional[TokenShardLayout] = None
+    kda_prefill_metadata: Optional[KimiKDAPrefillMetadata] = None
+    kda_current_state_registry: Optional[KimiKDACurrentStateRegistry] = None
 
 
 @dataclass(frozen=True)
@@ -283,7 +269,7 @@ class KimiK3DecoderLayer(nn.Module):
         active_blocks = previous_blocks + int(writes_block)
         active_block_residual = block_residual[:, :active_blocks]
         if self.is_kda:
-            attention_output, _ = self.self_attn(
+            attention_output = self.self_attn(
                 attention_input,
                 cu_seqlens,
                 mode=mode,
@@ -291,6 +277,8 @@ class KimiK3DecoderLayer(nn.Module):
                 attention_inputs=attention_inputs,
                 sequence_parallel=sequence_parallel,
                 prefill_sp_layout=prefill_sp_layout,
+                prefill_metadata=attn_meta.kda_prefill_metadata,
+                current_state_registry=attn_meta.kda_current_state_registry,
             )
         else:
             attention_output = self.self_attn(
@@ -347,36 +335,6 @@ class KimiK3DecoderLayer(nn.Module):
         return KimiK3DecoderOutput(output, block_residual)
 
 
-def _mask_multimodal_token_ids(
-    input_ids: torch.Tensor,
-    multimodal_features: Sequence[torch.Tensor],
-    multimodal_locs: torch.Tensor,
-) -> torch.Tensor:
-    """Zero the token ids that ``MultimodalEmbeddingInjector`` will overwrite.
-
-    Multimodal rows do not hold vocab ids: ``MultimodalProcessor::expandTokenIds``
-    replaces them with per-row feature hashes (``featureHashToTokenId``, an arbitrary
-    ``int32`` that is routinely negative or ``>= vocab_size``) so the prefix cache can
-    tell two images apart. Feeding those to the embedding op indexes out of bounds, so
-    they must be masked before lookup. The zeroed rows are overwritten by the injector.
-    """
-    locs = multimodal_locs.to(device="cpu", dtype=torch.long).view(-1).tolist()
-    masked_ids = input_ids.clone()
-    for feature, loc in zip(multimodal_features, locs):
-        if feature is None:
-            continue
-        # loc < 0 means the head rows already live in the reused KV prefix and only
-        # the tail lands in this chunk, at token 0 -- same convention as the injector.
-        offset = max(loc, 0)
-        length = feature.size(0) - min(max(-loc, 0), feature.size(0))
-        # Out-of-range spans are clipped rather than rejected here; the injector
-        # raises the canonical IndexError after the embedding lookup.
-        length = min(length, masked_ids.size(0) - offset)
-        if length > 0:
-            masked_ids.narrow(0, offset, length).fill_(0)
-    return masked_ids
-
-
 class KimiK3Model(GptModelBase):
     """Text decoder body consumed by RTP's Python model executor."""
 
@@ -424,6 +382,18 @@ class KimiK3Model(GptModelBase):
                 for layer_idx in range(self.layer_num)
             ]
         )
+        first_kda = next(
+            (
+                layer.self_attn
+                for layer in self.layers
+                if layer.is_kda and isinstance(layer.self_attn, KimiK3KDA)
+            ),
+            None,
+        )
+        if first_kda is None:
+            raise RuntimeError("Kimi K3 model has no KDA layer")
+        self._kda_local_heads = int(first_kda.local_heads)
+        self._kda_head_dim = int(first_kda.head_dim)
         self.norm = KimiK3FinalNorm(
             weights.get_global_weight(K3W.OUTPUT_ATTN_RES_NORM),
             weights.get_global_weight(K3W.OUTPUT_ATTN_RES_PROJ),
@@ -462,10 +432,10 @@ class KimiK3Model(GptModelBase):
             return True
 
         tp_size = int(self.parallelism_config.get_attn_tp_size())
-        max_global_tokens = _fused_ag_workspace_global_tokens(
+        max_global_tokens = fused_ag_workspace_global_tokens(
             int(self.config.max_seq_len),
             int(init_resource.max_context_batch_size),
-            _prefill_chunk_tokens(),
+            prefill_chunk_tokens(),
         )
         max_local_tokens = (max_global_tokens + tp_size - 1) // tp_size
         max_physical_tokens = max_local_tokens * tp_size
@@ -542,7 +512,7 @@ class KimiK3Model(GptModelBase):
         """Return a model-owned AttnRes bank reused across Prefill chunks."""
 
         tp_size = int(self.parallelism_config.get_attn_tp_size())
-        chunk_tokens = _prefill_chunk_tokens()
+        chunk_tokens = prefill_chunk_tokens()
         chunk_local_rows = (
             (chunk_tokens + tp_size - 1) // tp_size if chunk_tokens > 0 else 0
         )
@@ -585,7 +555,7 @@ class KimiK3Model(GptModelBase):
                 raise ValueError(
                     "Kimi K3 multimodal feature locations must match the feature count"
                 )
-            input_ids = _mask_multimodal_token_ids(
+            input_ids = mask_multimodal_token_ids(
                 input_ids, multimodal_features, mm_features_locs
             )
 
@@ -596,53 +566,10 @@ class KimiK3Model(GptModelBase):
             hidden_states, multimodal_features, mm_features_locs
         )
 
-    @staticmethod
-    def _cu_seqlens(
-        attention_inputs: PyAttentionInputs, input_ids: torch.Tensor
-    ) -> torch.Tensor:
-        cu_seqlens = (
-            attention_inputs.cu_seqlens
-            if attention_inputs.is_prefill
-            else attention_inputs.decode_cu_seqlens_d
-        )
-        if cu_seqlens is None or cu_seqlens.numel() == 0:
-            cu_seqlens = (
-                torch.tensor(
-                    [0, input_ids.numel()],
-                    dtype=torch.int32,
-                    device=input_ids.device,
-                )
-                if attention_inputs.is_prefill
-                else torch.arange(
-                    input_ids.numel() + 1,
-                    dtype=torch.int32,
-                    device=input_ids.device,
-                )
-            )
-        graph_decode = not attention_inputs.is_prefill and (
-            bool(getattr(attention_inputs, "is_cuda_graph", False))
-            or (input_ids.is_cuda and torch.cuda.is_current_stream_capturing())
-        )
-        if graph_decode:
-            # Decode has exactly one packed token per request.  Inspecting the
-            # CUDA prefix sums on the host would make capture illegal and would
-            # freeze replay metadata; shape validation is sufficient here.
-            if cu_seqlens.numel() != input_ids.numel() + 1:
-                raise ValueError(
-                    "K3 CUDA Graph decode requires one cu_seqlens interval per token"
-                )
-        else:
-            sequence_offsets(
-                cu_seqlens,
-                input_ids.numel(),
-                cu_seqlens_host=getattr(attention_inputs, "cu_seqlens_host", None),
-            )
-        return cu_seqlens
-
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         attention_inputs = inputs.attention_inputs
         input_ids = inputs.input_ids.reshape(-1)
-        chunk_tokens = _prefill_chunk_tokens()
+        chunk_tokens = prefill_chunk_tokens()
         if (
             chunk_tokens > 0
             and attention_inputs is not None
@@ -652,75 +579,17 @@ class KimiK3Model(GptModelBase):
             return self._forward_whole_chunk_prefill(inputs, fmha_impl, chunk_tokens)
         return self._forward_impl_one(inputs, fmha_impl)
 
-    def _validate_whole_chunk_prefill(
-        self,
-        inputs: PyModelInputs,
-        chunk_tokens: int,
+    def _publish_whole_chunk_cache(
+        self, attention_inputs: PyAttentionInputs
     ) -> None:
-        attention_inputs = inputs.attention_inputs
-        assert attention_inputs is not None
-        input_ids = inputs.input_ids.reshape(-1)
-        tp_size = int(self.parallelism_config.get_attn_tp_size())
-        ep_size = int(self.parallelism_config.ep_size)
-        if chunk_tokens <= 0 or chunk_tokens % tp_size:
-            raise RuntimeError(
-                "KIMI_K3_PREFILL_CHUNK_TOKENS must be divisible by attention TP; "
-                f"chunk={chunk_tokens}, TP={tp_size}"
-            )
-        if input_ids.numel() % tp_size:
-            raise RuntimeError(
-                "whole-model K3 Prefill requires total tokens divisible by "
-                f"attention TP; tokens={input_ids.numel()}, TP={tp_size}"
-            )
-        if ep_size != tp_size:
-            raise RuntimeError(
-                "whole-model K3 Prefill requires TP == EP Sequence Parallel; "
-                f"TP={tp_size}, EP={ep_size}"
-            )
-        if bool(getattr(attention_inputs, "is_target_verify", False)):
-            raise RuntimeError("whole-model K3 Prefill does not support target verify")
-        if bool(getattr(attention_inputs, "is_cuda_graph", False)):
-            raise RuntimeError("whole-model K3 Prefill does not support CUDA Graph")
-        prefix_lengths = attention_inputs.prefix_lengths
-        if prefix_lengths is not None and prefix_lengths.numel():
-            if bool(torch.any(prefix_lengths != 0).item()):
-                raise RuntimeError(
-                    "whole-model K3 Prefill currently requires a fresh request"
-                )
-
-    @staticmethod
-    def _chunk_attention_inputs(
-        attention_inputs: PyAttentionInputs,
-        *,
-        start: int,
-        end: int,
-        device: torch.device,
-        publish_cache_store: bool,
-    ) -> PyAttentionInputs:
-        length = end - start
-        if length <= 0:
-            raise ValueError(f"invalid whole-model Prefill chunk [{start}, {end})")
-        chunk = copy.copy(attention_inputs)
-        chunk.cu_seqlens = torch.tensor([0, length], dtype=torch.int32, device=device)
-        chunk.cu_kv_seqlens = torch.tensor([0, end], dtype=torch.int32, device=device)
-        chunk.input_lengths = torch.tensor([length], dtype=torch.int32, device=device)
-        chunk.prefix_lengths = torch.tensor([start], dtype=torch.int32, device=device)
-        chunk.sequence_lengths = torch.tensor([end], dtype=torch.int32, device=device)
-        chunk.sequence_lengths_plus_1_d = torch.arange(
-            start + 1, end + 1, dtype=torch.int32, device=device
-        )
-        chunk.cu_seqlens_host = torch.tensor([0, length], dtype=torch.int32)
-        chunk.input_lengths_host = torch.tensor([length], dtype=torch.int32)
-        chunk.prefix_lengths_host = torch.tensor([start], dtype=torch.int32)
-        chunk.sequence_lengths_host = torch.tensor([end], dtype=torch.int32)
-        chunk.total_tokens = int(length)
-        chunk.context_total_kv_length = int(end)
-        chunk.is_prefill = True
-        chunk.is_cuda_graph = False
-        chunk.cache_store_inputs = (
-            attention_inputs.cache_store_inputs if publish_cache_store else None
-        )
-        return chunk
+        writer = create_write_cache_store_impl(attention_inputs, self.kv_cache)
+        if writer is None or self.kv_cache is None:
+            return
+        for layer_idx, layer in enumerate(self.layers):
+            layer_cache = self.kv_cache.get_layer_cache(layer_idx)
+            if layer.is_kda:
+                layer.prepare_kda_cache_store(layer_cache)
+            writer(layer_cache)
 
     def _forward_whole_chunk_prefill(
         self,
@@ -728,54 +597,131 @@ class KimiK3Model(GptModelBase):
         fmha_impl: Any,
         chunk_tokens: int,
     ) -> PyModelOutputs:
-        self._validate_whole_chunk_prefill(inputs, chunk_tokens)
+        validate_whole_chunk_prefill(
+            inputs,
+            chunk_tokens,
+            tp_size=int(self.parallelism_config.get_attn_tp_size()),
+            ep_size=int(self.parallelism_config.ep_size),
+            page_size=(
+                int(self.kv_cache.seq_size_per_block)
+                if self.kv_cache is not None
+                else None
+            ),
+        )
         input_ids = inputs.input_ids.reshape(-1)
         attention_inputs = inputs.attention_inputs
         assert attention_inputs is not None
         total_tokens = int(input_ids.numel())
+        input_lengths = host_lengths(
+            attention_inputs.input_lengths_host, "input_lengths_host"
+        )
+        prefix_lengths = host_lengths(
+            attention_inputs.prefix_lengths_host, "prefix_lengths_host"
+        )
+        if sum(input_lengths) != total_tokens:
+            raise RuntimeError(
+                "whole-model K3 packed lengths do not cover input tokens: "
+                f"lengths={sum(input_lengths)} tokens={total_tokens}"
+            )
+        page_size = int(self.kv_cache.seq_size_per_block)
+        if self._layer_group_ids is None:
+            layer_map_host = getattr(
+                attention_inputs, "kv_cache_layer_to_group_host", None
+            )
+            if layer_map_host is None or not layer_map_host.numel():
+                raise RuntimeError(
+                    "whole-model K3 Prefill requires a host layer/group map"
+                )
+            self._layer_group_ids = tuple(
+                int(value) for value in layer_map_host.tolist()
+            )
+        rounds = plan_kimi_k3_chunk_rounds(
+            input_lengths,
+            prefix_lengths,
+            chunk_budget=chunk_tokens,
+            page_size=page_size,
+        )
         barrier(Group.TP)
         logging.info(
             "[K3_WHOLE_CHUNK_PREFILL] enabled total_tokens=%d "
-            "chunk_tokens=%d TP=%d EP=%d",
+            "requests=%d rounds=%d chunk_tokens=%d page_size=%d TP=%d EP=%d",
             total_tokens,
+            len(input_lengths),
+            len(rounds),
             chunk_tokens,
+            page_size,
             int(self.parallelism_config.get_attn_tp_size()),
             int(self.parallelism_config.ep_size),
         )
-        kda_modules = [
-            layer.self_attn
-            for layer in self.layers
-            if layer.is_kda and isinstance(layer.self_attn, KimiK3KDA)
-        ]
-        for module in kda_modules:
-            module._whole_chunk_prefill_state_active = True
-            module._whole_chunk_prefill_state = None
-        final_output: Optional[PyModelOutputs] = None
-        try:
-            for start in range(0, total_tokens, chunk_tokens):
-                end = min(start + chunk_tokens, total_tokens)
-                chunk_attention = self._chunk_attention_inputs(
-                    attention_inputs,
-                    start=start,
-                    end=end,
-                    device=input_ids.device,
-                    publish_cache_store=end == total_tokens,
+        terminal_hidden: Optional[torch.Tensor] = None
+        terminal_written = [False] * len(input_lengths)
+        final_params: Any = None
+        current_state_registry = KimiKDACurrentStateRegistry(len(input_lengths))
+        for layer_idx, layer in enumerate(self.layers):
+            if layer.is_kda and isinstance(layer.self_attn, KimiK3KDA):
+                layer_cache = self.kv_cache.get_layer_cache(layer_idx)
+                if int(layer_cache.seq_size_per_block) != page_size:
+                    raise RuntimeError(
+                        "whole-model K3 KDA/cache checkpoint step mismatch: "
+                        f"layer={layer_idx} linear_page="
+                        f"{layer_cache.seq_size_per_block} "
+                        f"physical_page={page_size}"
+                    )
+        for round_plan in rounds:
+            chunk_inputs = build_chunk_model_inputs(
+                input_ids,
+                attention_inputs,
+                round_plan=round_plan,
+            )
+            chunk_attention = chunk_inputs.attention_inputs
+            assert chunk_attention is not None
+            prepare_round_fmha(fmha_impl, chunk_attention)
+            round_output = self._forward_impl_one(
+                chunk_inputs,
+                fmha_impl,
+                kda_current_state_registry=current_state_registry,
+                round_plan=round_plan,
+            )
+            if terminal_hidden is None:
+                terminal_hidden = torch.empty(
+                    (len(input_lengths), round_output.hidden_states.shape[-1]),
+                    dtype=round_output.hidden_states.dtype,
+                    device=round_output.hidden_states.device,
                 )
-                chunk_inputs = PyModelInputs()
-                chunk_inputs.input_ids = input_ids.narrow(0, start, end - start)
-                chunk_inputs.attention_inputs = chunk_attention
-                final_output = self._forward_impl_one(chunk_inputs, fmha_impl)
-                del chunk_inputs
-                del chunk_attention
-        finally:
-            for module in kda_modules:
-                module._whole_chunk_prefill_state_active = False
-                module._whole_chunk_prefill_state = None
-        assert final_output is not None
-        return final_output
+            final_params = getattr(round_output, "params_ptr", None)
+            packed_end = 0
+            for item in round_plan.slices:
+                packed_end += item.new_length
+                if item.terminal:
+                    terminal_hidden[item.original_batch_idx].copy_(
+                        round_output.hidden_states[packed_end - 1]
+                    )
+                    terminal_written[item.original_batch_idx] = True
+            del chunk_inputs
+            del chunk_attention
+            del round_output
+        self._publish_whole_chunk_cache(attention_inputs)
+        if terminal_hidden is None or not all(terminal_written):
+            missing = [
+                idx for idx, written in enumerate(terminal_written) if not written
+            ]
+            raise RuntimeError(f"whole-model K3 missing terminal rows for {missing}")
+        hidden = terminal_hidden
+        result = (
+            PyModelOutputs(hidden, final_params)
+            if final_params is not None
+            else PyModelOutputs(hidden)
+        )
+        result.lm_output_already_selected = True
+        return result
 
     def _forward_impl_one(
-        self, inputs: PyModelInputs, fmha_impl: Any = None
+        self,
+        inputs: PyModelInputs,
+        fmha_impl: Any = None,
+        *,
+        kda_current_state_registry: Optional[KimiKDACurrentStateRegistry] = None,
+        round_plan: Optional[KimiK3ChunkRound] = None,
     ) -> PyModelOutputs:
         attention_inputs = inputs.attention_inputs
         if attention_inputs is None:
@@ -824,7 +770,7 @@ class KimiK3Model(GptModelBase):
                 int(self.parallelism_config.ep_size),
             )
             self._decode_sp_startup_logged = True
-        cu_seqlens = self._cu_seqlens(attention_inputs, input_ids)
+        cu_seqlens = resolve_cu_seqlens(attention_inputs, input_ids)
         if sp_active:
             ep_size = int(self.parallelism_config.ep_size)
             if ep_size != tp_size:
@@ -857,15 +803,6 @@ class KimiK3Model(GptModelBase):
             if attention_inputs.is_prefill and not is_target_verify
             else "decode"
         )
-        attn_meta = KimiK3DecoderMetadata(
-            cu_seqlens=cu_seqlens,
-            mode=mode,
-            sequence_parallel=sp_active,
-            prefill_sp_layout=prefill_sp_layout,
-        )
-        write_cache_store_impl = create_write_cache_store_impl(
-            attention_inputs, self.kv_cache
-        )
         if self._layer_group_ids is None:
             layer_map_host = getattr(
                 attention_inputs, "kv_cache_layer_to_group_host", None
@@ -874,6 +811,56 @@ class KimiK3Model(GptModelBase):
                 self._layer_group_ids = tuple(
                     int(value) for value in layer_map_host.tolist()
                 )
+        kda_prefill_metadata: Optional[KimiKDAPrefillMetadata] = None
+        if mode == "prefill" and self.kv_cache is not None:
+            cu_host = getattr(attention_inputs, "cu_seqlens_host", None)
+            lengths_host = getattr(attention_inputs, "input_lengths_host", None)
+            prefixes_host = getattr(attention_inputs, "prefix_lengths_host", None)
+            if (
+                cu_host is None
+                or not cu_host.numel()
+                or lengths_host is None
+                or not lengths_host.numel()
+                or prefixes_host is None
+                or not prefixes_host.numel()
+            ):
+                raise RuntimeError(
+                    "cache-backed K3 Prefill requires host sequence metadata"
+                )
+            page_size = int(self.kv_cache.seq_size_per_block)
+            materialized_maps = kda_materialized_block_maps(
+                attention_inputs,
+                layer_group_ids=self._layer_group_ids,
+                kda_layer_indices=[
+                    layer_idx
+                    for layer_idx, layer in enumerate(self.layers)
+                    if layer.is_kda
+                ],
+            )
+            active_indices, continuation_mask = kda_round_state_mapping(round_plan)
+            kda_prefill_metadata = prepare_kimi_kda_prefill_metadata(
+                cu_host,
+                lengths_host,
+                prefixes_host,
+                page_size=page_size,
+                local_heads=self._kda_local_heads,
+                head_dim=self._kda_head_dim,
+                device=input_ids.device,
+                active_original_batch_indices=active_indices,
+                continuation_mask=continuation_mask,
+                materialized_block_maps_host=materialized_maps,
+            )
+        attn_meta = KimiK3DecoderMetadata(
+            cu_seqlens=cu_seqlens,
+            mode=mode,
+            sequence_parallel=sp_active,
+            prefill_sp_layout=prefill_sp_layout,
+            kda_prefill_metadata=kda_prefill_metadata,
+            kda_current_state_registry=kda_current_state_registry,
+        )
+        write_cache_store_impl = create_write_cache_store_impl(
+            attention_inputs, self.kv_cache
+        )
         eagle3_hidden_states = []
         # A target-only request must stay target-only on Prefill as well.  In
         # particular, do not retain, concatenate, all-gather, or transfer the

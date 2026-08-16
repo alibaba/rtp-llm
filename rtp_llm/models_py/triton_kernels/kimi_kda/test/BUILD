@@ -54,3 +54,18 @@ py_test(
     tags = ["H20"],
     visibility = ["//visibility:public"],
 )
+
+py_test(
+    name = "fused_paged_prefill_test",
+    srcs = ["fused_paged_prefill_test.py"],
+    deps = [
+        "//rtp_llm:nvidia-cutlass-dsl",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py/triton_kernels:kimi_kda",
+        ":torch",
+        ":triton",
+    ],
+    exec_properties = {"gpu": "B300"},
+    tags = ["B300"],
+    visibility = ["//visibility:public"],
+)
