@@ -60,15 +60,15 @@ HostPinMode hostPinMode() {
 }
 
 bool shouldInterleaveRegisteredHostBlockPool() {
-    const char* value = std::getenv("RTP_LLM_HOST_BLOCK_POOL_NUMA_POLICY");
-    if (value == nullptr || std::string(value) == "interleave") {
+    const char* value = std::getenv("RTP_LLM_HOST_BLOCK_POOL_INTERLEAVE");
+    if (value != nullptr && std::string(value) == "1") {
         return true;
     }
-    if (std::string(value) == "none") {
+    if (value == nullptr || std::string(value) == "0") {
         return false;
     }
-    throw std::invalid_argument(std::string("invalid RTP_LLM_HOST_BLOCK_POOL_NUMA_POLICY='") + value
-                                + "', expected 'interleave' or 'none'");
+    throw std::invalid_argument(std::string("invalid RTP_LLM_HOST_BLOCK_POOL_INTERLEAVE='") + value
+                                + "', expected '1' or '0'");
 }
 
 void releaseRegisteredCpuMapping(void* ptr, size_t size_bytes) noexcept {
@@ -169,9 +169,13 @@ AlignedHostMemory::AlignedHostMemory(size_t usable_bytes, size_t alignment, cons
         || usable_bytes + alignment > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
         throw std::overflow_error("aligned host memory backing size overflow");
     }
-    backing_bytes_ = usable_bytes + alignment;
+    backing_bytes_              = usable_bytes + alignment;
+    const auto mode             = hostPinMode();
+    const bool interleave_nodes = shouldInterleaveRegisteredHostBlockPool();
+    if (interleave_nodes && mode != HostPinMode::REGISTER && mode != HostPinMode::MEMFD_REGISTER) {
+        throw std::invalid_argument("RTP_LLM_HOST_BLOCK_POOL_INTERLEAVE=1 requires a registered host pool");
+    }
     try {
-        const auto mode = hostPinMode();
 #if USING_CUDA
         // ATen recognizes externally pinned pointers only after CUDA initialization.
         at::globalContext().lazyInitDevice(at::kCUDA);
@@ -194,10 +198,8 @@ AlignedHostMemory::AlignedHostMemory(size_t usable_bytes, size_t alignment, cons
             if (!hostMemoryRegistrationSupported()) {
                 throw std::runtime_error("registered host block pool is not supported by this device backend");
             }
-            backing_    = allocateRegisteredCpuTensor(backing_bytes_,
-                                                   mode == HostPinMode::MEMFD_REGISTER,
-                                                   shouldInterleaveRegisteredHostBlockPool(),
-                                                   &shared_memory_fd_);
+            backing_ = allocateRegisteredCpuTensor(
+                backing_bytes_, mode == HostPinMode::MEMFD_REGISTER, interleave_nodes, &shared_memory_fd_);
             registered_ = true;
         }
     } catch (const std::exception& e) {

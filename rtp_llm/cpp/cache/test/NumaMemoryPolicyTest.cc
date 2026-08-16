@@ -1,17 +1,23 @@
 #include <gtest/gtest.h>
 
 #include <cerrno>
+#include <cstdlib>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 
 #include <sys/mman.h>
 #include <unistd.h>
+
+#if USING_CUDA
+#include <cuda_runtime.h>
+#endif
 
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/AlignedHostMemory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostMemoryRegistration.h"
@@ -22,6 +28,37 @@ namespace test {
 namespace {
 
 constexpr size_t kMiB = 1024 * 1024;
+
+class ScopedEnvVar {
+public:
+    ScopedEnvVar(const char* name, const char* value): name_(name) {
+        if (const char* current = std::getenv(name)) {
+            original_value_ = current;
+        }
+        if (::setenv(name, value, 1) != 0) {
+            throw std::runtime_error(std::string("setenv failed for ") + name + ": " + std::strerror(errno));
+        }
+    }
+
+    ~ScopedEnvVar() {
+        if (original_value_.has_value()) {
+            (void)::setenv(name_.c_str(), original_value_->c_str(), 1);
+        } else {
+            (void)::unsetenv(name_.c_str());
+        }
+    }
+
+    ScopedEnvVar(const ScopedEnvVar&)            = delete;
+    ScopedEnvVar& operator=(const ScopedEnvVar&) = delete;
+
+private:
+    std::string                name_;
+    std::optional<std::string> original_value_;
+};
+
+bool numaPolicySyscallIsBlocked(const NumaInterleavePolicyResult& result) {
+    return !result.success && (result.error_number == EPERM || result.error_number == ENOSYS);
+}
 
 struct NumaMappingInfo {
     std::string           line;
@@ -91,6 +128,9 @@ TEST(NumaMemoryPolicyTest, AnonymousMappingIsInterleavedAcrossAllowedNodes) {
     const auto result = applyAllowedNumaInterleavePolicy(ptr, size);
     if (!result.success) {
         (void)::munmap(ptr, size);
+        if (numaPolicySyscallIsBlocked(result)) {
+            GTEST_SKIP() << result.error_message;
+        }
         FAIL() << result.error_message;
     }
     if (result.allowed_nodes.size() < 2) {
@@ -119,31 +159,91 @@ TEST(NumaMemoryPolicyTest, RegisteredHostBlockPoolKeepsInterleavePolicy) {
     ASSERT_NE(probe, MAP_FAILED) << std::strerror(errno);
     const auto allowed = applyAllowedNumaInterleavePolicy(probe, size);
     ASSERT_EQ(::munmap(probe, size), 0);
+    if (numaPolicySyscallIsBlocked(allowed)) {
+        GTEST_SKIP() << allowed.error_message;
+    }
     ASSERT_TRUE(allowed.success) << allowed.error_message;
     if (allowed.allowed_nodes.size() < 2) {
         GTEST_SKIP() << "process is allowed to allocate memory on only one NUMA node";
     }
 
-    ASSERT_EQ(::setenv("RTP_LLM_HOST_BLOCK_POOL_PIN_MODE", "register", 1), 0);
-    ASSERT_EQ(::setenv("RTP_LLM_HOST_BLOCK_POOL_NUMA_POLICY", "interleave", 1), 0);
+    ScopedEnvVar pin_mode("RTP_LLM_HOST_BLOCK_POOL_PIN_MODE", "register");
+    ScopedEnvVar interleave("RTP_LLM_HOST_BLOCK_POOL_INTERLEAVE", "1");
 
-    AlignedHostMemory pool(size, 4096, "NUMA registered host pool test");
-    ASSERT_TRUE(pool.isRegistered());
+    uintptr_t pool_address = 0;
+    {
+        AlignedHostMemory pool(64 * kMiB, 4096, "NUMA registered pool test");
+        ASSERT_TRUE(pool.isRegistered());
 
-    expectPagesOnEveryAllowedNode(allowed, numaMappingInfo(pool.data()));
-
-    ASSERT_EQ(::unsetenv("RTP_LLM_HOST_BLOCK_POOL_PIN_MODE"), 0);
-    ASSERT_EQ(::unsetenv("RTP_LLM_HOST_BLOCK_POOL_NUMA_POLICY"), 0);
+#if USING_CUDA
+        cudaPointerAttributes attributes{};
+        ASSERT_EQ(cudaPointerGetAttributes(&attributes, pool.data()), cudaSuccess);
+        EXPECT_EQ(attributes.type, cudaMemoryTypeHost);
+#endif
+        std::memset(pool.data(), 0, size);
+        expectPagesOnEveryAllowedNode(allowed, numaMappingInfo(pool.data()));
+        pool_address = reinterpret_cast<uintptr_t>(pool.data());
+    }
+    EXPECT_EQ(mappingStart(reinterpret_cast<void*>(pool_address)), 0u);
 }
 
-TEST(NumaMemoryPolicyTest, InvalidHostBlockPoolNumaPolicyFailsFast) {
-    ASSERT_EQ(::setenv("RTP_LLM_HOST_BLOCK_POOL_PIN_MODE", "register", 1), 0);
-    ASSERT_EQ(::setenv("RTP_LLM_HOST_BLOCK_POOL_NUMA_POLICY", "invalid", 1), 0);
+TEST(NumaMemoryPolicyTest, RegisteredHostBlockPoolSupportsDisabledInterleave) {
+    if (!hostMemoryRegistrationSupported()) {
+        GTEST_SKIP() << "host memory registration is unavailable";
+    }
+    ScopedEnvVar pin_mode("RTP_LLM_HOST_BLOCK_POOL_PIN_MODE", "register");
+    ScopedEnvVar interleave("RTP_LLM_HOST_BLOCK_POOL_INTERLEAVE", "0");
 
-    EXPECT_ANY_THROW(AlignedHostMemory(8 * kMiB, 4096, "invalid NUMA policy test"));
+    uintptr_t pool_address = 0;
+    {
+        AlignedHostMemory pool(16 * kMiB, 4096, "NUMA registered pool test");
+        ASSERT_TRUE(pool.isRegistered());
+#if USING_CUDA
+        cudaPointerAttributes attributes{};
+        ASSERT_EQ(cudaPointerGetAttributes(&attributes, pool.data()), cudaSuccess);
+        EXPECT_EQ(attributes.type, cudaMemoryTypeHost);
+#endif
+        pool_address = reinterpret_cast<uintptr_t>(pool.data());
+    }
+    EXPECT_EQ(mappingStart(reinterpret_cast<void*>(pool_address)), 0u);
+}
 
-    ASSERT_EQ(::unsetenv("RTP_LLM_HOST_BLOCK_POOL_PIN_MODE"), 0);
-    ASSERT_EQ(::unsetenv("RTP_LLM_HOST_BLOCK_POOL_NUMA_POLICY"), 0);
+TEST(NumaMemoryPolicyTest, StrictInterleaveFailsWhenNumaPolicySyscallsAreBlocked) {
+    constexpr size_t probe_size = 4 * kMiB;
+    void*            probe = ::mmap(nullptr, probe_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    ASSERT_NE(probe, MAP_FAILED) << std::strerror(errno);
+    const auto policy_result = applyAllowedNumaInterleavePolicy(probe, probe_size);
+    ASSERT_EQ(::munmap(probe, probe_size), 0);
+    if (!numaPolicySyscallIsBlocked(policy_result)) {
+        GTEST_SKIP() << "NUMA policy syscalls are available in this environment";
+    }
+
+    ScopedEnvVar pin_mode("RTP_LLM_HOST_BLOCK_POOL_PIN_MODE", "register");
+    ScopedEnvVar interleave("RTP_LLM_HOST_BLOCK_POOL_INTERLEAVE", "1");
+
+    EXPECT_THROW(AlignedHostMemory(16 * kMiB, 4096, "invalid NUMA pool test"), std::runtime_error);
+}
+
+TEST(NumaMemoryPolicyTest, InvalidMappingReturnsStructuredError) {
+    const auto result = applyAllowedNumaInterleavePolicy(nullptr, 0);
+    EXPECT_FALSE(result.success);
+    EXPECT_FALSE(result.applied);
+    EXPECT_EQ(result.error_number, EINVAL);
+    EXPECT_FALSE(result.error_message.empty());
+}
+
+TEST(NumaMemoryPolicyTest, InvalidHostBlockPoolInterleaveFlagFailsFast) {
+    ScopedEnvVar pin_mode("RTP_LLM_HOST_BLOCK_POOL_PIN_MODE", "register");
+    ScopedEnvVar interleave("RTP_LLM_HOST_BLOCK_POOL_INTERLEAVE", "invalid");
+
+    EXPECT_THROW(AlignedHostMemory(8 * kMiB, 4096, "invalid NUMA pool test"), std::invalid_argument);
+}
+
+TEST(NumaMemoryPolicyTest, ExplicitInterleaveRejectsPinnedAllocatorMode) {
+    ScopedEnvVar pin_mode("RTP_LLM_HOST_BLOCK_POOL_PIN_MODE", "allocator");
+    ScopedEnvVar interleave("RTP_LLM_HOST_BLOCK_POOL_INTERLEAVE", "1");
+
+    EXPECT_THROW(AlignedHostMemory(8 * kMiB, 4096, "invalid NUMA pool test"), std::invalid_argument);
 }
 
 }  // namespace test
