@@ -27,7 +27,7 @@ import functools
 import json
 import logging
 import os
-from typing import List
+from typing import List, Optional, Tuple
 
 import torch
 
@@ -57,6 +57,41 @@ from rtp_llm.utils.model_weight import (
 SCORING_FUNC_SOFTMAX = 0
 SCORING_FUNC_SIGMOID = 1
 SCORING_FUNC_SQRT_SOFTPLUS = 2  # DeepSeek-V4
+
+# Routed-expert storage. The released checkpoint is FP4 and carries no such key;
+# dsv4_fp8/convert_fp4_experts_to_fp8.py stamps "fp8" after rewriting the expert
+# tensors. FP4 stays the default so an unconverted checkpoint is unaffected.
+EXPERT_DTYPE_FP4 = "fp4"
+EXPERT_DTYPE_FP8 = "fp8"
+EXPERT_DTYPES: Tuple[str, ...] = (EXPERT_DTYPE_FP4, EXPERT_DTYPE_FP8)
+
+
+def parse_expert_dtype(raw: Optional[object]) -> str:
+    """Normalise and validate the ``expert_dtype`` field.
+
+    This decides one thing: the dtype the loader declares for the routed-expert
+    tensors (``float8_e4m3fn`` vs ``int8``-packed nibble pairs). It does *not*
+    select a MoE strategy -- that is ``DSV4_USE_GROUPED_FP8`` plus device
+    capability, and a checkpoint whose experts are FP8 while this field says FP4
+    is a configuration error rather than a slower path.
+
+    Validated rather than passed through because the consumer matches ``"fp8"``
+    exactly: ``"FP8"``, ``" fp8"`` or a typo used to fall through to the FP4
+    branch silently, and the resulting failure surfaced much later as a dtype or
+    shape error deep in the MoE weight assembly.
+    """
+    if raw is None:
+        return EXPERT_DTYPE_FP4
+    value = str(raw).strip().lower()
+    if value not in EXPERT_DTYPES:
+        raise ValueError(
+            f"unsupported expert_dtype {raw!r} (normalised to {value!r}); "
+            f"expected one of {EXPERT_DTYPES}. This field describes how the "
+            "checkpoint's routed experts are stored -- if the experts were "
+            "rewritten by dsv4_fp8/convert_fp4_experts_to_fp8.py the value is "
+            f"{EXPERT_DTYPE_FP8!r}, otherwise omit it."
+        )
+    return value
 
 
 class DeepSeekV4Weight(DeepSeekV2Weight):
@@ -97,6 +132,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         else:
             self._compress_ratios = self._compress_ratios[: self._num_layers]
         self._num_hash_layers = int(self.model_config.num_hash_layers)
+        self._expert_dtype = parse_expert_dtype(self.model_config.expert_dtype)
 
     def _compress_ratio(self, layer_id: int) -> int:
         if layer_id < 0 or layer_id >= len(self._compress_ratios):
@@ -313,7 +349,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
             ),
         ]
 
-    def _build_routed_experts_fp4(self, layer_id: int) -> List[WeightModule]:
+    def _build_routed_experts(self, layer_id: int) -> List[WeightModule]:
         moe_cfg = MoeConfig(
             expert_num=self.expert_num_,
             align_size=self._moe_align_size,
@@ -333,6 +369,17 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         # consumers (QuantizedLinear factory + DeepGEMM kPackedFP4 path)
         # branch on dtype, and a uint8 cast will silently drop the FP4
         # routed-expert linears into a slower BF16 dequant fallback.
+        #
+        # An FP8-converted checkpoint stores the same experts as e4m3 [N, K] with
+        # a 128x128 UE8M0 scale — i.e. exactly the layout the rest of the
+        # checkpoint already uses — so only the declared weight dtype changes.
+        # The scale stays UE8M0 in both cases; only its shape differs, and that
+        # comes from the safetensors header, not from here.
+        weight_dtype = (
+            torch.float8_e4m3fn
+            if self._expert_dtype == EXPERT_DTYPE_FP8
+            else torch.int8
+        )
         out: List[WeightModule] = []
         for sub_w_name, sub_s_name, sub in [
             (W.v4_routed_w1_w, W.v4_routed_w1_s, "w1"),
@@ -350,7 +397,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                     ],
                     stack_,
                     config=moe_cfg,
-                    data_type=torch.int8,
+                    data_type=weight_dtype,
                 )
             )
             out.append(
@@ -417,8 +464,8 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         # 8. Shared expert (FP8)
         weights += self._build_shared_expert(layer_id)
 
-        # 9. Routed experts (FP4 — per-expert via MoeAtomicWeight)
-        weights += self._build_routed_experts_fp4(layer_id)
+        # 9. Routed experts (FP4 or FP8 — per-expert via MoeAtomicWeight)
+        weights += self._build_routed_experts(layer_id)
 
         return weights
 
@@ -638,6 +685,7 @@ class DeepSeekV4(DeepSeekV2):
         config.hc_eps = float(config_json.get("hc_eps", 1e-6))
         config.swiglu_limit = float(config_json.get("swiglu_limit", 0.0))
         config.num_hash_layers = int(config_json.get("num_hash_layers", 0))
+        config.expert_dtype = parse_expert_dtype(config_json.get("expert_dtype"))
 
         # DSpARK weight metadata is present in the target checkpoint as well
         # as the draft view. Proposal width is deliberately not read from the

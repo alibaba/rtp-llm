@@ -29,28 +29,17 @@ from rtp_llm.models_py.modules.dsv4.decode.fp8_kv_quant_decode_op import (
     dequantize_v4_kv_slot,
 )
 
-_FLASH_MLA_AVAILABLE = False
-try:
-    if torch.version.cuda:
-        major, minor = map(int, torch.version.cuda.split(".")[:2])
-        if (major, minor) >= (12, 9):
-            from flash_mla import (
-                flash_mla_with_kvcache,  # type: ignore[import-not-found]
-            )
-            from flash_mla import get_mla_metadata  # type: ignore[import-not-found]
+from rtp_llm.models_py.modules.dsv4._flash_mla_probe import flash_mla_available
 
-            _FLASH_MLA_AVAILABLE = True
-except (ImportError, AttributeError, ValueError) as e:
-    logging.warning(
-        "[dsv4-fp8] flash_mla not available (%s); FP8 sparse attn fast path "
-        "will fail unless reference is called explicitly",
-        e,
-    )
+# Availability comes from the shared probe: this file and its sibling each carried a
+# copy of the same two imports, the same except tuple and the same reasoning, so
+# widening that tuple had to be done twice.
+_FLASH_MLA_AVAILABLE = flash_mla_available()
 
 
 def _flash_mla_unavailable_reason(q: torch.Tensor, kv_cache: torch.Tensor) -> str:
     if not _FLASH_MLA_AVAILABLE:
-        return "flash_mla import failed or CUDA version is below 12.9"
+        return "flash_mla import failed"
     if not q.is_cuda:
         return f"q is on {q.device}, expected CUDA"
     if not kv_cache.is_cuda:

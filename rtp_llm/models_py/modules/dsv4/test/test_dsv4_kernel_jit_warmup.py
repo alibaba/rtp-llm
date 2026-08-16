@@ -34,6 +34,7 @@ _stub_package(
     os.path.join(_REPO, "rtp_llm", "models_py", "modules", "dsv4"),
 )
 
+from rtp_llm.models_py.modules.dsv4 import mhc_prenorm_backend
 from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     _collect_dsv4_branch_kernel_configs,
     _collect_dsv4_batched_fp8_einsum_shapes,
@@ -41,12 +42,16 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     _collect_dsv4_fp8_mqa_logits_shapes,
     _collect_dsv4_mhc_head_fused_shapes,
     _collect_dsv4_mhc_prenorm_shapes,
-    _compute_mhc_prenorm_num_split,
     _cp_padded_tokens_per_rank_bound,
     _dense_gemm_m_grid,
     _dist_rank,
     _generate_dense_gemm_warmup_m_grid,
+    _align_up,
+    _collect_dsv4_grouped_fp8_moe_shapes,
+    _collect_dsv4_wo_a_grouped_shapes,
     _generate_mhc_prenorm_warmup_specs,
+    _grouped_fp8_masked_m_values,
+    _mhc_prenorm_backend,
     _run_deepgemm_warmup_launch_with_retry,
     _run_tilelang_warmup_launch_with_retry,
     _run_triton_warmup_launch_with_retry,
@@ -58,6 +63,8 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     warmup_dense_gemm_jit,
     warmup_dsv4_fp8_swa_slot_dequant_jit,
     warmup_fp8_mqa_logits_jit,
+    warmup_grouped_fp8_moe_jit,
+    warmup_wo_a_grouped_jit,
     warmup_mhc_head_fused_jit,
     warmup_mhc_prenorm_gemm_jit,
     resolve_dense_gemm_warmup_max_m,
@@ -564,27 +571,72 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             max_m=200000,
             k_value=16384,
             num_sms=148,
+            backend=mhc_prenorm_backend.DEEPGEMM,
         )
         splits = {split for split, _ in specs}
         self.assertTrue({1, 8, 49, 64}.issubset(splits))
 
-        reps_by_split = dict(specs)
-        self.assertEqual(
-            _compute_mhc_prenorm_num_split(
-                m_value=reps_by_split[49],
+        # Each representative M must resolve back to the split it stands for, via
+        # the same function the runtime calls -- that agreement is the point of
+        # the spec list, and re-deriving the heuristic here would not test it.
+        for split, m_value in specs:
+            self.assertEqual(
+                mhc_prenorm_backend.resolve_n_splits(
+                    mhc_hidden_size=16384,
+                    num_tokens=m_value,
+                    num_sms=148,
+                    backend=mhc_prenorm_backend.DEEPGEMM,
+                ),
+                split,
+                f"m={m_value} no longer resolves to {split}",
+            )
+
+    def test_mhc_prenorm_warmup_specs_follow_the_tilelang_divisor_clamp(self):
+        """The TileLang backend launches fewer distinct splits than DeepGEMM.
+
+        Its count has to divide the kernel's K block count (16384/256 = 64), so
+        DeepGEMM's 49 and 39 are unreachable there. Warming DeepGEMM's list would
+        compile variants no request runs and miss the ones they do.
+        """
+        deepgemm = {
+            split
+            for split, _ in _generate_mhc_prenorm_warmup_specs(
+                max_m=200000,
                 k_value=16384,
                 num_sms=148,
-            ),
-            49,
+                backend=mhc_prenorm_backend.DEEPGEMM,
+            )
+        }
+        splitk_specs = _generate_mhc_prenorm_warmup_specs(
+            max_m=200000,
+            k_value=16384,
+            num_sms=148,
+            backend=mhc_prenorm_backend.TILELANG_SPLITK,
         )
-        self.assertEqual(
-            _compute_mhc_prenorm_num_split(
-                m_value=reps_by_split[8],
-                k_value=16384,
-                num_sms=148,
-            ),
-            8,
+        splitk = {split for split, _ in splitk_specs}
+        self.assertTrue(all(64 % split == 0 for split in splitk), splitk)
+        self.assertIn(49, deepgemm)
+        self.assertNotIn(49, splitk)
+        for split, m_value in splitk_specs:
+            self.assertEqual(
+                mhc_prenorm_backend.resolve_n_splits(
+                    mhc_hidden_size=16384,
+                    num_tokens=m_value,
+                    num_sms=148,
+                    backend=mhc_prenorm_backend.TILELANG_SPLITK,
+                ),
+                split,
+            )
+
+    def test_mhc_prenorm_warmup_specs_single_backend_has_one_variant(self):
+        """tilelang_single is one kernel for every M, so one spec is enough."""
+        specs = _generate_mhc_prenorm_warmup_specs(
+            max_m=200000,
+            k_value=16384,
+            num_sms=148,
+            backend=mhc_prenorm_backend.TILELANG_SINGLE,
         )
+        self.assertEqual({split for split, _ in specs}, {1})
 
     def test_mhc_warmup_launches_prenorm_gemm_and_pre_big_fuse(self):
         calls = []
@@ -618,11 +670,8 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             old_values["_get_deep_gemm_num_sms"] = with_patch(
                 "_get_deep_gemm_num_sms", lambda device: 148
             )
-            old_values["_mhc_prenorm_deepgemm_backend_name"] = with_patch(
-                "_mhc_prenorm_deepgemm_backend_name", lambda: "deepgemm"
-            )
-            old_values["_mhc_prenorm_deepgemm_backend_enabled"] = with_patch(
-                "_mhc_prenorm_deepgemm_backend_enabled", lambda: True
+            old_values["_mhc_prenorm_backend"] = with_patch(
+                "_mhc_prenorm_backend", lambda: mhc_prenorm_backend.DEEPGEMM
             )
             old_values["_generate_mhc_prenorm_warmup_specs"] = with_patch(
                 "_generate_mhc_prenorm_warmup_specs",
@@ -705,11 +754,8 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             old_values["_get_deep_gemm_num_sms"] = with_patch(
                 "_get_deep_gemm_num_sms", lambda device: 148
             )
-            old_values["_mhc_prenorm_deepgemm_backend_name"] = with_patch(
-                "_mhc_prenorm_deepgemm_backend_name", lambda: "tilelang_single"
-            )
-            old_values["_mhc_prenorm_deepgemm_backend_enabled"] = with_patch(
-                "_mhc_prenorm_deepgemm_backend_enabled", lambda: False
+            old_values["_mhc_prenorm_backend"] = with_patch(
+                "_mhc_prenorm_backend", lambda: mhc_prenorm_backend.TILELANG_SINGLE
             )
             old_values["_dist_rank"] = with_patch("_dist_rank", lambda: 0)
             old_values["_sync_cuda"] = with_patch("_sync_cuda", lambda device: None)
@@ -1197,6 +1243,376 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 launch,
                 device=torch.device("cpu"),
             )
+
+
+class MhcPrenormBackendResolutionTest(unittest.TestCase):
+    """The warmup and the runtime must not disagree about the backend.
+
+    They did, silently: this module resolved an unset or ``auto``
+    ``DSV4_MHC_PRE_GEMM_BACKEND`` to ``deepgemm`` unconditionally, while the
+    TileLang wrapper probes for ``deep_gemm.tf32_hc_prenorm_gemm`` and falls back
+    to ``tilelang_splitk``. On a build without that symbol -- the H20 build this
+    PR targets -- warmup drove the DeepGEMM path and raised during startup, and
+    the split-K kernel requests actually run was never compiled ahead of time.
+
+    Pure host: no CUDA, no ``deep_gemm``, no ``tilelang``.
+    """
+
+    def setUp(self):
+        self._saved = os.environ.get(mhc_prenorm_backend.BACKEND_ENV)
+        self.addCleanup(self._restore_env)
+        # Both are @functools.cache'd; clear on entry *and* exit so neither a
+        # probe result nor a log-once marker leaks between cases or out of them.
+        self.addCleanup(mhc_prenorm_backend.has_deepgemm_prenorm.cache_clear)
+        self.addCleanup(mhc_prenorm_backend._log_backend_choice.cache_clear)
+        mhc_prenorm_backend.has_deepgemm_prenorm.cache_clear()
+        mhc_prenorm_backend._log_backend_choice.cache_clear()
+
+    def _restore_env(self):
+        if self._saved is None:
+            os.environ.pop(mhc_prenorm_backend.BACKEND_ENV, None)
+        else:
+            os.environ[mhc_prenorm_backend.BACKEND_ENV] = self._saved
+
+    def _with_probe(self, available: bool):
+        """Replace the DeepGEMM symbol probe, restoring it on cleanup."""
+        original = mhc_prenorm_backend.has_deepgemm_prenorm
+        mhc_prenorm_backend.has_deepgemm_prenorm = lambda: available
+        self.addCleanup(setattr, mhc_prenorm_backend, "has_deepgemm_prenorm", original)
+
+    # (env value, backend when the DeepGEMM symbol is present, and when it is not).
+    # Spelled out rather than compared against resolve_backend(): asserting the two
+    # agree would hold no matter what either did, and would not pin the alias table
+    # or the case/whitespace normalisation at all.
+    _RESOLUTION_TABLE = (
+        (None, mhc_prenorm_backend.DEEPGEMM, mhc_prenorm_backend.TILELANG_SPLITK),
+        ("", mhc_prenorm_backend.DEEPGEMM, mhc_prenorm_backend.TILELANG_SPLITK),
+        ("   ", mhc_prenorm_backend.DEEPGEMM, mhc_prenorm_backend.TILELANG_SPLITK),
+        ("auto", mhc_prenorm_backend.DEEPGEMM, mhc_prenorm_backend.TILELANG_SPLITK),
+        ("AUTO", mhc_prenorm_backend.DEEPGEMM, mhc_prenorm_backend.TILELANG_SPLITK),
+        ("  auto  ", mhc_prenorm_backend.DEEPGEMM, mhc_prenorm_backend.TILELANG_SPLITK),
+        ("deepgemm", mhc_prenorm_backend.DEEPGEMM, mhc_prenorm_backend.DEEPGEMM),
+        ("DeepGEMM", mhc_prenorm_backend.DEEPGEMM, mhc_prenorm_backend.DEEPGEMM),
+        ("dg", mhc_prenorm_backend.DEEPGEMM, mhc_prenorm_backend.DEEPGEMM),
+        ("tilelang", mhc_prenorm_backend.TILELANG_SINGLE, mhc_prenorm_backend.TILELANG_SINGLE),
+        ("single", mhc_prenorm_backend.TILELANG_SINGLE, mhc_prenorm_backend.TILELANG_SINGLE),
+        (" TileLang_Single ", mhc_prenorm_backend.TILELANG_SINGLE, mhc_prenorm_backend.TILELANG_SINGLE),
+        ("splitk", mhc_prenorm_backend.TILELANG_SPLITK, mhc_prenorm_backend.TILELANG_SPLITK),
+        ("tilelang_splitk", mhc_prenorm_backend.TILELANG_SPLITK, mhc_prenorm_backend.TILELANG_SPLITK),
+        ("bogus", "bogus", "bogus"),
+    )
+
+    def test_resolution_table(self):
+        for value, with_symbol, without_symbol in self._RESOLUTION_TABLE:
+            for probe, expected in ((True, with_symbol), (False, without_symbol)):
+                with self.subTest(value=value, probe=probe):
+                    self._with_probe(probe)
+                    mhc_prenorm_backend._log_backend_choice.cache_clear()
+                    if value is None:
+                        os.environ.pop(mhc_prenorm_backend.BACKEND_ENV, None)
+                    else:
+                        os.environ[mhc_prenorm_backend.BACKEND_ENV] = value
+                    self.assertEqual(_mhc_prenorm_backend(), expected)
+
+    def test_warmup_does_not_resolve_the_env_itself(self):
+        """Structural: the warmup entry point must be the shared resolver.
+
+        The table above already fails if this module re-implements resolution and
+        drifts; this pins the intent directly, so a re-implementation that happens
+        to agree today still shows up as a change here.
+        """
+        sentinel = "sentinel_backend"
+        original = mhc_prenorm_backend.resolve_backend
+        mhc_prenorm_backend.resolve_backend = lambda: sentinel
+        self.addCleanup(
+            setattr, mhc_prenorm_backend, "resolve_backend", original
+        )
+        os.environ[mhc_prenorm_backend.BACKEND_ENV] = "tilelang_single"
+        self.assertEqual(_mhc_prenorm_backend(), sentinel)
+
+    def test_auto_follows_the_symbol_probe(self):
+        for value in (None, "", "auto"):
+            with self.subTest(value=value):
+                if value is None:
+                    os.environ.pop(mhc_prenorm_backend.BACKEND_ENV, None)
+                else:
+                    os.environ[mhc_prenorm_backend.BACKEND_ENV] = value
+
+                self._with_probe(True)
+                mhc_prenorm_backend._log_backend_choice.cache_clear()
+                self.assertEqual(_mhc_prenorm_backend(), mhc_prenorm_backend.DEEPGEMM)
+
+                self._with_probe(False)
+                mhc_prenorm_backend._log_backend_choice.cache_clear()
+                self.assertEqual(
+                    _mhc_prenorm_backend(), mhc_prenorm_backend.TILELANG_SPLITK
+                )
+
+    def test_explicit_deepgemm_is_not_downgraded_by_the_probe(self):
+        """An explicit pin must reach the runtime error, not a silent fallback."""
+        os.environ[mhc_prenorm_backend.BACKEND_ENV] = "deepgemm"
+        self._with_probe(False)
+        self.assertEqual(_mhc_prenorm_backend(), mhc_prenorm_backend.DEEPGEMM)
+
+    def test_unknown_value_is_passed_through(self):
+        os.environ[mhc_prenorm_backend.BACKEND_ENV] = "tilelang_splitq"
+        self.assertEqual(_mhc_prenorm_backend(), "tilelang_splitq")
+
+    def test_num_sms_has_one_source(self):
+        """The warmup must read the SM count from the shared resolver.
+
+        The split count is a function of it, so two sources meant the warmup could
+        compile a count the runtime never launches -- the same class of drift as the
+        backend name. Patching the shared function has to move what the warmup sees.
+        """
+        original = mhc_prenorm_backend.device_num_sms
+        mhc_prenorm_backend.device_num_sms = lambda device=None: 137
+        self.addCleanup(
+            setattr, mhc_prenorm_backend, "device_num_sms", original
+        )
+        seen = {}
+
+        def spy(**kwargs):
+            seen.update(kwargs)
+            return 1
+
+        with mock.patch.object(
+            warmup_module, "model_warm_up_enabled", return_value=True
+        ), mock.patch.object(
+            warmup_module, "_is_cuda_device", return_value=True
+        ), mock.patch.object(
+            warmup_module, "_assert_not_capturing"
+        ), mock.patch.object(
+            mhc_prenorm_backend, "resolve_n_splits", side_effect=spy
+        ), mock.patch.object(
+            warmup_module, "_run_deepgemm_warmup_launches_serialized"
+        ):
+            warmup_module._generate_mhc_prenorm_warmup_specs.cache_clear()
+            warmup_module.warmup_mhc_prenorm_gemm_jit(
+                {(24, 16384): {"name": "probe"}},
+                max_m=1,
+                device=torch.device("cpu"),
+            )
+        self.assertEqual(seen.get("num_sms"), 137)
+
+    def test_probe_never_raises_without_deep_gemm(self):
+        """The real probe answers False on a build/box without the symbol."""
+        mhc_prenorm_backend.has_deepgemm_prenorm.cache_clear()
+        self.assertIsInstance(mhc_prenorm_backend.has_deepgemm_prenorm(), bool)
+
+
+class GroupedFp8AndWoAWarmupCollectorTest(unittest.TestCase):
+    """The two SM90 collectors and the masked ``expected_m`` plan.
+
+    Pure host: the collectors only read shapes off registered tensors, and the plan
+    is arithmetic. What they feed -- the actual DeepGEMM launches -- needs a Hopper
+    GPU and is exercised by bringing a role up with WARM_UP=1.
+    """
+
+    def _grouped_fp8_module(self, *, experts=8, inter=256, dim=512, ep_size=4):
+        cls = _module_type(
+            "GroupedFP8Strategy",
+            {
+                "_w13": torch.empty(
+                    (experts, 2 * inter, dim), dtype=torch.float8_e4m3fn
+                ),
+                "_s13": torch.empty((experts, 2 * inter // 128, dim // 128)),
+                "_w2": torch.empty((experts, dim, inter), dtype=torch.float8_e4m3fn),
+                "_s2": torch.empty((experts, dim // 128, inter // 128)),
+                "cfg": SimpleNamespace(ep_size=ep_size),
+            },
+        )
+        return cls()
+
+    def test_align_up(self):
+        self.assertEqual(_align_up(1, 128), 128)
+        self.assertEqual(_align_up(128, 128), 128)
+        self.assertEqual(_align_up(129, 128), 256)
+        self.assertEqual(_align_up(0, 128), 0)
+        self.assertEqual(_align_up(65, 64), 128)
+
+    def test_masked_m_values_are_the_two_the_strategy_computes(self):
+        # N = tokens_per_rank * ep_size; max_m = align(N, 128) and
+        # t_rows = min(max_m, align(N, 64)).
+        # conc 8 over ep 4: N=32, max_m=align(32,128)=128, t_rows=align(32,64)=64
+        self.assertEqual(
+            _grouped_fp8_masked_m_values(tokens_per_rank=8, ep_size=4), (64, 128)
+        )
+        # N=128: both land on 128, so one launch covers the pair
+        self.assertEqual(
+            _grouped_fp8_masked_m_values(tokens_per_rank=32, ep_size=4), (128,)
+        )
+        # N=64: max_m still rounds to 128 while t_rows stays 64
+        self.assertEqual(
+            _grouped_fp8_masked_m_values(tokens_per_rank=8, ep_size=8), (64, 128)
+        )
+
+    def test_masked_m_values_empty_past_the_refusal_cap(self):
+        """Prefill never masks, so there is nothing to warm for it."""
+        self.assertEqual(
+            _grouped_fp8_masked_m_values(tokens_per_rank=16384, ep_size=4), ()
+        )
+        self.assertEqual(
+            _grouped_fp8_masked_m_values(tokens_per_rank=1024, ep_size=1), (1024,)
+        )
+        self.assertEqual(
+            _grouped_fp8_masked_m_values(tokens_per_rank=1025, ep_size=1), ()
+        )
+
+    def test_collect_grouped_fp8_shapes(self):
+        root = nn.Module()
+        root.add_module("layer0", self._grouped_fp8_module())
+        root.add_module("layer1", self._grouped_fp8_module())
+        shapes = _collect_dsv4_grouped_fp8_moe_shapes(root)
+        # Both layers share a shape, so one entry with all four operands.
+        self.assertEqual(len(shapes), 1)
+        (key,) = list(shapes)
+        self.assertEqual(key, (8, 512, 512, 512, 256, 4))
+        info = shapes[key]
+        self.assertEqual(info["ep_size"], 4)
+        for attr in ("_w13", "_s13", "_w2", "_s2"):
+            self.assertIn(attr, info)
+
+    def test_collect_grouped_fp8_shapes_skips_incomplete_modules(self):
+        """A strategy whose weights are not set up yet must not be collected."""
+        root = nn.Module()
+        partial = _module_type(
+            "GroupedFP8Strategy",
+            {"_w13": torch.empty((8, 512, 512), dtype=torch.float8_e4m3fn)},
+        )()
+        root.add_module("partial", partial)
+        self.assertEqual(_collect_dsv4_grouped_fp8_moe_shapes(root), {})
+
+    def test_collect_grouped_fp8_shapes_ignores_other_strategies(self):
+        root = nn.Module()
+        root.add_module(
+            "fp4",
+            _module_type(
+                "GroupedFP4Strategy",
+                {
+                    "_w13": torch.empty((8, 512, 256), dtype=torch.float8_e4m3fn),
+                    "_s13": torch.empty((8, 4, 2)),
+                    "_w2": torch.empty((8, 512, 128), dtype=torch.float8_e4m3fn),
+                    "_s2": torch.empty((8, 4, 1)),
+                    "cfg": SimpleNamespace(ep_size=4),
+                },
+            )(),
+        )
+        self.assertEqual(_collect_dsv4_grouped_fp8_moe_shapes(root), {})
+
+    def test_collect_wo_a_grouped_shapes(self):
+        root = nn.Module()
+        attn = nn.Module()
+        attn.register_buffer(
+            "_wo_a_grp_w", torch.empty((9, 256, 512), dtype=torch.float8_e4m3fn)
+        )
+        attn.register_buffer("_wo_a_grp_s", torch.empty((9, 2, 4)))
+        root.add_module("attn", attn)
+        shapes = _collect_dsv4_wo_a_grouped_shapes(root)
+        self.assertEqual(list(shapes), [(9, 256, 512)])
+        self.assertEqual(shapes[(9, 256, 512)]["name"], "attn")
+
+    def test_collect_wo_a_grouped_shapes_ignores_the_sm100_buffers(self):
+        """SM100 registers ``_wo_a_stk_*``; this collector must not match them."""
+        root = nn.Module()
+        attn = nn.Module()
+        attn.register_buffer(
+            "_wo_a_stk_w", torch.empty((9, 256, 512), dtype=torch.float8_e4m3fn)
+        )
+        attn.register_buffer("_wo_a_stk_s", torch.empty((9, 256, 4)))
+        root.add_module("attn", attn)
+        self.assertEqual(_collect_dsv4_wo_a_grouped_shapes(root), {})
+
+    def test_grouped_fp8_plan_reaches_the_launcher(self):
+        """The (layout, m) sequence actually launched, not just the computed plan."""
+        root = nn.Module()
+        root.add_module("layer0", self._grouped_fp8_module(ep_size=4))
+        shapes = _collect_dsv4_grouped_fp8_moe_shapes(root)
+        seen = []
+
+        def record(_label, desc, _fn, device=None):  # noqa: ARG001
+            seen.append(desc)
+
+        with mock.patch.object(
+            warmup_module, "model_warm_up_enabled", return_value=True
+        ), mock.patch.object(
+            warmup_module, "_is_cuda_device", return_value=True
+        ), mock.patch.object(
+            warmup_module, "_assert_not_capturing"
+        ), mock.patch.object(
+            warmup_module, "_sync_cuda"
+        ), mock.patch.object(
+            warmup_module, "_release_cuda_cache"
+        ), mock.patch.object(
+            warmup_module,
+            "_run_deepgemm_warmup_launches_serialized",
+            side_effect=lambda _label, fn: fn(),
+        ), mock.patch.object(
+            warmup_module,
+            "_run_deepgemm_warmup_launch_with_retry",
+            side_effect=record,
+        ):
+            warmup_grouped_fp8_moe_jit(
+                shapes, tokens_per_rank=8, device=torch.device("cpu")
+            )
+
+        # conc 8 over ep 4: one contiguous at the 128 alignment, then the two
+        # masked expected_m values (t_rows 64 and max_m 128).
+        self.assertEqual(len(seen), 3, seen)
+        self.assertIn("contiguous m=128", seen[0])
+        self.assertIn("masked m=64", seen[1])
+        self.assertIn("masked m=128", seen[2])
+
+    def test_grouped_fp8_plan_is_contiguous_only_for_prefill_shapes(self):
+        """Past the masked cap only the contiguous launch remains."""
+        root = nn.Module()
+        root.add_module("layer0", self._grouped_fp8_module(ep_size=4))
+        shapes = _collect_dsv4_grouped_fp8_moe_shapes(root)
+        seen = []
+        with mock.patch.object(
+            warmup_module, "model_warm_up_enabled", return_value=True
+        ), mock.patch.object(
+            warmup_module, "_is_cuda_device", return_value=True
+        ), mock.patch.object(
+            warmup_module, "_assert_not_capturing"
+        ), mock.patch.object(
+            warmup_module, "_sync_cuda"
+        ), mock.patch.object(
+            warmup_module, "_release_cuda_cache"
+        ), mock.patch.object(
+            warmup_module,
+            "_run_deepgemm_warmup_launches_serialized",
+            side_effect=lambda _label, fn: fn(),
+        ), mock.patch.object(
+            warmup_module,
+            "_run_deepgemm_warmup_launch_with_retry",
+            side_effect=lambda _l, desc, _f, device=None: seen.append(desc),
+        ):
+            warmup_grouped_fp8_moe_jit(
+                shapes, tokens_per_rank=16384, device=torch.device("cpu")
+            )
+        self.assertEqual(len(seen), 1, seen)
+        self.assertIn("contiguous", seen[0])
+
+    def test_warmups_are_noops_when_model_warmup_is_disabled(self):
+        with mock.patch.object(
+            warmup_module, "model_warm_up_enabled", return_value=False
+        ):
+            warmup_grouped_fp8_moe_jit(
+                {(8, 512, 512, 512, 256, 4): {"name": "x", "ep_size": 4}},
+                tokens_per_rank=8,
+                device=torch.device("cpu"),
+            )
+            warmup_wo_a_grouped_jit(
+                {(9, 256, 512): {"name": "x"}},
+                max_m=8,
+                device=torch.device("cpu"),
+            )
+
+    def test_warmups_are_noops_on_a_cpu_device(self):
+        """Guards the SM100 case: the collectors return {} and this must not run."""
+        warmup_grouped_fp8_moe_jit({}, tokens_per_rank=8, device=torch.device("cpu"))
+        warmup_wo_a_grouped_jit({}, max_m=8, device=torch.device("cpu"))
 
 
 if __name__ == "__main__":

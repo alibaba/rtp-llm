@@ -826,6 +826,30 @@ def transpose_packed_fp4(*args: Any, **kwargs: Any) -> Any:
     return _transpose_packed_fp4_impl(*args, **kwargs)
 
 
+@functools.cache
+def has_tf32_hc_prenorm_gemm() -> bool:
+    """Whether this DeepGEMM build exports the optional mHC pre-norm GEMM.
+
+    ``tf32_hc_prenorm_gemm`` is not part of ``_lazy_init_deep_gemm_once``, so its
+    impl global stays ``None`` until the first call -- which means reading that
+    global is not a usable availability test before then. Resolve it through the
+    same symbol map instead: ``_lazy_init_deep_gemm`` raises when a name is absent
+    from the installed build, so a raise here is the "not exported" answer rather
+    than an error to propagate.
+
+    Callers select a backend on this, so it must not raise: a build without the
+    symbol is a supported configuration, not a failure.
+    """
+    if not has_deep_gemm():
+        return False
+    if _tf32_hc_prenorm_gemm_impl is None:
+        try:
+            _lazy_init_deep_gemm(["tf32_hc_prenorm_gemm"])
+        except (RuntimeError, ValueError):
+            return False
+    return _tf32_hc_prenorm_gemm_impl is not None
+
+
 def tf32_hc_prenorm_gemm(
     x: torch.Tensor,
     fn: torch.Tensor,

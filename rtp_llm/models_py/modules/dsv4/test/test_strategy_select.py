@@ -7,6 +7,7 @@ contract. Pure-Python, no CUDA / DeepGEMM / dist required — runs on host.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import sys
 import types
@@ -15,14 +16,17 @@ from contextlib import contextmanager
 from unittest import mock
 
 # Importing strategies populates the registry via ``register_strategy``.
+from rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp8 import _MASKED_MAX_N
 from rtp_llm.models_py.modules.dsv4.moe.strategies import (
     DeepEPStrategy,
     GroupedFP4Strategy,
+    GroupedFP8Strategy,
     LocalLoopStrategy,
     MegaMoEStrategy,
     MegaMoEStrategySE,
     MoeCfg,
     _has_fp8_fp4_grouped_kernel,
+    _has_grouped_fp8_kernel,
     select_strategy,
 )
 from rtp_llm.models_py.modules.dsv4.moe.strategies.base import _resolve_forced
@@ -77,6 +81,7 @@ class StrategySelectTest(unittest.TestCase):
             "DSV4_USE_MEGA_MOE_SE",
             "DSV4_USE_MEGA_MOE_FUSED",
             "DSV4_USE_GROUPED_FP4",
+            "DSV4_USE_GROUPED_FP8",
         ):
             os.environ.pop(k, None)
 
@@ -125,8 +130,13 @@ class StrategySelectTest(unittest.TestCase):
             self.assertTrue(_has_fp8_fp4_grouped_kernel())
 
     def test_ep1_no_grouped_falls_to_local(self):
+        # Both grouped strategies have to be out of the way: grouped_fp8 sits
+        # above local_loop in the priority list and is capable wherever the SM90
+        # FP8 grouped kernel resolves.
         with mock.patch.object(
             GroupedFP4Strategy, "can_handle", return_value=False
+        ), mock.patch.object(
+            GroupedFP8Strategy, "can_handle", return_value=False
         ), mock.patch.object(
             MegaMoEStrategy, "can_handle", return_value=False
         ), mock.patch.object(
@@ -144,12 +154,82 @@ class StrategySelectTest(unittest.TestCase):
         ), mock.patch.object(MegaMoEStrategySE, "can_handle", return_value=True):
             self.assertIs(select_strategy(_cfg(ep_size=4)), MegaMoEStrategy)
 
-    def test_ep_gt1_no_mega_raises(self):
-        with mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False):
+    def test_ep_gt1_no_ep_capable_raises(self):
+        # grouped_fp8 joined mega/mega_fused as EP-capable, so the raise now
+        # requires every one of them to decline.
+        with mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False), \
+             mock.patch.object(GroupedFP8Strategy, "can_handle", return_value=False):
             with self.assertRaises(RuntimeError) as cm:
                 select_strategy(_cfg(ep_size=4))
-        self.assertIn("requires MegaMoEStrategy", str(cm.exception))
+        self.assertIn("requires one of", str(cm.exception))
+        self.assertIn("grouped_fp8", str(cm.exception))
         self.assertIn("fallback to DeepEP/LocalLoop is disabled", str(cm.exception))
+
+    # --- grouped_fp8: the SM90 EP path ------------------------------------
+
+    def test_ep_gt1_sm90_picks_grouped_fp8(self):
+        """Mega is SM100-only; on SM90 grouped_fp8 is what serves ep_size > 1."""
+        with mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False), \
+             mock.patch.object(GroupedFP8Strategy, "can_handle", return_value=True):
+            self.assertIs(select_strategy(_cfg(ep_size=4)), GroupedFP8Strategy)
+
+    def test_ep1_prefers_grouped_fp8_over_local_loop(self):
+        """grouped_fp8 outranks local_loop, which hardcodes FP4 expert storage."""
+        with mock.patch.object(GroupedFP4Strategy, "can_handle", return_value=False), \
+             mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False), \
+             mock.patch.object(GroupedFP8Strategy, "can_handle", return_value=True):
+            self.assertIs(select_strategy(_cfg(ep_size=1)), GroupedFP8Strategy)
+
+    def test_forced_grouped_fp8_at_ep_gt1_is_allowed(self):
+        """It carries its own EP combine, so forcing it under EP must not raise."""
+        with mock.patch.object(GroupedFP8Strategy, "can_handle", return_value=True):
+            self.assertIs(
+                select_strategy(_cfg(ep_size=4), forced="grouped_fp8"),
+                GroupedFP8Strategy,
+            )
+
+    def test_grouped_fp8_kernel_probe(self):
+        """env off / no CUDA / kernel absent / non-Hopper each disable it.
+
+        The predicate is ``@functools.cache``d -- it is called once per layer, so
+        caching the import and the capability query is deliberate -- which means
+        every case here has to clear it first.
+        """
+        impl = (
+            "rtp_llm.models_py.kernels.cuda.deepgemm_wrapper."
+            "_m_grouped_fp8_gemm_nt_contiguous_impl"
+        )
+        cuda = (
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp8.torch.cuda"
+        )
+
+        # The last probe below leaves a mocked True in the cache, and a failing
+        # assertion would otherwise skip the trailing clear and leak that answer
+        # into every later case in this process.
+        self.addCleanup(_has_grouped_fp8_kernel.cache_clear)
+
+        def probe():
+            _has_grouped_fp8_kernel.cache_clear()
+            return _has_grouped_fp8_kernel()
+
+        with _env(DSV4_USE_GROUPED_FP8="0"):
+            self.assertFalse(probe())
+        with mock.patch(f"{cuda}.is_available", return_value=False):
+            self.assertFalse(probe())
+        with mock.patch(f"{cuda}.is_available", return_value=True), \
+             mock.patch(impl, None):
+            self.assertFalse(probe())
+        # Gated to Hopper rather than "not SM100" on purpose: SM100 has the FP4
+        # kernels, which are faster, so this path would only regress there.
+        with mock.patch(f"{cuda}.is_available", return_value=True), \
+             mock.patch(impl, object()), \
+             mock.patch(f"{cuda}.get_device_capability", return_value=(10, 0)):
+            self.assertFalse(probe())
+        with mock.patch(f"{cuda}.is_available", return_value=True), \
+             mock.patch(impl, object()), \
+             mock.patch(f"{cuda}.get_device_capability", return_value=(9, 0)):
+            self.assertTrue(probe())
+        _has_grouped_fp8_kernel.cache_clear()
 
     # --- forced override ---------------------------------------------------
 
@@ -171,8 +251,8 @@ class StrategySelectTest(unittest.TestCase):
         with mock.patch.object(DeepEPStrategy, "can_handle", return_value=True):
             with self.assertRaises(RuntimeError) as cm:
                 select_strategy(_cfg(ep_size=4), forced="deepep")
-        self.assertIn("requires MegaMoEStrategy", str(cm.exception))
-        self.assertIn("bypass Mega", str(cm.exception))
+        self.assertIn("requires one of", str(cm.exception))
+        self.assertIn("has no EP combine", str(cm.exception))
 
     def test_forced_unknown_raises(self):
         with self.assertRaises(RuntimeError) as cm:
@@ -284,11 +364,218 @@ class StrategySelectTest(unittest.TestCase):
         # 64k_cp4_ep1 smoke that has ep_size=1 + DSV4_USE_MEGA_MOE=1.
         with mock.patch.object(
             MegaMoEStrategy, "can_handle", return_value=False
-        ), mock.patch.object(GroupedFP4Strategy, "can_handle", return_value=False):
+        ), mock.patch.object(
+            GroupedFP4Strategy, "can_handle", return_value=False
+        ), mock.patch.object(
+            GroupedFP8Strategy, "can_handle", return_value=False
+        ):
             self.assertIs(
                 select_strategy(_cfg(ep_size=1), forced="mega", strict=False),
                 LocalLoopStrategy,
             )
+
+
+class GroupedFP8CaptureGuardTest(unittest.TestCase):
+    """``_assert_one_captured_size``: turn a replay-time NCCL hang into a startup error.
+
+    The hazard is that ``CudaGraphRunner`` selects a graph per rank from that rank's
+    own batch size while this strategy's EP collectives sit inside the graph, so two
+    ranks on different graphs hang. Neither condition is observable from inside the
+    strategy at replay time, but both are observable at capture time: more than one
+    captured size, or a captured size the scheduler can exceed.
+    """
+
+    CAPTURING = (
+        "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp8."
+        "torch.cuda.is_current_stream_capturing"
+    )
+
+    def _strategy(self, ep_size: int, max_tokens_per_rank: int) -> GroupedFP8Strategy:
+        # MoeCfg is immutable, so the bound is set by rebuilding it.
+        cfg = dataclasses.replace(
+            _cfg(ep_size=ep_size), max_tokens_per_rank=max_tokens_per_rank
+        )
+        strat = GroupedFP8Strategy(cfg)
+        strat._captured_ns = set()
+        return strat
+
+    def test_single_size_at_the_scheduler_bound_is_accepted(self):
+        strat = self._strategy(ep_size=4, max_tokens_per_rank=8)
+        with mock.patch(self.CAPTURING, return_value=True):
+            strat._assert_one_captured_size(8)
+            strat._assert_one_captured_size(8)  # same size again is fine
+
+    def test_second_captured_size_raises(self):
+        strat = self._strategy(ep_size=4, max_tokens_per_rank=8)
+        with mock.patch(self.CAPTURING, return_value=True):
+            strat._assert_one_captured_size(8)
+            with self.assertRaises(RuntimeError) as cm:
+                strat._assert_one_captured_size(16)
+        self.assertIn("more than one batch size", str(cm.exception))
+        self.assertIn("concurrency_limit", str(cm.exception))
+
+    def test_captured_size_below_scheduler_bound_raises(self):
+        # A rank whose batch exceeds the graph falls back to eager while the others
+        # replay -- the same divergence, reached the other way.
+        strat = self._strategy(ep_size=4, max_tokens_per_rank=64)
+        with mock.patch(self.CAPTURING, return_value=True):
+            with self.assertRaises(RuntimeError) as cm:
+                strat._assert_one_captured_size(8)
+        self.assertIn("may hand it up to", str(cm.exception))
+
+    def test_ep1_and_non_capturing_are_exempt(self):
+        # ep_size == 1 has no EP collectives in the graph, and outside capture the
+        # runner is not selecting graphs at all.
+        strat = self._strategy(ep_size=1, max_tokens_per_rank=8)
+        with mock.patch(self.CAPTURING, return_value=True):
+            strat._assert_one_captured_size(8)
+            strat._assert_one_captured_size(999)
+        strat = self._strategy(ep_size=4, max_tokens_per_rank=8)
+        with mock.patch(self.CAPTURING, return_value=False):
+            strat._assert_one_captured_size(8)
+            strat._assert_one_captured_size(999)
+
+
+class GroupedFP8LowLatencyGateTest(unittest.TestCase):
+    """The low-latency buffer must only be built where the role can reach it.
+
+    ``_ll_max_tokens`` rounds the requested tokens-per-rank up to the alignment the
+    masked GEMM needs at this ``ep``: the 64-row floor is on ``M_MAX * ep``, not on
+    ``M_MAX``, so the unit is ``64 // gcd(64, ep)``.
+    """
+
+    def test_ll_max_tokens_alignment_unit_follows_ep(self):
+        from rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp8 import (
+            _ll_max_tokens,
+        )
+
+        with _env(DSV4_MOE_LL_MAX_TOKENS="8"):
+            self.assertEqual(_ll_max_tokens(4), 16)   # 64 // gcd(64, 4) = 16
+            self.assertEqual(_ll_max_tokens(8), 8)    # 64 // gcd(64, 8) = 8
+            self.assertEqual(_ll_max_tokens(1), 64)   # single rank: the full floor
+        with _env(DSV4_MOE_LL_MAX_TOKENS="0"):
+            self.assertEqual(_ll_max_tokens(4), 16)   # empty/0 still clears the floor
+
+    def test_gate_predicate_separates_the_roles(self):
+        """``_ll_gate`` decides whether a 136 MB RDMA buffer is allocated.
+
+        ``resolve_moe_max_tokens_per_rank`` gives a decode role
+        ``max_generate_batch_size * tokens_per_batch`` and any other role a >= 4096
+        budget, so the predicate is exactly "is this a decode role". Asserted
+        through the predicate rather than through arithmetic on ``_ll_max_tokens``:
+        an earlier version of this case compared 8 <= 16 and 8192 > 16, which held
+        no matter what the gate did.
+        """
+        with _env(DSV4_MOE_DEEPEP_LL="1", DSV4_MOE_LL_MAX_TOKENS="8"):
+            # decode: bound is the concurrency limit, inside the LL capacity
+            self.assertTrue(
+                GroupedFP8Strategy._ll_gate(
+                    dataclasses.replace(_cfg(ep_size=4), max_tokens_per_rank=8)
+                )
+            )
+            # prefill: >= 4096 budget, far past it
+            self.assertFalse(
+                GroupedFP8Strategy._ll_gate(
+                    dataclasses.replace(_cfg(ep_size=4), max_tokens_per_rank=8192)
+                )
+            )
+            # exactly at the rounded capacity is still reachable
+            self.assertTrue(
+                GroupedFP8Strategy._ll_gate(
+                    dataclasses.replace(_cfg(ep_size=4), max_tokens_per_rank=16)
+                )
+            )
+            self.assertFalse(
+                GroupedFP8Strategy._ll_gate(
+                    dataclasses.replace(_cfg(ep_size=4), max_tokens_per_rank=17)
+                )
+            )
+            # single rank: no exchange to accelerate
+            self.assertFalse(
+                GroupedFP8Strategy._ll_gate(
+                    dataclasses.replace(_cfg(ep_size=1), max_tokens_per_rank=8)
+                )
+            )
+        # opt-in flag off -> gate closed regardless of the bound
+        with _env(DSV4_MOE_DEEPEP_LL="0", DSV4_MOE_LL_MAX_TOKENS="8"):
+            self.assertFalse(
+                GroupedFP8Strategy._ll_gate(
+                    dataclasses.replace(_cfg(ep_size=4), max_tokens_per_rank=8)
+                )
+            )
+
+
+class GroupedFP8ShouldMaskTest(unittest.TestCase):
+    """``_should_mask`` reads a shape and an env var, never the data.
+
+    Host-only by design -- every rank has to reach the same answer or the group
+    deadlocks at the next collective -- so it belongs in the CPU suite. It used to
+    be covered from the GPU-only equivalence module, where the capture branch was
+    unreachable and the whole case skipped on any CPU lane.
+    """
+
+    CAPTURING = (
+        "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp8."
+        "torch.cuda.is_current_stream_capturing"
+    )
+    WARMUP_FORWARD = "RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD"
+
+    def setUp(self):
+        # Three inputs decide this predicate and only one is named per case, so the
+        # other two are cleared here. In particular a lane that exports
+        # RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD would make every expected-False case
+        # return True.
+        for name in ("DSV4_MOE_MASKED", self.WARMUP_FORWARD):
+            saved = os.environ.get(name)
+            os.environ.pop(name, None)
+            self.addCleanup(
+                lambda n=name, v=saved: (
+                    os.environ.pop(n, None)
+                    if v is None
+                    else os.environ.__setitem__(n, v)
+                )
+            )
+
+    def test_env_enabled_and_not_capturing(self):
+        with _env(DSV4_MOE_MASKED="1"), mock.patch(self.CAPTURING, return_value=False):
+            self.assertTrue(GroupedFP8Strategy._should_mask(8))
+            self.assertTrue(GroupedFP8Strategy._should_mask(_MASKED_MAX_N))
+            # Past the cap and not capturing: the contiguous path is still legal.
+            self.assertFalse(GroupedFP8Strategy._should_mask(_MASKED_MAX_N + 1))
+
+    def test_env_disabled_and_not_capturing(self):
+        with _env(DSV4_MOE_MASKED="0"), mock.patch(self.CAPTURING, return_value=False):
+            self.assertFalse(GroupedFP8Strategy._should_mask(8))
+
+    def test_capture_forces_the_masked_layout(self):
+        with _env(DSV4_MOE_MASKED="0"), mock.patch(self.CAPTURING, return_value=True):
+            self.assertTrue(GroupedFP8Strategy._should_mask(8))
+
+    def test_pre_capture_warmup_forward_takes_the_masked_layout(self):
+        """The forward ``initCapture`` runs before ``captureDecode()``.
+
+        DeepGEMM cannot JIT inside a capture, so the masked kernel has to be
+        compiled by that eager forward. Keyed only on
+        ``is_current_stream_capturing()`` this held solely when
+        ``DSV4_MOE_MASKED=1`` happened to be set, which is a guarantee resting on
+        deployment configuration.
+        """
+        with _env(DSV4_MOE_MASKED="0", RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD="1"), \
+                mock.patch(self.CAPTURING, return_value=False):
+            self.assertTrue(GroupedFP8Strategy._should_mask(8))
+            # Still refused past the cap, and without raising: not capturing yet.
+            self.assertFalse(GroupedFP8Strategy._should_mask(_MASKED_MAX_N + 1))
+
+    def test_pre_capture_flag_off_leaves_the_contiguous_path(self):
+        with _env(DSV4_MOE_MASKED="0", RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD="0"), \
+                mock.patch(self.CAPTURING, return_value=False):
+            self.assertFalse(GroupedFP8Strategy._should_mask(8))
+
+    def test_capture_past_the_cap_raises(self):
+        """Capture cannot express the contiguous path, so this must not fall back."""
+        with _env(DSV4_MOE_MASKED="1"), mock.patch(self.CAPTURING, return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "_MASKED_MAX_N"):
+                GroupedFP8Strategy._should_mask(_MASKED_MAX_N + 1)
 
 
 if __name__ == "__main__":

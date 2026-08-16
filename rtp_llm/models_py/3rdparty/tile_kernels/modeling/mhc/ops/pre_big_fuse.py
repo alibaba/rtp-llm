@@ -1,39 +1,56 @@
 import functools
-import os
 
 import torch
 
-from ....mhc.norm_fn_kernel import _mhc_pre_norm_fn_fwd_mul, round_to_tf32
+from ....mhc.norm_fn_kernel import (
+    _mhc_pre_norm_fn_fwd_mul,
+    _mhc_pre_norm_fn_fwd_mul_splitk,
+    round_to_tf32,
+)
 from ....mhc.pre_big_fuse_kernel import _mhc_pre_big_fuse
 
 
-def _ceil_div(x: int, y: int) -> int:
-    return (x + y - 1) // y
+@functools.cache
+def _policy():
+    """The module that owns backend selection and the split-K arithmetic.
+
+    Imported function-locally, as this file already does for ``deepgemm_wrapper``:
+    that module holds no TileLang dependency and must stay importable in a CPU-only
+    test lane, which importing it from this file's module scope would defeat.
+    """
+    from rtp_llm.models_py.modules.dsv4 import mhc_prenorm_backend
+
+    return mhc_prenorm_backend
+
+
+def resolve_n_splits(
+    *, mhc_hidden_size: int, num_tokens: int, num_sms: int, backend: str
+) -> int:
+    """See :func:`mhc_prenorm_backend.resolve_n_splits`."""
+    return _policy().resolve_n_splits(
+        mhc_hidden_size=mhc_hidden_size,
+        num_tokens=num_tokens,
+        num_sms=num_sms,
+        backend=backend,
+    )
 
 
 @functools.cache
-def _compute_num_split(block_k: int, k: int, grid_size: int) -> int:
-    device_props = torch.cuda.get_device_properties(0)
-    n_sms = device_props.multi_processor_count
-    split_k = n_sms // max(grid_size, 1)
-    num_block_k = _ceil_div(k, block_k)
-    split_k = min(split_k, num_block_k // 4)
-    return max(split_k, 1)
+def resolve_backend() -> str:
+    """Per-process cached :func:`mhc_prenorm_backend.resolve_backend`.
+
+    Cached here rather than in the shared module so the resolver itself stays
+    env-live for the tests that drive it: this is the hot path, called once per mHC
+    layer per step, and the value it reads cannot change within a process. Call
+    ``resolve_backend.cache_clear()`` if an ablation needs to switch mid-run.
+    """
+    return _policy().resolve_backend()
 
 
-def _requested_backend() -> str:
-    requested = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
-    if requested in ("", "auto"):
-        # Experiment branch: enable DeepGEMM by default to validate DSV4
-        # greedy/golden semantics under the full SM100 smoke suite. This is
-        # intentionally hard: DeepGEMM/JIT failures must surface directly.
-        return "deepgemm"
-    aliases = {
-        "dg": "deepgemm",
-        "tilelang": "tilelang_single",
-        "single": "tilelang_single",
-    }
-    return aliases.get(requested, requested)
+@functools.cache
+def device_num_sms() -> int:
+    """See :func:`mhc_prenorm_backend.device_num_sms`."""
+    return _policy().device_num_sms()
 
 
 def _run_tilelang_single_gemm(
@@ -53,6 +70,33 @@ def _run_tilelang_single_gemm(
         gemm_out_sqrsum[:1].view(-1, 1),
     )
     return 1
+
+
+def _run_tilelang_splitk_gemm(
+    residual_flat: torch.Tensor,
+    fn: torch.Tensor,
+    gemm_out_mul: torch.Tensor,
+    gemm_out_sqrsum: torch.Tensor,
+    mhc_mult3: int,
+    mhc_hidden_size: int,
+    n_splits: int,
+) -> None:
+    """Split-K TileLang mHC pre GEMM: same math as the single-GEMM path.
+
+    Writes partials into all ``n_splits`` slots; ``_mhc_pre_big_fuse`` below
+    already sums the leading axis, so nothing else changes. Unlike
+    ``_run_tilelang_single_gemm`` this does not narrow the buffers to ``[:1]``.
+    """
+    fn = round_to_tf32(fn)
+    kernel = _mhc_pre_norm_fn_fwd_mul_splitk(
+        mhc_mult3, 1, mhc_hidden_size, n_splits
+    )
+    kernel(
+        residual_flat.view(-1, mhc_hidden_size),
+        fn,
+        gemm_out_mul.view(n_splits, -1, 1, mhc_mult3),
+        gemm_out_sqrsum.view(n_splits, -1, 1),
+    )
 
 
 def _run_deepgemm_splitk_gemm(
@@ -107,13 +151,18 @@ def mhc_pre_big_fuse(
     num_tokens = residual_flat.shape[0]
     fn_flat = fn
 
-    backend = _requested_backend()
-    block_k = 64
-    block_m = 64
-    n_splits = (
-        _compute_num_split(block_k, mhc_hidden_size, _ceil_div(num_tokens, block_m))
-        if backend in ("deepgemm", "tilelang_splitk")
-        else 1
+    backend = resolve_backend()
+    # At decode (num_tokens <= a couple of dozen) grid_size is 1 and the split
+    # count lands on the cap, 64 for a 16384-wide fn; at prefill grid_size
+    # already fills the GPU and the heuristic returns 1, which makes the split-K
+    # kernel identical in shape to the single-GEMM one. Every distinct count is a
+    # distinct tl.constexpr and so a distinct compile, which is why the JIT
+    # warmup enumerates them through this same function.
+    n_splits = resolve_n_splits(
+        mhc_hidden_size=mhc_hidden_size,
+        num_tokens=num_tokens,
+        num_sms=device_num_sms(),
+        backend=backend,
     )
 
     post_mix = torch.empty(
@@ -152,9 +201,14 @@ def mhc_pre_big_fuse(
         gemm_out_mul = gemm_out_mul[:1]
         gemm_out_sqrsum = gemm_out_sqrsum[:1]
     elif backend == "tilelang_splitk":
-        raise RuntimeError(
-            "DSV4_MHC_PRE_GEMM_BACKEND=tilelang_splitk is not wired in this "
-            "RTP TileKernels snapshot; use deepgemm or tilelang_single."
+        _run_tilelang_splitk_gemm(
+            residual_flat,
+            fn_flat,
+            gemm_out_mul,
+            gemm_out_sqrsum,
+            mhc_mult3,
+            mhc_hidden_size,
+            n_splits,
         )
     else:
         raise ValueError(

@@ -67,6 +67,12 @@ class ModelConfig(CppModelConfig):
     # Python-only fields that are allowed to be set
     _python_fields = {
         "is_mtp",
+        # Routed-expert storage: "fp4" (released ckpt) or "fp8" (rewritten for
+        # SM90). Python-only -- there is no ModelConfig.h field and no
+        # def_readwrite for it, and nothing in the C++ engine reads it. If the
+        # engine ever needs it (buffer sizing, operator selection), add the field
+        # and its binding first, then move this name to _cpp_members.
+        "expert_dtype",
         "dspark_noise_token_id",
         "dspark_target_layer_ids",
         "dspark_markov_rank",
@@ -506,6 +512,11 @@ class ModelConfig(CppModelConfig):
         self.dspark_markov_rank: Optional[int] = None
         # Target-side decoder layer outputs exported to the DSpARK draft.
         self.capture_aux_hidden_layer_ids: Optional[list[int]] = None
+        # Routed-expert storage as declared by the checkpoint: "fp4", "fp8", or
+        # None when the key is absent. None means fp4; that mapping lives in
+        # models/deepseek_v4.py:parse_expert_dtype rather than here, because a
+        # default imported from rtp_llm/models would make config depend on models.
+        self.expert_dtype: Optional[str] = None
         self.normalize_lm_head_weight: bool = False
         self.enable_fp32_lm_head: bool = True
         self.has_lm_head_bias: bool = False
