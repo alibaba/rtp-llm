@@ -340,7 +340,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     if (!propose_maga_init_params_) {
         generate_stream->markGrpcNormalDeviceStatePending();
     }
-    if (propose_maga_init_params_) {
+    if (propose_maga_init_params_ && !generate_stream->forceDisableSpRun()) {
         const size_t propose_step = propose_maga_init_params_->gen_num_per_circle;
         RTP_LLM_CHECK_WITH_INFO(propose_step > 0, "decode rpc propose_step should be positive");
         if (maga_init_params_.sp_config.gen_num_per_cycle > 0) {
@@ -400,6 +400,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     request.set_partition_count(1);
     request.set_partition_id(0);
     request.set_prefill_cp_size(load_context.prefill_cp_size);
+    request.set_force_disable_sp_run(load_context.force_disable_sp_run);
 
     const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
     const bool  segmented_linear_cache =
@@ -462,6 +463,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
     request.set_request_key(load_context.request_key);
     request.set_dp_rank(maga_init_params_.parallelism_config.dp_rank);
     request.set_prefill_cp_size(load_context.prefill_cp_size);
+    request.set_force_disable_sp_run(load_context.force_disable_sp_run);
     const auto& cache_config        = engine_->resourceContext().cache_manager->cacheConfig();
     const bool  k3_hybrid_cache     = cache_config.use_mla && hasSegmentedLinearCacheGroup(cache_config);
     const int   decode_attention_tp = static_cast<int>(maga_init_params_.parallelism_config.get_attn_tp_size());
@@ -534,7 +536,30 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
     RTP_LLM_PROFILE_FUNCTION();
     auto*       generate_stream    = decode_context.getStream().get();
     auto&       cache_keys         = generate_stream->cacheKeys(0);
-    const auto& block_ids_by_group = generate_stream->kvCachePtr()->groupBlocks(0);
+    const auto& all_block_ids_by_group = generate_stream->kvCachePtr()->groupBlocks(0);
+    GroupBlockIds target_only_block_ids_by_group;
+    const GroupBlockIds* block_ids_by_group = &all_block_ids_by_group;
+    if (generate_stream->forceDisableSpRun() && propose_maga_init_params_) {
+        // A target-only Prefill intentionally skips the draft-model forward,
+        // so its draft cache group is never made ready.  Decode must request
+        // only the target model's cache groups; waiting for the draft group
+        // would block the PD cache hand-off forever.
+        const auto* cache_manager = engine_->resourceContext().cache_manager.get();
+        RTP_LLM_CHECK_WITH_INFO(cache_manager != nullptr, "target-only PD cache load requires a cache manager");
+        const size_t draft_group_num = cache_manager->getMTPModuleCacheConfig(0).groupNums();
+        RTP_LLM_CHECK_WITH_INFO(draft_group_num <= all_block_ids_by_group.size(),
+                                "draft cache group count %zu exceeds allocated group count %zu",
+                                draft_group_num,
+                                all_block_ids_by_group.size());
+        const size_t target_group_num = all_block_ids_by_group.size() - draft_group_num;
+        RTP_LLM_CHECK_WITH_INFO(target_group_num <= all_block_ids_by_group.size(),
+                                "target cache group count %zu exceeds allocated group count %zu",
+                                target_group_num,
+                                all_block_ids_by_group.size());
+        target_only_block_ids_by_group.assign(all_block_ids_by_group.begin(),
+                                              all_block_ids_by_group.begin() + target_group_num);
+        block_ids_by_group = &target_only_block_ids_by_group;
+    }
 
     if (resource_.workers.size() % decode_context.peer_addrs.size() != 0
         && decode_context.peer_addrs.size() % resource_.workers.size() != 0) {
@@ -564,13 +589,14 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
                                     decode_context.request_key,
                                     decode_context.peer_addrs,
                                     cache_keys,
-                                    block_ids_by_group,
+                                    *block_ids_by_group,
                                     generate_stream->reuseBlockSize(),
                                     min_timeout_ms,
                                     1,
                                     0,
                                     decode_context.server_context,
-                                    decode_context.prefill_cp_size};
+                                    decode_context.prefill_cp_size,
+                                    generate_stream->forceDisableSpRun()};
 
     // Prefill: TP = 1 && Decode: TP = 1
     if (resource_.workers.size() == 1 && decode_context.peer_addrs.size() == 1) {
@@ -1114,7 +1140,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             }
         }
 
-        if (engine_->isMTPEagle()) {
+        if (engine_->isMTPEagle() && !load_context.force_disable_sp_run) {
             if (propose_maga_init_params_ && propose_maga_init_params_->mtp_model_params_
                 && !propose_maga_init_params_->mtp_model_params_->empty()) {
                 const size_t mtp_base_model_id = propose_maga_init_params_->mtp_model_params_->at(0)->model_id;
@@ -1339,7 +1365,8 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                  request->partition_count(),
                                  request->partition_id(),
                                  server_context,
-                                 std::max(1, request->prefill_cp_size())});
+                                 std::max(1, request->prefill_cp_size()),
+                                 request->force_disable_sp_run()});
     response->mutable_error_info()->set_error_code(transErrorCodeToRPC(error_info.code()));
     response->mutable_error_info()->set_error_message(error_info.ToString());
     response->set_done_time_us(currentTimeUs());

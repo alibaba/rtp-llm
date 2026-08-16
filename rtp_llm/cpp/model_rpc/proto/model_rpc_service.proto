@@ -364,6 +364,7 @@ message BroadcastLoadRequestPB {
     int32 partition_id = 11;
     repeated IntVector group_block_ids = 12;
     int32 prefill_cp_size = 13;
+    bool force_disable_sp_run = 14;
 }
 
 message BroadcastLoadResponsePB {

@@ -385,6 +385,21 @@ class KimiK3RendererTest(unittest.TestCase):
                 )
                 renderer.apply_chat_completion_constraints(request, GenerateConfig())
 
+    def test_k3_sampling_contract_accepts_top_p_one_for_all_modes(self) -> None:
+        renderer = KimiK3Renderer.__new__(KimiK3Renderer)
+        for thinking in ({"type": "enabled"}, {"type": "disabled"}):
+            with self.subTest(thinking=thinking):
+                request = ChatCompletionRequest.model_validate(
+                    {
+                        "messages": [{"role": "user", "content": "question"}],
+                        "thinking": thinking,
+                        "top_p": 1.0,
+                    }
+                )
+                config = GenerateConfig()
+                renderer.apply_chat_completion_constraints(request, config)
+                self.assertEqual(config.top_p, 1.0)
+
     def test_forced_tool_choice_rejects_existing_grammar(self) -> None:
         request = ChatCompletionRequest.model_validate(
             {

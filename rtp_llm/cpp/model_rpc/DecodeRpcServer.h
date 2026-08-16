@@ -34,7 +34,8 @@ public:
                            int                              partition_count,
                            int                              partition_id,
                            grpc::ServerContext*             server_context,
-                           int32_t                          prefill_cp_size = 1):
+                           int32_t                          prefill_cp_size = 1,
+                           bool                             force_disable_sp_run = false):
             request_id(request_id),
             request_key(request_key),
             peer_addrs(peer_addrs),
@@ -45,7 +46,8 @@ public:
             partition_count(partition_count),
             partition_id(partition_id),
             server_context(server_context),
-            prefill_cp_size(prefill_cp_size) {}
+            prefill_cp_size(prefill_cp_size),
+            force_disable_sp_run(force_disable_sp_run) {}
         int64_t                          request_id;
         const std::string&               request_key;
         const std::vector<std::string>&  peer_addrs;
@@ -58,6 +60,7 @@ public:
 
         grpc::ServerContext* server_context;
         int32_t              prefill_cp_size;
+        bool                 force_disable_sp_run;
     };
 
 private:

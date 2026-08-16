@@ -322,6 +322,19 @@ absl::StatusOr<GptModelInputs> MtpBatchStreamProcessor::gatherDecodeModelInput(c
 
     RTP_LLM_CHECK(model_input.ok());
 
+    // A target-only decode has no draft hidden state to gather.  At this point
+    // the aggregate model-input flag is not guaranteed to be populated yet,
+    // so inspect the rank-0 streams directly. MtpExecutor will propagate the
+    // flag through tpSyncModelInputs before routing to decodeStepTargetOnly().
+    const auto all_streams = stream_groups.allStreams();
+    const bool target_only = !all_streams.empty()
+                             && std::all_of(all_streams.begin(), all_streams.end(), [](const auto& stream) {
+                                    return stream->forceDisableSpRun();
+                                });
+    if (target_only) {
+        return model_input;
+    }
+
     if (propose_step_ == 1) {
         return model_input;
     }

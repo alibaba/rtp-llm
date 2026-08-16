@@ -451,7 +451,7 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
             {context_position_ids.data_ptr<int32_t>(),
              context_position_ids.data_ptr<int32_t>() + context_position_ids.numel()});
     }
-    if (engine_->isMTPEagle()) {
+    if (engine_->isMTPEagle() && !stream->forceDisableSpRun()) {
         RTP_LLM_CHECK_WITH_INFO(stream->getProposeToken().size() > 0,
                                 "mtp remote generate propose token should not be empty");
     }
@@ -460,7 +460,10 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
 
     auto sp_output_buffer = stream->getSPOutputBuffer();
 
-    if (sp_output_buffer) {
+    // Target-only requests do not run the draft model.  MTP may still leave an
+    // allocated SP output holder on the stream, but its tensors are undefined
+    // and must not be serialized into the GENERATE RPC.
+    if (!stream->forceDisableSpRun() && sp_output_buffer) {
         auto all_probs_cpu =
             sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;
         torch::Tensor hidden_states_cpu;

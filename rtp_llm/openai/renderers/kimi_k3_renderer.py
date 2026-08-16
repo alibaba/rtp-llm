@@ -175,22 +175,11 @@ class KimiK3Renderer(CustomChatRenderer):
         if "top_p" not in fields_set or request.top_p is None:
             generate_config.top_p = 0.95
         else:
-            effort = (
-                request.thinking.effort
-                if request.thinking is not None and request.thinking.effort is not None
-                else request.reasoning_effort
-            )
-            effort_uses_top_p_one = (
-                thinking
-                and isinstance(effort, str)
-                and effort.lower() in {"low", "high", "max"}
-                and request.top_p == 1.0
-            )
-            if request.top_p != 0.95 and not effort_uses_top_p_one:
+            if request.top_p not in (0.95, 1.0):
                 cls._reject_sampling_param(
                     "top_p",
                     request.top_p,
-                    "to be 0.95 (or 1.0 with thinking effort)",
+                    "to be 0.95 or 1.0",
                 )
             generate_config.top_p = request.top_p
 

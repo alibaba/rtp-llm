@@ -435,6 +435,23 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                            py_model_inputs_.attention_inputs.kv_cache_layer_to_group,
                            inputs.attention_inputs.kv_cache_layer_to_group.numel() * sizeof(int32_t));
 
+        // TokenSpeed MLA builds its replay plan from pinned host metadata.  The
+        // capture tensors contain only dummy maximum-length descriptors, so the
+        // live values must be mirrored on every replay just like cu_seqlens.
+        // Both copies are H2H; no device synchronization or D2H copy is added.
+        if (inputs.attention_inputs.input_lengths_host.defined()
+            && py_model_inputs_.attention_inputs.input_lengths_host.defined()) {
+            optimizedCopyAsync(inputs.attention_inputs.input_lengths_host,
+                               py_model_inputs_.attention_inputs.input_lengths_host,
+                               state.current_batch_size * sizeof(int));
+        }
+        if (inputs.attention_inputs.prefix_lengths_host.defined()
+            && py_model_inputs_.attention_inputs.prefix_lengths_host.defined()) {
+            optimizedCopyAsync(inputs.attention_inputs.prefix_lengths_host,
+                               py_model_inputs_.attention_inputs.prefix_lengths_host,
+                               state.current_batch_size * sizeof(int));
+        }
+
         if (!is_prefill_cuda_graph_mode_) {
             // FlashInfer's replay-time planner consumes the CPU mirrors.  Keep
             // them aligned with the live request instead of retaining the
