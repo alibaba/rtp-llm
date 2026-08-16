@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceDiskTransferExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostTransferExecutor.h"
@@ -13,8 +14,6 @@
 
 namespace rtp_llm {
 
-class BlockTreeTaskPool;
-
 class PerRankBlockTransferEngine {
 public:
     explicit PerRankBlockTransferEngine(std::vector<GroupSetPtr> group_sets,
@@ -22,13 +21,11 @@ public:
                                         size_t                   device_disk_staging_block_count = 4,
                                         size_t                   max_descriptors_per_batch       = 64);
     PerRankBlockTransferEngine() = delete;
-    virtual ~PerRankBlockTransferEngine();
+    virtual ~PerRankBlockTransferEngine() = default;
 
     virtual std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors);
 
 private:
-    struct EndpointRegistry;
-
     TransferStatus execute(const std::vector<HostBufferView>&       hosts,
                            const std::vector<TransferDescriptor>& descriptors,
                            const std::vector<const GroupSet*>&    group_sets) const;
@@ -44,7 +41,6 @@ private:
     std::unique_ptr<BlockTreeTaskPool>          host_to_device_task_pool_;
     std::unique_ptr<BlockTreeTaskPool>          host_to_disk_task_pool_;
     std::unique_ptr<BlockTreeTaskPool>          disk_to_host_task_pool_;
-    std::shared_ptr<EndpointRegistry>           endpoint_registry_;
     size_t                                      max_descriptors_per_batch_{64};
 };
 

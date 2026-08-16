@@ -1,13 +1,9 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 
 #include <algorithm>
-#include <cstdint>
 #include <exception>
-#include <map>
 #include <memory>
-#include <mutex>
 #include <string>
-#include <tuple>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
@@ -23,7 +19,7 @@ namespace rtp_llm {
 namespace {
 
 constexpr size_t kTransferWorkerCount = 2;
-constexpr size_t kTransferQueueSize   = 1000;
+constexpr size_t kTransferQueueSize   = 10000;
 
 ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
     switch (status) {
@@ -43,132 +39,6 @@ ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
 
 }  // namespace
 
-struct PerRankBlockTransferEngine::EndpointRegistry:
-    public std::enable_shared_from_this<PerRankBlockTransferEngine::EndpointRegistry> {
-    struct Key {
-        Tier             tier;
-        uintptr_t        pool;
-        BlockIdxType     block;
-
-        bool operator<(const Key& other) const {
-            return std::tie(tier, pool, block) < std::tie(other.tier, other.pool, other.block);
-        }
-    };
-
-    struct Access {
-        Key    key;
-        bool   write;
-        size_t descriptor_index;
-    };
-
-    struct InFlight {
-        size_t readers{0};
-        bool   writer{false};
-    };
-
-    std::pair<ErrorInfo, std::shared_ptr<void>> reserve(const std::vector<TransferDescriptor>& descriptors,
-                                                        const std::vector<const GroupSet*>&    group_sets) {
-        std::vector<Access> accesses;
-        for (size_t descriptor_index = 0; descriptor_index < descriptors.size(); ++descriptor_index) {
-            const auto& descriptor = descriptors[descriptor_index];
-            const auto& group_set  = *group_sets[descriptor_index];
-            append(accesses, descriptor.source_tier, descriptor.source_blocks, group_set, false, descriptor_index);
-            append(accesses, descriptor.target_tier, descriptor.target_blocks, group_set, true, descriptor_index);
-        }
-
-        std::map<Key, Access> batch_accesses;
-        for (const auto& access : accesses) {
-            const auto [it, inserted] = batch_accesses.emplace(access.key, access);
-            if (!inserted && (it->second.write || access.write)) {
-                return {ErrorInfo(ErrorCode::INVALID_PARAMS,
-                                  "transfer endpoint conflict inside batch, descriptor_index="
-                                      + std::to_string(access.descriptor_index)),
-                        nullptr};
-            }
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            for (const auto& [_, access] : batch_accesses) {
-                const auto it = in_flight.find(access.key);
-                if (it != in_flight.end()
-                    && (access.write ? it->second.writer || it->second.readers > 0 : it->second.writer)) {
-                    return {ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
-                                      "RESOURCE_EXHAUSTED: transfer endpoint conflict, descriptor_index="
-                                          + std::to_string(access.descriptor_index)),
-                            nullptr};
-                }
-            }
-            for (const auto& [key, access] : batch_accesses) {
-                auto& state = in_flight[key];
-                if (access.write) {
-                    state.writer = true;
-                } else {
-                    ++state.readers;
-                }
-            }
-        }
-
-        std::vector<Access> reserved;
-        reserved.reserve(batch_accesses.size());
-        for (const auto& [_, access] : batch_accesses) {
-            reserved.push_back(access);
-        }
-        auto self = shared_from_this();
-        return {ErrorInfo::OkStatus(),
-                std::shared_ptr<void>(nullptr, [self, reserved = std::move(reserved)](void*) {
-                    self->release(reserved);
-                })};
-    }
-
-    static void append(std::vector<Access>&                 accesses,
-                       Tier                                 tier,
-                       const std::vector<BlockIdxType>&     blocks,
-                       const GroupSet&                      group_set,
-                       bool                                 write,
-                       size_t                               descriptor_index) {
-        if (tier == Tier::DEVICE) {
-            for (size_t index = 0; index < blocks.size(); ++index) {
-                accesses.push_back(Access{Key{tier,
-                                              reinterpret_cast<uintptr_t>(group_set.devicePools()[index].get()),
-                                              blocks[index]},
-                                          write,
-                                          descriptor_index});
-            }
-        } else if (tier == Tier::HOST) {
-            accesses.push_back(Access{Key{tier,
-                                          reinterpret_cast<uintptr_t>(group_set.hostPool().get()),
-                                          blocks.front()},
-                                      write,
-                                      descriptor_index});
-        } else if (tier == Tier::DISK) {
-            accesses.push_back(Access{Key{tier,
-                                          reinterpret_cast<uintptr_t>(group_set.diskPool().get()),
-                                          blocks.front()},
-                                      write,
-                                      descriptor_index});
-        }
-    }
-
-    void release(const std::vector<Access>& accesses) {
-        std::lock_guard<std::mutex> lock(mutex);
-        for (const auto& access : accesses) {
-            auto it = in_flight.find(access.key);
-            if (access.write) {
-                it->second.writer = false;
-            } else {
-                --it->second.readers;
-            }
-            if (!it->second.writer && it->second.readers == 0) {
-                in_flight.erase(it);
-            }
-        }
-    }
-
-    std::mutex              mutex;
-    std::map<Key, InFlight> in_flight;
-};
-
 PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> group_sets,
                                                        DeviceHostCopyOptions    device_host_options,
                                                        size_t                   device_disk_staging_block_count,
@@ -176,7 +46,6 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
     group_sets_(std::move(group_sets)),
     device_host_executor_(std::make_unique<DeviceHostTransferExecutor>(std::move(device_host_options))),
     host_disk_executor_(std::make_unique<HostDiskTransferExecutor>()),
-    endpoint_registry_(std::make_shared<EndpointRegistry>()),
     max_descriptors_per_batch_(max_descriptors_per_batch) {
     RTP_LLM_CHECK(max_descriptors_per_batch_ > 0);
     device_to_host_task_pool_ =
@@ -201,8 +70,6 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
     }
 }
 
-PerRankBlockTransferEngine::~PerRankBlockTransferEngine() = default;
-
 std::shared_ptr<AsyncContext>
 PerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descriptors) {
     if (descriptors.empty()) {
@@ -226,23 +93,8 @@ PerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descri
         }
     }
 
-    if ((source == Tier::HOST || target == Tier::HOST)
-        && (source == Tier::DISK || target == Tier::DISK)) {
-        const auto* disk_pool = group_sets.front()->diskPool().get();
-        if (std::any_of(group_sets.begin(), group_sets.end(),
-                        [disk_pool](const GroupSet* group_set) { return group_set->diskPool().get() != disk_pool; })) {
-            return std::make_shared<CompletedAsyncContext>(transferStatusToErrorInfo(TransferStatus::INVALID_ARGS));
-        }
-    }
-
-    auto [reservation_error, reservation] = endpoint_registry_->reserve(descriptors, group_sets);
-    if (!reservation_error.ok()) {
-        RTP_LLM_LOG_WARNING("rejecting transfer batch: %s", reservation_error.ToString().c_str());
-        return std::make_shared<CompletedAsyncContext>(reservation_error);
-    }
-
     if (source == Tier::DISK && target == Tier::DEVICE) {
-        return device_disk_executor_->execute(descriptors, group_sets, std::move(reservation));
+        return device_disk_executor_->execute(descriptors, group_sets);
     }
 
     if (source == Tier::DEVICE && target == Tier::DISK) {
@@ -258,7 +110,7 @@ PerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descri
         return std::make_shared<CompletedAsyncContext>(transferStatusToErrorInfo(TransferStatus::INVALID_ARGS));
     }
 
-    auto context = std::make_shared<TransferBatchAsyncContext>(std::move(reservation));
+    auto context = std::make_shared<TransferBatchAsyncContext>();
     const bool accepted = task_pool->submit([this, descriptors, group_sets, hosts, context] {
         try {
             for (size_t begin = 0; begin < descriptors.size(); begin += max_descriptors_per_batch_) {

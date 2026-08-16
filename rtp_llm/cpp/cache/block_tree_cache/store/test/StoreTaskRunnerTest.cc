@@ -149,5 +149,34 @@ TEST(StoreTaskRunnerTest, RunTransferReturnsDispatcherFailure) {
                                  BlockRefType::REQUEST);
 }
 
+TEST(StoreTaskRunnerTest, TransferSubmissionFollowsTargetTier) {
+    auto policy                                         = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    const GroupBase                            group    = makeTestGroupBase(policy);
+    const std::shared_ptr<const CacheTopology> topology = makeTestTopology({group});
+    DeviceBlockPoolPtr device_pool = makeTestDevicePool({{16, 0}}, 2, "store_task_runner_submission");
+    GroupSetPtr        group_set   = makeTestGroupSet(0, topology, {0}, {device_pool});
+    const std::vector<GroupSetPtr> group_sets{group_set};
+    StoreTaskRunner                runner(group_sets);
+    BlockTreeCacheMetricsReporter metrics_reporter;
+
+    StoreTaskRunner::Task host_task;
+    host_task.target_tier = Tier::HOST;
+    host_task.descriptors = {TransferDescriptor::deviceToHost(0, {1}, 1),
+                             TransferDescriptor::deviceToHost(0, {2}, 2)};
+    auto host_engine = std::make_shared<ControlledPerRankBlockTransferEngine>(group_sets, TransferCopyAction::Fail);
+    BlockTransferDispatcher host_dispatcher(host_engine);
+    EXPECT_FALSE(runner.runTransfer(host_task, host_dispatcher, metrics_reporter, 10, 20));
+    EXPECT_EQ(host_engine->submittedBatchCount(), 1u);
+
+    StoreTaskRunner::Task disk_task;
+    disk_task.target_tier = Tier::DISK;
+    disk_task.descriptors = {TransferDescriptor::deviceToDisk(0, {1}, 1),
+                             TransferDescriptor::deviceToDisk(0, {2}, 2)};
+    auto disk_engine = std::make_shared<ControlledPerRankBlockTransferEngine>(group_sets, TransferCopyAction::Fail);
+    BlockTransferDispatcher disk_dispatcher(disk_engine);
+    EXPECT_FALSE(runner.runTransfer(disk_task, disk_dispatcher, metrics_reporter, 10, 20));
+    EXPECT_EQ(disk_engine->submittedBatchCount(), 2u);
+}
+
 }  // namespace
 }  // namespace rtp_llm

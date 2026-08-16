@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/store/StoreTaskRunner.h"
 
+#include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -55,9 +56,18 @@ bool StoreTaskRunner::runTransfer(Task&                          task,
     };
 
     try {
-        auto context = transfer_dispatcher.executeMultiRank(task.descriptors, timeout_ms);
-        context->waitDone();
-        copy_success = context->success();
+        std::vector<std::shared_ptr<AsyncContext>> contexts;
+        if (task.target_tier == Tier::DISK) {
+            contexts.reserve(task.descriptors.size());
+            for (const auto& descriptor : task.descriptors) {
+                contexts.push_back(transfer_dispatcher.executeMultiRank({descriptor}, timeout_ms));
+            }
+        } else {
+            contexts.push_back(transfer_dispatcher.executeMultiRank(task.descriptors, timeout_ms));
+        }
+        FusedAsyncContext context(contexts);
+        context.waitDone();
+        copy_success = context.success();
         if (copy_success) {
             metrics_reporter.accumulateTransferBytes(task.descriptors, group_sets_, transfer_bytes);
         }

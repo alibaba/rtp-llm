@@ -37,13 +37,13 @@ class SubmissionOrderContext final: public AsyncContext {
 public:
     SubmissionOrderContext(std::atomic<size_t>& submit_count,
                            bool succeed,
-                           std::shared_ptr<std::atomic<bool>> all_submitted_before_wait):
+                           std::shared_ptr<std::atomic<size_t>> submit_count_at_wait):
         submit_count_(submit_count),
         succeed_(succeed),
-        all_submitted_before_wait_(std::move(all_submitted_before_wait)) {}
+        submit_count_at_wait_(std::move(submit_count_at_wait)) {}
 
     void waitDone() override {
-        all_submitted_before_wait_->store(submit_count_.load() == 2);
+        submit_count_at_wait_->store(submit_count_.load());
         done_ = true;
     }
     bool done() const override {
@@ -56,7 +56,7 @@ public:
 private:
     std::atomic<size_t>& submit_count_;
     bool                 succeed_;
-    std::shared_ptr<std::atomic<bool>> all_submitted_before_wait_;
+    std::shared_ptr<std::atomic<size_t>> submit_count_at_wait_;
     bool                 done_{false};
 };
 
@@ -70,15 +70,14 @@ public:
         ++submit_count_;
         const bool result = results_.front();
         results_.pop_front();
-        waits_after_all_submits_.push_back(std::make_shared<std::atomic<bool>>(false));
-        return std::make_shared<SubmissionOrderContext>(
-            submit_count_, result, waits_after_all_submits_.back());
+        submit_counts_at_wait_.push_back(std::make_shared<std::atomic<size_t>>(0));
+        return std::make_shared<SubmissionOrderContext>(submit_count_, result, submit_counts_at_wait_.back());
     }
 
     std::vector<std::vector<TransferDescriptor>> batches_;
     std::deque<bool>                             results_;
-    std::deque<std::shared_ptr<std::atomic<bool>>> waits_after_all_submits_;
-    std::atomic<size_t>                          submit_count_{0};
+    std::deque<std::shared_ptr<std::atomic<size_t>>> submit_counts_at_wait_;
+    std::atomic<size_t>                            submit_count_{0};
 };
 
 TEST(LoadTaskRunnerTest, CreateTaskAllowsNoTransferDescriptors) {
@@ -111,7 +110,7 @@ TEST(LoadTaskRunnerTest, CreateTaskSkipsDeviceDescriptors) {
     EXPECT_EQ(task, nullptr);
 }
 
-TEST(LoadTaskRunnerTest, HostAndDiskBatchesAreSubmittedBeforeUnifiedWait) {
+TEST(LoadTaskRunnerTest, HostBatchCompletesBeforeDiskBatchIsSubmitted) {
     GroupSetPtr group = makeTaskRunnerTestGroupSet();
     const std::vector<GroupSetPtr> group_sets{group};
     LoadTaskRunner runner(group_sets);
@@ -126,8 +125,27 @@ TEST(LoadTaskRunnerTest, HostAndDiskBatchesAreSubmittedBeforeUnifiedWait) {
     ASSERT_EQ(engine->batches_.size(), 2u);
     EXPECT_EQ(engine->batches_[0].front().source_tier, Tier::HOST);
     EXPECT_EQ(engine->batches_[1].front().source_tier, Tier::DISK);
-    EXPECT_TRUE(engine->waits_after_all_submits_[0]->load());
-    EXPECT_TRUE(engine->waits_after_all_submits_[1]->load());
+    ASSERT_EQ(engine->submit_counts_at_wait_.size(), 2u);
+    EXPECT_EQ(engine->submit_counts_at_wait_[0]->load(), 1u);
+    EXPECT_EQ(engine->submit_counts_at_wait_[1]->load(), 2u);
+}
+
+TEST(LoadTaskRunnerTest, HostFailureSkipsDiskBatch) {
+    GroupSetPtr group = makeTaskRunnerTestGroupSet();
+    const std::vector<GroupSetPtr> group_sets{group};
+    LoadTaskRunner runner(group_sets);
+    auto engine = std::make_shared<RecordingPerRankEngine>(std::deque<bool>{false, true});
+    BlockTransferDispatcher dispatcher(engine);
+    BlockTreeCacheMetricsReporter metrics_reporter;
+    LoadTaskRunner::Task task;
+    task.load_descs = {TransferDescriptor::hostToDevice(0, 1, {1}),
+                       TransferDescriptor::diskToDevice(0, 2, {2})};
+
+    EXPECT_FALSE(runner.runTransfer(task, dispatcher, metrics_reporter, 100, 100));
+    ASSERT_EQ(engine->batches_.size(), 1u);
+    EXPECT_EQ(engine->batches_[0].front().source_tier, Tier::HOST);
+    ASSERT_EQ(engine->submit_counts_at_wait_.size(), 1u);
+    EXPECT_EQ(engine->submit_counts_at_wait_[0]->load(), 1u);
 }
 
 TEST(LoadTaskRunnerTest, AnyDirectionFailureFailsTheLoadBatch) {

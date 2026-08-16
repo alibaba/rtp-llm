@@ -156,29 +156,6 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitHostToDiskRoundTrip) {
     disk_pool_->free(disk_slot);
 }
 
-TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitHostDiskBatchRejectsDifferentDiskPools) {
-    auto second_host_pool = makeHostPool(host_block_size_, 4, false);
-    auto second_disk_pool =
-        makeDiskPool(host_block_size_, 7, temp_dir_.path, nullptr, "per_rank_transfer_engine_disk_2");
-    auto second_group = makeHostDiskGroup(1, second_host_pool, second_disk_pool, host_block_size_);
-    auto engine       = makeEngine({group_set_, second_group});
-
-    const BlockIdxType first_host_block  = poolMalloc(*host_pool_);
-    const BlockIdxType second_host_block = poolMalloc(*second_host_pool);
-    const BlockIdxType first_disk_block  = poolMalloc(*disk_pool_);
-    const BlockIdxType second_disk_block = poolMalloc(*second_disk_pool);
-
-    for (const auto [source, target] :
-         {std::pair{Tier::HOST, Tier::DISK}, std::pair{Tier::DISK, Tier::HOST}}) {
-        auto context = engine->submit({makeDescriptor(
-                                           source, target, {}, first_host_block, first_disk_block, 0),
-                                       makeDescriptor(
-                                           source, target, {}, second_host_block, second_disk_block, 1)});
-        context->waitDone();
-        EXPECT_FALSE(context->success());
-    }
-}
-
 TEST_F(PerRankBlockTransferEngineHostDiskTest, MaxBatchSizeSplitsOneLogicalBatch) {
     auto owned_io = std::make_unique<RecordingBatchDiskBlockIO>();
     auto* io = owned_io.get();
@@ -198,31 +175,6 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, MaxBatchSizeSplitsOneLogicalBatch
 
     ASSERT_TRUE(context->success());
     EXPECT_EQ(io->batch_sizes, (std::vector<size_t>{2, 2, 1}));
-}
-
-TEST_F(PerRankBlockTransferEngineHostDiskTest, ConflictingLogicalBatchIsRejectedUntilFirstCompletes) {
-    auto owned_io = std::make_unique<BlockingBatchDiskBlockIO>(BlockingBatchDiskBlockIO::Operation::WRITE);
-    auto* io = owned_io.get();
-    auto host_pool = makeHostPool(host_block_size_, 3, false);
-    auto disk_pool = makeDiskPool(host_block_size_, 2, temp_dir_.path, std::move(owned_io), "endpoint_conflict");
-    auto group = makeHostDiskGroup(0, host_pool, disk_pool, host_block_size_);
-    auto engine = makeEngine({group});
-    const auto disk_block = poolMalloc(*disk_pool);
-    const auto first = makeDescriptor(Tier::HOST, Tier::DISK, {}, poolMalloc(*host_pool), disk_block);
-    const auto second = makeDescriptor(Tier::HOST, Tier::DISK, {}, poolMalloc(*host_pool), disk_block);
-
-    auto first_context = engine->submit({first});
-    ASSERT_TRUE(io->waitForBlockedCalls(1, std::chrono::seconds(5)));
-    auto conflict_context = engine->submit({second});
-    EXPECT_TRUE(conflict_context->done());
-    EXPECT_FALSE(conflict_context->success());
-
-    io->release();
-    first_context->waitDone();
-    ASSERT_TRUE(first_context->success());
-    auto retry_context = engine->submit({second});
-    retry_context->waitDone();
-    EXPECT_TRUE(retry_context->success());
 }
 
 TEST_F(PerRankBlockTransferEngineHostDiskTest, LogicalBatchesMayShareReadOnlyEndpoint) {

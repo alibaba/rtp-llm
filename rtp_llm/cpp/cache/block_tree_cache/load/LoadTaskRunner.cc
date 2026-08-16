@@ -72,35 +72,41 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
     };
 
     try {
-        if (task.host_to_device_descriptors.size() > 0) {
+        bool host_success = true;
+        if (!task.host_to_device_descriptors.empty()) {
             host_transfer_begin_time_us =
                 metrics_reporter.reportTransferStarted(CacheTransferOperation::LOAD, Tier::HOST, Tier::DEVICE);
             host_transfer_started = true;
+            auto host_context =
+                transfer_dispatcher.executeMultiRank(task.host_to_device_descriptors, host_timeout_ms);
+            host_context->waitDone();
+            host_success = host_context->success();
+            if (host_success) {
+                metrics_reporter.accumulateTransferBytes(
+                    task.host_to_device_descriptors, group_sets_, host_transfer_bytes);
+            }
+            finish_metrics(host_success, false);
+            if (!host_success) {
+                return false;
+            }
         }
-        if (task.disk_to_device_descriptors.size() > 0) {
+
+        bool disk_success = true;
+        if (!task.disk_to_device_descriptors.empty()) {
             disk_transfer_begin_time_us =
                 metrics_reporter.reportTransferStarted(CacheTransferOperation::LOAD, Tier::DISK, Tier::DEVICE);
             disk_transfer_started = true;
+            auto disk_context =
+                transfer_dispatcher.executeMultiRank(task.disk_to_device_descriptors, disk_timeout_ms);
+            disk_context->waitDone();
+            disk_success = disk_context->success();
+            if (disk_success) {
+                metrics_reporter.accumulateTransferBytes(
+                    task.disk_to_device_descriptors, group_sets_, disk_transfer_bytes);
+            }
+            finish_metrics(host_success, disk_success);
         }
-
-        auto host_context =
-            transfer_dispatcher.executeMultiRank(task.host_to_device_descriptors, host_timeout_ms);
-        auto disk_context =
-            transfer_dispatcher.executeMultiRank(task.disk_to_device_descriptors, disk_timeout_ms);
-        FusedAsyncContext transfer_context({host_context, disk_context});
-        transfer_context.waitDone();
-
-        const bool host_success = host_context->success();
-        const bool disk_success = disk_context->success();
-        if (host_success) {
-            metrics_reporter.accumulateTransferBytes(task.host_to_device_descriptors, group_sets_, host_transfer_bytes);
-        }
-        if (disk_success) {
-            metrics_reporter.accumulateTransferBytes(
-                task.disk_to_device_descriptors, group_sets_, disk_transfer_bytes);
-        }
-        finish_metrics(host_success, disk_success);
-        return transfer_context.success();
+        return disk_success;
     } catch (...) {
         finish_metrics(false, false);
         throw;

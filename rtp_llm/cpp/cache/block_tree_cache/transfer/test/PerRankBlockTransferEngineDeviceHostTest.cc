@@ -514,23 +514,6 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitHostToDeviceIndependentDescriptors)
     device_pool_->free(second_device_block);
 }
 
-TEST_F(PerRankBlockTransferEngineTest, BatchRejectsDuplicateWriteEndpoint) {
-    const BlockIdxType first_host_block  = poolMalloc(*host_pool_);
-    const BlockIdxType second_host_block = poolMalloc(*host_pool_);
-    ASSERT_NE(first_host_block, NULL_BLOCK_IDX);
-    ASSERT_NE(second_host_block, NULL_BLOCK_IDX);
-
-    auto context = per_rank_transfer_engine_->submit(
-        {makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks_, first_host_block),
-         makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks_, second_host_block)});
-    context->waitDone();
-    EXPECT_FALSE(context->success());
-    EXPECT_EQ(context->errorInfo().code(), ErrorCode::INVALID_PARAMS);
-
-    host_pool_->free(first_host_block);
-    host_pool_->free(second_host_block);
-}
-
 TEST_F(PerRankBlockTransferEngineTest, BatchAllowsSharedReadEndpoint) {
     fillDeviceLayer(device_pool_, 0, device_block_, {0x4A});
     const BlockIdxType first_host_block  = poolMalloc(*host_pool_);
