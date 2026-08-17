@@ -19,4 +19,11 @@ std::vector<size_t> blockPositionsForCacheTransfer(size_t block_num,
 
 std::string layerTagCacheTransferKey(size_t request_id, size_t layer_id, const std::string& tag);
 
+// The cache_store registration plan (CacheStoreBlockPair + buildCacheStorePlan)
+// lives in CacheGroupType.h, keyed on CacheGroupPolicy rather than on a bare
+// CacheGroupType, and is reached through CPSlotMapper::buildStorePlan(). Do not
+// redeclare either here: this header includes CacheGroupType.h, so a second
+// definition of CacheStoreBlockPair in namespace rtp_llm is a redefinition
+// error in every translation unit that includes this file.
+
 }  // namespace rtp_llm

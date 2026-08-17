@@ -24,7 +24,6 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-
 cc_library(
     name = "block_info",
     hdrs = [
@@ -140,8 +139,8 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":cache_types",
-        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:time_util",
+        "//rtp_llm/cpp/utils:core_utils",
     ],
 )
 
@@ -317,6 +316,7 @@ cc_library(
         ":batch_kv_cache_resource",
         ":cache_types",
         ":kv_cache_allocator",
+        ":prefill_cache_hit_metrics_reporter",
         "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",

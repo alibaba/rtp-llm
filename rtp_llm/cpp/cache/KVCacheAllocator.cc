@@ -38,25 +38,43 @@ size_t KVCacheAllocator::reservableAvailableBlocksNum() const {
 }
 
 MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
-    auto init_result = initMallocForCommonLen(malloc_info);
-    if (!init_result.success) {
+    // Gross demand decides whether this request can ever fit. Current
+    // availability is checked after device-cache matching, when the allocator
+    // knows how many new physical blocks are actually required.
+    const auto capacity_status = evaluateInitCapacity(malloc_info, reserveBlocksNum(), InitCapacityMode::TOTAL_ONLY);
+    if (capacity_status != MallocStatus::NONE) {
+        return {false, 0, 0, capacity_status};
+    }
+
+    auto finalize_init_failure = [this, &malloc_info](MallocResult result) {
+        // Classify against the failure-time snapshot. Rolling back first can
+        // make capacity look sufficient and turn a retryable race into an
+        // internal error.
+        if (result.status == MallocStatus::NONE || result.status == MallocStatus::INTERNAL_ERROR) {
+            const auto status =
+                evaluateInitCapacity(malloc_info, reserveBlocksNum(), InitCapacityMode::TOTAL_AND_AVAILABLE);
+            result.status = status == MallocStatus::NONE ? MallocStatus::INTERNAL_ERROR : status;
+        }
         FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};
         free(free_info);
-        return init_result;
+        return result;
+    };
+
+    auto init_result = initMallocForCommonLen(malloc_info);
+    if (!init_result.success) {
+        return finalize_init_failure(init_result);
     }
 
     auto incr_result = incrMalloc(malloc_info);
     if (!incr_result.success) {
-        FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};
-        free(free_info);
-        return incr_result;
+        return finalize_init_failure(incr_result);
     } else {
         if (metrics_reporter_ && malloc_info.enable_device_cache) {
             int64_t device_input_length = 0;
             if (malloc_info.batch_kv_cache_resource) {
                 const auto& cache_keys      = malloc_info.batch_kv_cache_resource->cacheKeys(0);
                 size_t      match_keys_size = cache_keys.size();
-                device_input_length         = static_cast<int64_t>(match_keys_size) * config_.seq_size_per_block;
+                device_input_length         = static_cast<int64_t>(match_keys_size) * deviceCacheMetricTokensPerBlock();
             }
 
             if (device_input_length > 0) {
@@ -73,6 +91,28 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
         }
         return init_result;
     }
+}
+
+MallocStatus KVCacheAllocator::evaluateInitCapacity(const MallocInfo& malloc_info,
+                                                    size_t            reserve_blocks,
+                                                    InitCapacityMode  mode) const {
+    const int need_blocks = getNeedBlocks(malloc_info);
+    if (need_blocks <= 0) {
+        return MallocStatus::NONE;
+    }
+
+    const size_t required_blocks = static_cast<size_t>(need_blocks);
+    auto         fits            = [required_blocks, reserve_blocks](size_t capacity) {
+        return required_blocks <= capacity && reserve_blocks <= capacity - required_blocks;
+    };
+
+    if (!fits(totalBlocksNum())) {
+        return MallocStatus::PERMANENT_RESOURCE_EXHAUSTED;
+    }
+    if (mode == InitCapacityMode::TOTAL_AND_AVAILABLE && !fits(availableBlocksNum())) {
+        return MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED;
+    }
+    return MallocStatus::NONE;
 }
 
 MallocResult KVCacheAllocator::malloc(const MallocInfo& malloc_info) {
@@ -351,6 +391,9 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
     }
     batch_resource->cacheResource(0).setCacheKeys(std::move(evicted_keys));
     batch_resource->cacheResource(0).setBlockDependencies(std::move(evicted_dependencies));
+    // Evicted keys already come from the GPU cache's actual key namespace.
+    // Under CP this can be a mixed batch of canonical paged keys and logical
+    // state/SWA keys, so coordinator must not remap the whole batch again.
     batch_resource->cacheResource(0).setCacheKeysAreCpCanonical(true);
     return batch_resource;
 }

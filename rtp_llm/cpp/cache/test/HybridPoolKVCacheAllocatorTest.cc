@@ -151,6 +151,26 @@ static void setExplicitBlocksForGroup(CacheConfig& config, size_t group_id, uint
     config.setGroupPolicies(policies);
 }
 
+// Move every explicitly-sized independent group (DSV4's fixed state pools) onto pinned host
+// memory. Residency and budget are independent knobs, so a host-resident pool must also drop
+// charge_to_paged_budget -- checkGroupResidencyBudget() enforces exactly that pairing.
+static std::vector<size_t> setPinnedHostPlacementForExplicitIndependentGroups(CacheConfig& config) {
+    std::vector<CacheGroupPolicy> policies;
+    std::vector<size_t>           pinned_gids;
+    policies.reserve(static_cast<size_t>(config.groupNums()));
+    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
+        auto policy = config.policyForGroup(gid);
+        if (policy.evict_policy == CacheEvictPolicy::INDEPENDENT && policy.explicit_block_num > 0) {
+            policy.memory_placement       = CacheMemoryPlacement::HOST_PINNED;
+            policy.charge_to_paged_budget = false;
+            pinned_gids.push_back(gid);
+        }
+        policies.push_back(policy);
+    }
+    config.setGroupPolicies(policies);
+    return pinned_gids;
+}
+
 static size_t firstExplicitIndependentGroup(const CacheConfig& config) {
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
         const auto policy = config.policyForGroup(gid);
@@ -818,8 +838,9 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveCheckIsBypassedWhenMallocInfoLacks
 
 TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackFreesPartiallyAllocatedGroupBlocks) {
     // gid=0 has enough room for the LINEAR tail block; gid=1 cannot satisfy
-    // the 3 FULL blocks needed for seq_len=9. initMallocForCommonLen should
-    // roll gid=0 back after gid=1 fails.
+    // the 3 FULL blocks needed for seq_len=9. Whichever stage rejects -- the
+    // per-group capacity preflight or initMallocForCommonLen's group loop --
+    // both pools must end up exactly as they started.
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/3, /*full_block_num=*/3);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
@@ -836,12 +857,52 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackFreesPartiallyAllocated
 
     auto result = allocator->malloc(malloc_info);
     EXPECT_FALSE(result.success);
+    // A 3-block pool exposes 2 usable blocks (block 0 is the null sentinel), so 3 FULL blocks can
+    // never fit: the per-group total-capacity test must report PERMANENT so the scheduler errors
+    // the stream out instead of parking it in WAITING forever.
+    EXPECT_EQ(result.status, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED);
 
     EXPECT_EQ(batch_res->curBlocksNum(), 0u);
     EXPECT_EQ(batch_res->blocksNum(0, /*gid=*/0), 0u);
     EXPECT_EQ(batch_res->blocksNum(0, /*gid=*/1), 0u);
     EXPECT_EQ(allocator->requestRefBlocksNum(), 0u);
     expectPoolCountersEq(allocator, counters_before);
+}
+
+// The same request that a live holder makes un-satisfiable must come back RETRYABLE (stream stays
+// WAITING) rather than PERMANENT, and must actually succeed once the holder releases its blocks.
+TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocReportsRetryablePerGroupCapacityShortage) {
+    // Each pool has enough empty-engine capacity for seq_len=8. A live holder
+    // leaves the FULL pool one block short, so only the current admission is
+    // retryable; the request is not permanently oversized.
+    auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/4, /*full_block_num=*/3);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+
+    auto holder_resource = makeBatchResource(/*batch_size=*/1, config);
+    holder_resource->setBatchCacheKeys(0, CacheKeysType{100});
+    auto       holder_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+    MallocInfo holder_info{holder_resource, holder_tokens};
+    holder_info.enable_device_cache = false;
+    holder_info.reuse_cache         = false;
+    ASSERT_TRUE(allocator->malloc(holder_info).success);
+
+    auto deferred_resource = makeBatchResource(/*batch_size=*/1, config);
+    deferred_resource->setBatchCacheKeys(0, CacheKeysType{200, 201});
+    auto       deferred_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/8, /*seq_size_per_block=*/4);
+    MallocInfo deferred_info{deferred_resource, deferred_tokens};
+    deferred_info.enable_device_cache = false;
+    deferred_info.reuse_cache         = false;
+    deferred_info.verbose             = false;
+
+    auto deferred_result = allocator->malloc(deferred_info);
+    EXPECT_FALSE(deferred_result.success);
+    EXPECT_EQ(deferred_result.status, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED);
+    EXPECT_EQ(deferred_resource->curBlocksNum(), 0u);
+
+    allocator->free(FreeInfo{holder_resource, holder_tokens});
+    auto retry_result = allocator->malloc(deferred_info);
+    EXPECT_TRUE(retry_result.success);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesDeviceReuseReferencesOnReserveReject) {
@@ -1015,6 +1076,27 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FixedTagPoolsUseGpuBacking) {
     }
 }
 
+// memory_placement=HOST_PINNED must move only the opted-in pools off HBM; every other pool of
+// the same DSV4 config stays on the device.
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FixedTagPoolsUsePinnedHostBackingWhenPlacementIsHostPinned) {
+    auto       config      = makeDSV4HybridPoolConfig(/*block_num=*/200);
+    const auto pinned_gids = setPinnedHostPlacementForExplicitIndependentGroups(config);
+    ASSERT_FALSE(pinned_gids.empty());
+    ASSERT_LT(pinned_gids.size(), static_cast<size_t>(config.groupNums()));
+
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+
+    ASSERT_EQ(allocator->groupBlockPools().size(), 7u);
+    const std::unordered_set<size_t> pinned_set(pinned_gids.begin(), pinned_gids.end());
+    for (size_t gid = 0; gid < allocator->groupBlockPools().size(); ++gid) {
+        const bool expect_pinned = pinned_set.count(gid) > 0;
+        EXPECT_EQ(allocator->groupBlockPools()[gid]->where(),
+                  expect_pinned ? MemoryType::MEMORY_CPU_PINNED : MemoryType::MEMORY_GPU)
+            << "gid=" << gid << " tag=" << config.tagForGroup(gid);
+    }
+}
+
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4HCAStateReuseEnabledAllocatesTailOnly) {
     auto config        = makeDSV4HybridPoolConfig(/*block_num=*/200);
     config.linear_step = 4;
@@ -1166,6 +1248,29 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4GpuHcaStatePoolIncludesFixedReserve) 
     }
     const size_t expected_reserve = 50u * config.blockSizeBytesForGroup(explicit_gid);
     EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, expected_reserve);
+}
+
+// Mirror image of DSV4GpuHcaStatePoolIncludesFixedReserve: a pinned-host pool keeps its explicit
+// block count but must NOT be deducted from the device paged budget, otherwise the KV cache
+// silently shrinks by bytes that never live in HBM.
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4PinnedHcaStatePoolExcludesFixedReserve) {
+    auto         config       = makeDSV4HybridPoolConfig(/*block_num=*/50);
+    const size_t explicit_gid = firstExplicitIndependentGroup(config);
+    setExplicitBlocksForGroup(config, explicit_gid, 50);
+    const auto pinned_gids = setPinnedHostPlacementForExplicitIndependentGroups(config);
+    ASSERT_EQ(pinned_gids.size(), 1u);
+    ASSERT_EQ(pinned_gids.front(), explicit_gid);
+
+    RuntimeConfig rt;
+    config.finalizeBlockNums(/*global_block_num=*/200, rt);
+
+    // Block counts are unaffected by residency: the explicit pool still gets its 50 blocks.
+    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
+        const uint32_t expected = config.policyForGroup(gid).explicit_block_num > 0 ? 50u : 200u;
+        EXPECT_EQ(config.blockNumForGroup(gid), expected) << "gid=" << gid;
+    }
+    EXPECT_GT(config.blockSizeBytesForGroup(explicit_gid), 0u);
+    EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, 0u);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateSwaPoolsWithoutExplicitBlocksScaleWithLinearStep) {
@@ -1352,7 +1457,11 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedInsertThenReuseSamePrefix) {
     auto result = allocator->malloc(hit_malloc);
 
     ASSERT_TRUE(result.success);
-    EXPECT_EQ(result.reuse_len, 5 * spb * 2);
+    // 10 full keys under cp_size=2 subsample to 5 canonical match keys;
+    // initMallocForCommonLen always drops the last canonical match key (it may
+    // be a partial tail, and fully reusing the input would leave no prefill
+    // tokens to compute), so only 4 canonical blocks are reusable.
+    EXPECT_EQ(result.reuse_len, 4 * spb * 2);
 
     FreeInfo hit_free{hit_res, hit_tokens};
     allocator->free(hit_free);

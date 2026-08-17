@@ -73,6 +73,11 @@ private:
     grpc::Status allocateResourceFunc(DecodeGenerateContext& decode_context);
     void         loadCacheFromPrefill(DecodeGenerateContext& decode_context);
     void         localGenerate(DecodeGenerateContext& decode_context);
+    // Report a terminal early failure to FlexLB via meta_->finishTask(); guaranteed at most once per
+    // request. MUST NOT be called inside functions driven by EXECUTE_WITH_RETRY (would report while
+    // retries could still succeed); only call at final failure points.
+    void
+    reportEarlyFinishTask(DecodeGenerateContext& decode_context, int64_t error_code, const std::string& error_message);
 
     ErrorInfo              loadCache(const LoadKVCacheContext& load_context);
     ErrorInfo              loadCacheForAllRank(DecodeGenerateContext& decode_context);

@@ -292,16 +292,35 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
 
     const int  seq_size_per_block = config_.seq_size_per_block;
     const bool is_first_malloc    = !malloc_info.batch_kv_cache_resource->curBlocksNum();
+    // A first malloc that failed with MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED leaves the stream
+    // WAITING and re-enters here having allocated nothing, so curBlocksNum() is still zero and
+    // is_first_malloc is still true. Recomputing the keys is wasted work, and reporting the
+    // prefill-cache-hit metric again would double-count the request. cacheKeysInitialized() is the
+    // discriminator rather than hasCacheKeys(): it is cleared by resetBatchSize() /
+    // resetAndReturnOldResources(), so a batch reshape between attempts correctly forces a recompute
+    // even though the surviving batch rows still hold keys. Only the attempt that actually
+    // initialises the keys owns the metric.
+    const bool keys_already_initialized = malloc_info.batch_kv_cache_resource->cacheKeysInitialized();
+    bool       keys_initialized_now     = false;
     if (is_first_malloc) {
-        initCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
+        if (!keys_already_initialized) {
+            initCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
+            keys_initialized_now = true;
+        }
     } else {
         updateCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
     }
-    reportPrefillCacheHitMetrics(malloc_info, is_first_malloc);
+    reportPrefillCacheHitMetrics(malloc_info, keys_initialized_now);
 
+    // MallocResult carries MallocStatus out by value. Do not flatten it to a bare bool on the way
+    // up: StreamCacheResource distinguishes RETRYABLE_RESOURCE_EXHAUSTED (keep the stream WAITING)
+    // from PERMANENT_RESOURCE_EXHAUSTED / INTERNAL_ERROR (fail the request).
     return allocator_->malloc(malloc_info);
 }
 
+// is_first_malloc is passed as "this call is the one that initialised the cache keys", which is the
+// first malloc minus its retries. Retried init-mallocs must not re-report, or the hit rate is
+// double-counted for every request that waited on cache pressure.
 void KVCacheManager::reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc) {
     if (!is_first_malloc || !prefill_cache_hit_metrics_reporter_ || !malloc_info.batch_kv_cache_resource
         || !malloc_info.complete_token_ids) {
@@ -546,10 +565,13 @@ KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_c
             all_keys.insert(device_cache_keys.begin(), device_cache_keys.end());
             info.version = shared_cache->version();
         }
-        // memory cache keys
+        // memory cache keys. The keys go straight into an unordered_set, so the LRU ordering that
+        // memoryCacheKeys() pays an O(n log n) sort to produce is discarded immediately. Use the
+        // unordered variant: same key set, no sort, which matters because this status path is polled
+        // while the memory cache holds tens of thousands of keys.
         RTP_LLM_CHECK_WITH_INFO(coordinator_ != nullptr,
                                 "getKVCacheInfo called before KVCacheManager coordinator initialized");
-        const auto mem_cache_keys = coordinator_->memoryCacheKeys();
+        const auto mem_cache_keys = coordinator_->memoryCacheKeysForStatus();
         all_keys.insert(mem_cache_keys.begin(), mem_cache_keys.end());
 
         info.cached_keys.assign(all_keys.begin(), all_keys.end());
