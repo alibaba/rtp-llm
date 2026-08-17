@@ -168,6 +168,24 @@ py_test(
 )
 
 py_test(
+    name = "test_sm120_tp_ep_layout",
+    srcs = ["test_sm120_tp_ep_layout.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
+    name = "test_sm120_nccl_ep_combine",
+    srcs = ["test_sm120_nccl_ep_combine.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["manual", "sm120"],
+)
+py_test(
     name = "test_chunked_moe",
     srcs = ["test_chunked_moe.py"],
     deps = [

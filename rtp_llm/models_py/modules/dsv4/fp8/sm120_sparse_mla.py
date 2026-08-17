@@ -112,19 +112,35 @@ def run(
             "trtllm_batch_decode_sparse_mla_dsv4"
         ) from exc
 
+    # FlashInfer's SM120 DSV4 instantiations currently start at 16 local
+    # attention heads. TP=8 leaves eight heads per rank, but attention heads
+    # are independent, so pad only that SM120 shape to 16 and discard the
+    # dummy outputs. This keeps TP=4 and all non-SM120 paths unchanged and
+    # avoids falling back to a reference implementation.
+    kernel_query = query.contiguous()
+    kernel_sinks = sinks.float()
+    kernel_out = out
+    original_heads = int(query.shape[-2])
+    if original_heads == 8:
+        kernel_query = torch.cat((kernel_query, torch.zeros_like(kernel_query)), dim=-2)
+        kernel_sinks = torch.cat((kernel_sinks, torch.zeros_like(kernel_sinks)), dim=-1)
+        kernel_out = torch.empty_like(kernel_query)
+
     trtllm_batch_decode_sparse_mla_dsv4(
-        query=query.contiguous(),
+        query=kernel_query,
         swa_kv_cache=swa_cache.unsqueeze(-2),
         workspace_buffer=workspace(query.device),
         sparse_indices=swa_indices,
         compressed_kv_cache=(
             extra_cache.unsqueeze(-2) if extra_cache is not None else None
         ),
-        out=out,
+        out=kernel_out,
         bmm1_scale=scale,
-        sinks=sinks.float(),
+        sinks=kernel_sinks,
         kv_layout="NHD",
         swa_topk_lens=swa_lens,
         extra_sparse_indices=extra_indices,
         extra_sparse_topk_lens=extra_lens,
     )
+    if kernel_out is not out:
+        out.copy_(kernel_out[..., :original_heads, :])

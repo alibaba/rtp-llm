@@ -241,3 +241,102 @@ def v4_indexer_score(
         num_stages=2,
     )
     return out
+
+
+@triton.jit
+def _v4_fp8_indexer_score_fwd(
+    q_ptr,  # [M, H, D] fp8 e4m3
+    kv_ptr,  # [N, D] fp8 e4m3
+    kv_scale_ptr,  # [N] fp32
+    w_ptr,  # [M, H] fp32
+    out_ptr,  # [M, N] fp32
+    M,
+    N,
+    q_m: tl.constexpr,
+    q_h: tl.constexpr,
+    kv_n: tl.constexpr,
+    w_m: tl.constexpr,
+    out_m: tl.constexpr,
+    H: tl.constexpr,
+    D: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    """SM120 FP8 indexer score without the [M,H,N] FP32 intermediate."""
+    pid_m = tl.program_id(0).to(tl.int64)
+    pid_n = tl.program_id(1).to(tl.int64)
+    m_off = pid_m * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
+    n_off = pid_n * BLOCK_N + tl.arange(0, BLOCK_N).to(tl.int64)
+    m_mask = m_off < M
+    n_mask = n_off < N
+    d_off = tl.arange(0, D)
+
+    k_ptrs = kv_ptr + n_off[:, None] * kv_n + d_off[None, :]
+    k_tile = tl.load(k_ptrs, mask=n_mask[:, None], other=0.0)
+    k_t = tl.trans(k_tile)
+    k_scale = tl.load(kv_scale_ptr + n_off, mask=n_mask, other=0.0).to(
+        tl.float32
+    )
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    for h in tl.static_range(H):
+        q_ptrs = q_ptr + m_off[:, None] * q_m + h * q_h + d_off[None, :]
+        q_tile = tl.load(q_ptrs, mask=m_mask[:, None], other=0.0)
+        score = tl.dot(q_tile, k_t, out_dtype=tl.float32)
+        score *= k_scale[None, :]
+        score = tl.maximum(score, 0.0)
+        weight = tl.load(w_ptr + m_off * w_m + h, mask=m_mask, other=0.0)
+        acc += score * weight[:, None].to(tl.float32)
+
+    out_ptrs = out_ptr + m_off[:, None] * out_m + n_off[None, :]
+    tl.store(out_ptrs, acc, mask=m_mask[:, None] & n_mask[None, :])
+
+
+def v4_fp8_indexer_score(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    kv_scale: torch.Tensor,
+    weights: torch.Tensor,
+) -> torch.Tensor:
+    """Fused SM120 FP8 indexer score, returning ``[M, N]`` FP32 logits."""
+    assert q.dtype == torch.float8_e4m3fn and q.dim() == 3
+    assert kv.dtype == torch.float8_e4m3fn and kv.dim() == 2
+    assert kv_scale.dtype == torch.float32 and kv_scale.dim() == 1
+    assert weights.dtype == torch.float32 and weights.dim() == 2
+    M, H, D = q.shape
+    N, kv_d = kv.shape
+    assert kv_d == D and kv_scale.shape[0] == N
+    assert weights.shape == (M, H)
+    assert q.is_contiguous() and kv.is_contiguous()
+    weights = weights.contiguous()
+    kv_scale = kv_scale.contiguous()
+    out = torch.empty((M, N), dtype=torch.float32, device=q.device)
+    if M == 0 or N == 0:
+        return out
+    block_m = 16
+    block_n = 256 if N >= 256 else max(16, triton.next_power_of_2(N))
+    grid = (triton.cdiv(M, block_m), triton.cdiv(N, block_n))
+    _v4_fp8_indexer_score_fwd[grid](
+        q,
+        kv,
+        kv_scale,
+        weights,
+        out,
+        M,
+        N,
+        q.stride(0),
+        q.stride(1),
+        kv.stride(0),
+        weights.stride(0),
+        out.stride(0),
+        H=H,
+        D=D,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        # SM120 needs eight warps for the 16x256 FP8 tile. Four warps makes
+        # this shape spill/serialize and is more than 40x slower at M=2048,
+        # N=8192 on RTX PRO 5000.
+        num_warps=8,
+        num_stages=2,
+    )
+    return out

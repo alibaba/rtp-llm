@@ -57,6 +57,9 @@ class MoeCfg:
     local_expert_start: int
     local_expert_end: int
     max_tokens_per_rank: int
+    # Effective attention TP size. CP deliberately reports 1 here because it
+    # repurposes the TP process group for sequence sharding.
+    tp_size: int = 1
 
 
 class RoutedExpertsStrategy(nn.Module):

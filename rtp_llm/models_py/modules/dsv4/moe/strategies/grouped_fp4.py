@@ -37,6 +37,7 @@ from rtp_llm.models_py.utils.math import align, ceil_div
 
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 from .._silu_mul_fp8_quant_triton import silu_mul_fp8_quant_packed
+from ..warmup_sync import cuda_graph_warmup_forward_enabled
 from ...quant_layouts import FP4_BLOCK, FP8_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 
 
@@ -44,6 +45,7 @@ from ...quant_layouts import FP4_BLOCK, FP8_BLOCK, prepare_fp4_weight_scale_for_
 # DeepGEMM contiguous requires per-expert M to be a multiple of the kernel's
 # alignment (128 on SM100). We use the same constant.
 _GROUPED_ALIGNMENT = 128
+_SM120_FUSED_MOE_WORKSPACES = {}
 
 
 def _has_fp8_fp4_grouped_kernel() -> bool:
@@ -227,7 +229,7 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         if N == 0:
             return torch.zeros(N, D, dtype=torch.float32, device=device)
         if torch.cuda.get_device_capability(device)[0] == 12:
-            if torch.cuda.is_current_stream_capturing():
+            if torch.cuda.is_current_stream_capturing() or cuda_graph_warmup_forward_enabled():
                 return self._forward_capture_sm120(x, weights, indices)
             return self._forward_sm120(x, weights, indices)
         if torch.cuda.is_current_stream_capturing():
@@ -358,6 +360,7 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         x: torch.Tensor,
         weights: torch.Tensor,
         indices: torch.Tensor,
+        input_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """FlashInfer contiguous groupwise MXFP8 x MXFP4 MoE path.
 
@@ -393,8 +396,23 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         padded_counts = [align(int(count), 4) for count in counts_list]
         total_rows = int(sum(padded_counts))
 
+        if input_scale is not None:
+            assert x.dtype == torch.float8_e4m3fn
+            assert input_scale.dtype == torch.uint8
+            input_scale = input_scale.reshape(n, d // FP4_BLOCK)
+
         token_ids = torch.div(order, topk, rounding_mode="floor")
         routed_x = torch.zeros(total_rows, d, dtype=x.dtype, device=device)
+        routed_input_scale = (
+            torch.zeros(
+                total_rows,
+                d // FP4_BLOCK,
+                dtype=torch.uint8,
+                device=device,
+            )
+            if input_scale is not None
+            else None
+        )
         valid_rows = torch.empty(order.numel(), dtype=torch.int64, device=device)
         src_offset = 0
         dst_offset = 0
@@ -402,23 +420,31 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
             count = int(count)
             if count:
                 dst = torch.arange(dst_offset, dst_offset + count, device=device)
-                routed_x.index_copy_(
-                    0,
-                    dst,
-                    x.index_select(0, token_ids[src_offset : src_offset + count]),
+                source_x = x.index_select(
+                    0, token_ids[src_offset : src_offset + count]
                 )
+                if x.dtype == torch.float8_e4m3fn:
+                    routed_x.view(torch.uint8).index_copy_(
+                        0, dst, source_x.view(torch.uint8)
+                    )
+                else:
+                    routed_x.index_copy_(0, dst, source_x)
+                if routed_input_scale is not None:
+                    routed_input_scale.index_copy_(
+                        0,
+                        dst,
+                        input_scale.index_select(
+                            0, token_ids[src_offset : src_offset + count]
+                        ),
+                    )
                 valid_rows[src_offset : src_offset + count] = dst
             src_offset += count
             dst_offset += padded_count
 
-        def quantize_groupwise(inp: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            inp_q, inp_scale = mxfp8_quantize(
-                inp.contiguous(), is_sf_swizzled_layout=False
-            )
-            # FlashInfer MXFP8 is fixed at one UE8M0 scale per 32 values;
-            # RTP's ``FP8_BLOCK`` is 128 and belongs to the DeepGEMM path.
-            scale_cols = inp.size(1) // FP4_BLOCK
-            inp_scale = inp_scale.reshape(inp.size(0), scale_cols)
+        def interleave_groupwise_scale(
+            inp_scale: torch.Tensor,
+        ) -> list[torch.Tensor]:
+            scale_cols = inp_scale.size(1)
             scale_chunks = []
             offset = 0
             for padded_count in padded_counts:
@@ -428,7 +454,16 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
                     ).reshape(-1, scale_cols)
                     scale_chunks.append(chunk)
                 offset += padded_count
-            return inp_q, scale_chunks
+            return scale_chunks
+
+        def quantize_groupwise(inp: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            inp_q, inp_scale = mxfp8_quantize(
+                inp.contiguous(), is_sf_swizzled_layout=False
+            )
+            # FlashInfer MXFP8 is fixed at one UE8M0 scale per 32 values;
+            # RTP's ``FP8_BLOCK`` is 128 and belongs to the DeepGEMM path.
+            inp_scale = inp_scale.reshape(inp.size(0), inp.size(1) // FP4_BLOCK)
+            return inp_q, interleave_groupwise_scale(inp_scale)
 
         def run_single_group_gemms(
             inp_q: torch.Tensor,
@@ -456,7 +491,11 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
                 offset += padded_count
             return torch.cat(outputs, dim=0)
 
-        routed_q, routed_scale = quantize_groupwise(routed_x)
+        if routed_input_scale is None:
+            routed_q, routed_scale = quantize_groupwise(routed_x)
+        else:
+            routed_q = routed_x
+            routed_scale = interleave_groupwise_scale(routed_input_scale)
         active_experts_t = torch.tensor(
             active_experts, dtype=torch.int64, device=device
         )
@@ -500,6 +539,90 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
             )
         return output
 
+    def forward_sm120_mxfp8(
+        self,
+        x: torch.Tensor,
+        input_scale: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run SM120 grouped MoE from linear-layout MXFP8 activations."""
+        if os.environ.get("DSV4_SM120_FUSED_MOE_PREFILL", "1") != "0":
+            from flashinfer import block_scale_interleave
+            from flashinfer.fused_moe import cutlass_fused_moe
+            from flashinfer.fused_moe.core import ActivationType
+
+            cfg = self.cfg
+            n = x.size(0)
+            fake_input_scale = torch.ones(
+                cfg.n_routed_experts, dtype=torch.float32, device=x.device
+            )
+            swiglu_limit = torch.full_like(fake_input_scale, cfg.swiglu_limit)
+            output = torch.empty(
+                (n, cfg.dim), dtype=torch.bfloat16, device=x.device
+            )
+            input_sf = block_scale_interleave(
+                input_scale.reshape(n, cfg.dim // FP4_BLOCK).contiguous()
+            )
+            cutlass_fused_moe(
+                input=x.contiguous(),
+                token_selected_experts=indices.to(torch.int32).contiguous(),
+                token_final_scales=weights.float().contiguous(),
+                fc1_expert_weights=self._w13.view(torch.uint8).view(torch.long),
+                fc2_expert_weights=self._w2.view(torch.uint8).view(torch.long),
+                output_dtype=torch.bfloat16,
+                quant_scales=[
+                    self._s13_sm120.view(torch.int32),
+                    fake_input_scale,
+                    self._s2_sm120.view(torch.int32),
+                    fake_input_scale,
+                ],
+                input_sf=input_sf,
+                swiglu_limit=swiglu_limit,
+                output=output,
+                use_mxfp8_act_scaling=True,
+                use_fused_finalize=False,
+                enable_pdl=False,
+                workspace_buffer=self._get_sm120_fused_moe_workspace(
+                    x.device, max_tokens=n
+                ),
+                tune_max_num_tokens=n,
+                activation_type=ActivationType.Swiglu,
+            )
+            return output.float()
+        return self._forward_sm120(x, weights, indices, input_scale=input_scale)
+
+    def _get_sm120_fused_moe_workspace(
+        self, device: torch.device, max_tokens: Optional[int] = None
+    ) -> torch.Tensor:
+        from flashinfer.fused_moe import cutlass_fused_moe_workspace_size
+        from flashinfer.fused_moe.core import ActivationType
+
+        cfg = self.cfg
+        max_tokens = (
+            min(max(int(cfg.max_tokens_per_rank), 1), 512)
+            if max_tokens is None
+            else max(int(max_tokens), 1)
+        )
+        key = (device.index, max_tokens, cfg.dim, cfg.moe_inter_dim,
+               cfg.n_routed_experts, cfg.n_activated_experts)
+        workspace = _SM120_FUSED_MOE_WORKSPACES.get(key)
+        if workspace is None:
+            workspace_bytes = cutlass_fused_moe_workspace_size(
+                max_tokens, cfg.dim, cfg.moe_inter_dim,
+                cfg.n_routed_experts, cfg.n_activated_experts,
+                x_dtype=torch.float8_e4m3fn, weight_dtype=torch.long,
+                output_dtype=torch.bfloat16,
+                activation_type=ActivationType.Swiglu,
+                use_mxfp8_act_scaling=True,
+                use_fused_finalize=False, device=device,
+            )
+            workspace = torch.empty(
+                workspace_bytes, dtype=torch.uint8, device=device
+            )
+            _SM120_FUSED_MOE_WORKSPACES[key] = workspace
+        return workspace
+
     def _forward_capture_sm120(
         self,
         x: torch.Tensor,
@@ -538,6 +661,9 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
             swiglu_limit=swiglu_limit,
             output=output,
             use_mxfp8_act_scaling=True,
+            use_fused_finalize=False,
+            enable_pdl=False,
+            workspace_buffer=self._get_sm120_fused_moe_workspace(x.device),
             tune_max_num_tokens=min(max(int(cfg.max_tokens_per_rank), 1), 512),
             activation_type=ActivationType.Swiglu,
         )

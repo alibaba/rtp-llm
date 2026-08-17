@@ -68,6 +68,7 @@ class GridRunner:
         self.warmup()
         logging.info("start to run perf test")
         metrics_list: List[MetricState] = []
+        profile_cases = []
 
         total_tests = len(self._batch_size_list) * len(self._input_len_list)
 
@@ -91,11 +92,21 @@ class GridRunner:
                         self._is_decode,
                         500,
                         self._decode_test_length,
-                        True,
+                        False,
                         self._generate_config,
                         trace_name,
+                        profile_runs=0,
                     ).run()
                     metrics_list.append(MetricState(input_len, batch_size, metric))
+                    profile_cases.append((batch_size, input_len, trace_name))
+                    if (
+                        os.environ.get("PERF_REQUIRE_ALL_SUCCESS", "1") == "1"
+                        and metric.success_requests != metric.total_requests
+                    ):
+                        raise RuntimeError(
+                            f"perf case {trace_name} succeeded for "
+                            f"{metric.success_requests}/{metric.total_requests} requests"
+                        )
 
                     pbar.update(1)
 
@@ -108,4 +119,28 @@ class GridRunner:
             self._generate_config,
         )
         logging.info("metrics_table: \n" + str(metrics_table))
+
+        # Profile only after every timed case has completed. Timeline export is
+        # asynchronous and DSpARK all-rank traces can be hundreds of MB per rank;
+        # profiling an earlier grid point inline can therefore contaminate the
+        # latency of the next point with trace serialization/flush time.
+        profile_runs = int(os.environ.get("PERF_PROFILE_RUNS", "1"))
+        if profile_runs > 0:
+            logging.info("start profile-only pass after all timed measurements")
+            for batch_size, input_len, trace_name in profile_cases:
+                BatchPerfImpl(
+                    self._port,
+                    self._dp_size,
+                    batch_size * self._dp_size,
+                    self._input_query_dict[input_len],
+                    self._is_decode,
+                    500,
+                    self._decode_test_length,
+                    True,
+                    self._generate_config,
+                    trace_name,
+                    warmup_runs=0,
+                    measure_runs=0,
+                    profile_runs=profile_runs,
+                ).run()
         return metrics_list

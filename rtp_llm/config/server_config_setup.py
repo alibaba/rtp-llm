@@ -367,16 +367,27 @@ def setup_default_args(py_env_configs):
     if py_env_configs.kv_cache_config.seq_size_per_block == 0:
         py_env_configs.kv_cache_config.seq_size_per_block = 64
 
-    # Set NCCL_P2P_DISABLE for RTX GPUs or when CUDA is not available
+    # Historically RTX deployments disabled NCCL P2P because older PCIe RTX
+    # topologies were not guaranteed to expose CUDA peer access.  Blackwell
+    # SM120 does expose peer access between the local GPUs and host staging is
+    # markedly slower there, so preserve the legacy default only for pre-SM120
+    # RTX devices.  An explicit user setting still wins in both cases.
     # Frontend doesn't need this setting
     if py_env_configs.role_config.role_type != RoleType.FRONTEND:
         if torch.cuda.is_available():
+            device_name = torch.cuda.get_device_name(0)
+            compute_capability = torch.cuda.get_device_capability(0)
             if (
                 "NCCL_P2P_DISABLE" not in os.environ
-                and "RTX" in torch.cuda.get_device_name(0)
+                and "RTX" in device_name
+                and compute_capability[0] < 12
             ):
                 os.environ["NCCL_P2P_DISABLE"] = "1"
                 logging.info("set NCCL_P2P_DISABLE to 1")
+            elif "RTX" in device_name and compute_capability[0] >= 12:
+                logging.info(
+                    "leave NCCL P2P enabled for SM120 RTX PCIe peer access"
+                )
 
     if (
         py_env_configs.role_config.role_type == RoleType.PREFILL

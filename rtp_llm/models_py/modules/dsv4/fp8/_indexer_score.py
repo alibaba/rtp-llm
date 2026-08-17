@@ -239,22 +239,22 @@ def fp8_mqa_indexer_score(
     in :class:`Indexer.forward` re-applies its own ``q_pos`` causal cap.
     """
     if q_fp8.is_cuda and torch.cuda.get_device_capability(q_fp8.device)[0] == 12:
-        # DeepGEMM's attention API rejects SM120.  Keep FP8 cache storage and
-        # reproduce the indexer score math in bounded chunks for correctness.
-        q = q_fp8.float()
-        k = k_quant.float() * k_scale.float().unsqueeze(-1)
-        rows, _, _ = q.shape
-        cols = k.shape[0]
-        out = torch.empty(rows, cols, dtype=torch.float32, device=q.device)
-        chunk_rows = 32
-        for start in range(0, rows, chunk_rows):
-            end = min(start + chunk_rows, rows)
-            per_head = torch.einsum("mhd,nd->mhn", q[start:end], k).relu_()
-            out[start:end] = torch.einsum(
-                "mh,mhn->mn", w_fold[start:end].float(), per_head
-            )
+        # DeepGEMM's attention API still rejects SM120. Use the fused Triton
+        # path so FP8 Q/K stay quantized and the large [M,H,N] FP32 score
+        # intermediate is never materialized.
+        from rtp_llm.models_py.modules.dsv4._indexer_score_triton import (
+            v4_fp8_indexer_score,
+        )
+
+        out = v4_fp8_indexer_score(
+            q_fp8.contiguous(),
+            k_quant.contiguous(),
+            k_scale.float().contiguous(),
+            w_fold.float().contiguous(),
+        )
+        rows, cols = out.shape
         if clean_logits:
-            positions = torch.arange(cols, device=q.device).unsqueeze(0)
+            positions = torch.arange(cols, device=q_fp8.device).unsqueeze(0)
             valid = (positions >= cu_seqlen_ks.long().unsqueeze(1)) & (
                 positions < cu_seqlen_ke.long().unsqueeze(1)
             )

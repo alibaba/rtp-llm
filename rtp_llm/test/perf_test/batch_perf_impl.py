@@ -36,9 +36,10 @@ def _curl_server_single_worker(
     req = {
         "prompt": input_query,
         "generate_config": {
+            "do_sample": False,
+            "top_k": 1,
             "max_new_tokens": decode_test_length if is_decode else 1,
             "min_new_tokens": decode_test_length if is_decode else 1,
-            "force_sp_accept": True,
         },
     }
 
@@ -48,6 +49,10 @@ def _curl_server_single_worker(
             req["top_k"] = generate_config["top_k"]
         if "top_p" in generate_config:
             req["top_p"] = generate_config["top_p"]
+    perf_random_seed = os.environ.get("PERF_RANDOM_SEED")
+    if perf_random_seed is not None:
+        # Keep replicated DP requests on the same real rejection-sampling path.
+        req["generate_config"]["random_seed"] = int(perf_random_seed)
 
     if "top_k" not in req:
         req["top_k"] = 1

@@ -11,6 +11,7 @@ class ResponseInfo:
     success: bool = False
     input_len: int = 0
     output_len: int = 0
+    iter_count: int = 0
     wait_time: float = 0.0
     total_time: float = 0.0
     prefill_time: float = 0.0
@@ -52,6 +53,7 @@ class ResponseInfo:
         aux_info = response.get("aux_info", {})
         self.input_len = aux_info.get("input_len", 0)
         self.output_len = aux_info.get("output_len", 0)
+        self.iter_count = aux_info.get("iter_count", 0)
         self.wait_time = aux_info.get("wait_time", 0.0)
         self.total_time = aux_info.get("cost_time", 0.0) - self.wait_time
         self.prefill_time = aux_info.get("first_token_cost_time", 0.0) - self.wait_time
@@ -68,6 +70,7 @@ class TestResultMetrics:
     fail_requests: int
     avg_input_len: float = 0.0
     avg_output_len: float = 0.0
+    avg_iter_count: float = 0.0
     avg_wait_time: float = 0.0
     max_wait_time: float = 0.0
     avg_total_time: float = 0.0
@@ -96,6 +99,9 @@ def analyze_results(responses: List[ResponseInfo]) -> TestResultMetrics:
         )
         metrics.avg_output_len = (
             sum([r.output_len for r in success_requests]) / success_count
+        )
+        metrics.avg_iter_count = (
+            sum([r.iter_count for r in success_requests]) / success_count
         )
         metrics.avg_wait_time = (
             sum([r.wait_time for r in success_requests]) / success_count
@@ -204,8 +210,14 @@ def create_metrics_table(
                 {
                     "input_len": metrics_item.input_len,
                     "batch_size": metrics_item.batch_size,
+                    "total_requests": metrics.total_requests,
+                    "success_requests": metrics.success_requests,
                     "success_rate": metrics.success_requests / metrics.total_requests,
+                    "avg_input_len": metrics.avg_input_len,
+                    "avg_output_len": metrics.avg_output_len,
+                    "avg_iter_count": metrics.avg_iter_count,
                     "avg_wait_time": metrics.avg_wait_time,
+                    "avg_total_time": metrics.avg_total_time,
                     "avg_prefill_time": metrics.avg_prefill_time,
                     "avg_decode_time": metrics.avg_decode_time,
                 }
