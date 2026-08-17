@@ -23,6 +23,7 @@ final class BatchInflight implements InflightEvictor.TtlTracked {
     private final AtomicLong maxExecutionTimeMs;
     private final AtomicBoolean successfulCompletionObserved;
     private final AtomicBoolean learningEligible;
+    private final AtomicBoolean cancelOverlayObserved;
     private volatile boolean running;
 
     BatchInflight(long predictTimeMs, List<BatchItem> requests) {
@@ -34,7 +35,7 @@ final class BatchInflight implements InflightEvictor.TtlTracked {
         this(predictTimeMs, requests, predictTimeMs,
                 requests.stream().map(BatchItem::requestId).collect(Collectors.toUnmodifiableSet()),
                 PrefillBatchFeatures.from(requests), nowMs,
-                nowMs, nowMs, 0, false, true, false);
+                nowMs, nowMs, 0, false, true, false, false);
     }
 
     private BatchInflight(long predictTimeMs,
@@ -48,6 +49,7 @@ final class BatchInflight implements InflightEvictor.TtlTracked {
                           long maxExecutionTimeMs,
                           boolean successfulCompletionObserved,
                           boolean learningEligible,
+                          boolean cancelOverlayObserved,
                           boolean running) {
         this.predictTimeMs = predictTimeMs;
         this.requests = requests;
@@ -60,6 +62,7 @@ final class BatchInflight implements InflightEvictor.TtlTracked {
         this.maxExecutionTimeMs = new AtomicLong(maxExecutionTimeMs);
         this.successfulCompletionObserved = new AtomicBoolean(successfulCompletionObserved);
         this.learningEligible = new AtomicBoolean(learningEligible);
+        this.cancelOverlayObserved = new AtomicBoolean(cancelOverlayObserved);
         this.running = running;
     }
 
@@ -140,11 +143,28 @@ final class BatchInflight implements InflightEvictor.TtlTracked {
         return learningEligible.get();
     }
 
+    /**
+     * Record that a WorkerStatus round reported a member of this batch in a
+     * priority-cancel overlay (CANCELING/CANCELED + PENDING, never executed).
+     * Kept as forensic evidence for hard-age eviction warnings.
+     */
+    void observeCancelOverlay() {
+        cancelOverlayObserved.set(true);
+    }
+
+    boolean cancelOverlayObserved() {
+        return cancelOverlayObserved.get();
+    }
+
+    boolean running() {
+        return running;
+    }
+
     BatchInflight repack(long newPredictTimeMs, List<BatchItem> newRequests) {
         return new BatchInflight(newPredictTimeMs, newRequests,
                 originalPredictTimeMs, originalRequestIds, originalFeatures,
                 createdAtMs, progressBaseMs(), lastObservedAtMs.get(),
                 maxExecutionTimeMs.get(), successfulCompletionObserved.get(),
-                learningEligible.get(), running);
+                learningEligible.get(), cancelOverlayObserved.get(), running);
     }
 }

@@ -21,6 +21,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.LongPredicate;
 
 /**
  * Decode-side endpoint with Auto-TPM shadow admission accounting.
@@ -925,6 +926,21 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * @return number of entries evicted
      */
     public int evictExpiredRequests(long ttlMs) {
+        return evictExpiredRequests(ttlMs, 0, requestId -> false);
+    }
+
+    /**
+     * TTL eviction with a hard age cap: entries older than
+     * {@code hardMaxAgeMs} are force-evicted even when a priority-preemption
+     * claim exempts them from the regular TTL pass — a claim whose Prefill
+     * CANCELED settlement never arrives (zombie cancel overlay in the engine
+     * report) must not pin decode accounting forever. Entries still owned by
+     * the batch scheduler are skipped ({@code schedulerOwnsRequest}) so the
+     * scheduler's own lifecycle/fence handling stays authoritative.
+     * {@code hardMaxAgeMs <= 0} disables the cap.
+     */
+    public int evictExpiredRequests(long ttlMs, long hardMaxAgeMs,
+                                    LongPredicate schedulerOwnsRequest) {
         admissionLock.lock();
         try {
             // A priority claim is a stronger accounting owner than generic
@@ -933,6 +949,39 @@ public class DecodeEndpoint extends WorkerEndpoint {
             // NOT_FOUND/UNKNOWN reconciliation settles the claim.
             int evicted = requestEvictor.evictExpired(
                     ttlMs, requestId -> !preemptionClaims.containsKey(requestId));
+            // Hard age cap pass: whatever survived above (claim-exempted) but
+            // exceeds the cap is force-released with full counter cleanup.
+            if (hardMaxAgeMs > 0) {
+                long nowMs = System.currentTimeMillis();
+                for (Map.Entry<Long, RequestInflight> entry : inflightRequests.entrySet()) {
+                    long requestId = entry.getKey();
+                    long ageMs = nowMs - entry.getValue().createdAtMs();
+                    if (ageMs <= hardMaxAgeMs || schedulerOwnsRequest.test(requestId)) {
+                        continue;
+                    }
+                    RequestInflight removed = inflightRequests.remove(requestId);
+                    if (removed == null) {
+                        continue;
+                    }
+                    inflightKvReservedTotal.addAndGet(-removed.kvTokens());
+                    inflightExpectedKvReservedTotal.addAndGet(-removed.expectedKvTokens());
+                    // Settle the zombie claim: return any KV still held behind
+                    // the never-arriving CANCELED fence, then drop the claim.
+                    PreemptionClaim claim = preemptionClaims.remove(requestId);
+                    if (claim != null) {
+                        releaseHeldKv(claim);
+                    }
+                    evicted++;
+                    logger.warn("event=inflight_hard_age_eviction role=DECODE endpoint={} "
+                                    + "request_id={} age_ms={} hard_max_age_ms={} created_at_ms={} "
+                                    + "kv_tokens={} expected_kv_tokens={} priority={} deadline_ms={} "
+                                    + "phase={} preemption_claim={} queued_phase={}",
+                            getIp(), requestId, ageMs, hardMaxAgeMs, removed.createdAtMs(),
+                            removed.kvTokens(), removed.expectedKvTokens(), removed.priority(),
+                            removed.deadlineMs(), removed.phase(), claim != null,
+                            queuedPhase.contains(requestId));
+                }
+            }
             // Drop stale queued ids one-by-one so the O(1) counter stays in
             // sync (PR-C) — evictExpired may have removed inflight entries.
             java.util.Iterator<Long> queuedEvictIt = queuedPhase.iterator();

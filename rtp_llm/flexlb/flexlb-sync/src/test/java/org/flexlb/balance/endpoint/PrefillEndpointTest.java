@@ -716,6 +716,83 @@ class PrefillEndpointTest {
         assertEquals(0, endpoint.getInflightBatchCount());
     }
 
+    // ---- hard age cap (zombie cancel-overlay entries) ----
+
+    @Test
+    void hardAgeCapEvictsBatchDespiteFenceAndFreshObservation() throws InterruptedException {
+        BatchItem item = createBatchItem(1L, 500, 200);
+        endpoint.commitBatch(1L, 100, List.of(item));
+        endpoint.beginDispatchReconciliation(1L, item.requestId());
+        Thread.sleep(10);
+        // A keep-alive observation refreshes lastObservedAtMs and would defeat
+        // the inactivity TTL forever (zombie engine report).
+        calibrate(Map.of(), Map.of("1", taskInfo(1L, 1L, TaskPhase.RUNNING, 0, 0)));
+
+        assertEquals(0, endpoint.evictExpiredBatches(1, 0, requestId -> false),
+                "cap disabled: the reconciliation fence keeps the batch alive");
+        assertEquals(1, endpoint.evictExpiredBatches(1, 5, requestId -> false),
+                "hard age cap overrides both the fence and the observation refresh");
+        assertEquals(0, endpoint.getInflightBatchCount());
+    }
+
+    @Test
+    void hardAgeCapSkipsSchedulerOwnedRequests() throws InterruptedException {
+        BatchItem item = createBatchItem(1L, 500, 200);
+        endpoint.commitBatch(1L, 100, List.of(item));
+        endpoint.beginDispatchReconciliation(1L, item.requestId());
+        Thread.sleep(10);
+
+        assertEquals(0, endpoint.evictExpiredBatches(1, 5, requestId -> requestId == 1L),
+                "an entry the scheduler still owns must not be force-evicted (race guard)");
+        assertEquals(1, endpoint.getInflightBatchCount());
+
+        assertEquals(1, endpoint.evictExpiredBatches(1, 5, requestId -> false),
+                "once the scheduler releases ownership the cap applies");
+        assertEquals(0, endpoint.getInflightBatchCount());
+    }
+
+    @Test
+    void hardAgeCapLeavesYoungBatchesAlone() {
+        endpoint.commitBatch(1L, 100, List.of(createBatchItem(1L, 500, 200)));
+
+        assertEquals(0, endpoint.evictExpiredBatches(60_000, 60_000, requestId -> false));
+        assertEquals(1, endpoint.getInflightBatchCount());
+    }
+
+    @Test
+    void calibrateRecordsCancelOverlayObservationForForensics() throws Exception {
+        endpoint.commitBatch(1L, 100, List.of(createBatchItem(1L, 500, 0)));
+
+        TaskInfo overlay = taskInfo(1L, 1L, TaskPhase.PENDING, 0, 0);
+        overlay.setPriorityPreemptionProgress(PriorityPreemptionProgress.CANCELING);
+        calibrate(Map.of(), Map.of("1", overlay));
+
+        assertTrue(inflightBatch(1L).cancelOverlayObserved(),
+                "a priority-cancel overlay member marks the batch for eviction forensics");
+    }
+
+    @Test
+    void cancelOverlayObservationIsStickyAndSurvivesRepack() {
+        BatchInflight batch = new BatchInflight(5_000, List.of(
+                createBatchItem(1L, 500, 0), createBatchItem(2L, 300, 0)));
+        assertFalse(batch.cancelOverlayObserved());
+
+        batch.observeCancelOverlay();
+        assertTrue(batch.cancelOverlayObserved());
+
+        BatchInflight repacked = batch.repack(3_000,
+                List.of(createBatchItem(1L, 500, 0)));
+        assertTrue(repacked.cancelOverlayObserved());
+    }
+
+    private BatchInflight inflightBatch(long batchId) throws Exception {
+        java.lang.reflect.Field field = PrefillEndpoint.class.getDeclaredField("inflightBatches");
+        field.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        Map<Long, BatchInflight> batches = (Map<Long, BatchInflight>) field.get(endpoint);
+        return batches.get(batchId);
+    }
+
     // ---- realPendingCount ----
 
     @Test

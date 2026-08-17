@@ -811,6 +811,49 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
+    void cleanupInflight_hardAgeCapBreaksUncertainOwnershipAndCascades() throws Exception {
+        when(cancelChannel.cancel(any(), anyLong(), anyLong())).thenReturn(
+                CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.notFound()));
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+                .thenAnswer(inv -> {
+                    EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
+                    sentBatches.add(request);
+                    return CompletableFuture.failedFuture(new TimeoutException("lost ack"));
+                });
+        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
+        BatchItem item = new BatchItem(context(307), new CompletableFuture<>(), successRoute(307),
+                server(RoleType.PREFILL, "10.0.0.1", 8080, 8081, 307),
+                server(RoleType.DECODE, "10.0.0.2", 8081, 8082, 307),
+                endpoint, null, System.currentTimeMillis());
+        assertTrue(scheduler.registerInflight(item));
+        scheduler.onBatchReady(List.of(item), new DispatchMeta("test", 0));
+        long deadline = System.currentTimeMillis() + 1_000;
+        while (sentBatches.isEmpty() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(1);
+        }
+
+        Thread.sleep(50);
+        assertEquals(1, scheduler.getInflightSize());
+        assertTrue(scheduler.hasInflightRequest(307L));
+
+        config.setFlexlbInflightTtlMs(0);
+        config.setFlexlbInflightHardMaxAgeMs(0);
+        scheduler.cleanupInflight();
+        assertEquals(1, scheduler.getInflightSize(),
+                "cap disabled: uncertain ownership still pins the entry");
+
+        config.setFlexlbInflightHardMaxAgeMs(1);
+        scheduler.cleanupInflight();
+        assertEquals(0, scheduler.getInflightSize(),
+                "hard age cap breaks never-settling uncertain ownership");
+        assertFalse(scheduler.hasInflightRequest(307L));
+        assertTrue(item.future().isDone());
+        assertFalse(item.future().get().isSuccess());
+        assertEquals(0, endpoint.getInflightBatchCount(),
+                "forced timeout cascades the prefill ledger release");
+    }
+
+    @Test
     void dispatchUncertain_acceptedCancelWaitsForTypedPrefillFinished() throws Exception {
         when(cancelChannel.cancel(any(), anyLong(), anyLong())).thenReturn(
                 CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.accepted()));

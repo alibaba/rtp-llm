@@ -14,6 +14,7 @@ import org.springframework.stereotype.Component;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
+import java.util.function.LongPredicate;
 
 @Component
 public class EndpointRegistry {
@@ -244,18 +245,23 @@ public class EndpointRegistry {
     /**
      * Trigger TTL eviction on all prefill and decode endpoints.
      *
-     * @param ttlMs max age before eviction
+     * @param ttlMs        max age before eviction
+     * @param hardMaxAgeMs hard age cap overriding TTL exemptions and
+     *                     observation keep-alives; {@code <= 0} disables it
      */
-    private void evictExpiredAll(long ttlMs) {
+    private void evictExpiredAll(long ttlMs, long hardMaxAgeMs) {
+        // Race guard for hard-cap eviction: entries the scheduler still owns
+        // are left to the scheduler's own cleanup cascade.
+        LongPredicate schedulerOwns = batchScheduler()::hasInflightRequest;
         prefillEndpoints.forEach((endpoint, ep) ->
                 logEndpointEviction(RoleType.PREFILL, endpoint,
-                        ep.evictExpiredBatches(ttlMs), ttlMs));
+                        ep.evictExpiredBatches(ttlMs, hardMaxAgeMs, schedulerOwns), ttlMs));
         decodeEndpoints.forEach((endpoint, ep) ->
                 logEndpointEviction(RoleType.DECODE, endpoint,
-                        ep.evictExpiredRequests(ttlMs), ttlMs));
+                        ep.evictExpiredRequests(ttlMs, hardMaxAgeMs, schedulerOwns), ttlMs));
         pdFusionEndpoints.forEach((endpoint, ep) ->
                 logEndpointEviction(RoleType.PDFUSION, endpoint,
-                        ep.evictExpiredBatches(ttlMs), ttlMs));
+                        ep.evictExpiredBatches(ttlMs, hardMaxAgeMs, schedulerOwns), ttlMs));
     }
 
     private static void logEndpointEviction(RoleType role,
@@ -278,7 +284,8 @@ public class EndpointRegistry {
      */
     @Scheduled(fixedRate = 60000L)
     public void scheduledEviction() {
-        long ttlMs = configService.loadBalanceConfig().getFlexlbInflightTtlMs();
-        evictExpiredAll(ttlMs);
+        FlexlbConfig config = configService.loadBalanceConfig();
+        evictExpiredAll(config.getFlexlbInflightTtlMs(),
+                config.getFlexlbInflightHardMaxAgeMs());
     }
 }

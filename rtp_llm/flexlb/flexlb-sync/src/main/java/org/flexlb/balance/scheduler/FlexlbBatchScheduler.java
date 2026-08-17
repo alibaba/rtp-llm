@@ -1090,6 +1090,17 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         return inflight.size();
     }
 
+    /**
+     * Whether the scheduler still owns an inflight entry for {@code requestId}.
+     * Used by endpoint hard-age eviction as a race guard: an endpoint ledger
+     * entry must not be force-evicted while the scheduler lifecycle still
+     * references the same request id (the scheduler's own cleanup — TTL or
+     * hard cap — will cascade the endpoint release instead).
+     */
+    public boolean hasInflightRequest(long requestId) {
+        return inflight.containsKey(requestId);
+    }
+
     /** Production RTP-LLM raw {@code ErrorCode::PRIORITY_PREEMPTED}. */
     private static final long ENGINE_ERROR_PRIORITY_PREEMPTED = 8429;
 
@@ -1112,6 +1123,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     @Scheduled(fixedRate = 60000L)
     public void cleanupInflight() {
         long ttlMs = configService.loadBalanceConfig().getFlexlbInflightTtlMs();
+        long hardMaxAgeMs = configService.loadBalanceConfig().getFlexlbInflightHardMaxAgeMs();
         long now = System.currentTimeMillis();
         int expiredCount = 0;
         long oldestExpiredAgeMs = 0;
@@ -1129,7 +1141,27 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 if (entry.preemption != null || entry.dispatchReconciliation || entry.cleanupOwned) {
                     // Cancel ambiguity is reconciled by token/WorkerStatus;
                     // a concurrent cleanup owner is likewise already settling
-                    // the entry and must not be raced by TTL.
+                    // the entry and must not be raced by TTL. The hard age cap
+                    // still applies: a reconciliation that never settles (e.g.
+                    // zombie cancel overlay in the engine report) must not pin
+                    // the entry — and its endpoint ledgers — forever.
+                    if (hardMaxAgeMs <= 0 || ageMs <= hardMaxAgeMs) {
+                        continue;
+                    }
+                    RequestLifecycleSnapshot snapshot = entry.lifecycle.snapshot();
+                    Logger.warn("event=scheduler_inflight_hard_age_eviction request_id={} "
+                                    + "age_ms={} hard_max_age_ms={} created_at_ms={} preemption={} "
+                                    + "dispatch_reconciliation={} cleanup_owned={} lifecycle_state={} "
+                                    + "lifecycle_detail={}",
+                            candidate.getKey(), ageMs, hardMaxAgeMs, entry.createdAtMs(),
+                            entry.preemption != null, entry.dispatchReconciliation,
+                            entry.cleanupOwned, snapshot.state(), snapshot.detail());
+                    timeoutEntry(entry, "inflight hard age cap exceeded");
+                    oldestExpiredAgeMs = Math.max(oldestExpiredAgeMs, ageMs);
+                    if (expiredRequestSamples.size() < 3) {
+                        expiredRequestSamples.add(candidate.getKey());
+                    }
+                    expiredCount++;
                     continue;
                 }
                 oldestExpiredAgeMs = Math.max(oldestExpiredAgeMs, ageMs);

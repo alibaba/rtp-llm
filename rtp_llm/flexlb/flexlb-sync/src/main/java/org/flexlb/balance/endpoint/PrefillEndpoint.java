@@ -28,6 +28,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.LongPredicate;
 import java.util.stream.Collectors;
 
 public class PrefillEndpoint extends WorkerEndpoint {
@@ -237,15 +238,20 @@ public class PrefillEndpoint extends WorkerEndpoint {
                         .collect(Collectors.toSet());
                 boolean observedCurrentMember = false;
                 boolean observedRunningMember = false;
+                boolean observedCancelOverlay = false;
                 for (TaskInfo task : entry.getValue()) {
                     if (!currentRequestIds.contains(task.getRequestId())) {
                         continue;
                     }
                     observedCurrentMember = true;
                     observedRunningMember |= task.getPhase() == TaskPhase.RUNNING;
+                    observedCancelOverlay |= isPriorityCancelOverlayOnly(task);
                 }
                 if (!observedCurrentMember) {
                     return batch;
+                }
+                if (observedCancelOverlay) {
+                    batch.observeCancelOverlay();
                 }
                 if (observedRunningMember) {
                     batch.markRunning(statusMs);
@@ -480,11 +486,45 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * @return number of batches evicted
      */
     public int evictExpiredBatches(long ttlMs) {
+        return evictExpiredBatches(ttlMs, 0, requestId -> false);
+    }
+
+    /**
+     * Evict inflight batches not observed for longer than {@code ttlMs}, and
+     * force-evict batches whose creation age exceeds {@code hardMaxAgeMs}
+     * regardless of the reconciliation fence or observation freshness.
+     *
+     * <p>The hard cap defends the ledger against engine-side zombie tasks: a
+     * stuck task that the engine keeps re-reporting refreshes
+     * {@code lastObservedAtMs} on every calibrate round, so the TTL criterion
+     * alone would retain the entry forever. Entries whose age exceeds any
+     * legitimate request lifecycle are evicted even when kept "fresh".
+     *
+     * <p>Safety: a batch is only force-evicted when none of its requests is
+     * still tracked by the scheduler ({@code schedulerOwnsRequest}), so an
+     * active cancel-fence settlement is never raced. The check runs inside the
+     * per-key compute so it is atomic against concurrent ledger mutation.
+     *
+     * @param ttlMs             max unobserved age before normal eviction
+     * @param hardMaxAgeMs      hard creation-age cap; {@code <= 0} disables
+     * @param schedulerOwnsRequest whether the scheduler still tracks a request
+     * @return number of batches evicted (normal + forced)
+     */
+    public int evictExpiredBatches(long ttlMs, long hardMaxAgeMs,
+                                   LongPredicate schedulerOwnsRequest) {
         long nowMs = System.currentTimeMillis();
         AtomicInteger evictedCount = new AtomicInteger();
         for (Long batchId : inflightBatches.keySet()) {
             AtomicReference<BatchInflight> evicted = new AtomicReference<>();
+            AtomicReference<BatchInflight> forced = new AtomicReference<>();
             inflightBatches.computeIfPresent(batchId, (id, batch) -> {
+                long ageMs = nowMs - batch.createdAtMs();
+                if (hardMaxAgeMs > 0 && ageMs > hardMaxAgeMs
+                        && batch.requests().stream().noneMatch(
+                                item -> schedulerOwnsRequest.test(item.requestId()))) {
+                    forced.set(batch);
+                    return null;
+                }
                 if (hasDispatchReconciliation(id)
                         || nowMs - batch.lastObservedAtMs() <= ttlMs) {
                     return batch;
@@ -492,7 +532,23 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 evicted.set(batch);
                 return null;
             });
-            BatchInflight removed = evicted.get();
+            BatchInflight forcedBatch = forced.get();
+            if (forcedBatch != null) {
+                // The engine never settled these members, so the fence's
+                // authoritative settlement will never arrive — drop it too.
+                boolean hadFence = reconciliationRequests.remove(batchId) != null;
+                org.flexlb.util.Logger.warn(
+                        "event=inflight_hard_age_eviction role=PREFILL endpoint={} "
+                                + "batch_id={} age_ms={} hard_max_age_ms={} created_at_ms={} "
+                                + "last_observed_ago_ms={} running={} cancel_overlay_observed={} "
+                                + "fence={} n_requests={} request_ids={}",
+                        getIp(), batchId, nowMs - forcedBatch.createdAtMs(), hardMaxAgeMs,
+                        forcedBatch.createdAtMs(), nowMs - forcedBatch.lastObservedAtMs(),
+                        forcedBatch.running(), forcedBatch.cancelOverlayObserved(),
+                        hadFence, forcedBatch.requests().size(),
+                        forcedBatch.originalRequestIds());
+            }
+            BatchInflight removed = forcedBatch != null ? forcedBatch : evicted.get();
             if (removed != null) {
                 inflightRequestCount.addAndGet(-removed.requests().size());
                 cachedWaitTimeExpireAtMs = 0;

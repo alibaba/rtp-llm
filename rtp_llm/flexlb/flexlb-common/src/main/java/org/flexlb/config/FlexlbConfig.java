@@ -367,6 +367,18 @@ public class FlexlbConfig {
     private long flexlbInflightTtlMs = 300_000L;
 
     /**
+     * Hard age cap for inflight ledger entries, enforced across all TTL
+     * exemptions (dispatch-reconciliation fence, preemption claim, cleanup
+     * ownership) and observation-refresh keep-alives.  A stuck engine that
+     * keeps re-reporting a zombie task (e.g. PENDING + priority-cancel
+     * overlay, never executed) must not pin ledger entries — and the
+     * inflight.max.age.ms metric — forever.  Must comfortably exceed the
+     * longest legitimate request lifecycle (admission SLO caps at seconds,
+     * prefill execution at minutes).  {@code <= 0} disables the cap.
+     */
+    private long flexlbInflightHardMaxAgeMs = 1_800_000L;
+
+    /**
      * Ack-only release gate: when true (default), the frontend-facing fetch
      * release completes only on the Prefill EnqueueBatch ACK semantic —
      * a direct/late ACK or a Prefill WorkerStatus observation of the same
@@ -437,6 +449,59 @@ public class FlexlbConfig {
     private double costHotspotMultiplier = 3.0;
 
     private double costImbalanceMultiplier = 3.0;
+
+    /**
+     * Queue-depth penalty gate for the Auto-TPM batcher wait estimate
+     * ({@code PrefillQueueManager.estimateWaitMs}, design doc 8.4). When
+     * true (default), the estimate returns {@code max(jumpWait, depthWait)},
+     * where the depth term is {@code (queueSize / flexlbBatchSizeMax) ×
+     * avgDispatchIntervalMs × flexlbQueueDepthPenaltyFactor}. The legacy
+     * jump estimate only counts items ordered ahead of the probe, so a
+     * high-priority request facing an already-saturated queue reports a
+     * near-zero wait and the slow engine keeps being the preferred target
+     * (na130_4). The depth term exposes the true drain horizon of the full
+     * queue regardless of the probe's priority. Set to false to restore the
+     * legacy jump-only estimate.
+     * Environment variable: FLEXLB_QUEUE_DEPTH_PENALTY_ENABLED.
+     */
+    private boolean flexlbQueueDepthPenaltyEnabled = true;
+
+    /**
+     * Multiplier of the depth term in the batcher wait estimate when
+     * {@link #flexlbQueueDepthPenaltyEnabled} is on:
+     * {@code depthWait = (queueSize / flexlbBatchSizeMax) ×
+     * avgDispatchIntervalMs × thisFactor}. Default 1.0 (linear in queue
+     * depth); values &gt; 1 penalize deep queues harder, 0 makes the term a
+     * no-op.
+     * Environment variable: FLEXLB_QUEUE_DEPTH_PENALTY_FACTOR.
+     */
+    private double flexlbQueueDepthPenaltyFactor = 1.0;
+
+    /**
+     * Congested-queue candidate filter gate for prefill selection
+     * ({@code CostBasedPrefillStrategy}): when true (default), a prefill
+     * endpoint whose batcher queue depth is at least
+     * {@code flexlbCongestedQueueRatio × flexlbBatchQueueMaxSize} is
+     * excluded from routing candidates ("CONGESTED_QUEUE_FILTERED"), so an
+     * engine whose queue is pinned near its cap stops being the preferred
+     * target (na130_4). When every feasible endpoint is congested, the
+     * existing least-loaded fallback still returns one endpoint, so routing
+     * never fails closed. A non-positive {@code flexlbBatchQueueMaxSize}
+     * (unbounded) disables the filter. Set to false to restore the legacy
+     * candidate set without the queue-depth condition.
+     * Environment variable: FLEXLB_CONGESTED_QUEUE_FILTER_ENABLED.
+     */
+    private boolean flexlbCongestedQueueFilterEnabled = true;
+
+    /**
+     * Queue-occupancy ratio (0-1, default 0.8) of
+     * {@link #flexlbBatchQueueMaxSize} at which the congested-queue filter
+     * excludes an endpoint, when {@link #flexlbCongestedQueueFilterEnabled}
+     * is on. An endpoint is congested when
+     * {@code queueSize >= ceil(ratio × flexlbBatchQueueMaxSize)}.
+     * Environment variable: FLEXLB_CONGESTED_QUEUE_RATIO.
+     */
+    private double flexlbCongestedQueueRatio = 0.8;
 
     /**
      * Whether to enable score-tie randomization among near-equal prefill candidates.
