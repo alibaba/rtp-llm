@@ -50,6 +50,12 @@ public:
     int64_t load_cache_from_prefill_rt_us  = 0;
     int64_t local_generate_rt_us           = 0;
 
+    // pd-sep decode admission gate: queue depth and rejections are otherwise invisible,
+    // leaving a saturated role indistinguishable from a slow one.
+    int64_t admission_wait_us     = 0;
+    int64_t admission_active_slots = 0;
+    bool    admission_reject_qps  = false;
+
     // pd-sep prefill metrics(decode entrance)
     int64_t notify_store_cache_rt_us   = 0;
     int64_t generate_first_token_rt_us = 0;
@@ -95,6 +101,10 @@ public:
     kmonitor::MutableMetric* allocate_resource_rt_us_metric        = nullptr;
     kmonitor::MutableMetric* load_cache_from_prefill_rt_us_metric  = nullptr;
     kmonitor::MutableMetric* local_generate_rt_us_metric           = nullptr;
+
+    kmonitor::MutableMetric* admission_wait_us_metric      = nullptr;
+    kmonitor::MutableMetric* admission_active_slots_metric = nullptr;
+    kmonitor::MutableMetric* admission_reject_qps_metric   = nullptr;
 
     kmonitor::MutableMetric* load_cache_min_rt_us_metric       = nullptr;
     kmonitor::MutableMetric* load_cache_max_rt_us_metric       = nullptr;

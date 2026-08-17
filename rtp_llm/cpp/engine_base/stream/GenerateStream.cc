@@ -163,7 +163,10 @@ absl::Status GenerateStream::prepareForRemoteCacheLoad(int64_t wait_timeout_ms) 
         if (!ret.ok()) {
             RTP_LLM_LOG_WARNING("GenerateStream::prepareForRemoteCacheLoad: initKVBlock failed, stream_id: %lld",
                                 streamId());
-            return ret;
+            // Re-tag as ResourceExhausted so the caller can tell a real block shortage from a
+            // cache-load failure: initKVBlock reports both shortage and internal errors as
+            // InternalError, and the two map to different gRPC codes upstream.
+            return absl::ResourceExhaustedError("initKVBlock failed: " + std::string(ret.message()));
         }
 
         // Preserve remote/memory-cache matching without granting scheduler

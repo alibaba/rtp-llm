@@ -69,6 +69,11 @@ public:
     GenerateRequestPB        allocate_request;
     DecodeStatInfo           stat_info;
     int64_t                  loading_cache_requests = 0;
+    // Decode admission gate observability: without these a saturated role looks identical to
+    // a slow one, since the wait happens before any stage timer starts.
+    int64_t                  admission_wait_us      = 0;
+    int64_t                  admission_active_slots = 0;
+    bool                     admission_rejected     = false;
     int32_t                  prefill_cp_size        = 1;  // CP size used by prefill; >1 means sharded KV cache
 
     // for debug, will delete in future

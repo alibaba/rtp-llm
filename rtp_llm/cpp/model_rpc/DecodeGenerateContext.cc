@@ -73,6 +73,9 @@ void DecodeGenerateContext::reportTime() {
     collector.allocate_resource_rt_us        = stat_info.allocate_resource_rt_us;
     collector.load_cache_from_prefill_rt_us  = stat_info.load_cache_from_prefill_rt_us;
     collector.local_generate_rt_us           = stat_info.local_generate_rt_us;
+    collector.admission_wait_us              = admission_wait_us;
+    collector.admission_active_slots         = admission_active_slots;
+    collector.admission_reject_qps           = admission_rejected;
 
     // for tp
     collector.load_cache_min_rt_us       = stat_info.load_cache_min_rt_us;

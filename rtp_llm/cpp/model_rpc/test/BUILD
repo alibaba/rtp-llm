@@ -93,6 +93,17 @@ cc_test(
 )
 
 cc_test(
+    name = "decode_admission_controller_test",
+    srcs = ["DecodeAdmissionControllerTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/model_rpc:decode_admission",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "decode_rpc_server_test",
     srcs = ["DecodeRpcServerTest.cc"],
     copts = test_copts,

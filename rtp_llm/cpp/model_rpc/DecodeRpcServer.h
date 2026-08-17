@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/DecodeGenerateContext.h"
 #include "rtp_llm/cpp/model_rpc/DecodeAdmissionController.h"
+#include "rtp_llm/cpp/model_rpc/DecodeAdmissionStatus.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 
@@ -103,12 +104,5 @@ private:
     bool                      admission_enabled_ = true;
     size_t                    model_id;
 };
-
-// Exposed for testing: the mapping carries two cross-module constraints that
-// PrefillRpcServer depends on, so it is asserted directly instead of through the
-// gRPC handler. TIMED_OUT must not become RESOURCE_EXHAUSTED (PrefillRpcServer maps
-// that to DECODE_MALLOC_FAILED) and no message may contain the substrings
-// PrefillRpcServer greps for to tear down the connection.
-grpc::Status admissionResultToStatus(DecodeAdmissionController::AcquireResult result);
 
 }  // namespace rtp_llm
