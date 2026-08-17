@@ -75,8 +75,9 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     paged-cache injection, FlashMLA non-causal top-k indices and the
     ``mtp.*`` checkpoint weights.
 
-    Output ``draft_tokens`` is ``[B, gamma]``; the rejection-sampling q is
-    reconstructed engine-side as a point mass on the emitted tokens.
+    Proposal forward emits ``draft_logits [B, gamma, vocab]``. The executor
+    applies the serial Markov correction and framework sampler after CUDA
+    graph replay.
     """
 
     # Draft side: carries the capture ids for the shared-buffer row-width

@@ -115,10 +115,9 @@ struct GptModelOutputs {
     torch::Tensor all_logits;
     torch::Tensor softmax_result;
 
-    // Optional in-model DSpARK proposal: [batch, gamma] tokens. Rejection
-    // sampling consumes these as an implicit point mass, so no per-vocab
-    // draft probabilities cross this boundary.
-    torch::Tensor draft_tokens;
+    // DSpARK model forward emits base logits inside CUDA graph. The executor
+    // samples them outside the graph.
+    torch::Tensor draft_logits;
 
     std::vector<torch::Tensor> moe_gating;
 };

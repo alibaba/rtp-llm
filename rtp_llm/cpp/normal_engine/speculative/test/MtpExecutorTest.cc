@@ -67,6 +67,7 @@ struct MtpExecutorTestConfig {
 
     SpeculativeType sp_type              = SP_TYPE_MTP;
     int64_t         dspark_mask_token_id = -1;
+    std::string     draft_sample_method  = "greedy";
 };
 
 template<typename T>
@@ -158,6 +159,12 @@ public:
     GptModelOutputs forward(const GptModelInputs& inputs) override {
         checkInputs(inputs);
         return output_holder.get();
+    }
+
+    torch::Tensor dsparkMarkovLogits(const torch::Tensor& base_logits,
+                                     const torch::Tensor& /*previous_tokens*/,
+                                     bool /*previous_is_draft*/) override {
+        return base_logits.to(torch::kFloat32).clone();
     }
 
     void prepareAttentionInputs(const GptModelInputs& inputs) override {
@@ -472,6 +479,7 @@ public:
         sp_config.type                    = test_config.sp_type;
         sp_config.gen_num_per_cycle       = test_config.gen_num_per_cycle;
         sp_config.sp_dspark_mask_token_id = test_config.dspark_mask_token_id;
+        sp_config.draft_sample_method     = test_config.draft_sample_method;
 
         resource_context.cache_manager =
             std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
@@ -984,6 +992,37 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
     checkOutput(stream, {0, 1, 2, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.21, 0.22});
 }
 
+TEST_F(MtpExecutorTest, testProbabilisticDraftSamplingUsesFrameworkKernelOutsideGraph) {
+    MtpExecutorTestConfig test_config;
+    test_config.vocab_size           = 4;
+    test_config.vocab_size_override  = 4;
+    test_config.gen_num_per_cycle    = 2;
+    test_config.draft_sample_method  = "probabilistic";
+    auto mtp_components              = createMtpExecutorComponents(test_config);
+    EXPECT_TRUE(mtp_components.executor->probabilistic_draft_);
+
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.dspark_mask_token_id = 0;
+    auto components                  = createMtpExecutorComponents(test_config);
+
+    auto stream =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    stream->generateConfig()->do_sample   = true;
+    stream->generateConfig()->top_k       = 0;
+    stream->generateConfig()->top_p       = 1.0f;
+    stream->generateConfig()->temperature = 2.0f;
+
+    auto base_logits = torch::tensor({{{0.0f, 1.0f, 2.0f, 3.0f}, {3.0f, 2.0f, 1.0f, 0.0f}}}).to(torch::kCUDA);
+    auto output = components.executor->sampleDSparkProposals(
+        *components.fake_draft_model, {stream}, base_logits, torch::tensor({1}, torch::kInt32));
+
+    ASSERT_EQ(output.token_ids.sizes(), torch::IntArrayRef({1, 2}));
+    ASSERT_EQ(output.all_probs.sizes(), torch::IntArrayRef({1, 2, 4}));
+    EXPECT_FALSE(output.token_ids_are_point_mass);
+    torch::Tensor expected = torch::softmax(base_logits / 2.0f, -1);
+    EXPECT_TRUE(torch::allclose(output.all_probs, expected));
+}
+
 TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     constexpr int32_t gamma      = 3;
     constexpr int32_t vocab_size = 4;
@@ -1070,7 +1109,10 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     commit_output.hidden_states = torch::zeros({gamma + 1, 2}, torch::kFloat32).to(torch::kCUDA);
 
     GptModelOutputs draft_output;
-    draft_output.draft_tokens = torch::tensor({{2, 1, 3}}, torch::kInt32).to(torch::kCUDA);
+    draft_output.draft_logits = torch::tensor({{{0.0f, 0.0f, 1.0f, 0.0f},
+                                                 {0.0f, 1.0f, 0.0f, 0.0f},
+                                                 {0.0f, 0.0f, 0.0f, 1.0f}}})
+                                     .to(torch::kCUDA);
     components.fake_draft_model->setInputs({draft_input, commit_input});
     components.fake_draft_model->setOutputs({draft_output, commit_output});
 

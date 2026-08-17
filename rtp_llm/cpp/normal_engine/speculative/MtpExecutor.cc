@@ -536,10 +536,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     propose_step_     = propose_params->gen_num_per_circle;
     vocab_size_       = params.model_config_.vocab_size;
     draft_vocab_size_ = propose_params->getEngineInitParams().model_config_.vocab_size;
-    is_dspark_        = propose_params->sp_type == SP_TYPE_DSPARK;
+    is_dspark_           = propose_params->sp_type == SP_TYPE_DSPARK;
+    probabilistic_draft_ = params.sp_config.draft_sample_method == "probabilistic";
 
     RTP_LLM_LOG_INFO("[speculative decoding] vocab_size_ = %d, draft_vocab_size_ = %d", vocab_size_, draft_vocab_size_);
 
+    RTP_LLM_CHECK_WITH_INFO(params.sp_config.draft_sample_method == "greedy"
+                                || params.sp_config.draft_sample_method == "probabilistic",
+                            "draft_sample_method must be greedy or probabilistic, got %s",
+                            params.sp_config.draft_sample_method.c_str());
     if (is_dspark_) {
         RTP_LLM_CHECK_WITH_INFO(propose_step_ > 0, "dspark fixed proposal width must be positive");
         // DSpARK commit handles both replicated and byte-sharded prefill-CP
@@ -765,9 +770,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     const auto& draft_weights = propose_params->getEngineInitParams().gpt_weights;
     d2t_map_                  = draft_model_ ? draft_model_->weights_.d2t_map : draft_weights.d2t_map;
     speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_));
-    if (!is_dspark_) {
-        fast_topk_sampler_.reset(new speculative::FastTopKSampler(d2t_map_));
-    }
+    fast_topk_sampler_.reset(new speculative::FastTopKSampler(d2t_map_));
 
     RTP_LLM_LOG_INFO("[speculative decoding] d2t_map size: %ld", d2t_map_.defined() ? d2t_map_.numel() : 0);
 }
@@ -977,7 +980,13 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             // Seeding is commit-only: there is no proposal to sample. The
             // decode worker produces the first proposal at its round head.
         } else {
-            fast_topk_sampler_output       = fast_topk_sampler_->forward(draft_model_output.logits);
+            if (probabilistic_draft_) {
+                auto config = fast_topk_sampler_->prepare(streams, true, buffer_holder_);
+                fast_topk_sampler_output =
+                    fast_topk_sampler_->sample(draft_model_output.logits, config, buffer_holder_);
+            } else {
+                fast_topk_sampler_output = fast_topk_sampler_->forward(draft_model_output.logits);
+            }
             draft_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
             draft_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
         }
@@ -1273,16 +1282,12 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         propose_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
         propose_input.dspark_call_phase       = DSparkCallPhase::PROPOSE;
         auto propose_output                   = runDSparkProposeForward(propose_input);
-        RTP_LLM_CHECK_WITH_INFO(propose_output.draft_tokens.defined(),
-                                "dspark round-head propose did not emit draft_tokens");
         if (isTpRank0()) {
-            dspark_round_proposals         = propose_output.draft_tokens;
-            draft_sampler_output.token_ids = dspark_round_proposals;
-            // The Markov tail is deterministic argmax. Rejection sampling
-            // consumes its one-hot distribution implicitly from token_ids,
-            // avoiding a [B, gamma, vocab] temporary every decode round.
-            draft_sampler_output.all_probs                = torch::Tensor();
-            draft_sampler_output.token_ids_are_point_mass = true;
+            auto* propose_model =
+                sp_prefill_draft_propose_model_ ? sp_prefill_draft_propose_model_.get() : draft_model_.get();
+            draft_sampler_output = sampleDSparkProposals(
+                *propose_model, streams, propose_output.draft_logits, dspark_round_head.anchors);
+            dspark_round_proposals = draft_sampler_output.token_ids;
         }
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
@@ -1547,7 +1552,13 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             // Tail is commit-only; the proposal lives and dies inside one
             // round, so no bookkeeping/PD channel carries it anymore.
         } else {
-            auto fast_topk_sampler_output          = fast_topk_sampler_->forward(draft_prefill_model_output.logits);
+            auto fast_topk_sampler_output = [&]() {
+                if (!probabilistic_draft_) {
+                    return fast_topk_sampler_->forward(draft_prefill_model_output.logits);
+                }
+                auto config = fast_topk_sampler_->prepare(streams, true, buffer_holder_);
+                return fast_topk_sampler_->sample(draft_prefill_model_output.logits, config, buffer_holder_);
+            }();
             draft_prefill_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
             draft_prefill_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
         }
@@ -1902,6 +1913,47 @@ GptModelOutputs MtpExecutor::runDSparkProposeForward(GptModelInputs& model_input
     return propose_model->forward(model_input);
 }
 
+SamplerOutput MtpExecutor::sampleDSparkProposals(ModelBase&                          propose_model,
+                                                 const std::list<GenerateStreamPtr>& streams,
+                                                 const torch::Tensor&                base_logits,
+                                                 const torch::Tensor&                anchors) {
+    RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(dspark_sample_outside_graph)");
+    const int64_t batch_size = static_cast<int64_t>(streams.size());
+    RTP_LLM_CHECK_WITH_INFO(base_logits.defined() && base_logits.is_cuda() && base_logits.dim() == 3
+                                && base_logits.size(0) == batch_size
+                                && base_logits.size(1) == static_cast<int64_t>(propose_step_)
+                                && base_logits.size(2) == static_cast<int64_t>(draft_vocab_size_),
+                            "DSpARK base logits must be CUDA [B,gamma,vocab]");
+
+    auto sampling_config = fast_topk_sampler_->prepare(streams, probabilistic_draft_, buffer_holder_);
+    auto previous = anchors.to(torch::Device(torch::kCUDA), /*non_blocking=*/true).to(torch::kInt32).contiguous();
+    std::vector<torch::Tensor> token_steps;
+    std::vector<torch::Tensor> probability_steps;
+    token_steps.reserve(propose_step_);
+    probability_steps.reserve(propose_step_);
+
+    for (int64_t step = 0; step < static_cast<int64_t>(propose_step_); ++step) {
+        auto logits = propose_model.dsparkMarkovLogits(base_logits.select(1, step), previous, false).contiguous();
+        RTP_LLM_CHECK_WITH_INFO(logits.is_cuda() && logits.scalar_type() == torch::kFloat32
+                                    && logits.sizes() == torch::IntArrayRef({batch_size, (int64_t)draft_vocab_size_}),
+                                "DSpARK Markov logits must be CUDA FP32 [B,vocab]");
+        auto sampled = fast_topk_sampler_->sample(logits, sampling_config, buffer_holder_, probabilistic_draft_);
+        previous     = sampled.token_ids.squeeze(1);
+        token_steps.push_back(previous);
+        if (sampled.all_probs.defined()) {
+            probability_steps.push_back(sampled.all_probs);
+        }
+    }
+
+    SamplerOutput output;
+    output.token_ids                = torch::stack(token_steps, 1).to(torch::kInt32).contiguous();
+    output.token_ids_are_point_mass = !probabilistic_draft_;
+    if (probabilistic_draft_) {
+        output.all_probs = torch::stack(probability_steps, 1).contiguous();
+    }
+    return output;
+}
+
 GptModelOutputs MtpExecutor::runDraftCommitForward(GptModelInputs& model_input) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_forward)");
     maybePrintModelInput(model_input, "decode post draft model");
@@ -2165,6 +2217,10 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         pre_propose_token_t_raw = to_cuda_i32_flat(model_input.combo_tokens);
     }
     const auto all_streams = stream_groups.allStreams();
+    std::optional<speculative::DraftSamplingConfig> sampling_config;
+    if (probabilistic_draft_ && isTpRank0()) {
+        sampling_config = fast_topk_sampler_->prepare(all_streams, true, buffer_holder_);
+    }
 
     torch::Tensor pre_target_token_t;
     // Prefer device state published before the bookkeeping worker launches.
@@ -2234,10 +2290,19 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %d forward done", i);
 
         // sample
-        auto fast_topk_sampler_output = fast_topk_sampler_->forward(draft_decode_model_output.logits, 1);
-        auto draft_probs              = fast_topk_sampler_output.all_probs;
-        auto draft_probs_reshape      = draft_probs.reshape({(int)batch_size, 1, -1});
-        auto draft_token_ids          = fast_topk_sampler_output.token_ids;
+        speculative::FastTopKSamplerOutput draft_sample;
+        if (!probabilistic_draft_) {
+            draft_sample = fast_topk_sampler_->forward(draft_decode_model_output.logits, 1);
+        } else if (isTpRank0()) {
+            draft_sample =
+                fast_topk_sampler_->sample(draft_decode_model_output.logits, *sampling_config, buffer_holder_);
+        } else {
+            draft_sample.token_ids = torch::empty({(int64_t)batch_size, 1}, cuda_i32);
+        }
+        if (probabilistic_draft_ && parallelism_config_.tp_size > 1) {
+            execBroadcast({{draft_sample.token_ids}, 0});
+        }
+        auto draft_token_ids = draft_sample.token_ids;
 
         if (model_input.is_fake_stream) {
             draft_token_ids.zero_();
@@ -2246,7 +2311,9 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 
         draft_token_ids = to_cuda_i32_flat(draft_token_ids);
         draft_token_columns.push_back(draft_token_ids);
-        draft_probs_list.push_back(draft_probs_reshape);
+        if (isTpRank0()) {
+            draft_probs_list.push_back(draft_sample.all_probs.reshape({(int)batch_size, 1, -1}));
+        }
 
         // update model input
         if (i != propose_step_ - 2) {

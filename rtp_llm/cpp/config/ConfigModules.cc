@@ -300,6 +300,7 @@ std::string SpeculativeExecutionConfig::to_string() const {
         << "sp_max_token_match: " << sp_max_token_match << "\n"
         << "tree_decode_config: " << tree_decode_config << "\n"
         << "gen_num_per_cycle: " << gen_num_per_cycle << "\n"
+        << "draft_sample_method: " << draft_sample_method << "\n"
         << "force_stream_sample: " << force_stream_sample << "\n"
         << "force_score_context_attention: " << force_score_context_attention << "\n"
         << "quantization: " << quantization << "\n"

@@ -136,6 +136,15 @@ public:
     virtual void            releaseBuffers() {}
     virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
 
+    // DSpARK's serial Markov correction runs after proposal CUDA-graph
+    // replay. Implemented by the Python-backed draft model that owns the
+    // Markov weights.
+    virtual torch::Tensor dsparkMarkovLogits(const torch::Tensor& base_logits,
+                                             const torch::Tensor& previous_tokens,
+                                             bool                 previous_is_draft) {
+        throw std::runtime_error("model does not implement DSpARK Markov logits");
+    }
+
     // Refresh only kv_cache_kernel_block_id-dependent state on a previously-
     // prepared attention_inputs_ (e.g., after an MTP propose+verify re-gather).
     // No-op when no attention inputs have been prepared yet.

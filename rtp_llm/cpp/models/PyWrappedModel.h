@@ -60,6 +60,9 @@ public:
     ~PyWrappedModel();
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
+    torch::Tensor   dsparkMarkovLogits(const torch::Tensor& base_logits,
+                                       const torch::Tensor& previous_tokens,
+                                       bool                 previous_is_draft) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
     void            releaseBuffers() override;
     torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;

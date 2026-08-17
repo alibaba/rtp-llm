@@ -22,8 +22,8 @@ public:
         decoder_layer_hidden_states_ = hidden_states;
     };
 
-    void setDraftTokens(at::Tensor draft_tokens) {
-        draft_tokens_ = draft_tokens;
+    void setDraftLogits(at::Tensor draft_logits) {
+        draft_logits_ = draft_logits;
     };
 
     CaptureMemoryHold() {}
@@ -67,7 +67,7 @@ public:
 public:
     py::object               attn_pyobj_{py::none()};
     at::Tensor               decoder_layer_hidden_states_;
-    at::Tensor               draft_tokens_;
+    at::Tensor               draft_logits_;
     torch_ext::PyModelInputs py_model_inputs_;
 };
 

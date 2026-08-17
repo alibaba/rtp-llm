@@ -598,9 +598,9 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_seq_len].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state.current_seq_len);
-        const auto& draft_tokens = graph_instances_[state.current_real_graph_seq_len].mem_hold_.draft_tokens_;
-        if (draft_tokens.defined()) {
-            outputs.draft_tokens = draft_tokens.slice(0, 0, state.current_batch_size);
+        const auto& draft_logits = graph_instances_[state.current_real_graph_seq_len].mem_hold_.draft_logits_;
+        if (draft_logits.defined()) {
+            outputs.draft_logits = draft_logits.slice(0, 0, state.current_batch_size);
         }
     } else {
         {
@@ -1005,8 +1005,8 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
     try {
         auto warmup_outputs = py_forward_method_(inputs, attn_pyobj).cast<PyModelOutputs>();
-        if (warmup_outputs.draft_tokens.defined()) {
-            graph_instances_[key].mem_hold_.setDraftTokens(torch::empty_like(warmup_outputs.draft_tokens));
+        if (warmup_outputs.draft_logits.defined()) {
+            graph_instances_[key].mem_hold_.setDraftLogits(torch::empty_like(warmup_outputs.draft_logits));
         }
         py_forward_method_(inputs, attn_pyobj);
     } catch (const py::error_already_set& e) {
@@ -1043,10 +1043,10 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                 throw;
             }
             graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
-            if (outputs.draft_tokens.defined()) {
-                RTP_LLM_CHECK_WITH_INFO(graph_instances_[key].mem_hold_.draft_tokens_.defined(),
-                                        "CUDA graph produced draft_tokens without a warmup output buffer");
-                graph_instances_[key].mem_hold_.draft_tokens_.copy_(outputs.draft_tokens);
+            if (outputs.draft_logits.defined()) {
+                RTP_LLM_CHECK_WITH_INFO(graph_instances_[key].mem_hold_.draft_logits_.defined(),
+                                        "CUDA graph produced draft_logits without a warmup output buffer");
+                graph_instances_[key].mem_hold_.draft_logits_.copy_(outputs.draft_logits);
             }
             graph.capture_end();
         }

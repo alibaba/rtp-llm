@@ -149,8 +149,8 @@ class ProposerContractTest(unittest.TestCase):
         )
         outputs = proposer.dspark_empty_outputs(2, torch.device("cpu"))
         self.assertEqual(tuple(outputs.hidden_states.shape), (6, 8))
-        self.assertEqual(tuple(outputs.draft_tokens.shape), (2, 3))
-        self.assertEqual(outputs.draft_tokens.dtype, torch.int32)
+        self.assertEqual(tuple(outputs.draft_logits.shape), (2, 3, 17))
+        self.assertEqual(outputs.draft_logits.dtype, torch.float32)
 
     def test_hooks_require_subclass_implementation(self) -> None:
         proposer = DSparkProposerMixin()
@@ -290,10 +290,7 @@ class ProposeStepTest(unittest.TestCase):
         self.assertEqual(positions[1].tolist(), [0, 1, 2, 3, 4])
         # Zero-prefix rows are CUDA-graph padding, not live requests.
         self.assertEqual(active.tolist(), [True, False])
-        expected = self.proposer._sample_sequential_markov(
-            self.proposer.seen_base, anchors
-        )
-        self.assertTrue(torch.equal(outputs.draft_tokens, expected))
+        torch.testing.assert_close(outputs.draft_logits, self.proposer.seen_base)
 
     def test_rejects_wrong_token_count(self) -> None:
         inputs = _propose_inputs(
@@ -324,7 +321,7 @@ class ProposeStepTest(unittest.TestCase):
 
         # Empty DP ranks must still execute the collective attention layers.
         self.assertIsNotNone(self.proposer.query_call)
-        self.assertEqual(outputs.draft_tokens.shape[0], 0)
+        self.assertEqual(outputs.draft_logits.shape[0], 0)
 
 
 if __name__ == "__main__":

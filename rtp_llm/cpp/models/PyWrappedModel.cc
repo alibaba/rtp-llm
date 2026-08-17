@@ -29,6 +29,14 @@ using namespace std;
 
 namespace rtp_llm {
 
+torch::Tensor PyWrappedModel::dsparkMarkovLogits(const torch::Tensor& base_logits,
+                                                 const torch::Tensor& previous_tokens,
+                                                 bool                 previous_is_draft) {
+    RTP_LLM_CHECK_WITH_INFO(is_dspark_draft_, "DSpARK Markov logits requested from a non-DSpARK model");
+    py::gil_scoped_acquire gil;
+    return py_model_.attr("dspark_markov_logits")(base_logits, previous_tokens, previous_is_draft).cast<torch::Tensor>();
+}
+
 static torch::Tensor layerRegionToGroupTensor(const std::optional<CacheLayerLayout>& layout_opt) {
     if (!layout_opt.has_value() || layout_opt->layer_region_to_group_id.empty()) {
         return torch::Tensor();
@@ -783,7 +791,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // already used by callForwardPostLayers.
         const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
         auto       attach_draft_outputs = [&py_model_outputs](GptModelOutputs outputs) {
-            outputs.draft_tokens      = py_model_outputs.draft_tokens;
+            outputs.draft_logits      = py_model_outputs.draft_logits;
             return outputs;
         };
         if (is_dspark_draft_) {

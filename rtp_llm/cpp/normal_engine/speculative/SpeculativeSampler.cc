@@ -35,6 +35,68 @@ FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int 
     return output;
 }
 
+DraftSamplingConfig FastTopKSampler::prepare(const std::list<GenerateStreamPtr>& streams,
+                                             bool                                probabilistic,
+                                             TensorHolder&                       host_holder) const {
+    const int64_t batch_size  = streams.size();
+    const auto    pinned_i32  = torch::TensorOptions(torch::kInt32).pinned_memory(true);
+    const auto    pinned_f32  = torch::TensorOptions(torch::kFloat32).pinned_memory(true);
+    const auto    pinned_bool = torch::TensorOptions(torch::kBool).pinned_memory(true);
+    DraftSamplingConfig result{torch::empty({batch_size}, pinned_i32),
+                               torch::empty({batch_size}, pinned_f32),
+                               torch::empty({batch_size}, pinned_f32),
+                               torch::empty({batch_size}, pinned_bool),
+                               {}};
+    result.generators.reserve(batch_size);
+    for (int64_t row = 0; const auto& stream : streams) {
+        const auto& config     = *stream->generateConfig();
+        const bool  stochastic = probabilistic && config.do_sample && config.top_k != 1 && config.temperature > 0.0f;
+        result.top_k.data_ptr<int32_t>()[row]       = stochastic ? config.top_k : 1;
+        result.top_p.data_ptr<float>()[row]         = stochastic ? config.top_p : 1.0f;
+        result.temperatures.data_ptr<float>()[row]  = stochastic ? config.temperature : 1.0f;
+        result.do_sample.data_ptr<bool>()[row++]    = stochastic;
+        result.generators.push_back(stream->getGenerator());
+    }
+    host_holder.hold_host(result.top_k);
+    host_holder.hold_host(result.top_p);
+    host_holder.hold_host(result.temperatures);
+    host_holder.hold_host(result.do_sample);
+    return result;
+}
+
+FastTopKSamplerOutput FastTopKSampler::sample(const torch::Tensor&       logits,
+                                              const DraftSamplingConfig& config,
+                                              TensorHolder&              host_holder,
+                                              bool                       materialize_probs) {
+    const int64_t batch_size = logits.size(0);
+    RTP_LLM_CHECK_WITH_INFO(config.top_k.numel() == batch_size, "draft sampling config batch mismatch");
+    const auto cuda_i32 = torch::TensorOptions(torch::kInt32).device(torch::kCUDA);
+    auto       tokens   = torch::zeros({batch_size, 1}, cuda_i32);
+    auto probs = materialize_probs ? torch::zeros({batch_size, logits.size(1)}, logits.options().dtype(torch::kFloat32)) :
+                                     torch::Tensor();
+    auto empty_lengths = torch::empty({0}, cuda_i32);
+    execSampleGreedy({logits,
+                      empty_lengths,
+                      empty_lengths,
+                      tokens,
+                      0,
+                      config.top_k,
+                      config.top_p,
+                      config.temperatures,
+                      std::nullopt,
+                      std::nullopt,
+                      std::nullopt,
+                      std::nullopt,
+                      probs.defined() ? std::optional<torch::Tensor>(probs) : std::nullopt,
+                      std::nullopt,
+                      std::nullopt,
+                      config.do_sample,
+                      config.generators,
+                      &host_holder});
+    execMappingDraft2Target({tokens, d2t_map_, static_cast<int>(batch_size), 0, 1});
+    return {std::move(probs), std::move(tokens)};
+}
+
 SpeculativeSamplerOutput SpeculativeSampler::forward(const std::list<GenerateStreamPtr>& streams,
                                                      SamplerOutput&                      draft_sampler_output,
                                                      SamplerOutput&                      target_sampler_output) {
@@ -76,7 +138,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         torch::zeros({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
     int stream_idx = 0;
     for (const GenerateStreamPtr& stream : streams) {
-        do_sample[stream_idx] = !stream->generateConfig()->top1();
+        do_sample[stream_idx] = stream->generateConfig()->do_sample && !stream->generateConfig()->top1();
         stream_idx++;
     }
     buffer_holder_.hold_host(do_sample);

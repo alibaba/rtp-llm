@@ -200,7 +200,7 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_PartialAccept) {
     EXPECT_EQ(out_ids_h[0][3].item<int>(), -1);
 }
 
-TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_LegacyStochasticSameTokenAccepted) {
+TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_StochasticSameTokenStillUsesRatio) {
     const int batch_size    = 1;
     const int num_spec      = 1;
     const int vocab_size    = 16;
@@ -236,11 +236,12 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_LegacyStochasticSameToke
     ASSERT_EQ(status, cudaSuccess);
     cudaStreamSynchronize(stream_);
 
-    // Preserve the legacy non-point-mass behavior: matching sampled tokens are
-    // accepted even when the probability-ratio check would reject them.
-    EXPECT_EQ(output_accepted_num.cpu()[0].item<int>(), 2);
-    EXPECT_EQ(output_token_ids.cpu()[0][0].item<int>(), 5);
-    EXPECT_EQ(output_token_ids.cpu()[0][1].item<int>(), 5);
+    // Target argmax happens to match, but standard rejection sampling uses
+    // only min(1, p_target/q_draft): 0.5 * 0.9 >= 0.2, so reject and sample
+    // the residual distribution, which is concentrated on token 7.
+    EXPECT_EQ(output_accepted_num.cpu()[0].item<int>(), 1);
+    EXPECT_EQ(output_token_ids.cpu()[0][0].item<int>(), 7);
+    EXPECT_EQ(output_token_ids.cpu()[0][1].item<int>(), -1);
 }
 
 TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_PointMassStochasticSameTokenCanReject) {

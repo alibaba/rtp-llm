@@ -30,12 +30,27 @@ struct FastTopKSamplerOutput {
     torch::Tensor token_ids;
 };
 
+struct DraftSamplingConfig {
+    torch::Tensor              top_k;
+    torch::Tensor              top_p;
+    torch::Tensor              temperatures;
+    torch::Tensor              do_sample;
+    std::vector<at::Generator> generators;
+};
+
 class FastTopKSampler {
 public:
     FastTopKSampler(torch::Tensor d2t_map): d2t_map_(d2t_map) {}
     virtual ~FastTopKSampler() {}
 
     virtual FastTopKSamplerOutput forward(const torch::Tensor& logits, int top_k = 1);
+    DraftSamplingConfig prepare(const std::list<GenerateStreamPtr>& streams,
+                                bool                                probabilistic,
+                                TensorHolder&                       host_holder) const;
+    FastTopKSamplerOutput sample(const torch::Tensor&         logits,
+                                 const DraftSamplingConfig&   config,
+                                 TensorHolder&                host_holder,
+                                 bool                         materialize_probs = true);
 
 private:
     torch::Tensor d2t_map_;
