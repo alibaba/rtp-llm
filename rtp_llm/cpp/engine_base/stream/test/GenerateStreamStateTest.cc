@@ -309,22 +309,26 @@ TEST_F(GenerateStreamStateTest, testLoadInitiatedPreventsDuplicateInitKVBlock) {
     ASSERT_EQ(new_state, StreamState::RUNNING);
 }
 
-TEST_F(GenerateStreamStateTest, testLoadInitiatedSkipsAsyncLoadCache) {
+// Renamed from testLoadInitiatedSkipsAsyncLoadCache, which promised something it never
+// asserted: prepareForRemoteCacheLoad() does call asyncLoadCache() (GenerateStream.cc), so the
+// null load_cache_context_ below only holds because createStream() installs no connector and
+// StreamCacheResource::asyncLoadCache() returns false early. What this case actually pins is
+// the no-connector path: no load context is created and moveToNext() still reaches RUNNING.
+TEST_F(GenerateStreamStateTest, testNoConnectorSkipsAsyncLoadContext) {
     auto stream = createStream();
     ASSERT_EQ(stream->getStatus(), StreamState::WAITING);
 
     auto& resource = stream->streamCacheResource();
     ASSERT_TRUE(stream->prepareForRemoteCacheLoad().ok());
 
-    // Verify load_cache_context_ is null (no asyncLoadCache was called)
+    // No connector installed, so asyncLoadCache() bailed out before creating a context.
     ASSERT_FALSE(resource.load_cache_context_);
 
-    // moveToNext should not trigger asyncLoadCache because LoadInitiated is set
+    // moveToNext must not create one either: LoadInitiated is set.
     stream->reportEvent(StreamEvents::CanRun);
     auto new_state = stream->moveToNext();
     ASSERT_EQ(new_state, StreamState::RUNNING);
 
-    // Still no asyncLoadCache context
     ASSERT_FALSE(resource.load_cache_context_);
 }
 

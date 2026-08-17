@@ -175,6 +175,14 @@ absl::Status GenerateStream::prepareForRemoteCacheLoad(int64_t wait_timeout_ms) 
         reportEventWithoutLock(StreamEvents::LoadInitiated);
     }
 
+    // This path loads the cache synchronously instead of going through the LOADING_CACHE state,
+    // but it is the same work the state machine used to do, so keep feeding the same two
+    // timers: leaving them unset would make the PD cache-load metrics read as a constant 0,
+    // which looks like "loading is free" rather than "nobody reports it".
+    if (cache_load_started) {
+        recordLoadingCacheStartTime();
+    }
+
     // The caller (DecodeRpcServer::allocateResource) holds a decode admission slot for the
     // whole wait, so every exit has to be reachable without the load finishing: loadCacheDone()
     // only turns true once the coordinator marks the transfer done, so a coordinator thread
@@ -204,6 +212,9 @@ absl::Status GenerateStream::prepareForRemoteCacheLoad(int64_t wait_timeout_ms) 
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (cache_load_started) {
+        recordLoadingCacheDoneTime();
     }
 
     if (hasError()) {

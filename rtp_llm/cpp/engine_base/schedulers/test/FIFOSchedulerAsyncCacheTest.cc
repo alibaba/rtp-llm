@@ -1,5 +1,6 @@
 
 #include <memory>
+#include "absl/status/status.h"
 #include "torch/all.h"
 #include "gmock/gmock-actions.h"
 #include "gmock/gmock-function-mocker.h"
@@ -259,8 +260,8 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionCompletedAsyncLoadStaysInAdmissi
     auto done_ctx = createDoneAsyncContext();
     EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(done_ctx)));
 
-    auto scheduler                           = createPDFusionRatioScheduler();
-    auto loaded                              = createStream({1, 2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+    auto scheduler = createPDFusionRatioScheduler();
+    auto loaded    = createStream({1, 2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
     loaded->generateConfig()->max_new_tokens = 2;
     ASSERT_TRUE(scheduler->enqueue(loaded).ok());
 
@@ -271,7 +272,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionCompletedAsyncLoadStaysInAdmissi
     ASSERT_EQ(cache_manager_->freeBlocksNum(), 1);
     ASSERT_EQ(loaded->estimatePeakNeedBlocks(/*remaining_tokens=*/1), 1);
 
-    auto candidate                              = createStream({3});
+    auto candidate = createStream({3});
     candidate->generateConfig()->max_new_tokens = 2;
     ASSERT_EQ(candidate->estimatePeakNeedBlocks(/*remaining_tokens=*/1), 1);
     ASSERT_TRUE(scheduler->enqueue(candidate).ok());
@@ -301,10 +302,10 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionLoadingCacheReservesDelayedBeamT
 
     auto scheduler = createPDFusionRatioScheduler();
     auto loaded    = createStream({1, 2, 3, 4, 5},
-                               /*reuse_cache=*/true,
-                               /*enable_memory_cache=*/true,
-                               /*max_new_tokens=*/3,
-                               /*variable_num_beams=*/{1, 4});
+                                  /*reuse_cache=*/true,
+                                  /*enable_memory_cache=*/true,
+                                  /*max_new_tokens=*/3,
+                                  /*variable_num_beams=*/{1, 4});
     ASSERT_EQ(loaded->currentBatchSize(), 1);
     ASSERT_EQ(loaded->maxBatchSize(), 4);
     ASSERT_TRUE(scheduler->enqueue(loaded).ok());
@@ -450,6 +451,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testRemotePreparedDecodeStreamsRespectBatchL
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
 
     std::vector<GenerateStreamPtr> streams;
+    const int                      free_blocks_before = cache_manager_->freeBlocksNum();
     for (int token = 1; token <= 3; ++token) {
         auto stream = createStream({token},
                                    /*reuse_cache=*/false,
@@ -463,12 +465,62 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testRemotePreparedDecodeStreamsRespectBatchL
         streams.push_back(stream);
     }
 
+    // The invariant this whole mechanism rests on: KV is already charged for every stream,
+    // admitted or not. Prefill writes into those blocks before the scheduler ever sees the
+    // stream, so they cannot be released while the stream waits.
+    const int free_blocks_after_prepare = cache_manager_->freeBlocksNum();
+    ASSERT_LT(free_blocks_after_prepare, free_blocks_before);
+    for (const auto& stream : streams) {
+        ASSERT_GT(stream->curBlocksNum(), 0);
+    }
+
     auto result = scheduler->schedule();
     ASSERT_TRUE(result.ok());
     ASSERT_EQ(result.value().size(), 2);
     ASSERT_EQ(scheduler->runningStreamsSize(), 2);
     ASSERT_EQ(scheduler->waitingStreamsSize(), 1);
     ASSERT_FALSE(streams.back()->hasEvent(StreamEvents::CanRun));
+    // Scheduling admits streams; it must not allocate or free blocks for them.
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), free_blocks_after_prepare);
+    ASSERT_GT(streams.back()->curBlocksNum(), 0);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testRemotePrepareFailsRetryablyWhenBlocksExhausted) {
+    // Two usable blocks, three tokens per stream: the third stream cannot get its KV. This is
+    // the failure path DecodeRpcServer retries through EXECUTE_WITH_RETRY, so the stream must
+    // report the failure without being driven to a terminal state.
+    cache_config_ = test::makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/3, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
+    cache_manager_ = std::make_shared<KVCacheManager>(cache_config_);
+    ASSERT_TRUE(cache_manager_->init());
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 2);
+
+    auto first = createStream({1, 2, 3},
+                              /*reuse_cache=*/false,
+                              /*enable_memory_cache=*/false,
+                              /*max_new_tokens=*/1,
+                              /*variable_num_beams=*/{},
+                              RoleType::DECODE);
+    ASSERT_TRUE(first->prepareForRemoteCacheLoad().ok());
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 0);
+
+    auto starved = createStream({4, 5, 6},
+                                /*reuse_cache=*/false,
+                                /*enable_memory_cache=*/false,
+                                /*max_new_tokens=*/1,
+                                /*variable_num_beams=*/{},
+                                RoleType::DECODE);
+    auto status = starved->prepareForRemoteCacheLoad();
+    ASSERT_FALSE(status.ok());
+    // ResourceExhausted, not Internal: DecodeRpcServer maps only this to RESOURCE_EXHAUSTED ->
+    // DECODE_MALLOC_FAILED, which is what tells prefill the decode node is out of blocks.
+    ASSERT_TRUE(absl::IsResourceExhausted(status)) << status.ToString();
+    // Retryable: no terminal state, no LoadInitiated, so a later attempt can allocate once
+    // another request releases its blocks.
+    ASSERT_FALSE(starved->hasEvent(StreamEvents::LoadInitiated));
+    ASSERT_EQ(starved->getStatus(), StreamState::WAITING);
+    ASSERT_EQ(starved->curBlocksNum(), 0);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), 0);
 }
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionLoadingCacheStreamsCountTowardBatchLimit) {
