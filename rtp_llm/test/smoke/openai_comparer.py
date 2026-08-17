@@ -218,6 +218,117 @@ class OpenaiComparer(BaseComparer):
         lines.append("=" * 60)
         return "\n".join(lines)
 
+    def _choice_content(
+        self,
+        result: Union[ChatCompletionResponse, ChatCompletionStreamResponse],
+        choice_index: int,
+    ) -> Optional[str]:
+        if choice_index < 0 or choice_index >= len(result.choices):
+            return None
+        choice = result.choices[choice_index]
+        if isinstance(result, ChatCompletionStreamResponse):
+            return choice.delta.content
+        return choice.message.content
+
+    def _compare_required_json_content(
+        self,
+        actual_result: Union[ChatCompletionResponse, ChatCompletionStreamResponse],
+        compare_config: Dict[str, Any],
+        diffs: List[str],
+    ) -> None:
+        should_check_json = any(
+            [
+                compare_config.get("require_json_object_content", False),
+                compare_config.get("json_content", False),
+                compare_config.get("json_object", False),
+                compare_config.get("required_json_fields"),
+                compare_config.get("required_json_keys"),
+                "expected_json" in compare_config,
+            ]
+        )
+        if not should_check_json:
+            return
+
+        choice_index = int(compare_config.get("json_choice_index", 0))
+        content = self._choice_content(actual_result, choice_index)
+        if not isinstance(content, str) or not content.strip():
+            diffs.append(
+                self._format_expect_actual(
+                    "required JSON content missing",
+                    "non-empty string",
+                    content,
+                )
+            )
+            return
+
+        text = content.strip()
+        if text.startswith("```"):
+            diffs.append(
+                self._format_expect_actual(
+                    "JSON content must not be wrapped in Markdown fence",
+                    "raw JSON object",
+                    content,
+                )
+            )
+            return
+
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as e:
+            diffs.append(
+                self._format_expect_actual(
+                    f"content is not valid JSON: {e}",
+                    "valid JSON object",
+                    content,
+                )
+            )
+            return
+
+        if compare_config.get("json_object", True) and not isinstance(parsed, dict):
+            diffs.append(
+                self._format_expect_actual(
+                    "content JSON is not an object",
+                    "JSON object",
+                    parsed,
+                )
+            )
+            return
+
+        if (
+            "expected_json" in compare_config
+            and parsed != compare_config["expected_json"]
+        ):
+            diffs.append(
+                self._format_expect_actual(
+                    "content JSON not equal",
+                    compare_config["expected_json"],
+                    parsed,
+                )
+            )
+
+        required_fields = compare_config.get("required_json_fields", [])
+        required_fields = required_fields or compare_config.get(
+            "required_json_keys", []
+        )
+        if required_fields and not isinstance(parsed, dict):
+            diffs.append(
+                self._format_expect_actual(
+                    "content JSON cannot check required fields on non-object",
+                    required_fields,
+                    parsed,
+                )
+            )
+        elif required_fields:
+            missing_fields = [field for field in required_fields if field not in parsed]
+            if missing_fields:
+                diffs.append(
+                    self._format_expect_actual(
+                        "content JSON missing required fields",
+                        required_fields,
+                        sorted(parsed.keys()),
+                    )
+                )
+
     def _validate_grammar_constraint(
         self, actual_result: Union[ChatCompletionResponse, ChatCompletionStreamResponse]
     ) -> None:
@@ -251,6 +362,9 @@ class OpenaiComparer(BaseComparer):
             return
 
         diffs: List[str] = []
+        compare_config = self.qr_info.get("compare_config", {})
+        skip_choices = compare_config.get("skip_choices", False)
+        skip_usage = compare_config.get("skip_usage", False)
 
         if type(expect_result) != type(actual_result):
             diffs.append(
@@ -260,7 +374,7 @@ class OpenaiComparer(BaseComparer):
                 + type(actual_result).__name__
             )
 
-        if expect_result.usage != actual_result.usage:
+        if not skip_usage and expect_result.usage != actual_result.usage:
             diffs.append(
                 self._format_expect_actual(
                     "usage not equal",
@@ -276,6 +390,30 @@ class OpenaiComparer(BaseComparer):
                 actual_result.aux_info,
                 diffs,
             )
+
+        required_aux_info = compare_config.get("required_aux_info", {})
+        if required_aux_info:
+            if actual_result.aux_info is None:
+                diffs.append(
+                    self._format_expect_actual(
+                        "required aux_info missing",
+                        required_aux_info,
+                        None,
+                    )
+                )
+            else:
+                actual_required_aux = {
+                    field: getattr(actual_result.aux_info, field, None)
+                    for field in required_aux_info
+                }
+                if actual_required_aux != required_aux_info:
+                    diffs.append(
+                        self._format_expect_actual(
+                            "required aux_info fields not equal",
+                            required_aux_info,
+                            actual_required_aux,
+                        )
+                    )
 
         expect_extra_outputs = copy.copy(expect_result.extra_outputs)
         actual_extra_outputs = copy.copy(actual_result.extra_outputs)
@@ -299,7 +437,7 @@ class OpenaiComparer(BaseComparer):
         expect_logprobs, expect_choices = self.extract_logprobs(expect_result.choices)
         actual_logprobs, actual_choices = self.extract_logprobs(actual_result.choices)
 
-        if expect_choices != actual_choices:
+        if not skip_choices and expect_choices != actual_choices:
             diffs.append(
                 self._format_expect_actual(
                     "choices not equal (after normalizing logprobs)",
@@ -309,7 +447,11 @@ class OpenaiComparer(BaseComparer):
             )
 
         rtol = atol = 1e-2
-        if expect_logprobs is not None and actual_logprobs is not None:
+        if (
+            not skip_choices
+            and expect_logprobs is not None
+            and actual_logprobs is not None
+        ):
             if not all(
                 torch.isclose(
                     torch.tensor(expect_logprobs),
@@ -325,6 +467,8 @@ class OpenaiComparer(BaseComparer):
                         actual_logprobs,
                     )
                 )
+
+        self._compare_required_json_content(actual_result, compare_config, diffs)
 
         if diffs:
             raise SmokeException(
