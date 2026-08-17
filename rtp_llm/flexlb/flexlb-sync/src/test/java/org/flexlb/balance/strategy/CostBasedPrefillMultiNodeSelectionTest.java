@@ -181,6 +181,12 @@ class CostBasedPrefillMultiNodeSelectionTest {
 
     /** auto-tpm 开启 + 背压 park 配置：batcher 队列确定性驻留不被 drain。 */
     private void setUpAutoTpmBatcherConfig() {
+        // na130_4 depth term note: the two auto-tpm cases below keep both
+        // engines' queueSize symmetric (40 each), so the default-on depth
+        // penalty adds the same wait to both scores and cancels out — the
+        // priority-composition asymmetry stays the only deciding factor.
+        // New asymmetric-queue cases must control
+        // flexlbQueueDepthPenaltyEnabled explicitly.
         config.setAutoTpmEnabled(true);
         config.setFlexlbBatchFixedWaitMs(1_000);
         config.setFlexlbBatchSizeMax(10);

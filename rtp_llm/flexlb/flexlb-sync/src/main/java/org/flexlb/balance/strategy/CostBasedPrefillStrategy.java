@@ -260,6 +260,18 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         long avgPendingCount = sumPendingCount / feasible.size();
 
         // Round 2: hotspot / imbalance filter using cached values (no re-computation)
+        // na130_4 congested-queue filter: an engine whose batcher queue sits at
+        // or beyond flexlbCongestedQueueRatio × flexlbBatchQueueMaxSize is
+        // excluded from candidates. Gated on autoTpmEnabled like the depth
+        // term above — legacy (non-Auto-TPM) deployments keep the untouched
+        // candidate set. A non-positive queue capacity means unbounded, so
+        // the threshold degenerates to Long.MAX_VALUE (filter never fires).
+        // When every feasible endpoint is congested the survivor set empties
+        // and the existing least-loaded fallback below still yields one
+        // endpoint — routing never fails closed.
+        boolean congestedQueueFilterEnabled = config.isFlexlbCongestedQueueFilterEnabled()
+                && config.isAutoTpmEnabled();
+        long congestedQueueThreshold = congestedQueueThreshold(config);
         int survivorCount = 0;
         PrefillEndpoint leastLoadedEndpoint = null;
         long leastLoadedCacheHit = 0;
@@ -277,6 +289,11 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                 leastLoadedScore = feasible.score(i);
             }
 
+            if (congestedQueueFilterEnabled
+                    && feasible.endpoint(i).getBatcher().queueSize() >= congestedQueueThreshold) {
+                rejections.merge("CONGESTED_QUEUE_FILTERED", 1, Integer::sum);
+                continue;
+            }
             if (hotspotMultiplier > 0 && avgPendingCount > 0 && pendingCount > avgPendingCount * hotspotMultiplier) {
                 rejections.merge("HOTSPOT_FILTERED", 1, Integer::sum);
                 continue;
@@ -381,6 +398,26 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             }
             return estimate;
         }
+    }
+
+    /**
+     * Congestion threshold for the Round-2 candidate filter:
+     * {@code ceil(flexlbCongestedQueueRatio × flexlbBatchQueueMaxSize)}.
+     * A non-positive queue capacity means unbounded — the filter can never
+     * fire, so the threshold degenerates to {@code Long.MAX_VALUE}.
+     */
+    private static long congestedQueueThreshold(FlexlbConfig config) {
+        int queueCapacity = config.getFlexlbBatchQueueMaxSize();
+        if (queueCapacity <= 0) {
+            return Long.MAX_VALUE;
+        }
+        double ratio = config.getFlexlbCongestedQueueRatio();
+        // A misconfigured ratio (NaN/Infinite or outside (0,1]) disables the
+        // filter — e.g. ratio=0 must not mark every engine congested.
+        if (!Double.isFinite(ratio) || ratio <= 0 || ratio > 1) {
+            return Long.MAX_VALUE;
+        }
+        return (long) Math.ceil(queueCapacity * ratio);
     }
 
     private Map<String, Integer> getCacheMatchResults(BalanceContext balanceContext, RoleType roleType, String group) {

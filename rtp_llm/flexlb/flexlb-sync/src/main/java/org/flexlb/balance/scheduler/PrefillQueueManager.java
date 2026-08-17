@@ -100,6 +100,17 @@ public final class PrefillQueueManager {
      * dispatch-interval sliding average as the per-cycle cost and the head's
      * remaining window as the partial first cycle.
      *
+     * <p>na130_4 depth term: the jump estimate above only counts items
+     * ordered ahead of the probe (jump-in semantics), so a high-priority
+     * request facing a queue already pinned at its cap reports a near-zero
+     * wait and the slow engine keeps winning the routing score. When
+     * {@code flexlbQueueDepthPenaltyEnabled} (default on), the estimate
+     * additionally computes {@code depthWait = (queueSize / maxBatchSize) ×
+     * intervalEMA × flexlbQueueDepthPenaltyFactor} — the drain horizon of the
+     * full queue — and returns {@code max(jumpWait, depthWait)}, so a probe
+     * can never look cheaper than the queue it jumps into. With the gate off
+     * the legacy jump-only value is returned unchanged.
+     *
      * <p>task61 L2: the previous implementation sorted the whole queue under
      * the lock only to take the ordered head and count the items ahead. The
      * count is order-independent, and the head is {@code queue.peek()} — the
@@ -115,11 +126,13 @@ public final class PrefillQueueManager {
     public long estimateWaitMs(int priority, long deadlineMs, long requestId) {
         long now = ctx.now();
         int itemsAhead = 0;
+        int queueSize = 0;
         BatchItem head;
         ctx.queueLock().lock();
         try {
             head = ctx.peek();
             for (BatchItem item : ctx.queueItems()) {
+                queueSize++;
                 if (ordersBefore(item, priority, deadlineMs, now, requestId)) {
                     itemsAhead++;
                 }
@@ -135,7 +148,22 @@ public final class PrefillQueueManager {
             long headWaitedMs = Math.max(0, now - head.enqueuedAtMs());
             headRemainingWindowMs = Math.max(0, intervalMs - headWaitedMs);
         }
-        return batchCyclesAhead * intervalMs + headRemainingWindowMs;
+        long jumpWaitMs = batchCyclesAhead * intervalMs + headRemainingWindowMs;
+        if (!ctx.cfg().isFlexlbQueueDepthPenaltyEnabled()) {
+            return jumpWaitMs;
+        }
+        // Depth term: full-queue drain horizon, independent of the probe's
+        // priority. depthCycles is bounded by the queue capacity. A
+        // misconfigured factor (NaN/Infinite or <= 0) is treated as the
+        // default 1.0, and the product is clamped to 1<<40 ms (~13 days) so
+        // an extreme factor can never wrap negative in the score sum.
+        long depthCycles = queueSize / maxBatchSize;
+        double factor = ctx.cfg().getFlexlbQueueDepthPenaltyFactor();
+        if (!Double.isFinite(factor) || factor <= 0) {
+            factor = 1.0;
+        }
+        long depthWaitMs = Math.min((long) (depthCycles * (double) intervalMs * factor), 1L << 40);
+        return Math.max(jumpWaitMs, depthWaitMs);
     }
 
     /**

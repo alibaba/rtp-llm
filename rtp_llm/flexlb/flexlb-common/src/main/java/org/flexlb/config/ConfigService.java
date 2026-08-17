@@ -326,6 +326,10 @@ public class ConfigService {
             config.getAutoTpmCancelAckTimeoutMs(), config.getAutoTpmCancelCompletionTimeoutMs());
         log.info("autoTpmCommitStrategy={}, autoTpmVictimGuardMode={}",
             config.getAutoTpmCommitStrategy(), config.getAutoTpmVictimGuardMode());
+        log.info("queueDepthPenaltyEnabled={}, queueDepthPenaltyFactor={}",
+            config.isFlexlbQueueDepthPenaltyEnabled(), config.getFlexlbQueueDepthPenaltyFactor());
+        log.info("congestedQueueFilterEnabled={}, congestedQueueRatio={}",
+            config.isFlexlbCongestedQueueFilterEnabled(), config.getFlexlbCongestedQueueRatio());
         log.info("maxNewTokensCap={}", config.getMaxNewTokensCap());
         log.info("workerTimeoutMs={}",
             config.getWorkerTimeoutMs());

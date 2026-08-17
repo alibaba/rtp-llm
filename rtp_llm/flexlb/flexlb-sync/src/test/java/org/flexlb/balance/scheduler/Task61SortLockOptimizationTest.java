@@ -117,6 +117,10 @@ class Task61SortLockOptimizationTest {
         FlexlbConfig config = new FlexlbConfig();
         config.setFlexlbBatchAlgorithm("fixed_window");
         config.setAutoTpmEnabled(true);
+        // This test pins the L2 itemsAhead count against a full-sort
+        // reference (jump-in semantics only); the na130_4 depth term has its
+        // own dedicated tests in PrefillQueueManagerTest, so gate it off here.
+        config.setFlexlbQueueDepthPenaltyEnabled(false);
         config.setFlexlbBatchSizeMax(2);
         config.setFlexlbBatchFixedWaitMs(200);
         WorkerBatcher batcher = new WorkerBatcher("test-worker", null, config,

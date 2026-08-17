@@ -108,6 +108,9 @@ class PrefillQueueManagerTest {
 
     @Test
     void estimate_wait_counts_only_items_ahead_and_is_monotonic_in_priority() {
+        // Legacy jump-in semantics: disable the na130_4 depth term so the
+        // estimate only reflects the items ordered ahead of the probe.
+        config.setFlexlbQueueDepthPenaltyEnabled(false);
         config.setFlexlbBatchSizeMax(1);
         config.setFlexlbBatchFixedWaitMs(200);
         WorkerBatcher batcher = newBatcher();
@@ -128,6 +131,77 @@ class PrefillQueueManagerTest {
         assertEquals(400, waitP50);
         assertEquals(400, waitP30);
         assertTrue(waitP70 <= waitP50 && waitP50 <= waitP30);
+    }
+
+    // ==================== na130_4 depth penalty ====================
+
+    @Test
+    void depth_penalty_exposes_saturated_queue_to_priority_jumps() {
+        // 16 low-priority items pin the queue. A P70 probe jumps ahead of all
+        // of them (jumpWait = 0), but the queue needs 16/8 = 2 dispatch cycles
+        // to drain, so with the depth penalty on (default) the estimate must
+        // expose that drain horizon instead of a near-zero wait.
+        config.setFlexlbBatchSizeMax(8);
+        config.setFlexlbBatchFixedWaitMs(200);
+        WorkerBatcher batcher = newBatcher();
+        long now = System.currentTimeMillis();
+        for (long requestId = 1; requestId <= 16; requestId++) {
+            assertTrue(batcher.tryOffer(item(requestId, 30, now, now - 100_000, 128)));
+        }
+
+        PrefillQueueManager manager = batcher.queueManager();
+        config.setFlexlbQueueDepthPenaltyEnabled(false);
+        long legacyWait = manager.estimateWaitMs(70, now + 60_000, 999);
+        config.setFlexlbQueueDepthPenaltyEnabled(true);
+        long penalizedWait = manager.estimateWaitMs(70, now + 60_000, 999);
+
+        // Legacy jump-only estimate is blind to the saturated queue (0 ahead)
+        assertEquals(0, legacyWait);
+        // Depth term: (16/8) cycles × 200ms fallback interval × factor 1.0
+        assertEquals(400, penalizedWait);
+        assertTrue(penalizedWait > legacyWait,
+                "deep queue must look significantly slower than with the gate off");
+    }
+
+    @Test
+    void depth_penalty_scales_with_factor() {
+        config.setFlexlbBatchSizeMax(8);
+        config.setFlexlbBatchFixedWaitMs(200);
+        WorkerBatcher batcher = newBatcher();
+        long now = System.currentTimeMillis();
+        for (long requestId = 1; requestId <= 16; requestId++) {
+            assertTrue(batcher.tryOffer(item(requestId, 30, now, now - 100_000, 128)));
+        }
+
+        PrefillQueueManager manager = batcher.queueManager();
+        config.setFlexlbQueueDepthPenaltyFactor(2.5);
+        // (16/8) cycles × 200ms × 2.5 = 1000
+        assertEquals(1000, manager.estimateWaitMs(70, now + 60_000, 999));
+
+        config.setFlexlbQueueDepthPenaltyFactor(0.5);
+        // (16/8) cycles × 200ms × 0.5 = 200 — still >= jumpWait(0)
+        assertEquals(200, manager.estimateWaitMs(70, now + 60_000, 999));
+    }
+
+    @Test
+    void depth_penalty_returns_jump_wait_when_gate_off_or_queue_empty() {
+        config.setFlexlbBatchSizeMax(1);
+        config.setFlexlbBatchFixedWaitMs(200);
+        WorkerBatcher batcher = newBatcher();
+        long now = System.currentTimeMillis();
+        assertTrue(batcher.tryOffer(item(1, 50, now, now - 100_000, 128)));
+        assertTrue(batcher.tryOffer(item(2, 50, now, now - 100_000, 128)));
+
+        PrefillQueueManager manager = batcher.queueManager();
+        // Gate off: bit-for-bit legacy value (2 cycles × 200ms)
+        config.setFlexlbQueueDepthPenaltyEnabled(false);
+        assertEquals(400, manager.estimateWaitMs(50, now + 60_000, 999));
+        // Gate on, jump wait dominates the depth term here (same 400)
+        config.setFlexlbQueueDepthPenaltyEnabled(true);
+        assertEquals(400, manager.estimateWaitMs(50, now + 60_000, 999));
+        // Empty queue: depth term is 0, P70 probe keeps its jump-in zero wait
+        WorkerBatcher emptyBatcher = newBatcher();
+        assertEquals(0, emptyBatcher.queueManager().estimateWaitMs(70, now + 60_000, 999));
     }
 
     // ==================== 17.2 atomic victim replace ====================
