@@ -5,7 +5,9 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/mha_paged_attn_plan.h"
+#include <c10/cuda/CUDAGuard.h>
 #include <cstdint>
+#include <limits>
 #include <algorithm>
 #include <numeric>
 #include <cuda_runtime.h>
@@ -43,6 +45,15 @@ torch::Tensor toDeviceContiguousI32(const torch::Tensor& tensor) {
         t = t.to(torch::kInt32);
     }
     return t.is_contiguous() ? t : t.contiguous();
+}
+
+void checkCudaI32Tensor(const torch::Tensor& tensor, const char* name, int64_t expected_dim) {
+    RTP_LLM_CHECK_WITH_INFO(tensor.defined(), "%s must be defined", name);
+    RTP_LLM_CHECK_WITH_INFO(tensor.is_cuda(), "%s must be CUDA", name);
+    RTP_LLM_CHECK_WITH_INFO(tensor.scalar_type() == torch::kInt32, "%s must be int32", name);
+    RTP_LLM_CHECK_WITH_INFO(tensor.is_contiguous(), "%s must be contiguous", name);
+    RTP_LLM_CHECK_WITH_INFO(
+        tensor.dim() == expected_dim, "%s must be %ld-D, got %ld-D", name, expected_dim, tensor.dim());
 }
 
 }  // namespace
@@ -616,6 +627,54 @@ void FlashInferMlaAttnParams::fillDecodeCudaGraphParams(torch::Tensor sequence_l
     slot_mapping                 = torch::Tensor();
 }
 
+void FlashInferMlaAttnParams::fillTokenSpeedMetadata(torch::Tensor block_tables,
+                                                     torch::Tensor sequence_lengths,
+                                                     int           batch_size,
+                                                     int           padded_blocks) {
+    RTP_LLM_CHECK_WITH_INFO(batch_size >= 0, "batch_size must be non-negative, got %d", batch_size);
+    RTP_LLM_CHECK_WITH_INFO(padded_blocks > 0, "padded_blocks must be positive, got %d", padded_blocks);
+    const int64_t output_elements = static_cast<int64_t>(batch_size) * padded_blocks;
+    RTP_LLM_CHECK_WITH_INFO(output_elements <= std::numeric_limits<int32_t>::max(),
+                            "TokenSpeed metadata output is too large: %ld elements",
+                            output_elements);
+    checkCudaI32Tensor(block_tables, "block_tables", 2);
+    checkCudaI32Tensor(sequence_lengths, "sequence_lengths", 1);
+    RTP_LLM_CHECK_WITH_INFO(block_tables.size(0) >= batch_size && block_tables.size(1) >= padded_blocks,
+                            "block_tables shape [%ld, %ld] cannot cover [%d, %d]",
+                            block_tables.size(0),
+                            block_tables.size(1),
+                            batch_size,
+                            padded_blocks);
+    RTP_LLM_CHECK_WITH_INFO(sequence_lengths.numel() >= batch_size,
+                            "sequence_lengths numel %ld is smaller than batch_size %d",
+                            sequence_lengths.numel(),
+                            batch_size);
+
+    checkCudaI32Tensor(page_indice_d, "page_indice_d", 1);
+    checkCudaI32Tensor(decode_page_indptr_d, "decode_page_indptr_d", 1);
+    checkCudaI32Tensor(kvlen_d, "kvlen_d", 1);
+    RTP_LLM_CHECK_WITH_INFO(decode_page_indptr_d.numel() >= static_cast<int64_t>(batch_size) + 1,
+                            "decode_page_indptr_d is smaller than batch_size + 1");
+    RTP_LLM_CHECK_WITH_INFO(kvlen_d.numel() >= batch_size, "kvlen_d is smaller than batch_size");
+    const auto device = block_tables.device();
+    RTP_LLM_CHECK_WITH_INFO(sequence_lengths.device() == device && page_indice_d.device() == device
+                                && decode_page_indptr_d.device() == device && kvlen_d.device() == device,
+                            "TokenSpeed metadata inputs and outputs must be on the same CUDA device");
+    if (batch_size == 0) {
+        return;
+    }
+
+    const c10::cuda::CUDAGuard device_guard(device);
+    invokePrepareTokenSpeedMlaFromCompact(page_indice_d.data_ptr<int32_t>(),
+                                          decode_page_indptr_d.data_ptr<int32_t>(),
+                                          kvlen_d.data_ptr<int32_t>(),
+                                          block_tables.data_ptr<int32_t>(),
+                                          sequence_lengths.data_ptr<int32_t>(),
+                                          batch_size,
+                                          padded_blocks,
+                                          at::cuda::getCurrentCUDAStream(block_tables.get_device()).stream());
+}
+
 void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths,
                                                   torch::Tensor t_sequence_lengths,
                                                   torch::Tensor t_input_lengths,
@@ -720,6 +779,13 @@ void registerPyFlashInferMlaParams(pybind11::module& m) {
              pybind11::arg("kv_cache_block_id_device"),
              pybind11::arg("seq_size_per_block"),
              "Update FlashInfer decode metadata on device during CUDA graph replay")
+        .def("fill_tokenspeed_metadata",
+             &rtp_llm::FlashInferMlaAttnParams::fillTokenSpeedMetadata,
+             pybind11::arg("block_tables"),
+             pybind11::arg("sequence_lengths"),
+             pybind11::arg("batch_size"),
+             pybind11::arg("padded_blocks"),
+             "Fuse compact FlashInfer metadata into TokenSpeed dense metadata")
         .def(
             "fill_params_mha_device",
             [](rtp_llm::FlashInferMlaAttnParams& self,

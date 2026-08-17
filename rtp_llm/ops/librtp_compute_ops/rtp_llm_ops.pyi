@@ -42,6 +42,10 @@ class FlashInferMlaAttnParams(librtp_compute_ops.ParamsBase):
         """
         Update FlashInfer decode metadata on device during CUDA graph replay
         """
+    def fill_tokenspeed_metadata(self, block_tables: torch.Tensor, sequence_lengths: torch.Tensor, batch_size: int, padded_blocks: int) -> None:
+        """
+        Fuse compact FlashInfer metadata into TokenSpeed dense metadata
+        """
     @property
     def batch_indice_d(self) -> torch.Tensor:
         """

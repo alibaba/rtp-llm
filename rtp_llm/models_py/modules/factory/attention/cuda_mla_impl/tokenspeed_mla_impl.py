@@ -122,6 +122,19 @@ class _TokenSpeedDecodeMetadata:
         assert self.block_tables is not None
         assert self.seq_lens is not None
         assert self.column_indices is not None
+        if self.block_tables.is_cuda and hasattr(
+            fmha_params, "fill_tokenspeed_metadata"
+        ):
+            fmha_params.fill_tokenspeed_metadata(
+                self.block_tables,
+                self.seq_lens,
+                batch_size,
+                width,
+            )
+            self.batch_size = batch_size
+            self.padded_blocks = width
+            self.max_seq_len = max_seq_len
+            return
         page_indices = fmha_params.page_indice_d
         page_indptr = fmha_params.decode_page_indptr_d
         row_starts = page_indptr[:batch_size].view(-1, 1)

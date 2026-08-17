@@ -318,16 +318,23 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 #endif
     } else {
         py_attn_inputs.total_tokens        = 0;
-        py_attn_inputs.cu_seqlens          = torch::zeros({batch_size + 1}, cuda_i32);
-        py_attn_inputs.cu_kv_seqlens       = torch::zeros({batch_size + 1}, cuda_i32);
+        const int64_t metadata_size        = batch_size + 1;
+        if (!decode_zero_cu_seqlens_.defined() || decode_zero_cu_seqlens_.numel() < metadata_size) {
+            decode_zero_cu_seqlens_    = torch::zeros({metadata_size}, cuda_i32);
+            decode_zero_cu_kv_seqlens_ = torch::zeros({metadata_size}, cuda_i32);
+            decode_cu_seqlens_         = torch::arange(0, metadata_size, 1, cuda_i32);
+        }
+        py_attn_inputs.cu_seqlens          = decode_zero_cu_seqlens_.slice(0, 0, metadata_size);
+        py_attn_inputs.cu_kv_seqlens       = decode_zero_cu_kv_seqlens_.slice(0, 0, metadata_size);
         py_attn_inputs.padding_offset      = torch::empty({0}, cuda_i32);
-        py_attn_inputs.decode_cu_seqlens_d = torch::arange(0, py_attn_inputs.sequence_lengths.size(0) + 1, 1, cuda_i32);
+        py_attn_inputs.decode_cu_seqlens_d = decode_cu_seqlens_.slice(0, 0, metadata_size);
     }
 
-    // In qwen3-next target verify mode, sequence_lengths_plus_1_d uses prefix_lengths
+    // Reuse a caller-provided next-length snapshot when it is still valid.
+    // Target verify falls back to prefix lengths; ordinary decode uses sequence lengths.
     {
         RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs(sequence_lengths_plus_1)");
-        if (py_attn_inputs.is_target_verify && inputs.sequence_lengths_plus_1.defined()) {
+        if (inputs.sequence_lengths_plus_1.defined()) {
             py_attn_inputs.sequence_lengths_plus_1_d = to_device_i32(inputs.sequence_lengths_plus_1);
         } else if (py_attn_inputs.is_target_verify) {
             py_attn_inputs.sequence_lengths_plus_1_d = length_plus_one_device(prefix_lengths_src);
@@ -1316,6 +1323,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 micro_model_inputs.input_lengths = inputs.input_lengths.narrow(0, sliced_batch_idx, total_batch_size);
                 micro_model_inputs.sequence_lengths =
                     inputs.sequence_lengths.narrow(0, decode_batch_idx, d_micro_batch_size);
+                micro_model_inputs.sequence_lengths_plus_1 =
+                    inputs.sequence_lengths_plus_1.defined() ?
+                        inputs.sequence_lengths_plus_1.narrow(0, decode_batch_idx, d_micro_batch_size) :
+                        torch::Tensor();
                 micro_model_inputs.kv_cache_block_id =
                     sliceKvCacheBlockIdByBatch(inputs.kv_cache_block_id, sliced_batch_idx, total_batch_size);
                 micro_model_inputs.kv_cache_kernel_block_id =
@@ -1368,6 +1379,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 micro_model_inputs.input_lengths = inputs.input_lengths.narrow(0, sliced_batch_idx, d_micro_batch_size);
                 micro_model_inputs.sequence_lengths =
                     inputs.sequence_lengths.narrow(0, decode_batch_idx, d_micro_batch_size);
+                micro_model_inputs.sequence_lengths_plus_1 =
+                    inputs.sequence_lengths_plus_1.defined() ?
+                        inputs.sequence_lengths_plus_1.narrow(0, decode_batch_idx, d_micro_batch_size) :
+                        torch::Tensor();
                 micro_model_inputs.attention_mask =
                     inputs.attention_mask.defined() ?
                         inputs.attention_mask.narrow(0, sliced_batch_idx, d_micro_batch_size) :

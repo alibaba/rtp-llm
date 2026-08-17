@@ -41,6 +41,13 @@ class FlashInferMlaAttnParams:
         kv_cache_block_id_device: torch.Tensor,
         seq_size_per_block: int,
     ) -> None: ...
+    def fill_tokenspeed_metadata(
+        self,
+        block_tables: torch.Tensor,
+        sequence_lengths: torch.Tensor,
+        batch_size: int,
+        padded_blocks: int,
+    ) -> None: ...
 
 class FlashInferOp:
     def __init__(

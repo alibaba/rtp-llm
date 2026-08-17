@@ -217,6 +217,185 @@ class FlashInferDecodeParamsTest(TestCase):
             {name: getattr(params, name).data_ptr() for name in output_names},
         )
 
+    def test_tokenspeed_compact_metadata_fusion_uses_current_stream(self) -> None:
+        batch_size = 3
+        page_size = 4
+        max_blocks = 5
+        sequence_lengths = torch.tensor([1, 7, 13], dtype=torch.int32)
+        block_table = torch.tensor(
+            [
+                [11, 12, 13, 14, 15],
+                [21, 22, 23, 24, 25],
+                [31, 32, 33, 34, 35],
+            ],
+            dtype=torch.int32,
+        )
+        params = rtp_llm_ops.FlashInferMlaAttnParams()
+        self._reserve_decode_buffers(params, batch_size, max_blocks, page_size)
+        sequence_lengths_d = sequence_lengths.cuda()
+        block_table_d = block_table.cuda()
+        dense_tables = torch.full(
+            (batch_size, max_blocks), -1, dtype=torch.int32, device="cuda"
+        )
+        dense_lengths = torch.full((batch_size,), -1, dtype=torch.int32, device="cuda")
+
+        current_stream = torch.cuda.current_stream()
+        metadata_stream = torch.cuda.Stream()
+        metadata_stream.wait_stream(current_stream)
+        with torch.cuda.stream(metadata_stream):
+            params.fill_decode_cuda_graph_params(
+                sequence_lengths_d, block_table_d, page_size
+            )
+            params.fill_tokenspeed_metadata(
+                dense_tables, dense_lengths, batch_size, max_blocks
+            )
+            completed = metadata_stream.record_event()
+        current_stream.wait_event(completed)
+
+        torch.testing.assert_close(
+            dense_tables.cpu(),
+            torch.tensor(
+                [
+                    [11, 0, 0, 0, 0],
+                    [21, 22, 0, 0, 0],
+                    [31, 32, 33, 34, 0],
+                ],
+                dtype=torch.int32,
+            ),
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            dense_lengths.cpu(), sequence_lengths, rtol=0, atol=0
+        )
+
+    def test_tokenspeed_compact_metadata_fusion_is_graph_replay_safe(self) -> None:
+        batch_size = 4
+        page_size = 64
+        max_blocks = 6
+        sequence_lengths = torch.ones(batch_size, dtype=torch.int32, device="cuda")
+        block_table = torch.zeros(
+            (batch_size, max_blocks), dtype=torch.int32, device="cuda"
+        )
+        dense_tables = torch.empty_like(block_table)
+        dense_lengths = torch.empty_like(sequence_lengths)
+        params = rtp_llm_ops.FlashInferMlaAttnParams()
+        self._reserve_decode_buffers(params, batch_size, max_blocks, page_size)
+        params.fill_decode_cuda_graph_params(sequence_lengths, block_table, page_size)
+        params.fill_tokenspeed_metadata(
+            dense_tables, dense_lengths, batch_size, max_blocks
+        )
+        torch.cuda.synchronize()
+        output_pointers = (dense_tables.data_ptr(), dense_lengths.data_ptr())
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            params.fill_decode_cuda_graph_params(
+                sequence_lengths, block_table, page_size
+            )
+            params.fill_tokenspeed_metadata(
+                dense_tables, dense_lengths, batch_size, max_blocks
+            )
+
+        for replay in range(4):
+            host_lengths = torch.tensor(
+                [1, 64 + replay, 128 + replay * 64, 383 - replay * 32],
+                dtype=torch.int32,
+            )
+            host_tables = (
+                torch.arange(batch_size * max_blocks, dtype=torch.int32).reshape(
+                    batch_size, max_blocks
+                )
+                + replay * 100
+                + 1
+            )
+            sequence_lengths.copy_(host_lengths)
+            block_table.copy_(host_tables)
+            graph.replay()
+            torch.cuda.synchronize()
+
+            expected_tables = torch.zeros_like(host_tables)
+            for batch, seq_len in enumerate(host_lengths.tolist()):
+                live_blocks = min((seq_len + page_size - 1) // page_size, max_blocks)
+                expected_tables[batch, :live_blocks] = host_tables[batch, :live_blocks]
+            torch.testing.assert_close(
+                dense_tables.cpu(), expected_tables, rtol=0, atol=0
+            )
+            torch.testing.assert_close(
+                dense_lengths.cpu(), host_lengths, rtol=0, atol=0
+            )
+            self.assertEqual(
+                output_pointers, (dense_tables.data_ptr(), dense_lengths.data_ptr())
+            )
+
+    def test_tokenspeed_compact_metadata_rejects_invalid_inputs(self) -> None:
+        batch_size = 2
+        max_blocks = 4
+        block_tables = torch.zeros(
+            (batch_size, max_blocks), dtype=torch.int32, device="cuda"
+        )
+        sequence_lengths = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
+        uninitialized = rtp_llm_ops.FlashInferMlaAttnParams()
+        with self.assertRaisesRegex(RuntimeError, "page_indice_d must be defined"):
+            uninitialized.fill_tokenspeed_metadata(
+                block_tables, sequence_lengths, batch_size, max_blocks
+            )
+
+        params = rtp_llm_ops.FlashInferMlaAttnParams()
+        self._reserve_decode_buffers(params, batch_size, max_blocks, 64)
+        invalid_calls = [
+            (block_tables.cpu(), sequence_lengths, batch_size, max_blocks),
+            (
+                block_tables.to(torch.int64),
+                sequence_lengths,
+                batch_size,
+                max_blocks,
+            ),
+            (block_tables.reshape(-1), sequence_lengths, batch_size, max_blocks),
+            (block_tables[:, ::2], sequence_lengths, batch_size, 2),
+            (block_tables, sequence_lengths.cpu(), batch_size, max_blocks),
+            (
+                block_tables,
+                sequence_lengths.to(torch.int64),
+                batch_size,
+                max_blocks,
+            ),
+            (
+                block_tables,
+                sequence_lengths.reshape(batch_size, 1),
+                batch_size,
+                max_blocks,
+            ),
+            (block_tables, sequence_lengths, -1, max_blocks),
+            (block_tables, sequence_lengths, batch_size, 0),
+            (block_tables, sequence_lengths, batch_size, 2**31 - 1),
+            (block_tables, sequence_lengths, batch_size + 1, max_blocks),
+            (block_tables, sequence_lengths, batch_size, max_blocks + 1),
+        ]
+        for args in invalid_calls:
+            with self.subTest(
+                block_device=args[0].device,
+                block_dtype=args[0].dtype,
+                block_shape=tuple(args[0].shape),
+                sequence_device=args[1].device,
+                sequence_dtype=args[1].dtype,
+                sequence_shape=tuple(args[1].shape),
+                batch_size=args[2],
+                padded_blocks=args[3],
+            ):
+                with self.assertRaises(RuntimeError):
+                    params.fill_tokenspeed_metadata(*args)
+
+        if torch.cuda.device_count() >= 2:
+            other_device_tables = block_tables.to("cuda:1")
+            with self.assertRaisesRegex(RuntimeError, "same CUDA device"):
+                params.fill_tokenspeed_metadata(
+                    other_device_tables,
+                    sequence_lengths,
+                    batch_size,
+                    max_blocks,
+                )
+
     def test_rejects_invalid_inputs(self) -> None:
         params = rtp_llm_ops.FlashInferMlaAttnParams()
         sequence_lengths = torch.ones(2, dtype=torch.int32, device="cuda")

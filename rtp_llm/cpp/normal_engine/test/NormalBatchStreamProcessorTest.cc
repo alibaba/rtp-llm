@@ -255,6 +255,7 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateGatherPreservesHostSequenc
     EXPECT_FALSE(model_input.sequence_lengths_host_for_log.is_cuda());
     EXPECT_EQ(std::vector<int32_t>({42}), toVec<int32_t>(model_input.combo_tokens));
     EXPECT_EQ(std::vector<int32_t>({3}), toVec<int32_t>(model_input.sequence_lengths));
+    EXPECT_EQ(std::vector<int32_t>({4}), toVec<int32_t>(model_input.sequence_lengths_plus_1));
     EXPECT_EQ(std::vector<int32_t>({3}), toVec<int32_t>(model_input.sequence_lengths_host_for_log));
 }
 
@@ -279,9 +280,11 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateGatherBatchesSequenceLengt
     std::list<GenerateStreamPtr> streams;
     std::vector<int32_t>         expected_tokens;
     std::vector<int32_t>         expected_device_seq_lens;
+    std::vector<int32_t>         expected_device_next_seq_lens;
     std::vector<int32_t>         expected_host_seq_lens;
     expected_tokens.reserve(batch_size);
     expected_device_seq_lens.reserve(batch_size);
+    expected_device_next_seq_lens.reserve(batch_size);
     expected_host_seq_lens.reserve(batch_size);
 
     for (int i = 0; i < batch_size; ++i) {
@@ -298,6 +301,7 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateGatherBatchesSequenceLengt
         // path must preserve the original contract: model input comes from
         // device state, while sequence_lengths_host_for_log uses the mirror.
         expected_device_seq_lens.push_back(999 + i);
+        expected_device_next_seq_lens.push_back(1000 + i);
         expected_host_seq_lens.push_back(1999 + i);
     }
 
@@ -309,6 +313,7 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateGatherBatchesSequenceLengt
     const auto& model_input = status.value();
     EXPECT_EQ(expected_tokens, toVec<int32_t>(model_input.combo_tokens));
     EXPECT_EQ(expected_device_seq_lens, toVec<int32_t>(model_input.sequence_lengths));
+    EXPECT_EQ(expected_device_next_seq_lens, toVec<int32_t>(model_input.sequence_lengths_plus_1));
     EXPECT_EQ(expected_host_seq_lens, toVec<int32_t>(model_input.sequence_lengths_host_for_log));
 }
 
@@ -356,6 +361,8 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateGatherReusesSharedBatchBac
     // Tensor is installed directly in GptModelInputs.
     EXPECT_EQ(tokens.unsafeGetTensorImpl(), model_input.combo_tokens.unsafeGetTensorImpl());
     EXPECT_EQ(toVec<int32_t>(tokens), toVec<int32_t>(model_input.combo_tokens));
+    EXPECT_EQ(next_seq_lens.unsafeGetTensorImpl(), model_input.sequence_lengths_plus_1.unsafeGetTensorImpl());
+    EXPECT_EQ(toVec<int32_t>(next_seq_lens), toVec<int32_t>(model_input.sequence_lengths_plus_1));
     auto expected_sequence_lengths = next_seq_lens - 1;
     EXPECT_EQ(toVec<int32_t>(expected_sequence_lengths), toVec<int32_t>(model_input.sequence_lengths));
 }
@@ -401,6 +408,7 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateGatherFallsBackForReordere
     const auto& model_input = status.value();
     EXPECT_NE(tokens.unsafeGetTensorImpl(), model_input.combo_tokens.unsafeGetTensorImpl());
     EXPECT_EQ(std::vector<int32_t>({20, 10}), toVec<int32_t>(model_input.combo_tokens));
+    EXPECT_EQ(std::vector<int32_t>({200, 100}), toVec<int32_t>(model_input.sequence_lengths_plus_1));
     EXPECT_EQ(std::vector<int32_t>({199, 99}), toVec<int32_t>(model_input.sequence_lengths));
     EXPECT_EQ(std::vector<int32_t>({299, 300}), toVec<int32_t>(model_input.sequence_lengths_host_for_log));
 }

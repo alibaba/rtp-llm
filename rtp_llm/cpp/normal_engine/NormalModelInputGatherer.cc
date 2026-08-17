@@ -504,7 +504,10 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                                                                         normal_sequence_lengths_gpu.front() :
                                                                         torch::cat(normal_sequence_lengths_gpu, 0));
         model_input.combo_tokens       = combo_tokens_gpu.to(torch::kInt32);
-        model_input.sequence_lengths   = (next_sequence_lengths_gpu - 1).to(torch::kInt32);
+        // Preserve the device state's already-computed next length so Python
+        // attention preparation does not launch another sequence_lengths + 1 kernel.
+        model_input.sequence_lengths_plus_1       = next_sequence_lengths_gpu.to(torch::kInt32);
+        model_input.sequence_lengths              = model_input.sequence_lengths_plus_1 - 1;
         model_input.sequence_lengths_host_for_log = normal_sequence_lengths_host;
     }
     return absl::OkStatus();

@@ -113,6 +113,30 @@ __global__ void prepareFlashInferDecodeParamsKernel(const int32_t* sequence_leng
     }
 }
 
+__global__ void prepareTokenSpeedMlaFromCompactKernel(const int32_t* page_indices,
+                                                      const int32_t* page_indptr,
+                                                      const int32_t* sequence_lengths,
+                                                      int32_t*       block_tables,
+                                                      int32_t*       output_sequence_lengths,
+                                                      int32_t        batch_size,
+                                                      int32_t        padded_blocks) {
+    const int32_t index = static_cast<int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+    const int32_t total = batch_size * padded_blocks;
+    if (index >= total) {
+        return;
+    }
+    const int32_t batch      = index / padded_blocks;
+    const int32_t column     = index - batch * padded_blocks;
+    const int32_t page_begin = page_indptr[batch];
+    const int32_t live_pages = page_indptr[batch + 1] - page_begin;
+    // Threads write independent table cells. Column zero also owns the only
+    // sequence-length write for its batch, so no block-wide synchronization is needed.
+    block_tables[index] = column < live_pages ? page_indices[page_begin + column] : 0;
+    if (column == 0) {
+        output_sequence_lengths[batch] = sequence_lengths[batch];
+    }
+}
+
 }  // namespace
 
 void invokeCudaGraphPrepareFill(CudaGraphPrepareFillParams params, cudaStream_t stream) {
@@ -174,6 +198,26 @@ void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
     const auto result = cudaGetLastError();
     TORCH_CHECK(
         result == cudaSuccess, "FlashInfer decode CUDA graph prepare kernel failed: ", cudaGetErrorString(result));
+}
+
+void invokePrepareTokenSpeedMlaFromCompact(const int32_t* page_indices,
+                                           const int32_t* page_indptr,
+                                           const int32_t* sequence_lengths,
+                                           int32_t*       block_tables,
+                                           int32_t*       output_sequence_lengths,
+                                           int32_t        batch_size,
+                                           int32_t        padded_blocks,
+                                           cudaStream_t   stream) {
+    TORCH_CHECK(page_indices != nullptr && page_indptr != nullptr && sequence_lengths != nullptr,
+                "TokenSpeed compact metadata input is null");
+    TORCH_CHECK(block_tables != nullptr && output_sequence_lengths != nullptr,
+                "TokenSpeed compact metadata output is null");
+    constexpr int threads = 256;
+    const int     blocks  = (batch_size * padded_blocks + threads - 1) / threads;
+    prepareTokenSpeedMlaFromCompactKernel<<<blocks, threads, 0, stream>>>(
+        page_indices, page_indptr, sequence_lengths, block_tables, output_sequence_lengths, batch_size, padded_blocks);
+    const auto result = cudaGetLastError();
+    TORCH_CHECK(result == cudaSuccess, "TokenSpeed compact metadata kernel failed: ", cudaGetErrorString(result));
 }
 
 }  // namespace rtp_llm

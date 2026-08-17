@@ -732,10 +732,12 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     auto         model_input_status = processor.gatherDecodeModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input_status.ok());
 
-    auto& model_input            = model_input_status.value();
-    model_input.sequence_lengths = torch::tensor({1, 2}, torch::kInt32);
+    auto& model_input                   = model_input_status.value();
+    model_input.sequence_lengths        = torch::tensor({1, 2}, torch::kInt32);
+    model_input.sequence_lengths_plus_1 = torch::tensor({2, 3}, torch::kInt32).to(torch::kCUDA);
 
     processor.prepareDecodeDraftModelInput(stream_groups, model_input, holder);
+    EXPECT_FALSE(model_input.sequence_lengths_plus_1.defined());
 
     auto        combo_tokens        = model_input.combo_tokens;
     vector<int> expect_combo_tokens = {3, 1};
@@ -745,6 +747,14 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     vector<int> expect_lm_output_indexes = {0, 1};
     EXPECT_TRUE(lm_output_indexes.is_cuda());
     EXPECT_EQ(expect_lm_output_indexes, toVec<int>(lm_output_indexes));
+
+    model_input.sequence_lengths_plus_1 = torch::tensor({2, 3}, torch::kInt32).to(torch::kCUDA);
+    GptModelOutputs model_output;
+    model_output.all_hidden_states = torch::zeros({2, 4}, torch::kFloat32).to(torch::kCUDA);
+    processor.updateDecodeDraftModelInput(
+        model_input, model_output, torch::tensor({1, 2}, torch::kInt32).to(torch::kCUDA), holder);
+    EXPECT_FALSE(model_input.sequence_lengths_plus_1.defined());
+    EXPECT_EQ(std::vector<int>({2, 3}), toVec<int>(model_input.sequence_lengths));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {

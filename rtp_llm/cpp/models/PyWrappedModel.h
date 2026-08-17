@@ -115,6 +115,11 @@ private:
     std::shared_ptr<KVCacheManager>          cache_manager_;  // For cache_store access
     torch::Tensor                            residual_scale_fp32_;
     torch::Tensor                            residual_scale_;
+    // Stable decode metadata views. Creating zeros/arange per step launches three
+    // small Torch CUDA kernels outside the captured graph.
+    torch::Tensor                            decode_zero_cu_seqlens_;
+    torch::Tensor                            decode_zero_cu_kv_seqlens_;
+    torch::Tensor                            decode_cu_seqlens_;
     TensorHolder                             buffer_holder_;
 
     GraphBase*                         graph_runner_{nullptr};

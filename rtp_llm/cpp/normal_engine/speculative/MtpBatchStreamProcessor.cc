@@ -476,6 +476,7 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
         model_input.combo_tokens      = emptyInt32OnCuda({0});
         model_input.input_lengths     = emptyInt32OnCuda({0});
         model_input.sequence_lengths  = emptyInt32OnCuda({0});
+        model_input.sequence_lengths_plus_1 = torch::Tensor();
         model_input.prefix_lengths    = emptyInt32OnCuda({0});
         model_input.lm_output_indexes = emptyInt32OnCuda({0});
         return;
@@ -499,6 +500,9 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
             } else if (model_input.sequence_lengths.defined() && !model_input.sequence_lengths.is_cuda()) {
                 model_input.sequence_lengths = toCudaInt32(model_input.sequence_lengths, host_holder);
             }
+            // The multi-step draft path mutates sequence_lengths between
+            // forwards. Do not reuse the normal-decode next-length snapshot.
+            model_input.sequence_lengths_plus_1 = torch::Tensor();
             model_input.input_lengths = toCudaInt32(model_input.input_lengths, host_holder);
             return;
         }
@@ -512,6 +516,7 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
         model_input.lm_output_indexes = makeCudaInt32Range(model_input.combo_tokens.numel());
         model_input.input_lengths     = toCudaInt32(model_input.input_lengths, host_holder);
         model_input.sequence_lengths  = toCudaInt32(model_input.sequence_lengths, host_holder);
+        model_input.sequence_lengths_plus_1 = torch::Tensor();
         model_input.prefix_lengths    = toCudaInt32(model_input.prefix_lengths, host_holder);
         return;
     }
@@ -528,6 +533,7 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
     model_input.combo_tokens      = toCudaInt32(combo_tokens, host_holder);
     model_input.input_lengths     = toCudaInt32(model_input.input_lengths, host_holder);
     model_input.sequence_lengths  = toCudaInt32(model_input.sequence_lengths, host_holder);
+    model_input.sequence_lengths_plus_1 = torch::Tensor();
     model_input.prefix_lengths    = toCudaInt32(model_input.prefix_lengths, host_holder);
     model_input.lm_output_indexes = makeCudaInt32Range(static_cast<int64_t>(batch_size));
 }
@@ -638,6 +644,9 @@ void MtpBatchStreamProcessor::updateDecodeDraftModelInput(GptModelInputs&       
         }
         model_input.sequence_lengths = toCudaInt32(sequence_lengths_cpu, host_holder);
     }
+    // sequence_lengths_plus_1 is a snapshot created by the normal decode
+    // gatherer. Recompute it from the updated draft length on the next forward.
+    model_input.sequence_lengths_plus_1 = torch::Tensor();
 }
 
 void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(GptModelInputs&        model_input,

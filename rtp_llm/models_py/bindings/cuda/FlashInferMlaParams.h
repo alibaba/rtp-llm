@@ -72,6 +72,11 @@ public:
                                    torch::Tensor kv_cache_block_id_device,
                                    int           seq_size_per_block);
 
+    void fillTokenSpeedMetadata(torch::Tensor block_tables,
+                                torch::Tensor sequence_lengths,
+                                int           batch_size,
+                                int           padded_blocks);
+
     // Device-only fast path for MHA paged attention. Fills paged-KV metadata
     // plus batch_indice_d/positions_d, reusing fillParams buffers so existing
     // FlashInfer aliases stay valid. MLA-only/reuse fields are not filled.

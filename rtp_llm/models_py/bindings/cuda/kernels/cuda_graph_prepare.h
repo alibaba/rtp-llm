@@ -34,4 +34,15 @@ void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
                                          int32_t        seq_size_per_block,
                                          cudaStream_t   stream);
 
+// Materialize TokenSpeed's dense decode metadata with one CUDA launch from
+// FlashInfer's compact page_indices/page_indptr representation.
+void invokePrepareTokenSpeedMlaFromCompact(const int32_t* page_indices,
+                                           const int32_t* page_indptr,
+                                           const int32_t* sequence_lengths,
+                                           int32_t*       block_tables,
+                                           int32_t*       output_sequence_lengths,
+                                           int32_t        batch_size,
+                                           int32_t        padded_blocks,
+                                           cudaStream_t   stream);
+
 }  // namespace rtp_llm
