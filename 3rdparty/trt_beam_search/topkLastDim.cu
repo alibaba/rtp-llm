@@ -1518,23 +1518,37 @@ void standalone_stable_radix_11bits(void* buf, size_t& buf_size, T const* in, in
     // See topkLastDim.h for the force_path legend.
     bool auto_one_block = (len <= block_dim * items_per_thread);
     unsigned grid_dim = 0;
-    if (!auto_one_block && force_path != 2)
+    // grid_dim is needed whenever multi-block can run; computing it only under
+    // !auto_one_block would leave force_path=1 with grid_dim 0 for small len.
+    if (force_path != 2)
     {
         int sm_cnt = tensorrt_llm::common::getMultiProcessorCount();
         grid_dim = air_topk_stable::calc_grid_dim<T, idxT, topk_bits, block_dim>(batch_size, len, sm_cnt);
 
+        if (!auto_one_block)
+        {
 #if USING_ROCM
-        // On ROCm, the one-block kernel with vectorized reads is faster than the
-        // multi-block path for small grid_dim values, because the multi-block path
-        // has inter-block sync overhead and multiple kernel launches (3 passes +
-        // last_filter + sort). Force one-block when grid_dim is small.
-        auto_one_block = (grid_dim <= 4);
+            // On ROCm, the one-block kernel with vectorized reads is faster than the
+            // multi-block path for small grid_dim values, because the multi-block path
+            // has inter-block sync overhead and multiple kernel launches (3 passes +
+            // last_filter + sort). Force one-block when grid_dim is small.
+            // grid_dim<=16 additionally requires batch_size>=8: measured on gfx942,
+            // one-block wins 2.2-5.8x for grid_dim 9..16 with batch_size>=8, while
+            // batch=1 shapes prefer multi-block. batch 2-7 stays on the original
+            // multi-block route (unmeasured, avoid regressions); grid_dim 17..36
+            // also stays multi-block (smaller, len-dependent wins of 1.2-2.4x).
+            auto_one_block = (grid_dim <= 4) || (grid_dim <= 16 && batch_size >= 8);
 #else
-        auto_one_block = (grid_dim == 1);
+            auto_one_block = (grid_dim == 1);
 #endif
+        }
     }
 
-    bool const one_block = (force_path == 2) || (force_path == 0 && auto_one_block);
+    // The multi-block path is only valid with grid_dim >= 2: the auto route has never
+    // selected it below that (grid_dim==1 always went one-block), and forcing it there
+    // yields invalid output, so force_path=1 clamps back to one-block.
+    bool const one_block
+        = (force_path == 2) || (force_path == 0 && auto_one_block) || (force_path == 1 && grid_dim < 2);
     if (one_block)
     {
         standalone_stable_radix_topk_one_block_<T, idxT, topk_bits, block_dim>(buf, buf_size, in,
