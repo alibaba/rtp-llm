@@ -165,6 +165,23 @@ public class PriorityAdmissionScheduler {
         return fresh;
     }
 
+    /**
+     * Full decode views for the eviction / failure-classification paths.
+     * With the snapshot cache on, the cached snapshot is shared across
+     * requests and may predate the newest reservations — planning victims
+     * from it would make a just-reserved lower-priority request invisible
+     * (spurious infeasible + terminal misclassification), so these paths
+     * re-capture from the live endpoints. With the cache off the
+     * attempt-start snapshot is already this-request fresh; keep it so the
+     * legacy OCC window (plan capture before route) stays bit-for-bit.
+     */
+    private Map<String, DecodeEndpointSnapshot> liveDecodeViews(ClusterSnapshot snapshot,
+                                                                FlexlbConfig config) {
+        return config.getFlexlbClusterSnapshotCacheTtlMs() > 0
+                ? ClusterSnapshot.captureDecodes(endpointRegistry, config)
+                : snapshot.decodes();
+    }
+
     @Autowired
     public PriorityAdmissionScheduler(ConfigService configService,
                                       Router router,
@@ -340,7 +357,7 @@ public class PriorityAdmissionScheduler {
                             ctx.getRequest().getSeqLen()
                                     + config.effectiveMaxNewTokensForReservation(ctx.getRequest().getMaxNewTokens()));
                     AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
-                            envelope, new ArrayList<>(snapshot.decodes().values()));
+                            envelope, new ArrayList<>(liveDecodeViews(snapshot, config).values()));
                     completeAdmissionError(future, failure.errorType(),
                             failure.reason(), failure.message());
                     return;
@@ -680,7 +697,12 @@ public class PriorityAdmissionScheduler {
                 ctx.getStartTime(), ctx.getRequestSloMs(), ctx.getDeadlineMs(),
                 seqLen, seqLen + effectiveMaxNewTokens);
 
-        List<DecodeEndpointSnapshot> decodes = new ArrayList<>(snapshot.decodes().values());
+        // Single decode-view build shared by the planner list and the target
+        // lookup below (in summary mode a decodes() call lazily rebuilds the
+        // full snapshots, so two calls could disagree); liveDecodeViews
+        // re-captures when the snapshot is TTL-cached — see its doc.
+        Map<String, DecodeEndpointSnapshot> decodeViews = liveDecodeViews(snapshot, config);
+        List<DecodeEndpointSnapshot> decodes = new ArrayList<>(decodeViews.values());
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal =
                 EvictionPlanner.planDecode(planEnvelope, decodes, config, cancelChannel, failures);
@@ -739,7 +761,7 @@ public class PriorityAdmissionScheduler {
         }
         priorityReporter.reportEvictionPlan(ctx.getPriority(), proposal.evictionCase(), "feasible");
 
-        DecodeEndpointSnapshot target = snapshot.decodes().get(proposal.endpointId());
+        DecodeEndpointSnapshot target = decodeViews.get(proposal.endpointId());
         DecodeEndpoint decodeEp = target.endpoint();
         long expectedKvTokens = target.realKvTotal() > 0
                 ? Math.min(seqLen + effectiveMaxNewTokens, target.realKvTotal())

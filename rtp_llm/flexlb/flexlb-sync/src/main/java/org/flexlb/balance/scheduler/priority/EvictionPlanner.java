@@ -229,6 +229,15 @@ public final class EvictionPlanner {
     }
 
     /**
+     * Lightweight deficit pre-check on the O(1) aggregate summary — lets a
+     * caller skip the full-snapshot upgrade entirely when the endpoint still
+     * has spare slot and KV capacity for the incoming request.
+     */
+    public static boolean hasDeficit(PriorityRequestEnvelope envelope, DecodeEndpointSummary summary) {
+        return summary.slotDeficit() > 0 || summary.kvDeficit(envelope.hardKvTokens()) > 0;
+    }
+
+    /**
      * 11.1: slots to free so engineLoad + 1 fits the limit (0 = unlimited).
      * P1-3: measured against the engine-facing load — the same measure the
      * N2 concurrency gate uses — so queued-phase reservations neither create
