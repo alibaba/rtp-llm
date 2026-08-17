@@ -5,6 +5,7 @@ import sys
 import time
 import traceback
 
+import requests
 import torch
 
 from rtp_llm.utils.time_util import timer_wrapper
@@ -43,7 +44,7 @@ def check_server_health(server_port, path="/health"):
             return True
         else:
             return False
-    except BaseException as e:
+    except requests.RequestException:
         return False
 
 

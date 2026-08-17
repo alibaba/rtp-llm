@@ -1,7 +1,9 @@
 from dataclasses import dataclass
+from functools import cache
 from typing import Optional
 
 import torch
+
 from librtp_compute_ops import LayerKVCache, PyAttentionInputs, get_scalar_type
 from rtp_llm.ops.attention_input_utils import select_prefill_position_ids
 from libth_transformer_config import (
@@ -9,11 +11,14 @@ from libth_transformer_config import (
     check_rope_cache,
     get_rope_cache_once,
 )
-from rtp_kernel.fused_rope_kvcache import (
-    convert_offset_to_block_array,
-    decode_fused_rope_kvcache,
-    prefill_fused_rope_kvcache,
-)
+
+
+@cache
+def _get_fused_rope_kvcache():
+    # Lazy: keeps import free of JIT builds; warm-up still hits this pre-readiness.
+    from rtp_kernel import fused_rope_kvcache
+
+    return fused_rope_kvcache
 
 
 @dataclass
@@ -43,7 +48,7 @@ class FusedRopeKVCachePrefillOpBase:
             attn_inputs.kv_cache_kernel_block_id_device is not None
             and attn_inputs.kv_cache_kernel_block_id_device.numel() > 0
         ):
-            kv_cache_offset = convert_offset_to_block_array(
+            kv_cache_offset = _get_fused_rope_kvcache().convert_offset_to_block_array(
                 attn_inputs.kv_cache_kernel_block_id_device
             )
         else:
@@ -88,7 +93,7 @@ class FusedRopeKVCachePrefillOpBase:
         rope_config = self.attn_configs.rope_config
         rope_cache = get_rope_cache_once(rope_config, self.attn_configs.max_seq_len)
 
-        return prefill_fused_rope_kvcache(
+        return _get_fused_rope_kvcache().prefill_fused_rope_kvcache(
             qkv,
             params.cu_seqlens,
             params.cu_seqlens.size(0) - 1,
@@ -206,7 +211,7 @@ class FusedRopeKVCacheDecodeOp:
         assert params.sequence_lengths.is_cuda or params.sequence_lengths.is_pinned(), (
             "sequence_lengths must be CUDA or pinned host memory"
         )
-        return decode_fused_rope_kvcache(
+        return _get_fused_rope_kvcache().decode_fused_rope_kvcache(
             qkv,
             params.position_ids,
             params.sequence_lengths,
@@ -245,7 +250,7 @@ class FusedRopeKVCacheDecodeOp:
             attn_inputs.kv_cache_kernel_block_id_device is not None
             and attn_inputs.kv_cache_kernel_block_id_device.numel() > 0
         )
-        kv_cache_offset = convert_offset_to_block_array(
+        kv_cache_offset = _get_fused_rope_kvcache().convert_offset_to_block_array(
             attn_inputs.kv_cache_kernel_block_id_device
         )
         kv_cache_offset_h = None  # not used
