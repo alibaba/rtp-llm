@@ -229,6 +229,63 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
             self._test_single(bs)
             print(f"success for batch size: {bs}")
 
+    def test_capture_bucket_beyond_concurrency_limit(self):
+        """max_bs_ comes from CONCURRENCY_LIMIT, which bounds the requests a role admits but
+        not the decode streams handed to it by its PD peer, so a batch above max_bs_ and
+        within the largest captured bucket is reachable. The graph buffers must be sized for
+        the bucket: replaying into buffers that hold only max_bs_ rows makes the output
+        slice() clamp silently, and the caller then reshapes a short tensor by the real batch.
+        """
+        capture_batch_sizes = [1, 2, 4, 8]
+        concurrency_limit = 2
+        batch_size = 8
+
+        build_result = self.model_builder.build_model(init_kv_cache=True)
+        op = CudaGraphRunner()
+        op.init_decode(
+            build_result.model,
+            self.hidden_size,
+            self.max_seq_len,
+            self.tokens_per_block,
+            self.kernel_tokens_per_block,
+            capture_batch_sizes,
+            max_context_batch_size=concurrency_limit,
+        )
+
+        inputs = self.build_inputs(
+            batch_size, self.max_seq_len, self.kernel_tokens_per_block
+        )
+        assert op.canRun(
+            inputs
+        ), "a batch within the largest captured bucket must be graph-runnable"
+
+        outputs = op.forward(inputs)
+        torch.cuda.synchronize()
+        assert outputs.hidden_states.shape[0] >= batch_size, (
+            f"graph buffers sized for max_bs {concurrency_limit} instead of the largest "
+            f"bucket {capture_batch_sizes[-1]}: got {outputs.hidden_states.shape[0]} rows "
+            f"for batch {batch_size}"
+        )
+
+        inputs_eager = self.build_inputs(
+            batch_size, self.max_seq_len, self.kernel_tokens_per_block
+        )
+        expected = self.normal_model.forward(inputs_eager)
+        torch.cuda.synchronize()
+        expected.hidden_states = expected.hidden_states.type(
+            outputs.hidden_states.dtype
+        )
+        close_mask = torch.isclose(
+            outputs.hidden_states[:batch_size],
+            expected.hidden_states,
+            rtol=1e-2,
+            atol=1e-2,
+        )
+        pass_ratio = close_mask.float().mean().item()
+        assert (
+            pass_ratio >= 0.999
+        ), f"Only {pass_ratio*100:.2f}% elements pass, expected >= 99.9%"
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=print)

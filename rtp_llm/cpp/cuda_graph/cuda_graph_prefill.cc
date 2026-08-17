@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include "rtp_llm/cpp/cuda_graph/mtp_draft_prefill_buckets.h"
 #include <optional>
 
 namespace rtp_llm {
@@ -100,27 +101,11 @@ void CudaGraphRunner::capturePrefill() {
 std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
     // MTP draft prefill: capture at multiples of num_tokens_per_bs_
     if (isMtpDraftPrefillCudaGraph()) {
-        // One graph per batch size from 1 to max_bs_ makes the capture count -- and the
-        // memory it holds -- grow linearly with CONCURRENCY_LIMIT, which is what runs the
-        // decode role out of device memory once the limit is raised. Replay does not need
-        // an exact match: tryGetRealGraphPrefillSeqLen() takes the first captured length
-        // >= the request via lower_bound, and prepareInputs() already zero-fills the
-        // padded batch slots, so bucketing costs padded compute on a replay and nothing
-        // else. Bucket the same way decode does, keeping max_bs_ itself so the largest
-        // batch still has an exact graph.
-        std::vector<int> batch_sizes;
-        for (int bs = 1; bs < static_cast<int>(max_bs_); bs *= 2) {
-            batch_sizes.push_back(bs);
-        }
-        batch_sizes.push_back(static_cast<int>(max_bs_));
-
-        std::vector<int> result;
-        result.reserve(batch_sizes.size());
-        for (int bs : batch_sizes) {
-            result.push_back(bs * num_tokens_per_bs_);
-        }
+        // Bucketing rationale and degenerate-config handling live with the helper, which is
+        // unit tested in tests/mtp_draft_prefill_buckets_test.cc.
+        std::vector<int> result = mtpDraftPrefillCaptureSeqLens(max_bs_, num_tokens_per_bs_);
         RTP_LLM_LOG_INFO(
-            "Draft model prefill: capture seq_lens at %d intervals, %zu total (max_bs=%d, num_tokens_per_bs=%d)",
+            "Draft model prefill: capture seq_lens at %d intervals, %zu total (max_bs=%zu, num_tokens_per_bs=%d)",
             num_tokens_per_bs_,
             result.size(),
             max_bs_,

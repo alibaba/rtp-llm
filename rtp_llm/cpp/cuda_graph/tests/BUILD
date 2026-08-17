@@ -13,6 +13,16 @@ cc_test(
     ] + torch_deps(),
 )
 
+cc_test(
+    name = "mtp_draft_prefill_buckets_test",
+    srcs = ["mtp_draft_prefill_buckets_test.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cuda_graph:mtp_draft_prefill_buckets",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 cc_library(
     name = "test_cuda_graph_runner_libs",
     srcs = [

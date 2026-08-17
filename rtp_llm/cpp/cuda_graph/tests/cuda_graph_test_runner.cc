@@ -47,7 +47,8 @@ public:
                      std::vector<int>         decode_capture_batch_sizes,
                      std::vector<std::string> group_tags,
                      bool                     is_target_verify,
-                     int64_t                  num_tokens_per_bs) {
+                     int64_t                  num_tokens_per_bs,
+                     int64_t                  max_context_batch_size) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph_debug_mode = false;
@@ -58,7 +59,9 @@ public:
         params.num_tokens_per_bs            = static_cast<int>(num_tokens_per_bs);
         params.hidden_size                  = static_cast<size_t>(hidden_size);
         params.model_data_type              = c10::ScalarType::BFloat16;
-        params.max_context_batch_size       = 128;
+        // Mirrors CONCURRENCY_LIMIT. Exposed so a test can configure capture buckets that
+        // exceed it, which is the only way to reach the buffer-sizing branch in initCapture().
+        params.max_context_batch_size       = static_cast<size_t>(max_context_batch_size);
         params.decode_capture_batch_sizes   = std::move(decode_capture_batch_sizes);
         params.kv_cache_group_tags          = std::move(group_tags);
         params.is_target_verify             = is_target_verify;
@@ -126,7 +129,8 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("decode_capture_batch_sizes"),
              py::arg("group_tags")        = std::vector<std::string>{},
              py::arg("is_target_verify")  = false,
-             py::arg("num_tokens_per_bs") = 1)
+             py::arg("num_tokens_per_bs") = 1,
+             py::arg("max_context_batch_size") = 128)
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)
         .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);

@@ -1004,14 +1004,18 @@ void CudaGraphRunner::initCapture() {
             // buffers for the largest bucket: replaying into buffers that only hold max_bs_ rows
             // makes the output slice() clamp silently, and the caller then reshapes a short tensor
             // by the real batch size.
-            if (!capture_range_.empty() && capture_range_.back() > max_bs_) {
+            // Compare as int before widening: capture_range_ holds ints from operator
+            // config, and an implicit conversion of a negative bucket to size_t would look
+            // like an enormous limit and size the buffers for it.
+            const int largest_bucket = capture_range_.empty() ? 0 : capture_range_.back();
+            if (largest_bucket > 0 && static_cast<size_t>(largest_bucket) > max_bs_) {
                 RTP_LLM_LOG_INFO(
-                    "decode capture buckets reach %d beyond max_bs_ %d; sizing graph buffers for %d",
-                    capture_range_.back(),
+                    "decode capture buckets reach %d beyond max_bs_ %zu; sizing graph buffers for %d",
+                    largest_bucket,
                     max_bs_,
-                    capture_range_.back());
-                max_bs_        = capture_range_.back();
-                max_num_token_ = max_bs_ * num_tokens_per_bs_;
+                    largest_bucket);
+                max_bs_        = static_cast<size_t>(largest_bucket);
+                max_num_token_ = static_cast<int>(max_bs_) * num_tokens_per_bs_;
             }
         }
 
