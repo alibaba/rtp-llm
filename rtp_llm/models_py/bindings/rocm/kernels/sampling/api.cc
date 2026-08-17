@@ -43,6 +43,20 @@ void top_p_sampling_from_probs(torch::Tensor                probs,
                                torch::Tensor                philox_offset,
                                uintptr_t                    stream) {
     CHECK_INPUT(probs);
+    CHECK_INPUT(output);
+    CHECK_INPUT(philox_seed);
+    CHECK_INPUT(philox_offset);
+    CHECK_DEVICE(output, probs);
+    CHECK_DEVICE(philox_seed, probs);
+    CHECK_DEVICE(philox_offset, probs);
+    if (maybe_indices.has_value()) {
+        CHECK_INPUT(maybe_indices.value());
+        CHECK_DEVICE(maybe_indices.value(), probs);
+    }
+    if (maybe_top_p_arr.has_value()) {
+        CHECK_INPUT(maybe_top_p_arr.value());
+        CHECK_DEVICE(maybe_top_p_arr.value(), probs);
+    }
     CHECK_DIM(2, probs);  // probs: (batch_size, vocab_size)
     unsigned int batch_size    = output.sizes()[0];
     unsigned int vocab_size    = probs.sizes()[1];
@@ -76,7 +90,19 @@ void top_k_sampling_from_probs(torch::Tensor                probs,
                                uintptr_t                    stream) {
     CHECK_INPUT(probs);
     CHECK_INPUT(output);
+    CHECK_INPUT(philox_seed);
+    CHECK_INPUT(philox_offset);
     CHECK_DEVICE(output, probs);
+    CHECK_DEVICE(philox_seed, probs);
+    CHECK_DEVICE(philox_offset, probs);
+    if (maybe_indices.has_value()) {
+        CHECK_INPUT(maybe_indices.value());
+        CHECK_DEVICE(maybe_indices.value(), probs);
+    }
+    if (maybe_top_k_arr.has_value()) {
+        CHECK_INPUT(maybe_top_k_arr.value());
+        CHECK_DEVICE(maybe_top_k_arr.value(), probs);
+    }
     CHECK_DIM(2, probs);   // probs: (batch_size, vocab_size)
     CHECK_DIM(1, output);  // output: (batch_size)
     unsigned int batch_size    = output.sizes()[0];
@@ -88,7 +114,7 @@ void top_k_sampling_from_probs(torch::Tensor                probs,
         static_cast<float*>(probs.data_ptr()),
         static_cast<int*>(output.data_ptr()),
         maybe_indices.has_value() ? static_cast<int*>(maybe_indices->data_ptr()) : nullptr,
-        has_top_k_arr ? static_cast<float*>(maybe_top_k_arr->data_ptr()) : nullptr,
+        has_top_k_arr ? static_cast<int*>(maybe_top_k_arr->data_ptr()) : nullptr,
         batch_size,
         top_k_val,
         vocab_size,
@@ -113,7 +139,23 @@ void top_k_top_p_sampling_from_probs(torch::Tensor                probs,
                                      uintptr_t                    stream) {
     CHECK_INPUT(probs);
     CHECK_INPUT(output);
+    CHECK_INPUT(philox_seed);
+    CHECK_INPUT(philox_offset);
     CHECK_DEVICE(output, probs);
+    CHECK_DEVICE(philox_seed, probs);
+    CHECK_DEVICE(philox_offset, probs);
+    if (maybe_indices.has_value()) {
+        CHECK_INPUT(maybe_indices.value());
+        CHECK_DEVICE(maybe_indices.value(), probs);
+    }
+    if (maybe_top_k_arr.has_value()) {
+        CHECK_INPUT(maybe_top_k_arr.value());
+        CHECK_DEVICE(maybe_top_k_arr.value(), probs);
+    }
+    if (maybe_top_p_arr.has_value()) {
+        CHECK_INPUT(maybe_top_p_arr.value());
+        CHECK_DEVICE(maybe_top_p_arr.value(), probs);
+    }
     CHECK_DIM(2, probs);   // probs: (batch_size, vocab_size)
     CHECK_DIM(1, output);  // output: (batch_size)
     unsigned int batch_size    = output.sizes()[0];
@@ -146,6 +188,12 @@ void top_p_renorm_probs(torch::Tensor                probs,
                         double                       top_p_val,
                         uintptr_t                    stream) {
     CHECK_INPUT(probs);
+    CHECK_INPUT(renorm_probs);
+    CHECK_DEVICE(renorm_probs, probs);
+    if (maybe_top_p_arr.has_value()) {
+        CHECK_INPUT(maybe_top_p_arr.value());
+        CHECK_DEVICE(maybe_top_p_arr.value(), probs);
+    }
     CHECK_DIM(2, probs);  // probs: (batch_size, vocab_size)
     unsigned int batch_size    = probs.sizes()[0];
     unsigned int vocab_size    = probs.sizes()[1];
@@ -171,6 +219,12 @@ void top_k_renorm_probs(torch::Tensor                probs,
                         int64_t                      top_k_val,
                         uintptr_t                    stream) {
     CHECK_INPUT(probs);
+    CHECK_INPUT(renorm_probs);
+    CHECK_DEVICE(renorm_probs, probs);
+    if (maybe_top_k_arr.has_value()) {
+        CHECK_INPUT(maybe_top_k_arr.value());
+        CHECK_DEVICE(maybe_top_k_arr.value(), probs);
+    }
     CHECK_DIM(2, probs);  // probs: (batch_size, vocab_size)
     unsigned int batch_size    = probs.sizes()[0];
     unsigned int vocab_size    = probs.sizes()[1];
