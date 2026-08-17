@@ -933,6 +933,52 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkRuntimeGammaThreePrefillInputShape
     EXPECT_EQ(model_input.dspark_call_phase, DSparkCallPhase::PROPOSE);
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testDSparkRoundHeadUsesPerStreamDeviceState) {
+    constexpr int32_t gamma = 3;
+
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    SpeculativeExecutionConfig  sp_config;
+    model_config.max_seq_len          = 2048;
+    model_config.vocab_size           = 256;
+    model_config.num_layers           = 1;
+    cache_config.group_types          = {CacheGroupType::FULL};
+    sp_config.type                    = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle       = gamma;
+    sp_config.sp_dspark_mask_token_id = 255;
+
+    ResourceContext resource_context;
+
+    auto steady_stream = createContextStream(model_config, runtime_config, resource_context, {10, 11}, 1);
+    auto fresh_stream  = createContextStream(model_config, runtime_config, resource_context, {20, 21, 22}, 2);
+    steady_stream->setIsContextStream(false);
+    fresh_stream->setIsContextStream(false);
+
+    // The steady stream's host token/length deliberately trail the state
+    // published before its previous bookkeeping worker. The fresh stream has
+    // no previous round and therefore legitimately falls back to host state.
+    GenerateStream::MtpAsyncDeviceState steady_state;
+    steady_state.accept_len_gpu    = torch::tensor({2}, torch::kInt32).to(torch::kCUDA);
+    steady_state.accept_tokens_gpu = torch::tensor({{101, 102, 0, 0}}, torch::kInt32).to(torch::kCUDA);
+    steady_state.next_seq_len_gpu  = torch::tensor({10}, torch::kInt32).to(torch::kCUDA);
+    steady_stream->setMtpAsyncDeviceState(std::move(steady_state));
+
+    StreamGroups   stream_groups({steady_stream, fresh_stream});
+    GptModelInputs model_input;
+    model_input.sequence_lengths = torch::tensor({1, 2}, torch::kInt32);
+
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    TensorHolder host_holder;
+    auto         round_head = processor.buildDSparkRoundHead(stream_groups, model_input, host_holder);
+
+    EXPECT_EQ((std::vector<int32_t>{102, 22}), toVec<int32_t>(round_head.anchors));
+    EXPECT_EQ((std::vector<int32_t>{9, 2}), toVec<int32_t>(round_head.committed_ends));
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testDSparkDecodeCommitPreservesDenseVerifyGeometry) {
     constexpr int32_t gamma = 3;
 

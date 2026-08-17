@@ -58,10 +58,6 @@ MtpExecutor::draftPrefillGraphPolicy(bool enable_cuda_graph, bool is_dspark, Rol
     return {/*create_propose_graph=*/true, /*create_commit_graph=*/true};
 }
 
-bool MtpExecutor::shouldSyncBookkeepingBeforePrepare(bool stream_async, bool drop_broad_sync, bool is_dspark) {
-    return stream_async && (!drop_broad_sync || is_dspark);
-}
-
 namespace {
 
 bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
@@ -1225,12 +1221,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // guards all_probs cloning. They stay null when stream-async is off.
     std::shared_ptr<torch::Event> rejection_event;
     std::shared_ptr<torch::Event> draft_event;
-    // process() waits before prepareStreams for DSpARK because round-head
-    // proposal may use the current host token/length as its fallback anchor.
-    // Remember that policy so the target sampler does not repeat the same wait.
-    bool prev_bookkeeping_synced_for_spec_logits = is_dspark_ && useStreamAsync() && useDropBroadSync();
-    bool spec_logits_async_launched              = false;
-    bool spec_logits_processor_present           = false;
+    bool                          prev_bookkeeping_synced_for_spec_logits = false;
+    bool                          spec_logits_async_launched              = false;
+    bool                          spec_logits_processor_present           = false;
 
     prepareGrpcMtpDeviceState(streams, buffer_holder_);
 
@@ -1348,7 +1341,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     auto launch_spec_logits_verify_async = [&](torch::Tensor                 draft_tokens,
                                                std::shared_ptr<torch::Event> tokens_ready_event) {
-        if (useStreamAsync() && useDropBroadSync() && !prev_bookkeeping_synced_for_spec_logits) {
+        if (useStreamAsync() && useDropBroadSync()) {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC(
                 "executor.mtp.decode_step(wait_prev_bookkeeping_pre_spec_logits,stream_count=%zu)", streams.size());
             spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
@@ -1428,7 +1421,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     if (spec_logits_processor_present && !spec_logits_async_launched) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_logits_verify_inline)");
-        if (useStreamAsync() && useDropBroadSync() && !prev_bookkeeping_synced_for_spec_logits) {
+        if (useStreamAsync() && useDropBroadSync()) {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC(
                 "executor.mtp.decode_step(wait_prev_bookkeeping_pre_spec_logits,stream_count=%zu)", streams.size());
             spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
@@ -1474,7 +1467,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         } else {
             // gatherSpecSamplerInput reads host stream state updated by the previous
             // bookkeeping worker. DROP_BROAD_SYNC therefore needs this narrow sync
-            // unless the broad sync at decodeStep start already waited.
+            // unless an earlier spec-logits narrow sync already waited.
             if (useStreamAsync() && useDropBroadSync() && !prev_bookkeeping_synced_for_spec_logits) {
                 RTP_LLM_PROFILE_SCOPE_DYNAMIC(
                     "executor.mtp.decode_step(wait_prev_bookkeeping_pre_sampler,stream_count=%zu)", streams.size());
@@ -2093,13 +2086,11 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
     std::list<GenerateStreamPtr> prefill_streams;
     std::list<GenerateStreamPtr> decode_streams;
 
-    // The previous decode round may still be mutating GenerateStream host
-    // state in the bookkeeping worker. Keep the default stream-async policy
-    // bounded to one outstanding round before prepareStreams reads that state.
-    // DROP_BROAD_SYNC uses narrower device-state syncs for ordinary MTP.
-    // DSpARK round-head proposal can fall back to the newest host token/length,
-    // so it must wait here before prepareStreams and StreamGroups read that state.
-    if (shouldSyncBookkeepingBeforePrepare(useStreamAsync(), useDropBroadSync(), is_dspark_)) {
+    // By default, wait before prepareStreams reads host state from the previous
+    // bookkeeping round. DROP_BROAD_SYNC lets draft/verify consume the state
+    // already published on GPU and waits only at later host consumers such as
+    // spec-logits processing and target sampling.
+    if (useStreamAsync() && !useDropBroadSync()) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.wait_prev_bookkeeping(stream_count=%zu)", streams.size());
         spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
     }

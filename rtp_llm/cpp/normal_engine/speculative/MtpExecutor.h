@@ -88,8 +88,6 @@ protected:
 
     static bool dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type);
     static DraftPrefillGraphPolicy draftPrefillGraphPolicy(bool enable_cuda_graph, bool is_dspark, RoleType role_type);
-    static bool shouldSyncBookkeepingBeforePrepare(bool stream_async, bool drop_broad_sync, bool is_dspark);
-
     struct AcceptLenMetricsSnapshot {
         int64_t total_accept_len        = 0;
         int64_t total_stream_num        = 0;

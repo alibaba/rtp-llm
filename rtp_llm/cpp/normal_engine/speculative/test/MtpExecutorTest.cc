@@ -60,17 +60,6 @@ TEST(MtpExecutorPolicyTest, DSparkSeparatesPrefillCPFromDecodeGraphs) {
     EXPECT_FALSE(MtpExecutor::dsparkPrefillCPRoleIsValid(decode_cp_config, RoleType::PDFUSION));
 }
 
-TEST(MtpExecutorPolicyTest, DSparkSynchronizesHostHistoryBeforePrepareWithDropBroadSync) {
-    EXPECT_FALSE(MtpExecutor::shouldSyncBookkeepingBeforePrepare(
-        /*stream_async=*/false, /*drop_broad_sync=*/true, /*is_dspark=*/true));
-    EXPECT_FALSE(MtpExecutor::shouldSyncBookkeepingBeforePrepare(
-        /*stream_async=*/true, /*drop_broad_sync=*/true, /*is_dspark=*/false));
-    EXPECT_TRUE(MtpExecutor::shouldSyncBookkeepingBeforePrepare(
-        /*stream_async=*/true, /*drop_broad_sync=*/false, /*is_dspark=*/false));
-    EXPECT_TRUE(MtpExecutor::shouldSyncBookkeepingBeforePrepare(
-        /*stream_async=*/true, /*drop_broad_sync=*/true, /*is_dspark=*/true));
-}
-
 struct MtpExecutorTestConfig {
     size_t max_seq_len         = 2048;
     size_t vocab_size          = 4;
