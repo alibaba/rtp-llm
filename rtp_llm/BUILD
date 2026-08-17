@@ -76,22 +76,22 @@ arch_with_version_dep = select({
     "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
 })
 
-# PPU, ROCm, and CUDA ARM pip repositories do not consistently expose Bazel
-# packages for these optional dependencies. Those platforms use the manager's
-# polling fallback when watchdog is unavailable and gzip snapshots when
-# zstandard is unavailable. PPU reuses the CUDA 12 zstandard package.
+# Not every platform pip repository exposes Bazel packages for these optional
+# dependencies. Missing platforms use the manager's polling fallback when
+# watchdog is unavailable and gzip snapshots when zstandard is unavailable.
+# PPU and pre-12.9 CUDA reuse the CUDA 12 zstandard package.
 py_library(
     name = "watchdog",
     deps = select({
         "@//:using_ppu": [],
-        "@//:cuda_pre_12_9": ["@pip_gpu_cuda12_torch//watchdog"],
-        "@//:using_cuda13_x86": ["@pip_gpu_cuda13_torch//watchdog"],
+        "@//:cuda_pre_12_9": [],
+        "@//:using_cuda13_x86": [],
         "@//:using_cuda12_9_x86": ["@pip_gpu_cuda12_9_torch//watchdog"],
         "@//:using_cuda13_arm": [],
         "@//:using_cuda12_arm": [],
         "@//:using_rocm": [],
-        "@//:using_arm": ["@pip_arm_torch//watchdog"],
-        "//conditions:default": ["@pip_cpu_torch//watchdog"],
+        "@//:using_arm": [],
+        "//conditions:default": [],
     }),
 )
 
@@ -100,13 +100,13 @@ py_library(
     deps = select({
         "@//:using_ppu": ["@pip_gpu_cuda12_torch//zstandard"],
         "@//:cuda_pre_12_9": ["@pip_gpu_cuda12_torch//zstandard"],
-        "@//:using_cuda13_x86": ["@pip_gpu_cuda13_torch//zstandard"],
+        "@//:using_cuda13_x86": [],
         "@//:using_cuda12_9_x86": ["@pip_gpu_cuda12_9_torch//zstandard"],
         "@//:using_cuda13_arm": [],
         "@//:using_cuda12_arm": [],
         "@//:using_rocm": [],
-        "@//:using_arm": ["@pip_arm_torch//zstandard"],
-        "//conditions:default": ["@pip_cpu_torch//zstandard"],
+        "@//:using_arm": [],
+        "//conditions:default": [],
     }),
 )
 
