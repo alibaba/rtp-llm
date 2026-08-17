@@ -1,93 +1,106 @@
+import fcntl
+import hashlib
 import os
-from typing import List
+from pathlib import Path
 
 import torch
-from torch.utils.cpp_extension import CUDAExtension, load
+from torch.utils.cpp_extension import load
 
-SOURCE_DIR = "tipc/csrc"
-EXTENSION_BUILD_DIR = "tipc/build"
 PROGRAM_NAME = "tipc"
+
+
+def _source_signature(root: Path, build_args: list) -> str:
+    digest = hashlib.sha256(repr((str(root.resolve()), build_args)).encode())
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            digest.update(path.relative_to(root).as_posix().encode() + b"\0")
+            digest.update(path.read_bytes() + b"\0")
+    return digest.hexdigest()[:16]
+
 
 class __CompileHelper__:
     def __init__(self) -> None:
-        self.BUILD_DIR = EXTENSION_BUILD_DIR
-        self.__CUDA_EXTENTION__ = None
+        self.__CUDA_EXTENSION__ = None
 
-        if torch.__version__ < '1.6.0':
-            raise RuntimeError(f"{PROGRAM_NAME} cannot finish compile; PyTorch version 1.6 or higher is required.")
+    def compile(self):
+        """Compile (or warm-load) the CUDA extension; needs C++17 + CUDA."""
+        from rtp_llm.utils.util import COMPILE_FLAG_ENVS, torch_abi_fingerprint
 
-    def compile(self) -> CUDAExtension:
-        """
-        Compiles a CUDA extension from all source files in the source directory.
-
-        This function automatically finds all .c, .cc, .cpp, and .cu files
-        in the specified source directory and compiles them using JIT compilation.
-        The compiled extension is a CUDAExtension object that can be called from Python.
-
-        Requires CUDA and C++17 for compilation.
-        """
-        print(f'{PROGRAM_NAME} is currently compiling the code, which may take some time. '
-              f'If any errors occur, please check your compilation environment: {PROGRAM_NAME} '
-              'requires C++17 and CUDA.')
-
-        # delete lock file.
-        lock_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), self.BUILD_DIR, 'lock')
-        if os.path.exists(lock_file): 
-            try: os.remove(lock_file)
-            except Exception as e:
-                raise PermissionError(f'Can not delete lock file at {lock_file}, delete it first!')
-
-        sources = self._find_all_source_files(os.path.join(os.path.dirname(os.path.dirname(__file__)), SOURCE_DIR))
-
-        self.__CUDA_EXTENTION__ = load(
-            name=PROGRAM_NAME,
-            sources=sources,
-            extra_include_paths=[
-                os.path.join(os.path.dirname(os.path.dirname(__file__)), 'csrc'),
-            ],
-            build_directory=os.path.join(os.path.dirname(os.path.dirname(__file__)), self.BUILD_DIR),
-            with_cuda=True,
-            extra_cuda_cflags=['-O3', '-use_fast_math'],
-            extra_cflags=['-O3'],
+        source_dir = Path(__file__).with_name("csrc")
+        sources = self._find_all_source_files(source_dir)
+        cflags, cuda_cflags = ["-O3"], ["-O3", "-use_fast_math"]
+        # Keys build_dir below, so a wrong arch would serve a wrong binary: fail
+        # hard here, unlike the cache scope probe that only gates caching.
+        major, minor = torch.cuda.get_device_capability()
+        fingerprint = torch_abi_fingerprint()
+        if fingerprint is None:
+            raise RuntimeError("torch C++ ABI flag unavailable; cannot key TIPC build")
+        build_args = [
+            *cflags,
+            *cuda_cflags,
+            f"sm_{major}{minor}",
+            torch.version.cuda or "",
+            *map(str, fingerprint),
+            # These envs change the binary without touching sources (e.g. load()
+            # derives -gencode from TORCH_CUDA_ARCH_LIST).
+            *(f"{name}={os.environ.get(name, '')}" for name in COMPILE_FLAG_ENVS),
+        ]
+        build_dir = (
+            Path(
+                os.environ.get("TORCH_EXTENSIONS_DIR")
+                or Path(__file__).with_name("build")
+            )
+            / PROGRAM_NAME
+            / _source_signature(source_dir, build_args)
         )
-        return self.__CUDA_EXTENTION__
+        build_dir.mkdir(parents=True, exist_ok=True)
+        # Serialize load() and clear a stale FileBaton left by a killed builder.
+        lock_path = build_dir / ".load.lock"
+        with os.fdopen(
+            os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o666), "r+"
+        ) as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            (build_dir / "lock").unlink(missing_ok=True)
+            self.__CUDA_EXTENSION__ = load(
+                PROGRAM_NAME,
+                sources,
+                build_directory=str(build_dir),
+                extra_include_paths=[str(source_dir)],
+                with_cuda=True,
+                extra_cuda_cflags=cuda_cflags,
+                extra_cflags=cflags,
+            )
+        return self.__CUDA_EXTENSION__
 
-    def _find_all_source_files(self, directory: str) -> List[str]:
-        """ Recursively finds all C/C++ and CUDA source files in a directory. """
-        source_files = []
-        for root, _, files in os.walk(directory):
-            for file in files:
-                if file.endswith(('.c', '.cc', '.cpp', '.cu')):
-                    source_files.append(os.path.join(root, file))
-        return source_files
+    def _find_all_source_files(self, directory: Path) -> list[str]:
+        return sorted(
+            str(path)
+            for path in directory.rglob("*")
+            if path.suffix in (".c", ".cc", ".cpp", ".cu")
+        )
 
     @property
     def CUDA_EXTENSION(self):
-        if self.__CUDA_EXTENTION__ is None:
+        if self.__CUDA_EXTENSION__ is None:
             self.compile()
-        return self.__CUDA_EXTENTION__
+        return self.__CUDA_EXTENSION__
 
 
 CompileHelper = __CompileHelper__()
 
-def CONTIGUOUS_TENSOR(tensor: torch.Tensor):
-    """ Helper function """
-    if tensor.is_contiguous(): 
-        return tensor
-    else: 
-        return tensor.contiguous()
 
 class CUDA:
-    """ Helper class for calling Compiled Methods. """
+    """Helper class for calling Compiled Methods."""
+
     @staticmethod
     def build_cuipc_meta(t: torch.Tensor) -> bytes:
         if not t.is_cuda:
             raise ValueError("Invalid tensor, not on cuda.")
-        
+
         # Ensure the tensor is contiguous and synchronized before export.
         if not t.is_contiguous():
             t = t.contiguous()
-            
+
         torch.cuda.synchronize(device=t.device)
         return CompileHelper.CUDA_EXTENSION.export_tensor_ipc(t)
 
@@ -96,5 +109,6 @@ class CUDA:
         if not isinstance(ipc, bytes):
             raise TypeError("invalid input type, expected bytes.")
         return CompileHelper.CUDA_EXTENSION.import_tensor_ipc(ipc)
+
 
 __all__ = ["CUDA"]

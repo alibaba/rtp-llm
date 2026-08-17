@@ -818,6 +818,16 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
     constexpr int vec_size         = Vec_t<T>::size;
     using Vec_t                    = typename Vec_t<T>::Type;
     const int token_idx            = blockIdx.x;
+
+    if constexpr (PAD_QUERY) {
+        // CUDA Graph replay keeps the capture-time launch grid, while cu_seqlens
+        // is refreshed with the live token count. Ignore graph-capacity tail
+        // blocks before they use the shorter replay lengths for padded indexing.
+        if (token_idx >= cu_seqlens[batch_size]) {
+            return;
+        }
+    }
+
     const int token_padding_offset = padding_offset == nullptr ? 0 : padding_offset[token_idx];
     const int tgt_token_idx        = token_idx + token_padding_offset;
 

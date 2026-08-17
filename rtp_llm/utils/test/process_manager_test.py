@@ -1765,9 +1765,12 @@ class TestFailureShutdownPaths(unittest.TestCase):
         in finally; processes is still []. Without this, the parent silently
         exits 0 and k8s/systemd never restarts.
         """
+        cleanup = Mock()
+        self.manager.pre_exit_cleanup = cleanup
         self.manager.request_failure_shutdown()
         with patch("os._exit") as mock_exit:
             self.manager.monitor_and_release_processes()
+            cleanup.assert_called_once_with()
             mock_exit.assert_called_once_with(1)
 
     def test_empty_processes_without_failure_returns_cleanly(self):
