@@ -480,6 +480,24 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /**
+     * Whether any live inflight batch still carries {@code requestId} as a
+     * member — the prefill-side visibility check for the scheduler's
+     * post-ACK inflight audit (F1). An entry invisible here and on the decode
+     * confirmed registry can no longer be settled through any ordinary path,
+     * so the audit may force-settle it.
+     */
+    public boolean tracksRequest(long requestId) {
+        for (BatchInflight batch : inflightBatches.values()) {
+            for (BatchItem request : batch.requests()) {
+                if (request.requestId() == requestId) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
      * Evict inflight batches not observed for longer than {@code ttlMs}.
      * Called periodically by the scheduler to clean up stale prefill entries.
      *

@@ -1126,6 +1126,10 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         long hardMaxAgeMs = configService.loadBalanceConfig().getFlexlbInflightHardMaxAgeMs();
         long now = System.currentTimeMillis();
         int expiredCount = 0;
+        // F3 observability: entries past the TTL retained only by a fence
+        // (preemption / dispatch reconciliation / cleanup ownership). A
+        // persistently non-zero rate is the inflight-leak signature.
+        int skippedFenced = 0;
         long oldestExpiredAgeMs = 0;
         List<Long> expiredRequestSamples = new ArrayList<>(3);
         for (Map.Entry<Long, InflightEntry> candidate : inflight.entrySet()) {
@@ -1146,6 +1150,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     // zombie cancel overlay in the engine report) must not pin
                     // the entry — and its endpoint ledgers — forever.
                     if (hardMaxAgeMs <= 0 || ageMs <= hardMaxAgeMs) {
+                        skippedFenced++;
                         continue;
                     }
                     RequestLifecycleSnapshot snapshot = entry.lifecycle.snapshot();
@@ -1174,9 +1179,14 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         }
         if (expiredCount > 0) {
             reporter.reportInflightTtlExpired(expiredCount);
+        }
+        if (skippedFenced > 0) {
+            reporter.reportInflightCleanupSkippedFenced(skippedFenced);
+        }
+        if (expiredCount > 0 || skippedFenced > 0) {
             Logger.info("event=scheduler_inflight_ttl_eviction evicted={} "
-                            + "oldest_age_ms={} ttl_ms={} request_samples={}",
-                    expiredCount, oldestExpiredAgeMs, ttlMs, expiredRequestSamples);
+                            + "oldest_age_ms={} ttl_ms={} skipped_fenced={} request_samples={}",
+                    expiredCount, oldestExpiredAgeMs, ttlMs, skippedFenced, expiredRequestSamples);
         }
         long cutoff = System.currentTimeMillis() - ttlMs;
         terminalStates.entrySet().removeIf(entry -> entry.getValue().updatedAtMs() < cutoff);
@@ -1198,6 +1208,73 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                             requestId, decodeEntry.getKey(),
                             now - reserved.getValue().createdAtMs());
                 }
+            }
+        }
+    }
+
+    // ==================== Post-ACK inflight audit (F1) ====================
+
+    /**
+     * F1 backstop: force-settle ledger entries the ordinary paths can no
+     * longer reach. An entry qualifies only when ALL of the following hold:
+     * <ol>
+     *   <li>age exceeds {@code flexlbInflightAuditAfterMs} (the ACK round is
+     *       long over),</li>
+     *   <li>its public future is already completed — the client saw a
+     *       terminal response, so no one is waiting,</li>
+     *   <li>no fence retains it (preemption claim / dispatch reconciliation /
+     *       cleanup ownership — those have their own reconciliation),</li>
+     *   <li>neither side is visible: the prefill batch ledger no longer
+     *       tracks the request and the decode engine never confirmed it
+     *       (or either endpoint is absent).</li>
+     * </ol>
+     * Such an entry is a post-ACK leak: nothing observable can settle it, yet
+     * it keeps charging the inflight capacity and the endpoint ledgers until
+     * the TTL/hard-cap eviction notices it minutes later. The audit clears it
+     * in seconds.
+     *
+     * <p>Lock order mirrors {@link #cleanupInflight()}: iterate the inflight
+     * map, take the entry monitor, re-verify {@code inflight.get(key) == entry},
+     * then settle via {@link #timeoutEntry} (which only takes the entry monitor
+     * — never the dispatch fence — so nesting it here cannot invert the
+     * global order).
+     */
+    @Scheduled(fixedRateString = "${flexlb.inflight.audit.rate.ms:10000}")
+    public void auditInflight() {
+        long auditAfterMs = configService.loadBalanceConfig().getFlexlbInflightAuditAfterMs();
+        if (auditAfterMs <= 0) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        for (Map.Entry<Long, InflightEntry> candidate : inflight.entrySet()) {
+            InflightEntry entry = candidate.getValue();
+            long ageMs = now - entry.createdAtMs();
+            if (ageMs <= auditAfterMs) {
+                continue;
+            }
+            synchronized (entry) {
+                if (inflight.get(candidate.getKey()) != entry) {
+                    continue;
+                }
+                if (entry.preemption != null || entry.dispatchReconciliation || entry.cleanupOwned) {
+                    continue;
+                }
+                if (!entry.item.future().isDone()) {
+                    continue;
+                }
+                PrefillEndpoint prefillEp = entry.item.prefillEp();
+                DecodeEndpoint decodeEp = entry.item.decodeEp();
+                boolean prefillInvisible = prefillEp == null
+                        || !prefillEp.tracksRequest(candidate.getKey());
+                boolean decodeInvisible = decodeEp == null
+                        || !decodeEp.isEngineConfirmed(candidate.getKey());
+                if (!prefillInvisible || !decodeInvisible) {
+                    continue;
+                }
+                Logger.warn("event=scheduler_inflight_audit_release request_id={} "
+                                + "age_ms={} threshold_ms={} reason=post_ack_both_sides_invisible",
+                        candidate.getKey(), ageMs, auditAfterMs);
+                timeoutEntry(entry, "post-ACK inflight audit: both endpoints invisible");
             }
         }
     }
@@ -1439,6 +1516,11 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             return;
         }
         BatcherContext.PendingRestoreResult result = batcher.restorePendingDispatch(item);
+        if (result == BatcherContext.PendingRestoreResult.RESTORED) {
+            // F3 observability: how often a dispatched item bounces back to
+            // the batcher queue (decode-capacity full / pre-send failure).
+            reporter.reportSchedulerRestorePendingDispatch();
+        }
         if (result == BatcherContext.PendingRestoreResult.STOPPED) {
             onOfferFailure(item,
                     new java.util.concurrent.CancellationException(
@@ -2090,6 +2172,11 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     @Scheduled(fixedRateString = "${report.interval.ms:2000}")
     public void reportBatchMetrics() {
         reporter.reportSchedulerInflightSize(inflight.size());
+        // F3 observability: age of the oldest inflight entry. With a healthy
+        // TTL the size gauge alone cannot distinguish "busy" from "leaking";
+        // a max age creeping toward the TTL window is the leak signature.
+        reporter.reportSchedulerInflightMaxAgeMs(
+                InflightEvictor.maxAgeMs(inflight, System.currentTimeMillis()));
 
         // Per-worker metrics: prefill endpoints
         for (Map.Entry<String, PrefillEndpoint> entry : endpointRegistry.getPrefillEndpoints().entrySet()) {
@@ -2115,7 +2202,12 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
     // ==================== Inflight entry ====================
 
-    private static final class InflightEntry {
+    /**
+     * Implements {@link InflightEvictor.TtlTracked} so the scheduler-level
+     * max-age gauge can reuse {@link InflightEvictor#maxAgeMs} (same package,
+     * no import needed).
+     */
+    private static final class InflightEntry implements InflightEvictor.TtlTracked {
         final BatchItem item;
         final RequestLifecycle lifecycle;
         final boolean autoTpmAdmission;

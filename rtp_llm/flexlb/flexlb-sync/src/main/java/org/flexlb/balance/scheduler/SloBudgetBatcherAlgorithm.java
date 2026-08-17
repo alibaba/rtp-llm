@@ -24,6 +24,15 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
     private volatile double interArrivalEmaMs;
     private final Map<Long, ParkTrace> lastParkByRequest = new ConcurrentHashMap<>();
 
+    /** Rate-limit window for the aggregated park INFO log (per reason). */
+    private static final long PARK_LOG_INTERVAL_MS = 10_000L;
+
+    /** Parks per reason since the last flush of the rate-limited INFO log. */
+    private final Map<String, Long> parkCountsSinceLastLog = new ConcurrentHashMap<>();
+
+    /** Wall clock of the last park INFO-log flush; 0 = flush on first park. */
+    private long lastParkLogMs;
+
     // ==================== BatcherAlgorithm implementation ====================
 
     @Override
@@ -358,6 +367,26 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
                 nowMs - head.enqueuedAtMs(),
                 ctx.size(),
                 ctx.prefillEp().getInflightBatchCount()));
+        reportPark(ctx, reason, nowMs);
+    }
+
+    /**
+     * F3 observability: count every park decision per reason (metric
+     * {@code app.flexlb.batcher.park.qps}) and flush a rate-limited INFO log
+     * ({@code event=flexlb_batch_park}) per 10s window so a parked queue is
+     * visible without flooding the log at park frequency (the batcher loop
+     * can park every ~1ms).
+     */
+    private synchronized void reportPark(BatcherContext ctx, String reason, long nowMs) {
+        ctx.reporter().reportBatcherPark(reason);
+        parkCountsSinceLastLog.merge(reason, 1L, Long::sum);
+        if (lastParkLogMs > 0 && nowMs - lastParkLogMs < PARK_LOG_INTERVAL_MS) {
+            return;
+        }
+        lastParkLogMs = nowMs;
+        parkCountsSinceLastLog.forEach((parkReason, count) -> Logger.info(
+                "event=flexlb_batch_park reason={} count_last_interval={}", parkReason, count));
+        parkCountsSinceLastLog.clear();
     }
 
     // ==================== Drop ====================

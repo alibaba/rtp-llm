@@ -1145,6 +1145,17 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return trackedConfirmed.containsKey(requestId);
     }
 
+    /**
+     * Whether the engine has confirmed this request in the layered registry
+     * (KV_ALLOCATED / RUNNING) — the decode-side visibility check for the
+     * scheduler's post-ACK inflight audit (F1). Mirrors
+     * {@link #isConfirmedTracked} under the audit's engine-confirmed
+     * vocabulary.
+     */
+    public boolean isEngineConfirmed(long requestId) {
+        return isConfirmedTracked(requestId);
+    }
+
     @Override
     public long getLoadMetric() {
         return getTotalLoad();

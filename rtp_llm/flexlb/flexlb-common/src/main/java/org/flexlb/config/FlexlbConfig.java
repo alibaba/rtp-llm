@@ -379,6 +379,21 @@ public class FlexlbConfig {
     private long flexlbInflightHardMaxAgeMs = 1_800_000L;
 
     /**
+     * Post-ACK inflight audit threshold in milliseconds. The scheduler audit
+     * tick force-settles an inflight ledger entry older than this when its
+     * public future is already completed, no fence (preemption claim /
+     * dispatch reconciliation / cleanup ownership) retains it, and neither
+     * the prefill batch ledger nor the decode confirmed registry still
+     * tracks the request — the post-ACK leak where an ACK-released entry
+     * lingers in the ledger with nothing left that can settle it through
+     * the ordinary paths. Shorter than {@link #flexlbInflightTtlMs} so such
+     * leaks clear in seconds instead of minutes. {@code 0} disables the
+     * audit entirely.
+     * Environment variable: FLEXLB_INFLIGHT_AUDIT_AFTER_MS.
+     */
+    private long flexlbInflightAuditAfterMs = 30_000L;
+
+    /**
      * Ack-only release gate: when true (default), the frontend-facing fetch
      * release completes only on the Prefill EnqueueBatch ACK semantic —
      * a direct/late ACK or a Prefill WorkerStatus observation of the same

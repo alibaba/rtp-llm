@@ -11,6 +11,7 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 
+import static org.flexlb.constant.MetricConstant.BATCHER_PARK_QPS;
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_SIZE;
 import static org.flexlb.constant.MetricConstant.BATCH_ACTUAL_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICTED_TIME_MS;
@@ -28,12 +29,15 @@ import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_S
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_TOTAL_TOKENS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_DISPATCH_REASON;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_BATCH_COUNT;
+import static org.flexlb.constant.MetricConstant.INFLIGHT_CLEANUP_SKIPPED_FENCED_QPS;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_MAX_AGE_MS;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_REQUEST_COUNT;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_TTL_EXPIRED_QPS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
+import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_MAX_AGE_MS;
 import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_SIZE;
+import static org.flexlb.constant.MetricConstant.SCHEDULER_RESTORE_PENDING_DISPATCH_QPS;
 
 /**
  * Batch scheduling metrics reporter for FlexLB batch dispatch path.
@@ -80,9 +84,15 @@ public class BatchSchedulerReporter {
         // Scheduler-level inflight size — uses scheduler-level tags (role=PREFILL, engineIp="scheduler")
         // Note: the former per-engine app.engine.health.check.local.inflight.size has been removed.
         monitor.register(SCHEDULER_INFLIGHT_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        // Scheduler-level inflight max age — same scheduler-level tags as SCHEDULER_INFLIGHT_SIZE
+        monitor.register(SCHEDULER_INFLIGHT_MAX_AGE_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        // Restore-pending-dispatch — Decode capacity full at flush, item returned to batcher queue (QPS)
+        monitor.register(SCHEDULER_RESTORE_PENDING_DISPATCH_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
         // Batcher queue size — per-engine pending batch request count (FlexLB batcher queue depth)
         monitor.register(BATCHER_QUEUE_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        // Batcher park — requests parked by the batcher instead of dispatched (inflight_full etc.), QPS tagged by reason
+        monitor.register(BATCHER_PARK_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
         // Decode total load and inflight KV reserved — per decode worker (FlexLB scheduler view)
         monitor.register(DECODE_TOTAL_LOAD, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -92,6 +102,8 @@ public class BatchSchedulerReporter {
 
         // Inflight TTL expired — count of inflight requests cleaned up by the TTL task, QPS tagged by role
         monitor.register(INFLIGHT_TTL_EXPIRED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        // Inflight cleanup fence skips — TTL-due entries retained by a stronger fence, QPS tagged by role
+        monitor.register(INFLIGHT_CLEANUP_SKIPPED_FENCED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
         // Prediction accuracy — predicted vs actual engine execution time (timer for distribution)
         monitor.register(BATCH_PREDICTED_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
@@ -107,7 +119,7 @@ public class BatchSchedulerReporter {
         // ACK-to-response time — from engine ACK to schedule response sent to client (timer for distribution)
         monitor.register(ACK_TO_RESPONSE_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
-        log.info("BatchSchedulerReporter initialized (20 metrics)");
+        log.info("BatchSchedulerReporter initialized (24 metrics)");
     }
 
     // ==================== Queue metrics ====================
@@ -153,6 +165,21 @@ public class BatchSchedulerReporter {
         FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", role);
         monitor.report(BATCHER_QUEUE_SIZE, tags, depth);
+    }
+
+    /**
+     * Report one batcher park decision via {@code app.flexlb.batcher.park.qps},
+     * tagged by park reason (inflight_full / outside_window /
+     * wait_for_min_batch / wait_for_target_batch).
+     * <p>Aggregated across endpoints (no engineIp tag): the park QPS by reason
+     * is the cluster-level signal that requests are silently waiting on
+     * backpressure instead of being dispatched or rejected.
+     */
+    public void reportBatcherPark(String reason) {
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", RoleType.PREFILL.name(),
+                "reason", reason);
+        monitor.report(BATCHER_PARK_QPS, tags, 1.0);
     }
 
     /**
@@ -241,6 +268,37 @@ public class BatchSchedulerReporter {
     }
 
     /**
+     * Report the age (ms) of the oldest entry in the scheduler's own inflight
+     * ledger via {@code app.flexlb.scheduler.inflight.max.age.ms}.
+     * <p>Uses the same scheduler-level tags as {@link #reportSchedulerInflightSize}
+     * (role=PREFILL, engineIp="scheduler") so the size and age gauges stay
+     * joinable in the same panel. Unlike the per-worker
+     * {@link #reportInflightMaxAgeMs}, this gauge is immune to per-endpoint
+     * ledger releases — it exposes master-side leaks (fence-skipped or
+     * post-ACK entries) that keep the scheduler ledger pinned.
+     *
+     * @param ageMs age of the oldest scheduler inflight entry, 0 when empty
+     */
+    public void reportSchedulerInflightMaxAgeMs(long ageMs) {
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", RoleType.PREFILL.name(),
+                "engineIp", "scheduler");
+        monitor.report(SCHEDULER_INFLIGHT_MAX_AGE_MS, tags, ageMs);
+    }
+
+    /**
+     * Report one restore-pending-dispatch event — a flush-time item returned
+     * to the batcher queue because the Decode concurrency gate reported
+     * CAPACITY_FULL — via {@code app.flexlb.scheduler.restore.pending.dispatch.qps}.
+     * <p>Scheduler-level metric tagged by role only, mirroring
+     * {@link #reportInflightTtlExpired}.
+     */
+    public void reportSchedulerRestorePendingDispatch() {
+        FlexMetricTags tags = FlexMetricTags.of("role", RoleType.PREFILL.name());
+        monitor.report(SCHEDULER_RESTORE_PENDING_DISPATCH_QPS, tags, 1.0);
+    }
+
+    /**
      * Report per-worker inflight batch count (number of dispatched-but-uncompleted batches)
      * via {@code flexlb.inflight.batch.count}.
      * <p>Unified for both prefill and decode workers, tagged by role and engineIp.
@@ -284,6 +342,23 @@ public class BatchSchedulerReporter {
     public void reportInflightTtlExpired(int count) {
         FlexMetricTags tags = FlexMetricTags.of("role", RoleType.PREFILL.name());
         monitor.report(INFLIGHT_TTL_EXPIRED_QPS, tags, count);
+    }
+
+    /**
+     * Report the count of inflight entries skipped by the TTL cleanup because
+     * a stronger fence (preemption claim / dispatch reconciliation / cleanup
+     * ownership) still owns them, via
+     * {@code app.flexlb.inflight.cleanup.skipped.fenced.qps}.
+     * <p>Scheduler-level metric tagged by role only, mirroring
+     * {@link #reportInflightTtlExpired}. A persistently non-zero value means
+     * fence-held entries are accumulating past their TTL — the population the
+     * hard age cap and the post-ACK audit eventually reclaim.
+     *
+     * @param count number of fence-held entries skipped in this cleanup cycle
+     */
+    public void reportInflightCleanupSkippedFenced(int count) {
+        FlexMetricTags tags = FlexMetricTags.of("role", RoleType.PREFILL.name());
+        monitor.report(INFLIGHT_CLEANUP_SKIPPED_FENCED_QPS, tags, count);
     }
 
     // ==================== Decode inflight metrics ====================

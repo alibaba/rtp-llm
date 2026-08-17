@@ -105,6 +105,16 @@ public class MetricConstant {
     public static final String INFLIGHT_TTL_EXPIRED_QPS = "app.flexlb.inflight.ttl.expired.qps";
 
     /**
+     * FlexLB scheduler inflight cleanup fence skips — number of inflight entries
+     * past the TTL that were retained because a stronger fence still owns them
+     * (preemption claim / dispatch reconciliation / cleanup ownership).
+     * Reported as QPS, tagged by role. Makes the previously invisible
+     * fence-exemption population of the inflight ledger observable.
+     */
+    public static final String INFLIGHT_CLEANUP_SKIPPED_FENCED_QPS =
+            "app.flexlb.inflight.cleanup.skipped.fenced.qps";
+
+    /**
      * Batch predicted execution time (formula estimate) in milliseconds
      */
     public static final String BATCH_PREDICTED_TIME_MS = "app.flexlb.batch.predicted.time.ms";
@@ -154,6 +164,23 @@ public class MetricConstant {
     public static final String SCHEDULER_INFLIGHT_SIZE = "app.flexlb.scheduler.inflight.size";
 
     /**
+     * FlexLB scheduler inflight max age (ms) — age of the oldest entry in the
+     * scheduler's own inflight ledger. Scheduler-level twin of
+     * {@link #INFLIGHT_MAX_AGE_MS}, reported with the same scheduler-level
+     * tags as {@link #SCHEDULER_INFLIGHT_SIZE} (role=PREFILL, engineIp="scheduler").
+     */
+    public static final String SCHEDULER_INFLIGHT_MAX_AGE_MS =
+            "app.flexlb.scheduler.inflight.max.age.ms";
+
+    /**
+     * FlexLB scheduler restore-pending-dispatch count — items returned to the
+     * batcher queue at flush time because the Decode concurrency gate reported
+     * CAPACITY_FULL. Reported as QPS, tagged by role.
+     */
+    public static final String SCHEDULER_RESTORE_PENDING_DISPATCH_QPS =
+            "app.flexlb.scheduler.restore.pending.dispatch.qps";
+
+    /**
      * FlexLB batcher queue size — number of pending (not-yet-batched) requests
      * in the per-engine WorkerBatcher queue.
      * <p>Reported by BatchSchedulerReporter with role and engineIp tags.
@@ -161,6 +188,15 @@ public class MetricConstant {
      * (which uses type=batchQueue tag for backward compatibility).
      */
     public static final String BATCHER_QUEUE_SIZE = "app.flexlb.batcher.queue.size";
+
+    /**
+     * FlexLB batcher park count — requests kept waiting (parked) by the
+     * SLO-budget batcher instead of being dispatched, e.g. inflight_full
+     * backpressure (per-endpoint inflight batch gate) or batch-shape waits.
+     * Reported as QPS, tagged by reason. Makes the previously silent
+     * inflight_full parking observable.
+     */
+    public static final String BATCHER_PARK_QPS = "app.flexlb.batcher.park.qps";
 
     /**
      * Engine finished task list size
