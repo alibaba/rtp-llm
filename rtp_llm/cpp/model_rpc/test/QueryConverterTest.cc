@@ -149,6 +149,64 @@ TEST(ThinkingModeTest, NormalizeThinkingModePreservesValidValues) {
     EXPECT_EQ(normalizeThinkingMode(3), ThinkingMode::ENABLED);
 }
 
+TEST_F(QueryConverterTest, ResolveCustomOutputRelativePosition) {
+    GenerateInputPB input;
+    for (int token : {7, 42, 8, 42, 9}) {
+        input.add_token_ids(token);
+    }
+    input.mutable_custom_output_token_position()->set_value(-2);
+    input.mutable_custom_output_expected_token_id()->set_value(42);
+
+    auto converted = QueryConverter::transQuery(&input);
+    EXPECT_EQ(converted->custom_output_token_position, 3);
+}
+
+TEST_F(QueryConverterTest, ResolveCustomOutputAbsolutePosition) {
+    GenerateInputPB input;
+    for (int token : {7, 42, 9}) {
+        input.add_token_ids(token);
+    }
+    input.mutable_custom_output_token_position()->set_value(1);
+
+    auto converted = QueryConverter::transQuery(&input);
+    EXPECT_EQ(converted->custom_output_token_position, 1);
+}
+
+TEST_F(QueryConverterTest, ResolveLastTrackedTokenOccurrence) {
+    GenerateInputPB input;
+    for (int token : {7, 42, 8, 42, 9}) {
+        input.add_token_ids(token);
+    }
+    input.mutable_custom_output_tracked_token_id()->set_value(42);
+
+    auto converted = QueryConverter::transQuery(&input);
+    EXPECT_EQ(converted->custom_output_token_position, 3);
+}
+
+TEST_F(QueryConverterTest, RejectInvalidCustomOutputSelectors) {
+    GenerateInputPB out_of_range;
+    out_of_range.add_token_ids(7);
+    out_of_range.mutable_custom_output_token_position()->set_value(-2);
+    EXPECT_THROW(QueryConverter::transQuery(&out_of_range), std::exception);
+
+    GenerateInputPB missing_token;
+    missing_token.add_token_ids(7);
+    missing_token.mutable_custom_output_tracked_token_id()->set_value(42);
+    EXPECT_THROW(QueryConverter::transQuery(&missing_token), std::exception);
+
+    GenerateInputPB expected_without_position;
+    expected_without_position.add_token_ids(42);
+    expected_without_position.mutable_custom_output_tracked_token_id()->set_value(42);
+    expected_without_position.mutable_custom_output_expected_token_id()->set_value(42);
+    EXPECT_THROW(QueryConverter::transQuery(&expected_without_position), std::exception);
+
+    GenerateInputPB wrong_expected_token;
+    wrong_expected_token.add_token_ids(7);
+    wrong_expected_token.mutable_custom_output_token_position()->set_value(0);
+    wrong_expected_token.mutable_custom_output_expected_token_id()->set_value(42);
+    EXPECT_THROW(QueryConverter::transQuery(&wrong_expected_token), std::exception);
+}
+
 TEST_F(QueryConverterTest, testTransOutput) {
     auto output_token_ids = torch::empty({1, 3}, torch::kInt32);
     auto data             = output_token_ids.data_ptr<int>();

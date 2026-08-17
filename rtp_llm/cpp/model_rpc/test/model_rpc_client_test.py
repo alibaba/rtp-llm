@@ -165,7 +165,7 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(request_info_pb.trace_id, "header-trace")
         self.assertEqual(request_info_pb.request_id, "header-request-id")
 
-    def test_trans_input_resolves_relative_position_without_mutating_request(self):
+    def test_trans_input_serializes_relative_position_for_cpp_resolution(self):
         input_py = GenerateInput(
             request_id=123,
             token_ids=torch.tensor([7, 42, 8, 42, 9]),
@@ -181,7 +181,7 @@ class ModelRpcClientTest(TestCase):
             input_pb = trans_input(input_py)
 
         self.assertTrue(input_pb.HasField("custom_output_token_position"))
-        self.assertEqual(input_pb.custom_output_token_position.value, 3)
+        self.assertEqual(input_pb.custom_output_token_position.value, -2)
         self.assertEqual(input_py.custom_output_token_position, -1)
 
     def test_trans_input_respects_explicit_position(self):
@@ -202,7 +202,7 @@ class ModelRpcClientTest(TestCase):
 
         self.assertEqual(input_pb.custom_output_token_position.value, 1)
 
-    def test_trans_input_rejects_relative_position_outside_prompt(self):
+    def test_trans_input_leaves_position_bounds_check_to_cpp(self):
         input_py = GenerateInput(
             request_id=123,
             token_ids=torch.tensor([42]),
@@ -215,10 +215,11 @@ class ModelRpcClientTest(TestCase):
             {"CUSTOM_OUTPUT_TOKEN_POSITION": "-2"},
             clear=True,
         ):
-            with self.assertRaisesRegex(FtRuntimeException, "outside prompt length 1"):
-                trans_input(input_py)
+            input_pb = trans_input(input_py)
 
-    def test_trans_input_rejects_invalid_request_and_configured_positions(self):
+        self.assertEqual(input_pb.custom_output_token_position.value, -2)
+
+    def test_trans_input_rejects_invalid_explicit_request_position(self):
         input_py = GenerateInput(
             request_id=123,
             token_ids=torch.tensor([42]),
@@ -229,16 +230,7 @@ class ModelRpcClientTest(TestCase):
         with self.assertRaisesRegex(ValueError, "must be -1 or non-negative"):
             trans_input(input_py)
 
-        input_py.custom_output_token_position = -1
-        with unittest.mock.patch.dict(
-            os.environ,
-            {"CUSTOM_OUTPUT_TOKEN_POSITION": "0"},
-            clear=True,
-        ):
-            with self.assertRaisesRegex(ValueError, "must be -2"):
-                trans_input(input_py)
-
-    def test_trans_input_validates_expected_token_at_minus_two(self):
+    def test_trans_input_serializes_expected_token_validation(self):
         input_py = GenerateInput(
             request_id=123,
             token_ids=torch.tensor([7, 42, 8, 42, 9]),
@@ -256,9 +248,10 @@ class ModelRpcClientTest(TestCase):
         ):
             input_pb = trans_input(input_py)
 
-        self.assertEqual(input_pb.custom_output_token_position.value, 3)
+        self.assertEqual(input_pb.custom_output_token_position.value, -2)
+        self.assertEqual(input_pb.custom_output_expected_token_id.value, 42)
 
-    def test_trans_input_rejects_unexpected_token_at_minus_two(self):
+    def test_trans_input_serializes_expected_token_without_scanning(self):
         input_py = GenerateInput(
             request_id=123,
             token_ids=torch.tensor([7, 8, 9]),
@@ -274,10 +267,12 @@ class ModelRpcClientTest(TestCase):
             },
             clear=True,
         ):
-            with self.assertRaisesRegex(FtRuntimeException, "is 8, expected 42"):
-                trans_input(input_py)
+            input_pb = trans_input(input_py)
 
-    def test_trans_input_rejects_legacy_tracked_token_selector(self):
+        self.assertEqual(input_pb.custom_output_token_position.value, -2)
+        self.assertEqual(input_pb.custom_output_expected_token_id.value, 42)
+
+    def test_trans_input_serializes_tracked_token_for_cpp_scan(self):
         input_py = GenerateInput(
             request_id=123,
             token_ids=torch.tensor([7, 42, 9]),
@@ -292,10 +287,12 @@ class ModelRpcClientTest(TestCase):
             },
             clear=True,
         ):
-            with self.assertRaisesRegex(ValueError, "is not supported"):
-                trans_input(input_py)
+            input_pb = trans_input(input_py)
 
-    def test_expected_token_requires_minus_two_selector(self):
+        self.assertFalse(input_pb.HasField("custom_output_token_position"))
+        self.assertEqual(input_pb.custom_output_tracked_token_id.value, 42)
+
+    def test_expected_token_requires_position_selector(self):
         with unittest.mock.patch.dict(
             os.environ,
             {"CUSTOM_OUTPUT_EXPECTED_TOKEN_ID": "42"},
@@ -307,8 +304,15 @@ class ModelRpcClientTest(TestCase):
     def test_custom_output_selector_validates_environment_at_construction(self):
         invalid_cases = [
             ({"CUSTOM_OUTPUT_TOKEN_POSITION": "not-an-int"}, "must be an integer"),
-            ({"CUSTOM_OUTPUT_TOKEN_POSITION": "-1"}, "must be -2"),
-            ({"CUSTOM_OUTPUT_TOKEN_POSITION": "-3"}, "must be -2"),
+            ({"CUSTOM_OUTPUT_TOKEN_POSITION": str(2**31)}, "valid int32"),
+            ({"CUSTOM_OUTPUT_TRACKED_TOKEN_ID": "-1"}, "between"),
+            (
+                {
+                    "CUSTOM_OUTPUT_TOKEN_POSITION": "-2",
+                    "CUSTOM_OUTPUT_TRACKED_TOKEN_ID": "42",
+                },
+                "mutually exclusive",
+            ),
             (
                 {
                     "CUSTOM_OUTPUT_TOKEN_POSITION": "-2",

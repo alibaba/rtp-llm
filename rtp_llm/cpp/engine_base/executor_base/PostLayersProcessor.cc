@@ -20,7 +20,7 @@ namespace rtp_llm {
 
 namespace {
 
-int parseSelectorEnv(const char* name, bool require_negative) {
+int parseSelectorEnv(const char* name, bool require_non_negative) {
     const char* value = std::getenv(name);
     errno             = 0;
     char* end         = nullptr;
@@ -28,10 +28,7 @@ int parseSelectorEnv(const char* name, bool require_negative) {
     if (errno != 0 || end == value || *end != '\0' || parsed < INT_MIN || parsed > INT_MAX) {
         throw std::runtime_error(std::string(name) + " must be a valid int32 integer");
     }
-    if (require_negative && parsed >= 0) {
-        throw std::runtime_error(std::string(name) + " must be negative");
-    }
-    if (!require_negative && parsed < 0) {
+    if (require_non_negative && parsed < 0) {
         throw std::runtime_error(std::string(name) + " must be non-negative");
     }
     return static_cast<int>(parsed);
@@ -88,19 +85,23 @@ void PostLayersProcessor::setHandler(py::object handler) {
     }
     if (HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::SELECTED_HIDDEN_STATES)) {
         const bool has_position = std::getenv("CUSTOM_OUTPUT_TOKEN_POSITION") != nullptr;
-        if (std::getenv("CUSTOM_OUTPUT_TRACKED_TOKEN_ID") != nullptr) {
+        const bool has_token_id = std::getenv("CUSTOM_OUTPUT_TRACKED_TOKEN_ID") != nullptr;
+        if (has_position == has_token_id) {
             throw std::runtime_error(
-                "CUSTOM_OUTPUT_TRACKED_TOKEN_ID is not supported; use CUSTOM_OUTPUT_TOKEN_POSITION=-2 and optional "
-                "CUSTOM_OUTPUT_EXPECTED_TOKEN_ID");
+                "selected_hidden_states requires exactly one of CUSTOM_OUTPUT_TOKEN_POSITION or "
+                "CUSTOM_OUTPUT_TRACKED_TOKEN_ID");
         }
-        if (!has_position) {
-            throw std::runtime_error("selected_hidden_states requires CUSTOM_OUTPUT_TOKEN_POSITION=-2");
+        if (has_position) {
+            parseSelectorEnv("CUSTOM_OUTPUT_TOKEN_POSITION", false);
+        } else {
+            parseSelectorEnv("CUSTOM_OUTPUT_TRACKED_TOKEN_ID", true);
         }
-        if (parseSelectorEnv("CUSTOM_OUTPUT_TOKEN_POSITION", true) != -2) {
-            throw std::runtime_error("CUSTOM_OUTPUT_TOKEN_POSITION must be -2");
+        const bool has_expected_token_id = std::getenv("CUSTOM_OUTPUT_EXPECTED_TOKEN_ID") != nullptr;
+        if (has_expected_token_id && !has_position) {
+            throw std::runtime_error("CUSTOM_OUTPUT_EXPECTED_TOKEN_ID requires CUSTOM_OUTPUT_TOKEN_POSITION");
         }
-        if (std::getenv("CUSTOM_OUTPUT_EXPECTED_TOKEN_ID") != nullptr) {
-            parseSelectorEnv("CUSTOM_OUTPUT_EXPECTED_TOKEN_ID", false);
+        if (has_expected_token_id) {
+            parseSelectorEnv("CUSTOM_OUTPUT_EXPECTED_TOKEN_ID", true);
         }
     }
 

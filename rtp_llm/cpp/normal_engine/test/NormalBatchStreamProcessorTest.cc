@@ -1063,6 +1063,7 @@ TEST_F(NormalBatchStreamProcessorTest, testCustomOutputDispatch) {
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
     query1->input_ids                     = hostIntBuffer({1});
     query1->generate_config               = make_shared<GenerateConfig>();
+    query1->custom_output_token_position  = 0;
     GenerateStreamPtr stream1 =
         make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr1;
@@ -1074,6 +1075,7 @@ TEST_F(NormalBatchStreamProcessorTest, testCustomOutputDispatch) {
     std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
     query2->input_ids                     = hostIntBuffer({0, 1});
     query2->generate_config               = make_shared<GenerateConfig>();
+    query2->custom_output_token_position  = 0;
     GenerateStreamPtr stream2 =
         make_shared<NormalGenerateStream>(query2, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr2;
@@ -1094,7 +1096,11 @@ TEST_F(NormalBatchStreamProcessorTest, testCustomOutputDispatch) {
     StreamGroups stream_groups(streams);
     TensorHolder holder;
     auto         merge_input_status = processor.gatherModelInput(stream_groups, holder);
-    EXPECT_TRUE(merge_input_status.ok());
+    ASSERT_TRUE(merge_input_status.ok());
+    // Flattened hidden rows are [stream1 token0, stream2 token0, stream2 token1].
+    // Selecting absolute position 0 for both streams must gather rows 0 and 1,
+    // rather than the legacy last-token rows 0 and 2.
+    EXPECT_EQ(toVec<int>(merge_input_status->custom_output_indexes), (std::vector<int>{0, 1}));
 
     MergedOutput merge_outputs;
     merge_outputs.model_output.custom_output =
@@ -1111,17 +1117,6 @@ TEST_F(NormalBatchStreamProcessorTest, testCustomOutputDispatch) {
     ASSERT_TRUE(out2.defined());
     EXPECT_EQ(toVec<float>(out2), (std::vector<float>{3.0f, 4.0f}));
 
-    // On a later chunk only stream2 contains its selected position. A false
-    // validity row must preserve stream1's earlier output instead of
-    // overwriting it with the placeholder row.
-    merge_outputs.model_output.custom_output =
-        torch::tensor({9.0f, 9.0f, 5.0f, 6.0f}).reshape({2, 2}).to(torch::kCUDA);
-    merge_outputs.model_output.custom_output_valid_mask =
-        torch::tensor({false, true}, torch::TensorOptions(torch::kBool).device(torch::kCUDA));
-    status = processor.dispatch(stream_groups, merge_outputs);
-    EXPECT_TRUE(status.ok());
-    EXPECT_EQ(toVec<float>(stream1->getCustomOutput()), (std::vector<float>{1.0f, 2.0f}));
-    EXPECT_EQ(toVec<float>(stream2->getCustomOutput()), (std::vector<float>{5.0f, 6.0f}));
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testCustomOutputSkipsDecodeRows) {

@@ -48,68 +48,77 @@ JsonableOption = Optional[Union[str, Dict[str, Any], bool]]
 
 @dataclass(frozen=True)
 class CustomOutputSelector:
-    """Validated fixed -2 selection, created once per RPC client."""
+    """Deployment selector serialized to RPC and resolved by C++."""
 
-    relative_position: Optional[int] = None
+    token_position: Optional[int] = None
+    tracked_token_id: Optional[int] = None
     expected_token_id: Optional[int] = None
+
+    @staticmethod
+    def _parse_int32(name: str, raw: str, *, non_negative: bool) -> int:
+        try:
+            value = int(raw)
+        except ValueError as error:
+            raise ValueError(f"{name} must be an integer") from error
+        lower_bound = 0 if non_negative else -(2**31)
+        if value < lower_bound or value > 2**31 - 1:
+            requirement = (
+                "between 0 and 2147483647"
+                if non_negative
+                else "a valid int32 integer"
+            )
+            raise ValueError(f"{name} must be {requirement}")
+        return value
 
     @classmethod
     def from_env(cls) -> "CustomOutputSelector":
         position_raw = os.environ.get("CUSTOM_OUTPUT_TOKEN_POSITION")
+        tracked_token_id_raw = os.environ.get("CUSTOM_OUTPUT_TRACKED_TOKEN_ID")
         expected_token_id_raw = os.environ.get("CUSTOM_OUTPUT_EXPECTED_TOKEN_ID")
-        if os.environ.get("CUSTOM_OUTPUT_TRACKED_TOKEN_ID") is not None:
+        if position_raw is not None and tracked_token_id_raw is not None:
             raise ValueError(
-                "CUSTOM_OUTPUT_TRACKED_TOKEN_ID is not supported; use "
-                "CUSTOM_OUTPUT_TOKEN_POSITION=-2 and optional "
-                "CUSTOM_OUTPUT_EXPECTED_TOKEN_ID"
+                "CUSTOM_OUTPUT_TOKEN_POSITION and CUSTOM_OUTPUT_TRACKED_TOKEN_ID "
+                "are mutually exclusive"
             )
-        if position_raw is None:
-            if expected_token_id_raw is not None:
-                raise ValueError(
-                    "CUSTOM_OUTPUT_EXPECTED_TOKEN_ID requires "
-                    "CUSTOM_OUTPUT_TOKEN_POSITION=-2"
-                )
-            return cls()
-        try:
-            position = int(position_raw)
-        except ValueError as error:
-            raise ValueError("CUSTOM_OUTPUT_TOKEN_POSITION must be an integer") from error
-        if position != -2:
-            raise ValueError("CUSTOM_OUTPUT_TOKEN_POSITION must be -2")
+        if expected_token_id_raw is not None and position_raw is None:
+            raise ValueError(
+                "CUSTOM_OUTPUT_EXPECTED_TOKEN_ID requires CUSTOM_OUTPUT_TOKEN_POSITION"
+            )
 
-        expected_token_id = None
-        if expected_token_id_raw is not None:
-            try:
-                expected_token_id = int(expected_token_id_raw)
-            except ValueError as error:
-                raise ValueError(
-                    "CUSTOM_OUTPUT_EXPECTED_TOKEN_ID must be an integer"
-                ) from error
-            if expected_token_id < 0 or expected_token_id > 2**31 - 1:
-                raise ValueError(
-                    "CUSTOM_OUTPUT_EXPECTED_TOKEN_ID must be between 0 and 2147483647"
-                )
-        return cls(relative_position=-2, expected_token_id=expected_token_id)
+        position = (
+            cls._parse_int32(
+                "CUSTOM_OUTPUT_TOKEN_POSITION", position_raw, non_negative=False
+            )
+            if position_raw is not None
+            else None
+        )
+        tracked_token_id = (
+            cls._parse_int32(
+                "CUSTOM_OUTPUT_TRACKED_TOKEN_ID",
+                tracked_token_id_raw,
+                non_negative=True,
+            )
+            if tracked_token_id_raw is not None
+            else None
+        )
+        expected_token_id = (
+            cls._parse_int32(
+                "CUSTOM_OUTPUT_EXPECTED_TOKEN_ID",
+                expected_token_id_raw,
+                non_negative=True,
+            )
+            if expected_token_id_raw is not None
+            else None
+        )
+        return cls(position, tracked_token_id, expected_token_id)
 
-    def resolve(self, token_ids: list[int]) -> int:
-        if self.relative_position is not None:
-            position = len(token_ids) + self.relative_position
-            if position < 0:
-                raise FtRuntimeException(
-                    ExceptionType.INVALID_PARAMS,
-                    f"CUSTOM_OUTPUT_TOKEN_POSITION {self.relative_position} is outside prompt length {len(token_ids)}",
-                )
-            if (
-                self.expected_token_id is not None
-                and token_ids[position] != self.expected_token_id
-            ):
-                raise FtRuntimeException(
-                    ExceptionType.INVALID_PARAMS,
-                    f"token at CUSTOM_OUTPUT_TOKEN_POSITION -2 is {token_ids[position]}, "
-                    f"expected {self.expected_token_id}",
-                )
-            return position
-        return -1
+    def write_to(self, input_pb: GenerateInputPB) -> None:
+        if self.token_position is not None:
+            input_pb.custom_output_token_position.value = self.token_position
+        elif self.tracked_token_id is not None:
+            input_pb.custom_output_tracked_token_id.value = self.tracked_token_id
+        if self.expected_token_id is not None:
+            input_pb.custom_output_expected_token_id.value = self.expected_token_id
 
 
 class StreamState:
@@ -165,18 +174,18 @@ def trans_input(
     input_pb.request_id = input_py.request_id
     token_ids = input_py.token_ids.reshape(-1).tolist()
     input_pb.token_ids.extend(token_ids)
-    # Resolve the deployment-level selector once at the request boundary,
-    # keeping selector work out of the scheduler/model hot path.
+    # Keep the deployment selector typed on the wire. C++ resolves it against
+    # the authoritative token array before the request reaches the scheduler.
     custom_output_token_position = input_py.custom_output_token_position
     if custom_output_token_position < -1:
         raise ValueError("custom_output_token_position must be -1 or non-negative")
     if selector is None:
         selector = CustomOutputSelector.from_env()
-    if custom_output_token_position < 0:
-        custom_output_token_position = selector.resolve(token_ids)
     input_pb.batch_group_size = input_py.batch_group_size
     if custom_output_token_position >= 0:
         input_pb.custom_output_token_position.value = custom_output_token_position
+    else:
+        selector.write_to(input_pb)
     if input_py.batch_group_id != -1:
         input_pb.batch_group_id.value = input_py.batch_group_id
 
@@ -791,7 +800,7 @@ class ModelRpcClient(object):
         batch_input_pb = BatchGenerateInputPB()
         for inp in inputs:
             inp.generate_config.timeout_ms = int(grpc_timeout_seconds * 1000)
-            input_pb = trans_input(inp)
+            input_pb = trans_input(inp, self._custom_output_selector)
             batch_input_pb.inputs.append(input_pb)
 
         target_address = self._addresses[inputs[0].request_id % len(self._addresses)]
