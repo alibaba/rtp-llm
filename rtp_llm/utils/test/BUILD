@@ -143,6 +143,12 @@ py_test(
 )
 
 py_test(
+    name = "startup_warmup_test",
+    srcs = ["startup_warmup_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
+
+py_test(
     name = "process_manager_test",
     srcs = [
         "process_manager_test.py",

@@ -19,6 +19,19 @@ cc_library(
 )
 
 cc_library(
+    name = "decode_admission",
+    hdrs = [
+        "DecodeAdmissionController.h",
+        "DecodeAdmissionStatus.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+    ],
+)
+
+cc_library(
     name = "rpc_error_code",
     hdrs = [
         "RpcErrorCode.h",
@@ -57,6 +70,7 @@ cc_library(
         ":embedding_arpc_deps",
         ":model_rpc_pool",
         ":rpc_error_code",
+        ":decode_admission",
         ":tensor_pb_convert",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:cache_types",

@@ -430,6 +430,11 @@ struct PDSepConfig {
     int64_t  max_rpc_timeout_ms              = 2 * 3600 * 1000;  // 2h default
     int64_t  worker_port_offset              = 0;
     bool     decode_entrance                 = false;
+    // Bounds end-to-end concurrent requests admitted by the decode role, which is NOT the
+    // same unit as max_generate_batch_size (rows in a forward batch). <0 derives it from
+    // max_generate_batch_size, 0 disables the admission gate and lets the scheduler's
+    // waiting queue absorb bursts as it did before the gate existed, >0 sets it explicitly.
+    int64_t  decode_admission_limit          = -1;
 
     std::string to_string() const;
 };

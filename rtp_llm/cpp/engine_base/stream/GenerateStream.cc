@@ -1,7 +1,9 @@
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <memory>
+#include <thread>
 #include <ATen/Generator.h>
 #if defined(USING_CUDA) || defined(USING_ROCM)
 #include <ATen/cuda/CUDAGeneratorImpl.h>
@@ -146,6 +148,79 @@ absl::Status GenerateStream::initKVBlock() {
         RTP_LLM_LOG_WARNING("GenerateStream::initKVBlock: initKVBlock failed, stream_id: %lld", streamId());
     }
     return ret;
+}
+
+absl::Status GenerateStream::prepareForRemoteCacheLoad(int64_t wait_timeout_ms) {
+    RTP_LLM_PROFILE_FUNCTION();
+    bool cache_load_started = false;
+    {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        if (hasEventWithoutLock(StreamEvents::LoadInitiated)) {
+            return hasErrorWithoutLock() ? absl::InternalError(statusInfoWithoutLock().ToString()) : absl::OkStatus();
+        }
+
+        auto ret = stream_cache_resource_->initKVBlock();
+        if (!ret.ok()) {
+            RTP_LLM_LOG_WARNING("GenerateStream::prepareForRemoteCacheLoad: initKVBlock failed, stream_id: %lld",
+                                streamId());
+            // Re-tag as ResourceExhausted so the caller can tell a real block shortage from a
+            // cache-load failure: initKVBlock reports both shortage and internal errors as
+            // InternalError, and the two map to different gRPC codes upstream.
+            return absl::ResourceExhaustedError("initKVBlock failed: " + std::string(ret.message()));
+        }
+
+        // Preserve remote/memory-cache matching without granting scheduler
+        // admission. DecodeRpcServer already owns an admission slot here.
+        cache_load_started = stream_cache_resource_->asyncLoadCache();
+        reportEventWithoutLock(StreamEvents::LoadInitiated);
+    }
+
+    // This path loads the cache synchronously instead of going through the LOADING_CACHE state,
+    // but it is the same work the state machine used to do, so keep feeding the same two
+    // timers: leaving them unset would make the PD cache-load metrics read as a constant 0,
+    // which looks like "loading is free" rather than "nobody reports it".
+    if (cache_load_started) {
+        recordLoadingCacheStartTime();
+    }
+
+    // The caller (DecodeRpcServer::allocateResource) holds a decode admission slot for the
+    // whole wait, so every exit has to be reachable without the load finishing: loadCacheDone()
+    // only turns true once the coordinator marks the transfer done, so a coordinator thread
+    // that never completes -- or an error/cancel reported on this stream from another thread --
+    // would otherwise spin here forever while pinning that slot.
+    const auto wait_begin = std::chrono::steady_clock::now();
+    while (cache_load_started) {
+        bool cache_load_done = false;
+        {
+            std::lock_guard<std::mutex> lock(*mutex_);
+            if (hasErrorWithoutLock()) {
+                return absl::InternalError(statusInfoWithoutLock().ToString());
+            }
+            cache_load_done = stream_cache_resource_->loadCacheDone();
+        }
+        if (cache_load_done) {
+            break;
+        }
+        if (wait_timeout_ms > 0) {
+            const auto waited_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now() - wait_begin)
+                                       .count();
+            if (waited_ms >= wait_timeout_ms) {
+                return absl::DeadlineExceededError("wait remote cache load timeout after "
+                                                   + std::to_string(waited_ms) + "ms, stream_id: "
+                                                   + std::to_string(streamId()));
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (cache_load_started) {
+        recordLoadingCacheDoneTime();
+    }
+
+    if (hasError()) {
+        return absl::InternalError(statusInfo().ToString());
+    }
+    return absl::OkStatus();
 }
 
 void GenerateStream::fakeInitKVBlock(size_t reserved_blocks) {

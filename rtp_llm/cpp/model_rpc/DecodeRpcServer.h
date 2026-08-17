@@ -3,6 +3,8 @@
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/DecodeGenerateContext.h"
+#include "rtp_llm/cpp/model_rpc/DecodeAdmissionController.h"
+#include "rtp_llm/cpp/model_rpc/DecodeAdmissionStatus.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 
@@ -96,9 +98,11 @@ private:
                                                           const std::vector<std::string>& buffer_debug_infos);
 
 private:
-    autil::ThreadPoolBasePtr thread_pool_;
-    std::atomic<size_t>      onflight_load_cache_requests_{0};
-    size_t                   model_id;
+    autil::ThreadPoolBasePtr  thread_pool_;
+    std::atomic<size_t>       onflight_load_cache_requests_{0};
+    DecodeAdmissionController decode_admission_;
+    bool                      admission_enabled_ = true;
+    size_t                    model_id;
 };
 
 }  // namespace rtp_llm

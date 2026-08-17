@@ -74,6 +74,9 @@ bool RpcMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(allocate_resource_rt_us_metric, "rtp_llm_rpc_allocate_resource_rt_us");
     REGISTER_GAUGE_MUTABLE_METRIC(load_cache_from_prefill_rt_us_metric, "rtp_llm_rpc_load_cache_from_prefill_rt_us");
     REGISTER_GAUGE_MUTABLE_METRIC(local_generate_rt_us_metric, "rtp_llm_rpc_local_generate_rt_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(admission_wait_us_metric, "rtp_llm_rpc_decode_admission_wait_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(admission_active_slots_metric, "rtp_llm_rpc_decode_admission_active_slots");
+    REGISTER_QPS_MUTABLE_METRIC(admission_reject_qps_metric, "rtp_llm_rpc_decode_admission_reject_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(load_cache_min_rt_us_metric, "rtp_llm_rpc_load_cache_min_rt_us");
     REGISTER_GAUGE_MUTABLE_METRIC(load_cache_max_rt_us_metric, "rtp_llm_rpc_load_cache_max_rt_us");
     REGISTER_GAUGE_MUTABLE_METRIC(load_cache_polling_cost_us_metric, "rtp_llm_rpc_load_cache_polling_cost_us");
@@ -184,6 +187,9 @@ void RpcMetrics::report(const kmonitor::MetricsTags* tags, RpcMetricsCollector* 
     REPORT_GAUGE(allocate_resource_rt_us);
     REPORT_GAUGE(load_cache_from_prefill_rt_us);
     REPORT_GAUGE(local_generate_rt_us);
+    REPORT_GAUGE(admission_wait_us);
+    REPORT_GAUGE(admission_active_slots);
+    REPORT_QPS(admission_reject_qps);
     REPORT_GAUGE(load_cache_min_rt_us);
     REPORT_GAUGE(load_cache_max_rt_us);
     REPORT_GAUGE(load_cache_polling_cost_us);

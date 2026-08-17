@@ -2014,6 +2014,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("max_rpc_timeout_ms", &PDSepConfig::max_rpc_timeout_ms)
         .def_readwrite("worker_port_offset", &PDSepConfig::worker_port_offset)
         .def_readwrite("decode_entrance", &PDSepConfig::decode_entrance)
+        .def_readwrite("decode_admission_limit", &PDSepConfig::decode_admission_limit)
         .def("to_string", &PDSepConfig::to_string)
         .def(py::pickle(
             [](const PDSepConfig& self) {
@@ -2036,10 +2037,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.load_cache_timeout_ms,
                                       self.max_rpc_timeout_ms,
                                       self.worker_port_offset,
-                                      self.decode_entrance);
+                                      self.decode_entrance,
+                                      self.decode_admission_limit);
             },
             [](py::tuple t) {
-                if (t.size() != 20)
+                if (t.size() != 21)
                     throw std::runtime_error("Invalid state!");
                 PDSepConfig c;
                 try {
@@ -2063,6 +2065,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.max_rpc_timeout_ms              = t[17].cast<int64_t>();
                     c.worker_port_offset              = t[18].cast<int64_t>();
                     c.decode_entrance                 = t[19].cast<bool>();
+                    c.decode_admission_limit          = t[20].cast<int64_t>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("PDSepConfig unpickle error: ") + e.what());
                 }

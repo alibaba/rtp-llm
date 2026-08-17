@@ -54,6 +54,18 @@ def init_pd_separation_group_args(parser, pd_separation_config):
     )
 
     pd_separation_group.add_argument(
+        "--decode_admission_limit",
+        env_name="DECODE_ADMISSION_LIMIT",
+        bind_to=(pd_separation_config, "decode_admission_limit"),
+        type=int,
+        default=-1,
+        help="Decode 角色准入的端到端并发请求上限（注意与 max_generate_batch_size 单位不同："
+        "后者是一次前向的批内行数）；<0 表示按 max_generate_batch_size 推导（默认）；"
+        "0 表示关闭准入门，由 scheduler 等待队列承担背压（回退到未引入准入门前的行为）；"
+        ">0 表示显式指定上限",
+    )
+
+    pd_separation_group.add_argument(
         "--decode_retry_times",
         env_name="DECODE_RETRY_TIMES",
         bind_to=(pd_separation_config, "decode_retry_times"),
