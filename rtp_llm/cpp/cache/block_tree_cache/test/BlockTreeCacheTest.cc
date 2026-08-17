@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <thread>
 
+#include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
@@ -240,6 +241,27 @@ TEST_F(BlockTreeCacheTest, AccumulateTransferBytesAggregatesDescriptors) {
     const auto bytes_it = transfer_bytes.find({device_pool->poolName(), CacheGroupType::FULL});
     ASSERT_NE(bytes_it, transfer_bytes.end());
     EXPECT_EQ(bytes_it->second, 2 * device_pool->blockSizeBytes());
+}
+
+TEST_F(BlockTreeCacheTest, ReportTransferFinishedAcceptsSuccessfulDescriptors) {
+    const std::vector<GroupSetPtr>&       group_sets = cache_->groupSets();
+    const std::vector<TransferDescriptor> descs      = {
+        TransferDescriptor::deviceToHost(0, {1}, 10),
+        TransferDescriptor::deviceToHost(0, {2}, 11),
+    };
+    kmonitor::MetricsTags tags;
+    BlockTreeCacheMetricsReporter reporter;
+    reporter.setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", tags));
+
+    const int64_t begin_time_us =
+        reporter.reportTransferStarted(CacheTransferOperation::STORE, Tier::DEVICE, Tier::HOST);
+    reporter.reportTransferFinished(
+        CacheTransferOperation::STORE, Tier::DEVICE, Tier::HOST, descs.size(), begin_time_us, true, descs, group_sets);
+
+    const size_t operation_index = static_cast<size_t>(CacheTransferOperation::STORE);
+    const size_t direction_index =
+        static_cast<size_t>(BlockTreeCacheMetricsReporter::transferDirectionIndex(Tier::DEVICE, Tier::HOST));
+    EXPECT_EQ(reporter.transfer_in_flight_[operation_index][direction_index].load(), 0);
 }
 
 TEST_F(BlockTreeCacheTest, InsertPublishesAndShutdownRetiresDeviceBlockMapping) {

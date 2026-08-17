@@ -371,13 +371,15 @@ int64_t BlockTreeCacheMetricsReporter::reportTransferStarted(CacheTransferOperat
     return begin_time_us;
 }
 
-void BlockTreeCacheMetricsReporter::reportTransferFinished(CacheTransferOperation        operation,
-                                                           Tier                          source_tier,
-                                                           Tier                          target_tier,
-                                                           size_t                        block_count,
-                                                           int64_t                       begin_time_us,
-                                                           bool                          success,
-                                                           const BlockTreeTransferBytes& transfer_bytes) {
+void BlockTreeCacheMetricsReporter::reportTransferFinished(
+    CacheTransferOperation                  operation,
+    Tier                                    source_tier,
+    Tier                                    target_tier,
+    size_t                                  block_count,
+    int64_t                                 begin_time_us,
+    bool                                    success,
+    const std::vector<TransferDescriptor>& successful_descriptors,
+    const std::vector<GroupSetPtr>&        group_sets) {
     if (metrics_reporter_ == nullptr) {
         return;
     }
@@ -388,6 +390,8 @@ void BlockTreeCacheMetricsReporter::reportTransferFinished(CacheTransferOperatio
     const size_t  operation_index = transferOperationIndex(operation);
     const int64_t in_flight =
         transfer_in_flight_[operation_index][static_cast<size_t>(direction_index)].fetch_sub(1) - 1;
+    BlockTreeTransferBytes transfer_bytes;
+    accumulateTransferBytes(successful_descriptors, group_sets, transfer_bytes);
 
     RtpLLMCacheTransferMetricsCollector collector;
     collector.operation   = cacheTransferOperationName(operation);

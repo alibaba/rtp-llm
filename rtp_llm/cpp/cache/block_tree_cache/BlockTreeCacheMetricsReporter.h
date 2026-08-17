@@ -101,20 +101,15 @@ public:
                                 const std::vector<GroupSetPtr>& group_sets) const;
 
     int64_t reportTransferStarted(CacheTransferOperation operation, Tier source_tier, Tier target_tier);
-    void    reportTransferFinished(CacheTransferOperation        operation,
-                                   Tier                          source_tier,
-                                   Tier                          target_tier,
-                                   size_t                        block_count,
-                                   int64_t                       begin_time_us,
-                                   bool                          success,
-                                   const BlockTreeTransferBytes& transfer_bytes);
+    void    reportTransferFinished(CacheTransferOperation                  operation,
+                                   Tier                                    source_tier,
+                                   Tier                                    target_tier,
+                                   size_t                                  block_count,
+                                   int64_t                                 begin_time_us,
+                                   bool                                    success,
+                                   const std::vector<TransferDescriptor>& successful_descriptors,
+                                   const std::vector<GroupSetPtr>&        group_sets);
     void    reportStorePublish(Tier target_tier, size_t accepted_blocks, size_t duplicate_blocks) const;
-    void    accumulateTransferBytes(const TransferDescriptor& desc,
-                                    const GroupSetPtr&        group_set,
-                                    BlockTreeTransferBytes&   transfer_bytes) const;
-    void    accumulateTransferBytes(const std::vector<TransferDescriptor>& descs,
-                                    const std::vector<GroupSetPtr>&        group_sets,
-                                    BlockTreeTransferBytes&                transfer_bytes) const;
 
 private:
     static constexpr size_t kOperationCount = 3;
@@ -127,6 +122,12 @@ private:
                                       int64_t                         finish_time_us,
                                       bool                            report_candidate_times) const;
     void       reportStoreBlocks(Tier target_tier, const char* outcome, size_t block_count) const;
+    void       accumulateTransferBytes(const TransferDescriptor& desc,
+                                       const GroupSetPtr&        group_set,
+                                       BlockTreeTransferBytes&   transfer_bytes) const;
+    void       accumulateTransferBytes(const std::vector<TransferDescriptor>& descs,
+                                       const std::vector<GroupSetPtr>&        group_sets,
+                                       BlockTreeTransferBytes&                transfer_bytes) const;
 
     std::shared_ptr<kmonitor::MetricsReporter>                                     metrics_reporter_;
     std::array<std::array<std::atomic<int64_t>, kDirectionCount>, kOperationCount> transfer_in_flight_{};

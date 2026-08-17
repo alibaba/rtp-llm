@@ -50,10 +50,9 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
     int64_t    disk_transfer_begin_time_us = 0;
     bool       host_transfer_started       = false;
     bool       disk_transfer_started       = false;
-    BlockTreeTransferBytes host_transfer_bytes;
-    BlockTreeTransferBytes disk_transfer_bytes;
-    bool                   host_success = false;
-    bool                   disk_success = false;
+    const std::vector<TransferDescriptor> empty_descriptors;
+    bool                                  host_success = false;
+    bool                                  disk_success = false;
     const auto finish_metrics = [&](bool host_success, bool disk_success) {
         if (host_transfer_started) {
             host_transfer_started = false;
@@ -63,7 +62,8 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
                                                     task.host_to_device_descriptors.size(),
                                                     host_transfer_begin_time_us,
                                                     host_success,
-                                                    host_transfer_bytes);
+                                                    host_success ? task.host_to_device_descriptors : empty_descriptors,
+                                                    group_sets_);
         }
         if (disk_transfer_started) {
             disk_transfer_started = false;
@@ -73,7 +73,8 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
                                                     task.disk_to_device_descriptors.size(),
                                                     disk_transfer_begin_time_us,
                                                     disk_success,
-                                                    disk_transfer_bytes);
+                                                    disk_success ? task.disk_to_device_descriptors : empty_descriptors,
+                                                    group_sets_);
         }
     };
     const auto execute_batches = [&](const std::vector<std::vector<TransferDescriptor>>& batches, int timeout_ms) {
@@ -98,9 +99,6 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
             host_transfer_started = true;
         }
         host_success = execute_batches(host_batches, host_timeout_ms);
-        if (host_success) {
-            metrics_reporter.accumulateTransferBytes(task.host_to_device_descriptors, group_sets_, host_transfer_bytes);
-        }
         finish_metrics(host_success, false);
         if (!host_success) {
             return false;
@@ -112,10 +110,6 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
             disk_transfer_started = true;
         }
         disk_success = execute_batches(disk_batches, disk_timeout_ms);
-        if (disk_success) {
-            metrics_reporter.accumulateTransferBytes(
-                task.disk_to_device_descriptors, group_sets_, disk_transfer_bytes);
-        }
         finish_metrics(host_success, disk_success);
         return disk_success;
     } catch (...) {

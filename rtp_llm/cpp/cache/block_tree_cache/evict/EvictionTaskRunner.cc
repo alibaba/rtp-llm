@@ -16,23 +16,33 @@ EvictionTaskRunner::EvictionTaskRunner(const std::vector<GroupSetPtr>& group_set
 
 EvictionTaskResult EvictionTaskRunner::runTransfer(const EvictionTask&            task,
                                                    BlockTreeCacheMetricsReporter& metrics_reporter) const {
-    EvictionTaskResult     task_result;
-    BlockTreeTransferBytes transfer_bytes;
-    int64_t                transfer_begin_time_us = 0;
-    bool                   transfer_started       = false;
-    bool                   overall_success        = false;
-    const auto             finish_metrics         = [&]() {
+    EvictionTaskResult task_result;
+    int64_t            transfer_begin_time_us = 0;
+    bool               transfer_started       = false;
+    bool               overall_success        = false;
+    const auto         finish_metrics         = [&]() {
         if (!transfer_started) {
             return;
         }
         transfer_started = false;
+        std::vector<TransferDescriptor> successful_descriptors;
+        successful_descriptors.reserve(task.cascade_descs.size() + 1);
+        if (task_result.primary_success) {
+            successful_descriptors.push_back(task.primary_desc);
+        }
+        for (size_t i = 0; i < task_result.cascade_success.size(); ++i) {
+            if (task_result.cascade_success[i]) {
+                successful_descriptors.push_back(task.cascade_descs[i]);
+            }
+        }
         metrics_reporter.reportTransferFinished(CacheTransferOperation::EVICT,
                                                 task.primary_desc.source_tier,
                                                 task.primary_desc.target_tier,
                                                 task.cascade_descs.size() + 1,
                                                 transfer_begin_time_us,
                                                 overall_success,
-                                                transfer_bytes);
+                                                successful_descriptors,
+                                                group_sets_);
     };
 
     try {
@@ -51,9 +61,7 @@ EvictionTaskResult EvictionTaskRunner::runTransfer(const EvictionTask&          
             transfer_dispatcher_->executeMultiRank({task.primary_desc}, transfer_timeout_ms);
         primary_context->waitDone();
         task_result.primary_success = primary_context->success();
-        if (task_result.primary_success) {
-            metrics_reporter.accumulateTransferBytes({task.primary_desc}, group_sets_, transfer_bytes);
-        } else {
+        if (!task_result.primary_success) {
             task_result.cascade_success.assign(task.cascade_descs.size(), false);
             finish_metrics();
             return task_result;
@@ -67,9 +75,6 @@ EvictionTaskResult EvictionTaskRunner::runTransfer(const EvictionTask&          
             const bool cascade_success = cascade_context->success();
             task_result.cascade_success.push_back(cascade_success);
             overall_success = overall_success && cascade_success;
-            if (cascade_success) {
-                metrics_reporter.accumulateTransferBytes({cascade_desc}, group_sets_, transfer_bytes);
-            }
         }
         finish_metrics();
         return task_result;
