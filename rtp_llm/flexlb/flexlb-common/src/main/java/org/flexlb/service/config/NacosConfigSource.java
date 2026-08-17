@@ -127,9 +127,8 @@ final class NacosConfigSource implements ConfigSource {
     private com.alibaba.nacos.api.config.ConfigService createClient(NacosConfig config) throws Exception {
         Properties properties = new Properties();
         properties.put(PropertyKeyConst.SERVER_ADDR, config.getServerAddr());
-        if (!config.getNamespace().isBlank()) {
-            properties.put(PropertyKeyConst.NAMESPACE, config.getNamespace());
-        }
+        properties.put(PropertyKeyConst.IS_USE_CLOUD_NAMESPACE_PARSING, Boolean.FALSE.toString());
+        properties.put(PropertyKeyConst.NAMESPACE, config.getNamespace());
         return NacosFactory.createConfigService(properties);
     }
 
