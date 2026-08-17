@@ -11,6 +11,7 @@ import java.util.Comparator;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.PriorityQueue;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -185,6 +186,60 @@ public class BatcherContext {
         List<BatchItem> candidates = new ArrayList<>(queue);
         candidates.sort(queueOrder);
         return candidates;
+    }
+
+    /**
+     * The first {@code k} items in active queue order — the same prefix as
+     * {@code sortedItems().subList(0, min(k, size))} — via bounded-heap
+     * partial selection in O(n log k) instead of a full O(n log n) sort
+     * (task61 M1, {@code flexlbFlushTopKSortEnabled}).
+     *
+     * <p>Equivalence: the queue order is a total order (Auto-TPM appends a
+     * {@code requestId} tie-break), so the top-k set and its sorted order are
+     * uniquely determined and identical to the full-sort prefix. The heap
+     * keeps the k smallest elements under {@code queueOrder} (root = largest
+     * of the kept ones, hence the reversed comparison), then drains into
+     * ascending order.
+     */
+    List<BatchItem> sortedHeadItems(int k) {
+        if (k <= 0) {
+            return new ArrayList<>();
+        }
+        PriorityQueue<BatchItem> worstFirst =
+                new PriorityQueue<>(k + 1, queueOrder.reversed());
+        for (BatchItem item : queue) {
+            if (worstFirst.size() < k) {
+                worstFirst.add(item);
+            } else if (queueOrder.compare(item, worstFirst.peek()) < 0) {
+                worstFirst.poll();
+                worstFirst.add(item);
+            }
+        }
+        BatchItem[] head = new BatchItem[worstFirst.size()];
+        for (int i = head.length - 1; i >= 0; i--) {
+            head[i] = worstFirst.poll();
+        }
+        List<BatchItem> result = new ArrayList<>(head.length);
+        java.util.Collections.addAll(result, head);
+        return result;
+    }
+
+    /**
+     * Unordered mutable copy of the live queue members. Callers holding
+     * {@link #queueLock()} get a copy consistent with the current queue
+     * version that they may sort outside the lock (task61 M2).
+     */
+    List<BatchItem> copiedItems() {
+        return new ArrayList<>(queue);
+    }
+
+    /**
+     * Live queue members for zero-copy iteration (weakly consistent
+     * iterator; content-stable while {@link #queueLock()} is held on the
+     * Auto-TPM path, where every queue mutation takes the lock).
+     */
+    Iterable<BatchItem> queueItems() {
+        return queue;
     }
 
     /**

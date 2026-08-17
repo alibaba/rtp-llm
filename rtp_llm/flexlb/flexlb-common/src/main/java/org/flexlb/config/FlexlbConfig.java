@@ -378,6 +378,28 @@ public class FlexlbConfig {
     private boolean flexlbAckOnlyReleaseEnabled = true;
 
     /**
+     * Flush-path top-k sort gate (task61 M1): when true (default) the
+     * SLO-budget batcher picks its greedy-fill candidates with a bounded-heap
+     * top-k selection instead of a per-flush full sort of the queue. Only
+     * effective on the Auto-TPM path, whose queue comparator is a total order
+     * (requestId tie-break) — that is what makes the top-k prefix provably
+     * identical to the full-sort prefix. Set to false to restore the full
+     * per-flush sort.
+     */
+    private boolean flexlbFlushTopKSortEnabled = true;
+
+    /**
+     * Snapshot sort placement gate (task61 M2): when true (default) the
+     * prefill queue snapshot copies items and captures the queue version
+     * inside the queue lock, then sorts outside the lock. The copy+version
+     * pair is captured atomically under the lock and the sort is a pure
+     * function of the thread-private copy, so the "version unchanged =>
+     * content unchanged" optimistic-concurrency invariant is preserved.
+     * Set to false to restore sorting inside the lock.
+     */
+    private boolean flexlbSnapshotSortOutsideLockEnabled = true;
+
+    /**
      * Maximum threads in the batch dispatch executor pool.
      */
     private int flexlbBatchDispatchPoolSize = 64;

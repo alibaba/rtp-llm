@@ -174,7 +174,7 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
         long maxPredMs = headPredMs + Math.max(0, budgetMs);
         int scanned = 0;
 
-        for (BatchItem c : ctx.sortedItems()) {
+        for (BatchItem c : pickCandidates(ctx, maxScan)) {
             if (c == head) {
                 continue;
             }
@@ -198,6 +198,32 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
             }
         }
         return new BatchPick(picked, headPredMs, Math.max(headPredMs, (long) predictor.predictBatchMs(picked)));
+    }
+
+    /**
+     * Candidates for the greedy fill in active queue order. The loop above
+     * consumes at most the first {@code maxScan + 1} sorted items (the +1 is
+     * the skipped head), so with {@code flexlbFlushTopKSortEnabled} (task61
+     * M1, default on) a bounded-heap top-k selection replaces the per-flush
+     * full sort — O(n log k) vs O(n log n) on the queue-depth-driven hotspot
+     * (JFR: PriorityOrdering + TimSort ≈ 70% CPU under deep queues).
+     *
+     * <p>Gated on Auto-TPM as well: only {@code AUTO_TPM_QUEUE_ORDER} is a
+     * total order (requestId tie-break), which makes the top-k prefix
+     * provably identical to the full-sort prefix. The legacy sort-key order
+     * allows ties, so the legacy path keeps the original full sort
+     * byte-for-byte.
+     */
+    private static List<BatchItem> pickCandidates(BatcherContext ctx, int maxScan) {
+        if (ctx.cfg().isFlexlbFlushTopKSortEnabled() && ctx.cfg().isAutoTpmEnabled()) {
+            // The scan visits at most maxScan non-head items (the
+            // batchMaxCount break only tightens that bound when trial picks
+            // succeed, so it must not shrink k); +1 covers the head's slot
+            // in the sorted prefix.
+            int k = Math.max(1, maxScan) + 1;
+            return ctx.sortedHeadItems(k);
+        }
+        return ctx.sortedItems();
     }
 
     // ==================== Target batch size ====================

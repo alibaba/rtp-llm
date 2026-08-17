@@ -46,26 +46,52 @@ public final class PrefillQueueManager {
      * Consistent point-in-time view of the queue for eviction planning:
      * version + per-item {@link QueuedRequestSnapshot} in queue order.
      * The hard capacity reuses {@code flexlbBatchQueueMaxSize} (0 = unbounded).
+     *
+     * <p>With {@code flexlbSnapshotSortOutsideLockEnabled} (task61 M2, default
+     * on) only the membership copy and the version capture happen under the
+     * queue lock; the O(n log n) sort runs on the thread-confined copy outside
+     * it. Correctness: the copy and the version are captured atomically under
+     * the same lock hold, sorting is a pure function of the copy, so the
+     * "version unchanged ⇒ queue content unchanged" invariant and the output
+     * order are both preserved bit-for-bit.
      */
     public PrefillQueueSnapshot snapshot() {
+        if (ctx.cfg().isFlexlbSnapshotSortOutsideLockEnabled()) {
+            List<BatchItem> queued;
+            long version;
+            ctx.queueLock().lock();
+            try {
+                queued = ctx.copiedItems();
+                version = batcher.queueVersion();
+            } finally {
+                ctx.queueLock().unlock();
+            }
+            queued.sort(ctx.queueOrder());
+            return new PrefillQueueSnapshot(ctx.key(), version,
+                    ctx.cfg().getFlexlbBatchQueueMaxSize(), toItemSnapshots(queued));
+        }
         ctx.queueLock().lock();
         try {
             // Only live queue members are actionable eviction victims. A
             // staged callback member remains capacity-charged, but cannot be
             // removed by the versioned queue mutation APIs.
             List<BatchItem> queued = ctx.sortedItems();
-            List<QueuedRequestSnapshot> items = new ArrayList<>(queued.size());
-            for (BatchItem item : queued) {
-                items.add(new QueuedRequestSnapshot(
-                        item.requestId(), item.priority(), item.deadlineMs(),
-                        item.enqueuedAtMs(), item.seqLen(), item.hitCache(),
-                        QueuedRequestSnapshot.PREFILL_QUEUED));
-            }
             return new PrefillQueueSnapshot(ctx.key(), batcher.queueVersion(),
-                    ctx.cfg().getFlexlbBatchQueueMaxSize(), items);
+                    ctx.cfg().getFlexlbBatchQueueMaxSize(), toItemSnapshots(queued));
         } finally {
             ctx.queueLock().unlock();
         }
+    }
+
+    private static List<QueuedRequestSnapshot> toItemSnapshots(List<BatchItem> queued) {
+        List<QueuedRequestSnapshot> items = new ArrayList<>(queued.size());
+        for (BatchItem item : queued) {
+            items.add(new QueuedRequestSnapshot(
+                    item.requestId(), item.priority(), item.deadlineMs(),
+                    item.enqueuedAtMs(), item.seqLen(), item.hitCache(),
+                    QueuedRequestSnapshot.PREFILL_QUEUED));
+        }
+        return items;
     }
 
     /**
@@ -73,17 +99,27 @@ public final class PrefillQueueManager {
      * {@code itemsAhead → batchCyclesAhead → estimatedWaitMs}, using the
      * dispatch-interval sliding average as the per-cycle cost and the head's
      * remaining window as the partial first cycle.
+     *
+     * <p>task61 L2: the previous implementation sorted the whole queue under
+     * the lock only to take the ordered head and count the items ahead. The
+     * count is order-independent, and the head is {@code queue.peek()} — the
+     * backing {@link java.util.concurrent.PriorityBlockingQueue} is ordered
+     * by the same comparator as {@code sortedItems()}, which on the Auto-TPM
+     * path (the only caller of this estimate) is a total order thanks to the
+     * {@code requestId} tie-break, so the heap root is exactly the sorted
+     * head. Iterating the raw queue with the primitive comparison removes the
+     * per-call O(n log n) sort and the per-item probe allocation (JFR:
+     * PriorityOrdering sort CPU + ordersBefore 11.69% allocation) from the
+     * queue-lock critical section that the submit path enqueues behind.
      */
     public long estimateWaitMs(int priority, long deadlineMs, long requestId) {
         long now = ctx.now();
         int itemsAhead = 0;
-        BatchItem head = null;
+        BatchItem head;
         ctx.queueLock().lock();
         try {
-            for (BatchItem item : ctx.sortedItems()) {
-                if (head == null) {
-                    head = item;
-                }
+            head = ctx.peek();
+            for (BatchItem item : ctx.queueItems()) {
                 if (ordersBefore(item, priority, deadlineMs, now, requestId)) {
                     itemsAhead++;
                 }
@@ -109,19 +145,17 @@ public final class PrefillQueueManager {
      * time ({@code now}) — it has not been enqueued yet.
      *
      * <p>Delegates the priority + enqueue-seq comparison to
-     * {@link PriorityOrdering#STRICT} via a temporary {@link Prioritized}
-     * view of the probe, then breaks residual ties by {@code requestId}.
-     * The {@code deadlineMs} parameter is retained for call-site stability
-     * but is no longer part of the ordering rule (PR-B removed the deadline
-     * key).
+     * {@link PriorityOrdering#compareStrict} (task61 L1: the primitive form
+     * of {@code STRICT}, replacing the temporary {@link Prioritized} probe
+     * allocated per item — JFR allocation hotspot 11.69%), then breaks
+     * residual ties by {@code requestId}. The {@code deadlineMs} parameter is
+     * retained for call-site stability but is no longer part of the ordering
+     * rule (PR-B removed the deadline key).
      */
     private static boolean ordersBefore(BatchItem item, int priority, long deadlineMs,
                                         long arrivalMs, long requestId) {
-        Prioritized probe = new Prioritized() {
-            @Override public int priority() { return priority; }
-            @Override public long enqueueSeq() { return arrivalMs; }
-        };
-        int cmp = PriorityOrdering.STRICT.compare(item, probe);
+        int cmp = PriorityOrdering.compareStrict(item.priority(), item.enqueueSeq(),
+                priority, arrivalMs);
         if (cmp != 0) {
             return cmp < 0;
         }

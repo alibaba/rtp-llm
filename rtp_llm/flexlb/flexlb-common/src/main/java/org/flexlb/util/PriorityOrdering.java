@@ -37,11 +37,31 @@ public final class PriorityOrdering {
      * <p>Priority descending, then enqueue-sequence ascending. This is the
      * shared ordering primitive for both the top-level request queue
      * ({@code QueueManager}) and the per-worker batcher queue
-     * ({@code WorkerBatcher}).
+     * ({@code WorkerBatcher}). Delegates to {@link #compareStrict} so the
+     * boxed comparator and the primitive hot-path comparison can never
+     * diverge.
      */
-    public static final Comparator<Prioritized> STRICT = Comparator
-            .comparingInt(Prioritized::priority).reversed()
-            .thenComparingLong(Prioritized::enqueueSeq);
+    public static final Comparator<Prioritized> STRICT = (a, b) ->
+            compareStrict(a.priority(), a.enqueueSeq(), b.priority(), b.enqueueSeq());
+
+    /**
+     * Primitive form of the {@link #STRICT} ordering rule — priority
+     * descending, then enqueue-sequence ascending — for hot paths that must
+     * not allocate a {@link Prioritized} view per comparison (e.g. the
+     * per-item probe comparison in {@code PrefillQueueManager}, JFR
+     * allocation hotspot).
+     *
+     * @return negative when (priorityA, seqA) orders before (priorityB, seqB),
+     *         positive when after, 0 on a full tie
+     */
+    public static int compareStrict(int priorityA, long enqueueSeqA,
+                                    int priorityB, long enqueueSeqB) {
+        int byPriority = Integer.compare(priorityB, priorityA);
+        if (byPriority != 0) {
+            return byPriority;
+        }
+        return Long.compare(enqueueSeqA, enqueueSeqB);
+    }
 
     /**
      * Returns {@link #STRICT} typed to a specific {@link Prioritized}
