@@ -1588,7 +1588,12 @@ size_t invokeComputeTopkLastDimWorkspaceSize(
     SizeType32 batchSize, SizeType32 inputLength, SizeType32 k, bool is_largest, int force_path)
 {
 #if USING_ROCM
-    if (k <= 512) {
+    // Gate is k<=256 (was 512): beam search used to pass k=2*beamWidth, so beams
+    // <=256 took WarpSort. After the 2k->1k change, k=beamWidth; 256 keeps the exact
+    // pre-change path partition and avoids newly exposing beams 257..512 to WarpSort's
+    // tie-break semantics, whose order and boundary-tie set among exactly equal values
+    // differ from the radix path below.
+    if (k <= 256) {
         return rocm_efficient_topk_workspace_size<T>(batchSize, inputLength, k, is_largest);
     }
 #endif
@@ -1627,7 +1632,8 @@ void invokeTopkLastDim(SizeType32 batchSize, SizeType32 inputLength, SizeType32 
     T* out_val_ = reinterpret_cast<T*>(out_val);
     SizeType32* out_idx_ = reinterpret_cast<SizeType32*>(out_idx);
 #if USING_ROCM
-    if (k <= 512) {
+    // k<=256 (was 512): keep the pre-2k->1k path partition, see workspace-size query.
+    if (k <= 256) {
         rocm_efficient_topk<T>(batchSize, inputLength, k, is_largest, in, out_val_, out_idx_, workspace, stream);
         return;
     }

@@ -25,12 +25,25 @@
 #include "decodingCommon.h"
 #include "topkLastDim.h" // Air TopK
 
+#include <cstdlib>
+
 #define BEAM_SEARCH_DEBUG 0
 
 namespace tensorrt_llm
 {
 namespace kernels
 {
+// Runtime rollback switch for the V2 top-k radix routing: 0/unset = auto route,
+// 1 = force multi-block, 2 = force one-block (see topkLastDim.h). Cached so the
+// workspace-size query and the run always agree on the path.
+inline int beamTopkForcePath()
+{
+    static int const force_path = [] {
+        char const* env = std::getenv("RTP_LLM_BEAM_TOPK_FORCE_PATH");
+        return env ? std::atoi(env) : 0;
+    }();
+    return force_path;
+}
 static size_t constexpr kMaxBeamWidth = 1024;           // Max beam width supported in TRT-LLM now
 static size_t constexpr kMaxBeamWidthForV1 = 8;         // Max beam width for V1 workflow (V2 for larger)
 static size_t constexpr kMaxBeamWidthArrayLength = 8;   // Max length of beam width array of a request

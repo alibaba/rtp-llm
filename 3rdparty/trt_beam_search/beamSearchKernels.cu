@@ -154,11 +154,11 @@ __global__ void addCumLogProbsKernel(
     int const bid = blockIdx.x; // Index of request in batch
     runtime::SizeType32 const slot = batchSlots ? batchSlots[bid] : bid;
     float const diversityRate{diversityRates == nullptr ? kBeamSearchDiversity : diversityRates[slot]};
-    T* pLocalLogProbs = pStage1LogProbs + bid * nBMIn * nBMOut * 2;
+    T* pLocalLogProbs = pStage1LogProbs + bid * nBMIn * nBMOut;
 
-    for (int i = threadIdx.x; i < nBMIn * nBMOut * 2; i += blockDim.x)
+    for (int i = threadIdx.x; i < nBMIn * nBMOut; i += blockDim.x)
     {
-        int const iBMIn = i / (nBMOut * 2);
+        int const iBMIn = i / nBMOut;
         if (finished && finished[slot * nBMIn + iBMIn].isFinished())
         {
             pLocalLogProbs[i] += endIds && (i == endIds[slot]) ? T(1.0f) : T(0.0f);
@@ -196,7 +196,11 @@ template void launchAddCumLogProbs<half>(
 __global__ void gatherId(int const* __restrict pStage1Id, int* __restrict pStage2Id, size_t const nBS,
     size_t const nBMIn, size_t const nBMOut, size_t const nV)
 {
-    // Use topK output `pStage1Id` and `pStage1Id` to get the index of a new token in `logProbs` for each beam.
+    // Use topK output `pStage1Id` and `pStage2Id` to get the index of a new token in `logProbs` for each beam.
+    // Note: the worked examples below still show the old 2x-oversampled layout (divisors (nBM * 2) and
+    // (nBMOut * 2)); the code now keeps nBMOut candidates per beam (the 2x oversampling only served the
+    // CBA/end-token path, which is not wired here), so divisors below read as nBMOut.
+    // The div/mod structure illustrated is unchanged.
     //
     // clang-format off
     //
@@ -245,14 +249,14 @@ __global__ void gatherId(int const* __restrict pStage1Id, int* __restrict pStage
     //
     // clang-format on
     int const a = blockIdx.x; // Index of request in batch
-    for (int j = threadIdx.x; j < nBMOut * 2; j += blockDim.x)
+    for (int j = threadIdx.x; j < nBMOut; j += blockDim.x)
     {
-        int const index = a * (nBMOut * 2) + j;
+        int const index = a * nBMOut + j;
         int const stage2Id = pStage2Id[index];
-        int const b = stage2Id / (nBMOut * 2);
+        int const b = stage2Id / nBMOut;
         int const c = a * nBMIn + b;
-        int const d = stage2Id % (nBMOut * 2);
-        int const e = pStage1Id[c * (nBMOut * 2) + d];
+        int const d = stage2Id % nBMOut;
+        int const e = pStage1Id[c * nBMOut + d];
         int const f = b * nV;
         pStage2Id[index] = e + f;
     }

@@ -201,10 +201,10 @@ BeamSearchConfig configureBeamSearch(runtime::SizeType32 batchSize,
         size_t const nByteStage1Ids = roundUp(sizeof(int) * batchSize * beamWidthIn * beamWidthOut * 2, 4);
         size_t const nByteStage2LogProbs = roundUp(sizeof(T) * batchSize * beamWidthOut * 2, 4);
         size_t const nByteStage2Ids = roundUp(sizeof(int) * batchSize * beamWidthOut * 2, 4);
-        size_t const nByteStage1TopK
-            = invokeComputeTopkLastDimWorkspaceSize<T>(batchSize * beamWidthIn, vocabSize, beamWidthOut * 2, true);
+        size_t const nByteStage1TopK = invokeComputeTopkLastDimWorkspaceSize<T>(
+            batchSize * beamWidthIn, vocabSize, beamWidthOut, true, beamTopkForcePath());
         size_t const nByteStage2TopK = invokeComputeTopkLastDimWorkspaceSize<T>(
-            batchSize, beamWidthIn * beamWidthOut * 2, beamWidthOut * 2, true);
+            batchSize, beamWidthIn * beamWidthOut, beamWidthOut, true, beamTopkForcePath());
         size_t const nByteStage3 = sizeof(T) * beamWidthIn * beamWidthOut * 2;
         config.mWorkspaceSize = nByteStage2LogProbs + nByteStage2Ids
             + std::max(nByteStage1LogProbs + nByteStage1Ids + std::max(nByteStage1TopK, nByteStage2TopK), nByteStage3);
