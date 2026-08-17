@@ -64,8 +64,6 @@ struct MallocInfo {
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
     int64_t                 request_id          = 0;
-    // Upper bound in tokens for prefix reuse; -1 means unrestricted.
-    int                     max_reuse_len       = -1;
     bool                    verbose             = true;  // for failed log
     bool                    reuse_cache         = true;
     bool                    enable_device_cache = true;

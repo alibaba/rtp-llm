@@ -9,9 +9,13 @@ last-layer hidden states，过自定义 MLP 打分，打分随生成结果一起
     # 相对 .py 路径从 CHECKPOINT_PATH 解析，可随 ckpt 一起发布
     CUSTOM_OUTPUT_PROCESSOR=custom_output_processor.py
     # 也支持绝对 .py 路径或 Python 模块 dotted path
+    # 选择模式一：固定位置。支持正数绝对位置和负数尾部相对位置。
     CUSTOM_OUTPUT_TOKEN_POSITION=-2
-    # 可选：校验倒数第二个 token，不扫描 prompt
+    # 可选：O(1) 校验该位置确实是预期特殊 token。
     CUSTOM_OUTPUT_EXPECTED_TOKEN_ID=151644
+
+    # 选择模式二：按 token ID 反向寻找最后一次出现（与位置模式互斥）。
+    # CUSTOM_OUTPUT_TRACKED_TOKEN_ID=151644
     CUSTOM_PROCESSOR_MODE=eager                     # 默认 eager；compiled 见下
 
 CUSTOM_PROCESSOR_MODE=compiled（AOT 档，生产推荐）:

@@ -486,32 +486,6 @@ TEST_F(SingleTypeKVCacheAllocatorTest, PrefixReuseDisabledSkipsMatchAndInsert) {
     EXPECT_FALSE(shared_cache->contains(301));
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, PrefixReuseStopsBeforeCustomOutputToken) {
-    auto config       = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/16, /*seq_size_per_block=*/4);
-    auto shared_cache = std::make_shared<SharedBlockCache>();
-    allocator_        = std::make_shared<SingleTypeKVCacheAllocator>(config);
-    allocator_->setSharedBlockCache(shared_cache);
-    ASSERT_TRUE(allocator_->init());
-
-    auto seed_resource = createBatchKVCacheResource(/*batch_size=*/1, config);
-    seed_resource->setBatchCacheKeys(0, CacheKeysType{100, 101, 102});
-    auto seed_tokens = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
-    ASSERT_TRUE(allocator_->malloc(MallocInfo{seed_resource, seed_tokens}).success);
-    allocator_->insertIntoCache(InsertInfo{seed_resource, seed_tokens, /*is_resident=*/false});
-    allocator_->free(FreeInfo{seed_resource, seed_tokens});
-
-    auto hit_resource = createBatchKVCacheResource(/*batch_size=*/1, config);
-    hit_resource->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103});
-    auto hit_tokens = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/16, /*seq_size_per_block=*/4);
-    MallocInfo hit_info{hit_resource, hit_tokens};
-    hit_info.max_reuse_len = 6;
-
-    auto result = allocator_->malloc(hit_info);
-    ASSERT_TRUE(result.success);
-    EXPECT_EQ(result.reuse_len, 4);
-    EXPECT_LT(result.reuse_len, hit_info.max_reuse_len);
-}
-
 // Test convert index to addr
 TEST_F(SingleTypeKVCacheAllocatorTest, ConvertIndexToAddr) {
     auto config = createSingleTypeTestConfig();

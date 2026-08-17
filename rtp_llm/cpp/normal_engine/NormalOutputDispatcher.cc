@@ -108,8 +108,6 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     const torch::Tensor success_cpu   = copyToPinnedCpuAsync(sampler_output.success, need_d2h_sync);
     const torch::Tensor custom_output_cpu =
         copyToPinnedCpuAsync(merge_outputs.model_output.custom_output, need_d2h_sync);
-    const torch::Tensor custom_output_valid_mask_cpu =
-        copyToPinnedCpuAsync(merge_outputs.model_output.custom_output_valid_mask, need_d2h_sync);
     syncPinnedCpuCopies(need_d2h_sync);
     RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(token_ids_cpu).c_str());
     int  batch_idx_in     = 0;
@@ -127,25 +125,14 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
         // custom_output rows cover context streams only (decode streams come
         // first in the batch), so index them relative to the decode tail.
         torch::Tensor batch_custom_output;
-        bool          custom_output_valid = false;
+        bool          has_custom_output = false;
         const bool custom_output_failed = !merge_outputs.model_output.custom_output_error.empty()
                                           && batch_idx_in >= total_decode_batch_size;
         if (custom_output_cpu.defined() && batch_idx_in >= total_decode_batch_size
             && batch_idx_in - total_decode_batch_size + cur_batch_size <= custom_output_cpu.size(0)) {
             const int context_row = batch_idx_in - total_decode_batch_size;
-            custom_output_valid = !custom_output_valid_mask_cpu.defined();
-            if (custom_output_valid_mask_cpu.defined()
-                && context_row + cur_batch_size <= custom_output_valid_mask_cpu.size(0)) {
-                const auto* mask = custom_output_valid_mask_cpu.data_ptr<bool>() + context_row;
-                custom_output_valid = mask[0];
-                for (int i = 1; i < cur_batch_size; ++i) {
-                    RTP_LLM_CHECK_WITH_INFO(mask[i] == custom_output_valid,
-                                            "custom output validity differs within stream batch");
-                }
-            }
-            if (custom_output_valid) {
-                batch_custom_output = custom_output_cpu.narrow(0, context_row, cur_batch_size);
-            }
+            has_custom_output  = true;
+            batch_custom_output = custom_output_cpu.narrow(0, context_row, cur_batch_size);
         }
 
         dispatchSingleStream(stream,
@@ -158,7 +145,7 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
                              token_ids_cpu,
                              success_cpu,
                              batch_custom_output,
-                             custom_output_valid,
+                             has_custom_output,
                              custom_output_failed);
 
         batch_idx_in += cur_batch_size;
@@ -180,7 +167,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                                   const torch::Tensor& token_ids_cpu,
                                                   const torch::Tensor& success_cpu,
                                                   const torch::Tensor& batch_custom_output,
-                                                  bool                 custom_output_valid,
+                                                  bool                 has_custom_output,
                                                   bool                 custom_output_failed) const {
 
     const auto&  model_output      = merge_outputs.model_output;
@@ -357,7 +344,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                  loss,
                                  src_batch_indices,
                                  all_hidden_states,
-                                 custom_output_valid ? batch_custom_output : torch::Tensor(),
+                                 has_custom_output ? batch_custom_output : torch::Tensor(),
                                  /*update_remote_generate=*/true,
                                  /*force_update_info=*/false,
                                  std::move(prompt_logits_output),

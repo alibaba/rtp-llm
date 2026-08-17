@@ -31,7 +31,7 @@ private:
                               const torch::Tensor& token_ids_cpu,
                               const torch::Tensor& success_cpu,
                               const torch::Tensor& batch_custom_output = {},
-                              bool                 custom_output_valid  = false,
+                              bool                 has_custom_output    = false,
                               bool                 custom_output_failed = false) const;
 };
 

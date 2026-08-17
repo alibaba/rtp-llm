@@ -186,7 +186,11 @@ message GenerateInputPB {
     int32 batch_group_size = 7;
     google.protobuf.Int64Value batch_group_id = 8;
     RequestInfoPB request_info = 9;
-    google.protobuf.Int32Value custom_output_token_position = 10;
+    oneof custom_output_selector {
+        google.protobuf.Int32Value custom_output_token_position = 10;
+        google.protobuf.Int32Value custom_output_tracked_token_id = 11;
+    }
+    google.protobuf.Int32Value custom_output_expected_token_id = 12;
 }
 
 message AuxInfoPB {
