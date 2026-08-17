@@ -777,10 +777,18 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             is_deep_gemm_e8m0_used,
         )
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
+        from rtp_llm.models_py.utils.arch import is_sm120
+        from rtp_llm.utils.sm120_fp8_backend import resolve_sm120_fp8_backend
+
+        layout_device = None if torch.cuda.is_available() else torch.device(device)
+        use_cutlass = (
+            is_sm120(layout_device) and resolve_sm120_fp8_backend() == "cutlass"
+        )
+        use_e8m0 = is_deep_gemm_e8m0_used() and not use_cutlass
 
         # e8m0 not reshape, weight scale need be non contiguous
         # TODO: rm reshape all time
-        if not is_deep_gemm_e8m0_used():
+        if not use_e8m0:
             kernel_weight = (
                 kernel_weight.reshape(kernel_weight.shape[-1], -1)
                 if kernel_weight.dim() == 2
@@ -789,7 +797,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         processed_res[self.kernel.name] = kernel_weight
         if self.scale is not None:
             scale_weight = processed_res[self.scale.name]
-            if not is_deep_gemm_e8m0_used():
+            if not use_e8m0:
                 scale_weight = (
                     scale_weight.reshape(scale_weight.shape[-1], -1)
                     if scale_weight.dim() == 2
@@ -803,11 +811,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             )
             # kernel_weight, scale_weight = load_config.exported_device.convert_fp8_weight_params(kernel_weight, scale_weight)
 
-            # Online SM100/SM120 loading can already produce the final packed
-            # UE8M0 representation directly from source weights.  Legacy/pre-quantized
-            # inputs still arrive with floating-point block scales and require
-            # the old dequantize/requantize conversion here.
-            if is_deep_gemm_e8m0_used() and scale_weight.dtype != torch.int32:
+            if use_e8m0 and scale_weight.dtype != torch.int32:
                 kernel_weight, scale_weight = requant_weight_ue8m0(
                     kernel_weight, scale_weight
                 )
@@ -875,10 +879,15 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
             is_deep_gemm_e8m0_used,
         )
+        from rtp_llm.models_py.utils.arch import is_sm120
+        from rtp_llm.utils.sm120_fp8_backend import resolve_sm120_fp8_backend
 
         is_dense_weight = self.kernel.name not in (W.moe_w1, W.moe_w2)
         direct_ue8m0 = (
-            self.scale is not None and is_dense_weight and is_deep_gemm_e8m0_used()
+            self.scale is not None
+            and is_dense_weight
+            and is_deep_gemm_e8m0_used()
+            and not (is_sm120(None) and resolve_sm120_fp8_backend() == "cutlass")
         )
         if direct_ue8m0 and self.group_size != 128:
             raise ValueError(
@@ -922,7 +931,7 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         if self.scale:
             scale = scale.T if scale.dim() == 2 and not direct_ue8m0 else scale
             # Packed UE8M0 scales intentionally use a non-contiguous TMA
-            # layout (stride(-2) == 1).  Do not normalize that layout here.
+            # layout; do not normalize it before DeepGEMM consumes it.
             scale = scale.to(device) if direct_ue8m0 else scale.contiguous().to(device)
             res.update({self.scale.name: scale})
 

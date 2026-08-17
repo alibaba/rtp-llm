@@ -38,6 +38,12 @@ py_test(
 )
 
 py_test(
+    name = "test_per_block_fp8_layout",
+    srcs = ["test_per_block_fp8_layout.py"],
+    deps = py_test_deps,
+)
+
+py_test(
     name = "test_model_weight_info",
     srcs = ["test_model_weight_info.py"],
     deps = py_test_deps + [
