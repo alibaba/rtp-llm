@@ -1,7 +1,9 @@
 
 #pragma once
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
+#include <deque>
 #include <optional>
 #include <string>
 #include <atomic>
@@ -67,6 +69,62 @@ public:
     void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
 
 private:
+    // A Python attention implementation can own pinned planner workspaces used by
+    // asynchronous H2D copies.  Replacing its last py::object reference before
+    // the backend stream reaches those copies allows the pinned storage to be
+    // reused too early.  Keep retired objects paired with a completion event and
+    // only destroy them while the GIL is held after the event reports complete.
+    //
+    // This is a template so the lifetime policy can be unit-tested with a small
+    // fake event without requiring a GPU.  EventT must provide query() and
+    // synchronize().
+    template<typename EventT>
+    class AttnPyObjectRetirementQueue {
+    public:
+        void retire(py::object object, std::shared_ptr<EventT> completion_event) {
+            if (!object.ptr()) {
+                return;
+            }
+            RTP_LLM_CHECK_WITH_INFO(completion_event != nullptr,
+                                    "attention Python object must have a completion event before retirement");
+            entries_.push_back({std::move(object), std::move(completion_event)});
+        }
+
+        // The caller must hold the GIL. query() is non-blocking, so this is safe
+        // on the normal forward/releaseBuffers hot path.
+        void releaseCompleted() {
+            while (!entries_.empty() && entries_.front().completion_event->query()) {
+                entries_.pop_front();
+            }
+        }
+
+        // Destruction is not a hot path.  Finish outstanding backend work before
+        // dropping the final Python references, still under the caller's GIL.
+        void synchronizeAndReleaseAll() {
+            for (const auto& entry : entries_) {
+                if (!entry.completion_event->query()) {
+                    entry.completion_event->synchronize();
+                }
+            }
+            entries_.clear();
+        }
+
+        bool empty() const {
+            return entries_.empty();
+        }
+
+        size_t size() const {
+            return entries_.size();
+        }
+
+    private:
+        struct Entry {
+            py::object              object;
+            std::shared_ptr<EventT> completion_event;
+        };
+        std::deque<Entry> entries_;
+    };
+
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
 
 private:
@@ -80,7 +138,7 @@ private:
                                           const GptModelInputs& inputs,
                                           bool                  skip_final_layernorm,
                                           bool                  lm_output_already_selected = false,
-                                          size_t                num_valid_tokens = -1);
+                                          size_t                num_valid_tokens           = -1);
     torch::Tensor   tensorHoldHostAndToCuda(const torch::Tensor& tensor);
 
     // Methods absorbed from GptModel
@@ -105,6 +163,9 @@ private:
     std::pair<std::vector<GptModelInputs>, std::vector<TokenSliceInfo>>
          splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroBatchPlan& micro_batch_plan);
     void holdInputsHostBuffers(const GptModelInputs& inputs);
+    void retireHeldAttentionObject();
+    void releaseCompletedAttentionObjects();
+    void recordHeldAttentionObjectCompletion();
 
     // Member variables (formerly inherited from GptModel)
     const rtp_llm::ExecProperties            device_props_;
@@ -122,9 +183,13 @@ private:
     torch::Tensor                            decode_cu_seqlens_;
     TensorHolder                             buffer_holder_;
 
-    GraphBase*                         graph_runner_{nullptr};
-    py::object                         py_model_;
-    py::object                         held_attn_pyobj_;
+    GraphBase* graph_runner_{nullptr};
+    py::object py_model_;
+    py::object held_attn_pyobj_;
+#if USING_CUDA || USING_ROCM
+    std::shared_ptr<torch::Event>             held_attn_completion_event_;
+    AttnPyObjectRetirementQueue<torch::Event> retired_attn_pyobjs_;
+#endif
     bool                               enable_cuda_graph_{false};
     bool                               is_prefill_cuda_graph_mode_{false};
     bool                               use_spec_decoding_{false};

@@ -44,3 +44,16 @@ cc_test(
     },
     exec_properties = {'gpu':'H20'},
 )
+
+cc_test(
+    name = "attn_pyobject_retirement_queue_test",
+    srcs = [
+        "AttnPyObjectRetirementQueueTest.cc",
+    ],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/models:models",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda13_torch_link_deps,
+)

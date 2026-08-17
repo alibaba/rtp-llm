@@ -17,9 +17,9 @@ from rtp_llm.ops import KvCacheDataType
 from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
-
 _FLASHMLA_WORKSPACES: Dict[int, torch.Tensor] = {}
 _FLASHMLA_LOGGED_DEVICES: set[int] = set()
+_FLASHMLA_DIRECT_PLAN_LOGGED_DEVICES: set[int] = set()
 # Log each static execution shape once. KV lengths are intentionally excluded:
 # target verification grows them every iteration while reusing the same plan
 # shape, so including them turns this guard into a per-step INFO log.
@@ -29,12 +29,275 @@ _FLASHMLA_LOGGED_CONFIGS: set[tuple[int, int, tuple[int, ...], bool]] = set()
 def _workspace(device: torch.device) -> torch.Tensor:
     """Return FlashMLA's reusable 32 MiB inference workspace per device."""
 
-    device_index = device.index if device.index is not None else torch.cuda.current_device()
+    device_index = (
+        device.index if device.index is not None else torch.cuda.current_device()
+    )
     workspace = _FLASHMLA_WORKSPACES.get(device_index)
     if workspace is None:
         workspace = torch.empty(32 * 1024 * 1024, dtype=torch.uint8, device=device)
         _FLASHMLA_WORKSPACES[device_index] = workspace
     return workspace
+
+
+class FlashMLADeviceParams:
+    """Device-resident metadata consumed by dense FlashMLA Prefill.
+
+    This deliberately is not a ``FlashInferMlaAttnParams``.  In particular it
+    owns no pinned host staging buffer whose lifetime can end when the draft
+    model's next decode forward replaces ``held_attn_pyobj_``.
+    """
+
+    def __init__(
+        self,
+        *,
+        attn_inputs: Any,
+        q_lens_host: List[int],
+        kv_lens_host: List[int],
+        prefix_lens_host: List[int],
+        qo_indptr_d: torch.Tensor,
+        kv_indptr_d: torch.Tensor,
+        positions_d: torch.Tensor,
+        batch_indice_d: torch.Tensor,
+        reuse_cache_page_indice_d: torch.Tensor,
+        batch_reuse_info_vec_d: torch.Tensor,
+        block_table_width: int,
+    ) -> None:
+        self.attn_inputs = attn_inputs
+        self.q_lens_host = q_lens_host
+        self.kv_lens_host = kv_lens_host
+        self.prefix_lens_host = prefix_lens_host
+        self.qo_indptr_d = qo_indptr_d
+        self.prefill_ragged_kv_len_indptr_d = kv_indptr_d
+        self.positions_d = positions_d
+        self.batch_indice_d = batch_indice_d
+        self.reuse_cache_page_indice_d = reuse_cache_page_indice_d
+        self.batch_reuse_info_vec_d = batch_reuse_info_vec_d
+        self.block_table_width = block_table_width
+        self.has_reuse_cache = any(prefix_lens_host)
+        # MlaKVCacheWriteOp asks the wrapper to derive this from live device
+        # positions and the currently selected HybridCache group.
+        self.slot_mapping = None
+
+
+def _host_i32_values(tensor: Optional[torch.Tensor], name: str) -> List[int]:
+    if tensor is None or tensor.numel() == 0:
+        raise RuntimeError(f"FlashMLA direct planner requires {name}")
+    if tensor.is_cuda:
+        raise RuntimeError(
+            f"FlashMLA direct planner requires CPU {name}; refusing a hidden D2H"
+        )
+    if tensor.dtype != torch.int32:
+        raise RuntimeError(
+            f"FlashMLA direct planner requires int32 {name}, got {tensor.dtype}"
+        )
+    if tensor.dim() != 1:
+        raise RuntimeError(f"FlashMLA {name} must be 1-D, got {tuple(tensor.shape)}")
+    return [int(value) for value in tensor.tolist()]
+
+
+def _cuda_i32_tensor(tensor: Optional[torch.Tensor], name: str) -> torch.Tensor:
+    if tensor is None or tensor.numel() == 0:
+        raise RuntimeError(f"FlashMLA direct planner requires CUDA {name}")
+    if not tensor.is_cuda or tensor.dtype != torch.int32:
+        raise RuntimeError(
+            f"FlashMLA {name} must be CUDA int32, got "
+            f"device={tensor.device} dtype={tensor.dtype}"
+        )
+    return tensor
+
+
+def build_flashmla_device_params(
+    attn_inputs: Any,
+    page_size: int,
+) -> FlashMLADeviceParams:
+    """Build dense-prefill metadata without FlashInfer's pinned ``buf_h``.
+
+    Host mirrors are used only for shape scalars required by FlashMLA's Python
+    API.  Indptrs, positions, reuse metadata and page IDs stay on CUDA.  The
+    fixed-width branch is the K3 MTP draft-prefill hot path (currently q_len=4).
+    """
+
+    if page_size <= 0:
+        raise ValueError(f"FlashMLA page_size must be positive, got {page_size}")
+
+    input_lengths_d = _cuda_i32_tensor(
+        getattr(attn_inputs, "input_lengths", None), "input_lengths"
+    )
+    prefix_lengths_d = _cuda_i32_tensor(
+        getattr(attn_inputs, "prefix_lengths", None), "prefix_lengths"
+    )
+    q_lens = _host_i32_values(
+        getattr(attn_inputs, "input_lengths_host", None), "input_lengths_host"
+    )
+    prefix_lens = _host_i32_values(
+        getattr(attn_inputs, "prefix_lengths_host", None), "prefix_lengths_host"
+    )
+    batch_size = len(q_lens)
+    if batch_size == 0 or len(prefix_lens) != batch_size:
+        raise RuntimeError(
+            "FlashMLA host length batch mismatch: "
+            f"q={len(q_lens)} prefix={len(prefix_lens)}"
+        )
+    if input_lengths_d.numel() != batch_size or prefix_lengths_d.numel() != batch_size:
+        raise RuntimeError(
+            "FlashMLA device length batch mismatch: "
+            f"host={batch_size} input={input_lengths_d.numel()} "
+            f"prefix={prefix_lengths_d.numel()}"
+        )
+    if any(q_len <= 0 for q_len in q_lens) or any(
+        prefix_len < 0 for prefix_len in prefix_lens
+    ):
+        raise RuntimeError(
+            f"FlashMLA lengths must be q>0 and prefix>=0, got "
+            f"q={q_lens} prefix={prefix_lens}"
+        )
+
+    total_q = sum(q_lens)
+    total_tokens = int(getattr(attn_inputs, "total_tokens", total_q))
+    if total_tokens != total_q:
+        raise RuntimeError(
+            "FlashMLA packed query disagrees with host lengths: "
+            f"total_tokens={total_tokens} sum_q={total_q}"
+        )
+    kv_lens = [
+        q_len + prefix_len
+        for q_len, prefix_len in zip(q_lens, prefix_lens, strict=True)
+    ]
+
+    qo_indptr_d = _cuda_i32_tensor(
+        getattr(attn_inputs, "cu_seqlens", None), "cu_seqlens"
+    )
+    kv_indptr_d = _cuda_i32_tensor(
+        getattr(attn_inputs, "cu_kv_seqlens", None), "cu_kv_seqlens"
+    )
+    if qo_indptr_d.numel() != batch_size + 1 or kv_indptr_d.numel() != batch_size + 1:
+        raise RuntimeError(
+            "FlashMLA indptr shape mismatch: "
+            f"batch={batch_size} qo={qo_indptr_d.numel()} kv={kv_indptr_d.numel()}"
+        )
+    if (
+        qo_indptr_d.device != input_lengths_d.device
+        or kv_indptr_d.device != input_lengths_d.device
+    ):
+        raise RuntimeError("FlashMLA length tensors and indptrs must share one device")
+
+    device = input_lengths_d.device
+    packed_indices = torch.arange(total_q, dtype=torch.int32, device=device)
+    fixed_q_len = q_lens[0] if all(q_len == q_lens[0] for q_len in q_lens) else 0
+    if fixed_q_len:
+        # K3 draft-prefill: q_len == propose_step + 1, currently 4.
+        batch_indice_d = torch.div(packed_indices, fixed_q_len, rounding_mode="floor")
+        local_positions = torch.remainder(packed_indices, fixed_q_len)
+    else:
+        padding_offset = _cuda_i32_tensor(
+            getattr(attn_inputs, "padding_offset", None), "padding_offset"
+        )
+        if padding_offset.numel() != total_q:
+            raise RuntimeError(
+                "FlashMLA ragged padding_offset mismatch: "
+                f"expected={total_q} actual={padding_offset.numel()}"
+            )
+        max_q_len = max(q_lens)
+        padded_indices = packed_indices + padding_offset
+        batch_indice_d = torch.div(padded_indices, max_q_len, rounding_mode="floor")
+        local_positions = torch.remainder(padded_indices, max_q_len)
+    positions_d = (
+        prefix_lengths_d.index_select(0, batch_indice_d.to(torch.int64))
+        + local_positions
+    )
+
+    block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
+    has_reuse_cache = any(prefix_lens)
+    if block_table is None or block_table.numel() == 0:
+        if has_reuse_cache:
+            raise RuntimeError("FlashMLA cache reuse requires a CUDA block table")
+        block_table = torch.empty((batch_size, 0), dtype=torch.int32, device=device)
+    if (
+        not block_table.is_cuda
+        or block_table.dtype != torch.int32
+        or block_table.dim() != 2
+        or block_table.shape[0] != batch_size
+        or block_table.device != device
+    ):
+        raise RuntimeError(
+            "FlashMLA block table must be CUDA int32 [batch, max_blocks], "
+            f"got device={block_table.device} dtype={block_table.dtype} "
+            f"shape={tuple(block_table.shape)}"
+        )
+    max_blocks = int(block_table.shape[1])
+    required_cache_pages = [(kv_len + page_size - 1) // page_size for kv_len in kv_lens]
+    # A cache-less warmup/pure-attention call legitimately has no block table.
+    # If a cache is supplied later, _device_slot_mapping() will require it at
+    # the actual write site.  Whenever a table is present, validate the full
+    # suffix write (not only the reused prefix) before indexing it.
+    if max_blocks and any(
+        page_count > max_blocks for page_count in required_cache_pages
+    ):
+        raise RuntimeError(
+            "FlashMLA query write exceeds the selected block table: "
+            f"required={required_cache_pages} max_blocks={max_blocks}"
+        )
+
+    batch_ids_d = torch.arange(batch_size, dtype=torch.int32, device=device)
+    page_counts_d = torch.div(
+        prefix_lengths_d + page_size - 1,
+        page_size,
+        rounding_mode="floor",
+    )
+    batch_reuse_info_vec_d = torch.stack(
+        (
+            batch_ids_d,
+            prefix_lengths_d,
+            batch_ids_d * max_blocks,
+            page_counts_d,
+        ),
+        dim=1,
+    )
+    flat_block_table = block_table.contiguous().view(-1)
+    reuse_cache_page_indice_d = (
+        flat_block_table if has_reuse_cache else flat_block_table[:0]
+    )
+
+    # Async MTP preparation can allocate these tensors on a producer stream.
+    # Record their main-forward consumer stream before the producer-owned
+    # PyAttentionInputs (or the transient plan) can be replaced next step.
+    current_stream = torch.cuda.current_stream(device)
+    for tensor in (
+        input_lengths_d,
+        prefix_lengths_d,
+        qo_indptr_d,
+        kv_indptr_d,
+        block_table,
+        positions_d,
+        batch_indice_d,
+        reuse_cache_page_indice_d,
+        batch_reuse_info_vec_d,
+    ):
+        tensor.record_stream(current_stream)
+
+    device_index = (
+        device.index if device.index is not None else torch.cuda.current_device()
+    )
+    if device_index not in _FLASHMLA_DIRECT_PLAN_LOGGED_DEVICES:
+        logging.info(
+            "[mtp-sync-free] FlashMLA Prefill uses direct CUDA metadata; "
+            "FlashInferMlaAttnParams/buf_h bypassed"
+        )
+        _FLASHMLA_DIRECT_PLAN_LOGGED_DEVICES.add(device_index)
+
+    return FlashMLADeviceParams(
+        attn_inputs=attn_inputs,
+        q_lens_host=q_lens,
+        kv_lens_host=kv_lens,
+        prefix_lens_host=prefix_lens,
+        qo_indptr_d=qo_indptr_d,
+        kv_indptr_d=kv_indptr_d,
+        positions_d=positions_d,
+        batch_indice_d=batch_indice_d,
+        reuse_cache_page_indice_d=reuse_cache_page_indice_d,
+        batch_reuse_info_vec_d=batch_reuse_info_vec_d,
+        block_table_width=max_blocks,
+    )
 
 
 class MlaFlashMLAPrefillOp:
@@ -94,50 +357,63 @@ class MlaFlashMLAPrefillOp:
         self.batch_size = 0
         self.q_lens: List[int] = []
         self.kv_lens: List[int] = []
+        self._direct_attn_inputs: Optional[Any] = None
+        self._direct_block_table_width = 0
 
     def plan(self, mla_params: Any) -> None:
-        qo_host = mla_params.qo_indptr_h
-        kv_host = mla_params.prefill_ragged_kv_len_indptr_h
-        qo_values = [int(value) for value in qo_host.tolist()]
-        kv_values = [int(value) for value in kv_host.tolist()]
-        if len(qo_values) != len(kv_values) or len(qo_values) < 2:
-            raise ValueError(
-                f"invalid FlashMLA indptr: qo={qo_values}, kv={kv_values}"
-            )
+        if isinstance(mla_params, FlashMLADeviceParams):
+            self.q_lens = list(mla_params.q_lens_host)
+            self.kv_lens = list(mla_params.kv_lens_host)
+            prefix_lens = list(mla_params.prefix_lens_host)
+            self.qo_indptr = mla_params.qo_indptr_d
+            self.kv_indptr = mla_params.prefill_ragged_kv_len_indptr_d
+            self.has_reuse_cache = mla_params.has_reuse_cache
+            self._direct_attn_inputs = mla_params.attn_inputs
+            self._direct_block_table_width = mla_params.block_table_width
+        else:
+            qo_host = mla_params.qo_indptr_h
+            kv_host = mla_params.prefill_ragged_kv_len_indptr_h
+            qo_values = [int(value) for value in qo_host.tolist()]
+            kv_values = [int(value) for value in kv_host.tolist()]
+            if len(qo_values) != len(kv_values) or len(qo_values) < 2:
+                raise ValueError(
+                    f"invalid FlashMLA indptr: qo={qo_values}, kv={kv_values}"
+                )
+            self.qo_indptr = mla_params.qo_indptr_d
+            self.kv_indptr = mla_params.prefill_ragged_kv_len_indptr_d
+            self.q_lens = [
+                qo_values[index + 1] - qo_values[index]
+                for index in range(len(qo_values) - 1)
+            ]
+            self.kv_lens = [
+                kv_values[index + 1] - kv_values[index]
+                for index in range(len(kv_values) - 1)
+            ]
+            reuse_pages = mla_params.reuse_cache_page_indice_d
+            self.has_reuse_cache = reuse_pages is not None and reuse_pages.numel() != 0
+            reuse_host = mla_params.batch_reuse_info_vec_h
+            if reuse_host is None or reuse_host.numel() == 0:
+                prefix_lens = [0] * len(self.q_lens)
+            else:
+                reuse_rows = reuse_host.reshape(-1, 4)
+                if reuse_rows.shape[0] != len(self.q_lens):
+                    raise ValueError(
+                        "FlashMLA batch reuse metadata disagrees with qo_indptr: "
+                        f"batch={len(self.q_lens)}, "
+                        f"reuse_rows={reuse_rows.shape[0]}"
+                    )
+                prefix_lens = [int(row[1]) for row in reuse_rows.tolist()]
+            self._direct_attn_inputs = None
+            self._direct_block_table_width = 0
 
-        self.qo_indptr = mla_params.qo_indptr_d
-        self.kv_indptr = mla_params.prefill_ragged_kv_len_indptr_d
-        self.q_lens = [
-            qo_values[index + 1] - qo_values[index]
-            for index in range(len(qo_values) - 1)
-        ]
-        self.kv_lens = [
-            kv_values[index + 1] - kv_values[index]
-            for index in range(len(kv_values) - 1)
-        ]
         self.max_q_len = max(self.q_lens)
         self.max_kv_len = max(self.kv_lens)
-        self.total_kv_lens = kv_values[-1]
+        self.total_kv_lens = sum(self.kv_lens)
         self.batch_size = len(self.q_lens)
-        reuse_pages = mla_params.reuse_cache_page_indice_d
-        self.has_reuse_cache = reuse_pages is not None and reuse_pages.numel() != 0
-        self.reuse_cache_page_indice = reuse_pages
+        self.reuse_cache_page_indice = mla_params.reuse_cache_page_indice_d
         self.batch_reuse_info_vec = mla_params.batch_reuse_info_vec_d
-
-        reuse_host = mla_params.batch_reuse_info_vec_h
-        if reuse_host is None or reuse_host.numel() == 0:
-            prefix_lens = [0] * self.batch_size
-        else:
-            reuse_rows = reuse_host.reshape(-1, 4)
-            if reuse_rows.shape[0] != self.batch_size:
-                raise ValueError(
-                    "FlashMLA batch reuse metadata disagrees with qo_indptr: "
-                    f"batch={self.batch_size}, reuse_rows={reuse_rows.shape[0]}"
-                )
-            prefix_lens = [int(row[1]) for row in reuse_rows.tolist()]
         expected_kv_lens = [
-            q_len + prefix_len
-            for q_len, prefix_len in zip(self.q_lens, prefix_lens)
+            q_len + prefix_len for q_len, prefix_len in zip(self.q_lens, prefix_lens)
         ]
         if expected_kv_lens != self.kv_lens:
             raise ValueError(
@@ -168,6 +444,30 @@ class MlaFlashMLAPrefillOp:
                 f"kv={self.total_kv_lens}, suffix={compressed_kv.shape[0]}"
             )
 
+        reuse_cache_page_indice = self.reuse_cache_page_indice
+        if self._direct_attn_inputs is not None:
+            block_table = getattr(
+                self._direct_attn_inputs,
+                "kv_cache_kernel_block_id_device",
+                None,
+            )
+            if (
+                block_table is None
+                or not block_table.is_cuda
+                or block_table.dtype != torch.int32
+                or block_table.dim() != 2
+                or block_table.shape[0] != self.batch_size
+                or block_table.shape[1] != self._direct_block_table_width
+            ):
+                raise RuntimeError(
+                    "FlashMLA current HybridCache group block table no longer "
+                    "matches its direct plan"
+                )
+            reuse_cache_page_indice = block_table.contiguous().view(-1)
+            reuse_cache_page_indice.record_stream(
+                torch.cuda.current_stream(block_table.device)
+            )
+
         final_compressed_kv = torch.empty(
             (self.total_kv_lens, self.kv_lora_rank),
             dtype=compressed_kv.dtype,
@@ -184,7 +484,7 @@ class MlaFlashMLAPrefillOp:
             compressed_kv,
             flat_k_pe.contiguous(),
             kv_cache.kv_cache_base,
-            self.reuse_cache_page_indice,
+            reuse_cache_page_indice,
             self.batch_reuse_info_vec,
             self.qo_indptr,
             self.page_size,
@@ -215,9 +515,7 @@ class MlaFlashMLAPrefillOp:
             self.qk_nope_head_dim + self.qk_rope_head_dim,
         )
         k[..., : self.qk_nope_head_dim].copy_(k_nope)
-        k[..., self.qk_nope_head_dim :].copy_(
-            k_pe.view(-1, 1, self.qk_rope_head_dim)
-        )
+        k[..., self.qk_nope_head_dim :].copy_(k_pe.view(-1, 1, self.qk_rope_head_dim))
         return k, value_states
 
     def _dense_attention(

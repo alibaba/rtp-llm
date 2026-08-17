@@ -188,6 +188,50 @@ class MlaFlashInferImplBase(MlaImplBase):
         )
         self.fmha_impl.plan(self.fmha_params)
 
+    def _device_slot_mapping(self) -> Optional[torch.Tensor]:
+        """Map direct-plan positions through the live HybridCache group."""
+
+        assert self.fmha_params is not None
+        slot_mapping = getattr(self.fmha_params, "slot_mapping", None)
+        if slot_mapping is not None:
+            # The legacy FlashInfer planner already produced the mapping.
+            return None
+
+        positions = getattr(self.fmha_params, "positions_d", None)
+        batch_indices = getattr(self.fmha_params, "batch_indice_d", None)
+        block_table = getattr(self.attn_inputs, "kv_cache_kernel_block_id_device", None)
+        if (
+            positions is None
+            or batch_indices is None
+            or block_table is None
+            or positions.numel() == 0
+            or batch_indices.numel() == 0
+            or block_table.numel() == 0
+        ):
+            raise RuntimeError(
+                "direct CUDA MLA cache write requires positions, batch indices, "
+                "and the current HybridCache group block table"
+            )
+        if positions.numel() != batch_indices.numel():
+            raise RuntimeError(
+                "direct CUDA MLA position/batch metadata size mismatch: "
+                f"positions={positions.numel()} batch={batch_indices.numel()}"
+            )
+
+        positions_i64 = positions.to(torch.int64)
+        batch_indices_i64 = batch_indices.to(torch.int64)
+        block_indices = torch.div(
+            positions_i64,
+            self.seq_size_per_block,
+            rounding_mode="floor",
+        )
+        block_numbers = block_table[batch_indices_i64, block_indices].to(torch.int64)
+        slot_mapping = block_numbers * self.seq_size_per_block + torch.remainder(
+            positions_i64, self.seq_size_per_block
+        )
+        slot_mapping.record_stream(torch.cuda.current_stream(slot_mapping.device))
+        return slot_mapping
+
     def forward(
         self,
         q: torch.Tensor,
@@ -208,11 +252,15 @@ class MlaFlashInferImplBase(MlaImplBase):
         self.rope_impl.forward(q_pe, k_pe, self.rope_params)
 
         # Write compressed KV and position-encoded K to cache
+        slot_mapping_override = (
+            self._device_slot_mapping() if kv_cache is not None else None
+        )
         self.kv_cache_write_op.forward(
             compressed_kv,
             k_pe,
             kv_cache,
             self.rope_params,
+            slot_mapping_override=slot_mapping_override,
         )
 
         common.apply_write_cache_store(
@@ -382,7 +430,16 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         self.rope_impl.forward(q_pe, k_pe, self.rope_params)
 
         # Write compressed KV and position-encoded K to cache
-        self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache, self.rope_params)
+        slot_mapping_override = (
+            self._device_slot_mapping() if kv_cache is not None else None
+        )
+        self.kv_cache_write_op.forward(
+            compressed_kv,
+            k_pe,
+            kv_cache,
+            self.rope_params,
+            slot_mapping_override=slot_mapping_override,
+        )
 
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
@@ -445,6 +502,31 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
         self.has_reuse_cache = False
         self.absorb_opt_len = 0
         self.absorb_fmha = None
+
+    def create_params(self, attn_inputs: PyAttentionInputs):
+        if self.fmha_impl is not None:
+            self.prepare(attn_inputs)
+
+    def prepare(self, attn_inputs: PyAttentionInputs, forbid_realloc: bool = False):
+        """Plan dense FlashMLA directly from CUDA metadata.
+
+        A fresh parameter object is installed for every model invocation.  The
+        small model's following decode may replace this wrapper, but it cannot
+        mutate or recycle a pinned FlashInfer host plan because none is created.
+        """
+
+        if forbid_realloc:
+            raise RuntimeError("dense FlashMLA Prefill does not support graph replay")
+        assert self.fmha_impl is not None
+        check_attention_inputs(attn_inputs)
+        from .flashmla_dense_prefill import build_flashmla_device_params
+
+        params = build_flashmla_device_params(attn_inputs, self.seq_size_per_block)
+        self.attn_inputs = attn_inputs
+        self.fmha_params = params
+        self.rope_params = params
+        self.fmha_impl.plan(params)
+        return params
 
     @classmethod
     def support(

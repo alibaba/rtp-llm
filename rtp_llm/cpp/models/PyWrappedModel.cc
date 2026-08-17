@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <mutex>
 #include <numeric>
 #include <sstream>
 #include "rtp_llm/cpp/models/ModelInputsLogger.h"
@@ -89,10 +90,60 @@ torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tenso
     return cuda_tensor;
 }
 
-void PyWrappedModel::releaseBuffers() {
-    if (held_attn_pyobj_.ptr()) {
-        py::gil_scoped_acquire gil;
+void PyWrappedModel::recordHeldAttentionObjectCompletion() {
+#if USING_CUDA || USING_ROCM
+    if (!held_attn_pyobj_.ptr() || held_attn_pyobj_.is_none()) {
+        return;
+    }
+    held_attn_completion_event_ = runtimeCreateEvent();
+#endif
+}
+
+void PyWrappedModel::retireHeldAttentionObject() {
+    if (!held_attn_pyobj_.ptr()) {
+        return;
+    }
+    if (held_attn_pyobj_.is_none()) {
         held_attn_pyobj_ = py::object();
+#if USING_CUDA || USING_ROCM
+        held_attn_completion_event_.reset();
+#endif
+        return;
+    }
+
+#if USING_CUDA || USING_ROCM
+    // A failed Python forward can leave an attention object without the normal
+    // end-of-forward event.  Record one now so release remains asynchronous but
+    // still waits for all work already enqueued on the current backend stream.
+    if (!held_attn_completion_event_) {
+        recordHeldAttentionObjectCompletion();
+    }
+    static std::once_flag retirement_log_once;
+    std::call_once(retirement_log_once, [] {
+        RTP_LLM_LOG_INFO(
+            "[mtp-sync-free] retired attention planner waits on backend event without stream synchronization");
+    });
+    retired_attn_pyobjs_.retire(std::move(held_attn_pyobj_), std::move(held_attn_completion_event_));
+#else
+    held_attn_pyobj_ = py::object();
+#endif
+}
+
+void PyWrappedModel::releaseCompletedAttentionObjects() {
+#if USING_CUDA || USING_ROCM
+    retired_attn_pyobjs_.releaseCompleted();
+#endif
+}
+
+void PyWrappedModel::releaseBuffers() {
+#if USING_CUDA || USING_ROCM
+    if (held_attn_pyobj_.ptr() || !retired_attn_pyobjs_.empty()) {
+#else
+    if (held_attn_pyobj_.ptr()) {
+#endif
+        py::gil_scoped_acquire gil;
+        retireHeldAttentionObject();
+        releaseCompletedAttentionObjects();
     }
     // TensorHolder release point (PyWrappedModel): advances model-internal
     // host staging buffers from tensorHoldHostAndToCuda()/holdInputsHostBuffers().
@@ -132,7 +183,12 @@ torch::Tensor PyWrappedModel::getMtpLastHiddenStates(int64_t num_tokens) {
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
-        held_attn_pyobj_ = py::object();
+        retireHeldAttentionObject();
+#if USING_CUDA || USING_ROCM
+        // Model destruction is outside the inference hot path.  It is the only
+        // place this lifetime guard may wait for outstanding backend work.
+        retired_attn_pyobjs_.synchronizeAndReleaseAll();
+#endif
         // Always release py_model_ since it's always initialized now
         py_model_.release();
         if (graph_runner_ != nullptr) {
@@ -828,10 +884,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     try {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 
-        const auto whole_chunk_tokens = kimiK3WholeChunkPrefillTokens();
-        const bool will_run_whole_chunk =
-            whole_chunk_tokens > 0 && inputs.sequence_lengths.size(0) == 0
-            && inputs.combo_tokens.size(0) > whole_chunk_tokens;
+        const auto whole_chunk_tokens   = kimiK3WholeChunkPrefillTokens();
+        const bool will_run_whole_chunk = whole_chunk_tokens > 0 && inputs.sequence_lengths.size(0) == 0
+                                          && inputs.combo_tokens.size(0) > whole_chunk_tokens;
 
         if (int(device_props_.enable_layer_micro_batch)) {
             RTP_LLM_CHECK_WITH_INFO(
@@ -884,13 +939,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // and combo_tokens above used direct .to(non_blocking=true). Both are async on
         // the current stream and will be ordered correctly with the kernels below.
 
-        auto           py_model_inputs = PyModelInputs({token_ids,
-                                                        input_hiddens,
-                                                        combo_position_ids,
-                                                        embedding_inputs,
-                                                        multimodal_inputs,
-                                                        attention_inputs_,
-                                                        bert_embedding_inputs});
+        auto py_model_inputs                 = PyModelInputs({token_ids,
+                                                              input_hiddens,
+                                                              combo_position_ids,
+                                                              embedding_inputs,
+                                                              multimodal_inputs,
+                                                              attention_inputs_,
+                                                              bert_embedding_inputs});
         py_model_inputs.force_disable_sp_run = inputs.force_disable_sp_run;
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
@@ -915,11 +970,20 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
                               py_model_inputs.attention_inputs.is_target_verify,
                               py_model_inputs.attention_inputs.is_prefill);
+            // Never overwrite the last Python owner while its planner metadata
+            // or kernels may still be consumed by the backend stream.
+            retireHeldAttentionObject();
+            releaseCompletedAttentionObjects();
             held_attn_pyobj_      = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
             auto py_model_forward = py_model_.attr("forward");
             auto outputs          = py_model_forward(py_model_inputs, held_attn_pyobj_);
             py_model_outputs      = outputs.cast<PyModelOutputs>();
             hidden_states         = py_model_outputs.hidden_states.clone();
+            // Record after every successful normal forward.  The event query in
+            // releaseBuffers/replacement is non-blocking and therefore does not
+            // introduce the stream synchronization this guard is intended to
+            // avoid.
+            recordHeldAttentionObjectCompletion();
         }
 
         if (!inputs.warmup && inputs.pd_separation) {
@@ -949,8 +1013,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
             return callForwardPostLayers(hidden_states, inputs, true, false, num_valid_tokens);
         }
-        return callForwardPostLayers(
-            hidden_states, inputs, true, py_model_outputs.lm_output_already_selected);
+        return callForwardPostLayers(hidden_states, inputs, true, py_model_outputs.lm_output_already_selected);
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
@@ -1096,11 +1159,10 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         if (has_context_request && !need_all_logits) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(index_select_last_hidden)");
             if (lm_output_already_selected) {
-                RTP_LLM_CHECK_WITH_INFO(
-                    hidden.size(0) == lm_output_indexes_device.numel(),
-                    "model-selected LM rows mismatch: hidden=%ld lm_output_indexes=%ld",
-                    hidden.size(0),
-                    lm_output_indexes_device.numel());
+                RTP_LLM_CHECK_WITH_INFO(hidden.size(0) == lm_output_indexes_device.numel(),
+                                        "model-selected LM rows mismatch: hidden=%ld lm_output_indexes=%ld",
+                                        hidden.size(0),
+                                        lm_output_indexes_device.numel());
                 last_hidden = hidden;
             } else {
                 last_hidden = torch::index_select(hidden, 0, lm_output_indexes_device);

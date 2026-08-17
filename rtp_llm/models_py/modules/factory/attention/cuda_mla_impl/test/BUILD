@@ -40,6 +40,16 @@ py_test(
 )
 
 py_test(
+    name = "flashmla_dense_prefill_params_test",
+    srcs = ["flashmla_dense_prefill_params_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    tags = ["H20"],
+    exec_properties = {'gpu': 'H20'},
+)
+
+py_test(
     name = "tokenspeed_mla_impl_test",
     srcs = ["tokenspeed_mla_impl_test.py"],
     deps = [
