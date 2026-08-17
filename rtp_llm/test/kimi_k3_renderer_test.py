@@ -2,6 +2,7 @@
 
 import json
 import unittest
+from unittest.mock import Mock
 
 from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
@@ -114,6 +115,22 @@ class KimiK3RendererTest(unittest.TestCase):
         renderer.apply_chat_completion_constraints(request, config)
         self.assertFalse(config.in_think_mode)
         self.assertEqual(config.max_thinking_tokens, 0)
+
+    def test_thinking_budget_uses_k3_xtml_transition_without_grammar(self) -> None:
+        renderer = KimiK3Renderer.__new__(KimiK3Renderer)
+        renderer.tokenizer = Mock()
+        renderer.tokenizer.encode.return_value = [101, 102, 103]
+        config = GenerateConfig(max_thinking_tokens=100)
+
+        renderer.apply_chat_completion_constraints(
+            self.request(enable_thinking=True), config
+        )
+
+        self.assertEqual(config.end_think_token_ids, [101, 102, 103])
+        renderer.tokenizer.encode.assert_called_once_with(
+            renderer._THINK_TO_RESPONSE,
+            add_special_tokens=False,
+        )
 
     def test_thinking_effort_precedes_legacy_reasoning_effort(self) -> None:
         request = ChatCompletionRequest(
@@ -333,6 +350,8 @@ class KimiK3RendererTest(unittest.TestCase):
 
     def test_k3_sampling_contract_accepts_supported_profiles(self) -> None:
         renderer = KimiK3Renderer.__new__(KimiK3Renderer)
+        renderer.tokenizer = Mock()
+        renderer.tokenizer.encode.return_value = [101, 102, 103]
         cases = [
             ({"thinking": {"type": "enabled"}, "temperature": 0.0}, 0.0, 0.95),
             ({"thinking": {"type": "enabled"}, "temperature": 0.6}, 0.6, 0.95),

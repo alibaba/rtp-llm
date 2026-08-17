@@ -139,7 +139,21 @@ bool targetVerifyMetadataFitsCapture(const PyModelInputs& inputs,
                                      int                  batch_size,
                                      int                  max_seq_len,
                                      int                  captured_query_length) {
-    const auto* prefix_lengths = inputs.attention_inputs.prefix_lengths_host.data_ptr<int32_t>();
+    const auto& prefix_lengths_host = inputs.attention_inputs.prefix_lengths_host;
+    if (!prefix_lengths_host.defined() || prefix_lengths_host.is_cuda()
+        || prefix_lengths_host.scalar_type() != torch::kInt32 || !prefix_lengths_host.is_contiguous()
+        || prefix_lengths_host.numel() < batch_size) {
+        RTP_LLM_LOG_WARNING("target-verify CUDA graph requires a contiguous int32 CPU prefix-length mirror "
+                            "with at least %d entries (defined=%d, cuda=%d, numel=%ld); "
+                            "fallback to eager execution",
+                            batch_size,
+                            prefix_lengths_host.defined(),
+                            prefix_lengths_host.defined() && prefix_lengths_host.is_cuda(),
+                            prefix_lengths_host.defined() ? prefix_lengths_host.numel() : 0);
+        return false;
+    }
+
+    const auto* prefix_lengths = prefix_lengths_host.data_ptr<int32_t>();
     for (int batch = 0; batch < batch_size; ++batch) {
         const int64_t kv_length = prefix_lengths[batch] + captured_query_length;
         if (kv_length > max_seq_len) {

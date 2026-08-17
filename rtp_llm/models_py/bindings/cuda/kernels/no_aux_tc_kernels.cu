@@ -618,7 +618,9 @@ __global__ void fused_sigmoid_topk_kernel(float const* router_logits,
             float const logit = token_logits[expert];
             float const bias  = correction_bias[expert];
             if (isfinite(logit) && isfinite(bias)) {
-                unbiased = 0.5f * tanhf(0.5f * logit) + 0.5f;
+                // Match torch.sigmoid exactly enough to preserve expert ordering at
+                // the top-k boundary; the tanh identity can differ by one FP32 ULP.
+                unbiased = 1.0f / (1.0f + expf(-logit));
                 selection = unbiased + bias;
                 selection = selection == 0.0f ? 0.0f : selection;
             }

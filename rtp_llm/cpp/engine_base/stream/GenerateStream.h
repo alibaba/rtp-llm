@@ -517,6 +517,10 @@ public:
         torch::Tensor accept_len_gpu;
         torch::Tensor accept_tokens_gpu;
         torch::Tensor next_seq_len_gpu;
+        // Exact pinned-host mirror of next_seq_len_gpu. Async publishers record
+        // the event after the D2H copy; consumers synchronize it before CPU use.
+        torch::Tensor                 next_seq_len_host;
+        std::shared_ptr<torch::Event> next_seq_len_host_ready_event;
         torch::Tensor propose_tokens_gpu;
         // Main-thread mirrors used when DROP_BROAD_SYNC lets the next step run
         // before worker-side specUpdate has written sp_output_buffer fields.

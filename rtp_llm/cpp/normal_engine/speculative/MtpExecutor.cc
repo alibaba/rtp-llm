@@ -442,7 +442,9 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
     auto int32_gpu          = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     auto accept_len_gpu     = torch::ones({1}, int32_gpu);
     auto accept_tokens_gpu  = torch::zeros({1, max_new_tokens + 1}, int32_gpu);
-    auto next_seq_len_gpu   = torch::ones({1}, int32_gpu) + 1;
+    auto int32_pinned       = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+    auto next_seq_len_host  = torch::ones({1}, int32_pinned) + 1;
+    auto next_seq_len_gpu   = next_seq_len_host.to(torch::kCUDA, /*non_blocking=*/false);
     auto propose_tokens_gpu = torch::zeros({1, 1}, int32_gpu);
 
     fake_stream->setMtpAsyncDeviceState(GenerateStream::MtpAsyncDeviceState{
@@ -450,6 +452,8 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
         .accept_len_gpu         = std::move(accept_len_gpu),
         .accept_tokens_gpu      = std::move(accept_tokens_gpu),
         .next_seq_len_gpu       = std::move(next_seq_len_gpu),
+        // Derived from the same host tensor, so the two can never drift apart.
+        .next_seq_len_host      = std::move(next_seq_len_host),
         .propose_tokens_gpu     = std::move(propose_tokens_gpu),
         .last_hidden_states_gpu = sp_buffer->hidden_states,
         .draft_all_probs_gpu    = sp_buffer->all_probs,
@@ -1118,6 +1122,9 @@ void MtpExecutor::prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& 
             .accept_len_gpu         = std::move(accept_len_gpu),
             .accept_tokens_gpu      = std::move(accept_tokens_gpu),
             .next_seq_len_gpu       = std::move(next_seq_len_gpu),
+            // next_seq_len_cpu is the host source of next_seq_len_gpu, so it is exact
+            // and needs no readiness event.
+            .next_seq_len_host      = next_seq_len_cpu,
             .propose_tokens_gpu     = std::move(propose_tokens_gpu),
             .last_hidden_states_gpu = sp_output_buffer->hidden_states,
             .draft_all_probs_gpu    = sp_output_buffer->all_probs,
@@ -2263,8 +2270,15 @@ void MtpExecutor::populateTargetVerifyHostMetadata(GptModelInputs&      target,
     target.input_lengths_host_for_log =
         torch::full({static_cast<int64_t>(batch_size)}, query_length, pinned_i32);
 
-    target.prefix_lengths_host_for_log =
-        prefix_lengths_host.slice(0, 0, static_cast<int64_t>(batch_size));
+    // The mirror is optional: one-step MTP already cleared it, and the device-input
+    // path has none. Undefined lets PyWrappedModel fall back to prefix_lengths.
+    if (prefix_lengths_host.defined() && !prefix_lengths_host.is_cuda()
+        && prefix_lengths_host.numel() >= static_cast<int64_t>(batch_size)) {
+        target.prefix_lengths_host_for_log =
+            prefix_lengths_host.slice(0, 0, static_cast<int64_t>(batch_size));
+    } else {
+        target.prefix_lengths_host_for_log = torch::Tensor();
+    }
     target.sequence_lengths_host_for_log = torch::Tensor();
 }
 
@@ -2345,6 +2359,8 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
         state.propose_tokens_gpu =
             propose_tokens_all.defined() ? propose_tokens_all.narrow(0, idx, 1) : torch::Tensor();
         state.next_seq_len_gpu       = next_seq_len_owned.narrow(0, idx, 1);
+        // Host is authoritative on this path, so the mirror needs no readiness event.
+        state.next_seq_len_host      = next_seq_len_cpu.narrow(0, idx, 1);
         state.last_hidden_states_gpu = last_hidden_all.defined() ? last_hidden_all.narrow(0, idx, 1) : torch::Tensor();
 
         const auto next_batch_size = stream->nextBatchSize();
@@ -2417,6 +2433,16 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
 #endif
     }
 
+    torch::Tensor next_seq_len_host_all;
+    if (next_seq_len_all.defined()) {
+        const auto pinned_i32 =
+            torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).pinned_memory(true);
+        next_seq_len_host_all = torch::empty({batch_size}, pinned_i32);
+        next_seq_len_host_all.copy_(next_seq_len_all, /*non_blocking=*/true);
+        // Reuse the sampler's host-transfer event so both CPU mirrors share one wait.
+        spec_decode_output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
+    }
+
     // 2. Batch gather hidden states (1 gather op instead of N index_selects)
     torch::Tensor last_hidden_all;
     const auto    stream_hidden_len = static_cast<int64_t>(propose_step_ + 1);
@@ -2438,11 +2464,14 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     int64_t idx             = 0;
     for (auto& stream : all_streams) {
         GenerateStream::MtpAsyncDeviceState state;
-        state.accept_len_gpu         = accept_len_gpu_all.narrow(0, idx, 1);
-        state.accept_tokens_gpu      = accept_tokens_gpu_all.narrow(0, idx, 1);
-        state.propose_tokens_gpu     = propose_tokens_gpu_all.narrow(0, idx, 1);
-        state.next_seq_len_gpu       = next_seq_len_all.narrow(0, idx, 1);
-        state.last_hidden_states_gpu = last_hidden_all.defined() ? last_hidden_all.narrow(0, idx, 1) : torch::Tensor();
+        state.accept_len_gpu                  = accept_len_gpu_all.narrow(0, idx, 1);
+        state.accept_tokens_gpu               = accept_tokens_gpu_all.narrow(0, idx, 1);
+        state.propose_tokens_gpu              = propose_tokens_gpu_all.narrow(0, idx, 1);
+        state.next_seq_len_gpu                = next_seq_len_all.narrow(0, idx, 1);
+        state.next_seq_len_host               = next_seq_len_host_all.narrow(0, idx, 1);
+        state.next_seq_len_host_ready_event   = spec_decode_output.transfer_done_event;
+        state.last_hidden_states_gpu          =
+            last_hidden_all.defined() ? last_hidden_all.narrow(0, idx, 1) : torch::Tensor();
 
         const auto next_batch_size = stream->nextBatchSize();
         if (draft_probs_all.defined() && next_batch_size > 0) {

@@ -224,13 +224,15 @@ class KimiK3KDADecode(nn.Module):
         conv_steps: list[torch.Tensor] = []
         for step in range(sequence_length):
             reserve_base = torch.div(
-                cache.sequence_lengths_plus_one - 2,
+                cache.sequence_lengths_plus_one - 1,
                 cache.page_size,
                 rounding_mode="floor",
             ).to(torch.long)
             reserve_col = reserve_base + step
+            # Kernels read state at ``length - 2`` and write at ``length - 1``;
+            # reserve from the write column to avoid aliasing across pages.
             logical_col = torch.div(
-                cache.sequence_lengths_plus_one + step - 2,
+                cache.sequence_lengths_plus_one + step - 1,
                 cache.page_size,
                 rounding_mode="floor",
             ).to(torch.long)
@@ -257,9 +259,9 @@ class KimiK3KDADecode(nn.Module):
 
         if sequence_length == 1:
             return self._recurrent(
-                q,
-                k,
-                v,
+                q.contiguous(),
+                k.contiguous(),
+                v.contiguous(),
                 raw_gate,
                 raw_beta,
                 cu_seqlens,
@@ -280,13 +282,13 @@ class KimiK3KDADecode(nn.Module):
         output_steps: list[torch.Tensor] = []
         for step in range(sequence_length):
             reserve_base = torch.div(
-                cache.sequence_lengths_plus_one - 2,
+                cache.sequence_lengths_plus_one - 1,
                 cache.page_size,
                 rounding_mode="floor",
             ).to(torch.long)
             reserve_col = reserve_base + step
             logical_col = torch.div(
-                cache.sequence_lengths_plus_one + step - 2,
+                cache.sequence_lengths_plus_one + step - 1,
                 cache.page_size,
                 rounding_mode="floor",
             ).to(torch.long)
@@ -298,11 +300,13 @@ class KimiK3KDADecode(nn.Module):
             step_block_map = cache.block_map.clone()
             step_block_map[batch_idx, logical_col] = dest_ids.to(step_block_map.dtype)
             step_output = self._recurrent(
-                q_seq[:, step, :].reshape(batch, -1),
-                k_seq[:, step, :].reshape(batch, -1),
-                v_seq[:, step, :].reshape(batch, -1),
-                gate_seq[:, step, :].reshape(batch, -1),
-                beta_seq[:, step, :].reshape(batch, -1),
+                # Selecting one step from [batch, steps, hidden] leaves a strided
+                # view; the Triton recurrence needs packed token rows.
+                q_seq[:, step, :].contiguous(),
+                k_seq[:, step, :].contiguous(),
+                v_seq[:, step, :].contiguous(),
+                gate_seq[:, step, :].contiguous(),
+                beta_seq[:, step, :].contiguous(),
                 one_token_cu,
                 cache.ssm,
                 step_block_map,

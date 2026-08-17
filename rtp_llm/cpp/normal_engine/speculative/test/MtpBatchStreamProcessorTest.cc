@@ -533,6 +533,8 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
 
     auto& model_input            = model_input_status.value();
     model_input.sequence_lengths = torch::tensor({1, 2}, torch::kInt32);
+    model_input.sequence_lengths_host_for_log =
+        torch::tensor({1, 2}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
 
     processor.prepareOneStepSpecDecodeModelInput(stream_groups, model_input, holder);
 
@@ -547,6 +549,11 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
     auto        input_lengths        = model_input.input_lengths;
     vector<int> expect_input_lengths = {2, 2};
     EXPECT_EQ(expect_input_lengths, toVec<int>(input_lengths));
+    ASSERT_TRUE(model_input.input_lengths_host_for_log.defined());
+    EXPECT_EQ(expect_input_lengths, toVec<int>(model_input.input_lengths_host_for_log));
+    ASSERT_TRUE(model_input.prefix_lengths_host_for_log.defined());
+    EXPECT_EQ(expect_prefix_lengths, toVec<int>(model_input.prefix_lengths_host_for_log));
+    EXPECT_FALSE(model_input.sequence_lengths_host_for_log.defined());
 
     auto sequence_lengths = model_input.sequence_lengths;
     EXPECT_TRUE(sequence_lengths.is_cuda());
@@ -614,11 +621,14 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInputFromDe
                      torch::Tensor(),
                      torch::Tensor()});
 
-    const auto                          cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto cuda_i32   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto pinned_i32 = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+
     GenerateStream::MtpAsyncDeviceState state1;
     state1.accept_len_gpu     = torch::tensor({2}, torch::kInt32).to(torch::kCUDA);
     state1.accept_tokens_gpu  = torch::tensor({{2, 3}}, torch::kInt32).to(torch::kCUDA);
     state1.next_seq_len_gpu   = torch::full({1}, 7, cuda_i32);
+    state1.next_seq_len_host  = torch::tensor({7}, pinned_i32);
     state1.propose_tokens_gpu = torch::tensor({{1}}, torch::kInt32).to(torch::kCUDA);
     stream1->setMtpAsyncDeviceState(std::move(state1));
 
@@ -626,6 +636,7 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInputFromDe
     state2.accept_len_gpu     = torch::tensor({1}, torch::kInt32).to(torch::kCUDA);
     state2.accept_tokens_gpu  = torch::tensor({{1, 0}}, torch::kInt32).to(torch::kCUDA);
     state2.next_seq_len_gpu   = torch::full({1}, 4, cuda_i32);
+    state2.next_seq_len_host  = torch::tensor({4}, pinned_i32);
     state2.propose_tokens_gpu = torch::tensor({{2}}, torch::kInt32).to(torch::kCUDA);
     stream2->setMtpAsyncDeviceState(std::move(state2));
 
@@ -640,6 +651,10 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInputFromDe
 
     auto& model_input            = model_input_status.value();
     model_input.sequence_lengths = torch::tensor({99, 99}, torch::kInt32);
+    // Deliberately inconsistent with next_seq_len_gpu ({7, 4} -> prefix {6, 3}):
+    // the device path must not republish this mirror.
+    model_input.sequence_lengths_host_for_log =
+        torch::tensor({98, 98}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
 
     processor.prepareOneStepSpecDecodeModelInput(stream_groups, model_input, holder);
 
@@ -656,6 +671,12 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInputFromDe
     vector<int> expect_input_lengths = {2, 2};
     EXPECT_TRUE(model_input.input_lengths.is_cuda());
     EXPECT_EQ(expect_input_lengths, toVec<int>(model_input.input_lengths));
+    ASSERT_TRUE(model_input.input_lengths_host_for_log.defined());
+    EXPECT_EQ(expect_input_lengths, toVec<int>(model_input.input_lengths_host_for_log));
+    ASSERT_TRUE(model_input.prefix_lengths_host_for_log.defined());
+    EXPECT_TRUE(model_input.prefix_lengths_host_for_log.is_pinned());
+    EXPECT_EQ(expect_prefix_lengths, toVec<int>(model_input.prefix_lengths_host_for_log));
+    EXPECT_FALSE(model_input.sequence_lengths_host_for_log.defined());
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {

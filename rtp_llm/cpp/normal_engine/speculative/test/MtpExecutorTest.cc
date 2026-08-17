@@ -802,6 +802,30 @@ TEST_F(MtpExecutorTest, testTargetVerifyHostMetadataMatchesPackedInput) {
     EXPECT_FALSE(target.sequence_lengths_host_for_log.defined());
 }
 
+// One-step MTP clears sequence_lengths_host_for_log before this helper runs, so it
+// must tolerate an absent mirror instead of slicing an undefined tensor.
+TEST_F(MtpExecutorTest, testTargetVerifyHostMetadataToleratesMissingMirror) {
+    GptModelInputs target;
+
+    MtpExecutor::populateTargetVerifyHostMetadata(target, torch::Tensor(), 2, 4);
+
+    EXPECT_TRUE(target.input_lengths_host_for_log.defined());
+    EXPECT_EQ(std::vector<int32_t>({4, 4}), toVec<int32_t>(target.input_lengths_host_for_log));
+    EXPECT_FALSE(target.prefix_lengths_host_for_log.defined());
+    EXPECT_FALSE(target.sequence_lengths_host_for_log.defined());
+}
+
+// A mirror shorter than the verify batch cannot be sliced safely either.
+TEST_F(MtpExecutorTest, testTargetVerifyHostMetadataRejectsShortMirror) {
+    GptModelInputs target;
+    auto           prefix_lengths_host =
+        torch::tensor({126}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+
+    MtpExecutor::populateTargetVerifyHostMetadata(target, prefix_lengths_host, 2, 4);
+
+    EXPECT_FALSE(target.prefix_lengths_host_for_log.defined());
+}
+
 TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetToken) {
     size_t propose_step = 2;
     size_t vocab_size   = 4;

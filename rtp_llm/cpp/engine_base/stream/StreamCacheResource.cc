@@ -211,12 +211,18 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
             auto accept_tokens      = torch::zeros({1, static_cast<int64_t>(payload->propose_tokens.size())}, cuda_i32);
             accept_tokens[0][0]     = sp_output_buffer->tokens[0][0];
             auto next_seq_len       = torch::full({1}, static_cast<int64_t>(stream->seqLength()), cuda_i32);
+            // Same host value that seeds next_seq_len_gpu, so it is exact and needs no
+            // readiness event.
+            auto next_seq_len_host = torch::full({1},
+                                                 static_cast<int64_t>(stream->seqLength()),
+                                                 torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
 
             stream->setMtpAsyncDeviceState(GenerateStream::MtpAsyncDeviceState{
                 .epoch                  = 0,
                 .accept_len_gpu         = std::move(accept_len),
                 .accept_tokens_gpu      = std::move(accept_tokens),
                 .next_seq_len_gpu       = std::move(next_seq_len),
+                .next_seq_len_host      = std::move(next_seq_len_host),
                 .propose_tokens_gpu     = std::move(propose_tokens_gpu),
                 .last_hidden_states_gpu = sp_output_buffer->hidden_states,
                 .draft_all_probs_gpu    = sp_output_buffer->all_probs,
