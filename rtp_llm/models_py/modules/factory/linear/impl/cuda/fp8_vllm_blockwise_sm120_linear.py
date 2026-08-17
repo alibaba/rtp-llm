@@ -240,7 +240,7 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
                 raise ValueError(f"Bias dtype must be bfloat16, got {self.bias.dtype}")
             self.bias = self.bias.to(device=self.weight.device)
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def _forward_impl(self, input: torch.Tensor, use_gelu: bool) -> torch.Tensor:
         if input.dtype != torch.bfloat16:
             raise ValueError(f"Input tensor dtype must be bfloat16, got {input.dtype}")
         if input.dim() != 2:
@@ -273,7 +273,13 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
             self.weight,
             input_scales,
             self.weight_scales,
+            self.bias,
+            use_gelu,
         )
-        if self.bias is not None:
-            output.add_(self.bias)
         return output
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return self._forward_impl(input, use_gelu=False)
+
+    def forward_with_bias_gelu(self, input: torch.Tensor) -> torch.Tensor:
+        return self._forward_impl(input, use_gelu=True)
