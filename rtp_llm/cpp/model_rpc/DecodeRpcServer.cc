@@ -73,8 +73,9 @@ grpc::Status DecodeRpcServer::init(const EngineInitParams&                      
         // surface as request timeouts. Raise the limit instead of failing startup -- the gate is
         // an optimisation, the scheduler's threshold is a correctness requirement.
         int64_t final_limit = effective_limit;
-        if (maga_init_params.scheduler_config.use_batch_decode_scheduler) {
-            const int64_t batch_size = maga_init_params.scheduler_config.batch_decode_scheduler_batch_size;
+        if (maga_init_params.runtime_config.use_batch_decode_scheduler) {
+            const int64_t batch_size =
+                maga_init_params.runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
             if (final_limit < batch_size) {
                 RTP_LLM_LOG_WARNING("decode admission limit [%ld] is below batch_decode_scheduler_batch_size [%ld]; "
                                     "raising it to avoid starving the batch scheduler",
