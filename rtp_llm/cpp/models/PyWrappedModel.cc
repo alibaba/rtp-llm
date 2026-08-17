@@ -737,7 +737,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             return forwardMicroBatched(inputs);
         }
         PyContextParallelParams cp_params;
-        if (device_props_.enable_prefill_cp) {
+        const bool              has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
+        if (device_props_.enable_prefill_cp && has_context_request) {
+            // CP accepts pure-prefill batches without MTP/speculative hidden states;
+            // handleInputs enforces both constraints before mutating the batch.
             context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
         }
 
@@ -768,14 +771,15 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         if (!prepared_attention_inputs_.load(std::memory_order_acquire)) {
             prepareAttentionInputs(inputs, /*skip_forward_event_sync=*/true);
         }
-        if (device_props_.enable_prefill_cp) {
+        if (device_props_.enable_prefill_cp && has_context_request) {
             attention_inputs_.context_parallel_info = cp_params;
             for (auto& [tag, tagged_inputs] : attention_inputs_by_tag_) {
                 tagged_inputs.context_parallel_info = cp_params;
             }
         }
 
-        if (device_props_.enable_prefill_cp && attention_inputs_.cache_store_inputs.has_value()) {
+        if (device_props_.enable_prefill_cp && has_context_request
+            && attention_inputs_.cache_store_inputs.has_value()) {
             // ContextParallelProcessor rewrites input_lengths to the rank-local
             // chunk; cache-store planning must keep the full pre-sharding lengths.
             attention_inputs_.cache_store_inputs->input_lengths_host = cp_params.prefill_actual_input_lengths_cpu;
@@ -825,7 +829,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         cache_store_write_cycle.finish();
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
-        const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
         if (device_props_.enable_prefill_cp && has_context_request) {
             if (!inputs.need_all_logits && !inputs.need_all_hidden_states) {
                 context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);

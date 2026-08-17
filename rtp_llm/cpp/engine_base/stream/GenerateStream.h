@@ -246,11 +246,10 @@ public:
     void spStep();
 
     // Raw multimodal accessors — return the full per-image vectors/tensor unfiltered.
-    // Stream is a pure data holder; the reuse-filtering rule ("an image is reused only
-    // when reuse_length covers its full token span") lives in NormalModelInputGatherer
-    // (see computeReusedMultimodalCount there). multimodalFeaturesLength() and
-    // hasMultimodalExtraInput() also return RAW counts; consumers that need post-reuse
-    // counts compute them on demand.
+    // Stream is a pure data holder; NormalModelInputGatherer omits fully reused images
+    // and slices partially reused feature/deepstack rows for the current model input.
+    // multimodalFeaturesLength() and hasMultimodalExtraInput() also return RAW counts;
+    // consumers that need post-reuse counts compute them on demand.
     std::vector<torch::Tensor> multimodalFeatures() const;
     std::vector<torch::Tensor> multimodalExtraInput() const;
     bool                       hasMultimodalExtraInput() const;

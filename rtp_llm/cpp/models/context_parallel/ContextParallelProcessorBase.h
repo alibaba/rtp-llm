@@ -41,6 +41,10 @@ protected:
     ///
     /// Plans the distribution of input tokens by splitting and padding as needed.
     /// Each rank receives a processed chunk according to the processing strategy.
+    /// Valid shuffle_indices entries must reference total_input_tokens and be
+    /// strictly increasing. Invalid entries represent padding. handleInputs relies
+    /// on this ordering to remap per-token and multimodal side inputs in one pass;
+    /// every processing strategy must preserve this contract.
     virtual bool plan(const std::vector<int>& total_input_tokens,
                       std::vector<int>&       input_tokens,
                       std::vector<int>&       shuffle_indices,

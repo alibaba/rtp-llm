@@ -9,9 +9,12 @@ import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.enums.TaskStateEnum;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
+import org.flexlb.sync.config.VitStatusConfig;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
+import org.flexlb.util.EnvUtils;
 import org.flexlb.util.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -23,17 +26,33 @@ import java.util.concurrent.atomic.AtomicLong;
 
 @Component
 public class ExpirationCleaner {
+    private static final String TASK_TIMEOUT_ENV = "TASK_TIMEOUT_US";
+    private static final String WORKER_TIMEOUT_ENV = "WORKER_TIMEOUT_US";
+    private static final long DEFAULT_TASK_TIMEOUT_US = 3_000_000L;
+    private static final long DEFAULT_WORKER_TIMEOUT_US = 3_000_000L;
 
     private static final String TASK_REMOVED = "task.removed";
 
     private final long taskTimeoutUs;
     private final long workerTimeoutUs;
+    private final long vitWorkerTimeoutUs;
     private final FlexMonitor monitor;
 
+    @Autowired
     public ExpirationCleaner(FlexMonitor monitor) {
+        this(monitor,
+                EnvUtils.readPositiveLong(TASK_TIMEOUT_ENV, DEFAULT_TASK_TIMEOUT_US),
+                EnvUtils.readPositiveLong(WORKER_TIMEOUT_ENV, DEFAULT_WORKER_TIMEOUT_US),
+                VitStatusConfig.WORKER_TIMEOUT_US);
+    }
+
+    ExpirationCleaner(FlexMonitor monitor, long taskTimeoutUs, long workerTimeoutUs, long vitWorkerTimeoutUs) {
         this.monitor = monitor;
-        this.taskTimeoutUs = Long.parseLong(System.getenv().getOrDefault("TASK_TIMEOUT_US", "3000000"));  // Default 3s
-        this.workerTimeoutUs = Long.parseLong(System.getenv().getOrDefault("WORKER_TIMEOUT_US", "3000000")); // Default 3s
+        this.taskTimeoutUs = taskTimeoutUs;
+        this.workerTimeoutUs = workerTimeoutUs;
+        this.vitWorkerTimeoutUs = vitWorkerTimeoutUs;
+        Logger.info("ExpirationCleaner config: taskTimeoutUs={}, workerTimeoutUs={}, vitWorkerTimeoutUs={}",
+                taskTimeoutUs, workerTimeoutUs, vitWorkerTimeoutUs);
     }
 
     @PostConstruct
@@ -60,7 +79,8 @@ public class ExpirationCleaner {
             WorkerStatus workerStatus = item.getValue();
 
             // 1. Check if worker needs cleanup
-            long expirationTime = workerStatus.getStatusLastUpdateTime().get() + workerTimeoutUs;
+            long roleWorkerTimeoutUs = role == RoleType.VIT ? vitWorkerTimeoutUs : workerTimeoutUs;
+            long expirationTime = workerStatus.getStatusLastUpdateTime().get() + roleWorkerTimeoutUs;
             long currentTime = System.nanoTime() / 1000;
             if (currentTime > expirationTime) {
                 it.remove();

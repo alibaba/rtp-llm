@@ -240,12 +240,11 @@ def _derive_echo_prefix_ids(
 ) -> List[int]:
     """Encode ``generate_env_config.think_start_tag`` once to produce the prefill token ids.
 
-    Disabled (returns ``[]``) when ``THINK_MODE`` env is off or ``think_start_tag`` is empty;
-    stays aligned with the engine's thinking switch so dash_sc and the engine turn on/off
-    together. Fail-open: any error returns ``[]`` and logs a warning.
+    DashSC resolves an omitted request mode to adaptive independently of
+    ``THINK_MODE``, so the startup metadata must not be gated by that OpenAI
+    default. An empty ``think_start_tag`` disables the prefix. Fail-open
+    tokenizer errors return ``[]`` and log a warning.
     """
-    if not bool(generate_env_config.think_mode):
-        return []
     tag = normalize_think_tag(generate_env_config.think_start_tag or "")
     if not tag:
         return []

@@ -109,6 +109,10 @@ python -m rtp_llm.dash_sc.client \
   --enable_thinking false
 ```
 
+Thinking control must use the boolean
+`request.parameters["enable_thinking"]`. The legacy
+`ds_header_attributes["x-ds-llm-thinking"]` attribute is no longer consumed.
+
 仓库内还提供 Bash 封装（**必须用 bash**）：
 
 ```bash

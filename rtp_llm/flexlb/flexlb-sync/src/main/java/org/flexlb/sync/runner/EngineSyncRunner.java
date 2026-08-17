@@ -128,20 +128,32 @@ public class EngineSyncRunner implements Runnable {
                             = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, host.getGroup(),
                             workerStatus, engineHealthReporter, engineGrpcService,
                             syncRequestTimeoutMs);
-                    statusCheckExecutor.submit(grpcWorkerStatusRunner);
+                    try {
+                        statusCheckExecutor.submit(grpcWorkerStatusRunner);
+                    } catch (RuntimeException e) {
+                        workerStatus.getStatusCheckInProgress().set(false);
+                        throw e;
+                    }
                 } else {
-                    logger.info("Skip status check for worker: {}, previous request in progress", workerIpPort);
+                    logger.debug("Skip status check for worker: {}, previous request in progress", workerIpPort);
                 }
 
-                if (workerStatus.getCacheCheckInProgress().compareAndSet(false, true)) {
-                    logger.debug("Submitting GrpcCacheStatusCheckRunner for worker: {}, site: {}", workerIpPort, site);
-                    GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner
-                            = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
-                            workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
-                            syncRequestTimeoutMs, syncCount, syncEngineStatusInterval);
-                    statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
-                } else {
-                    logger.info("Skip cache check for worker: {}, previous request in progress", workerIpPort);
+                if (roleType != RoleType.VIT) {
+                    if (workerStatus.getCacheCheckInProgress().compareAndSet(false, true)) {
+                        logger.debug("Submitting GrpcCacheStatusCheckRunner for worker: {}, site: {}", workerIpPort, site);
+                        GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner
+                                = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
+                                workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
+                                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval);
+                        try {
+                            statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
+                        } catch (RuntimeException e) {
+                            workerStatus.getCacheCheckInProgress().set(false);
+                            throw e;
+                        }
+                    } else {
+                        logger.debug("Skip cache check for worker: {}, previous request in progress", workerIpPort);
+                    }
                 }
             }
             logger.info("Finished submitting status check tasks for model: {}, role: {}, worker count: {}", modelName,

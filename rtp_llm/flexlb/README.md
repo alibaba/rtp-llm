@@ -209,6 +209,25 @@ FlexLB supports various configuration options through environment variables and 
 - **Backend Services**: Configure through `MODEL_SERVICE_CONFIG`
 - **ZooKeeper Settings**: Configure through `FLEXLB_SYNC_CONSISTENCY_CONFIG`
 
+Worker expiry and VIT endpoint health use startup-only environment variables:
+
+| Variable | Default | Semantics |
+| --- | ---: | --- |
+| `TASK_TIMEOUT_US` | `3000000` | Maximum idle age of a tracked task before cleanup. |
+| `WORKER_TIMEOUT_US` | `3000000` | Maximum age of the last successful non-VIT worker status update before cleanup. |
+| `VIT_SYNC_REQUEST_TIMEOUT_MS` | `2000` | Minimum timeout for a FlexLB-to-VIT status request. A larger global sync timeout still applies. |
+| `VIT_WORKER_TIMEOUT_US` | `5000000` | Maximum age of the last successful VIT status update before FlexLB removes the endpoint. |
+| `VIT_RETAIN_ALIVE_ON_TIMEOUT` | `true` | Keep the last VIT alive state after a gRPC deadline. Boolean values accept `true/false`, `1/0`, `yes/no`, and `on/off`; use any false form for immediate fail-closed behavior. |
+
+Invalid or non-positive integer values fall back to the defaults. A proxy may reject an
+individual child worker before FlexLB removes the aggregate VIT endpoint; this
+intentional layering tolerates transient proxy status timeouts while preserving a
+bounded stale endpoint window. With the defaults, the worst-case stale window is
+approximately 8 seconds: the 5-second VIT expiry plus up to one 3-second cleaner interval.
+All worker deadline failures continue to emit one `3104` (`WORKER_STATUS_GRPC_TIMEOUT`)
+event for alert compatibility. The status-sync error log includes
+`retainLastAliveStatus=true` when a VIT endpoint keeps its previous state.
+
 ## Monitoring
 
 FlexLB provides comprehensive monitoring through:

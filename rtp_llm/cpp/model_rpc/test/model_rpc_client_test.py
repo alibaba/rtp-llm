@@ -26,7 +26,7 @@ from unittest import TestCase, main
 
 import torch
 
-from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
@@ -36,6 +36,7 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
     trans_output,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    GenerateConfigPB,
     GenerateInputPB,
     GenerateOutputsPB,
     TensorPB,
@@ -169,6 +170,36 @@ class ModelRpcClientTest(TestCase):
             mm_inputs=[],
             generate_config=generate_config,
         )
+
+    def test_thinking_mode_values_match_proto_contract(self):
+        cases = (
+            (ThinkingMode.UNSPECIFIED, GenerateConfigPB.THINKING_MODE_UNSPECIFIED),
+            (ThinkingMode.DISABLED, GenerateConfigPB.THINKING_MODE_DISABLED),
+            (ThinkingMode.ADAPTIVE, GenerateConfigPB.THINKING_MODE_ADAPTIVE),
+            (ThinkingMode.ENABLED, GenerateConfigPB.THINKING_MODE_ENABLED),
+        )
+
+        for python_mode, proto_mode in cases:
+            with self.subTest(mode=python_mode):
+                self.assertEqual(int(python_mode), proto_mode)
+
+    def test_trans_input_writes_thinking_mode(self):
+        cases = (
+            (ThinkingMode.UNSPECIFIED, GenerateConfigPB.THINKING_MODE_UNSPECIFIED),
+            (ThinkingMode.DISABLED, GenerateConfigPB.THINKING_MODE_DISABLED),
+            (ThinkingMode.ADAPTIVE, GenerateConfigPB.THINKING_MODE_ADAPTIVE),
+            (ThinkingMode.ENABLED, GenerateConfigPB.THINKING_MODE_ENABLED),
+        )
+
+        for python_mode, proto_mode in cases:
+            with self.subTest(mode=python_mode):
+                config = GenerateConfig(thinking_mode=python_mode)
+                config_before_rpc = config.model_dump()
+
+                input_pb = trans_input(self._make_generate_input(config))
+
+                self.assertEqual(config.model_dump(), config_before_rpc)
+                self.assertEqual(input_pb.generate_config.thinking_mode, proto_mode)
 
     def test_trans_input_writes_typed_grammar_fields_consistently(self):
         grammar_fields = ("json_schema", "regex", "ebnf", "structural_tag")

@@ -14,18 +14,25 @@ from rtp_llm.dash_sc.codec import (
     DashScParameterError,
     DashScRequestControls,
     LLMFinishReason,
+    MultimodalPart,
     SamplingParams,
     build_dash_error_response,
     build_stream_response_from_generate_outputs,
     parse_dash_sc_grpc_request,
     parse_input_ids_from_request,
+    parse_multimodal_parts_from_request,
     parse_request_controls,
     parse_sampling_params,
     prepend_to_generated_ids_tensor,
 )
 from rtp_llm.dash_sc.inference.servicer import stream_log_tag
 from rtp_llm.dash_sc.proto import predict_v2_pb2
-from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
+from rtp_llm.utils.base_model_datatypes import (
+    AuxInfo,
+    GenerateOutput,
+    GenerateOutputs,
+    MMUrlType,
+)
 
 
 def _unpack_int32_le(raw: bytes) -> list[int]:
@@ -783,6 +790,8 @@ class DashScGrpcRequestTest(TestCase):
     def test_parse_request_controls_thinking_controls(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["ds_header_attributes"].string_param = json.dumps(
+            # This retired header is deliberately ignored. Clients must use
+            # request.parameters["enable_thinking"] instead.
             {
                 "x-ds-llm-thinking": "false",
                 "x-dashscope-inner-timeout": 1800,
@@ -794,13 +803,27 @@ class DashScGrpcRequestTest(TestCase):
         _add_tensor(req, "max_new_think_tokens", "INT32", [1], struct.pack("<i", 0))
         op = parse_request_controls(req)
         self.assertFalse(op.return_input_ids)
-        self.assertIs(op.enable_thinking, False)
+        self.assertIsNone(op.enable_thinking)
         self.assertEqual(op.max_new_think_tokens, 0)
         self.assertEqual(op.timeout_ms, 1_800_000)
         self.assertEqual(op.traffic_reject_priority, 10)
         self.assertEqual(
             op.request_headers, {"user_id": "u1", "x-dashscope-apikeyid": "ak1"}
         )
+
+    def test_parse_request_controls_enable_thinking_only_from_parameter(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["enable_thinking"].bool_param = True
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "x-ds-llm-thinking": "false",
+                "parameters": {"enable_thinking": False},
+            }
+        )
+
+        op = parse_request_controls(req)
+
+        self.assertIs(op.enable_thinking, True)
 
     def test_parse_request_controls_reasoning_effort_max_alias(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
@@ -866,6 +889,316 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(gc.max_thinking_tokens, 128)
         self.assertEqual(gc.stop_words_list, [[42]])
         self.assertTrue(gc.return_input_ids)
+
+
+class DashScMultimodalRequestTest(TestCase):
+    @staticmethod
+    def _set_payload(
+        request: predict_v2_pb2.ModelInferRequest,
+        payload: object,
+        key: str = "payload",
+    ) -> None:
+        request.parameters[key].string_param = json.dumps(payload)
+
+    def test_parses_openai_image_video_and_audio_parts(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            request,
+            {
+                "input": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": "http://x.png"},
+                                },
+                                {
+                                    "type": "video_url",
+                                    "video_url": {"url": "http://y.mp4"},
+                                },
+                                {
+                                    "type": "audio_url",
+                                    "audio_url": {"url": "http://z.wav"},
+                                },
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+
+        self.assertEqual(
+            parse_multimodal_parts_from_request(request),
+            [
+                MultimodalPart("http://x.png", MMUrlType.IMAGE),
+                MultimodalPart("http://y.mp4", MMUrlType.VIDEO),
+                MultimodalPart("http://z.wav", MMUrlType.AUDIO),
+            ],
+        )
+
+    def test_parses_nested_dashscope_payload_wrapper(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            request,
+            {
+                "payload": {
+                    "input": {
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [{"image": "http://nested.png"}],
+                            }
+                        ]
+                    }
+                }
+            },
+        )
+
+        self.assertEqual(
+            parse_multimodal_parts_from_request(request),
+            [MultimodalPart("http://nested.png", MMUrlType.IMAGE)],
+        )
+
+    def test_parses_dashscope_native_string_video(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            request,
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"image": "http://x.png", "max_pixels": 4096},
+                        {
+                            "video": "http://video.mp4",
+                            "fps": 2,
+                            "max_frames": 32,
+                        },
+                    ],
+                }
+            ],
+            key="__messages__",
+        )
+
+        self.assertEqual(
+            parse_multimodal_parts_from_request(request),
+            [
+                MultimodalPart("http://x.png", MMUrlType.IMAGE, max_pixels=4096),
+                MultimodalPart(
+                    "http://video.mp4",
+                    MMUrlType.VIDEO,
+                    fps=2,
+                    max_frames=32,
+                ),
+            ],
+        )
+
+    def test_rejects_dashscope_native_video_frame_list(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            request,
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"video": ["http://f1.jpg", "http://f2.jpg"]},
+                    ],
+                }
+            ],
+            key="__messages__",
+        )
+
+        with self.assertRaisesRegex(
+            DashScParameterError, "video frame lists are not supported"
+        ):
+            parse_multimodal_parts_from_request(request)
+
+    def test_inline_preprocess_values_override_nested_values(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            request,
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": "http://x.png",
+                                "preprocess_config": {
+                                    "min_pixels": 100,
+                                    "max_pixels": 200,
+                                },
+                                "min_pixels": 300,
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(
+            parse_multimodal_parts_from_request(request),
+            [
+                MultimodalPart(
+                    "http://x.png",
+                    MMUrlType.IMAGE,
+                    min_pixels=300,
+                    max_pixels=200,
+                )
+            ],
+        )
+
+    def test_preserves_mixed_part_order_and_filters_invalid_config(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            request,
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "describe"},
+                            {
+                                "type": "image_url",
+                                "image_url": "http://x.png",
+                                "max_pixels": -1,
+                            },
+                            {
+                                "type": "video_url",
+                                "video_url": "http://v.mp4",
+                                "preprocess_config": {
+                                    "fps": True,
+                                    "max_frames": 0,
+                                    "min_frames": 3,
+                                },
+                            },
+                            {
+                                "image": "http://native.png",
+                                "video": "http://native.mp4",
+                            },
+                        ],
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(
+            parse_multimodal_parts_from_request(request),
+            [
+                MultimodalPart("http://x.png", MMUrlType.IMAGE),
+                MultimodalPart(
+                    "http://v.mp4",
+                    MMUrlType.VIDEO,
+                    min_frames=3,
+                ),
+                MultimodalPart("http://native.png", MMUrlType.IMAGE),
+                MultimodalPart("http://native.mp4", MMUrlType.VIDEO),
+            ],
+        )
+
+    def test_nested_enable_thinking_is_a_compatibility_fallback(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        request.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"body": {"parameters": {"enable_thinking": False}}}
+        )
+
+        self.assertIs(parse_request_controls(request).enable_thinking, False)
+
+    def test_missing_payload_is_text_only(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        self.assertEqual(parse_multimodal_parts_from_request(request), [])
+
+    def test_rejects_empty_or_non_string_payload(self) -> None:
+        for field, value in (
+            ("int64_param", 1),
+            ("string_param", ""),
+        ):
+            with self.subTest(field=field):
+                request = predict_v2_pb2.ModelInferRequest()
+                setattr(request.parameters["payload"], field, value)
+                with self.assertRaisesRegex(
+                    DashScParameterError, "must be a non-empty JSON string"
+                ):
+                    parse_multimodal_parts_from_request(request)
+
+    def test_rejects_invalid_payload_json(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        request.parameters["payload"].string_param = "not-json"
+        with self.assertRaisesRegex(DashScParameterError, "failed to parse"):
+            parse_multimodal_parts_from_request(request)
+
+    def test_payload_takes_precedence_over_legacy_messages(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            request,
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": "http://payload.png"}
+                        ],
+                    }
+                ]
+            },
+            key="payload",
+        )
+        self._set_payload(
+            request,
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": "http://legacy.png"}
+                        ],
+                    }
+                ]
+            },
+            key="__messages__",
+        )
+
+        self.assertEqual(
+            parse_multimodal_parts_from_request(request),
+            [MultimodalPart("http://payload.png", MMUrlType.IMAGE)],
+        )
+
+    def test_rejects_invalid_openai_multimodal_urls(self) -> None:
+        for part in (
+            {"type": "image_url", "image_url": ""},
+            {"type": "video_url", "video_url": {"url": None}},
+            {"type": "audio_url"},
+        ):
+            with self.subTest(part=part):
+                request = predict_v2_pb2.ModelInferRequest()
+                self._set_payload(
+                    request,
+                    {"messages": [{"role": "user", "content": [part]}]},
+                )
+                with self.assertRaisesRegex(
+                    DashScParameterError, "requires a non-empty URL string"
+                ):
+                    parse_multimodal_parts_from_request(request)
+
+    def test_rejects_invalid_dashscope_multimodal_urls(self) -> None:
+        for part in (
+            {"image": ""},
+            {"video": None},
+            {"audio": {"url": "http://audio"}},
+        ):
+            with self.subTest(part=part):
+                request = predict_v2_pb2.ModelInferRequest()
+                self._set_payload(
+                    request,
+                    [{"role": "user", "content": [part]}],
+                    key="__messages__",
+                )
+                with self.assertRaisesRegex(
+                    DashScParameterError, "requires a non-empty URL string"
+                ):
+                    parse_multimodal_parts_from_request(request)
 
 
 class BuildStreamResponseFromGenerateOutputsTest(TestCase):

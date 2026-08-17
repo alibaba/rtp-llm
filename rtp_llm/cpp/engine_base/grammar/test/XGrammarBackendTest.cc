@@ -163,6 +163,34 @@ TEST(XGrammarBackendTest, CompileStructuralTagSupportsMultipleBoundedRegions) {
     ASSERT_TRUE(result.ok()) << result.status().ToString();
 }
 
+TEST(XGrammarBackendTest, CreateMatcherFromAdaptiveReasoningStructuralTag) {
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
+    GrammarKeyCpp key{"structural_tag",
+                      R"({"type":"structural_tag","format":{"type":"or","elements":[)"
+                      R"({"type":"sequence","elements":[)"
+                      R"({"type":"tag","begin":"<think>","content":{"type":"any_text","max_tokens":2},)"
+                      R"("end":"</think>"},{"type":"regex","pattern":"a"}]},)"
+                      R"({"type":"any_text","excludes":["<think>","</think>"]}]}})"};
+
+    const auto accepts = [&](const std::string& text) {
+        auto matcher_or = backend->createMatcherFromKey(key);
+        EXPECT_TRUE(matcher_or.ok()) << matcher_or.status().ToString();
+        if (!matcher_or.ok()) {
+            return false;
+        }
+        for (const unsigned char token : text) {
+            auto accepted = matcher_or.value()->acceptToken(token);
+            EXPECT_TRUE(accepted.ok()) << accepted.status().ToString();
+            EXPECT_TRUE(accepted.ok() && accepted.value()) << "rejected token " << token;
+        }
+        return true;
+    };
+
+    EXPECT_TRUE(accepts("<think>x</think>a"));
+    EXPECT_TRUE(accepts("plain answer"));
+}
+
 TEST(XGrammarBackendTest, CreateMatcherProducesUsableObject) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);

@@ -2,6 +2,7 @@ import copy
 import hashlib
 import logging
 import time
+from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from pydantic import (
@@ -22,6 +23,12 @@ from rtp_llm.config.response_format import (
     normalize_think_tag,
     parse_response_format,
 )
+from rtp_llm.config.thinking_mode import (
+    THINK_MODE_ADAPTIVE,
+    THINK_MODE_DISABLED,
+    THINK_MODE_ENABLED,
+    normalize_think_mode,
+)
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.check_util import *
 from rtp_llm.utils.util import check_with_info
@@ -40,6 +47,22 @@ class ReturnAllProbsMode:
     NONE = 0
     DEFAULT = 1
     ORIGINAL = 2
+
+
+class ThinkingMode(IntEnum):
+    UNSPECIFIED = 0
+    DISABLED = 1
+    ADAPTIVE = 2
+    ENABLED = 3
+
+
+def thinking_mode_from_value(value: Any) -> ThinkingMode:
+    normalized = normalize_think_mode(value)
+    return {
+        THINK_MODE_DISABLED: ThinkingMode.DISABLED,
+        THINK_MODE_ADAPTIVE: ThinkingMode.ADAPTIVE,
+        THINK_MODE_ENABLED: ThinkingMode.ENABLED,
+    }[normalized]
 
 
 class RoleAddr(BaseModel):
@@ -103,6 +126,7 @@ class GenerateConfig(BaseModel):
     in_think_mode: bool = (
         False  # same as `enable_thinking` in chat_template_kwargs, discard one in the future
     )
+    thinking_mode: ThinkingMode = ThinkingMode.UNSPECIFIED
     chat_template_kwargs: Optional[Dict[str, Any]] = None
     begin_think_token_ids: List[int] = []
     end_think_token_ids: List[int] = []
@@ -585,22 +609,73 @@ class GenerateConfig(BaseModel):
         later request enrichment may only update grammar-independent fields.
         """
 
+        requested_mode = self.thinking_mode
+        if requested_mode == ThinkingMode.UNSPECIFIED and enable_thinking is None:
+            requested_mode = thinking_mode_from_value(generate_env_config.think_mode)
+
+        if requested_mode == ThinkingMode.ADAPTIVE:
+            self.thinking_mode = ThinkingMode.ADAPTIVE
+            self.in_think_mode = False
+            if tokenizer and not self.begin_think_token_ids:
+                think_start_tag = normalize_think_tag(
+                    generate_env_config.think_start_tag
+                )
+                self.begin_think_token_ids = tokenizer.encode(
+                    think_start_tag, add_special_tokens=False
+                )
+
+            if not self.end_think_token_ids:
+                end_think_token_id = generate_env_config.think_end_token_id
+                if end_think_token_id != -1:
+                    self.end_think_token_ids = [end_think_token_id]
+                elif tokenizer:
+                    think_end_tag = normalize_think_tag(
+                        generate_env_config.think_end_tag
+                    )
+                    self.end_think_token_ids = tokenizer.encode(
+                        think_end_tag, add_special_tokens=False
+                    )
+
+            from rtp_llm.config.response_format_compiler import ReasoningFormat
+
+            if reasoning_format is None:
+                base_format = ReasoningFormat.from_generate_env_config(
+                    generate_env_config
+                )
+                reasoning_format = ReasoningFormat(
+                    tag_begin=normalize_think_tag(generate_env_config.think_start_tag),
+                    tag_end=base_format.tag_end,
+                    suffix=base_format.suffix,
+                    no_think_excludes=base_format.no_think_excludes,
+                )
+            return self.finalize_response_format(reasoning_format=reasoning_format)
+
+        if enable_thinking is None:
+            if requested_mode == ThinkingMode.ENABLED:
+                enable_thinking = True
+            elif requested_mode == ThinkingMode.DISABLED:
+                enable_thinking = False
+            else:
+                enable_thinking = (
+                    thinking_mode_from_value(generate_env_config.think_mode)
+                    == ThinkingMode.ENABLED
+                )
+
+        # Preserve the pre-adaptive fixed-mode behavior. In particular, fixed
+        # ENABLED does not require the model to emit a begin tag.
         end_think_token_id = generate_env_config.think_end_token_id
-        in_think_mode = (
-            bool(generate_env_config.think_mode)
-            if enable_thinking is None
-            else enable_thinking
-        )
         self.end_think_token_ids = (
             [end_think_token_id] if end_think_token_id != -1 else []
         )
-        if in_think_mode and tokenizer and end_think_token_id == -1:
+        if enable_thinking and tokenizer and end_think_token_id == -1:
             think_end_tag = normalize_think_tag(generate_env_config.think_end_tag)
-            tokenized_result: List[int] = tokenizer.encode(
+            self.end_think_token_ids = tokenizer.encode(
                 think_end_tag, add_special_tokens=False
             )
-            self.end_think_token_ids = tokenized_result
-        self.in_think_mode = in_think_mode
+        self.in_think_mode = bool(enable_thinking)
+        self.thinking_mode = (
+            ThinkingMode.ENABLED if self.in_think_mode else ThinkingMode.DISABLED
+        )
 
         from rtp_llm.config.response_format_compiler import ReasoningFormat
 
@@ -738,7 +813,17 @@ class GenerateConfig(BaseModel):
                 is_list_positive_integer(self.begin_think_token_ids),
                 f"begin_think_token_ids {self.begin_think_token_ids} is wrong data type",
             )
-            if self.in_think_mode:
+            resolved_thinking_mode = self.thinking_mode
+            if resolved_thinking_mode == ThinkingMode.UNSPECIFIED:
+                resolved_thinking_mode = (
+                    ThinkingMode.ENABLED
+                    if self.in_think_mode
+                    else ThinkingMode.DISABLED
+                )
+            if resolved_thinking_mode in (
+                ThinkingMode.ADAPTIVE,
+                ThinkingMode.ENABLED,
+            ):
                 check_with_info(
                     is_positive_integer(self.max_thinking_tokens),
                     f"max_thinking_tokens {self.max_thinking_tokens} is wrong data type",
@@ -746,6 +831,11 @@ class GenerateConfig(BaseModel):
                 check_with_info(
                     is_list_positive_integer(self.end_think_token_ids),
                     f"end_think_token_ids {self.end_think_token_ids} is wrong data type",
+                )
+            if resolved_thinking_mode == ThinkingMode.ADAPTIVE:
+                check_with_info(
+                    is_list_positive_integer(self.begin_think_token_ids),
+                    f"begin_think_token_ids {self.begin_think_token_ids} is wrong data type",
                 )
             calculate_loss_list = [0, 1, 2]
             check_with_info(
