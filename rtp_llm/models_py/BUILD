@@ -112,7 +112,10 @@ py_library(
     srcs = glob([
         "kernels/*.py",
         "kernels/**/*.py",
-    ])
+    ]),
+    visibility = [
+        ":__subpackages__",
+    ],
 )
 
 py_library(

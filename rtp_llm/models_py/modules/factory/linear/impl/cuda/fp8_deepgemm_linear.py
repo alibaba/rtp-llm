@@ -74,7 +74,10 @@ class CudaFp8DeepGEMMLinear(LinearBase):
 
         # Check if DeepGEMM is available
         if not has_deep_gemm():
-            error_msg = "DeepGEMM is not available. Please install the `deep_gemm` package to enable DeepGEMM kernels."
+            error_msg = (
+                "DeepGEMM is not available. Please install the `deep_gemm` "
+                "package to enable DeepGEMM kernels."
+            )
             logger.error(error_msg)
             raise RuntimeError(error_msg)
         # Check weight and weight scale dimensions
