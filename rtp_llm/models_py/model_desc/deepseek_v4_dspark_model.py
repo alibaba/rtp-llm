@@ -40,13 +40,13 @@ from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
 from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
 from rtp_llm.models_py.modules.dsv4.cp import build_cp_context_for_forward
-from rtp_llm.models_py.modules.dsv4.fp8.attention import BIND_KEEP, bind_attn_cache
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._swa_ops_triton import (
     compute_swa_slot_mapping_from_positions,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.attention import BIND_KEEP, bind_attn_cache
 from rtp_llm.models_py.modules.dsv4.fp8.decode.compute_qkv import decode_compute_qkv
 from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
     get_or_build_sched_meta,
@@ -58,7 +58,6 @@ from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
 )
 from rtp_llm.models_py.speculative.dspark_proposer_mixin import (
-    DSparkMarkovHead,
     DSparkProposerMixin,
     optional_tensor,
 )
@@ -69,14 +68,15 @@ from rtp_llm.utils.model_weight import W
 class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     """DeepSeek-V4 implementation of the shared DSpark proposer.
 
-    The engine input contract, query-block geometry and Markov sampling tail
-    are inherited from :class:`DSparkProposerMixin`; this class implements the
+    The engine input contract and query-block geometry are inherited from
+    :class:`DSparkProposerMixin`; this class implements the
     model-specific hooks with DeepSeek-V4 specifics: mHC blocks, FP8 SWA
     paged-cache injection, FlashMLA non-causal top-k indices and the
     ``mtp.*`` checkpoint weights.
 
-    Output ``draft_tokens`` is ``[B, gamma]``; the rejection-sampling q is
-    reconstructed engine-side as a point mass on the emitted tokens.
+    Output is normalized ``[B * gamma, hidden_dim]``. The regular C++ model
+    wrapper applies lm_head; the speculative executor then applies the Markov
+    tail and the request's sampling parameters.
     """
 
     # Draft side: carries the capture ids for the shared-buffer row-width
@@ -159,7 +159,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             noise_token_id=int(noise_token_id),
             aux_feature_dim=len(self._dspark_target_layer_ids) * int(self._v4_args.dim),
             hidden_dim=int(self._v4_args.dim),
-            vocab_size=int(self._v4_args.vocab_size),
         )
         # Model-level weights are attached by ``_load_extra_weights`` after
         # the inherited V4Transformer has consumed the per-layer dictionaries.
@@ -212,12 +211,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         )
         self.main_proj = _v4_fp8_linear(
             gw[W.v4_dspark_main_proj_w], gw[W.v4_dspark_main_proj_s]
-        )
-        self.markov_head = DSparkMarkovHead(
-            gw[W.v4_dspark_markov_w1],
-            gw[W.v4_dspark_markov_w2],
-            vocab_size=int(self._v4_args.vocab_size),
-            rank=self._dspark_markov_rank,
         )
 
     # ------------------------------------------------------------------
@@ -592,14 +585,9 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         if commit_ctx is not None:
             # Proj-then-gather: the row map is gathered once here; each
             # layer's projected KV is gathered inside _commit_layer_features.
-            from rtp_llm.models_py.distributed.collective_torch import (
-                Group,
-                all_gather,
-            )
+            from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 
-            gathered_req_ids = all_gather(
-                context_req_ids.contiguous(), group=Group.TP
-            )
+            gathered_req_ids = all_gather(context_req_ids.contiguous(), group=Group.TP)
             gathered_positions = all_gather(
                 context_positions.contiguous(), group=Group.TP
             )
@@ -772,49 +760,12 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             graph_metadata,
         )
 
-    def compute_draft_logits(
-        self, hidden: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def compute_draft_hidden_states(self, hidden: torch.Tensor) -> torch.Tensor:
         batch_size, gamma = int(hidden.shape[0]), int(hidden.shape[1])
         dim = int(self._v4_args.dim)
 
         head_hidden = self.v4._hc_head_reduce(hidden).reshape(batch_size * gamma, dim)
-        # PyModelOutputs.hidden_states convention is post-final-norm and
-        # pre-lm-head.  Reuse it for the base DSpark logits and for the
-        # framework's (unused) regular logits output.
-        normalized = self.v4.norm(head_hidden)
-        base_logits = torch.mm(
-            normalized.to(self.v4.head_weight.dtype), self.v4.head_weight.t()
-        ).float()
-        # The lm_head is aliased from the target owner, whose weight is
-        # vocab-sharded across TP ranks; the sequential Markov tail needs the
-        # full vocabulary on every rank. Only k rows per request cross this
-        # gather, so it stays tiny relative to the aliased ~1.8 GiB matrix.
-        local_vocab = int(base_logits.size(-1))
-        if local_vocab < self._dspark_vocab_size:
-            if self.tp_size <= 1:
-                raise RuntimeError(
-                    "DSpARK lm_head output is vocabulary-sharded but TP is disabled: "
-                    f"local={local_vocab}, vocab={self._dspark_vocab_size}"
-                )
-            from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
-
-            rows = int(base_logits.size(0))
-            gathered = all_gather(base_logits.contiguous(), group=Group.TP)
-            shard_vocab = local_vocab
-            base_logits = (
-                gathered.reshape(self.tp_size, rows, shard_vocab)
-                .permute(1, 0, 2)
-                .reshape(rows, self.tp_size * shard_vocab)
-            )
-            if int(base_logits.size(-1)) < self._dspark_vocab_size:
-                raise RuntimeError(
-                    "DSpARK gathered lm_head output is narrower than vocabulary: "
-                    f"gathered={int(base_logits.size(-1))}, "
-                    f"vocab={self._dspark_vocab_size}"
-                )
-        base_logits = base_logits[..., : self._dspark_vocab_size].contiguous()
-        return normalized, base_logits.view(batch_size, gamma, -1)
+        return self.v4.norm(head_hidden)
 
     @torch.inference_mode()
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
@@ -824,7 +775,9 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         gamma = self._gen_num_per_cycle
         phase = getattr(inputs, "dspark_call_phase", DSparkCallPhase.NONE)
         if phase == DSparkCallPhase.NONE:
-            raise RuntimeError("DSpark forward requires an explicit proposal/commit phase")
+            raise RuntimeError(
+                "DSpark forward requires an explicit proposal/commit phase"
+            )
         is_commit = phase == DSparkCallPhase.COMMIT
 
         # PyWrappedModel warmup intentionally has no KVCache.  Produce stable

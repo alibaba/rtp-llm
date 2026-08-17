@@ -404,7 +404,8 @@ absl::StatusOr<GptModelInputs> MtpBatchStreamProcessor::gatherDecodeModelInput(c
 absl::StatusOr<SamplerInputs>
 MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
                                                 const GptModelOutputs&                      model_output,
-                                                const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result) const {
+                                                const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result,
+                                                const torch::Tensor&                        draft_token_ids) const {
     RTP_LLM_PROFILE_SCOPE("mtp_batch_stream_processor.gather_spec_sampler_input");
     RTP_LLM_CHECK(!stream_groups.empty());
     auto all_streams      = stream_groups.allStreams();
@@ -438,20 +439,60 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
 
         copyScoreSamplerTokenIds(
             sampler_inputs.token_ids, complete_token_ids, batch_idx, static_cast<int64_t>(score_len), seq_len);
+        RTP_LLM_CHECK_WITH_INFO(
+            seq_len + static_cast<int64_t>(propose_step_) <= static_cast<int64_t>(sampler_inputs.step + 1),
+            "MTP verify sampler history exceeds its allocated width: seq_len=%ld gamma=%zu step=%zu",
+            seq_len,
+            propose_step_,
+            sampler_inputs.step);
         batch_idx += static_cast<int64_t>(score_len);
         RTP_LLM_LOG_DEBUG("stream [%s], sampler inputs token ids = [%s]",
                           stream->streamLogTag().c_str(),
                           tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
     }
 
-    auto vocab_size           = (size_t)model_output.logits.size(1);
-    sampler_inputs.vocab_size = vocab_size;
+    RTP_LLM_CHECK_WITH_INFO(model_output.logits.dim() == 2
+                                && model_output.logits.size(1) >= static_cast<int64_t>(vocab_size_),
+                            "MTP target logits width %ld is smaller than vocab size %zu",
+                            model_output.logits.dim() == 2 ? model_output.logits.size(1) : -1,
+                            vocab_size_);
+    sampler_inputs.vocab_size = vocab_size_;
     if (return_all_probs) {
-        sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size, (int64_t)vocab_size},
+        sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size, (int64_t)vocab_size_},
                                                 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     }
 
-    sampler_inputs.logits = model_output.logits.clone();
+    const auto batch_size = static_cast<int64_t>(stream_groups.size());
+    const auto gamma      = static_cast<int64_t>(propose_step_);
+    const auto rows       = static_cast<int64_t>(score_len);
+    RTP_LLM_CHECK_WITH_INFO(draft_token_ids.defined() && draft_token_ids.scalar_type() == torch::kInt32
+                                && draft_token_ids.dim() == 2 && draft_token_ids.size(0) == batch_size
+                                && draft_token_ids.size(1) == gamma,
+                            "MTP verify draft tokens must be int32 [B,gamma]");
+
+    // The sampler already needs token history on device. Fill every proposal
+    // slot once for all score rows, then let each row's sequence length expose
+    // exactly proposals [0, score_position).
+    auto token_ids_gpu = sampler_inputs.token_ids.to(torch::kCUDA, /*non_blocking=*/true);
+    auto histories     = token_ids_gpu.view({batch_size, rows, static_cast<int64_t>(sampler_inputs.step + 1)});
+    auto proposals     = draft_token_ids.to(torch::kCUDA, /*non_blocking=*/true)
+                         .contiguous()
+                         .view({batch_size, 1, gamma})
+                         .expand({batch_size, rows, gamma});
+    auto base_lengths = sampler_inputs.sequence_lengths.view({batch_size, rows})
+                            .select(1, 0)
+                            .to(torch::Device(torch::kCUDA), torch::kLong, /*non_blocking=*/true)
+                            .view({batch_size, 1, 1});
+    auto proposal_offsets =
+        torch::arange(gamma, torch::TensorOptions().dtype(torch::kLong).device(torch::Device(torch::kCUDA)))
+            .view({1, 1, gamma});
+    auto proposal_columns = (base_lengths + proposal_offsets).expand({batch_size, rows, gamma});
+    histories.scatter_(2, proposal_columns, proposals);
+    sampler_inputs.token_ids = std::move(token_ids_gpu);
+
+    // lm_head shards may contain TP-alignment padding. Synthetic columns must
+    // not participate in target sampling or the rejection distribution.
+    sampler_inputs.logits = model_output.logits.narrow(1, 0, static_cast<int64_t>(vocab_size_)).clone();
 
     // TODO(async): debug formatting is CPU-only. Keep the .cpu() explicit
     // and do not route this through the model-input fast path.
@@ -459,7 +500,7 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
                       tensorDebugStringWithData<float>(sampler_inputs.logits.cpu(), 10).c_str());
 
     RTP_LLM_LOG_DEBUG("gatherSamplerInput done");
-    return std::move(sampler_inputs);
+    return sampler_inputs;
 }
 
 void MtpBatchStreamProcessor::updateProposeTokens(const StreamGroups&                stream_groups,
@@ -763,11 +804,11 @@ torch::Tensor MtpBatchStreamProcessor::dsparkDraftInputLengths(int64_t batch_siz
 }
 
 torch::Tensor MtpBatchStreamProcessor::dsparkDraftLmIndexes(int64_t batch_size) {
-    const int64_t draft_width = propose_step_;
-    if (!dspark_lm_indexes_cache_.defined() || dspark_lm_indexes_cache_.size(0) < batch_size) {
-        dspark_lm_indexes_cache_ = torch::arange(0, batch_size * draft_width, draft_width, cudaInt32Options());
+    const int64_t token_count = batch_size * propose_step_;
+    if (!dspark_lm_indexes_cache_.defined() || dspark_lm_indexes_cache_.size(0) < token_count) {
+        dspark_lm_indexes_cache_ = torch::arange(token_count, cudaInt32Options());
     }
-    return dspark_lm_indexes_cache_.narrow(0, 0, batch_size);
+    return dspark_lm_indexes_cache_.narrow(0, 0, token_count);
 }
 
 void MtpBatchStreamProcessor::validatePrefillDSparkCommitInput(const GptModelInputs& model_input) const {
@@ -1069,6 +1110,9 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
             accept_tokens.narrow(0, batch_idx_out, next_batch_size).narrow(1, 0, cur_accept_len).contiguous();
         spec_update_infos.push_back(
             {accept_tokens_tensor, cur_accept_len, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
+        auto& update_info                    = spec_update_infos.back();
+        update_info.speculative_propose_step = propose_step_;
+        update_info.accepted_draft_tokens    = std::max(0, cur_accept_len - 1);
 
         token_offset += propose_step_ + 1;
         batch_idx_out += next_batch_size;

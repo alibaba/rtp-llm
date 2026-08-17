@@ -899,6 +899,16 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
         return;
     }
 
+    if (update_info.speculative_propose_step > 0) {
+        sp_iter_count_++;
+        speculative_accepted_tokens_per_pos_.resize(update_info.speculative_propose_step, 0);
+        const int accepted_draft_tokens =
+            std::clamp(update_info.accepted_draft_tokens, 0, update_info.speculative_propose_step);
+        for (int position = 0; position < accepted_draft_tokens; ++position) {
+            speculative_accepted_tokens_per_pos_[position]++;
+        }
+    }
+
     // update speculative output buffer
     int  target_last_token = new_tokens.data_ptr<int>()[num_new_tokens - 1];
     int* spec_tokens       = sp_output_buffer_->tokens.data_ptr<int>();
@@ -906,7 +916,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     if (update_info.draft_token >= 0) {
         RTP_LLM_CHECK_WITH_INFO(sp_output_buffer_->tokens.numel() >= 2,
                                 "speculative token buffer must contain target and draft slots");
-        spec_tokens[1]  = update_info.draft_token;
+        spec_tokens[1] = update_info.draft_token;
         propose_token_ = {target_last_token, update_info.draft_token};
     } else {
         // Commit-only speculative steps (DSpARK prefill/decode tail) publish
@@ -1202,8 +1212,8 @@ void GenerateStream::reportStreamMetrics() {
         collector.is_streaming_qps  = generate_input_->generate_config->is_streaming;
         collector.not_streaming_qps = !generate_input_->generate_config->is_streaming;
         if (getStatus() == StreamState::FINISHED || cancelled || timeout) {
-            collector.reuse_length           = initial_reuse_length_;
-            collector.input_token_length     = inputLength();
+            collector.reuse_length       = initial_reuse_length_;
+            collector.input_token_length = inputLength();
             collector.effective_context_length =
                 std::max<int64_t>(0, collector.input_token_length - initial_reuse_length_);
             collector.output_token_length    = outputTokenLen();

@@ -84,6 +84,8 @@ class FakeStub:
         aux_info2 = output_pb2.aux_info.add()
         aux_info2.iter_count = 2
         aux_info2.output_len = 2
+        aux_info2.speculative_draft_rounds = 4
+        aux_info2.speculative_accepted_tokens_per_pos.extend([3, 2, 1])
         output_pb2.logits.data_type = TensorPB.DataType.FP32
         output_pb2.logits.shape.extend([1, 1, 2])
         output_pb2.logits.fp32_data = struct.pack("<ff", 0.1, 0.2)
@@ -190,6 +192,27 @@ class ModelRpcClientTest(TestCase):
             responses.extend(res.generate_outputs)
         return responses
 
+    def test_trans_output_preserves_speculative_acceptance_counters(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2], dtype=torch.int32),
+            generate_config=GenerateConfig(aux_info=True),
+            request_id=1,
+            mm_inputs=[],
+        )
+        outputs_pb = GenerateOutputsPB()
+        output_pb = outputs_pb.flatten_output
+        output_pb.finished.append(False)
+        aux_info = output_pb.aux_info.add()
+        aux_info.speculative_draft_rounds = 7
+        aux_info.speculative_accepted_tokens_per_pos.extend([6, 4, 2])
+
+        outputs = trans_output(input_py, outputs_pb, StreamState())
+
+        self.assertEqual(len(outputs.generate_outputs), 1)
+        actual = outputs.generate_outputs[0].aux_info
+        self.assertEqual(actual.speculative_draft_rounds, 7)
+        self.assertEqual(actual.speculative_accepted_tokens_per_pos, [6, 4, 2])
+
     @unittest.skip("need fix")
     def test_generate_stream(self):
         client = FakeModelRpcClient()
@@ -211,6 +234,8 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(res[1].finished, False)
         self.assertEqual(res[1].aux_info.iter_count, 3)
         self.assertEqual(res[1].aux_info.output_len, 2)
+        self.assertEqual(res[1].aux_info.speculative_draft_rounds, 4)
+        self.assertEqual(res[1].aux_info.speculative_accepted_tokens_per_pos, [3, 2, 1])
 
         self.assertEqual(res[2].finished, True)
 

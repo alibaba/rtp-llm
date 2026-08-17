@@ -40,7 +40,8 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
 
         inputs.dspark_call_phase = DSparkCallPhase.PROPOSE
         outputs = model.forward(inputs)
-        self.assertEqual(tuple(outputs.draft_tokens.shape), (1, 3))
+        self.assertEqual(tuple(outputs.hidden_states.shape), (3, 8))
+        self.assertEqual(outputs.hidden_states.dtype, torch.bfloat16)
 
     def test_padded_bucket_rows_have_no_attention_work(self) -> None:
         model = _dspark_harness()
@@ -87,13 +88,11 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
             noise_token_id=1,
             aux_feature_dim=24,
             hidden_dim=8,
-            vocab_size=17,
         )
 
         outputs = model.dspark_empty_outputs(2, torch.device("cpu"))
 
         self.assertEqual(tuple(outputs.hidden_states.shape), (6, 8))
-        self.assertEqual(tuple(outputs.draft_tokens.shape), (2, 3))
 
     def test_padded_graph_slot_maps_no_rows_with_prefix_sum_starts(self) -> None:
         # A graph bucket of two requests replays a one-request batch. Rows

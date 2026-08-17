@@ -96,6 +96,9 @@ class AuxInfo:
     decode_remote_reuse_len: int = 0
     decode_memory_reuse_len: int = 0
 
+    speculative_draft_rounds: int = 0
+    speculative_accepted_tokens_per_pos: List[int] = field(default_factory=list)
+
     role_addrs: List[RoleAddr] = field(default_factory=list)
     aux_string: str = ""
 

@@ -17,6 +17,7 @@ public:
                             bool                               warm_up):
         NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
         propose_step_(sp_config.gen_num_per_cycle),
+        vocab_size_(model_config.vocab_size),
         is_dspark_(sp_config.type == SP_TYPE_DSPARK),
         dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)) {}
 
@@ -36,10 +37,10 @@ public:
     absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups,
                                                           TensorHolder&       host_holder) const;
 
-    absl::StatusOr<SamplerInputs>
-    gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
-                           const GptModelOutputs&                      model_output,
-                           const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result = {}) const;
+    absl::StatusOr<SamplerInputs> gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
+                                                         const GptModelOutputs&                      model_output,
+                                                         const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result,
+                                                         const torch::Tensor& draft_token_ids) const;
 
     void prepareDecodeDraftModelInput(const StreamGroups& stream_groups,
                                       GptModelInputs&     model_input,
@@ -76,7 +77,7 @@ public:
     void buildDSparkProposeInput(GptModelInputs&      model_input,
                                  const torch::Tensor& anchors,
                                  const torch::Tensor& committed_ends,
-                                                TensorHolder&          host_holder);
+                                 TensorHolder&        host_holder);
 
     // Round-head stream state (anchor = last accepted token, committed_end =
     // committed length - 1), derived once per decode round and consumed by
@@ -92,13 +93,13 @@ public:
                                          TensorHolder&         host_holder) const;
 
     void buildDSparkProposeInputFromStreams(const DSparkRoundHead& round_head,
-                                       GptModelInputs&     model_input,
-                                       TensorHolder&       host_holder);
+                                            GptModelInputs&        model_input,
+                                            TensorHolder&          host_holder);
 
     void prepareDSparkVerifyModelInput(const DSparkRoundHead& round_head,
                                        GptModelInputs&        model_input,
                                        const torch::Tensor&   proposals,
-                                        TensorHolder&       host_holder);
+                                       TensorHolder&          host_holder);
 
     void updateDecodePostDSparkCommitInput(GptModelInputs&      model_input,
                                            const torch::Tensor& target_features,
@@ -147,7 +148,8 @@ protected:
     torch::Tensor dsparkDraftInputLengths(int64_t batch_size);
     torch::Tensor dsparkDraftLmIndexes(int64_t batch_size);
 
-    int propose_step_;
+    int     propose_step_;
+    size_t  vocab_size_           = 0;
     bool    is_dspark_            = false;
     int32_t dspark_mask_token_id_ = -1;
 

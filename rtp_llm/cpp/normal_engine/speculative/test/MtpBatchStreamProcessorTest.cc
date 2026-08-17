@@ -29,12 +29,12 @@ std::vector<T> toVec(const torch::Tensor& t) {
     return std::vector<T>(c.data_ptr<T>(), c.data_ptr<T>() + c.numel());
 }
 
-void fillScoreTokenIdsWithMemcpy(torch::Tensor&                     token_ids,
-                                 const std::vector<torch::Tensor>&  complete_token_ids,
-                                 const std::vector<int64_t>&        seq_lens,
-                                 int64_t                            score_len) {
-    int64_t batch_idx = 0;
-    auto*   dst       = token_ids.data_ptr<int32_t>();
+void fillScoreTokenIdsWithMemcpy(torch::Tensor&                    token_ids,
+                                 const std::vector<torch::Tensor>& complete_token_ids,
+                                 const std::vector<int64_t>&       seq_lens,
+                                 int64_t                           score_len) {
+    int64_t    batch_idx  = 0;
+    auto*      dst        = token_ids.data_ptr<int32_t>();
     const auto dst_stride = token_ids.size(1);
     for (size_t stream_idx = 0; stream_idx < complete_token_ids.size(); ++stream_idx) {
         auto* src     = complete_token_ids[stream_idx].data_ptr<int32_t>();
@@ -46,10 +46,10 @@ void fillScoreTokenIdsWithMemcpy(torch::Tensor&                     token_ids,
     }
 }
 
-void fillScoreTokenIdsWithTorchCopy(torch::Tensor&                     token_ids,
-                                    const std::vector<torch::Tensor>&  complete_token_ids,
-                                    const std::vector<int64_t>&        seq_lens,
-                                    int64_t                            score_len) {
+void fillScoreTokenIdsWithTorchCopy(torch::Tensor&                    token_ids,
+                                    const std::vector<torch::Tensor>& complete_token_ids,
+                                    const std::vector<int64_t>&       seq_lens,
+                                    int64_t                           score_len) {
     int64_t batch_idx = 0;
     for (size_t stream_idx = 0; stream_idx < complete_token_ids.size(); ++stream_idx) {
         auto seq_len = seq_lens[stream_idx];
@@ -78,12 +78,14 @@ public:
                                           const vector<int>&     input_ids,
                                           const int              block_id,
                                           const vector<int>&     begin_think_token_ids = {},
-                                          const vector<int>&     end_think_token_ids   = {}) {
+                                          const vector<int>&     end_think_token_ids   = {},
+                                          const int              num_return_sequences  = 1) {
         std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
         query->input_ids       = torch::tensor(std::vector<int32_t>(input_ids.begin(), input_ids.end()), torch::kInt32);
         query->generate_config = make_shared<GenerateConfig>();
         query->generate_config->begin_think_token_ids = begin_think_token_ids;
         query->generate_config->end_think_token_ids   = end_think_token_ids;
+        query->generate_config->num_return_sequences  = num_return_sequences;
         GenerateStreamPtr stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         BatchKVCacheResource addr;
@@ -165,7 +167,7 @@ TEST_F(MtpBatchStreamProcessorTest, DISABLED_benchmarkScoreTokenIdsTorchCopyVsMe
               << " torch_copy_us=" << torch_us << " speedup=" << (memcpy_us / torch_us) << std::endl;
 }
 
-TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputReplicatesScoreTokenIds) {
+TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputBuildsPositionSpecificHistories) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -178,6 +180,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputReplicatesScoreTok
     model_config.vocab_size     = 4;
     model_config.num_layers     = 1;
     sp_config.gen_num_per_cycle = 3;
+    sp_config.type              = SP_TYPE_DSPARK;
 
     ResourceContext resource_context;
 
@@ -185,6 +188,14 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputReplicatesScoreTok
     GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {6, 7}, 2);
     stream1->setScoreLen(sp_config.gen_num_per_cycle + 1);
     stream2->setScoreLen(sp_config.gen_num_per_cycle + 1);
+    stream1->generateConfig()->do_sample   = true;
+    stream1->generateConfig()->top_k       = 0;
+    stream1->generateConfig()->top_p       = 0.8f;
+    stream1->generateConfig()->temperature = 0.0f;
+    stream2->generateConfig()->do_sample   = true;
+    stream2->generateConfig()->top_k       = 0;
+    stream2->generateConfig()->top_p       = 0.7f;
+    stream2->generateConfig()->temperature = 1.0f;
 
     auto stream_groups = StreamGroups({stream1, stream2});
     auto processor     = MtpBatchStreamProcessor(
@@ -193,23 +204,42 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputReplicatesScoreTok
     GptModelInputs  model_inputs;
     GptModelOutputs model_output;
     model_output.logits =
-        torch::empty({static_cast<int64_t>(stream_groups.size() * (sp_config.gen_num_per_cycle + 1)), 4},
-                     torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        torch::full({static_cast<int64_t>(stream_groups.size() * (sp_config.gen_num_per_cycle + 1)), 7},
+                    1000.0f,
+                    torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    model_output.logits.narrow(1, 0, model_config.vocab_size).zero_();
 
-    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_output);
+    auto draft_token_ids       = torch::tensor({1, 2, 3, 3, 2, 1}, torch::kInt32).reshape({2, 3});
+    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_output, {}, draft_token_ids);
     ASSERT_TRUE(sampler_inputs_status.ok());
 
-    auto token_ids = sampler_inputs_status.value().token_ids;
-    auto stride    = token_ids.size(1);
-    auto* data     = token_ids.data_ptr<int32_t>();
+    const auto& sampler_inputs = sampler_inputs_status.value();
+    EXPECT_EQ((std::vector<int64_t>{8, 4}), sampler_inputs.logits.sizes().vec());
+    EXPECT_EQ((std::vector<int64_t>{8, 4}), sampler_inputs.all_probs.sizes().vec());
+    EXPECT_TRUE(sampler_inputs.logits.eq(0).all().item<bool>());
+
+    auto  token_ids = sampler_inputs.token_ids.cpu();
+    auto  stride    = token_ids.size(1);
+    auto* data      = token_ids.data_ptr<int32_t>();
 
     for (int64_t row = 0; row < 4; ++row) {
         EXPECT_EQ(5, data[row * stride]);
+        EXPECT_EQ(1, data[row * stride + 1]);
+        EXPECT_EQ(2, data[row * stride + 2]);
+        EXPECT_EQ(3, data[row * stride + 3]);
     }
     for (int64_t row = 4; row < 8; ++row) {
         EXPECT_EQ(6, data[row * stride]);
         EXPECT_EQ(7, data[row * stride + 1]);
+        EXPECT_EQ(3, data[row * stride + 2]);
+        EXPECT_EQ(2, data[row * stride + 3]);
+        EXPECT_EQ(1, data[row * stride + 4]);
     }
+    EXPECT_EQ((std::vector<int32_t>{1, 2, 3, 4, 2, 3, 4, 5}), toVec<int32_t>(sampler_inputs.sequence_lengths));
+    EXPECT_EQ((std::vector<int32_t>{0, 0, 0, 0, 0, 0, 0, 0}), toVec<int32_t>(sampler_inputs.top_k));
+    EXPECT_EQ((std::vector<float>{0.8f, 0.8f, 0.8f, 0.8f, 0.7f, 0.7f, 0.7f, 0.7f}), toVec<float>(sampler_inputs.top_p));
+    EXPECT_EQ((std::vector<float>{0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f}),
+              toVec<float>(sampler_inputs.temperature));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens) {
@@ -244,10 +274,10 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
     // exactly the way MtpExecutor::buildSpecLogitsVerifyInline wires it.
     SpecLogitsVerifyRunner             runner;
     SpecLogitsVerifyRunner::LaunchTask task;
-    task.total_streams = 1;
-    task.propose_step  = static_cast<int>(sp_config.gen_num_per_cycle);
-    task.vocab_size    = model_config.vocab_size;
-    task.draft_tokens  = torch::tensor(std::vector<int32_t>{1, 2}, torch::kInt32).reshape({1, 2});
+    task.total_streams   = 1;
+    task.propose_step    = static_cast<int>(sp_config.gen_num_per_cycle);
+    task.vocab_size      = model_config.vocab_size;
+    task.draft_tokens    = torch::tensor(std::vector<int32_t>{1, 2}, torch::kInt32).reshape({1, 2});
     size_t processor_idx = 0;
     for (const auto& processor_ptr : stream->getAllLogitsProcessorPtr()) {
         auto spec_processor = std::dynamic_pointer_cast<SpecLogitsProcessor>(processor_ptr);
@@ -265,7 +295,8 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
     auto spec_result = runner.buildInline(task);
     ASSERT_TRUE(spec_result.has_active_processor);
 
-    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_output, spec_result);
+    auto sampler_inputs_status =
+        processor.gatherSpecSamplerInput(stream_groups, model_output, spec_result, task.draft_tokens);
     ASSERT_TRUE(sampler_inputs_status.ok());
     auto sampler_inputs = sampler_inputs_status.value();
 
@@ -810,14 +841,14 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
 
     auto expect_positions =
         [](const GptModelInputs& input, const vector<int>& expected_prefix, const vector<int>& expected_sequence) {
-        EXPECT_TRUE(input.prefix_lengths.is_cuda());
-        EXPECT_TRUE(input.sequence_lengths.is_cuda());
-        EXPECT_EQ(torch::kInt32, input.prefix_lengths.scalar_type());
-        EXPECT_EQ(torch::kInt32, input.sequence_lengths.scalar_type());
-        EXPECT_EQ(expected_prefix, toVec<int>(input.prefix_lengths));
-        EXPECT_EQ(expected_sequence, toVec<int>(input.sequence_lengths));
-        EXPECT_EQ(expected_sequence, toVec<int>(input.prefix_lengths + 1));
-    };
+            EXPECT_TRUE(input.prefix_lengths.is_cuda());
+            EXPECT_TRUE(input.sequence_lengths.is_cuda());
+            EXPECT_EQ(torch::kInt32, input.prefix_lengths.scalar_type());
+            EXPECT_EQ(torch::kInt32, input.sequence_lengths.scalar_type());
+            EXPECT_EQ(expected_prefix, toVec<int>(input.prefix_lengths));
+            EXPECT_EQ(expected_sequence, toVec<int>(input.sequence_lengths));
+            EXPECT_EQ(expected_sequence, toVec<int>(input.prefix_lengths + 1));
+        };
     expect_positions(model_input, {1, 2}, {2, 3});
 
     // Legacy GPU propose-token path receives the normal decode position.
@@ -876,14 +907,14 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkRuntimeGammaThreePrefillInputShape
     EXPECT_NO_THROW(processor.validatePrefillDSparkCommitInput(model_input));
 
     // Missing aux features must refuse the commit.
-    GptModelInputs no_features   = model_input;
+    GptModelInputs no_features     = model_input;
     no_features.last_hidden_states = torch::Tensor();
     EXPECT_THROW(processor.validatePrefillDSparkCommitInput(no_features), std::exception);
 
     // A non-positive draft width must refuse the commit.
     SpeculativeExecutionConfig zero_width_config = sp_config;
     zero_width_config.gen_num_per_cycle          = 0;
-    MtpBatchStreamProcessor    zero_width(
+    MtpBatchStreamProcessor zero_width(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, zero_width_config, false);
     EXPECT_THROW(zero_width.validatePrefillDSparkCommitInput(model_input), std::exception);
 
@@ -898,26 +929,26 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkRuntimeGammaThreePrefillInputShape
     EXPECT_FALSE(model_input.last_hidden_states.defined());
     EXPECT_EQ((std::vector<int32_t>{10, 6}), toVec<int32_t>(model_input.prefix_lengths));
     EXPECT_EQ((std::vector<int32_t>{gamma, gamma}), toVec<int32_t>(model_input.input_lengths));
-    EXPECT_EQ((std::vector<int32_t>{0, gamma}), toVec<int32_t>(model_input.lm_output_indexes));
+    EXPECT_EQ((std::vector<int32_t>{0, 1, 2, 3, 4, 5}), toVec<int32_t>(model_input.lm_output_indexes));
     EXPECT_EQ(model_input.dspark_call_phase, DSparkCallPhase::PROPOSE);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testDSparkDecodeCommitPreservesDenseVerifyGeometry) {
-    constexpr int32_t gamma          = 3;
+    constexpr int32_t gamma = 3;
 
     ModelConfig                 model_config;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
     SpeculativeExecutionConfig  sp_config;
-    cache_config.group_types          = {CacheGroupType::FULL};
-    sp_config.type                    = SP_TYPE_DSPARK;
-    sp_config.gen_num_per_cycle       = gamma;
+    cache_config.group_types    = {CacheGroupType::FULL};
+    sp_config.type              = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle = gamma;
 
     MtpBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
 
-    GptModelInputs             model_input;
+    GptModelInputs model_input;
     model_input.combo_tokens      = torch::tensor({11, 12, 13, 14, 21, 22, 23, 24}, torch::kInt32);
     model_input.input_lengths     = torch::tensor({gamma + 1, gamma + 1}, torch::kInt32);
     model_input.prefix_lengths    = torch::tensor({7, 15}, torch::kInt32);

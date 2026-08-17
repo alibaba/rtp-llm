@@ -96,8 +96,12 @@ public:
     std::optional<int> group_timeout;
     std::string        unique_key;
 
-    bool top1() {
+    bool top1() const {
         return top_k == 1;
+    }
+
+    bool stochastic() const {
+        return do_sample && !top1();
     }
 
     std::vector<RoleAddr> role_addrs;

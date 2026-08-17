@@ -4,6 +4,7 @@
 
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "rtp_llm/models_py/bindings/common/kernels/sampling_penalty_kernels.h"
 #include "rtp_llm/models_py/bindings/common/kernels/banRepeatNgram.h"
@@ -66,9 +67,9 @@ std::pair<torch::Tensor, torch::Tensor> makeSamplingSeedOffsetTensors(const std:
     auto off_ptr  = offset_h.data_ptr<int64_t>();
 
     for (int64_t i = 0; i < batch_size; ++i) {
-        auto generator = (i < static_cast<int64_t>(generators.size()) && generators[i].defined()) ?
-                             std::make_optional(generators[i]) :
-                             std::nullopt;
+        auto generator      = (i < static_cast<int64_t>(generators.size()) && generators[i].defined()) ?
+                                  std::make_optional(generators[i]) :
+                                  std::nullopt;
         auto [seed, offset] = get_seed_and_offset(increment, generator);
         seed_ptr[i]         = static_cast<int64_t>(seed);
         off_ptr[i]          = static_cast<int64_t>(offset);
@@ -162,15 +163,18 @@ void processLogits(const GreedyParams&  params,
             if (params.buffer_holder) {
                 params.buffer_holder->hold_host(output_ids_ptrs);
             }
-            auto output_ids_ptrs_gpu  = output_ids_ptrs.to(torch::kCUDA, true);
-            auto sequence_lengths_gpu = params.sequence_lengths.to(torch::kCUDA, true);
+            auto output_ids_ptrs_gpu = output_ids_ptrs.to(torch::kCUDA, true);
+            // SamplerInputs stores real sequence lengths, while the imported
+            // TensorRT-LLM no-repeat kernel still expects the last valid
+            // token index and adds one internally.
+            auto sequence_last_indexes_gpu = params.sequence_lengths.to(torch::kCUDA, true).sub(1);
 
             tensorrt_llm::kernels::invokeBanRepeatNgram(params.logits.data_ptr<float>(),
                                                         (int32_t const**)(output_ids_ptrs_gpu.data_ptr()),
                                                         nullptr,  // finished_buf
                                                         nullptr,  // parent_ids_buf
                                                         nullptr,  // batch_slot
-                                                        sequence_lengths_gpu.data_ptr<int32_t>(),
+                                                        sequence_last_indexes_gpu.data_ptr<int32_t>(),
                                                         decoder_batch_size,
                                                         1,  // beam_width
                                                         step + 1,
@@ -198,10 +202,10 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     // [1, batch_size] — last row of transposed_tokens
     auto samples_t = transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0));
 
-    constexpr bool       deterministic    = true;
-    constexpr int        max_sampling_rounds = 32;
+    constexpr bool deterministic       = true;
+    constexpr int  max_sampling_rounds = 32;
     auto [seed_t, offset_t]            = makeSamplingSeedOffsetTensors(
-            params.generator, batch_size, static_cast<int>(max_sampling_rounds), params.buffer_holder);
+        params.generator, batch_size, static_cast<int>(max_sampling_rounds), params.buffer_holder);
 
     torch::Tensor success_t = success;
     torch::Tensor top_k_t   = params.top_k;
@@ -356,6 +360,29 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     return flashinferSampleGreedy(params, transposed_tokens);
 }
 
+torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
+    RTP_LLM_CHECK_WITH_INFO(probabilities.defined() && probabilities.is_cuda() && probabilities.dim() == 2
+                                && probabilities.scalar_type() == torch::kFloat32 && probabilities.is_contiguous(),
+                            "probability sampling expects contiguous CUDA FP32 [batch,vocab] probabilities");
+    const auto          batch_size = probabilities.size(0);
+    at::cuda::CUDAGuard device_guard(probabilities.device());
+    auto [seed, offset] = get_seed_and_offset(/*increment_size=*/4);
+
+    auto token_ids =
+        torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kInt32).device(probabilities.device()));
+    auto valid = torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kBool).device(probabilities.device()));
+    sampling_from_probs(probabilities,
+                        token_ids,
+                        valid,
+                        std::nullopt,
+                        /*deterministic=*/true,
+                        std::nullopt,
+                        seed,
+                        std::nullopt,
+                        offset);
+    return token_ids;
+}
+
 void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     chain_speculative_sampling(params.draft_probs_d,
@@ -390,22 +417,22 @@ void rejectionSampling(const RejectionSamplingParams& params) {
         RTP_LLM_CHECK(params.draft_probs_d.dim() == 3);
         RTP_LLM_CHECK(params.draft_probs_d.size(0) == batch_size);
         RTP_LLM_CHECK(params.draft_probs_d.size(1) == num_speculative_tokens);
-    RTP_LLM_CHECK(params.draft_probs_d.size(2) == target_vocab_size);
+        RTP_LLM_CHECK(params.draft_probs_d.size(2) == target_vocab_size);
     }
 
     check_cuda_value(
         invokeRejectionSampling(params.draft_probs_point_mass ? nullptr : params.draft_probs_d.data_ptr<float>(),
-                                             params.draft_token_ids_d.data_ptr<int32_t>(),
-                                             params.uniform_samples_d.data_ptr<float>(),
-                                             params.target_probs_d.data_ptr<float>(),
-                                             params.target_token_ids_d.data_ptr<int32_t>(),
-                                             target_token_stride,
-                                             params.output_token_ids_d.data_ptr<int32_t>(),
-                                             params.output_accepted_token_num_d.data_ptr<int32_t>(),
-                                             params.do_sample_d.data_ptr<bool>(),
-                                             batch_size,
-                                             num_speculative_tokens,
-                                             target_vocab_size,
+                                params.draft_token_ids_d.data_ptr<int32_t>(),
+                                params.uniform_samples_d.data_ptr<float>(),
+                                params.target_probs_d.data_ptr<float>(),
+                                params.target_token_ids_d.data_ptr<int32_t>(),
+                                target_token_stride,
+                                params.output_token_ids_d.data_ptr<int32_t>(),
+                                params.output_accepted_token_num_d.data_ptr<int32_t>(),
+                                params.do_sample_d.data_ptr<bool>(),
+                                batch_size,
+                                num_speculative_tokens,
+                                target_vocab_size,
                                 stream,
                                 params.draft_probs_point_mass));
 }
@@ -706,6 +733,11 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     return GreedyOutput{};
 }
 
+torch::Tensor sampleFromProbs(const torch::Tensor&) {
+    RTP_LLM_CHECK_WITH_INFO(false, "DSpARK stochastic probability sampling currently requires CUDA");
+    return {};
+}
+
 }  // namespace rtp_llm
 
 // Forward-declare in global namespace (matches rtp_llm/models_py/bindings/rocm/speculative_sampling/sampling.cu)
@@ -755,22 +787,22 @@ void rejectionSampling(const RejectionSamplingParams& params) {
         RTP_LLM_CHECK(params.draft_probs_d.dim() == 3);
         RTP_LLM_CHECK(params.draft_probs_d.size(0) == batch_size);
         RTP_LLM_CHECK(params.draft_probs_d.size(1) == num_speculative_tokens);
-    RTP_LLM_CHECK(params.draft_probs_d.size(2) == target_vocab_size);
+        RTP_LLM_CHECK(params.draft_probs_d.size(2) == target_vocab_size);
     }
 
     hipError_t err =
         ::invokeRejectionSampling(params.draft_probs_point_mass ? nullptr : params.draft_probs_d.data_ptr<float>(),
-                                               params.draft_token_ids_d.data_ptr<int32_t>(),
-                                               params.uniform_samples_d.data_ptr<float>(),
-                                               params.target_probs_d.data_ptr<float>(),
-                                               params.target_token_ids_d.data_ptr<int32_t>(),
-                                               target_token_stride,
-                                               params.output_token_ids_d.data_ptr<int32_t>(),
-                                               params.output_accepted_token_num_d.data_ptr<int32_t>(),
-                                               params.do_sample_d.data_ptr<bool>(),
-                                               batch_size,
-                                               num_speculative_tokens,
-                                               target_vocab_size,
+                                  params.draft_token_ids_d.data_ptr<int32_t>(),
+                                  params.uniform_samples_d.data_ptr<float>(),
+                                  params.target_probs_d.data_ptr<float>(),
+                                  params.target_token_ids_d.data_ptr<int32_t>(),
+                                  target_token_stride,
+                                  params.output_token_ids_d.data_ptr<int32_t>(),
+                                  params.output_accepted_token_num_d.data_ptr<int32_t>(),
+                                  params.do_sample_d.data_ptr<bool>(),
+                                  batch_size,
+                                  num_speculative_tokens,
+                                  target_vocab_size,
                                   stream,
                                   params.draft_probs_point_mass);
     RTP_LLM_CHECK_WITH_INFO(err == hipSuccess, "invokeRejectionSampling failed: %s", hipGetErrorString(err));
