@@ -43,13 +43,15 @@ static void initFullCacheConfig(CacheConfig& cache_config, int layer_num) {
 
 class NormalBatchStreamProcessorTest: public DeviceTestBase {
 protected:
-    static ModelConfig makeOutputVocabModelConfig(std::vector<int64_t> output_vocab_ids = {0, 2, 7}) {
+    static ModelConfig makeOutputVocabModelConfig(std::vector<int64_t> output_vocab_ids = {0, 2, 7},
+                                                  int64_t              padded_size      = 0) {
         ModelConfig model_config;
-        model_config.max_seq_len              = 8;
-        model_config.vocab_size               = 10;
-        model_config.num_layers               = 1;
-        model_config.output_vocab_ids         = std::move(output_vocab_ids);
-        model_config.output_vocab_padded_size = model_config.output_vocab_ids.size();
+        model_config.max_seq_len      = 8;
+        model_config.vocab_size       = 10;
+        model_config.num_layers       = 1;
+        model_config.output_vocab_ids = std::move(output_vocab_ids);
+        model_config.output_vocab_padded_size =
+            padded_size > 0 ? padded_size : static_cast<int64_t>(model_config.output_vocab_ids.size());
         return model_config;
     }
 };
@@ -640,6 +642,41 @@ TEST_F(NormalBatchStreamProcessorTest, testDisabledOutputVocabPreservesTopK) {
     auto sampler_inputs = processor.gatherSamplerInput(stream_groups, GptModelInputs(), model_output);
     ASSERT_TRUE(sampler_inputs.ok());
     EXPECT_EQ(sampler_inputs->top_k.data_ptr<int32_t>()[0], 8);
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testPaddedSizeLargerThanKKeepsDispatchAndSamplingOnK) {
+    ResourceContext resource_context;
+    auto            model_config = makeOutputVocabModelConfig({0, 2, 7}, /*padded_size=*/8);
+    RuntimeConfig   runtime_config;
+
+    auto query                    = make_shared<GenerateInput>();
+    query->input_ids              = hostIntBuffer({2});
+    query->generate_config        = make_shared<GenerateConfig>();
+    query->generate_config->top_k = 8;
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->generate_status_->status = StreamState::RUNNING;
+    EXPECT_EQ(stream->outputVocabSize(), 3u);
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    NormalBatchStreamProcessor  processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+    StreamGroups stream_groups({stream});
+
+    // top_k is clamped to the K-wide logits, not to the padded width P
+    GptModelOutputs model_output;
+    model_output.logits = torch::zeros({1, 3}, torch::kFloat32).to(torch::kCUDA);
+    auto sampler_inputs = processor.gatherSamplerInput(stream_groups, GptModelInputs(), model_output);
+    ASSERT_TRUE(sampler_inputs.ok());
+    EXPECT_EQ(sampler_inputs->vocab_size, 3u);
+    EXPECT_EQ(sampler_inputs->top_k.data_ptr<int32_t>()[0], 3);
+
+    // dispatch consumes K-wide results; compact-id restoration is insensitive to P
+    MergedOutput merge_outputs;
+    merge_outputs.sampler_output.token_ids = torch::tensor({2, 2}, torch::kInt32).reshape({1, 2});
+    ASSERT_TRUE(processor.dispatch(stream_groups, merge_outputs).ok());
+    EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{2, 7}));
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabPassesCompactEosOnlyToMultiSeqProcessor) {
