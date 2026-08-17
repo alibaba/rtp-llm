@@ -39,6 +39,12 @@ namespace rtp_llm {
 
 bool initLogger(std::string log_file_path = "");
 
+// Runtime request-timeline control. deadline_us uses Unix epoch microseconds:
+// -1 restores the ENABLE_REQUEST_TIMELINE_LOG environment default, 0 disables,
+// and a positive value enables logging until that deadline.
+bool requestTimelineEnabled();
+void setRequestTimelineDeadlineUs(int64_t deadline_us);
+
 class Logger {
 public:
     Logger(const std::string& submodule_name);

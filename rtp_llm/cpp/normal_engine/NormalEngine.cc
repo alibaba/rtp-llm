@@ -17,6 +17,8 @@
 #include <c10/core/InferenceMode.h>
 #include <algorithm>
 #include <memory>
+#include <numeric>
+#include <sstream>
 #include <thread>
 #include <random>
 
@@ -32,6 +34,82 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
+struct TimelineBatchSnapshot {
+    std::vector<int64_t> request_ids;
+    std::vector<int64_t> input_token_lens;
+    std::vector<int64_t> execute_token_lens;
+    std::vector<int64_t> sequence_lens;
+    std::vector<int64_t> context_lens;
+    std::vector<int64_t> fake_streams;
+};
+
+std::string timelineArray(const std::vector<int64_t>& values) {
+    std::ostringstream out;
+    out << "[";
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) {
+            out << ",";
+        }
+        out << values[i];
+    }
+    out << "]";
+    return out.str();
+}
+
+TimelineBatchSnapshot snapshotTimelineBatch(const std::list<GenerateStreamPtr>& streams) {
+    TimelineBatchSnapshot snapshot;
+    snapshot.request_ids.reserve(streams.size());
+    snapshot.input_token_lens.reserve(streams.size());
+    snapshot.execute_token_lens.reserve(streams.size());
+    snapshot.sequence_lens.reserve(streams.size());
+    snapshot.context_lens.reserve(streams.size());
+    snapshot.fake_streams.reserve(streams.size());
+    for (const auto& stream : streams) {
+        snapshot.request_ids.push_back(stream->streamId());
+        snapshot.input_token_lens.push_back(stream->inputLength());
+        snapshot.execute_token_lens.push_back(stream->currentExecuteTokenSize());
+        snapshot.sequence_lens.push_back(stream->seqLength());
+        snapshot.context_lens.push_back(stream->contextLength());
+        snapshot.fake_streams.push_back(stream->isFakeStream() ? 1 : 0);
+    }
+    return snapshot;
+}
+
+void logEngineTimeline(const char*                  event,
+                       int64_t                      batch_id,
+                       const TimelineBatchSnapshot& snapshot,
+                       int64_t                      ts_us,
+                       const char*                  phase       = nullptr,
+                       int64_t                      duration_us = -1,
+                       const char*                  status      = nullptr) {
+    const int64_t total_input_tokens =
+        std::accumulate(snapshot.input_token_lens.begin(), snapshot.input_token_lens.end(), int64_t{0});
+    const int64_t total_execute_tokens =
+        std::accumulate(snapshot.execute_token_lens.begin(), snapshot.execute_token_lens.end(), int64_t{0});
+    std::ostringstream record;
+    record << "REQUEST_TIMELINE {\"schema_version\":1,\"component\":\"backend_engine\",\"event\":\"" << event
+           << "\",\"ts_us\":" << ts_us << ",\"batch_id\":" << batch_id
+           << ",\"request_ids\":" << timelineArray(snapshot.request_ids)
+           << ",\"input_token_lens\":" << timelineArray(snapshot.input_token_lens)
+           << ",\"execute_token_lens\":" << timelineArray(snapshot.execute_token_lens)
+           << ",\"sequence_lens\":" << timelineArray(snapshot.sequence_lens)
+           << ",\"context_lens\":" << timelineArray(snapshot.context_lens)
+           << ",\"fake_streams\":" << timelineArray(snapshot.fake_streams)
+           << ",\"batch_size\":" << snapshot.request_ids.size() << ",\"total_input_tokens\":" << total_input_tokens
+           << ",\"total_execute_tokens\":" << total_execute_tokens;
+    if (phase != nullptr) {
+        record << ",\"phase\":\"" << phase << "\"";
+    }
+    if (duration_us >= 0) {
+        record << ",\"duration_us\":" << duration_us;
+    }
+    if (status != nullptr) {
+        record << ",\"status\":\"" << status << "\"";
+    }
+    record << "}";
+    RTP_LLM_LOG_INFO("%s", record.str().c_str());
+}
+
 // 释放glibc缓存的host内存，将其归还给操作系统
 // 在模型加载完成后调用，可以显著减少常驻内存占用
 void releaseHostMemoryCache() {
@@ -477,6 +555,7 @@ absl::Status NormalEngine::step() {
     }
 
     list<GenerateStreamPtr> streams;
+    const int64_t           schedule_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
     if (parallelism_config.tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
         {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
@@ -492,6 +571,24 @@ absl::Status NormalEngine::step() {
         if (streams.empty() && parallelism_config.tp_size <= 1) {
             return absl::OkStatus();
         }
+    }
+
+    const int64_t schedule_end_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    const bool    trace_batch     = parallelism_config.tp_rank == 0 && !streams.empty() && requestTimelineEnabled();
+    const int64_t timeline_batch_id =
+        trace_batch ? request_timeline_batch_id_.fetch_add(1, std::memory_order_relaxed) : -1;
+    TimelineBatchSnapshot timeline_snapshot;
+    if (trace_batch) {
+        timeline_snapshot = snapshotTimelineBatch(streams);
+        logEngineTimeline("batch_start", timeline_batch_id, timeline_snapshot, schedule_start_us);
+        logEngineTimeline("phase_start", timeline_batch_id, timeline_snapshot, schedule_start_us, "schedule");
+        logEngineTimeline("phase_end",
+                          timeline_batch_id,
+                          timeline_snapshot,
+                          schedule_end_us,
+                          "schedule",
+                          schedule_end_us - schedule_start_us,
+                          "ok");
     }
 
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -510,17 +607,52 @@ absl::Status NormalEngine::step() {
         }
     }
 
+    const int64_t execute_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    if (trace_batch) {
+        logEngineTimeline("phase_start", timeline_batch_id, timeline_snapshot, execute_start_us, "execute");
+    }
     {
         [[maybe_unused]] auto profile_step = step_profiler_.stepScope();
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
         status = executor_->process(streams);
     }
+    const int64_t execute_end_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    if (trace_batch) {
+        logEngineTimeline("phase_end",
+                          timeline_batch_id,
+                          timeline_snapshot,
+                          execute_end_us,
+                          "execute",
+                          execute_end_us - execute_start_us,
+                          status.ok() ? "ok" : "error");
+    }
 
     // report step metrics
     if (parallelism_config.tp_rank == 0) {
+        const int64_t report_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        if (trace_batch) {
+            logEngineTimeline("phase_start", timeline_batch_id, timeline_snapshot, report_start_us, "report_metrics");
+        }
         RTP_LLM_PROFILE_SCOPE("engine.normal.report_metrics_work");
         auto step_latency = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;
         reportMetrics({step_latency});
+        if (trace_batch) {
+            const int64_t report_end_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            logEngineTimeline("phase_end",
+                              timeline_batch_id,
+                              timeline_snapshot,
+                              report_end_us,
+                              "report_metrics",
+                              report_end_us - report_start_us,
+                              "ok");
+            logEngineTimeline("batch_complete",
+                              timeline_batch_id,
+                              timeline_snapshot,
+                              report_end_us,
+                              nullptr,
+                              report_end_us - schedule_start_us,
+                              status.ok() ? "ok" : "error");
+        }
     }
 
     return status;

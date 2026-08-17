@@ -85,6 +85,7 @@ private:
     kmonitor::MetricsReporterPtr                  metrics_reporter_;
     std::unique_ptr<ProposeModelEngineInitParams> propose_params_;
     StepWindowProfiler                            step_profiler_;
+    std::atomic<int64_t>                          request_timeline_batch_id_{0};
     int                                           reserve_step_ = 0;
 };
 

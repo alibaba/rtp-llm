@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
+#include "rtp_llm/cpp/testing/TestLogCapture.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
 #include <chrono>
@@ -622,6 +623,7 @@ TEST_F(GenerateStreamTest, testAllHiddenStatesCopiedToCpuOnceForMultipleOutputs)
     ASSERT_NE(stream, nullptr);
     stream->generate_input_->generate_config->return_all_hidden_states = true;
     stream->iter_count_                                                = 1;
+    stream->request_id_                                                = 901;
 
     auto all_hidden_states =
         torch::tensor({1.0f, 2.0f, 3.0f, 4.0f}, torch::TensorOptions().device(torch::kCUDA)).reshape({2, 2});
@@ -637,7 +639,11 @@ TEST_F(GenerateStreamTest, testAllHiddenStatesCopiedToCpuOnceForMultipleOutputs)
                                  all_hidden_states,
                                  false};
 
-    auto outputs = stream->prepareGenerateOutput(update_info);
+    setRequestTimelineDeadlineUs(autil::TimeUtility::currentTimeInMicroSeconds() + 60 * 1000 * 1000);
+    test::TestLogCapture capture("all_hidden_device_to_host");
+    auto                 outputs = stream->prepareGenerateOutput(update_info);
+    const auto           trace   = capture.content();
+    setRequestTimelineDeadlineUs(-1);
 
     ASSERT_EQ(outputs.generate_outputs.size(), 2);
     const auto& first  = outputs.generate_outputs[0].all_hidden_states;
@@ -647,6 +653,15 @@ TEST_F(GenerateStreamTest, testAllHiddenStatesCopiedToCpuOnceForMultipleOutputs)
     ASSERT_FALSE(first->is_cuda());
     ASSERT_EQ(first->data_ptr(), second->data_ptr());
     ASSERT_TRUE(torch::equal(first.value(), all_hidden_states.cpu()));
+    EXPECT_NE(trace.find("\"component\":\"backend_engine\""), std::string::npos);
+    EXPECT_NE(trace.find("\"phase\":\"all_hidden_device_to_host\""), std::string::npos);
+    EXPECT_NE(trace.find("\"request_id\":901"), std::string::npos);
+    EXPECT_NE(trace.find("\"input_token_len\":2"), std::string::npos);
+    EXPECT_NE(trace.find("\"element_count\":4"), std::string::npos);
+    EXPECT_NE(trace.find("\"tensor_bytes\":16"), std::string::npos);
+    EXPECT_NE(trace.find("\"source_device\":\"cuda\""), std::string::npos);
+    EXPECT_NE(trace.find("\"event\":\"phase_start\""), std::string::npos);
+    EXPECT_NE(trace.find("\"event\":\"phase_end\""), std::string::npos);
 }
 
 TEST_F(GenerateStreamTest, testInputEmbeddingsDisableTokenOnlyReuseCache) {

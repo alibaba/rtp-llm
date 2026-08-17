@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/testing/TestLogCapture.h"
 
 using namespace ::testing;
 
@@ -35,6 +36,13 @@ public:
 
     grpc::Status poll(WriterInterface* writer, std::shared_ptr<GenerateStream>& stream) {
         return pollStreamOutput(nullptr, "request", writer, stream);
+    }
+
+    grpc::Status pollTraced(WriterInterface*                 writer,
+                            std::shared_ptr<GenerateStream>& stream,
+                            const std::vector<int64_t>&      request_ids,
+                            const std::vector<int64_t>&      input_token_lens) {
+        return pollStreamOutput(nullptr, "request", writer, stream, &request_ids, &input_token_lens);
     }
 
     ErrorInfo collect(std::shared_ptr<GenerateStream>& stream) {
@@ -232,6 +240,39 @@ TEST(LocalRpcServerTest, PollWritesFinalLocalOutputBeforeRemoteHandoff) {
     EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
     EXPECT_FALSE(normal_stream->stream_cache_resource_->isResourceReleased());
     EXPECT_FALSE(normal_stream->hasOutput());
+}
+
+TEST(LocalRpcServerTest, PollTraceReportsAllHiddenStatesAndResponseBytes) {
+    TestLocalRpcServer server;
+    RecordingWriter    writer;
+    auto               mock_stream = createMockStream();
+
+    EXPECT_CALL(*mock_stream, nextOutput(_))
+        .WillOnce(InvokeWithoutArgs([] {
+            GenerateOutputs outputs;
+            outputs.request_id = 902;
+            GenerateOutput output;
+            output.output_ids        = torch::tensor({7}, torch::kInt32).reshape({1, 1});
+            output.finished          = true;
+            output.all_hidden_states = torch::tensor({1.0f, 2.0f, 3.0f, 4.0f}).reshape({2, 2});
+            outputs.generate_outputs.push_back(std::move(output));
+            return ErrorResult<GenerateOutputs>(std::move(outputs));
+        }))
+        .WillOnce(InvokeWithoutArgs([] { return wakeResult(WakeReason::FINISHED); }));
+    std::shared_ptr<GenerateStream> stream = mock_stream;
+
+    setRequestTimelineDeadlineUs(autil::TimeUtility::currentTimeInMicroSeconds() + 60 * 1000 * 1000);
+    test::TestLogCapture capture("rpc_response_payload");
+    const auto           status = server.pollTraced(&writer, stream, {902}, {2});
+    const auto           trace  = capture.content();
+    setRequestTimelineDeadlineUs(-1);
+
+    EXPECT_TRUE(status.ok());
+    ASSERT_EQ(writer.outputs_.size(), 1);
+    EXPECT_THAT(trace, HasSubstr("\"phase\":\"response_convert\""));
+    EXPECT_THAT(trace, HasSubstr("\"phase\":\"response_write\""));
+    EXPECT_THAT(trace, HasSubstr("\"all_hidden_tensor_bytes\":16"));
+    EXPECT_THAT(trace, HasSubstr("\"response_bytes\":"));
 }
 
 }  // namespace rtp_llm

@@ -1,9 +1,40 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 #include <algorithm>
 #include <chrono>
+#include <sstream>
 
 namespace rtp_llm {
+
+namespace {
+
+void logAllHiddenStatesCopyTimeline(const char*          event,
+                                    int64_t              request_id,
+                                    int64_t              input_token_len,
+                                    int64_t              ts_us,
+                                    const torch::Tensor& tensor,
+                                    int64_t              duration_us = -1,
+                                    const char*          status      = nullptr) {
+    std::ostringstream record;
+    record << "REQUEST_TIMELINE {\"schema_version\":1,\"component\":\"backend_engine\",\"event\":\"" << event
+           << "\",\"ts_us\":" << ts_us << ",\"request_id\":" << request_id << ",\"request_ids\":[" << request_id
+           << "],\"input_token_len\":" << input_token_len << ",\"input_token_lens\":[" << input_token_len
+           << "],\"batch_size\":1,\"total_input_tokens\":" << input_token_len
+           << ",\"phase\":\"all_hidden_device_to_host\",\"element_count\":" << tensor.numel()
+           << ",\"tensor_bytes\":" << tensor.numel() * tensor.element_size() << ",\"source_device\":\""
+           << (tensor.is_cuda() ? "cuda" : "cpu") << "\"";
+    if (duration_us >= 0) {
+        record << ",\"duration_us\":" << duration_us;
+    }
+    if (status != nullptr) {
+        record << ",\"status\":\"" << status << "\"";
+    }
+    record << "}";
+    RTP_LLM_LOG_INFO("%s", record.str().c_str());
+}
+
+}  // namespace
 
 ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput(int64_t wait_timeout_ms) {
     RTP_LLM_CHECK_WITH_INFO(wait_timeout_ms >= 0, "nextOutput wait_timeout_ms must be non-negative");
@@ -131,7 +162,37 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             }
             if (all_hidden_states != nullptr) {
                 if (!all_hidden_states_cpu.defined()) {
-                    all_hidden_states_cpu = all_hidden_states->cpu();
+                    const bool    trace_copy    = requestTimelineEnabled();
+                    const int64_t copy_start_us = trace_copy ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
+                    if (trace_copy) {
+                        logAllHiddenStatesCopyTimeline(
+                            "phase_start", request_id_, inputLength(), copy_start_us, *all_hidden_states);
+                    }
+                    try {
+                        all_hidden_states_cpu = all_hidden_states->cpu();
+                    } catch (...) {
+                        if (trace_copy) {
+                            const int64_t copy_end_us = autil::TimeUtility::currentTimeInMicroSeconds();
+                            logAllHiddenStatesCopyTimeline("phase_end",
+                                                           request_id_,
+                                                           inputLength(),
+                                                           copy_end_us,
+                                                           *all_hidden_states,
+                                                           copy_end_us - copy_start_us,
+                                                           "error");
+                        }
+                        throw;
+                    }
+                    if (trace_copy) {
+                        const int64_t copy_end_us = autil::TimeUtility::currentTimeInMicroSeconds();
+                        logAllHiddenStatesCopyTimeline("phase_end",
+                                                       request_id_,
+                                                       inputLength(),
+                                                       copy_end_us,
+                                                       *all_hidden_states,
+                                                       copy_end_us - copy_start_us,
+                                                       "ok");
+                    }
                 }
                 generate_output.all_hidden_states = all_hidden_states_cpu;
             }

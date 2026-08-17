@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 
+#include <atomic>
+#include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
@@ -22,6 +25,37 @@
 #include "autil/NetUtil.h"
 
 namespace rtp_llm {
+
+namespace {
+
+std::atomic<int64_t> request_timeline_deadline_us{-1};
+
+bool requestTimelineEnvEnabled() {
+    static const bool enabled = []() {
+        const char* raw = std::getenv("ENABLE_REQUEST_TIMELINE_LOG");
+        if (raw == nullptr) {
+            return false;
+        }
+        std::string value(raw);
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return std::tolower(c); });
+        return value == "1" || value == "true" || value == "yes" || value == "on";
+    }();
+    return enabled;
+}
+
+}  // namespace
+
+bool requestTimelineEnabled() {
+    const int64_t deadline_us = request_timeline_deadline_us.load(std::memory_order_relaxed);
+    if (deadline_us >= 0) {
+        return deadline_us > autil::TimeUtility::currentTimeInMicroSeconds();
+    }
+    return requestTimelineEnvEnabled();
+}
+
+void setRequestTimelineDeadlineUs(int64_t deadline_us) {
+    request_timeline_deadline_us.store(std::max<int64_t>(-1, deadline_us), std::memory_order_relaxed);
+}
 
 bool initLogger(std::string log_file_path) {
     std::cerr << "initLogger log_file_path: " << log_file_path << std::endl;

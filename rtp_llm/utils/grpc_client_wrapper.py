@@ -192,6 +192,24 @@ class GrpcClientWrapper:
             logging.error(f"Start profile failed: {e}")
             return {"error": f"Failed to start profile: {str(e)}"}
 
+    async def request_trace(self, req: Any) -> Dict[str, Any]:
+        """Set the request timeline deadline in the backend process."""
+        try:
+            await self._ensure_connection()
+            if isinstance(req, str):
+                req = json.loads(req)
+            deadline_us = int((req or {}).get("expires_ts_us", 0))
+            if deadline_us < 0:
+                raise ValueError("expires_ts_us must be non-negative")
+            request = pb2.SetLogLevelRequestPB(
+                log_level=f"REQUEST_TRACE:{deadline_us}",
+            )
+            await self.stub.SetLogLevel(request, timeout=3)
+            return {"status": "ok", "expires_ts_us": deadline_us}
+        except Exception as e:
+            logging.error(f"Request trace control failed: {e}")
+            return {"error": f"Failed to control request trace: {str(e)}"}
+
     async def update_eplb_config(self, req: Any) -> Dict[str, Any]:
         """Update EPLB config - this would need to be implemented based on your requirements"""
         try:
@@ -255,6 +273,8 @@ class GrpcClientWrapper:
                 return await self.set_log_level(req)
             elif uri == "start_profile":
                 return await self.start_profile(req)
+            elif uri == "request_trace":
+                return await self.request_trace(req)
             elif uri == "update_eplb_config":
                 return await self.update_eplb_config(req)
             elif uri == "update_scheduler_info":

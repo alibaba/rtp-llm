@@ -3,6 +3,7 @@
 #include <atomic>
 #include <memory>
 #include <string>
+#include <vector>
 #include <iostream>
 #include "grpc++/grpc++.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -110,7 +111,9 @@ protected:
     grpc::Status pollStreamOutput(grpc::ServerContext*             context,
                                   const std::string&               request_key,
                                   WriterInterface*                 writer,
-                                  std::shared_ptr<GenerateStream>& stream);
+                                  std::shared_ptr<GenerateStream>& stream,
+                                  const std::vector<int64_t>*      trace_request_ids      = nullptr,
+                                  const std::vector<int64_t>*      trace_input_token_lens = nullptr);
 
     // Shared helpers for single and batch paths
     ErrorInfo validateInputRuntimeSupport(const GenerateInput& input) const;

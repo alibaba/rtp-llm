@@ -1,5 +1,7 @@
 #include <memory>
 #include <chrono>
+#include <numeric>
+#include <sstream>
 #include <c10/core/InferenceMode.h>
 #include <pybind11/pybind11.h>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -18,7 +20,71 @@ namespace rtp_llm {
 
 namespace {
 constexpr int64_t kRpcOutputWaitTimeoutMs = 500;
+
+std::string timelineIntArray(const std::vector<int64_t>& values) {
+    std::ostringstream out;
+    out << "[";
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) {
+            out << ",";
+        }
+        out << values[i];
+    }
+    out << "]";
+    return out.str();
 }
+
+void logRpcTimeline(const char*                 event,
+                    const std::vector<int64_t>& request_ids,
+                    const std::vector<int64_t>& input_token_lens,
+                    int64_t                     ts_us,
+                    const char*                 phase                   = nullptr,
+                    int64_t                     duration_us             = -1,
+                    const char*                 status                  = nullptr,
+                    int64_t                     all_hidden_tensor_bytes = -1,
+                    int64_t                     response_bytes          = -1) {
+    const int64_t total_input_tokens = std::accumulate(input_token_lens.begin(), input_token_lens.end(), int64_t{0});
+    std::ostringstream record;
+    record << "REQUEST_TIMELINE {\"schema_version\":1,\"component\":\"backend_rpc\",\"event\":\"" << event
+           << "\",\"ts_us\":" << ts_us;
+    if (request_ids.size() == 1) {
+        record << ",\"request_id\":" << request_ids.front();
+    }
+    record << ",\"request_ids\":" << timelineIntArray(request_ids)
+           << ",\"input_token_lens\":" << timelineIntArray(input_token_lens) << ",\"batch_size\":" << request_ids.size()
+           << ",\"total_input_tokens\":" << total_input_tokens;
+    if (input_token_lens.size() == 1) {
+        record << ",\"input_token_len\":" << input_token_lens.front();
+    }
+    if (phase != nullptr) {
+        record << ",\"phase\":\"" << phase << "\"";
+    }
+    if (duration_us >= 0) {
+        record << ",\"duration_us\":" << duration_us;
+    }
+    if (status != nullptr) {
+        record << ",\"status\":\"" << status << "\"";
+    }
+    if (all_hidden_tensor_bytes >= 0) {
+        record << ",\"all_hidden_tensor_bytes\":" << all_hidden_tensor_bytes;
+    }
+    if (response_bytes >= 0) {
+        record << ",\"response_bytes\":" << response_bytes;
+    }
+    record << "}";
+    RTP_LLM_LOG_INFO("%s", record.str().c_str());
+}
+
+int64_t allHiddenStatesTensorBytes(const GenerateOutputs& outputs) {
+    for (const auto& output : outputs.generate_outputs) {
+        if (output.all_hidden_states.has_value() && output.all_hidden_states->defined()) {
+            const auto& tensor = output.all_hidden_states.value();
+            return tensor.numel() * tensor.element_size();
+        }
+    }
+    return -1;
+}
+}  // namespace
 
 grpc::Status LocalRpcServer::init(const EngineInitParams&                       maga_init_params,
                                   std::unique_ptr<ProposeModelEngineInitParams> propose_params,
@@ -81,10 +147,54 @@ grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorI
 grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             context,
                                               const string&                    request_key,
                                               WriterInterface*                 writer,
-                                              std::shared_ptr<GenerateStream>& stream) {
+                                              std::shared_ptr<GenerateStream>& stream,
+                                              const std::vector<int64_t>*      trace_request_ids,
+                                              const std::vector<int64_t>*      trace_input_token_lens) {
     RTP_LLM_PROFILE_FUNCTION();
+    const bool trace_output = trace_request_ids != nullptr && trace_input_token_lens != nullptr
+                              && !trace_request_ids->empty() && requestTimelineEnabled();
+    const auto log_phase_start =
+        [&](const char* phase, int64_t ts_us, int64_t all_hidden_tensor_bytes = -1, int64_t response_bytes = -1) {
+            if (trace_output) {
+                logRpcTimeline("phase_start",
+                               *trace_request_ids,
+                               *trace_input_token_lens,
+                               ts_us,
+                               phase,
+                               -1,
+                               nullptr,
+                               all_hidden_tensor_bytes,
+                               response_bytes);
+            }
+        };
+    const auto log_phase_end = [&](const char* phase,
+                                   int64_t     start_us,
+                                   const char* status,
+                                   int64_t     all_hidden_tensor_bytes = -1,
+                                   int64_t     response_bytes          = -1,
+                                   int64_t     end_us                  = -1) {
+        if (trace_output) {
+            if (end_us < 0) {
+                end_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            }
+            logRpcTimeline("phase_end",
+                           *trace_request_ids,
+                           *trace_input_token_lens,
+                           end_us,
+                           phase,
+                           end_us - start_us,
+                           status,
+                           all_hidden_tensor_bytes,
+                           response_bytes);
+        }
+    };
     while (true) {
-        const auto result = stream->nextOutput(kRpcOutputWaitTimeoutMs);
+        const int64_t wait_start_us = trace_output ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
+        log_phase_start("engine_output_wait", wait_start_us);
+        const auto result  = stream->nextOutput(kRpcOutputWaitTimeoutMs);
+        const bool wait_ok = result.ok() || result.status().code() == ErrorCode::OUTPUT_QUEUE_NO_UPDATE
+                             || result.status().code() == ErrorCode::FINISHED;
+        log_phase_end("engine_output_wait", wait_start_us, wait_ok ? "ok" : "error");
         if (isCancelled(context)) {
             stream->reportError(ErrorCode::CANCELLED, "request cancelled by user");
             RTP_LLM_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());
@@ -102,13 +212,26 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
         }
         RTP_LLM_LOG_DEBUG("request [%s] generate next output success", request_key.c_str());
         GenerateOutputsPB outputs_pb;
+        const int64_t     all_hidden_tensor_bytes = trace_output ? allHiddenStatesTensorBytes(result.value()) : -1;
 
+        const int64_t convert_start_us = trace_output ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
+        log_phase_start("response_convert", convert_start_us, all_hidden_tensor_bytes);
         QueryConverter::transResponse(&outputs_pb,
                                       &(result.value()),
                                       stream->generateConfig()->aux_info,
                                       maga_init_params_.misc_config.aux_string,
                                       stream->specialTokens().eos_token_id);
-        if (!writer->Write(outputs_pb)) {
+        const int64_t convert_end_us = trace_output ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
+        const int64_t response_bytes = trace_output ? outputs_pb.ByteSizeLong() : -1;
+        log_phase_end(
+            "response_convert", convert_start_us, "ok", all_hidden_tensor_bytes, response_bytes, convert_end_us);
+
+        const int64_t write_start_us = trace_output ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
+        log_phase_start("response_write", write_start_us, all_hidden_tensor_bytes, response_bytes);
+        const bool write_ok = writer->Write(outputs_pb);
+        log_phase_end(
+            "response_write", write_start_us, write_ok ? "ok" : "error", all_hidden_tensor_bytes, response_bytes);
+        if (!write_ok) {
             stream->reportError(ErrorCode::CANCELLED, "write outputs pb failed");
             RTP_LLM_LOG_WARNING("request [%s] write outputs pb failed", request_key.c_str());
             return grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
@@ -193,15 +316,36 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
                                                 const GenerateInputPB*                 request,
                                                 grpc::ServerWriter<GenerateOutputsPB>* writer) {
     RTP_LLM_PROFILE_SCOPE("rpc.generate_stream_call");
-    c10::InferenceMode inference_guard(true);
-    AtomicGuard        request_guard(onflight_requests_);
-    auto               request_id = request->request_id();
+    c10::InferenceMode         inference_guard(true);
+    AtomicGuard                request_guard(onflight_requests_);
+    auto                       request_id    = request->request_id();
+    const bool                 trace_request = requestTimelineEnabled();
+    const std::vector<int64_t> request_ids{request_id};
+    const std::vector<int64_t> input_token_lens{request->token_ids_size()};
+    const int64_t              request_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    if (trace_request) {
+        logRpcTimeline("request_arrive", request_ids, input_token_lens, request_start_us);
+    }
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
     std::shared_ptr<GenerateInput> input;
     {
+        const int64_t phase_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        if (trace_request) {
+            logRpcTimeline("phase_start", request_ids, input_token_lens, phase_start_us, "prepare_input");
+        }
         auto mm_res = prepareInput(*request, input);
+        if (trace_request) {
+            const int64_t phase_end_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            logRpcTimeline("phase_end",
+                           request_ids,
+                           input_token_lens,
+                           phase_end_us,
+                           "prepare_input",
+                           phase_end_us - phase_start_us,
+                           mm_res.ok() ? "ok" : "error");
+        }
         if (!mm_res.ok()) {
             generate_context.error_status = serializeErrorMsg(generate_context.request_key, mm_res);
         }
@@ -211,13 +355,52 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
     {
         RTP_LLM_PROFILE_SCOPE("rpc.enqueue_engine");
+        const int64_t phase_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        if (trace_request) {
+            logRpcTimeline("phase_start", request_ids, input_token_lens, phase_start_us, "engine_enqueue");
+        }
         generate_context.setStream(engine_->enqueue(input));
+        if (trace_request) {
+            const int64_t phase_end_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            logRpcTimeline("phase_end",
+                           request_ids,
+                           input_token_lens,
+                           phase_end_us,
+                           "engine_enqueue",
+                           phase_end_us - phase_start_us,
+                           "ok");
+        }
     }
 
     RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", request_id);
 
-    generate_context.error_status =
-        pollStreamOutput(context, generate_context.request_key, writer, generate_context.getStream());
+    const int64_t collect_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    if (trace_request) {
+        logRpcTimeline("phase_start", request_ids, input_token_lens, collect_start_us, "collect_output");
+    }
+    generate_context.error_status = pollStreamOutput(context,
+                                                     generate_context.request_key,
+                                                     writer,
+                                                     generate_context.getStream(),
+                                                     trace_request ? &request_ids : nullptr,
+                                                     trace_request ? &input_token_lens : nullptr);
+    if (trace_request) {
+        const int64_t collect_end_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        logRpcTimeline("phase_end",
+                       request_ids,
+                       input_token_lens,
+                       collect_end_us,
+                       "collect_output",
+                       collect_end_us - collect_start_us,
+                       generate_context.error_status.ok() ? "ok" : "error");
+        logRpcTimeline("request_complete",
+                       request_ids,
+                       input_token_lens,
+                       collect_end_us,
+                       nullptr,
+                       collect_end_us - request_start_us,
+                       generate_context.error_status.ok() ? "ok" : "error");
+    }
     meta_->dequeue(generate_context.request_id, generate_context.getStream());
     return generate_context.error_status;
 }
@@ -226,9 +409,22 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
                                                const BatchGenerateInputPB* request,
                                                BatchGenerateOutputsPB*     response) {
     RTP_LLM_PROFILE_SCOPE("rpc.batch_generate_call");
-    c10::InferenceMode inference_guard(true);
-    AtomicGuard        request_guard(onflight_requests_);
-    const int          batch_size = request->inputs_size();
+    c10::InferenceMode   inference_guard(true);
+    AtomicGuard          request_guard(onflight_requests_);
+    const int            batch_size       = request->inputs_size();
+    const bool           trace_request    = requestTimelineEnabled();
+    const int64_t        request_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    std::vector<int64_t> request_ids;
+    std::vector<int64_t> input_token_lens;
+    request_ids.reserve(batch_size);
+    input_token_lens.reserve(batch_size);
+    for (int i = 0; i < batch_size; ++i) {
+        request_ids.push_back(request->inputs(i).request_id());
+        input_token_lens.push_back(request->inputs(i).token_ids_size());
+    }
+    if (trace_request) {
+        logRpcTimeline("request_arrive", request_ids, input_token_lens, request_start_us);
+    }
     RTP_LLM_LOG_INFO("receive batch generate request, batch_size=%d", batch_size);
 
     if (batch_size == 0) {
@@ -237,6 +433,10 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
 
     std::vector<std::shared_ptr<GenerateInput>> inputs;
     inputs.reserve(batch_size);
+    const int64_t prepare_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    if (trace_request) {
+        logRpcTimeline("phase_start", request_ids, input_token_lens, prepare_start_us, "prepare_input");
+    }
     for (int i = 0; i < batch_size; i++) {
         std::shared_ptr<GenerateInput> input;
         auto                           err = prepareInput(request->inputs(i), input);
@@ -257,33 +457,122 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         }
         inputs.push_back(input);
     }
+    if (trace_request) {
+        const int64_t prepare_end_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        logRpcTimeline("phase_end",
+                       request_ids,
+                       input_token_lens,
+                       prepare_end_us,
+                       "prepare_input",
+                       prepare_end_us - prepare_start_us,
+                       "ok");
+    }
 
     // batchEnqueue contract: returned vector is 1:1 with `inputs` (same size, same order).
     // Streams that failed checkInputLength carry an error reported via reportError() and surface
     // it through collectStreamOutput → nextOutput → ErrorInfo path below.
+    const int64_t enqueue_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    if (trace_request) {
+        logRpcTimeline("phase_start", request_ids, input_token_lens, enqueue_start_us, "engine_enqueue");
+    }
     auto streams = engine_->batchEnqueue(inputs);
+    if (trace_request) {
+        const int64_t enqueue_end_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        logRpcTimeline("phase_end",
+                       request_ids,
+                       input_token_lens,
+                       enqueue_end_us,
+                       "engine_enqueue",
+                       enqueue_end_us - enqueue_start_us,
+                       "ok");
+    }
 
     // collectStreamOutput is currently SERIAL: streams[0] must finish before streams[1] is drained.
     // For batch decode this is bounded (all streams advance together), but TODO: parallelize for
     // mixed-length batches.
+    const int64_t collect_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    if (trace_request) {
+        logRpcTimeline("phase_start", request_ids, input_token_lens, collect_start_us, "collect_output");
+    }
+    bool    batch_ok                      = true;
+    int64_t total_all_hidden_tensor_bytes = 0;
+    bool    has_all_hidden_states         = false;
     for (int i = 0; i < (int)streams.size(); i++) {
         auto* result = response->add_results();
 
         GenerateOutputs last_outputs;
         auto            err = collectStreamOutput(context, streams[i], inputs[i], last_outputs);
         if (!err.ok()) {
+            batch_ok     = false;
             auto* err_pb = result->mutable_error_info();
             err_pb->set_error_code(err.code() == ErrorCode::CANCELLED ? ErrorCodePB::CANCELLED :
                                                                         ErrorCodePB::UNKNOWN_ERROR);
             err_pb->set_error_message(err.ToString());
         } else {
-            auto* output_pb = result->mutable_final_output();
+            auto*         output_pb               = result->mutable_final_output();
+            const int64_t all_hidden_tensor_bytes = trace_request ? allHiddenStatesTensorBytes(last_outputs) : -1;
+            if (all_hidden_tensor_bytes >= 0) {
+                has_all_hidden_states = true;
+                total_all_hidden_tensor_bytes += all_hidden_tensor_bytes;
+            }
+            const int64_t convert_start_us = trace_request ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
+            if (trace_request) {
+                logRpcTimeline("phase_start",
+                               {request_ids[i]},
+                               {input_token_lens[i]},
+                               convert_start_us,
+                               "response_convert",
+                               -1,
+                               nullptr,
+                               all_hidden_tensor_bytes);
+            }
             QueryConverter::transResponse(output_pb,
                                           &last_outputs,
                                           inputs[i]->generate_config->aux_info,
                                           maga_init_params_.misc_config.aux_string,
                                           streams[i]->specialTokens().eos_token_id);
+            if (trace_request) {
+                const int64_t convert_end_us      = autil::TimeUtility::currentTimeInMicroSeconds();
+                const int64_t item_response_bytes = output_pb->ByteSizeLong();
+                logRpcTimeline("phase_end",
+                               {request_ids[i]},
+                               {input_token_lens[i]},
+                               convert_end_us,
+                               "response_convert",
+                               convert_end_us - convert_start_us,
+                               "ok",
+                               all_hidden_tensor_bytes,
+                               item_response_bytes);
+            }
         }
+    }
+
+    if (trace_request) {
+        const int64_t collect_end_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        logRpcTimeline("phase_end",
+                       request_ids,
+                       input_token_lens,
+                       collect_end_us,
+                       "collect_output",
+                       collect_end_us - collect_start_us,
+                       batch_ok ? "ok" : "error");
+        const int64_t response_bytes = response->ByteSizeLong();
+        logRpcTimeline("response_ready",
+                       request_ids,
+                       input_token_lens,
+                       collect_end_us,
+                       nullptr,
+                       -1,
+                       batch_ok ? "ok" : "error",
+                       has_all_hidden_states ? total_all_hidden_tensor_bytes : -1,
+                       response_bytes);
+        logRpcTimeline("request_complete",
+                       request_ids,
+                       input_token_lens,
+                       collect_end_us,
+                       nullptr,
+                       collect_end_us - request_start_us,
+                       batch_ok ? "ok" : "error");
     }
 
     RTP_LLM_LOG_INFO("batch generate done, batch_size=%d", batch_size);
@@ -466,8 +755,26 @@ grpc::Status LocalRpcServer::UpdateSchedulerInfo(grpc::ServerContext*           
 
 grpc::Status
 LocalRpcServer::SetLogLevel(grpc::ServerContext* context, const SetLogLevelRequestPB* request, EmptyPB* response) {
-    std::string log_level_str = request->log_level();
-    uint32_t    log_level     = alog::LOG_LEVEL_INFO;
+    std::string           log_level_str        = request->log_level();
+    constexpr const char* request_trace_prefix = "REQUEST_TRACE:";
+    if (log_level_str.rfind(request_trace_prefix, 0) == 0) {
+        try {
+            const auto deadline_us =
+                std::stoll(log_level_str.substr(std::char_traits<char>::length(request_trace_prefix)));
+            if (deadline_us < 0) {
+                return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                    "request trace deadline must be a non-negative epoch timestamp");
+            }
+            setRequestTimelineDeadlineUs(deadline_us);
+            RTP_LLM_LOG_INFO(
+                "request trace control deadline_us=%ld enabled=%d", deadline_us, int(requestTimelineEnabled()));
+            return grpc::Status::OK;
+        } catch (const std::exception& e) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                std::string("invalid request trace deadline: ") + e.what());
+        }
+    }
+    uint32_t log_level = alog::LOG_LEVEL_INFO;
     if (log_level_str == "INFO" || log_level_str == "info") {
         log_level = alog::LOG_LEVEL_INFO;
     } else if (log_level_str == "WARNING" || log_level_str == "warning") {

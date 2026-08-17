@@ -45,6 +45,17 @@ py_test(
 )
 
 py_test(
+    name = "request_timeline_test",
+    srcs = [
+        "request_timeline_test.py",
+    ],
+    deps = [
+        "//rtp_llm:utils",
+    ],
+)
+
+
+py_test(
     name = "util_test",
     srcs = [
         "util_test.py",
