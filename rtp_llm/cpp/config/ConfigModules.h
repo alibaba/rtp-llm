@@ -9,6 +9,10 @@
 
 namespace rtp_llm {
 
+inline constexpr double  kDefaultRuntimeMemorySafetyRatio = 0.05;
+// "Mb" matches the runtime_mem_no_warmup_floor_mb field spelling; the unit is MiB.
+inline constexpr int64_t kDefaultRuntimeNoWarmupFloorMb   = 2048;
+
 /** NCCL communication config (ip + ports). Aligns with Python NcclCommConfig. */
 struct NcclCommConfig {
     std::string master_ip   = "";
@@ -160,15 +164,29 @@ struct KVCacheConfig {
     int64_t                                 memory_cache_disk_sync_timeout_ms = 30000;
     int                                     linear_step                       = 1;  // for linear attention cache reuse
     // Fields merged from PyKvCacheConfig
-    int         fp8_kv_cache              = 0;
-    std::string ssm_state_dtype           = "bf16";
-    int64_t     kv_cache_mem_mb           = -1;
-    int         seq_size_per_block        = 64;
-    int         kernel_seq_size_per_block = 0;
-    int         test_block_num            = 0;
-    int         use_block_cache           = -1;  // -1 means not set, use Optional<int> equivalent
-    bool        enable_device_cache       = true;
-    bool        enable_memory_cache       = false;
+    int         fp8_kv_cache    = 0;
+    std::string ssm_state_dtype = "bf16";
+    int64_t     kv_cache_mem_mb = -1;
+    // These two fields are the single source of truth for the runtime memory
+    // sizing defaults: the cache-layer sizing math takes them as call arguments
+    // off this config (MemoryEvaluationHelper.cc) instead of restating them, and
+    // the Python side reads them back off the constructed config (see
+    // kv_cache_group_args.py).
+    // Placement tradeoff, recorded so it is not re-litigated: these two knobs
+    // are inputs to KV-cache sizing and live here next to their consumer, while
+    // the third knob of the same formula, RuntimeConfig::reserve_runtime_mem_mb,
+    // predates them and keeps its argparse-layer default (see
+    // DEFAULT_RESERVER_RUNTIME_MEM_MB in server_args/util.py). Moving either
+    // side changes a pybind pickle tuple arity and every entrypoint constructing
+    // these configs; the split was judged cheaper to document than to close.
+    double  runtime_mem_safety_ratio       = kDefaultRuntimeMemorySafetyRatio;
+    int64_t runtime_mem_no_warmup_floor_mb = kDefaultRuntimeNoWarmupFloorMb;
+    int     seq_size_per_block             = 64;
+    int     kernel_seq_size_per_block      = 0;
+    int     test_block_num                 = 0;
+    int     use_block_cache                = -1;  // -1 means not set, use Optional<int> equivalent
+    bool    enable_device_cache            = true;
+    bool    enable_memory_cache            = false;
     // When true, memory-cache H2D/D2H may use split-KV SM scatter/gather (CUDA) when layout is eligible.
     bool    enable_memory_cache_sm_copy             = false;
     bool    enable_remote_cache                     = false;

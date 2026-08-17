@@ -650,10 +650,29 @@ void KVCacheManager::allocateAndSync() {
         execSyncCommunication(false);
         cudaSyncAndCheck();
 
+        const int local_block_num = config_.block_num;
         if (parallelism_config_.ffn_disaggregate_config.is_ffn_service()) {
             config_.block_num = 1;
         } else {
             config_.block_num = *std::min_element(block_num_ptr, block_num_ptr + world_size);
+            // This min reduction is what keeps per-rank sizing consistent: the knobs are
+            // expected to be identical on every rank but nothing validates that, while the
+            // warmup measurement is per-rank and may legitimately differ. The knob values are
+            // printed so a suspected drift can be compared across ranks.
+            if (config_.block_num != local_block_num) {
+                RTP_LLM_LOG_INFO("kv cache block_num reduced from %d (this rank) to %d (cluster min) across "
+                                 "world_size=%zu. This rank: reserver_runtime_mem_mb=%ld, "
+                                 "runtime_mem_safety_ratio=%.4f, runtime_mem_no_warmup_floor_mb=%ld, "
+                                 "kv_cache_mem_mb=%ld (local_rank=%zu).",
+                                 local_block_num,
+                                 config_.block_num,
+                                 world_size,
+                                 runtime_config_.reserve_runtime_mem_mb,
+                                 kv_cache_config_.runtime_mem_safety_ratio,
+                                 kv_cache_config_.runtime_mem_no_warmup_floor_mb,
+                                 kv_cache_config_.kv_cache_mem_mb,
+                                 local_rank);
+            }
         }
     }
     config_.finalizeBlockNums(static_cast<uint32_t>(config_.block_num), runtime_config_);

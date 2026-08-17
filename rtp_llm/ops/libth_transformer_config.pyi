@@ -685,6 +685,8 @@ class KVCacheConfig:
     enable_remote_cache: bool
     fp8_kv_cache: int
     kv_cache_mem_mb: int
+    runtime_mem_safety_ratio: float
+    runtime_mem_no_warmup_floor_mb: int
     linear_step: int
     max_block_size_per_item: int
     memory_cache_size_mb: int

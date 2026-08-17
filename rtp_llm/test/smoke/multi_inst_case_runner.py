@@ -1,4 +1,6 @@
 import logging
+import os
+import re
 from typing import Dict, List, Union
 
 from smoke.case_runner import CaseRunner
@@ -7,11 +9,26 @@ from smoke.task_info import TaskInfo, TaskStates
 from rtp_llm.server.host_service import EndPoint, GroupEndPoint, ServiceRoute
 from rtp_llm.test.utils.device_resource import get_gpu_ids
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
+from rtp_llm.utils.util import str_to_bool
 
 PREFILL_ROLE_NAME = "prefill"
 DECODE_ROLE_NAME = "decode"
 FRONTEND_ROLE_NAME = "frontend"
 PD_FUNSION_ROLE_NAME = "pd_fusion"
+
+# Test-only opt-in for the warmup/KV-sizing log assertions, read from a case's
+# `envs` rather than its `smoke_args`: smoke_args are forwarded verbatim to the
+# server process, where an unknown option aborts argument parsing.
+#
+# It replaces sniffing `--warm_up` out of smoke_args. That sniffing silently
+# skipped every assertion whenever the value was not spelled exactly
+# "--warm_up <value>" -- `--warm_up=1`, an abbreviation, or relying on the
+# Python entry point's own `warm_up=true` default all read as "off".
+ASSERT_WARMUP_SIZING_ENV = "SMOKE_ASSERT_WARMUP_SIZING"
+
+# Emitted unconditionally by _log_runtime_tuning_summary (server_args.py) on every
+# rank of every role, always at INFO.
+PYTHON_LOG_SENTINEL = "Runtime memory tuning: world_rank="
 
 
 class PdSeperationCaseRunner(CaseRunner):
@@ -33,6 +50,45 @@ class PdSeperationCaseRunner(CaseRunner):
         ):
             raise Exception("env_args in PdSeperationCaseRunner should not empty")
 
+    @classmethod
+    def _assert_warmup_sizing_logs(
+        cls,
+        role: str,
+        server_manager: MagaServerManager,
+    ) -> None:
+        log_path = server_manager.log_file_path
+        if not log_path:
+            raise AssertionError(f"{role} server log path is unavailable")
+        with open(log_path, "r", encoding="utf-8", errors="replace") as log_file:
+            output = log_file.read()
+        # Field-level match, not tag presence: a broken memory-trace pipeline still
+        # emits the tag with measured_total_growth_bytes=0 (and the sizing layer then
+        # degrades to the no-warmup formula, so warm_up=1 below also disappears).
+        warmup_done = re.search(r"\[WARMUP_DONE\] measured_total_growth_bytes=(\d+)", output)
+        if warmup_done is None:
+            raise AssertionError(
+                f"{role} server log {log_path} is missing "
+                "'[WARMUP_DONE] measured_total_growth_bytes='"
+            )
+        if int(warmup_done.group(1)) == 0:
+            raise AssertionError(
+                f"{role} warmup completed but measured_total_growth_bytes=0: a real "
+                "forward cannot produce zero growth, so the memory-trace "
+                "measurement is broken"
+            )
+        for marker in ("[KV_ALLOC] warm_up=1",):
+            if marker not in output:
+                raise AssertionError(
+                    f"{role} server log {log_path} is missing {marker}"
+                )
+
+        # Bazel smoke sets FT_SERVER_TEST=1, so Python logging is captured in this
+        # server stdout log instead of being redirected to per-rank files.
+        if PYTHON_LOG_SENTINEL not in output:
+            raise AssertionError(
+                f"{role} server log {log_path} lacks {PYTHON_LOG_SENTINEL!r}"
+            )
+
     # override
     def run(self):
         frontend_server_manager = None
@@ -41,6 +97,17 @@ class PdSeperationCaseRunner(CaseRunner):
         decode_envs = self.create_env_from_args(self.env_args[DECODE_ROLE_NAME])
         prefill_args = self.smoke_args.get(PREFILL_ROLE_NAME, "")
         decode_args = self.smoke_args.get(DECODE_ROLE_NAME, "")
+        assert_warmup_sizing = str_to_bool(
+            prefill_envs.get(
+                ASSERT_WARMUP_SIZING_ENV, decode_envs.get(ASSERT_WARMUP_SIZING_ENV, "0")
+            )
+        )
+        if not assert_warmup_sizing:
+            logging.info(
+                "skipping warmup/KV sizing log assertions: %s is not set in this "
+                "case's envs for either role",
+                ASSERT_WARMUP_SIZING_ENV,
+            )
         prefill_enable_remote_cache = self._extract_bool_arg(
             prefill_args, "--enable_remote_cache"
         )
@@ -167,6 +234,12 @@ class PdSeperationCaseRunner(CaseRunner):
         if enable_remote_cache and self.remote_kvcm_server is not None:
             self.remote_kvcm_server.stop_server()
             self.remote_kvcm_server.copy_logs()
+        if task_states.ret == True and assert_warmup_sizing:
+            self._assert_warmup_sizing_logs(
+                "prefill",
+                prefill_server_manager,
+            )
+            self._assert_warmup_sizing_logs("decode", decode_server_manager)
         return task_states
 
 

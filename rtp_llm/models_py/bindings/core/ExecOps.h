@@ -65,6 +65,8 @@ void cudaProfilerEnd();
 ExecStatus    getGpuExecStatus();
 torch::Device getTorchCudaDevice();
 void          setTraceMemory(bool trace_memory);
+// True only inside the RAII-guarded warmup forward (between setTraceMemory(true/false)).
+bool isTraceMemory();
 
 // ===================================================================
 // Copy ops

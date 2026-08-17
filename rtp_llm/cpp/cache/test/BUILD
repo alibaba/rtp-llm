@@ -61,6 +61,43 @@ cc_library(
 )
 
 cc_test(
+    name = "runtime_memory_sizing_test",
+    srcs = ["RuntimeMemorySizingTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:runtime_memory_sizing",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "warmup_result_assembly_test",
+    srcs = ["WarmUpResultAssemblyTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:warmup_result_assembly",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "memory_evaluation_helper_test",
+    srcs = ["MemoryEvaluationHelperTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:memory_evaluation_sizing",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:model_config",
+        "//rtp_llm/cpp/config:static_config",
+        "//rtp_llm/cpp/testing:test_log_capture",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+)
+
+cc_test(
     name = "cache_topology_test",
     srcs = ["CacheTopologyTest.cc"],
     copts = test_copts,

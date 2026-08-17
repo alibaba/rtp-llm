@@ -164,6 +164,7 @@ cc_library(
         "//rtp_llm/models_py/bindings/core:types_hdr",
         "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/utils:memory_status",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),

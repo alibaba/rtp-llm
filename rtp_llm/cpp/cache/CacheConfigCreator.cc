@@ -3,11 +3,12 @@
 #include <algorithm>
 #include <limits>
 #include <numeric>
+#include <string>
 
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
-#include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
+#include "rtp_llm/cpp/cache/MemoryEvaluationHelperDevice.h"
 #include "rtp_llm/cpp/cache/SingleConfigCreator.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -15,6 +16,44 @@
 namespace rtp_llm {
 
 namespace {
+
+// Single definition of the [KV_ALLOC_LOCAL] summary, shared by the plain and the SP/MTP sizing
+// paths so the tag and field names exist in exactly one place.
+//
+// Its own tag, not a "local" qualifier under [KV_ALLOC]: the sizing layer's [KV_ALLOC] line carries
+// a completely different field set (base / measured_growth / safety / total), so sharing one tag
+// would let a prefix-based log rule match two schemas.
+//
+// Tagged "LOCAL", not "final", on purpose: this runs while the config is being built, which is
+// before KVCacheManager::allocateAndSync reduces block_num to the cluster minimum. On a
+// multi-rank deployment the value logged here can therefore exceed what the rank actually
+// allocates -- the post-reduction value is logged by allocateAndSync ("block_num is %d after tp
+// sync"). The in-repository smoke gate matches [KV_ALLOC] warm_up= from the sizing layer, not
+// this line; this repository has no consumer that treats [KV_ALLOC_LOCAL] as a completion
+// sentinel. External tooling that depends on this tag must coordinate its own schema updates.
+//
+// total_kv is block_num * block_size, i.e. the single-pool cost model: hybrid/SWA configs with
+// independent group pools spend a different real byte count, so operators sizing reserves for
+// those must read the per-group breakdown in debugString() -- independent_pools=1 flags that
+// caveat machine-readably. sp_breakdown, when non-empty, is appended verbatim to describe how
+// block_size splits across score and propose modules.
+void logKvAllocLocal(size_t             block_num,
+                     size_t             block_size_bytes,
+                     size_t             kv_cache_seq_len,
+                     bool               independent_pools,
+                     const std::string& sp_breakdown = "") {
+    const size_t total_kv_bytes = block_num * block_size_bytes;
+    RTP_LLM_LOG_INFO("[KV_ALLOC_LOCAL] block_num=%zu block_size=%.2f MiB%s total_kv=%zu MiB (%.2f GiB, single-pool "
+                     "estimate before cross-rank reduction; per-group breakdown in debugString), stores %zu tokens "
+                     "independent_pools=%d",
+                     block_num,
+                     block_size_bytes / 1024.0 / 1024.0,
+                     sp_breakdown.c_str(),
+                     total_kv_bytes / 1024 / 1024,
+                     total_kv_bytes / 1024.0 / 1024.0 / 1024.0,
+                     kv_cache_seq_len,
+                     independent_pools ? 1 : 0);
+}
 
 bool blockNumFitsBudget(uint32_t block_num, size_t total_budget_bytes, const KVCacheBlockBudget& budget, int step) {
     if (budget.explicit_pool_reserve_bytes > total_budget_bytes) {
@@ -114,7 +153,6 @@ uint32_t computeBlockNum(CacheConfig&                                     config
                          const ModelConfig&                               model_config,
                          const RuntimeConfig&                             runtime_config,
                          const KVCacheConfig&                             kv_cache_config,
-                         const ParallelismConfig&                         parallelism_config,
                          const std::optional<WarmUpResult>&               warm_up_result,
                          const std::optional<SpeculativeExecutionConfig>& sp_config) {
     if (kv_cache_config.test_block_num > 0) {
@@ -123,8 +161,8 @@ uint32_t computeBlockNum(CacheConfig&                                     config
         return static_cast<uint32_t>(kv_cache_config.test_block_num);
     }
 
-    const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
-        runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
+    const auto kv_cache_mem_size = getKVCacheMemorySizeFromDevice(
+        runtime_config, kv_cache_config, model_config, warm_up_result, sp_config);
     config.finalizeBlockNums(0, runtime_config);
 
     const auto block_budget = blockBudgetForConfig(config);
@@ -225,17 +263,20 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     config.linear_step = kv_cache_config.linear_step;
     setupKernelSeqSize(config, kv_cache_config, "cache");
 
-    uint32_t block_num = computeBlockNum(
-        config, model_config, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
+    uint32_t block_num =
+        computeBlockNum(config, model_config, runtime_config, kv_cache_config, warm_up_result, sp_config);
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
-                            "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",
+                            "kv cache needs at least 1 block but %u, each block needs %ld MiB memory",
                             block_num,
                             static_cast<long>(config.block_size_bytes / 1024 / 1024));
 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
     config.block_num            = static_cast<int>(block_num);
     config.finalizeBlockNums(block_num, runtime_config);
-    RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %ld tokens", block_num, kv_cache_seq_len);
+    logKvAllocLocal(block_num,
+                    config.block_size_bytes,
+                    kv_cache_seq_len,
+                    model_config.hybrid_attention_config.enable_independent_kv_cache_pools);
     if (kv_cache_seq_len < model_config.max_seq_len) {
         RTP_LLM_LOG_WARNING("kv cache block nums %u can only store %ld tokens, less than max_seq_len %ld, "
                             "this is dangerous, consider decrease max_seq_len",
@@ -304,8 +345,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     if (kv_cache_config.test_block_num > 0) {
         block_num = kv_cache_config.test_block_num;
     } else {
-        const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
-            runtime_config, kv_cache_config, score_model_config, parallelism_config, warm_up_result, sp_config);
+        const auto kv_cache_mem_size = getKVCacheMemorySizeFromDevice(
+            runtime_config, kv_cache_config, score_model_config, warm_up_result, sp_config);
 
         if (explicit_pool_reserve > 0) {
             RTP_LLM_CHECK_WITH_INFO(
@@ -364,17 +405,22 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     config.explicitly_sized_pool_reserve_bytes = explicit_pool_reserve;
 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
-    RTP_LLM_LOG_INFO("CacheConfig created: is_mtp=%d, total_layers=%u, num_mtp_modules=%d, block_num=%zu, "
-                     "allows storing %zu tokens, total_block_size=%zu bytes (main=%zu + %d*propose=%zu)",
+    // block_size here is the joint per-block cost across score + propose modules; the breakdown
+    // suffix keeps that split visible without giving this path its own log format. It stays in
+    // bytes: a propose module's per-block cost is routinely under 1 MiB and would round to 0.
+    logKvAllocLocal(block_num,
+                    total_block_size_bytes,
+                    kv_cache_seq_len,
+                    score_model_config.hybrid_attention_config.enable_independent_kv_cache_pools,
+                    " (score=" + std::to_string(score_config.block_size_bytes) + "B + "
+                        + std::to_string(num_mtp_modules) + " x propose="
+                        + std::to_string(propose_config.block_size_bytes) + "B)");
+    // Only the fields [KV_ALLOC_LOCAL] does not already carry: it logs block_num, block_size
+    // (with the score/propose split), total_kv and token capacity.
+    RTP_LLM_LOG_INFO("CacheConfig created: is_mtp=%d, total_layers=%u, num_mtp_modules=%d",
                      is_mtp,
                      total_layer_num,
-                     num_mtp_modules,
-                     block_num,
-                     kv_cache_seq_len,
-                     total_block_size_bytes,
-                     score_config.block_size_bytes,
-                     num_mtp_modules,
-                     propose_config.block_size_bytes);
+                     num_mtp_modules);
 
     RTP_LLM_LOG_INFO("CacheConfig debugString(main_score_model):\n%s", score_config.debugString().c_str());
     for (size_t i = 0; i < config.mtp_sub_configs.size(); ++i) {

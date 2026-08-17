@@ -55,7 +55,7 @@ public:
 
 private:
     // Removed functions moved to MemoryEvaluationHelper:
-    // getDefaultRuntimeMemorySize
+    // getConfiguredRuntimeMemorySize (formerly getDefaultRuntimeMemorySize)
     // getKVCacheMemorySize
 
     // Removed functions moved to dedicated creators:

@@ -8,3 +8,11 @@ py_test(
     ],
     exec_properties = {'gpu':'H20'},
 )
+
+py_test(
+    name = "util_test",
+    srcs = ["util_test.py"],
+    deps = [
+        "//rtp_llm/server:server_args_util",
+    ],
+)

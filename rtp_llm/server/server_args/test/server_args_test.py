@@ -1,8 +1,11 @@
 import importlib
+import io
 import json
+import logging
 import os
 import sys
 from unittest import TestCase, main
+from unittest.mock import patch
 
 
 class ServerArgsPyEnvConfigsTest(TestCase):
@@ -91,6 +94,519 @@ class ServerArgsSetTest(TestCase):
 
         # Verify disable_flashinfer_hybrid_prefill
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)
+
+    def test_runtime_tuning_args_are_bound_to_configs(self):
+        """CLI values bind to the configs and win over a conflicting environment."""
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        with patch.dict(
+            os.environ,
+            {
+                "RUNTIME_MEM_SAFETY_RATIO": "0.5",
+                "RUNTIME_MEM_NO_WARMUP_FLOOR_MB": "9999",
+            },
+            clear=True,
+        ):
+            py_env_configs = setup_args(
+                [
+                    "--runtime_mem_safety_ratio",
+                    "0.08",
+                    "--runtime_mem_no_warmup_floor_mb",
+                    "3072",
+                ]
+            )
+
+        # CLI wins over the environment values above (provided_args precedence).
+        self.assertEqual(py_env_configs.kv_cache_config.runtime_mem_safety_ratio, 0.08)
+        self.assertEqual(
+            py_env_configs.kv_cache_config.runtime_mem_no_warmup_floor_mb, 3072
+        )
+
+    def test_empty_string_untyped_env_keeps_legacy_semantics_on_both_paths(self):
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        for env_only in (True, False):
+            with self.subTest(env_only=env_only):
+                parser = EnvArgumentParser()
+                parser.add_argument("--label", env_name="LABEL", default="default")
+                sys.argv = ["prog"]
+                with patch.dict(os.environ, {"LABEL": ""}, clear=True):
+                    parsed = parser.parse_args() if env_only else parser.parse_args([])
+
+                self.assertEqual(parsed.label, "")
+
+    def test_empty_bounded_runtime_memory_env_uses_default_on_all_paths(self):
+        from rtp_llm.ops import KVCacheConfig
+        from rtp_llm.server.server_args.generate_args_from_env_clean import (
+            generate_args_list,
+        )
+        from rtp_llm.server.server_args.server_args import setup_args
+        from rtp_llm.server.server_args.util import DEFAULT_RESERVER_RUNTIME_MEM_MB
+
+        defaults = KVCacheConfig()
+        cases = (
+            (
+                "RUNTIME_MEM_SAFETY_RATIO",
+                "--runtime_mem_safety_ratio",
+                "runtime_mem_safety_ratio",
+            ),
+            (
+                "RUNTIME_MEM_NO_WARMUP_FLOOR_MB",
+                "--runtime_mem_no_warmup_floor_mb",
+                "runtime_mem_no_warmup_floor_mb",
+            ),
+        )
+        for env_name, option, attribute in cases:
+            for env_only in (True, False):
+                with self.subTest(env_name=env_name, env_only=env_only):
+                    sys.argv = ["prog"]
+                    with patch.dict(os.environ, {env_name: ""}, clear=True):
+                        configs = setup_args() if env_only else setup_args([])
+
+                    self.assertEqual(
+                        getattr(configs.kv_cache_config, attribute),
+                        getattr(defaults, attribute),
+                    )
+
+            with self.subTest(env_name=env_name, generator=True):
+                with patch.dict(os.environ, {env_name: ""}, clear=True):
+                    generated = generate_args_list(only_env_vars=True)
+                self.assertNotIn(option, generated)
+
+        for env_only in (True, False):
+            with self.subTest(env_name="RESERVER_RUNTIME_MEM_MB", env_only=env_only):
+                sys.argv = ["prog"]
+                with patch.dict(
+                    os.environ, {"RESERVER_RUNTIME_MEM_MB": ""}, clear=True
+                ):
+                    configs = setup_args() if env_only else setup_args([])
+
+                self.assertEqual(
+                    configs.runtime_config.reserve_runtime_mem_mb,
+                    DEFAULT_RESERVER_RUNTIME_MEM_MB,
+                )
+
+        with patch.dict(
+            os.environ, {"RESERVER_RUNTIME_MEM_MB": ""}, clear=True
+        ):
+            generated = generate_args_list(only_env_vars=True)
+        self.assertNotIn("--reserver_runtime_mem_mb", generated)
+
+    def test_explicit_empty_cli_value_for_bounded_runtime_memory_is_rejected(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        for option in (
+            "--reserver_runtime_mem_mb",
+            "--runtime_mem_safety_ratio",
+            "--runtime_mem_no_warmup_floor_mb",
+        ):
+            with (
+                self.subTest(option=option),
+                patch.dict(os.environ, {}, clear=True),
+                patch("sys.stderr", new_callable=io.StringIO),
+            ):
+                with self.assertRaises(SystemExit) as caught:
+                    setup_args([option, ""])
+                self.assertEqual(caught.exception.code, 2)
+
+    def test_env_mappings_are_isolated_between_parser_instances(self):
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        parser_a = EnvArgumentParser(env_prefix="A")
+        parser_b = EnvArgumentParser(env_prefix="B")
+        parser_a.add_argument("--value", env_name="VALUE")
+        parser_b.add_argument("--value", env_name="VALUE")
+
+        mappings_a = parser_a.get_env_mappings()
+        mappings_b = parser_b.get_env_mappings()
+        self.assertEqual(mappings_a["value"], "A_VALUE")
+        self.assertEqual(mappings_b["value"], "B_VALUE")
+        self.assertEqual(mappings_a["help"], "A_HELP")
+        self.assertEqual(mappings_b["help"], "B_HELP")
+        self.assertNotIn("B_VALUE", mappings_a.values())
+        self.assertNotIn("A_VALUE", mappings_b.values())
+
+    def test_forward_warmup_is_on_by_default(self):
+        """The Python service entrypoint preserves the legacy warmup default."""
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        self.assertTrue(setup_args([]).runtime_config.warm_up)
+
+    def test_runtime_memory_env_boundaries_are_bound_to_config(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        for safety_ratio, no_warmup_floor_mb in (
+            ("0", "0"),
+            ("0.999999", "3072"),
+        ):
+            with (
+                self.subTest(
+                    safety_ratio=safety_ratio,
+                    no_warmup_floor_mb=no_warmup_floor_mb,
+                ),
+                patch.dict(
+                    os.environ,
+                    {
+                        "RUNTIME_MEM_SAFETY_RATIO": safety_ratio,
+                        "RUNTIME_MEM_NO_WARMUP_FLOOR_MB": no_warmup_floor_mb,
+                    },
+                    clear=True,
+                ),
+            ):
+                py_env_configs = setup_args([])
+
+                self.assertEqual(
+                    py_env_configs.kv_cache_config.runtime_mem_safety_ratio,
+                    float(safety_ratio),
+                )
+                self.assertEqual(
+                    py_env_configs.kv_cache_config.runtime_mem_no_warmup_floor_mb,
+                    int(no_warmup_floor_mb),
+                )
+
+    def test_strict_env_values_abort_with_usage_error_naming_the_env_var(self):
+        """Strict converters reject bad env values through argparse, not a bare traceback.
+
+        setup_args([]) takes the CLI-mixed branch (args is not None), where env values are
+        converted by hand after argparse has run. The strict runtime-memory knobs use bounded_*
+        converters,
+        which raise argparse.ArgumentTypeError; that is routed through parser.error() so the exit
+        code (2) and the usage-error form match the env-only path. The message names the env var,
+        which argparse itself cannot do on the env-only path.
+        """
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        for env_name, bad_value in (
+            ("RUNTIME_MEM_SAFETY_RATIO", "1.0"),  # upper bound is exclusive
+            ("RUNTIME_MEM_SAFETY_RATIO", "-0.1"),
+            ("RUNTIME_MEM_SAFETY_RATIO", "nan"),
+            ("RUNTIME_MEM_SAFETY_RATIO", "abc"),
+            ("RUNTIME_MEM_NO_WARMUP_FLOOR_MB", "-1"),
+        ):
+            with self.subTest(env_name=env_name, bad_value=bad_value):
+                with (
+                    patch.dict(os.environ, {env_name: bad_value}, clear=True),
+                    # argparse prints usage to stderr before exiting; keep test output readable.
+                    patch("sys.stderr", new_callable=io.StringIO) as stderr,
+                ):
+                    with self.assertRaises(SystemExit) as caught:
+                        setup_args([])
+
+                self.assertEqual(caught.exception.code, 2)
+                self.assertIn(env_name, stderr.getvalue())
+
+    def test_runtime_memory_strict_env_does_not_change_existing_converters(self):
+        """An existing converter keeps taking main's generic ArgumentTypeError branch.
+
+        main routes every argparse.ArgumentTypeError through parser.error(), so an invalid
+        str2bool env value is a usage error for reasons that predate this branch. What must
+        stay true is that it is not routed through the strict/lenient policy added here for
+        the runtime-memory knobs; the two branches are told apart by their message shape.
+        """
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+        from rtp_llm.server.server_args.util import str2bool
+
+        parser = EnvArgumentParser()
+        parser.add_argument("--existing_bool", env_name="EXISTING_BOOL", type=str2bool)
+
+        with (
+            patch.dict(os.environ, {"EXISTING_BOOL": "invalid"}, clear=True),
+            patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            with self.assertRaises(SystemExit) as caught:
+                parser.parse_args([])
+
+        self.assertEqual(caught.exception.code, 2)
+        self.assertIn("EXISTING_BOOL (existing_bool):", stderr.getvalue())
+        self.assertNotIn("invalid value for", stderr.getvalue())
+
+    def test_invalid_reserver_env_still_falls_back_on_the_cli_mixed_path(self):
+        """The one knob that deliberately keeps the opposite contract.
+
+        non_negative_mib_int raises ValueError rather than ArgumentTypeError precisely so an
+        invalid RESERVER_RUNTIME_MEM_MB keeps its pre-warmup-feature behavior on this path: warn
+        and use the default instead of aborting. Pinned so the divergence stays deliberate --
+        making it strict is a behaviour change that needs a release note.
+        """
+        from rtp_llm.server.server_args.server_args import setup_args
+        from rtp_llm.server.server_args.util import DEFAULT_RESERVER_RUNTIME_MEM_MB
+
+        for bad_value in ("-1", "not-an-int"):
+            with self.subTest(bad_value=bad_value):
+                with patch.dict(
+                    os.environ, {"RESERVER_RUNTIME_MEM_MB": bad_value}, clear=True
+                ):
+                    py_env_configs = setup_args([])
+
+                self.assertEqual(
+                    py_env_configs.runtime_config.reserve_runtime_mem_mb,
+                    DEFAULT_RESERVER_RUNTIME_MEM_MB,
+                )
+
+    def test_env_only_path_binds_new_knobs_and_aborts_on_invalid_values(self):
+        """The env-only branch, which setup_args([]) never exercises.
+
+        setup_args([]) passes a non-None args list and therefore takes the CLI-mixed branch. With
+        sys.argv holding only the program name and args=None, every env value is instead synthesised
+        into argv and converted by argparse itself. RESERVER_RUNTIME_MEM_MB is the interesting one:
+        it aborts here even though the same value falls back on the CLI-mixed path, which is the
+        deliberate asymmetry documented on non_negative_mib_int.
+        """
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        sys.argv = ["prog"]
+
+        with patch.dict(
+            os.environ,
+            {
+                "RUNTIME_MEM_SAFETY_RATIO": "0.08",
+                "RUNTIME_MEM_NO_WARMUP_FLOOR_MB": "3072",
+            },
+            clear=True,
+        ):
+            py_env_configs = setup_args()
+
+        self.assertEqual(py_env_configs.kv_cache_config.runtime_mem_safety_ratio, 0.08)
+        self.assertEqual(
+            py_env_configs.kv_cache_config.runtime_mem_no_warmup_floor_mb, 3072
+        )
+        # Out-of-range values abort on this path as well, via argparse's own conversion.
+        for env_name, bad_value in (
+            ("RUNTIME_MEM_SAFETY_RATIO", "1.0"),
+            # Lenient on the CLI-mixed path, but env-only hands it to argparse, which rejects it.
+            ("RESERVER_RUNTIME_MEM_MB", "-1"),
+        ):
+            with self.subTest(env_name=env_name, bad_value=bad_value):
+                sys.argv = ["prog"]
+                with (
+                    patch.dict(os.environ, {env_name: bad_value}, clear=True),
+                    patch("sys.stderr", new_callable=io.StringIO),
+                ):
+                    with self.assertRaises(SystemExit) as caught:
+                        setup_args()
+                self.assertEqual(caught.exception.code, 2)
+
+    def test_env_generator_emits_only_the_three_bounded_runtime_memory_values(self):
+        from rtp_llm.server.server_args.generate_args_from_env_clean import (
+            generate_args_list,
+        )
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        env_values = {
+            "RESERVER_RUNTIME_MEM_MB": "1536",
+            "RUNTIME_MEM_NO_WARMUP_FLOOR_MB": "3072",
+            "RUNTIME_MEM_SAFETY_RATIO": "0.08",
+        }
+        with patch.dict(os.environ, env_values, clear=True):
+            generated = generate_args_list(only_env_vars=True)
+            generated_pairs = dict(zip(generated[::2], generated[1::2]))
+
+            self.assertEqual(
+                generated_pairs,
+                {
+                    "--reserver_runtime_mem_mb": "1536",
+                    "--runtime_mem_no_warmup_floor_mb": "3072",
+                    "--runtime_mem_safety_ratio": "0.08",
+                },
+            )
+
+            configs = setup_args(generated)
+            self.assertEqual(configs.runtime_config.reserve_runtime_mem_mb, 1536)
+            self.assertEqual(configs.kv_cache_config.runtime_mem_safety_ratio, 0.08)
+            self.assertEqual(
+                configs.kv_cache_config.runtime_mem_no_warmup_floor_mb, 3072
+            )
+
+    def test_env_generator_keeps_invalid_bounded_value_for_argparse_to_reject(self):
+        from rtp_llm.server.server_args.generate_args_from_env_clean import (
+            generate_args_list,
+        )
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        with patch.dict(
+            os.environ, {"RUNTIME_MEM_SAFETY_RATIO": "not-a-ratio"}, clear=True
+        ):
+            generated = generate_args_list(only_env_vars=True)
+            self.assertIn(
+                ["--runtime_mem_safety_ratio", "not-a-ratio"],
+                [generated[index : index + 2] for index in range(0, len(generated), 2)],
+            )
+            with patch("sys.stderr", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as caught:
+                    setup_args(generated)
+            self.assertEqual(caught.exception.code, 2)
+
+    def test_env_generator_treats_invalid_reserver_as_fail_fast_argv(self):
+        from rtp_llm.server.server_args.generate_args_from_env_clean import (
+            generate_args_list,
+        )
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        for bad_value in ("not-an-int", "-1"):
+            with self.subTest(bad_value=bad_value):
+                with patch.dict(
+                    os.environ,
+                    {"RESERVER_RUNTIME_MEM_MB": bad_value},
+                    clear=True,
+                ):
+                    generated = generate_args_list(only_env_vars=True)
+
+                self.assertIn(
+                    ["--reserver_runtime_mem_mb", bad_value],
+                    [
+                        generated[index : index + 2]
+                        for index in range(0, len(generated), 2)
+                    ],
+                )
+                with (
+                    patch.dict(os.environ, {}, clear=True),
+                    patch("sys.stderr", new_callable=io.StringIO),
+                ):
+                    with self.assertRaises(SystemExit) as caught:
+                        setup_args(generated)
+                self.assertEqual(caught.exception.code, 2)
+
+    def test_no_warmup_compat_anchor_defaults(self):
+        """Pin the literals behind the "no-warmup sizing is unchanged" promise.
+
+        The pre-feature formula hardcoded max(2048 MiB, 5% * total); the C++
+        defaults (kDefaultRuntimeMemorySafetyRatio / kDefaultRuntimeNoWarmupFloorMb
+        in ConfigModules.h) now carry those numbers. Every other test compares
+        against freshly constructed configs, so nothing else fails if the
+        defaults drift -- these literal assertions are the backward-compat
+        anchor: changing either value resizes the KV cache of every deployment
+        that never runs a traced warmup, and needs that impact assessed first.
+        """
+        from rtp_llm.ops import KVCacheConfig
+
+        config = KVCacheConfig()
+        self.assertEqual(
+            config.runtime_mem_safety_ratio,
+            0.05,
+            msg="no-warmup compat anchor: pre-feature formula reserved 5% of total GPU",
+        )
+        self.assertEqual(
+            config.runtime_mem_no_warmup_floor_mb,
+            2048,
+            msg="no-warmup compat anchor: pre-feature formula floored at 2048 MiB",
+        )
+
+    def test_runtime_tuning_summary_logs_defaults_at_info(self):
+        """assertLogs renders the record, so a %-placeholder/argument mismatch in
+        _log_runtime_tuning_summary fails here instead of only at runtime."""
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            self.assertLogs(level="INFO") as logs,
+        ):
+            setup_args([])
+
+        records = [
+            record
+            for record in logs.records
+            if record.getMessage().startswith("Runtime memory tuning:")
+        ]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].levelno, logging.INFO)
+        message = records[0].getMessage()
+        # One contiguous string on purpose: this must stay byte-identical to
+        # PYTHON_LOG_SENTINEL in rtp_llm/test/smoke/multi_inst_case_runner.py, which
+        # greps it as a single substring. Asserting the halves separately would let a
+        # field inserted between them pass here and fail smoke.
+        self.assertIn("Runtime memory tuning: world_rank=", message)
+        self.assertIn("configured_role_type=", message)
+        self.assertIn("vit_separation=", message)
+        self.assertNotIn(" role_type=", message)
+        self.assertIn("tuned=none", message)
+        # The reserver default lives at the argparse layer (1024), not in the C++
+        # RuntimeConfig (0): rendering 1024 with tuned=none proves the summary
+        # compares against the right default, else this default run would list it
+        # in the tuned field.
+        self.assertIn("reserver_runtime_mem_mb=1024", message)
+
+    def test_runtime_tuning_summary_lists_non_default_values_in_tuned_field(self):
+        """Tuned knobs stay at INFO and surface in the same-line tuned=[...] field.
+
+        Collectors filter on the field, not the level: legal tuning is
+        configuration, not an incident. WARNING is reserved for genuinely
+        actionable conditions.
+        """
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        for args, expected_fragments in (
+            # The only knob whose default is argparse-level (1024) rather than a
+            # freshly constructed C++ config: it must still land in tuned=[...].
+            (
+                ["--reserver_runtime_mem_mb", "8192"],
+                ("reserver_runtime_mem_mb=8192", "(default 1024)"),
+            ),
+        ):
+            with self.subTest(args=args):
+                with (
+                    patch.dict(os.environ, {}, clear=True),
+                    self.assertLogs(level="INFO") as logs,
+                ):
+                    setup_args(args)
+
+                records = [
+                    record
+                    for record in logs.records
+                    if record.getMessage().startswith("Runtime memory tuning:")
+                ]
+                self.assertEqual(len(records), 1)
+                self.assertEqual(records[0].levelno, logging.INFO)
+                message = records[0].getMessage()
+                self.assertIn("tuned=[", message)
+                self.assertNotIn("tuned=none", message)
+                for fragment in expected_fragments:
+                    self.assertIn(fragment, message)
+
+    def test_runtime_tuning_summary_reports_reserver_env_fallback(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        with (
+            patch.dict(os.environ, {"RESERVER_RUNTIME_MEM_MB": "-1"}, clear=True),
+            self.assertLogs(level="INFO") as logs,
+        ):
+            setup_args([])
+
+        messages = [
+            record.getMessage()
+            for record in logs.records
+            if record.getMessage().startswith("Runtime memory tuning:")
+        ]
+        self.assertEqual(len(messages), 1)
+        self.assertIn("env_fallback=[reserver_runtime_mem_mb]", messages[0])
+
+    def test_production_parser_help_renders_without_error(self):
+        """Tripwire for bare % in any help string.
+
+        argparse expands help text with the % operator, so a literal percent
+        sign written as a bare % (instead of %%) makes format_help() raise
+        ValueError. That only fires when help is rendered, so servers start
+        fine and nothing else catches it -- this test does, for every argument
+        the production parser registers.
+        """
+        from rtp_llm.server.server_args.server_args import (
+            EnvArgumentParser,
+            PyEnvConfigs,
+            init_all_group_args,
+        )
+
+        parser = EnvArgumentParser(description="help rendering tripwire")
+        py_env_configs = PyEnvConfigs()
+        parser.set_root_config(py_env_configs)
+        init_all_group_args(parser, py_env_configs)
+        parser.add_argument(
+            "--percent_help_tripwire",
+            help="test-only literal percent: 5%%",
+        )
+
+        help_text = parser.format_help()
+        # Keep the escape assertion independent of production wording while format_help() above
+        # continues to check every argument registered by the production parser.
+        self.assertIn("test-only literal percent: 5%", help_text)
 
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""

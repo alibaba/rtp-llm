@@ -21,6 +21,10 @@ cc_library(
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:static_config",
         "@local_config_cuda//cuda:cublas_headers",
+        # cuda_host_utils.cc calls the driver API (cuGetErrorName); without this the
+        # solib carries an undefined symbol and only links when some *other* library
+        # on the consumer's link line happens to pull the driver stub in. Keep the
+        # dependency explicit so every direct or transitive consumer has the symbol.
         "@local_config_cuda//cuda:cuda_driver",
         "@local_config_cuda//cuda:nvml",
     ],
