@@ -101,14 +101,14 @@ void CudaGraphRunner::capturePrefill() {
 std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
     // MTP draft prefill: capture at multiples of num_tokens_per_bs_
     if (isMtpDraftPrefillCudaGraph()) {
-        // Rollback path: an explicit prefill_capture_seq_lens wins over the bucket set, so a
-        // deployment that regresses on padded replay cost can pin the old one-graph-per-batch
-        // behaviour (1..max_bs scaled by num_tokens_per_bs) without a new config knob.
-        if (!prefill_capture_seq_lens_.empty()) {
-            RTP_LLM_LOG_INFO("Draft model prefill: using %zu explicit prefill_capture_seq_lens, skipping bucketing",
-                             prefill_capture_seq_lens_.size());
-            return prefill_capture_seq_lens_;
-        }
+        // Do NOT let prefill_capture_seq_lens_ override this. It is the embedding-prefill
+        // capture list and hw_kernel_group_args._parse_prefill_capture_config() populates it
+        // unconditionally (160 lengths at step=1 in the EAGLE cudagraph smoke), so treating it
+        // as an opt-in rollback knob here silently replaced the bucket set with keys that are
+        // not multiples of num_tokens_per_bs_ and aborted during capture (SIGABRT on rank 1 in
+        // rocm_eagle_qwen2_14b_cudagraph). A rollback switch for the bucketing needs its own
+        // config, not this field.
+        //
         // Buckets are powers of two plus max_bs -- deliberately NOT the decode set, which is
         // {1,8,16,24,32} then +16 (cuda_graph_decode.cc): decode replays every step so it trades
         // capture memory for at most 15 padded rows, while draft prefill replays one graph whose
