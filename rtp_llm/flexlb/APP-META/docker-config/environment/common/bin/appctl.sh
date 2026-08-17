@@ -182,7 +182,7 @@ update_target() {
 }
 
 start_spring_boot() {
-    # dashscope 模式下 java 输出直通容器 stdout，其余模式落 SERVICE_OUT 文件并轮转
+    # SERVICE_OUT_TO_STDOUT=1 时 java 输出直通容器 stdout，否则落 SERVICE_OUT 文件并轮转
     local REDIRECT_OUT="$SERVICE_OUT"
     if [ "${SERVICE_OUT_TO_STDOUT:-0}" = "1" ]; then
         REDIRECT_OUT=/proc/1/fd/1

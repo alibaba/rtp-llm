@@ -132,11 +132,8 @@ zookeeperConfig{zkHost, zkTimeoutMs}}`。环境变量
   AsyncAppender（`neverBlock=true`，队列 `flexlb.log.async-queue-size` 默认 16384）。
 - 命名 logger（additivity=false）：`pvLogger`→pv.log（每请求 JSON 记录）、`syncLogger`→
   sync.log、`syncConsistencyLogger`→sync_consistency.log、`flexlbLogger`→flexlb.log。
-- Spring profile 行为：`pre,test` → root 到文件+控制台；生产（`!pre,!test`）→ 只写文件；
-  **`dashscope`** → root 与 pvLogger 走 stdout，且 `application-dashscope.yml` 把
-  `flexlb.log.app-path` 改为 `${FLEXLB_APP_LOG_PATH:/home/admin/logs}`（application/pv 移到
-  /home/admin/logs，sync 系仍在 /home/admin/ai-whale/logs）。profile 块可叠加：dashscope +
-  生产时 root 同时写文件和 stdout。
+- Spring profile 行为：`pre,test` → root 到文件+控制台；生产（`!pre,!test`）→ 只写文件。
+  application.log 和 pv.log 的路径可通过 `FLEXLB_APP_LOG_PATH` 独立配置。
 - 运行时调级：logger group `flexlb` = `org.flexlb,flexlbLogger,syncLogger,
   syncConsistencyLogger`（application.yml），经 `/flexlb/update_log_level` 修改。
 
@@ -184,8 +181,7 @@ zookeeperConfig{zkHost, zkTimeoutMs}}`。环境变量
 - `application.yml`：`server.port: 7001`、`management.server.port: 7002`、
   `server.shutdown: graceful`（`${FLEXLB_SHUTDOWN_TIMEOUT:30s}`）。
 - Spring profiles：`default`（生产日志）、`pre`/`test`（staging/testing Docker 镜像，
-  test 下跳过 GracefulOnlineService）、`dashscope`（日志走 stdout）；生产镜像用
-  `-Dspring.profiles.active=${FLEXLB_ACTIVE_PROFILES}` 由环境注入。
+  test 下跳过 GracefulOnlineService）。
 - 其他 env：`MAX_IN_MEMORY_SIZE`（codec 默认 10MB）、`FLEXLB_LOG_LEVEL`、`FLEXLB_LOG_PATH`、
   `FLEXLB_APP_LOG_PATH`、`FLEXLB_MONITOR_PROVIDER`、
   `BLOCK_HASH_STRATEGY`（`VLLM` / `SGLANG`）、

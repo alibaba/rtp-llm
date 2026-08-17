@@ -1,3 +1,0 @@
-flexlb:
-  log:
-    app-path: ${FLEXLB_APP_LOG_PATH:/home/admin/logs}
