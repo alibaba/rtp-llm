@@ -855,19 +855,20 @@ MtpBatchStreamProcessor::DSparkRoundHead MtpBatchStreamProcessor::buildDSparkRou
     return {std::move(anchors), std::move(committed_ends)};
 }
 
-void MtpBatchStreamProcessor::buildDSparkProposeInputFromStreams(const DSparkRoundHead& round_head,
-                                                                 GptModelInputs&        model_input,
-                                                                 TensorHolder&          host_holder) {
+MtpBatchStreamProcessor::DSparkRoundHead MtpBatchStreamProcessor::prepareDSparkDraftModelInput(
+    const StreamGroups& stream_groups, GptModelInputs& model_input, TensorHolder& host_holder) {
+    auto round_head = buildDSparkRoundHead(stream_groups, model_input, host_holder);
     if (!round_head.anchors.defined() || round_head.anchors.numel() == 0) {
-        return;
+        return round_head;
     }
     buildDSparkProposeInput(model_input, round_head.anchors, round_head.committed_ends, host_holder);
+    return round_head;
 }
 
-void MtpBatchStreamProcessor::prepareDSparkVerifyModelInput(const DSparkRoundHead& round_head,
-                                                            GptModelInputs&        model_input,
-                                                            const torch::Tensor&   proposals,
-                                                            TensorHolder&          host_holder) {
+void MtpBatchStreamProcessor::updateDSparkTargetVerifyModelInput(const DSparkRoundHead& round_head,
+                                                                 GptModelInputs&        model_input,
+                                                                 const torch::Tensor&   proposals,
+                                                                 TensorHolder&          host_holder) {
     if (!round_head.anchors.defined() || round_head.anchors.numel() == 0) {
         return;
     }
@@ -883,6 +884,7 @@ void MtpBatchStreamProcessor::prepareDSparkVerifyModelInput(const DSparkRoundHea
     auto verify                = torch::cat({anchor_col, proposals.to(torch::kInt32)}, 1).reshape({-1});
     model_input.prefix_lengths = round_head.committed_ends;
     setVerifyPairInputs(model_input, std::move(verify), batch_size, propose_step_ + 1, host_holder);
+    model_input.dspark_call_phase = DSparkCallPhase::NONE;
 }
 
 void MtpBatchStreamProcessor::updateDecodePostDSparkCommitInput(GptModelInputs&      model_input,

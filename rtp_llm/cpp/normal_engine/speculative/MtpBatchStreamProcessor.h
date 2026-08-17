@@ -92,14 +92,17 @@ public:
                                          const GptModelInputs& model_input,
                                          TensorHolder&         host_holder) const;
 
-    void buildDSparkProposeInputFromStreams(const DSparkRoundHead& round_head,
-                                            GptModelInputs&        model_input,
-                                            TensorHolder&          host_holder);
+    // Prepare the fixed-width DSpARK proposal input from current stream state.
+    // The returned round head is reused after sampling to build target verify.
+    DSparkRoundHead prepareDSparkDraftModelInput(const StreamGroups& stream_groups,
+                                                 GptModelInputs&     model_input,
+                                                 TensorHolder&       host_holder);
 
-    void prepareDSparkVerifyModelInput(const DSparkRoundHead& round_head,
-                                       GptModelInputs&        model_input,
-                                       const torch::Tensor&   proposals,
-                                       TensorHolder&          host_holder);
+    // Convert the proposal-stage input into dense target-verify rows.
+    void updateDSparkTargetVerifyModelInput(const DSparkRoundHead& round_head,
+                                            GptModelInputs&        model_input,
+                                            const torch::Tensor&   proposals,
+                                            TensorHolder&          host_holder);
 
     void updateDecodePostDSparkCommitInput(GptModelInputs&      model_input,
                                            const torch::Tensor& target_features,

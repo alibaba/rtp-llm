@@ -1251,54 +1251,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     // TODO(yinzhi): consider beam search & lora
 
-    // DSpARK round head: the proposal for THIS round is produced here, from
-    // the draft ring as of the previous round's commit. The propose input
-    // (anchor = last accepted token, committed_end = committed length - 1) is
-    // exactly the state the verify input reads, so a freshly handed-over PD
-    // stream needs no special case — its first proposal is produced on its
-    // first decode round. The prefill worker no longer proposes at all.
-    torch::Tensor                            dspark_round_proposals;
     MtpBatchStreamProcessor::DSparkRoundHead dspark_round_head;
-    if (is_dspark_ && isTpRank0()) {
-        // Derived once per round; the propose and verify builders below both
-        // consume this same state.
-        dspark_round_head = batch_stream_processor_->buildDSparkRoundHead(stream_groups, model_input, buffer_holder_);
-    }
-    if (is_dspark_) {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(dspark_round_head_propose)");
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        // Run on a shallow copy: the propose call overwrites the token/length
-        // and draft cache-geometry fields, while the verify flow below must
-        // see the untouched target-side gather output.
-        GptModelInputs propose_input = model_input;
-        if (isTpRank0()) {
-            batch_stream_processor_->buildDSparkProposeInputFromStreams(
-                dspark_round_head, propose_input, buffer_holder_);
-            ensureModelInputsOnCuda(propose_input, "decode.dspark_round_head_propose");
-        }
-        tpSyncModelInputs(propose_input, parallelism_config_);
-        if (propose_input.skip_run) {
-            return absl::OkStatus();
-        }
-        const auto& mtp_cache_cfg             = cache_manager_->getMTPModuleCacheConfig(0);
-        propose_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
-        propose_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
-        propose_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
-        propose_input.dspark_call_phase       = DSparkCallPhase::PROPOSE;
-        auto propose_output                   = runDSparkProposeForward(propose_input);
-        if (isTpRank0()) {
-            draft_sampler_output   = sampleDSparkDraft(stream_groups, propose_output.logits, dspark_round_head.anchors);
-            dspark_round_proposals = draft_sampler_output.token_ids;
-        }
-        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-    }
 
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_decode_input_and_tp_sync)");
         if (isTpRank0()) {
             if (is_dspark_) {
-                batch_stream_processor_->prepareDSparkVerifyModelInput(
-                    dspark_round_head, model_input, dspark_round_proposals, buffer_holder_);
+                dspark_round_head =
+                    batch_stream_processor_->prepareDSparkDraftModelInput(stream_groups, model_input, buffer_holder_);
             } else if (propose_step_ == 1) {
                 batch_stream_processor_->prepareOneStepSpecDecodeModelInput(stream_groups, model_input, buffer_holder_);
             } else {
@@ -1314,10 +1274,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
     size_t batch_size             = model_input.input_lengths.size(0);
     spec_logits_processor_present = isTpRank0() && !model_input.is_fake_stream && hasSpecLogitsProcessor(streams);
-    if (is_dspark_) {
-        draft_token_ids_t = model_input.combo_tokens.reshape(
-            {static_cast<int64_t>(batch_size), static_cast<int64_t>(propose_step_ + 1)});
-    }
     if (isTpRank0() && !model_input.is_fake_stream && hasUnsupportedMtpStatefulLogitsProcessor(streams)) {
         return absl::InternalError(
             "MTP spec decode found a stateful logits processor without SpecLogitsProcessor support; "
@@ -1329,8 +1285,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     launchTargetVerifyPrepareAsync(model_input, batch_size);
 
-    if (propose_step_ > 1 && !is_dspark_) {
-        model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
+    if (is_dspark_) {
+        dsparkModelDecode(
+            model_input, stream_groups, dspark_round_head, draft_sampler_output, draft_token_ids_t, model_forward_us);
+    } else if (propose_step_ > 1) {
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
         draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
@@ -1594,7 +1552,8 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_target_verify_input)");
         const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
         // Async prepare only needs the token count for metadata/cudagraph sizing.
-        // The actual target-verify token ids are produced by draftModelDecode below.
+        // The actual target-verify token ids are produced by the draft decode
+        // path below.
         model_input_copy.combo_tokens =
             torch::empty({static_cast<int64_t>(batch_size * (propose_step_ + 1))}, cuda_i32);
 #if USING_CUDA
@@ -1645,7 +1604,8 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
     model_input_copy.last_hidden_states = torch::Tensor();
     model_input_copy.sequence_lengths =
         torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-    model_input_copy.is_target_verify = true;
+    model_input_copy.is_target_verify  = true;
+    model_input_copy.dspark_call_phase = DSparkCallPhase::NONE;
     ensureModelInputsOnCuda(model_input_copy, "decode.target_prepare");
 
     // Device-first inputs are produced on the main stream; the async prepare
@@ -1936,6 +1896,46 @@ SamplerOutput MtpExecutor::sampleDSparkDraft(const StreamGroups&  stream_groups,
         base_logits, anchors, temperature, dspark_markov_w1_, dspark_markov_w2_, draft_vocab_size_);
 }
 
+void MtpExecutor::dsparkModelDecode(GptModelInputs&                                 model_input,
+                                    const StreamGroups&                             stream_groups,
+                                    const MtpBatchStreamProcessor::DSparkRoundHead& round_head,
+                                    SamplerOutput&                                  draft_sampler_output,
+                                    torch::Tensor&                                  draft_token_ids_t,
+                                    int64_t&                                        model_forward_us) {
+    RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.dspark_model_decode(batch_size=%zu)",
+                                  model_input.input_lengths.size(0));
+
+    const auto& draft_cache_cfg         = cache_manager_->getMTPModuleCacheConfig(0);
+    model_input.kv_block_stride_bytes   = draft_cache_cfg.kv_block_stride_bytes;
+    model_input.kv_scale_stride_bytes   = draft_cache_cfg.kv_scale_stride_bytes;
+    model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
+    // tpSyncModelInputs does not broadcast scalar call metadata. Set the
+    // proposal phase here on every rank that executes the draft forward.
+    model_input.dspark_call_phase = DSparkCallPhase::PROPOSE;
+
+    int64_t start_time_us  = autil::TimeUtility::currentTimeInMicroSeconds();
+    auto    propose_output = runDSparkProposeForward(model_input);
+    model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+
+    if (isTpRank0()) {
+        draft_sampler_output = sampleDSparkDraft(stream_groups, propose_output.logits, round_head.anchors);
+        batch_stream_processor_->updateDSparkTargetVerifyModelInput(
+            round_head, model_input, draft_sampler_output.token_ids, buffer_holder_);
+        draft_token_ids_t = model_input.combo_tokens.reshape(
+            {static_cast<int64_t>(model_input.input_lengths.size(0)), static_cast<int64_t>(propose_step_ + 1)});
+    }
+
+    const auto& target_cache_cfg        = cache_manager_->cacheConfig();
+    model_input.kv_block_stride_bytes   = target_cache_cfg.kv_block_stride_bytes;
+    model_input.kv_scale_stride_bytes   = target_cache_cfg.kv_scale_stride_bytes;
+    model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
+    // The processor updates rank 0's model input. The phase is scalar metadata,
+    // so reset it explicitly on every TP rank before target verification.
+    model_input.dspark_call_phase = DSparkCallPhase::NONE;
+    tpSyncModelInputs(model_input, parallelism_config_);
+    ensureModelInputsOnCuda(model_input, "decode.dspark_target_verify");
+}
+
 GptModelOutputs MtpExecutor::runDraftCommitForward(GptModelInputs& model_input) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_forward)");
     maybePrintModelInput(model_input, "decode post draft model");
@@ -2164,9 +2164,10 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                                    int64_t&                    model_forward_us) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(batch_size=%zu)", model_input.combo_tokens.size(0));
 
-    const auto& mtp_cache_cfg         = cache_manager_->getMTPModuleCacheConfig(0);
-    model_input.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
-    model_input.kv_scale_stride_bytes = mtp_cache_cfg.kv_scale_stride_bytes;
+    const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
+    model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
+    model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
+    model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
 
     GptModelOutputs            draft_decode_model_output;
     std::vector<torch::Tensor> draft_token_columns;

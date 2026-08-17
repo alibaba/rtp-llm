@@ -122,6 +122,12 @@ protected:
     SamplerOutput   sampleDSparkDraft(const StreamGroups&  stream_groups,
                                       const torch::Tensor& base_logits,
                                       const torch::Tensor& anchors);
+    void            dsparkModelDecode(GptModelInputs&                                 model_input,
+                                      const StreamGroups&                             stream_groups,
+                                      const MtpBatchStreamProcessor::DSparkRoundHead& round_head,
+                                      SamplerOutput&                                  draft_sampler_output,
+                                      torch::Tensor&                                  draft_token_ids_t,
+                                      int64_t&                                        model_forward_us);
     GptModelOutputs runDraftCommitForward(GptModelInputs& model_input);
     SpecLogitsVerifyRunner::LaunchResult
                  buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
