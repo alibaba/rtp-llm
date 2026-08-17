@@ -6,6 +6,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
@@ -125,6 +126,20 @@ class ConfigServiceTest {
         assertThat(initialSnapshot.getMaxRetryCount()).isEqualTo(9);
         assertThat(updatedSnapshot.getMaxRetryCount()).isEqualTo(9);
         assertThat(updatedSnapshot.isEnableQueueing()).isFalse();
+    }
+
+    @Test
+    void notifiesListenerWithCurrentAndRuntimeConfigurations() {
+        FakeConfigSource source = new FakeConfigSource("Nacos", 200, "{\"maxRetryCount\":9}");
+        ConfigService service = createService(List.of(
+                environmentSource(Map.of()),
+                source));
+        List<FlexlbConfig> updates = new ArrayList<>();
+
+        service.addUpdateListener(updates::add);
+        source.emit("{\"maxRetryCount\":10}");
+
+        assertThat(updates).extracting(FlexlbConfig::getMaxRetryCount).containsExactly(9, 10);
     }
 
     @Test

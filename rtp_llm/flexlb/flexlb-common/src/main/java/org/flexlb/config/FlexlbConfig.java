@@ -5,6 +5,7 @@ import lombok.Setter;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.BlockHashStrategyType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
+import org.flexlb.enums.LogLevel;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 
 import static org.flexlb.enums.LoadBalanceStrategyEnum.RANDOM;
@@ -21,6 +22,11 @@ import static org.flexlb.enums.ResourceMeasureIndicatorEnum.WAIT_TIME;
 @Getter
 @Setter
 public class FlexlbConfig {
+
+    /**
+     * Log level for the FlexLB logging group.
+     */
+    private LogLevel flexlbLogLevel = LogLevel.INFO;
 
     /**
      * Block hash strategy used for cache matching.

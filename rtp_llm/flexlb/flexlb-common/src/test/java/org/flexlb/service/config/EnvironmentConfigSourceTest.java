@@ -2,6 +2,7 @@ package org.flexlb.service.config;
 
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.enums.LogLevel;
 import org.junit.jupiter.api.Test;
 import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
 
@@ -15,6 +16,7 @@ class EnvironmentConfigSourceTest {
     void registersAndLoadsFullConfigThenAppliesIndividualEnvironmentOverrides() throws Exception {
         Map<String, String> environment = Map.of(
                 "FLEXLB_CONFIG", "{\"maxRetryCount\":3,\"enableQueueing\":false}",
+                "FLEXLB_LOG_LEVEL", "DEBUG",
                 "MAX_RETRY_COUNT", "4",
                 "ENABLE_QUEUEING", "true");
         EnvironmentConfigSource source = new EnvironmentVariables(environment).execute(() -> {
@@ -32,6 +34,7 @@ class EnvironmentConfigSourceTest {
         assertThat(source.load()).isEqualTo(initializedContent);
         assertThat(config.getMaxRetryCount()).isEqualTo(4);
         assertThat(config.isEnableQueueing()).isTrue();
+        assertThat(config.getFlexlbLogLevel()).isEqualTo(LogLevel.DEBUG);
         configService.close();
     }
 }

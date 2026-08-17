@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 @Slf4j
 @Component
@@ -22,6 +23,7 @@ public class ConfigService {
     private static final List<ConfigSource> CONFIG_SOURCES = new ArrayList<>();
 
     private final AtomicReference<FlexlbConfig> currentConfig;
+    private final List<Consumer<FlexlbConfig>> updateListeners = new ArrayList<>();
     private final Object updateLock = new Object();
 
     public ConfigService() {
@@ -36,6 +38,13 @@ public class ConfigService {
 
     public FlexlbConfig loadBalanceConfig() {
         return currentConfig.get();
+    }
+
+    public void addUpdateListener(Consumer<FlexlbConfig> listener) {
+        synchronized (updateLock) {
+            updateListeners.add(listener);
+            listener.accept(currentConfig.get());
+        }
     }
 
     private void initializeConfigSources() {
@@ -63,6 +72,9 @@ public class ConfigService {
             try {
                 FlexlbConfig newConfig = mergeConfig(currentConfig.get(), content, source.name());
                 currentConfig.set(newConfig);
+                for (Consumer<FlexlbConfig> listener : updateListeners) {
+                    listener.accept(newConfig);
+                }
                 log.info("Applied FlexLB configuration update from {} source", source.name());
             } catch (Exception e) {
                 log.error(

@@ -1,5 +1,6 @@
 package org.flexlb.service.monitor;
 
+import org.flexlb.config.ConfigService;
 import org.flexlb.enums.LogLevel;
 import org.springframework.boot.logging.LoggerGroup;
 import org.springframework.boot.logging.LoggerGroups;
@@ -16,10 +17,11 @@ public class FlexlbLogLevelManager {
     private final LoggingSystem loggingSystem;
     private final LoggerGroup loggerGroup;
 
-    public FlexlbLogLevelManager(LoggingSystem loggingSystem, LoggerGroups loggerGroups) {
+    public FlexlbLogLevelManager(LoggingSystem loggingSystem, LoggerGroups loggerGroups, ConfigService configService) {
         this.loggingSystem = loggingSystem;
         this.loggerGroup = Objects.requireNonNull(
                 loggerGroups.get(LOG_GROUP_NAME), "Logging group 'flexlb' is not configured");
+        configService.addUpdateListener(config -> setLogLevel(config.getFlexlbLogLevel()));
     }
 
     public LogLevel setLogLevel(LogLevel logLevel) {
