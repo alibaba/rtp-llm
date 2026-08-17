@@ -577,4 +577,115 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
     }
 }
 
+TEST_F(NormalBatchStreamProcessorTest, testPartiallyReusedMultimodalFeatureIsNormalizedWithinItsStream) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len                   = 2048;
+    model_config.vocab_size                    = 2048;
+    model_config.num_layers                    = 2;
+    model_config.attn_config.kv_cache_dtype    = KvCacheDataType::FP8;
+    model_config.mm_model_config.is_multimodal = true;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    initFullCacheConfig(cache_config, model_config.num_layers);
+    RuntimeConfig              runtime_config;
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    auto query1             = make_shared<GenerateInput>();
+    query1->input_ids       = hostIntBuffer({11, 12, 13, 14});
+    query1->generate_config = make_shared<GenerateConfig>();
+    GenerateStreamPtr stream1 =
+        make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
+    stream1->setIsContextStream(true);
+
+    auto fully_reused_feature   = torch::arange(2, torch::kFloat32).reshape({1, 2});
+    auto fully_reused_deepstack = torch::arange(4, torch::kFloat32).reshape({2, 1, 2});
+    auto feature                = torch::arange(12, torch::kFloat32).reshape({6, 2});
+    auto deepstack              = torch::arange(24, torch::kFloat32).reshape({2, 6, 2});
+    auto query2                 = make_shared<GenerateInput>();
+    query2->input_ids           = hostIntBuffer({-1, -1, -1, -1, -1, -1, -1, 21});
+    query2->generate_config     = make_shared<GenerateConfig>();
+    query2->mm_locs             = torch::tensor({0, 1}, torch::kInt32);
+    query2->text_tokens_mask    = torch::tensor({0, 0, 0, 0, 0, 0, 0, 1}, torch::kInt32);
+    query2->multimodal_features = {fully_reused_feature, feature};
+    query2->mm_extra_input      = std::vector<torch::Tensor>{fully_reused_deepstack.flatten(), deepstack.flatten()};
+    GenerateStreamPtr stream2 =
+        make_shared<NormalGenerateStream>(query2, model_config, runtime_config, resource_context, nullptr);
+    stream2->setIsContextStream(true);
+    stream2->setReuseLength(3);
+
+    std::list<GenerateStreamPtr> streams{stream1, stream2};
+    for (const auto& stream : streams) {
+        stream->generate_status_->status = StreamState::RUNNING;
+    }
+
+    StreamGroups stream_groups(streams);
+    TensorHolder holder;
+    auto         merge_input_status = processor.gatherModelInput(stream_groups, holder);
+    ASSERT_TRUE(merge_input_status.ok());
+
+    auto& model_input = merge_input_status.value();
+    EXPECT_EQ(toVec<int>(model_input.combo_tokens), (vector<int>{11, 12, 13, 14, -1, -1, -1, -1, 21}));
+    EXPECT_EQ(toVec<int>(model_input.input_lengths), (vector<int>{4, 5}));
+    EXPECT_EQ(toVec<int>(model_input.mm_features_locs), (vector<int>{4}));
+    EXPECT_EQ(toVec<int>(model_input.text_tokens_mask), (vector<int>{1, 1, 1, 1, 0, 0, 0, 0, 1}));
+
+    ASSERT_TRUE(model_input.multimodal_features.has_value());
+    ASSERT_EQ(model_input.multimodal_features.value().size(), 1);
+    EXPECT_TRUE(torch::equal(model_input.multimodal_features.value()[0].cpu(), feature.slice(0, 2, 6)));
+
+    ASSERT_TRUE(model_input.mm_extra_input.has_value());
+    ASSERT_EQ(model_input.mm_extra_input.value().size(), 1);
+    EXPECT_TRUE(torch::equal(model_input.mm_extra_input.value()[0].cpu().reshape({2, 4, 2}), deepstack.slice(1, 2, 6)));
+
+    // The stream retains the complete ViT output for later reuse decisions.
+    ASSERT_EQ(stream2->multimodalFeatures().size(), 2);
+    EXPECT_TRUE(torch::equal(stream2->multimodalFeatures()[0], fully_reused_feature));
+    EXPECT_TRUE(torch::equal(stream2->multimodalFeatures()[1], feature));
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testMisalignedMultimodalExtraInputIsRejected) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len                   = 2048;
+    model_config.vocab_size                    = 2048;
+    model_config.num_layers                    = 2;
+    model_config.attn_config.kv_cache_dtype    = KvCacheDataType::FP8;
+    model_config.mm_model_config.is_multimodal = true;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    initFullCacheConfig(cache_config, model_config.num_layers);
+    RuntimeConfig              runtime_config;
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    auto feature               = torch::arange(12, torch::kFloat32).reshape({6, 2});
+    auto query                 = make_shared<GenerateInput>();
+    query->input_ids           = hostIntBuffer({-1, -1, -1, -1, -1, -1, 21});
+    query->generate_config     = make_shared<GenerateConfig>();
+    query->mm_locs             = torch::tensor({0}, torch::kInt32);
+    query->text_tokens_mask    = torch::tensor({0, 0, 0, 0, 0, 0, 1}, torch::kInt32);
+    query->multimodal_features = {feature};
+    query->mm_extra_input      = std::vector<torch::Tensor>{torch::arange(3, torch::kFloat32)};
+    GenerateStreamPtr stream =
+        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->setIsContextStream(true);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    std::list<GenerateStreamPtr> streams{stream};
+    StreamGroups                 stream_groups(streams);
+    TensorHolder                 holder;
+    bool                         threw = false;
+    try {
+        (void)processor.gatherModelInput(stream_groups, holder);
+    } catch (const std::runtime_error& e) {
+        threw = true;
+        EXPECT_NE(std::string(e.what()).find("not divisible"), std::string::npos);
+    }
+    EXPECT_TRUE(threw);
+}
+
 }  // namespace rtp_llm

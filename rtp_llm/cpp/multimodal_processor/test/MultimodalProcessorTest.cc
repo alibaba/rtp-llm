@@ -1,5 +1,8 @@
+#include <array>
 #include <memory>
+#include <utility>
 #include "gtest/gtest.h"
+#include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/multimodal_processor/test/FakeMultimodalProcessor.h"
 
@@ -119,6 +122,71 @@ TEST_F(MultimodalProcessorTest, testGetMMFeatures) {
     EXPECT_EQ(res.text_tokens_mask.numel(), 6);
     EXPECT_EQ(res.locs.numel(), 1);
     EXPECT_EQ(res.expanded_ids.numel(), 6);
+}
+
+TEST(MultimodalErrorTest, validatesMultimodalErrorCodes) {
+    EXPECT_EQ(parseMultimodalErrorCode(static_cast<int>(ErrorCode::MM_WRONG_FORMAT_ERROR)),
+              ErrorCode::MM_WRONG_FORMAT_ERROR);
+    EXPECT_EQ(parseMultimodalErrorCode(static_cast<int>(ErrorCode::MM_DOWNLOAD_FAILED)), ErrorCode::MM_DOWNLOAD_FAILED);
+    EXPECT_FALSE(parseMultimodalErrorCode(static_cast<int>(ErrorCode::EXECUTION_EXCEPTION)).has_value());
+    EXPECT_FALSE(parseMultimodalErrorCode(999999).has_value());
+}
+
+TEST(MultimodalErrorTest, parsesKnownErrorCodes) {
+    constexpr std::array<ErrorCode, 7> cases = {{
+        ErrorCode::MM_LONG_PROMPT_ERROR,
+        ErrorCode::MM_WRONG_FORMAT_ERROR,
+        ErrorCode::MM_PROCESS_ERROR,
+        ErrorCode::MM_EMPTY_ENGINE_ERROR,
+        ErrorCode::MM_NOT_SUPPORTED_ERROR,
+        ErrorCode::MM_DOWNLOAD_FAILED,
+        ErrorCode::MM_REMOTE_RPC_FAILED,
+    }};
+
+    for (const auto code : cases) {
+        const auto parsed = parseMultimodalErrorMessage("[" + ErrorCodeToString(code) + "] details");
+        ASSERT_TRUE(parsed.has_value());
+        EXPECT_EQ(parsed->code(), code);
+        EXPECT_EQ(parsed->ToString(), "details");
+    }
+}
+
+TEST(MultimodalErrorTest, classifiesRetryableErrorsCentrally) {
+    EXPECT_FALSE(isRetryableMultimodalError(ErrorCode::MM_LONG_PROMPT_ERROR));
+    EXPECT_FALSE(isRetryableMultimodalError(ErrorCode::MM_WRONG_FORMAT_ERROR));
+    EXPECT_TRUE(isRetryableMultimodalError(ErrorCode::MM_PROCESS_ERROR));
+    EXPECT_FALSE(isRetryableMultimodalError(ErrorCode::MM_NOT_SUPPORTED_ERROR));
+    EXPECT_TRUE(isRetryableMultimodalError(ErrorCode::MM_EMPTY_ENGINE_ERROR));
+    EXPECT_TRUE(isRetryableMultimodalError(ErrorCode::MM_DOWNLOAD_FAILED));
+    EXPECT_TRUE(isRetryableMultimodalError(ErrorCode::MM_REMOTE_RPC_FAILED));
+}
+
+TEST(MultimodalErrorTest, rejectsMalformedOrUnknownMessages) {
+    EXPECT_FALSE(parseMultimodalErrorMessage("plain grpc error").has_value());
+    EXPECT_FALSE(parseMultimodalErrorMessage("prefix [MM_PROCESS_ERROR] details").has_value());
+    EXPECT_FALSE(parseMultimodalErrorMessage("[MM_PROCESS_ERROR details").has_value());
+    EXPECT_FALSE(parseMultimodalErrorMessage("[UNKNOWN_ERROR] details").has_value());
+}
+
+TEST(MultimodalErrorTest, allowsEmptyDetails) {
+    const auto parsed = parseMultimodalErrorMessage("[MM_WRONG_FORMAT_ERROR]");
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(parsed->code(), ErrorCode::MM_WRONG_FORMAT_ERROR);
+    EXPECT_TRUE(parsed->ToString().empty());
+}
+
+TEST(MultimodalInputTest, timeoutDoesNotAffectCacheKey) {
+    MMPreprocessConfig inherited_timeout;
+    inherited_timeout.max_pixels        = 4096;
+    inherited_timeout.mm_timeout_ms     = -1;
+    MMPreprocessConfig explicit_timeout = inherited_timeout;
+    explicit_timeout.mm_timeout_ms      = 120000;
+
+    MultimodalInput inherited_input("http://image", 0, torch::empty({0}), inherited_timeout);
+    MultimodalInput explicit_input("http://image", 0, torch::empty({0}), explicit_timeout);
+
+    EXPECT_EQ(inherited_input.cache_key(), explicit_input.cache_key());
+    EXPECT_NE(inherited_input.to_string(), explicit_input.to_string());
 }
 
 }  // namespace rtp_llm

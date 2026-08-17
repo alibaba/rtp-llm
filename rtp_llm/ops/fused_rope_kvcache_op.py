@@ -5,6 +5,7 @@ from typing import Optional
 import torch
 
 from librtp_compute_ops import LayerKVCache, PyAttentionInputs, get_scalar_type
+from rtp_llm.ops.attention_input_utils import select_prefill_position_ids
 from libth_transformer_config import (
     AttentionConfigs,
     check_rope_cache,
@@ -54,9 +55,10 @@ class FusedRopeKVCachePrefillOpBase:
             kv_cache_offset = None
         kv_cache_offset_h = None  # not used
 
-        position_ids = attn_inputs.combo_position_ids
-        if attn_inputs.context_parallel_info is not None:
-            position_ids = attn_inputs.context_parallel_info.prefill_shuffle_indices
+        # CP remaps explicit position IDs alongside the local token shard. Keep
+        # them for models such as Qwen3-VL whose mRoPE positions have three axes;
+        # shuffle indices are only a fallback for models without position IDs.
+        position_ids = select_prefill_position_ids(attn_inputs)
 
         return FusedRopeAttnParams(
             kv_cache_offset,

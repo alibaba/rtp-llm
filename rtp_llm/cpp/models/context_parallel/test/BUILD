@@ -12,6 +12,8 @@ cc_library(
         "//rtp_llm/cpp/models:context_parallel",
         "//rtp_llm/cpp/pybind:th_utils",
         "//rtp_llm/cpp/pybind:th_compute_lib",
+        "//rtp_llm/models_py/bindings:op_defs",
+        "//rtp_llm/models_py/bindings/core:op_data",
     ],
     copts = cuda_copts(),
     alwayslink = True,

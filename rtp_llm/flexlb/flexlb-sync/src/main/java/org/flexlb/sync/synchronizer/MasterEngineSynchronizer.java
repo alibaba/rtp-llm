@@ -14,6 +14,7 @@ import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.runner.EngineSyncRunner;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
+import org.flexlb.util.EnvUtils;
 import org.flexlb.util.IdUtils;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
@@ -51,12 +52,9 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
         this.engineGrpcService = engineGrpcService;
         this.localKvCacheAwareManager = localKvCacheAwareManager;
 
-        this.syncEngineStatusInterval = System.getenv("SYNC_STATUS_INTERVAL") != null
-                ? Long.parseLong(System.getenv("SYNC_STATUS_INTERVAL"))
-                : 20;
-        this.syncRequestTimeoutMs = System.getenv("SYNC_REQUEST_TIMEOUT_MS") != null
-                ? Long.parseLong(System.getenv("SYNC_REQUEST_TIMEOUT_MS"))
-                : syncEngineStatusInterval;
+        this.syncEngineStatusInterval = EnvUtils.readPositiveLong("SYNC_STATUS_INTERVAL", 20L);
+        this.syncRequestTimeoutMs =
+                EnvUtils.readPositiveLong("SYNC_REQUEST_TIMEOUT_MS", syncEngineStatusInterval);
         this.scheduler = new ScheduledThreadPoolExecutor(5, new NamedThreadFactory("sync-status-scheduler"),
                 new ThreadPoolExecutor.AbortPolicy());
         this.scheduler.scheduleAtFixedRate(this::syncEngineStatus, 0, syncEngineStatusInterval, TimeUnit.MILLISECONDS);

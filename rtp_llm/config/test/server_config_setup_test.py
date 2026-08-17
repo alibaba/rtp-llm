@@ -12,7 +12,7 @@ from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_and_configure_server,
 )
-from rtp_llm.ops import NcclCommConfig, RoleType
+from rtp_llm.ops import CPRotateMethod, NcclCommConfig, RoleType
 from rtp_llm.server.server_args.server_args import setup_args
 
 # clear=True must preserve gpu_lock isolation across Torch lazy initialization.
@@ -190,6 +190,23 @@ class GenerateConfigTest(TestCase):
 
         self.assertEqual(engine_config.pd_sep_config.role_type, RoleType.PREFILL)
         self.assertEqual(engine_config.parallelism_config.role_type, RoleType.PREFILL)
+
+    def test_engine_config_preserves_role_when_context_parallel_is_enabled(self):
+        for role_type in (
+            RoleType.PDFUSION,
+            RoleType.PREFILL,
+            RoleType.DECODE,
+        ):
+            with self.subTest(role_type=role_type):
+                py_env_configs = PyEnvConfigs()
+                py_env_configs.role_config.role_type = role_type
+                py_env_configs.parallelism_config.prefill_cp_config.method = (
+                    CPRotateMethod.ALL_GATHER
+                )
+
+                engine_config = EngineConfig.create(py_env_configs)
+                self.assertEqual(engine_config.pd_sep_config.role_type, role_type)
+                self.assertEqual(engine_config.parallelism_config.role_type, role_type)
 
     def test_engine_config_minimal_dataclass_construction_from_py_env_configs(self):
         py_env_configs = PyEnvConfigs()

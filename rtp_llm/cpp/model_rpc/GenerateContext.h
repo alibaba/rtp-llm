@@ -28,6 +28,8 @@ public:
     virtual void                             reset();
     bool                                     ok() const;
     bool                                     hasError() const;
+    bool                                     shouldRetry() const;
+    void                                     setRetryable(bool retryable);
     bool                                     cancelled() const;
     int64_t                                  executeTimeMs();
     void                                     reportTime();
@@ -54,6 +56,7 @@ public:
 
 protected:
     std::shared_ptr<GenerateStream> stream_;
+    bool                            retryable_ = true;
 
 protected:
     void stopStream();
@@ -112,6 +115,9 @@ protected:
         }                                                                                                              \
         auto cost_time_us                   = currentTimeUs() - begin_time_us;                                         \
         generate_context.retry_cost_time_ms = cost_time_us / 1000;                                                     \
+        if (!generate_context.shouldRetry()) {                                                                         \
+            break;                                                                                                     \
+        }                                                                                                              \
         if (retry_timeout_ms > 0 && cost_time_us >= retry_timeout_ms * 1000) {                                         \
             break;                                                                                                     \
         }                                                                                                              \

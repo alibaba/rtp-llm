@@ -119,6 +119,7 @@ class ExceptionType(IntEnum):
     MM_EMPTY_ENGINE_ERROR = 904
     MM_NOT_SUPPORTED_ERROR = 905, ExceptionCategory.UNSUPPORTED
     MM_DOWNLOAD_FAILED = 906
+    MM_REMOTE_RPC_FAILED = 907
 
     @classmethod
     def from_value(cls, value):
@@ -138,3 +139,6 @@ class FtRuntimeException(Exception):
         self.exception_type = exception_type
         self.message = message
         super().__init__(self.message)
+
+    def __reduce__(self):
+        return self.__class__, (self.exception_type, self.message)
