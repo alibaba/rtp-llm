@@ -17,6 +17,7 @@ jieba
 jinja2
 # add qwen agent package
 json5
+jsonschema==4.26.0
 librosa
 lru-dict
 matplotlib
@@ -56,3 +57,4 @@ xfastertransformer_devel==1.8.1.1 ; platform_machine == "x86_64"
 xfastertransformer_devel_icx==1.8.1.1 ; platform_machine == "x86_64"
 zstandard==0.25.0
 pybind11_stubgen
+xgrammar==0.2.5

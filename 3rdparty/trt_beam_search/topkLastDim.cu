@@ -25,6 +25,7 @@
 #include <hipcub/hipcub.hpp>
 #include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
 #include "rtp_llm/models_py/bindings/rocm/hipcub_shims.h"
+#include "3rdparty/cub_compat.h"
 #else
 #include <cuda_runtime_api.h>
 #include <cub/cub.cuh>

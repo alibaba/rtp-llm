@@ -12,6 +12,7 @@ cc_library(
         "**/*.hpp",
     ]),
     deps = [
+        "//3rdparty:cub_compat",
         "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
         "//rtp_llm/cpp/utils:math_utils",
         "//rtp_llm/cpp/utils:core_utils",
@@ -25,7 +26,6 @@ cc_library(
         ],
         "//conditions:default": [
             ":trt_beam_search_header",
-            "//3rdparty:cub_compat",
             "//rtp_llm/models_py/bindings/cuda:trt_utils",
             "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
             "@local_config_cuda//cuda:cuda",
