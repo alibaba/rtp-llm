@@ -17,6 +17,10 @@ cc_test(
     name = "mtp_draft_prefill_buckets_test",
     srcs = ["mtp_draft_prefill_buckets_test.cc"],
     copts = copts(),
+    # The case needs no device, but ut-sm9x selects targets with a positive H20 tag
+    # (--test_tag_filters=...,H20), so an untagged target is silently never executed.
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
     deps = [
         "//rtp_llm/cpp/cuda_graph:mtp_draft_prefill_buckets",
         "@com_google_googletest//:gtest_main",

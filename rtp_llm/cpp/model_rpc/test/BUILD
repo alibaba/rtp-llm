@@ -96,6 +96,10 @@ cc_test(
     name = "decode_admission_controller_test",
     srcs = ["DecodeAdmissionControllerTest.cc"],
     copts = test_copts,
+    # The cases need no device, but ut-sm9x selects targets with a positive H20 tag
+    # (--test_tag_filters=...,H20), so an untagged target is silently never executed.
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
     deps = [
         "//rtp_llm/cpp/model_rpc:decode_admission",
         "@com_google_googletest//:gtest",
