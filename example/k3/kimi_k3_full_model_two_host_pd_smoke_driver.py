@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import TextIO
 
 
-ROLE_SCRIPT = "./example/kimi_k3_full_model_two_host_pd_smoke.sh"
+ROLE_SCRIPT = "./example/k3/kimi_k3_full_model_two_host_pd_smoke.sh"
 
 
 def env_default(name: str, fallback: str | None = None) -> str | None:
@@ -49,8 +49,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-id", default=env_default("SMOKE_RUN_ID"))
     parser.add_argument(
         "--suite",
-        choices=("quick", "cache", "all"),
-        default=env_default("SMOKE_SUITE", "cache"),
+        choices=("all",),
+        default=env_default("SMOKE_SUITE", "all"),
+        help="complete accuracy suite; all is required before merge",
     )
     parser.add_argument(
         "--result-endpoint", default=env_default("SMOKE_RESULT_ENDPOINT")

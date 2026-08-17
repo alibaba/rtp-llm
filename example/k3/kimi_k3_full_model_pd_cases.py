@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -36,7 +36,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--decode-health-url", required=True)
     parser.add_argument("--output", required=True, type=pathlib.Path)
-    parser.add_argument("--suite", choices=("quick", "cache", "all"), default="cache")
+    parser.add_argument(
+        "--suite",
+        choices=("all",),
+        default="all",
+        help="complete accuracy suite; all is required before merge",
+    )
     parser.add_argument("--namespace", required=True)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--block-size", type=int, default=4096)
@@ -275,7 +280,7 @@ class Runner:
             f"reuse={[record['effective_reuse_len'] for record in records]}"
         )
 
-    def run_quick(self) -> None:
+    def run_all(self) -> None:
         self.run_stage(
             "identity_miss",
             [
@@ -288,8 +293,6 @@ class Runner:
             ],
         )
 
-    def run_cache(self) -> None:
-        self.run_quick()
         exact_prompt = make_cache_prompt(self.args.namespace, "single-exact", 37)
         self.run_stage(
             "single_exact_seed",
@@ -418,8 +421,6 @@ class Runner:
             concurrent=True,
         )
 
-    def run_all(self) -> None:
-        self.run_cache()
         single_prompt = make_whole_chunk_prompt(self.args.namespace, "whole-chunk-single", 61)
         self.run_stage(
             "whole_chunk_single_miss",
@@ -469,12 +470,7 @@ def main() -> int:
     args = parse_args()
     runner = Runner(args)
     try:
-        suites: dict[str, Callable[[], None]] = {
-            "quick": runner.run_quick,
-            "cache": runner.run_cache,
-            "all": runner.run_all,
-        }
-        suites[args.suite]()
+        runner.run_all()
         runner.save(passed=True)
         print(f"PASS: suite={args.suite} cases={len(runner.records)} artifacts={args.output}")
         return 0

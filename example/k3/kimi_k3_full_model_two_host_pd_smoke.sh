@@ -13,7 +13,7 @@
 #    DECODE_ENDPOINT=xx.xx.xx.xx:28188 \
 #    SMOKE_RUN_ID=my-run \
 #    SMOKE_SUITE=all \
-#    python3 ./example/kimi_k3_full_model_two_host_pd_smoke_driver.py
+#    python3 ./example/k3/kimi_k3_full_model_two_host_pd_smoke_driver.py
 #
 # Manual role startup remains available for debugging. Run from the RTP-LLM
 # repository root inside lhc_GPU; both roles may now be started concurrently:
@@ -23,8 +23,8 @@
 #    PREFILL_ENDPOINT=xx.xx.xx.xx:27188 \
 #    DECODE_ENDPOINT=xx.xx.xx.xx:28188 \
 #    SMOKE_RUN_ID=my-run \
-#    SMOKE_SUITE=cache \
-#    ./example/kimi_k3_full_model_two_host_pd_smoke.sh decode
+#    SMOKE_SUITE=all \
+#    ./example/k3/kimi_k3_full_model_two_host_pd_smoke.sh decode
 #
 # 2. Start Prefill with the same endpoints and run ID (it waits for both the
 #    Decode model and Decode result listener to become ready):
@@ -32,8 +32,8 @@
 #    PREFILL_ENDPOINT=xx.xx.xx.xx:27188 \
 #    DECODE_ENDPOINT=xx.xx.xx.xx:28188 \
 #    SMOKE_RUN_ID=my-run \
-#    SMOKE_SUITE=cache \
-#    ./example/kimi_k3_full_model_two_host_pd_smoke.sh prefill
+#    SMOKE_SUITE=all \
+#    ./example/k3/kimi_k3_full_model_two_host_pd_smoke.sh prefill
 #
 # Lightweight two-host Kimi K3 full-model (93-layer) PD smoke.
 #
@@ -41,7 +41,8 @@
 # machine address; the optional driver accepts all SSH/host paths at runtime.
 # The validated profile always enables Barex RDMA on both roles; this smoke is
 # intentionally not a TCP/cache-store fallback test.
-# Prefill checks both services, runs the selected request suite, validates model
+# Merge-gate runs must use SMOKE_SUITE=all; it is the only supported suite.
+# Prefill checks both services, runs the complete request suite, validates model
 # answers and cache metadata, then reports PASS/FAIL back to Decode. Both
 # commands therefore have a meaningful exit status and clean only their own
 # process group.
@@ -61,7 +62,7 @@ Usage (run inside lhc_GPU as the normal user):
   PREFILL_ENDPOINT=prefill-host:27188 \
   DECODE_ENDPOINT=decode-host:28188 \
   SMOKE_RUN_ID=my-run \
-  kimi_k3_full_model_two_host_pd_smoke.sh decode|prefill
+  example/k3/kimi_k3_full_model_two_host_pd_smoke.sh decode|prefill
 
 The two roles may start concurrently. Prefill waits for both the Decode model
 and result channel. The default result channel is DECODE host at DECODE port +
@@ -76,11 +77,9 @@ Important optional variables:
   SMOKE_REQUEST_TIMEOUT_S   defaults to 900
   SMOKE_RESULT_TIMEOUT_S    defaults to 18000
   SMOKE_RESULT_ENDPOINT     defaults to decode-host:(decode-port + 100)
-  SMOKE_SUITE               quick, cache (default), or all
-                            quick: one cold single-request identity check
-                            cache: single miss/hit, partial hit, concurrent
-                                   all-miss/all-hit and mixed hit+miss batches
-                            all: cache plus >64K single and batched chunk cases
+  SMOKE_SUITE               must be all (default and merge-gate requirement)
+                            covers identity, cache reuse, concurrent mixed
+                            batches, and >64K single/batched chunk cases
   RTP_LLM_SERVER_BINARY     use an existing Bazel launcher
   RTP_LLM_SKIP_BUILD=1      skip the CUDA13/SM10x build in the launcher
 EOF
@@ -122,10 +121,10 @@ SMOKE_RESULT_ENDPOINT="${SMOKE_RESULT_ENDPOINT:-${decode_host}:${default_result_
 result_port="$(endpoint_port "${SMOKE_RESULT_ENDPOINT}")"
 result_host="${SMOKE_RESULT_ENDPOINT%:*}"
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-launcher="${repo_root}/example/start_kimi_k3_pd.sh"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+launcher="${repo_root}/example/k3/start_kimi_k3_pd.sh"
 [[ -x "${launcher}" ]] || die "missing executable launcher ${launcher}"
-case_runner="${repo_root}/example/kimi_k3_full_model_pd_cases.py"
+case_runner="${repo_root}/example/k3/kimi_k3_full_model_pd_cases.py"
 [[ -f "${case_runner}" ]] || die "missing smoke case runner ${case_runner}"
 
 checkpoint_real="$(realpath -e "${CHECKPOINT_PATH}")" \
@@ -525,11 +524,8 @@ wait_for_result_listener
 max_tokens="${SMOKE_MAX_TOKENS:-32}"
 [[ "${max_tokens}" =~ ^[1-9][0-9]*$ ]] \
     || die "SMOKE_MAX_TOKENS must be a positive integer"
-smoke_suite="${SMOKE_SUITE:-cache}"
-case "${smoke_suite}" in
-    quick | cache | all) ;;
-    *) die "SMOKE_SUITE must be quick, cache or all" ;;
-esac
+smoke_suite="${SMOKE_SUITE:-all}"
+[[ "${smoke_suite}" == "all" ]] || die "SMOKE_SUITE must be all"
 
 python3 "${case_runner}" \
     --base-url "http://127.0.0.1:${prefill_port}" \

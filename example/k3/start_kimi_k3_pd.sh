@@ -10,12 +10,12 @@
 #   CHECKPOINT_PATH=/local/path/to/Kimi-K3 \
 #   PREFILL_ENDPOINT=${PREFILL_HOST}:27188 \
 #   DECODE_ENDPOINT=${DECODE_HOST}:28188 \
-#   ./example/start_kimi_k3_pd.sh prefill
+#   ./example/k3/start_kimi_k3_pd.sh prefill
 #
 #   CHECKPOINT_PATH=/local/path/to/Kimi-K3 \
 #   PREFILL_ENDPOINT=${PREFILL_HOST}:27188 \
 #   DECODE_ENDPOINT=${DECODE_HOST}:28188 \
-#   ./example/start_kimi_k3_pd.sh decode
+#   ./example/k3/start_kimi_k3_pd.sh decode
 #
 # The process stays in the foreground. Set RTP_LLM_DRY_RUN=1 to inspect the
 # resolved configuration without starting the model.
@@ -43,7 +43,7 @@ Usage:
   CHECKPOINT_PATH=/path/to/Kimi-K3 \
   PREFILL_ENDPOINT=host:port \
   DECODE_ENDPOINT=host:port \
-  start_kimi_k3_pd.sh prefill|decode
+  example/k3/start_kimi_k3_pd.sh prefill|decode
 
 Required on both hosts:
   CHECKPOINT_PATH                        local-data-disk checkpoint
@@ -191,7 +191,7 @@ export no_proxy="${no_proxy:+${no_proxy},}${pd_no_proxy_hosts}"
 tokenizer_path="${TOKENIZER_PATH:-${CHECKPOINT_PATH}}"
 [[ -d "${tokenizer_path}" ]] || die "TOKENIZER_PATH is not a directory"
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 server_target="//rtp_llm:rtp_llm_server"
 server_binary="${RTP_LLM_SERVER_BINARY:-${repo_root}/bazel-bin/rtp_llm/rtp_llm_server}"
 skip_build="${RTP_LLM_SKIP_BUILD:-0}"
