@@ -253,6 +253,11 @@ class DecodeEvictionSchedulerTest {
         // mode unrelated admission-version churn no longer aborts a commit
         // (redesign N3) — this case asserts the legacy OCC retry contract.
         config.setAutoTpmVictimGuardMode("queue_version");
+        // Pin the per-attempt fresh snapshot (cache off): the one-shot bump
+        // below must land between the plan capture and the commit; with the
+        // TTL cache on the eviction path re-captures live views after the
+        // route, which would absorb the bump before the plan even builds.
+        config.setFlexlbClusterSnapshotCacheTtlMs(0);
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
         // One-shot interference: bump the admission version between the
         // incoming's plan snapshot (pre-route) and its eviction commit.

@@ -640,6 +640,26 @@ public class FlexlbConfig {
     private String autoTpmVictimGuardMode = "victim_presence";
 
     /**
+     * Scheduling snapshot capture mode (O(1) snapshot redesign):
+     * {@code summary} (default) — O(1) aggregate-only decode summaries on
+     * the normal path, with the full per-entry snapshots built lazily only
+     * when the eviction / failure classification paths need them;
+     * {@code full} — legacy per-attempt full decode snapshots (per-endpoint
+     * layered view under the admission lock), bit-for-bit identical to the
+     * pre-redesign decision path.
+     * Environment variable: AUTO_TPM_SNAPSHOT_MODE.
+     */
+    private String autoTpmSnapshotMode = "summary";
+
+    /**
+     * True when the O(1) summary snapshot path is enabled; any value other
+     * than {@code summary} keeps the legacy full-capture behavior.
+     */
+    public boolean isAutoTpmSnapshotSummaryMode() {
+        return "summary".equalsIgnoreCase(autoTpmSnapshotMode);
+    }
+
+    /**
      * TTL in milliseconds for the shared {@code ClusterSnapshot} cache on the
      * priority admission path. Capturing a snapshot walks every endpoint under
      * its admission lock and deep-copies the layered views; doing that
