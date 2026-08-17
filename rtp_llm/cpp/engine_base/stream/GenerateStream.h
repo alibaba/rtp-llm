@@ -160,7 +160,9 @@ public:
     int                  reuseBlockSize() const;
     void                 fakeInitKVBlock(size_t reserved_blocks = 0);
     virtual absl::Status initKVBlock();
-    absl::Status         prepareForRemoteCacheLoad();
+    // wait_timeout_ms <= 0 waits for the cache load without a deadline; callers holding a
+    // scarce resource across the call must pass their remaining budget.
+    absl::Status         prepareForRemoteCacheLoad(int64_t wait_timeout_ms = 0);
     virtual absl::Status incrKVBlock();
     virtual void         releaseResource();
     int                  nextNeedBlockNums(int reserve_step) const;

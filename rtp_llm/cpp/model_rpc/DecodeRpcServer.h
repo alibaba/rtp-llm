@@ -100,7 +100,15 @@ private:
     autil::ThreadPoolBasePtr  thread_pool_;
     std::atomic<size_t>       onflight_load_cache_requests_{0};
     DecodeAdmissionController decode_admission_;
+    bool                      admission_enabled_ = true;
     size_t                    model_id;
 };
+
+// Exposed for testing: the mapping carries two cross-module constraints that
+// PrefillRpcServer depends on, so it is asserted directly instead of through the
+// gRPC handler. TIMED_OUT must not become RESOURCE_EXHAUSTED (PrefillRpcServer maps
+// that to DECODE_MALLOC_FAILED) and no message may contain the substrings
+// PrefillRpcServer greps for to tear down the connection.
+grpc::Status admissionResultToStatus(DecodeAdmissionController::AcquireResult result);
 
 }  // namespace rtp_llm

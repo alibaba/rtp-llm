@@ -2,7 +2,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include "rtp_llm/cpp/model_rpc/DecodeAdmissionController.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
@@ -11,7 +13,10 @@
 
 namespace rtp_llm {
 
-TEST(DecodeAdmissionControllerTest, QueuesBeforeResourceAllocationAndReleasesSlots) {
+// Named for what it asserts: the controller is a counting semaphore. Ordering against
+// resource allocation is a property of RemoteGenerate, not of this class, and is not
+// covered here.
+TEST(DecodeAdmissionControllerTest, SemaphoreQueuesAndReleasesSlots) {
     DecodeAdmissionController controller(/*limit=*/2);
     ASSERT_EQ(controller.acquire(/*slots=*/2, [] { return false; }, /*timeout_ms=*/100),
               DecodeAdmissionController::AcquireResult::ACQUIRED);
@@ -110,6 +115,83 @@ TEST(DecodeAdmissionControllerTest, BlockedWaiterObservesCancellation) {
 
     EXPECT_EQ(result, DecodeAdmissionController::AcquireResult::CANCELLED);
     EXPECT_EQ(controller.activeSlots(), 1);
+}
+
+// The AcquireResult -> grpc::Status mapping is a cross-module contract with
+// PrefillRpcServer, so it is asserted directly instead of through the gRPC handler:
+// RESOURCE_EXHAUSTED becomes DECODE_MALLOC_FAILED there (PrefillRpcServer.cc:138) and the
+// two substrings below make it tear the connection down (:126, :129).
+TEST(DecodeAdmissionControllerTest, AcquireResultStatusMappingHoldsCrossModuleContract) {
+    struct MappingCase {
+        DecodeAdmissionController::AcquireResult result;
+        grpc::StatusCode                        expected_code;
+    };
+    const std::vector<MappingCase> cases = {
+        {DecodeAdmissionController::AcquireResult::ACQUIRED, grpc::StatusCode::OK},
+        {DecodeAdmissionController::AcquireResult::CANCELLED, grpc::StatusCode::CANCELLED},
+        {DecodeAdmissionController::AcquireResult::TIMED_OUT, grpc::StatusCode::DEADLINE_EXCEEDED},
+        {DecodeAdmissionController::AcquireResult::OVERSIZED, grpc::StatusCode::RESOURCE_EXHAUSTED},
+    };
+
+    for (const auto& mapping_case : cases) {
+        const auto status = admissionResultToStatus(mapping_case.result);
+        EXPECT_EQ(status.error_code(), mapping_case.expected_code)
+            << "unexpected code for result " << static_cast<int>(mapping_case.result);
+        const auto message = status.error_message();
+        EXPECT_EQ(message.find("Deadline Exceeded"), std::string::npos) << message;
+        EXPECT_EQ(message.find("Connection timed out"), std::string::npos) << message;
+    }
+
+    // A saturated role is healthy: queueing timeouts must not be reported as decode KV
+    // allocation failures.
+    EXPECT_NE(admissionResultToStatus(DecodeAdmissionController::AcquireResult::TIMED_OUT).error_code(),
+              grpc::StatusCode::RESOURCE_EXHAUSTED);
+}
+
+TEST(DecodeAdmissionControllerTest, InitialLimitIsHonoredAndShrinkStopsNewAdmissions) {
+    DecodeAdmissionController controller(/*limit=*/4);
+    EXPECT_EQ(controller.limit(), 4u);
+
+    ASSERT_EQ(controller.acquire(/*slots=*/1, [] { return false; }, /*timeout_ms=*/100),
+              DecodeAdmissionController::AcquireResult::ACQUIRED);
+    ASSERT_EQ(controller.acquire(/*slots=*/1, [] { return false; }, /*timeout_ms=*/100),
+              DecodeAdmissionController::AcquireResult::ACQUIRED);
+
+    // Shrinking below the slots already handed out must not retroactively evict live
+    // requests, but it must stop admitting new ones until they drain.
+    controller.setLimit(1);
+    EXPECT_EQ(controller.limit(), 1u);
+    EXPECT_EQ(controller.activeSlots(), 2u);
+    EXPECT_EQ(controller.acquire(/*slots=*/1, [] { return false; }, /*timeout_ms=*/20),
+              DecodeAdmissionController::AcquireResult::TIMED_OUT);
+
+    {
+        DecodeAdmissionGuard first(controller, /*slots=*/1);
+        DecodeAdmissionGuard second(controller, /*slots=*/1);
+    }
+    EXPECT_EQ(controller.activeSlots(), 0u);
+    EXPECT_EQ(controller.acquire(/*slots=*/1, [] { return false; }, /*timeout_ms=*/100),
+              DecodeAdmissionController::AcquireResult::ACQUIRED);
+    DecodeAdmissionGuard guard(controller, /*slots=*/1);
+}
+
+TEST(DecodeAdmissionControllerTest, SetLimitGrowWakesBlockedWaiter) {
+    DecodeAdmissionController controller(/*limit=*/1);
+    ASSERT_EQ(controller.acquire(/*slots=*/1, [] { return false; }, /*timeout_ms=*/100),
+              DecodeAdmissionController::AcquireResult::ACQUIRED);
+    DecodeAdmissionGuard held(controller, /*slots=*/1);
+
+    auto        result = DecodeAdmissionController::AcquireResult::TIMED_OUT;
+    std::thread queued(
+        [&] { result = controller.acquire(/*slots=*/1, [] { return false; }, /*timeout_ms=*/2000); });
+    // setLimit must notify the waiter; without notify_all it would only notice on its next
+    // 50ms cancel poll.
+    controller.setLimit(2);
+    queued.join();
+
+    EXPECT_EQ(result, DecodeAdmissionController::AcquireResult::ACQUIRED);
+    DecodeAdmissionGuard queued_guard(controller, /*slots=*/1);
+    EXPECT_EQ(controller.activeSlots(), 2u);
 }
 
 namespace {

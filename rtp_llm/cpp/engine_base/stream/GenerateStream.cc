@@ -150,7 +150,7 @@ absl::Status GenerateStream::initKVBlock() {
     return ret;
 }
 
-absl::Status GenerateStream::prepareForRemoteCacheLoad() {
+absl::Status GenerateStream::prepareForRemoteCacheLoad(int64_t wait_timeout_ms) {
     RTP_LLM_PROFILE_FUNCTION();
     bool cache_load_started = false;
     {
@@ -172,14 +172,33 @@ absl::Status GenerateStream::prepareForRemoteCacheLoad() {
         reportEventWithoutLock(StreamEvents::LoadInitiated);
     }
 
+    // The caller (DecodeRpcServer::allocateResource) holds a decode admission slot for the
+    // whole wait, so every exit has to be reachable without the load finishing: loadCacheDone()
+    // only turns true once the coordinator marks the transfer done, so a coordinator thread
+    // that never completes -- or an error/cancel reported on this stream from another thread --
+    // would otherwise spin here forever while pinning that slot.
+    const auto wait_begin = std::chrono::steady_clock::now();
     while (cache_load_started) {
         bool cache_load_done = false;
         {
             std::lock_guard<std::mutex> lock(*mutex_);
+            if (hasErrorWithoutLock()) {
+                return absl::InternalError(statusInfoWithoutLock().ToString());
+            }
             cache_load_done = stream_cache_resource_->loadCacheDone();
         }
         if (cache_load_done) {
             break;
+        }
+        if (wait_timeout_ms > 0) {
+            const auto waited_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now() - wait_begin)
+                                       .count();
+            if (waited_ms >= wait_timeout_ms) {
+                return absl::DeadlineExceededError("wait remote cache load timeout after "
+                                                   + std::to_string(waited_ms) + "ms, stream_id: "
+                                                   + std::to_string(streamId()));
+            }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
