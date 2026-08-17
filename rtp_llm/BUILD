@@ -173,6 +173,20 @@ py_library(
     ] + arch_dep + internal_deps()
 )
 
+# In-repo entrypoint for the startup warmup script. RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE
+# makes /health, /status and cm2_status return 503 until this script publishes the gate file,
+# so "set the env" and "run this binary" must be deployed as a pair -- an instance with the
+# env set and nobody running the script never becomes healthy.
+py_binary(
+    name = "startup_warmup",
+    srcs = ["utils/startup_warmup.py"],
+    main = "utils/startup_warmup.py",
+    deps = [
+        ":utils",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "jit_cache_manager_lib",
     srcs = _JIT_CACHE_SRCS,

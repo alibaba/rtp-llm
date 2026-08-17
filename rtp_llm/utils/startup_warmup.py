@@ -402,7 +402,10 @@ def main(env: Optional[Mapping[str, str]] = None) -> int:
                 "RTP_LLM_STARTUP_WARMUP_PREFIX_CASES", "1024x1,256x8,2048x1,2048x8"
             )
         )
-        concurrency_limit = int(config.get("CONCURRENCY_LIMIT", "8"))
+        # Keep the fallback aligned with --concurrency_limit in
+        # server_args/concurrent_group_args.py (32). An 8 here silently rejected warmup
+        # batches between 9 and 32 that the server would happily serve.
+        concurrency_limit = int(config.get("CONCURRENCY_LIMIT", "32"))
         largest_batch = max(case.batch_size for case in regular_cases + prefix_cases)
         if largest_batch > concurrency_limit:
             raise WarmupError(
