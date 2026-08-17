@@ -24,6 +24,17 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         help="最大 batch tokens 大小。",
     )
     fifo_scheduler_group.add_argument(
+        "--max_batch_tokens_without_cache",
+        env_name="MAX_BATCH_TOKENS_WITHOUT_CACHE",
+        bind_to=[(fifo_scheduler_config, "max_batch_tokens_without_cache")],
+        type=int,
+        default=0,
+        help=(
+            "单轮调度中不含 KV cache prefix 的 prefill token 软上限；CP 按 Zigzag padding 后计数，"
+            "保留越界 stream、停止 admit 后续 stream，但仍处理其错误状态；<=0 表示不限制。"
+        ),
+    )
+    fifo_scheduler_group.add_argument(
         "--pdfusion_scheduler_mode",
         env_name="PDFUSION_SCHEDULER_MODE",
         bind_to=[(fifo_scheduler_config, "pdfusion_scheduler_mode")],

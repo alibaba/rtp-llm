@@ -54,6 +54,24 @@ def init_pd_separation_group_args(parser, pd_separation_config):
     )
 
     pd_separation_group.add_argument(
+        "--prefill_prepare_resource_pool_size",
+        env_name="PREFILL_PREPARE_RESOURCE_POOL_SIZE",
+        bind_to=(pd_separation_config, "prefill_prepare_resource_pool_size"),
+        type=int,
+        default=0,
+        help="Prefill prepare-resource 线程池大小；0 表示 concurrency_limit * 2，最终值最小为 128；queue 同值",
+    )
+
+    pd_separation_group.add_argument(
+        "--prefill_stop_stream_wait_timeout_ms",
+        env_name="PREFILL_STOP_STREAM_WAIT_TIMEOUT_MS",
+        bind_to=(pd_separation_config, "prefill_stop_stream_wait_timeout_ms"),
+        type=int,
+        default=2000,
+        help="stopStream() 中等待 Engine Loop 调用 finish_internal() 的最大时间（毫秒）",
+    )
+
+    pd_separation_group.add_argument(
         "--decode_retry_times",
         env_name="DECODE_RETRY_TIMES",
         bind_to=(pd_separation_config, "decode_retry_times"),

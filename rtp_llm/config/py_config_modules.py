@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+from dataclasses import dataclass
 from typing import Dict, Optional
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
@@ -548,6 +549,29 @@ class DeepEPConfig:
         )
 
 
+@dataclass(slots=True)
+class GrammarAdmissionConfig:
+    """Dash-SC admission sandbox policy, separate from engine grammar settings."""
+
+    queue_timeout_s: float = 30.0
+    compile_timeout_s: float = 30.0
+    sandbox_pool_size: int = 0
+    sandbox_process_memory_limit_mb: int = 1024
+    compiler_cache_bytes: int = 1024 * 1024 * 1024
+    result_cache_max_entries: int = 2048
+
+    def to_string(self):
+        return (
+            f"queue_timeout_s: {self.queue_timeout_s}\n"
+            f"compile_timeout_s: {self.compile_timeout_s}\n"
+            f"sandbox_pool_size: {self.sandbox_pool_size}\n"
+            "sandbox_process_memory_limit_mb: "
+            f"{self.sandbox_process_memory_limit_mb}\n"
+            f"compiler_cache_bytes: {self.compiler_cache_bytes}\n"
+            f"result_cache_max_entries: {self.result_cache_max_entries}"
+        )
+
+
 class PyEnvConfigs:
     def __init__(self):
         self.server_config: ServerConfig = ServerConfig()
@@ -570,7 +594,7 @@ class PyEnvConfigs:
         self.device_resource_config: DeviceResourceConfig = DeviceResourceConfig()
         self.runtime_config: RuntimeConfig = RuntimeConfig()
         # EngineConfig has been merged into RuntimeConfig and ModelConfig
-        # warm_up and warm_up_with_loss are in RuntimeConfig
+        # warm_up, warm_up_with_loss, and model_warm_up are in RuntimeConfig
         # max_seq_len is in ModelConfig
         self.embedding_config: EmbeddingConfig = EmbeddingConfig()
         self.role_config: RoleConfig = RoleConfig()
@@ -591,6 +615,7 @@ class PyEnvConfigs:
         self.grpc_config = GrpcConfig()
         self.dash_sc_grpc_config = DashScGrpcConfig()
         self.grammar_config = GrammarConfig()
+        self.grammar_admission_config = GrammarAdmissionConfig()
         self.deep_ep_config = DeepEPConfig()
         self.prefill_cp_config = PrefillCPConfig()
 
@@ -647,5 +672,8 @@ class PyEnvConfigs:
             "[grpc_config]\n" + self.grpc_config.to_string() + "\n\n"
             "[dash_sc_grpc_config]\n" + self.dash_sc_grpc_config.to_string() + "\n\n"
             "[grammar_config]\n" + self.grammar_config.to_string() + "\n\n"
+            "[grammar_admission_config]\n"
+            + self.grammar_admission_config.to_string()
+            + "\n\n"
             "[prefill_cp_config]\n" + self.prefill_cp_config.to_string() + "\n\n"
         )

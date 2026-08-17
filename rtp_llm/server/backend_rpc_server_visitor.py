@@ -1,15 +1,16 @@
+import asyncio
 import logging
 import os
 import time
-import asyncio
-from typing import TYPE_CHECKING, AsyncGenerator, List, Optional
+from dataclasses import replace
+from typing import TYPE_CHECKING, AsyncGenerator, Callable, List, Optional, Set
 
 import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
-from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
+from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient, trans_input
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cache_keys
@@ -34,8 +35,26 @@ if TYPE_CHECKING:
 
 route_logger = logging.getLogger("route_logger")
 
+
+def get_role_names(role_addrs: List[RoleAddr]) -> Set[str]:
+    """Return the set of human-readable role names from a list of RoleAddr."""
+    return {role_addr.role.name for role_addr in role_addrs}
+
+
 PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE"
 DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE = 3
+_TERMINAL_ROUTE_EXCEPTION_TYPES = frozenset(
+    {
+        ExceptionType.PRIORITY_PREEMPTED,
+        ExceptionType.PRIORITY_ADMISSION_REJECTED,
+        ExceptionType.RESOURCE_EXHAUSTED,
+        ExceptionType.ADMISSION_UNAVAILABLE,
+        # A scheduling deadline is already a completed admission outcome.
+        # Retrying it with a new request id silently starts a second admission
+        # attempt with a fresh identity and can hide the original timeout.
+        ExceptionType.BATCH_SLO_EXPIRED,
+    }
+)
 
 
 class BackendRPCServerVisitor:
@@ -103,10 +122,15 @@ class BackendRPCServerVisitor:
         self.master_config = master_config
         self._page_rr_route_cache_keys = False
         self._page_rr_cp_size = 1
+        # _prefill_cp_active only depends on the CP config: an explicitly passed
+        # prefill_cp_config must take effect even without parallelism_config.
+        cp_config = prefill_cp_config or getattr(
+            parallelism_config, "prefill_cp_config", None
+        )
+        self._prefill_cp_active = bool(
+            cp_config and (cp_config.is_enabled() or cp_config.is_prefill_enabled())
+        )
         if parallelism_config is not None:
-            cp_config = prefill_cp_config or getattr(
-                parallelism_config, "prefill_cp_config", None
-            )
             tp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
             kv_cache_sharded = bool(getattr(cp_config, "kv_cache_sharded", False))
             if kv_cache_sharded and tp_size > 1:
@@ -119,6 +143,7 @@ class BackendRPCServerVisitor:
         )
         self.recent_cache_key_window = RecentCacheKeyWindow()
         self.pd_route_retry_on_unavailable = self._pd_route_retry_on_unavailable()
+        self.request_id_factory: Optional[Callable[[], int]] = None
 
     @staticmethod
     def _pd_route_retry_on_unavailable() -> int:
@@ -138,10 +163,20 @@ class BackendRPCServerVisitor:
 
     @staticmethod
     def _is_retryable_route_rpc_error(e: BaseException) -> bool:
-        exception_type = getattr(e, "exception_type", None)
-        if exception_type is not None:
+        # Use isinstance instead of getattr duck-typing — only FtRuntimeException
+        # carries exception_type; gRPC RpcError and other exceptions do not.
+        if isinstance(e, FtRuntimeException):
             try:
-                return int(exception_type) >= 8000
+                exception_type = int(e.exception_type)
+                # These are completed admission decisions, not transient route
+                # transport failures.  A new request id would change request
+                # identity and hide the typed 429 result selected by Master.
+                if any(
+                    exception_type == int(terminal_type)
+                    for terminal_type in _TERMINAL_ROUTE_EXCEPTION_TYPES
+                ):
+                    return False
+                return exception_type >= 8000
             except (TypeError, ValueError):
                 pass
         text = str(e)
@@ -157,6 +192,9 @@ class BackendRPCServerVisitor:
             await self.model_rpc_client.close()
         finally:
             await self.master_client.close()
+
+    def set_request_id_factory(self, factory: Callable[[], int]) -> None:
+        self.request_id_factory = factory
 
     @staticmethod
     def get_backend_role_list(
@@ -218,6 +256,7 @@ class BackendRPCServerVisitor:
         full_block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
         block_cache_keys = self._route_cache_keys(full_block_cache_keys)
         self._report_recent_cache_key_metrics(block_cache_keys)
+        input_pb = trans_input(input)
 
         try:
             route_result = await self.master_client.get_backend_role_addrs(
@@ -225,6 +264,7 @@ class BackendRPCServerVisitor:
                 cache_key_block_size=self._cache_key_block_size(),
                 input=input,
                 request_id=input.request_id,
+                input_pb=input_pb,
             )
         except BaseException as e:
             exception_json = format_exception(e)
@@ -237,6 +277,7 @@ class BackendRPCServerVisitor:
 
         if route_result.is_ok:
             input.generate_config.role_addrs = route_result.role_addrs
+            input.enqueued_by_master = route_result.enqueued_by_master
             route_logger.debug(
                 "master route success, request_id=%s, addrs=%s",
                 input.request_id,
@@ -374,11 +415,18 @@ class BackendRPCServerVisitor:
 
         kmonitor.report(GaugeMetrics.ROUTE_RT_METRIC, route_timer.cost_ms())
         if not input.generate_config.role_addrs:
-            raise FtRuntimeException(
+            route_error = FtRuntimeException(
                 ExceptionType.ROUTE_ERROR,
                 "request_id=%s no backend role addresses found after routing"
                 % input.request_id,
             )
+            if (
+                master_route_result is not None
+                and not master_route_result.is_ok
+                and master_route_result.error_code is not None
+            ):
+                route_error.rtp_error_code = master_route_result.error_code
+            raise route_error
 
     def check_sp_supported(self, input: GenerateInput):
         if not self.sp_config or not self.sp_config.model_type:
@@ -406,6 +454,22 @@ class BackendRPCServerVisitor:
             raise FtRuntimeException(
                 ExceptionType.UNSUPPORTED_OPERATION,
                 "speculative decoding does not support return_all_probs",
+            )
+
+    def check_prefill_cp_supported(self, input: GenerateInput) -> None:
+        if not self._prefill_cp_active:
+            return
+
+        unsupported = []
+        if input.generate_config.calculate_loss:
+            unsupported.append("calculate_loss")
+        if input.generate_config.return_all_hidden_states:
+            unsupported.append("return_all_hidden_states")
+        if unsupported:
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                "prefill context parallelism does not support request option(s): "
+                + ", ".join(unsupported),
             )
 
     def fill_request_info(self, input: GenerateInput) -> None:
@@ -484,26 +548,28 @@ class BackendRPCServerVisitor:
 
         try:
             self.fill_request_info(input)
+            input.generate_config.validate()
             self._validate_input(input)
             self.check_sp_supported(input)
+            self.check_prefill_cp_supported(input)
         except BaseException as e:
             set_aux_info(e)
             raise
 
-        async def route_and_enqueue(attempt: int):
-            if attempt > 0:
-                input.generate_config.role_addrs = []
+        async def route_and_enqueue(attempt_input: GenerateInput):
             if self.host_service.service_available:
-                await self.route_ips(input)
-            return self.model_rpc_client.enqueue(input)
+                await self.route_ips(attempt_input)
+            return self.model_rpc_client.enqueue(attempt_input)
 
         async def stream_with_aux_info():
             attempt = 0
+            attempt_input = input
             is_streaming = bool(getattr(input.generate_config, "is_streaming", False))
+            first_exc: Optional[BaseException] = None
             while True:
                 yielded_output = False
                 try:
-                    stream = await route_and_enqueue(attempt)
+                    stream = await route_and_enqueue(attempt_input)
                     if is_streaming:
                         async for output in stream:
                             yielded_output = True
@@ -518,17 +584,51 @@ class BackendRPCServerVisitor:
                     return
                 except BaseException as e:
                     set_aux_info(e)
+                    if first_exc is None:
+                        first_exc = e
                     if (
                         yielded_output
                         or attempt >= self.pd_route_retry_on_unavailable
                         or not self._is_retryable_route_rpc_error(e)
                     ):
+                        # After retries, re-raise the ORIGINAL exception to
+                        # preserve its error category (e.g. CAPACITY->429 from
+                        # the first route failure).  A later attempt may have
+                        # hit a different error (e.g. a model-RPC
+                        # INTERNAL->500) whose category does not reflect the
+                        # root cause; the caller should see the original
+                        # exception so that servicer/frontend maps it to the
+                        # correct HTTP status code.
+                        # A later terminal admission decision is authoritative;
+                        # do not hide it behind an earlier retryable transport
+                        # or legacy capacity failure.
+                        is_terminal_route_decision = (
+                            isinstance(e, FtRuntimeException)
+                            and e.exception_type in _TERMINAL_ROUTE_EXCEPTION_TYPES
+                        )
+                        if (
+                            first_exc is not None
+                            and first_exc is not e
+                            and not is_terminal_route_decision
+                        ):
+                            raise first_exc
+                        raise
+                    request_id_factory = getattr(self, "request_id_factory", None)
+                    if request_id_factory is None:
                         raise
                     attempt += 1
+                    attempt_input = replace(
+                        input,
+                        request_id=request_id_factory(),
+                        generate_config=input.generate_config.model_copy(
+                            update={"role_addrs": []}
+                        ),
+                        enqueued_by_master=False,
+                    )
                     route_logger.warning(
                         "retrying PD route after retryable RPC error, "
                         "request_id=%s, attempt=%s/%s, error=%s",
-                        input.request_id,
+                        attempt_input.request_id,
                         attempt,
                         self.pd_route_retry_on_unavailable,
                         e,
@@ -543,6 +643,7 @@ class BackendRPCServerVisitor:
             self.fill_request_info(input)
             self._validate_input(input)
             self.check_sp_supported(input)
+            self.check_prefill_cp_supported(input)
 
         if self.host_service.service_available:
             for input in inputs:

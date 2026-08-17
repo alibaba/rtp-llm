@@ -11,12 +11,12 @@ __all__: list[str] = [
     "BertEmbeddingInputs",
     "CacheGroupType",
     "CacheStoreWriter",
+    "DSparkCallPhase",
     "LayerKVCache",
     "KVCache",
     "ParamsBase",
     "PyAttentionInputs",
     "PyCacheStoreInputs",
-    "PyCaptureMetaData",
     "PyContextParallelParams",
     "PyEmbeddingInputs",
     "PyModelInitResources",
@@ -31,6 +31,10 @@ __all__: list[str] = [
     "get_scalar_type",
     "get_typemeta",
     "init_exec_ctx",
+    "register_comm_ops",
+    "clear_comm_ops",
+    "init_cpu_tp_broadcaster",
+    "destroy_cpu_tp_broadcaster",
     "rtp_llm_ops",
 ]
 class BertEmbeddingInputs:
@@ -102,6 +106,36 @@ class CacheGroupType:
     LINEAR: typing.ClassVar[CacheGroupType]
     SWA: typing.ClassVar[CacheGroupType]
     __members__: typing.ClassVar[dict[str, CacheGroupType]]
+    def __eq__(self, other: typing.Any) -> bool: ...
+    def __getstate__(self) -> int: ...
+    def __hash__(self) -> int: ...
+    def __index__(self) -> int: ...
+    def __init__(self, value: int) -> None: ...
+    def __int__(self) -> int: ...
+    def __ne__(self, other: typing.Any) -> bool: ...
+    def __repr__(self) -> str: ...
+    def __setstate__(self, state: int) -> None: ...
+    def __str__(self) -> str: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def value(self) -> int: ...
+
+class DSparkCallPhase:
+    """
+    Members:
+
+      NONE
+
+      PROPOSE
+
+      COMMIT
+    """
+
+    NONE: typing.ClassVar[DSparkCallPhase]
+    PROPOSE: typing.ClassVar[DSparkCallPhase]
+    COMMIT: typing.ClassVar[DSparkCallPhase]
+    __members__: typing.ClassVar[dict[str, DSparkCallPhase]]
     def __eq__(self, other: typing.Any) -> bool: ...
     def __getstate__(self) -> int: ...
     def __hash__(self) -> int: ...
@@ -259,9 +293,6 @@ class PyAttentionInputs:
 class PyCacheStoreInputs:
     def __init__(self) -> None: ...
 
-class PyCaptureMetaData:
-    def __init__(self) -> None: ...
-
 class PyContextParallelParams:
     prefill_actual_input_lengths_cpu: torch.Tensor
     prefill_cp_chunk_lengths: torch.Tensor
@@ -318,6 +349,7 @@ class PyModelInputs:
         multimodal_inputs: PyMultimodalInputs = ...,
         attention_inputs: PyAttentionInputs | dict[str, PyAttentionInputs] = ...,
         bert_embedding_inputs: BertEmbeddingInputs = ...,
+        dspark_call_phase: DSparkCallPhase = ...,
     ) -> None: ...
     @property
     def attention_inputs(self) -> PyAttentionInputs | dict[str, PyAttentionInputs]:
@@ -343,6 +375,14 @@ class PyModelInputs:
 
     @combo_position_ids.setter
     def combo_position_ids(self, arg0: torch.Tensor) -> None: ...
+    @property
+    def dspark_call_phase(self) -> DSparkCallPhase:
+        """
+        Explicit DSpARK proposal/commit phase
+        """
+
+    @dspark_call_phase.setter
+    def dspark_call_phase(self, arg0: DSparkCallPhase) -> None: ...
     @property
     def embedding_inputs(self) -> PyEmbeddingInputs:
         """
@@ -397,18 +437,26 @@ class PyModelOutputs:
 
     @hidden_states.setter
     def hidden_states(self, arg0: torch.Tensor) -> None: ...
+    @property
+    def draft_tokens(self) -> torch.Tensor:
+        """
+        Optional [batch, gamma] DSpARK draft tokens
+        """
+
+    @draft_tokens.setter
+    def draft_tokens(self, arg0: torch.Tensor) -> None: ...
 
 class PyMultimodalInputs:
     def __init__(self) -> None: ...
     def __repr__(self) -> str: ...
     @property
-    def mm_deepstack_embeds(self) -> list[torch.Tensor]:
+    def mm_extra_input(self) -> list[torch.Tensor]:
         """
-        Multimodal deepstack embeds tensor
+        Multimodal model-specific extra input tensor
         """
 
-    @mm_deepstack_embeds.setter
-    def mm_deepstack_embeds(self, arg0: list[torch.Tensor]) -> None: ...
+    @mm_extra_input.setter
+    def mm_extra_input(self, arg0: list[torch.Tensor]) -> None: ...
     @property
     def mm_features_locs(self) -> torch.Tensor:
         """
@@ -455,6 +503,15 @@ def init_exec_ctx(
     mla_ops_type: int,
 ) -> None: ...
 
-def register_comm_ops(broadcast_fn: typing.Callable, allreduce_fn: typing.Callable, allgather_fn: typing.Callable) -> None: ...
+def register_comm_ops(broadcast_fn: typing.Callable, allreduce_fn: typing.Callable, allgather_fn: typing.Callable) -> None:
+    """
+    Register Python callbacks for C++ communication ops.
+    """
 
-def clear_comm_ops() -> None: ...
+def clear_comm_ops() -> None:
+    """
+    Clear registered Python communication callbacks.
+    """
+
+def init_cpu_tp_broadcaster(tp_rank: int, tp_size: int, base_path: str) -> None: ...
+def destroy_cpu_tp_broadcaster() -> None: ...
