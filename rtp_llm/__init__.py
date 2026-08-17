@@ -1,7 +1,11 @@
 import importlib
+import logging
 from typing import Any
 
-from rtp_llm.utils.import_util import import_optional_internal_source_entrypoint
+from rtp_llm.utils.import_util import (
+    has_internal_source,
+    import_optional_internal_source_entrypoint,
+)
 from rtp_llm.utils.triton_compile_patch import maybe_enable_compile_monitor
 
 # Opt-in and side-effect free unless RTP_LLM_TRITON_COMPILE_MONITOR is set, so it
@@ -19,8 +23,17 @@ maybe_enable_compile_monitor()
 # Go through the shared entrypoint helper rather than a bare import guarded by a
 # directory check: it tolerates a missing submodule the same way the three register
 # modules do, so a present-but-unimportable internal_source cannot make
-# `import rtp_llm` itself fail.
-import_optional_internal_source_entrypoint("models_py")
+# `import rtp_llm` itself fail. The import still happens here, at module level, because
+# the registration it performs must precede argparse construction.
+#
+# Warn when the entrypoint is skipped despite internal_source being present: that is the
+# state where models go unregistered and the failure resurfaces much later as an
+# `--moe_strategy invalid choice` argparse error, which is expensive to trace back here.
+if not import_optional_internal_source_entrypoint("models_py") and has_internal_source():
+    logging.getLogger(__name__).warning(
+        "internal_source is present but internal_source.rtp_llm.models_py was not imported; "
+        "internal models and their server argument extensions are NOT registered"
+    )
 
 
 def __getattr__(name: str) -> Any:
