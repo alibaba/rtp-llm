@@ -1,4 +1,5 @@
 
+#include <chrono>
 #include <memory>
 #include "absl/status/status.h"
 #include "torch/all.h"
@@ -521,6 +522,70 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testRemotePrepareFailsRetryablyWhenBlocksExh
     ASSERT_EQ(starved->getStatus(), StreamState::WAITING);
     ASSERT_EQ(starved->curBlocksNum(), 0);
     ASSERT_EQ(cache_manager_->freeBlocksNum(), 0);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testRemotePrepareTimesOutWhenCacheLoadNeverCompletes) {
+    // The deadline exit in prepareForRemoteCacheLoad is what keeps a stuck coordinator from
+    // pinning a decode admission slot forever, so drive it with a load context that never
+    // reports done. Without that exit this case does not fail -- it hangs.
+    setupMockCoordinator();
+    auto pending_ctx = createPendingAsyncContext();
+    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(pending_ctx)));
+
+    auto stream = createStream({1, 2, 3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+
+    const auto begin  = std::chrono::steady_clock::now();
+    auto       status = stream->prepareForRemoteCacheLoad(/*wait_timeout_ms=*/20);
+    const auto waited_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count();
+
+    ASSERT_FALSE(status.ok());
+    // DeadlineExceeded, not ResourceExhausted: DecodeRpcServer maps only the latter to
+    // RESOURCE_EXHAUSTED -> DECODE_MALLOC_FAILED, which would report a stuck transfer as a
+    // decode KV shortage and send operators to memory water marks.
+    ASSERT_TRUE(absl::IsDeadlineExceeded(status)) << status.ToString();
+    ASSERT_FALSE(absl::IsResourceExhausted(status)) << status.ToString();
+    ASSERT_GE(waited_ms, 20);
+    // The blocks stay charged and the stream stays retryable rather than terminal: prefill still
+    // owns the destination buffers, so releasing them here would corrupt an in-flight transfer.
+    ASSERT_TRUE(stream->hasEvent(StreamEvents::LoadInitiated));
+    ASSERT_EQ(stream->getStatus(), StreamState::WAITING);
+    ASSERT_GT(stream->curBlocksNum(), 0);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testRemotePrepareRetryDoesNotReportSuccessWhileLoadPending) {
+    // Regression guard: LoadInitiated is set by the first attempt, so the early-return branch
+    // must not treat "already initiated" as "already loaded". EXECUTE_WITH_RETRY calls back in
+    // after the timeout, and reporting OkStatus() there would let loadCacheFromPrefill and
+    // localGenerate read KV blocks the connector is still writing.
+    setupMockCoordinator();
+    auto pending_ctx = createPendingAsyncContext();
+    // WillOnce: the retry must resume the existing transfer, not start a second one.
+    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(pending_ctx)));
+
+    auto stream = createStream({1, 2, 3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+
+    ASSERT_TRUE(absl::IsDeadlineExceeded(stream->prepareForRemoteCacheLoad(/*wait_timeout_ms=*/20)));
+    const size_t blocks_after_first = stream->curBlocksNum();
+
+    auto retry_status = stream->prepareForRemoteCacheLoad(/*wait_timeout_ms=*/20);
+    ASSERT_FALSE(retry_status.ok()) << "retry reported success while the load was still pending";
+    ASSERT_TRUE(absl::IsDeadlineExceeded(retry_status)) << retry_status.ToString();
+    // The retry reused the same allocation instead of allocating a second time.
+    ASSERT_EQ(stream->curBlocksNum(), blocks_after_first);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testRemotePrepareWaitsWithoutDeadlineWhenBudgetUnset) {
+    // wait_timeout_ms <= 0 keeps the pre-existing unbounded behaviour for requests that set no
+    // deadline; pin it so the bound is known to be caller-driven rather than accidental.
+    setupMockCoordinator();
+    auto done_ctx = createDoneAsyncContext();
+    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(done_ctx)));
+
+    auto stream = createStream({1, 2, 3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+
+    ASSERT_TRUE(stream->prepareForRemoteCacheLoad(/*wait_timeout_ms=*/0).ok());
+    ASSERT_TRUE(stream->hasEvent(StreamEvents::LoadInitiated));
 }
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionLoadingCacheStreamsCountTowardBatchLimit) {

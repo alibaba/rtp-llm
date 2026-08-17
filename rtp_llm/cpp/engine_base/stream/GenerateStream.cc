@@ -156,29 +156,42 @@ absl::Status GenerateStream::prepareForRemoteCacheLoad(int64_t wait_timeout_ms) 
     {
         std::lock_guard<std::mutex> lock(*mutex_);
         if (hasEventWithoutLock(StreamEvents::LoadInitiated)) {
-            return hasErrorWithoutLock() ? absl::InternalError(statusInfoWithoutLock().ToString()) : absl::OkStatus();
-        }
+            if (hasErrorWithoutLock()) {
+                return absl::InternalError(statusInfoWithoutLock().ToString());
+            }
+            // LoadInitiated alone does not mean the transfer finished: a previous attempt may
+            // have returned DeadlineExceeded with it still in flight, and EXECUTE_WITH_RETRY
+            // calls back in. Returning OkStatus() here would let the caller proceed to read KV
+            // blocks the connector is still writing, so resume the wait on this attempt's
+            // budget instead and only report success once the load is actually done.
+            cache_load_started = !stream_cache_resource_->loadCacheDone();
+            if (!cache_load_started) {
+                return absl::OkStatus();
+            }
+        } else {
+            auto ret = stream_cache_resource_->initKVBlock();
+            if (!ret.ok()) {
+                RTP_LLM_LOG_WARNING("GenerateStream::prepareForRemoteCacheLoad: initKVBlock failed, stream_id: %lld",
+                                    streamId());
+                // Re-tag as ResourceExhausted so the caller can tell a real block shortage from a
+                // cache-load failure: initKVBlock reports both shortage and internal errors as
+                // InternalError, and the two map to different gRPC codes upstream.
+                return absl::ResourceExhaustedError("initKVBlock failed: " + std::string(ret.message()));
+            }
 
-        auto ret = stream_cache_resource_->initKVBlock();
-        if (!ret.ok()) {
-            RTP_LLM_LOG_WARNING("GenerateStream::prepareForRemoteCacheLoad: initKVBlock failed, stream_id: %lld",
-                                streamId());
-            // Re-tag as ResourceExhausted so the caller can tell a real block shortage from a
-            // cache-load failure: initKVBlock reports both shortage and internal errors as
-            // InternalError, and the two map to different gRPC codes upstream.
-            return absl::ResourceExhaustedError("initKVBlock failed: " + std::string(ret.message()));
+            // Preserve remote/memory-cache matching without granting scheduler
+            // admission. DecodeRpcServer already owns an admission slot here.
+            cache_load_started = stream_cache_resource_->asyncLoadCache();
+            reportEventWithoutLock(StreamEvents::LoadInitiated);
         }
-
-        // Preserve remote/memory-cache matching without granting scheduler
-        // admission. DecodeRpcServer already owns an admission slot here.
-        cache_load_started = stream_cache_resource_->asyncLoadCache();
-        reportEventWithoutLock(StreamEvents::LoadInitiated);
     }
 
     // This path loads the cache synchronously instead of going through the LOADING_CACHE state,
     // but it is the same work the state machine used to do, so keep feeding the same two
     // timers: leaving them unset would make the PD cache-load metrics read as a constant 0,
     // which looks like "loading is free" rather than "nobody reports it".
+    // recordLoadingCacheStartTime() only records the first call, so a resumed wait keeps the
+    // original start time.
     if (cache_load_started) {
         recordLoadingCacheStartTime();
     }
