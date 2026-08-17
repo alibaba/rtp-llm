@@ -19,6 +19,9 @@ namespace rtp_llm {
 
 class CudaGraphRunner: public GraphBase {
 public:
+    // Sanity bound for decode_capture_batch_sizes. The largest bucket sizes every graph buffer,
+    // so a typo there is paid in device memory; fail fast instead of OOM-ing during capture.
+    static constexpr int kMaxDecodeCaptureBatchSize = 4096;
     CudaGraphRunner(const GraphParams& graph_params, py::object py_instance):
         GraphBase(std::move(py_instance)),
         enable_cuda_graph_(graph_params.enable_cuda_graph),
@@ -46,6 +49,7 @@ public:
             throw std::runtime_error("CudaGraphRunner constructor: kernel_tokens_per_block must be > 0.");
         }
         max_bs_               = graph_params.max_context_batch_size;
+        concurrency_limit_bs_ = max_bs_;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr("forward");
         options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
@@ -141,6 +145,10 @@ private:
     cuda_graph::GraphStream capture_stream_;
     bool                    enable_cuda_graph_debug_mode_{false};
     size_t                  max_bs_{1};
+    // The unwidened CONCURRENCY_LIMIT. max_bs_ doubles as graph buffer capacity and may be
+    // widened by initCapture() when a capture bucket exceeds it; this keeps the configured
+    // concurrency limit available for logs and startup checks.
+    size_t                  concurrency_limit_bs_{1};
     int                     num_tokens_per_bs_{1};
     int                     max_num_token_{1};
     int                     max_seq_len_{0};

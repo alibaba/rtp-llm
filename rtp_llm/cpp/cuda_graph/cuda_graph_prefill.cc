@@ -101,8 +101,23 @@ void CudaGraphRunner::capturePrefill() {
 std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
     // MTP draft prefill: capture at multiples of num_tokens_per_bs_
     if (isMtpDraftPrefillCudaGraph()) {
-        // Bucketing rationale and degenerate-config handling live with the helper, which is
-        // unit tested in tests/mtp_draft_prefill_buckets_test.cc.
+        // Rollback path: an explicit prefill_capture_seq_lens wins over the bucket set, so a
+        // deployment that regresses on padded replay cost can pin the old one-graph-per-batch
+        // behaviour (1..max_bs scaled by num_tokens_per_bs) without a new config knob.
+        if (!prefill_capture_seq_lens_.empty()) {
+            RTP_LLM_LOG_INFO("Draft model prefill: using %zu explicit prefill_capture_seq_lens, skipping bucketing",
+                             prefill_capture_seq_lens_.size());
+            return prefill_capture_seq_lens_;
+        }
+        // Buckets are powers of two plus max_bs -- deliberately NOT the decode set, which is
+        // {1,8,16,24,32} then +16 (cuda_graph_decode.cc): decode replays every step so it trades
+        // capture memory for at most 15 padded rows, while draft prefill replays one graph whose
+        // token slice length equals the graph key, so a bucket costs padded compute proportional
+        // to the gap (batch 17 replays the 32 bucket). Bucketing is still the right trade here:
+        // one graph per batch size makes the capture count -- and its device memory -- grow
+        // linearly with CONCURRENCY_LIMIT, which is what ran the decode role out of memory.
+        // Rationale and degenerate-config handling live with the helper, unit tested in
+        // tests/mtp_draft_prefill_buckets_test.cc.
         std::vector<int> result = mtpDraftPrefillCaptureSeqLens(max_bs_, num_tokens_per_bs_);
         RTP_LLM_LOG_INFO(
             "Draft model prefill: capture seq_lens at %d intervals, %zu total (max_bs=%zu, num_tokens_per_bs=%d)",
