@@ -1,6 +1,4 @@
-import glob
 import logging
-import logging.config
 import multiprocessing
 import os
 import signal
@@ -8,8 +6,10 @@ import subprocess
 import sys
 import time
 import traceback
-from multiprocessing import Process
-from typing import List, Optional
+from contextlib import suppress
+from multiprocessing.connection import Connection
+from multiprocessing.process import BaseProcess
+from typing import List
 
 import torch
 from setproctitle import setproctitle
@@ -28,8 +28,21 @@ from rtp_llm.utils.concurrency_controller import (
 )
 from rtp_llm.utils.oom_diag import install_oom_dump
 from rtp_llm.utils.process_manager import ProcessManager
+from rtp_llm.utils.util import copy_gemm_config
 
 setup_logging()
+
+
+def _send_pipe_status(pipe_writer, status: str, message: str, error_trace: str = ""):
+    if pipe_writer is None:
+        return
+    try:
+        pipe_writer.send(
+            {"status": status, "message": message, "traceback": error_trace}
+        )
+        pipe_writer.close()
+    except Exception as e:
+        logging.warning(f"Failed to send status via pipe: {e}")
 
 
 def local_rank_start(
@@ -41,25 +54,15 @@ def local_rank_start(
     """Start local rank with proper signal handling for graceful shutdown"""
     backend_manager = None
     logging.info(f"[PROCESS_START]Start local rank process")
-    start_time = time.time()
-    from rtp_llm.server.backend_manager import BackendManager
-    from rtp_llm.utils.util import copy_gemm_config
-
-    logging.info(f"import BackendManager took {time.time()- start_time:.2f}s")
 
     def signal_handler(signum, frame):
         logging.info(
             f"Local rank received signal {signum}, shutting down gracefully..."
         )
-        if backend_manager is not None:
-            try:
-                backend_manager.request_shutdown()
-            except Exception as e:
-                logging.error(f"Error during backend manager shutdown: {e}")
-
-    # Setup signal handlers for graceful shutdown
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
+        try:
+            backend_manager.request_shutdown()
+        except Exception as e:
+            logging.error(f"Error during backend manager shutdown: {e}")
 
     copy_gemm_config()
 
@@ -78,24 +81,22 @@ def local_rank_start(
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
         install_oom_dump()
+        from rtp_llm.server.backend_manager import BackendManager
+
         backend_manager = BackendManager(py_env_configs)
         backend_manager.start()
+        # Defer these handlers until model loading completes.
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
         logging.info("Backend server initialized successfully, sending ready status")
 
-        # Send startup success message
-        if pipe_writer is not None:
-            try:
-                pipe_writer.send(
-                    {
-                        "status": "success",
-                        "message": f"Backend server started successfully on rank {py_env_configs.parallelism_config.local_rank}",
-                    }
-                )
-                pipe_writer.close()
-            except Exception as e:
-                logging.warning(f"Failed to send success status via pipe: {e}")
+        _send_pipe_status(
+            pipe_writer,
+            "success",
+            f"Backend server started successfully on rank {py_env_configs.parallelism_config.local_rank}",
+        )
+        pipe_writer = None  # success closed it
 
-        # Enter service loop to keep the process alive
         logging.info("Entering service loop to keep backend_manager alive")
         backend_manager.serve_forever()
 
@@ -104,16 +105,8 @@ def local_rank_start(
         error_trace = traceback.format_exc()
         logging.error(f"{error_msg}, trace: {error_trace}")
 
-        # Send startup failure message
-        if pipe_writer is not None:
-            try:
-                pipe_writer.send(
-                    {"status": "failed", "message": error_msg, "traceback": error_trace}
-                )
-                pipe_writer.close()
-            except Exception as pipe_error:
-                logging.warning(f"Failed to send error status via pipe: {pipe_error}")
-        raise e
+        _send_pipe_status(pipe_writer, "failed", error_msg, error_trace)
+        raise
 
 
 def _get_local_world_size(py_env_configs: PyEnvConfigs) -> int:
@@ -155,39 +148,44 @@ def _validate_dp_configuration(py_env_configs: PyEnvConfigs):
 def _create_rank_processes(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
+    ctx,
+    processes: List[BaseProcess],
+    rank_pipe_readers: List[Connection],
 ):
-    """Create and start rank processes, returns (processes, rank_pipe_readers)"""
+    """Create and start rank processes. Each proc is appended before start() so a
+    mid-loop abort still leaves every spawned object in the caller's list; teardown
+    guards proc.pid to skip any that never started."""
     pc = py_env_configs.parallelism_config
     local_world_size = _get_local_world_size(py_env_configs)
     cuda_device_list = _get_cuda_device_list()
     _validate_dp_configuration(py_env_configs)
 
-    processes = []
-    rank_pipe_readers = []  # Store pipe readers for each rank
-
-    for _, world_rank in enumerate(
-        range(pc.world_rank, pc.world_rank + local_world_size)
-    ):
-        reader, writer = multiprocessing.Pipe(duplex=False)
+    for world_rank in range(pc.world_rank, pc.world_rank + local_world_size):
+        reader, writer = ctx.Pipe(duplex=False)
+        rank_pipe_readers.append(reader)
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
         os.environ["WORLD_RANK"] = str(world_rank)
-
-        proc = Process(
+        proc = ctx.Process(
             target=local_rank_start,
             args=(global_controller, py_env_configs, world_rank, writer),
             name=f"rank-{world_rank}",
         )
-        proc.start()
-        writer.close()  # Parent process closes write end
         processes.append(proc)
-        rank_pipe_readers.append(reader)
+        try:
+            proc.start()
+        finally:
+            writer.close()  # drop parent copy so reader EOFs when the rank dies
 
-    return processes, rank_pipe_readers
+
+def _close_readers(readers: List[Connection]) -> None:
+    for reader in readers:
+        with suppress(Exception):
+            reader.close()
 
 
 def _wait_for_ranks_startup(
-    processes: List[Process],
-    rank_pipe_readers: List[multiprocessing.Pipe],
+    processes: List[BaseProcess],
+    rank_pipe_readers: List[Connection],
     local_world_size: int,
 ):
     """
@@ -234,128 +232,119 @@ def _wait_for_ranks_startup(
                 if ranks_received[i]:
                     continue
 
+                # The try only guards poll/recv: a failed status must raise
+                # below, outside any handler that could swallow it.
                 try:
-                    # Non-blocking check if data is available
-                    if reader.poll(timeout=poll_timeout):
-                        data = reader.recv()
-                        ranks_received[i] = True
-                        if data.get("status") == "success":
-                            logging.info(
-                                f"Rank {i} started successfully: {data.get('message', '')}"
-                            )
-                        else:
-                            error_msg = data.get("message", "Unknown error")
-                            traceback_info = data.get("traceback", "")
-                            if traceback_info:
-                                logging.error(f"Rank {i} traceback: {traceback_info}")
-                            raise Exception(f"Rank {i} startup failed: {error_msg}")
+                    if not reader.poll(timeout=poll_timeout):
+                        continue
+                    data = reader.recv()
                 except EOFError:
                     # Pipe closed unexpectedly (process died)
-                    if not ranks_received[i]:
-                        error_msg = f"Rank {i}: Pipe closed unexpectedly (process may have died)"
-                        logging.error(error_msg)
-                        raise Exception(error_msg)
+                    error_msg = (
+                        f"Rank {i}: Pipe closed unexpectedly (process may have died)"
+                    )
+                    logging.error(error_msg)
+                    raise Exception(error_msg)
                 except Exception as e:
-                    if not ranks_received[i]:
-                        logging.error(f"Failed to receive status from rank {i}: {e}")
-                        raise
+                    logging.error(f"Failed to receive status from rank {i}: {e}")
+                    raise
+                ranks_received[i] = True
+                if data.get("status") == "success":
+                    logging.info(
+                        f"Rank {i} started successfully: {data.get('message', '')}"
+                    )
+                else:
+                    error_msg = data.get("message", "Unknown error")
+                    traceback_info = data.get("traceback", "")
+                    if traceback_info:
+                        logging.error(f"Rank {i} traceback: {traceback_info}")
+                    raise Exception(f"Rank {i} startup failed: {error_msg}")
+            if all(ranks_received):
+                break
             time.sleep(5)
 
         logging.info(f"All {local_world_size} ranks started successfully")
     finally:
-        # Always close all readers
-        for reader in rank_pipe_readers:
-            try:
-                reader.close()
-            except Exception:
-                pass
+        _close_readers(rank_pipe_readers)
 
 
 def multi_rank_start(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
+    cleanup=None,
 ):
     """Start multi-rank backend server with proper process management"""
+    ctx = multiprocessing.get_context("spawn")
+    processes, rank_pipe_readers = [], []
     try:
-        multiprocessing.set_start_method("spawn")
-    except RuntimeError as e:
-        logging.warning(str(e))
+        _create_rank_processes(
+            global_controller, py_env_configs, ctx, processes, rank_pipe_readers
+        )
+        local_world_size = len(processes)
 
-    # Create processes and get pipe readers
-    processes, rank_pipe_readers = _create_rank_processes(
-        global_controller, py_env_configs
-    )
-    local_world_size = len(processes)
+        if py_env_configs.distribute_config.fake_gang_env:
+            # Test-only path: returning releases the manager, which publishes one
+            # last snapshot; the caller-owned ranks keep serving from the local tree.
+            _close_readers(rank_pipe_readers)
+            return processes
 
-    if py_env_configs.distribute_config.fake_gang_env:
-        return processes
-
-    # Wait for all ranks to report startup status
-    try:
+        # Wait for all ranks to report startup status
         _wait_for_ranks_startup(processes, rank_pipe_readers, local_world_size)
 
-        # Report success via external pipe
-        if pipe_writer is not None:
-            try:
-                pipe_writer.send(
-                    {
-                        "status": "success",
-                        "message": f"All {local_world_size} backend ranks started successfully",
-                    }
-                )
-                pipe_writer.close()
-            except Exception as e:
-                logging.warning(f"Failed to send status via pipe: {e}")
-    except Exception as e:
-        error_msg = str(e)
+        manager = ProcessManager(
+            shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
+            monitor_interval=py_env_configs.server_config.monitor_interval,
+            allow_defer_first_sigterm=True,
+            pre_exit_cleanup=cleanup,
+        )
+        manager.set_processes(processes, shutdown_group="backend")
+        _send_pipe_status(
+            pipe_writer,
+            "success",
+            f"All {local_world_size} backend ranks started successfully",
+        )
+        pipe_writer = None  # success closed it; a later abort speaks via exit code
+    except BaseException as e:
+        error_msg = str(e) or type(e).__name__
+        error_trace = traceback.format_exc()
         logging.error(f"Multi-rank startup failed: {error_msg}")
 
         # Report failure via external pipe
-        if pipe_writer is not None:
-            try:
-                pipe_writer.send(
-                    {
-                        "status": "failed",
-                        "message": error_msg,
-                        "traceback": "",
-                    }
-                )
-                pipe_writer.close()
-            except Exception as pipe_error:
-                logging.warning(f"Failed to send status via pipe: {pipe_error}")
+        _send_pipe_status(pipe_writer, "failed", error_msg, error_trace)
+
+        _close_readers(rank_pipe_readers)
 
         # Terminate all processes if any rank failed
         logging.error("Terminating all ranks due to startup failures")
         for proc in processes:
-            if proc.is_alive():
+            if proc.pid is not None and proc.is_alive():
                 proc.terminate()
 
         # timeout join + kill to avoid terminate failed
         for proc in processes:
+            if proc.pid is None:
+                continue
             proc.join(timeout=5)
             if proc.is_alive():
                 logging.warning(f"Force killing process {proc.name} (pid={proc.pid})")
                 proc.kill()
                 proc.join(timeout=2)
 
-        # os._exit to avoid atexit deadlock
-        alive_procs = [p for p in processes if p.is_alive()]
+        alive_procs = [p for p in processes if p.pid is not None and p.is_alive()]
         if alive_procs:
-            logging.error(
-                f"{len(alive_procs)} processes still alive after kill, using os._exit to avoid atexit deadlock"
-            )
+            logging.error(f"{len(alive_procs)} processes still alive after kill")
+            if cleanup:
+                try:
+                    cleanup()  # JitCacheManager.stop() is bounded.
+                except Exception:
+                    logging.exception("JIT cache cleanup failed before hard exit")
             os._exit(1)
-        else:
-            raise Exception("Multi-rank startup failed")
+        if isinstance(e, Exception):
+            raise Exception(f"Multi-rank startup failed: {error_msg}") from e
+        raise
 
     # After successful startup, monitor processes
-    manager = ProcessManager(
-        shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
-        monitor_interval=py_env_configs.server_config.monitor_interval,
-        allow_defer_first_sigterm=True,
-    )
-    manager.set_processes(processes, shutdown_group="backend")
     manager.monitor_and_release_processes()
 
     return processes
@@ -408,28 +397,30 @@ def load_gpu_nic_affinity():
         return False
 
 
-def clear_jit_filelock():
-    # check whether exists jit dir
-    if os.path.exists("deep_gemm_runtime"):
-        files = glob.glob("./deep_gemm_runtime/**/*_lock", recursive=True)
-        for file in files:
-            os.remove(file)
-
-
 def start_backend_server(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
 ):
+    # Startup window only: turn SIGTERM/SIGINT into an exception so the teardown
+    # below runs (a defaulted SIGTERM would kill the process with no cleanup);
+    # local_rank_start / ProcessManager install the runtime handlers later.
+    def abort(signum, frame):
+        # A second signal must kill immediately, not be swallowed by teardown.
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        raise KeyboardInterrupt(f"signal {signum} during startup")
+
+    signal.signal(signal.SIGTERM, abort)
+    signal.signal(signal.SIGINT, abort)
+
     logging.info(f"[PROCESS_START]Start backend server process")
     setproctitle("rtp_llm_backend_server")
     os.makedirs("logs", exist_ok=True)
     load_gpu_nic_affinity()
 
-    clear_jit_filelock()
-
     if not torch.cuda.is_available():
-        return local_rank_start(global_controller, py_env_configs)
+        return local_rank_start(global_controller, py_env_configs, 0, pipe_writer)
 
     pc = py_env_configs.parallelism_config
     if (
@@ -441,15 +432,22 @@ def start_backend_server(
             not support WORLD_SIZE {pc.world_size} for {torch.cuda.device_count()} local gpu"
         )
 
-    if torch.cuda.device_count() > 1 and pc.world_size > 1:
-        return multi_rank_start(global_controller, py_env_configs, pipe_writer)
-    else:
+    manager = None
+    try:
+        try:
+            from rtp_llm.utils.jit_cache_manager import start_from_config
+
+            manager = start_from_config(py_env_configs.jit_config)
+        except Exception:  # cold start; a signal instead unwinds to the finally
+            logging.exception("JIT_CACHE_FAIL_OPEN: setup failed; cold start")
+        if torch.cuda.device_count() > 1 and pc.world_size > 1:
+            return multi_rank_start(
+                global_controller,
+                py_env_configs,
+                pipe_writer,
+                cleanup=manager.stop if manager else None,
+            )
         return local_rank_start(global_controller, py_env_configs, 0, pipe_writer)
-
-
-def main():
-    return start_backend_server(None)
-
-
-if __name__ == "__main__":
-    main()
+    finally:
+        if manager:
+            manager.stop()
