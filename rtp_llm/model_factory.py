@@ -30,6 +30,7 @@ from rtp_llm.ops import (
     VitSeparation,
 )
 from rtp_llm.utils.util import check_with_info
+from rtp_llm.utils.warmup import configure_warmup
 
 
 class ModelFactory:
@@ -78,6 +79,10 @@ class ModelFactory:
             vit_config: Optional VitConfig (needed for multimodal models)
             merge_lora: Whether to merge LoRA weights
         """
+        configure_warmup(
+            engine_config.runtime_config.warm_up,
+            engine_config.runtime_config.model_warm_up,
+        )
         model_type = model_config.model_type
         model_cls = ModelFactory.get_model_cls(model_type)
 
@@ -109,6 +114,7 @@ class ModelFactory:
         model_config: ModelConfig,
         propose_model_config: Optional[ModelConfig],
         engine_config: EngineConfig,
+        target_model: Optional[Any] = None,
     ) -> Optional[Any]:
         """Get and create ProposeModel from engine_config and propose_model_config.
 
@@ -118,10 +124,16 @@ class ModelFactory:
             model_config: Main ModelConfig (for max_seq_len alignment)
             propose_model_config: Optional propose ModelConfig
             engine_config: EngineConfig containing sp_config
+            target_model: Optional already-loaded target model, used as the owner
+                of any global weights the draft model borrows
 
         Returns:
             ProposeModel instance or None if no propose model needed
         """
+        configure_warmup(
+            engine_config.runtime_config.warm_up,
+            engine_config.runtime_config.model_warm_up,
+        )
         sp_type = engine_config.sp_config.type  # Get SpeculativeType enum value
         if sp_type == SpeculativeType.NONE:
             return None
@@ -136,6 +148,7 @@ class ModelFactory:
             or sp_type == SpeculativeType.MTP
             or sp_type == SpeculativeType.EAGLE3
             or sp_type == SpeculativeType.EAGLE
+            or sp_type == SpeculativeType.DSPARK
         ):
             model_type = propose_model_config.model_type
             if model_type == "deepseek-v3-mtp" or model_type == "mixtbstars-mtp":
@@ -157,6 +170,16 @@ class ModelFactory:
             propose_model_config.max_seq_len = model_config.max_seq_len
             propose_model_config.gen_num_per_cycle = model_config.gen_num_per_cycle
 
+            alias_names = ()
+            if target_model is not None:
+                alias_names = tuple(
+                    model_cls.speculative_weight_alias_names(
+                        target_model, propose_model_config
+                    )
+                )
+            if alias_names and target_model.weight is None:
+                raise RuntimeError("speculative shared-weight owner is not loaded")
+
             gpt_model = model_cls.from_config(
                 model_config=propose_model_config,
                 parallelism_config=engine_config.parallelism_config,
@@ -171,7 +194,29 @@ class ModelFactory:
                 merge_lora=False,  # Propose model doesn't need merge_lora
                 loader_recycle_handles=engine_config.load_config.loader_recycle_handles,
                 moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
+                weight_alias_owner=target_model if alias_names else None,
+                weight_alias_names=alias_names,
             )
+            aliased_local_bytes = 0
+            for name in alias_names:
+                owner_tensor = target_model.weight.get_global_weight(name)
+                alias_tensor = gpt_model.weight.get_global_weight(name)
+                if (
+                    alias_tensor is not owner_tensor
+                    or alias_tensor.data_ptr() != owner_tensor.data_ptr()
+                ):
+                    raise RuntimeError(
+                        f"speculative global weight alias {name!r} did not preserve storage identity"
+                    )
+                aliased_local_bytes += (
+                    owner_tensor.numel() * owner_tensor.element_size()
+                )
+            if alias_names:
+                logging.info(
+                    "speculative model aliases owner weights: %s; local HBM not duplicated: %.3f GiB",
+                    alias_names,
+                    aliased_local_bytes / (1024**3),
+                )
             logging.info(f"create propose model {engine_config.sp_config.type}")
             return ProposeModel(sp_type, gen_num_per_circle, gpt_model)
         elif sp_type == SpeculativeType.DETERMINISTIC:
@@ -236,6 +281,7 @@ class ModelFactory:
             model_config=model_config,
             propose_model_config=propose_model_config,
             engine_config=engine_config,
+            target_model=model,
         )
 
         # Create engine using create_engine function (replaces AsyncModel)
@@ -274,7 +320,7 @@ class ModelFactory:
         This method handles ModelConfig construction and initialization logic for the main model.
 
         The flow is:
-        1. Call model's create_config to create ModelConfig with model architecture
+        1. Call model's _create_config to create ModelConfig with model architecture
         2. Apply ModelArgs to ModelConfig (overwrite with user-provided values)
         3. Build ModelConfig with build_model_config
 
@@ -380,14 +426,18 @@ class ModelFactory:
         if not sp_config.checkpoint_path:
             return None
 
-        # Current SP engine only supports MTP and EAGLE
-        if sp_config.type not in [SpeculativeType.MTP, SpeculativeType.EAGLE]:
+        # Current learned-draft SP engine supports MTP, EAGLE and DSpARK.
+        if sp_config.type not in [
+            SpeculativeType.MTP,
+            SpeculativeType.EAGLE,
+            SpeculativeType.DSPARK,
+        ]:
             logging.error(
-                "Speculative engine only supports MTP and EAGLE, but got %s",
+                "Speculative engine only supports MTP, EAGLE and DSpARK, but got %s",
                 sp_config.type.name,
             )
             raise ValueError(
-                "Speculative engine only supports MTP and EAGLE, but got %s"
+                "Speculative engine only supports MTP, EAGLE and DSpARK, but got %s"
                 % sp_config.type.name
             )
 
@@ -424,4 +474,80 @@ class ModelFactory:
         )
         propose_model_cls._post_build_model_config(propose_model_config)
 
+        if sp_config.type == SpeculativeType.DSPARK:
+            ModelFactory._setup_dspark_configs(
+                sp_config, model_config, propose_model_config
+            )
+
         return propose_model_config
+
+    @staticmethod
+    def _setup_dspark_configs(
+        sp_config, model_config: ModelConfig, propose_model_config: ModelConfig
+    ) -> None:
+        """Validate fixed-width DSpARK and wire target aux-state capture.
+
+        DeepSeek-V4 DSpARK uses a draft query block of exactly ``gamma`` rows
+        (one anchor plus ``gamma - 1`` noise tokens). The target verifies
+        ``gamma + 1`` rows. ``gen_num_per_cycle`` therefore remains the single
+        source of truth for the fixed proposal width in the engine.
+        """
+        required = {
+            "dspark_noise_token_id": propose_model_config.dspark_noise_token_id,
+            "dspark_target_layer_ids": propose_model_config.dspark_target_layer_ids,
+            "dspark_markov_rank": propose_model_config.dspark_markov_rank,
+        }
+        missing = [name for name, value in required.items() if value is None]
+        if missing:
+            raise ValueError(
+                "sp_type dspark requires draft checkpoint metadata: "
+                + ", ".join(missing)
+            )
+
+        gamma = int(sp_config.gen_num_per_cycle)
+        if gamma <= 0:
+            raise ValueError(
+                f"dspark requires a positive gen_num_per_cycle, got {gamma}"
+            )
+
+        noise_token_id = int(propose_model_config.dspark_noise_token_id)
+        if noise_token_id < 0 or noise_token_id >= propose_model_config.vocab_size:
+            raise ValueError(
+                f"invalid dspark_noise_token_id {noise_token_id} for vocab_size "
+                f"{propose_model_config.vocab_size}"
+            )
+
+        target_layer_ids = [
+            int(layer_id) for layer_id in propose_model_config.dspark_target_layer_ids
+        ]
+        if not target_layer_ids:
+            raise ValueError("dspark_target_layer_ids must not be empty")
+        invalid_layer_ids = [
+            layer_id
+            for layer_id in target_layer_ids
+            if layer_id < 0 or layer_id >= model_config.num_layers
+        ]
+        if invalid_layer_ids:
+            raise ValueError(
+                f"dspark_target_layer_ids {invalid_layer_ids} are out of range "
+                f"for target with {model_config.num_layers} layers"
+            )
+
+        markov_rank = int(propose_model_config.dspark_markov_rank)
+        if markov_rank <= 0:
+            raise ValueError(f"invalid dspark_markov_rank: {markov_rank}")
+
+        sp_config.sp_dspark_mask_token_id = noise_token_id
+        # Both models carry the capture ids: the target uses them to capture
+        # and to size the shared MTP hidden buffer rows; the draft only needs
+        # them for the same row-width derivation (it never captures).
+        model_config.capture_aux_hidden_layer_ids = target_layer_ids
+        propose_model_config.capture_aux_hidden_layer_ids = target_layer_ids
+        logging.info(
+            "DSpARK fixed-width wiring: gamma=%d, noise_token_id=%d, "
+            "target capture layer ids=%s, markov_rank=%d",
+            gamma,
+            noise_token_id,
+            target_layer_ids,
+            markov_rank,
+        )

@@ -24,6 +24,7 @@ public:
         enable_cuda_graph_(graph_params.enable_cuda_graph),
         is_prefill_cuda_graph_mode_(graph_params.is_prefill_cuda_graph_mode),
         is_target_verify_(graph_params.is_target_verify),
+        dspark_call_phase_(graph_params.dspark_call_phase),
         capture_stream_(cuda_graph::graphGetStreamFromPool(true)),
         enable_cuda_graph_debug_mode_(graph_params.enable_cuda_graph_debug_mode),
         num_tokens_per_bs_(graph_params.num_tokens_per_bs),
@@ -31,6 +32,7 @@ public:
         seq_size_per_block_(graph_params.tokens_per_block),
         kernel_seq_size_per_block_(graph_params.kernel_tokens_per_block),
         hidden_size_(graph_params.hidden_size),
+        input_hidden_size_(graph_params.input_hidden_size),
         hc_mult_(static_cast<int>(graph_params.hc_mult)),
         sp_steps_(graph_params.sp_steps),
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
@@ -53,13 +55,14 @@ public:
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, kernel_seq_size_per_block_: %d, \
-            hidden_size_: %d, num_tokens_per_bs_: %d, is_prefill_cuda_graph_mode_: %d, is_target_verify_: %d",
+            hidden_size_: %d, input_hidden_size_: %zu, num_tokens_per_bs_: %d, is_prefill_cuda_graph_mode_: %d, is_target_verify_: %d",
                          enable_cuda_graph_,
                          max_bs_,
                          enable_cuda_graph_debug_mode_,
                          max_seq_len_,
                          kernel_seq_size_per_block_,
                          hidden_size_,
+                         input_hidden_size_,
                          num_tokens_per_bs_,
                          is_prefill_cuda_graph_mode_,
                          is_target_verify_);
@@ -106,7 +109,11 @@ private:
         return is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
     }
     bool usesFixedCapacityMtpDraftPrefillCudaGraph() const {
-        return isMtpDraftPrefillCudaGraph() && hc_mult_ > 1;
+        // DSpARK's input_hiddens width is len(target_layer_ids) * hidden_size, which is
+        // independent of hc_mult, so its fixed-width graphs must be recognised by phase
+        // as well: slicing their output buffer would mismatch the forward_decode
+        // [B * q_len, dim] result in captureOneGraphInstance.
+        return isMtpDraftPrefillCudaGraph() && (hc_mult_ > 1 || dspark_call_phase_ != DSparkCallPhase::NONE);
     }
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
@@ -138,6 +145,7 @@ private:
     bool                    enable_cuda_graph_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
+    DSparkCallPhase         dspark_call_phase_{DSparkCallPhase::NONE};
     cuda_graph::GraphStream capture_stream_;
     bool                    enable_cuda_graph_debug_mode_{false};
     size_t                  max_bs_{1};
@@ -147,6 +155,7 @@ private:
     int                     seq_size_per_block_{0};
     int                     kernel_seq_size_per_block_{0};
     int                     hidden_size_{0};
+    size_t                  input_hidden_size_{0};
     int                     hc_mult_{1};
     int                     sp_steps_{0};
     std::vector<int>        capture_range_;

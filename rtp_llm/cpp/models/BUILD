@@ -98,6 +98,18 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# Context Parallel token layout shared by scheduling and execution.
+cc_library(
+    name = "context_parallel_layout",
+    hdrs = [
+        "context_parallel/ZigzagTokenLayout.h",
+    ],
+    srcs = [
+        "context_parallel/ZigzagTokenLayout.cc",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 # Context Parallel Interface - base interface for context parallel processors
 cc_library(
     name = "context_parallel_interface",
@@ -121,6 +133,7 @@ cc_library(
         "context_parallel/ContextParallelProcessorFactory.cc",
     ],
     deps = [
+        ":context_parallel_layout",
         ":context_parallel_interface",
         "//:rtp_compute_ops",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
@@ -159,13 +172,16 @@ cc_library(
         ":context_parallel",
         "//:rtp_compute_ops",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/models_py/bindings/core:tensor_holder",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/metrics",
         "//rtp_llm/models_py/bindings/core:cache_store_async_writer",
         "//rtp_llm/cpp/utils:debug_utils",
         "//rtp_llm/cpp/utils:profiling_scope",
+        "//rtp_llm/cpp/utils:tensor_debug_utils",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",

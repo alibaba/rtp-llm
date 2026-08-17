@@ -32,6 +32,7 @@ public:
         params.num_tokens_per_bs            = static_cast<int>(max_seq_len);
         params.max_context_batch_size       = static_cast<size_t>(max_context_batch_size);
         params.hidden_size                  = static_cast<size_t>(hidden_size);
+        params.input_hidden_size            = static_cast<size_t>(hidden_size);
         params.model_data_type              = c10::ScalarType::BFloat16;
         params.prefill_capture_seq_lens     = std::move(prefill_capture_seq_lens);
         params.kv_cache_group_tags          = std::move(group_tags);
@@ -55,6 +56,7 @@ public:
         params.max_seq_len                  = static_cast<int>(max_seq_len);
         params.tokens_per_block             = static_cast<int>(tokens_per_block);
         params.kernel_tokens_per_block      = static_cast<int>(kernel_tokens_per_block);
+        params.input_hidden_size            = static_cast<size_t>(hidden_size);
         params.num_tokens_per_bs            = static_cast<int>(num_tokens_per_bs);
         params.hidden_size                  = static_cast<size_t>(hidden_size);
         params.model_data_type              = c10::ScalarType::BFloat16;

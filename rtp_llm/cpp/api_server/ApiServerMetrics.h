@@ -19,10 +19,13 @@ public:
 
 public:
     // `virtual` for test
-    virtual void reportQpsMetric(const std::string& source);
-    virtual void reportCancelQpsMetric(const std::string& source);
-    virtual void reportSuccessQpsMetric(const std::string& source);
-    virtual void reportErrorQpsMetric(const std::string& source, int error_code);
+    // ``priority`` is the Auto-TPM qos level used as the kmonitor ``priority``
+    // tag; 0 when the caller has no qos context. Each method single-reports
+    // with the ``priority`` tag.
+    virtual void reportQpsMetric(const std::string& source, int priority = 0);
+    virtual void reportCancelQpsMetric(const std::string& source, int priority = 0);
+    virtual void reportSuccessQpsMetric(const std::string& source, int priority = 0);
+    virtual void reportErrorQpsMetric(const std::string& source, int error_code, int priority = 0);
     virtual void reportConflictQpsMetric();
     virtual void reportResponseIterateQpsMetric();
 

@@ -241,8 +241,8 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     }
 
     // TODO: move it to better position
-    RTP_LLM_LOG_DEBUG("stream [%ld] finished: %d, pd_sep: %d, is_streaming: %d, need_remote_generate: %d",
-                      streamId(),
+    RTP_LLM_LOG_DEBUG("stream [%s] finished: %d, pd_sep: %d, is_streaming: %d, need_remote_generate: %d",
+                      streamLogTag().c_str(),
                       finished_,
                       queryPdSep(),
                       isStreaming(),
@@ -252,8 +252,10 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         // Hold KV cache even when the stream already finished in prefill
         // (e.g. stop words hit): the decode role still issues RemoteLoad for
         // these blocks and would hang if they were freed here.
+        RTP_LLM_LOG_DEBUG("stream [%s] hold kv cache for pd-sep", streamLogTag().c_str());
         holdKVCacheForPDSep();
         if (!finished_) {
+            RTP_LLM_LOG_DEBUG("stream [%s] set need_remote_generate", streamLogTag().c_str());
             reportEventWithoutLock(StreamEvents::NeedRemoteGenerate);
             reportEventWithoutLock(StreamEvents::GenerateDone);
         }
@@ -269,7 +271,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         return;
     }
 
-    RTP_LLM_LOG_DEBUG("stream [%ld] enqueue generate output", streamId());
+    RTP_LLM_LOG_DEBUG("stream [%s] enqueue generate output", streamLogTag().c_str());
     enqueueGenerateOutput(prepareGenerateOutput(update_info));
 
     if (hasErrorWithoutLock()) {

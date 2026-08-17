@@ -39,7 +39,11 @@ class CudaFp8DeepGEMMLinearOutContractTest(unittest.TestCase):
         gemm_calls = []
 
         def fake_quant(x, **kwargs):
-            return x, torch.ones(x.shape[0], 1, dtype=torch.float32)
+            # forward_quantized() enforces float8_e4m3fn, so the fake must
+            # return a genuinely quantized tensor.
+            return x.to(torch.float8_e4m3fn), torch.ones(
+                x.shape[0], 1, dtype=torch.float32
+            )
 
         def fake_fp8_gemm_nt(input_pair, weight_pair, output, c=None, **kwargs):
             gemm_calls.append((input_pair, weight_pair, output, c, kwargs))
@@ -67,16 +71,31 @@ class CudaFp8DeepGEMMLinearOutContractTest(unittest.TestCase):
         linear = _make_linear_for_forward()
         input_tensor = torch.ones(2, linear.K, dtype=torch.bfloat16)
 
-        with self.assertRaisesRegex(ValueError, "Output tensor shape"):
-            linear(input_tensor, out=torch.empty(2, linear.N + 1, dtype=torch.bfloat16))
-        with self.assertRaisesRegex(ValueError, "Output tensor dtype"):
-            linear(input_tensor, out=torch.empty(2, linear.N, dtype=torch.float32))
+        def fake_quant(x, **kwargs):
+            return x.to(torch.float8_e4m3fn), torch.ones(
+                x.shape[0], 1, dtype=torch.float32
+            )
 
-        non_contiguous = torch.empty(linear.N, 2, dtype=torch.bfloat16).t()
-        self.assertEqual(tuple(non_contiguous.shape), (2, linear.N))
-        self.assertFalse(non_contiguous.is_contiguous())
-        with self.assertRaisesRegex(ValueError, "Output tensor must be contiguous"):
-            linear(input_tensor, out=non_contiguous)
+        # forward() quantizes before output preparation; stub the quantizer so
+        # the invalid `out` buffers reach _prepare_output() and are rejected there.
+        with patch.object(
+            deepgemm_linear_mod,
+            "sgl_per_token_group_quant_fp8",
+            side_effect=fake_quant,
+        ):
+            with self.assertRaisesRegex(ValueError, "Output tensor shape"):
+                linear(
+                    input_tensor,
+                    out=torch.empty(2, linear.N + 1, dtype=torch.bfloat16),
+                )
+            with self.assertRaisesRegex(ValueError, "Output tensor dtype"):
+                linear(input_tensor, out=torch.empty(2, linear.N, dtype=torch.float32))
+
+            non_contiguous = torch.empty(linear.N, 2, dtype=torch.bfloat16).t()
+            self.assertEqual(tuple(non_contiguous.shape), (2, linear.N))
+            self.assertFalse(non_contiguous.is_contiguous())
+            with self.assertRaisesRegex(ValueError, "Output tensor must be contiguous"):
+                linear(input_tensor, out=non_contiguous)
 
     def test_dispatch_wrapper_uses_deepgemm_for_out_buffer(self):
         input_tensor = torch.ones(2, 4, dtype=torch.bfloat16)

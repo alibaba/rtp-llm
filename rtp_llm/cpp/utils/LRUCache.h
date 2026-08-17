@@ -54,6 +54,8 @@ public:
 
     bool contains(const KeyType& key) const;
 
+    const ValueType* peek(const KeyType& key) const;
+
     bool remove(const KeyType& key, ValueType* removed_value = nullptr);
 
     void printCache() const;
@@ -174,6 +176,12 @@ template<typename KeyType, typename ValueType, typename Hash, typename Equal>
 bool LRUCache<KeyType, ValueType, Hash, Equal>::contains(const KeyType& key) const {
     auto it = cache_items_map_.find(key);
     return it != cache_items_map_.end();
+}
+
+template<typename KeyType, typename ValueType, typename Hash, typename Equal>
+const ValueType* LRUCache<KeyType, ValueType, Hash, Equal>::peek(const KeyType& key) const {
+    auto it = cache_items_map_.find(key);
+    return it == cache_items_map_.end() ? nullptr : &it->second->second;
 }
 
 template<typename KeyType, typename ValueType, typename Hash, typename Equal>

@@ -22,6 +22,7 @@ struct GraphParams {
     bool             enable_cuda_graph_debug_mode = false;
     bool             is_prefill_cuda_graph_mode   = false;
     bool             is_target_verify             = false;
+    DSparkCallPhase  dspark_call_phase            = DSparkCallPhase::NONE;
     int              max_seq_len                  = 0;
     int              tokens_per_block             = 0;  // physical kv block size
     int              kernel_tokens_per_block      = 0;  // must be explicitly configured
@@ -42,6 +43,11 @@ struct GraphParams {
     // >0 = factor (e.g. Mrope = rope_config.index_factor). Sourced from
     //     description_.attention_conf.rope_config in the model wrapper, not Python reflection.
     int position_id_len_factor = 0;
+    // Width of one input_hiddens row. This is deliberately independent from
+    // hidden_size and from hc_mult: regular DSv4 MTP consumes
+    // hc_mult * hidden_size while DSpARK consumes
+    // len(target_layer_ids) * hidden_size.
+    std::size_t input_hidden_size = 0;
 };
 
 class GraphBase {

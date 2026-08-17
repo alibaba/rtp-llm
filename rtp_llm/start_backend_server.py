@@ -33,6 +33,16 @@ from rtp_llm.utils.util import copy_gemm_config
 setup_logging()
 
 
+def _install_hot_hook_runtime(role: str) -> None:
+    try:
+        from rtp_llm.utils.hot_hook_runtime import install_if_enabled
+
+        if install_if_enabled():
+            logging.info("RTP hot hook runtime installed for %s", role)
+    except Exception as e:
+        logging.error("failed to install RTP hot hook runtime for %s: %s", role, e)
+
+
 def _send_pipe_status(pipe_writer, status: str, message: str, error_trace: str = ""):
     if pipe_writer is None:
         return
@@ -52,6 +62,7 @@ def local_rank_start(
     pipe_writer=None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
+    _install_hot_hook_runtime(f"backend_rank_{world_rank}")
     backend_manager = None
     logging.info(f"[PROCESS_START]Start local rank process")
 

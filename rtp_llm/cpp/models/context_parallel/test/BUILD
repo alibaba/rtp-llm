@@ -1,5 +1,19 @@
-load("//:def.bzl", "copts", "cuda_copts")
+load("//:def.bzl", "cc_test_wrapper", "copts", "cuda_copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
+
+cc_test = cc_test_wrapper
+
+cc_test(
+    name = "zigzag_token_layout_test",
+    srcs = [
+        "ZigzagTokenLayoutTest.cc",
+    ],
+    deps = [
+        "//rtp_llm/cpp/models:context_parallel_layout",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
 
 cc_library(
     name = "th_context_parallel_py_wrapper_test_lib",
@@ -39,4 +53,3 @@ py_test(
     ],
     exec_properties = {'gpu':'H20'},
 )
-
