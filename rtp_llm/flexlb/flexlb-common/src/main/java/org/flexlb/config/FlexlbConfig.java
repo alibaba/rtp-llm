@@ -29,6 +29,11 @@ public class FlexlbConfig {
     private LogLevel flexlbLogLevel = LogLevel.INFO;
 
     /**
+     * Load balancer status consistency and master election configuration.
+     */
+    private LBConsistencyConfig flexlbSyncConsistencyConfig = new LBConsistencyConfig();
+
+    /**
      * Block hash strategy used for cache matching.
      */
     private BlockHashStrategyType blockHashStrategy = BlockHashStrategyType.VLLM;

@@ -17,6 +17,8 @@ class EnvironmentConfigSourceTest {
         Map<String, String> environment = Map.of(
                 "FLEXLB_CONFIG", "{\"maxRetryCount\":3,\"enableQueueing\":false}",
                 "FLEXLB_LOG_LEVEL", "DEBUG",
+                "FLEXLB_SYNC_CONSISTENCY_CONFIG",
+                "{\"needConsistency\":true,\"zookeeperConfig\":{\"zkHost\":\"zk:2181\",\"zkTimeoutMs\":10000}}",
                 "MAX_RETRY_COUNT", "4",
                 "ENABLE_QUEUEING", "true");
         EnvironmentConfigSource source = new EnvironmentVariables(environment).execute(() -> {
@@ -35,6 +37,9 @@ class EnvironmentConfigSourceTest {
         assertThat(config.getMaxRetryCount()).isEqualTo(4);
         assertThat(config.isEnableQueueing()).isTrue();
         assertThat(config.getFlexlbLogLevel()).isEqualTo(LogLevel.DEBUG);
+        assertThat(config.getFlexlbSyncConsistencyConfig().isNeedConsistency()).isTrue();
+        assertThat(config.getFlexlbSyncConsistencyConfig().getZookeeperConfig().getZkHost()).isEqualTo("zk:2181");
+        assertThat(config.getFlexlbSyncConsistencyConfig().getZookeeperConfig().getZkTimeoutMs()).isEqualTo(10000);
         configService.close();
     }
 }

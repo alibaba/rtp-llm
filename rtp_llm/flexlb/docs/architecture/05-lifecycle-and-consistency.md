@@ -62,7 +62,8 @@ warmup 未完成 → 404 "warm not finish"；否则 200 "success"。
 
 ### 配置
 
-env `FLEXLB_SYNC_CONSISTENCY_CONFIG`（JSON → `LBConsistencyConfig`）：`needConsistency`
+`FlexlbConfig.flexlbSyncConsistencyConfig`（环境变量兼容
+`FLEXLB_SYNC_CONSISTENCY_CONFIG`）：`needConsistency`
 （默认 false，缺省时一切成为 no-op、`isMaster()` 恒 false）、`masterElectType`（仅
 `ZOOKEEPER`）、`zookeeperConfig{zkHost, zkTimeoutMs}`。另需 env `HIPPO_ROLE`（做选举路径），
 端口取 `-Dserver.port`（默认 7001，假定所有副本同端口）。

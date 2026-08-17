@@ -2,6 +2,7 @@ package org.flexlb.service.config;
 
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.LBConsistencyConfig;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
@@ -104,6 +105,27 @@ class ConfigServiceTest {
 
         assertThat(service.loadBalanceConfig().isEnableQueueing()).isTrue();
         assertThat(service.loadBalanceConfig().getMaxRetryCount()).isEqualTo(9);
+    }
+
+    @Test
+    void loadsNestedConsistencyConfigFromNacos() {
+        FakeConfigSource source = new FakeConfigSource(
+                "Nacos",
+                200,
+                "{\"flexlbSyncConsistencyConfig\":{\"needConsistency\":true,"
+                        + "\"masterElectType\":\"ZOOKEEPER\",\"zookeeperConfig\":{"
+                        + "\"zkHost\":\"zk:2181\",\"zkTimeoutMs\":10000}}}");
+
+        ConfigService service = createService(List.of(
+                environmentSource(Map.of()),
+                source));
+        LBConsistencyConfig consistencyConfig =
+                service.loadBalanceConfig().getFlexlbSyncConsistencyConfig();
+
+        assertThat(consistencyConfig.isNeedConsistency()).isTrue();
+        assertThat(consistencyConfig.getMasterElectType()).isEqualTo(LBConsistencyConfig.MasterElectType.ZOOKEEPER);
+        assertThat(consistencyConfig.getZookeeperConfig().getZkHost()).isEqualTo("zk:2181");
+        assertThat(consistencyConfig.getZookeeperConfig().getZkTimeoutMs()).isEqualTo(10000);
     }
 
     @Test

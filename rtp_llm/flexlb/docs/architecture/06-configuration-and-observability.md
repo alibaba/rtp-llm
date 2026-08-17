@@ -98,10 +98,14 @@ Spring 属性/env，缺省**启动失败**。反序列化为 `ServiceRoute`：
   KVCM namespace。请求收尾从 Reactor event-loop 卸载；线程池不设置任务队列，瞬时
   饱和时由提交线程执行，executor shutdown 后允许丢弃晚到任务。
 
-### FLEXLB_SYNC_CONSISTENCY_CONFIG（可选）
+### flexlbSyncConsistencyConfig（可选）
 
+统一配置字段为 `FlexlbConfig.flexlbSyncConsistencyConfig`：
 `LBConsistencyConfig{needConsistency=false, masterElectType=ZOOKEEPER,
-zookeeperConfig{zkHost, zkTimeoutMs}}`；另需 env `HIPPO_ROLE`。见
+zookeeperConfig{zkHost, zkTimeoutMs}}`。环境变量
+`FLEXLB_SYNC_CONSISTENCY_CONFIG` 仍然兼容；Nacos 中使用对象字段
+`flexlbSyncConsistencyConfig`。该配置在启动时初始化，更新后需要重启生效；另需 env
+`HIPPO_ROLE`。见
 [05-lifecycle-and-consistency](05-lifecycle-and-consistency.md)。
 
 ## HTTP 端点（主端口 7001，全部 WebFlux RouterFunction）

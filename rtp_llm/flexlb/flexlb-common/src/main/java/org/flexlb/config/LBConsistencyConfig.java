@@ -1,13 +1,8 @@
-package org.flexlb.domain.consistency;
+package org.flexlb.config;
 
 import lombok.Getter;
 import lombok.Setter;
 
-/**
- * @author zjw
- * description:
- * date: 2025/3/30
- */
 @Getter
 @Setter
 public class LBConsistencyConfig {
@@ -26,5 +21,4 @@ public class LBConsistencyConfig {
         private String zkHost;
         private int zkTimeoutMs;
     }
-
 }

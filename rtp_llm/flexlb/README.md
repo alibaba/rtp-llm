@@ -241,7 +241,8 @@ FlexLB supports various configuration options through environment variables and 
 
 - **Load Balancing Strategy**: Configure through `FLEXLB_CONFIG`
 - **Backend Services**: Configure through `MODEL_SERVICE_CONFIG`
-- **ZooKeeper Settings**: Configure through `FLEXLB_SYNC_CONSISTENCY_CONFIG`
+- **ZooKeeper Settings**: Configure through `FlexlbConfig.flexlbSyncConsistencyConfig`
+  (legacy environment variable `FLEXLB_SYNC_CONSISTENCY_CONFIG` is still supported)
 ## Contributing
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details on how to contribute to this project.

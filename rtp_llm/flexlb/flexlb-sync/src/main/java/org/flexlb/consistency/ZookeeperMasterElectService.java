@@ -14,13 +14,13 @@ import org.apache.curator.framework.recipes.leader.Participant;
 import org.apache.curator.framework.state.ConnectionState;
 import org.apache.curator.retry.ExponentialBackoffRetry;
 import org.apache.curator.utils.CloseableUtils;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.LBConsistencyConfig;
 import org.flexlb.constant.ZkMasterEvent;
-import org.flexlb.domain.consistency.LBConsistencyConfig;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.transport.GeneralHttpNettyService;
-import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -69,18 +69,19 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     private final AtomicReference<CountDownLatch> leaderCloseLatchRef = new AtomicReference<>();
 
     public ZookeeperMasterElectService(GeneralHttpNettyService generalHttpNettyService,
-                                       EngineHealthReporter engineHealthReporter) {
+                                       EngineHealthReporter engineHealthReporter,
+                                       ConfigService configService) {
 
         Logger.warn("Initializing ZookeeperMasterElectService...");
 
         this.generalHttpNettyService = generalHttpNettyService;
         this.engineHealthReporter = engineHealthReporter;
+        this.lbConsistencyConfig = configService.loadBalanceConfig().getFlexlbSyncConsistencyConfig();
 
         init();
     }
 
     public void init() {
-        initializeLBConsistencyConfig();
         if (!lbConsistencyConfig.isNeedConsistency()) {
             LOGGER.warn("Consistency is not required for LBConsistencyConfig.");
             return;
@@ -106,15 +107,6 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
             throw new RuntimeException("Failed to retrieve local host address", e);
         }
         port = Integer.parseInt(System.getProperty("server.port", "7001"));
-    }
-
-    private void initializeLBConsistencyConfig() {
-        String configStr = System.getenv("FLEXLB_SYNC_CONSISTENCY_CONFIG");
-        LOGGER.warn("FLEXLB_SYNC_CONSISTENCY_CONFIG = {}.", configStr);
-
-        lbConsistencyConfig = configStr == null
-                ? new LBConsistencyConfig()
-                : JsonUtils.toObject(configStr, LBConsistencyConfig.class);
     }
 
     private void initializeZookeeperClient() {
