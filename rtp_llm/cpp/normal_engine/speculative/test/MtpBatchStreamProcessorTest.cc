@@ -1116,7 +1116,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrepareAndVerifyUsePerStreamDevice
               toVec<int32_t>(model_input.combo_position_ids));
 }
 
-TEST_F(MtpBatchStreamProcessorTest, testDSparkRoundHeadUsesPerStreamDeviceState) {
+TEST_F(MtpBatchStreamProcessorTest, testDSparkPrepareAndVerifyUsePerStreamDeviceState) {
     constexpr int32_t gamma = 3;
 
     ModelConfig                 model_config;
@@ -1156,10 +1156,22 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkRoundHeadUsesPerStreamDeviceState)
     MtpBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
     TensorHolder host_holder;
-    auto         round_head = processor.buildDSparkRoundHead(stream_groups, model_input, host_holder);
+    auto         round_head = processor.prepareDSparkDraftModelInput(stream_groups, model_input, host_holder);
 
     EXPECT_EQ((std::vector<int32_t>{102, 22}), toVec<int32_t>(round_head.anchors));
     EXPECT_EQ((std::vector<int32_t>{9, 2}), toVec<int32_t>(round_head.committed_ends));
+    EXPECT_EQ((std::vector<int32_t>{102, 255, 255, 22, 255, 255}), toVec<int32_t>(model_input.combo_tokens));
+    EXPECT_EQ((std::vector<int32_t>{gamma, gamma}), toVec<int32_t>(model_input.input_lengths));
+    EXPECT_EQ((std::vector<int32_t>{9, 2}), toVec<int32_t>(model_input.prefix_lengths));
+    EXPECT_EQ(model_input.dspark_call_phase, DSparkCallPhase::PROPOSE);
+
+    auto proposals = torch::tensor({{31, 32, 33}, {41, 42, 43}}, torch::kInt32).to(torch::kCUDA);
+    processor.updateDSparkTargetVerifyModelInput(round_head, model_input, proposals, host_holder);
+    EXPECT_EQ((std::vector<int32_t>{102, 31, 32, 33, 22, 41, 42, 43}), toVec<int32_t>(model_input.combo_tokens));
+    EXPECT_EQ((std::vector<int32_t>{gamma + 1, gamma + 1}), toVec<int32_t>(model_input.input_lengths));
+    EXPECT_EQ((std::vector<int32_t>{9, 2}), toVec<int32_t>(model_input.prefix_lengths));
+    EXPECT_EQ((std::vector<int32_t>{0, 1, 2, 3, 4, 5, 6, 7}), toVec<int32_t>(model_input.lm_output_indexes));
+    EXPECT_EQ(model_input.dspark_call_phase, DSparkCallPhase::NONE);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testDSparkDecodeCommitPreservesDenseVerifyGeometry) {
