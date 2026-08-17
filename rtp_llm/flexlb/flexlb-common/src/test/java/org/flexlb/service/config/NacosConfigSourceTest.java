@@ -69,15 +69,18 @@ class NacosConfigSourceTest {
         com.alibaba.nacos.api.config.ConfigService client =
                 mock(com.alibaba.nacos.api.config.ConfigService.class);
         ArgumentCaptor<Listener> listenerCaptor = ArgumentCaptor.forClass(Listener.class);
-        when(client.getConfigAndSignListener(
+        when(client.getConfig(
                 org.mockito.ArgumentMatchers.eq("flexlb-test"),
                 org.mockito.ArgumentMatchers.eq("FLEXLB_GROUP"),
-                org.mockito.ArgumentMatchers.eq(3000L),
-                listenerCaptor.capture()))
+                org.mockito.ArgumentMatchers.eq(3000L)))
                 .thenReturn("{\"maxRetryCount\":9}");
         NacosConfigSource source = createSource(client, "test-namespace");
 
         source.initialize();
+        verify(client).addListener(
+                org.mockito.ArgumentMatchers.eq("flexlb-test"),
+                org.mockito.ArgumentMatchers.eq("FLEXLB_GROUP"),
+                listenerCaptor.capture());
         ConfigService configService = new ConfigService();
 
         assertThat(configService.loadBalanceConfig().getMaxRetryCount()).isEqualTo(9);
@@ -96,11 +99,10 @@ class NacosConfigSourceTest {
     void shutsDownClientWhenRemovingListenerFails() throws Exception {
         com.alibaba.nacos.api.config.ConfigService client =
                 mock(com.alibaba.nacos.api.config.ConfigService.class);
-        when(client.getConfigAndSignListener(
+        when(client.getConfig(
                 org.mockito.ArgumentMatchers.eq("flexlb-test"),
                 org.mockito.ArgumentMatchers.eq("FLEXLB_GROUP"),
-                org.mockito.ArgumentMatchers.eq(3000L),
-                org.mockito.ArgumentMatchers.any(Listener.class)))
+                org.mockito.ArgumentMatchers.eq(3000L)))
                 .thenReturn("{\"maxRetryCount\":9}");
         NacosConfigSource source = createSource(client, "");
         source.initialize();

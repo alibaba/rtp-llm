@@ -80,11 +80,8 @@ final class NacosConfigSource implements ConfigSource {
                 client = createClient(config);
             }
             listener = createListener();
-            configContent = client.getConfigAndSignListener(
-                    config.getDataId(),
-                    config.getGroup(),
-                    CONFIG_READ_TIMEOUT_MS,
-                    listener);
+            configContent = client.getConfig(config.getDataId(), config.getGroup(), CONFIG_READ_TIMEOUT_MS);
+            client.addListener(config.getDataId(), config.getGroup(), listener);
             ConfigService.register(this);
         } catch (Exception e) {
             try {
