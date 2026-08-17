@@ -1092,8 +1092,18 @@ def _tiled_swiglu_mxfp8_configs():
     """
     cfgs = []
     tiles = (
-        (8, 16), (16, 16), (8, 32), (16, 32), (32, 16), (32, 8),
-        (64, 8), (8, 64), (16, 8), (4, 32), (64, 4), (4, 64),
+        (8, 16),
+        (16, 16),
+        (8, 32),
+        (16, 32),
+        (32, 16),
+        (32, 8),
+        (64, 8),
+        (8, 64),
+        (16, 8),
+        (4, 32),
+        (64, 4),
+        (4, 64),
     )
     for block_t, ng in tiles:
         for num_warps in (4, 8, 16):
@@ -1106,31 +1116,31 @@ def _tiled_swiglu_mxfp8_configs():
 @triton.autotune(configs=_tiled_swiglu_mxfp8_configs(), key=["size_n"])
 @triton.jit
 def _silu_and_mul_mxfp8_quant_tiled_kernel(
-    input_ptr,             # [T, 2*H_out] bf16
+    input_ptr,  # [T, 2*H_out] bf16
     stride_input_t,
-    output_ptr,            # [T, H_out] fp8_e4m3fn
+    output_ptr,  # [T, H_out] fp8_e4m3fn
     stride_output_t,
-    output_scale_ptr,      # [T, num_groups] fp32
+    output_scale_ptr,  # [T, num_groups] fp32
     stride_scale_t,
     stride_scale_g,
     T,
-    size_n,                # H_out
+    size_n,  # H_out
     n_groups,
     fp8_max,
     fp8_min,
-    BLOCK_N: tl.constexpr,   # MX_BLOCK = 32
+    BLOCK_N: tl.constexpr,  # MX_BLOCK = 32
     GEMM1_ALPHA: tl.constexpr,
     GEMM1_CLAMP_LIMIT: tl.constexpr,
-    BLOCK_T: tl.constexpr,   # rows per program (autotuned)
-    NG: tl.constexpr,        # groups per program (autotuned)
+    BLOCK_T: tl.constexpr,  # rows per program (autotuned)
+    NG: tl.constexpr,  # groups per program (autotuned)
 ):
     """Tiled SwiGLU-OAI + MXFP8 quant: BLOCK_T rows × NG groups per program.
 
     One wide contiguous load per operand, then a reshape+reduce over the group
     axis (no per-group loop) for coalesced, near-peak-bandwidth access.
     """
-    pid_g = tl.program_id(0)
-    pid_t = tl.program_id(1)
+    pid_t = tl.program_id(0)
+    pid_g = tl.program_id(1)
 
     stride_input_t = tl.cast(stride_input_t, dtype=tl.int64)
     stride_output_t = tl.cast(stride_output_t, dtype=tl.int64)
@@ -1148,9 +1158,9 @@ def _silu_and_mul_mxfp8_quant_tiled_kernel(
     # One wide contiguous load for gate and up: [BLOCK_T, BLOCK_W].
     in_base = input_ptr + offs_t[:, None] * stride_input_t
     gate = tl.load(in_base + offs_w[None, :], mask=load_mask, other=0.0).to(tl.float32)
-    up = tl.load(
-        in_base + (size_n + offs_w)[None, :], mask=load_mask, other=0.0
-    ).to(tl.float32)
+    up = tl.load(in_base + (size_n + offs_w)[None, :], mask=load_mask, other=0.0).to(
+        tl.float32
+    )
 
     # SwiGLU-OAI: gate * sigmoid(gate*alpha) * (up+1) with clamps
     gate = tl.minimum(gate, GEMM1_CLAMP_LIMIT)
@@ -1170,8 +1180,8 @@ def _silu_and_mul_mxfp8_quant_tiled_kernel(
     # IEEE-RNE div (match _silu_and_mul_post_quant_dense_packed_kernel)
     s0 = _ieee_rn_div_f32(absmax, fp8_max)
     log_s = tl.ceil(tl.log2(tl.abs(s0)))  # [BLOCK_T, NG]
-    output_s = tl.exp2(log_s)             # power-of-two scale to store
-    recip = tl.exp2(-log_s)               # exact 1/scale (pow2 → bit-exact)
+    output_s = tl.exp2(log_s)  # power-of-two scale to store
+    recip = tl.exp2(-log_s)  # exact 1/scale (pow2 → bit-exact)
 
     # Quantize by multiplying with the exact reciprocal. Because the scale is a
     # power of two, x * (1/scale) == x / scale bit-for-bit, so this stays byte
@@ -1199,7 +1209,7 @@ def silu_and_mul_mxfp8_quant_tiled_fwd(
     gemm1_alpha: float = 0.0,
     gemm1_clamp_limit: float = 0.0,
     block_t: int = 8,  # deprecated: kept for BC, BLOCK_T is autotuned
-    ng: int = 16,      # deprecated: kept for BC, NG is autotuned
+    ng: int = 16,  # deprecated: kept for BC, NG is autotuned
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Tiled fused SwiGLU-OAI + MXFP8 quant, optimized for large T.
 
@@ -1226,7 +1236,9 @@ def silu_and_mul_mxfp8_quant_tiled_fwd(
     num_groups = size_n // quant_group_size
 
     output = torch.empty((T, size_n), dtype=torch.float8_e4m3fn, device=input.device)
-    output_scale = torch.empty((T, num_groups), dtype=torch.float32, device=input.device)
+    output_scale = torch.empty(
+        (T, num_groups), dtype=torch.float32, device=input.device
+    )
 
     if T == 0:
         return output, output_scale
@@ -1236,9 +1248,15 @@ def silu_and_mul_mxfp8_quant_tiled_fwd(
     fp8_min = -fp8_max
 
     def grid(meta):
+        # The token axis must map to gridDim.x: CUDA caps gridDim.y/z at
+        # 65535, and long-context prefill steps (T up to ~1M) overflow it
+        # once cdiv(T, BLOCK_T) > 65535 -- cuLaunchKernelEx then fails with
+        # CUDA_ERROR_INVALID_VALUE ("Triton Error [CUDA]: invalid argument").
+        # num_groups is bounded by size_n / quant_group_size, well under the
+        # y-axis limit, so only this axis order is launch-safe for any T.
         return (
-            triton.cdiv(num_groups, meta["NG"]),
             triton.cdiv(T, meta["BLOCK_T"]),
+            triton.cdiv(num_groups, meta["NG"]),
         )
 
     _silu_and_mul_mxfp8_quant_tiled_kernel[grid](
