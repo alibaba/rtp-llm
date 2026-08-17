@@ -325,7 +325,10 @@ __global__ void TopKSamplingFromProbKernel(DType*    probs,
     const uint32_t              batch_size = gridDim.x;
     const uint32_t              bx = blockIdx.x, tx = threadIdx.x;
     hiprandStatePhilox4_32_10_t state;
-    hiprand_init(philox_seed[bx], bx, philox_offset[bx], &state);
+    // Each row already owns an independent generator state. Mixing the current
+    // batch row into the Philox subsequence makes a request's stream change when
+    // continuous batching reorders it or changes its co-batch size.
+    hiprand_init(philox_seed[bx], 0, philox_offset[bx], &state);
     const uint32_t k       = top_k_arr == nullptr ? top_k_val : top_k_arr[bx];
     const uint32_t row_idx = indices == nullptr ? bx : indices[bx];
 
@@ -444,7 +447,7 @@ __global__ void TopPSamplingFromProbKernel(DType*    probs,
     const uint32_t              batch_size = gridDim.x;
     const uint32_t              bx = blockIdx.x, tx = threadIdx.x;
     hiprandStatePhilox4_32_10_t state;
-    hiprand_init(philox_seed[bx], bx, philox_offset[bx], &state);
+    hiprand_init(philox_seed[bx], 0, philox_offset[bx], &state);
     const uint32_t row_idx = indices == nullptr ? bx : indices[bx];
     float          top_p   = (top_p_arr == nullptr) ? top_p_val : top_p_arr[row_idx];
 
@@ -559,7 +562,7 @@ __global__ void TopKTopPSamplingFromProbKernel(DType*    probs,
     const uint32_t              batch_size = gridDim.x;
     const uint32_t              bx = blockIdx.x, tx = threadIdx.x;
     hiprandStatePhilox4_32_10_t state;
-    hiprand_init(philox_seed[bx], bx, philox_offset[bx], &state);
+    hiprand_init(philox_seed[bx], 0, philox_offset[bx], &state);
     const uint32_t row_idx = indices == nullptr ? bx : indices[bx];
     const uint32_t k       = top_k_arr == nullptr ? top_k_val : top_k_arr[row_idx];
     const float    p       = top_p_arr == nullptr ? top_p_val : top_p_arr[row_idx];
@@ -663,7 +666,7 @@ template<typename T, typename IdType>
 hipError_t TopKSamplingFromProb(T*          probs,
                                 IdType*     output,
                                 IdType*     indices,
-                                T*          top_k_arr,
+                                IdType*     top_k_arr,
                                 uint32_t    batch_size,
                                 uint32_t    top_k_val,
                                 uint32_t    d,

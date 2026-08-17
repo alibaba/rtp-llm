@@ -330,6 +330,23 @@ cc_library(
     alwayslink = 1,
 )
 
+# Isolate CudaSampleOp.cc from GPU-only dependencies so the generic PyTorch
+# fallback remains compile- and testable under --config=cpu.
+cc_library(
+    name = "generic_sampler_fallback_test_lib",
+    srcs = ["CudaSampleOp.cc"],
+    deps = [
+        ":common_defines",
+        ":op_data",
+    ] + torch_deps(),
+    copts = copts(),
+    target_compatible_with = select({
+        "@//:using_cpu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    visibility = ["//rtp_llm/models_py/bindings/core/test:__pkg__"],
+)
+
 # Combined target for backward compatibility — pulls in both state + ops.
 cc_library(
     name = "exec_ctx_rocm",

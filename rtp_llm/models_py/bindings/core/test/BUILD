@@ -5,6 +5,21 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
+cc_test(
+    name = "generic_sampler_batch_fallback_test",
+    srcs = ["GenericSamplerBatchFallbackTest.cc"],
+    deps = [
+        "//rtp_llm/models_py/bindings/core:generic_sampler_fallback_test_lib",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    copts = test_copts,
+    tags = ["cpu"],
+    target_compatible_with = select({
+        "@//:using_cpu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
 exec_ops_test_deps = [
     "//rtp_llm/cpp/cache:cache_config",
     "//rtp_llm/models_py/bindings:op_defs",
