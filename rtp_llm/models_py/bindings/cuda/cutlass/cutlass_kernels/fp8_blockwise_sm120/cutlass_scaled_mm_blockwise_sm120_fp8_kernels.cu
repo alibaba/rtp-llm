@@ -22,9 +22,8 @@
 #include <cuda_runtime_api.h>
 #include <torch/all.h>
 
-#include <utility>
-
 #include <type_traits>
+#include <utility>
 
 #include "cutlass_scaled_mm_blockwise_sm120_fp8.h"
 
@@ -41,6 +40,7 @@
 #include "cutlass/gemm/kernel/tile_scheduler_params.h"
 #include "cutlass/epilogue/dispatch_policy.hpp"
 #include "cutlass/epilogue/collective/collective_builder.hpp"
+#include "cutlass/epilogue/thread/activation.h"
 #include "cutlass/util/packed_stride.hpp"
 // clang-format on
 
@@ -77,9 +77,6 @@ struct CachedDeviceProperties {
 };
 
 CachedDeviceProperties get_cached_device_properties(int device) {
-    // Inference worker threads normally stay on one CUDA device. Cache the
-    // capability per thread so the GEMM hot path does not repeatedly enter
-    // the CUDA Runtime while still validating the actual runtime device.
     thread_local int cached_device   = -1;
     thread_local int cached_major    = -1;
     thread_local int cached_minor    = -1;
@@ -125,7 +122,8 @@ template<class OutType,
          class ClusterShape,
          class EpilogueScheduler,
          class MainloopScheduler,
-         bool swap_ab_ = false>
+         bool swap_ab_ = false,
+         bool UseGelu_ = false>
 struct cutlass_3x_gemm_fp8_blockwise {
     static constexpr bool swap_ab = swap_ab_;
     using ElementAB               = cutlass::float_e4m3_t;
@@ -172,10 +170,43 @@ struct cutlass_3x_gemm_fp8_blockwise {
     using ArchTag       = cutlass::arch::Sm120;
     using OperatorClass = cutlass::arch::OpClassTensorOp;
 
-    static constexpr auto RoundStyle = cutlass::FloatRoundStyle::round_to_nearest;
-    using ElementScalar              = float;
-    using DefaultOperation =
-        cutlass::epilogue::fusion::LinearCombination<ElementD, ElementCompute, ElementC, ElementScalar, RoundStyle>;
+    static constexpr auto RoundStyle   = cutlass::FloatRoundStyle::round_to_nearest;
+    using ElementScalar                = float;
+    static constexpr int AlignmentBias = 128 / cutlass::sizeof_bits<ElementD>::value;
+    // Fuse optional per-output-channel (per-N) bias into the epilogue.
+    // swap_ab computes the transposed problem (N, M), so the per-N bias is
+    // per-row there; the normal path has it per-column. bias_ptr=nullptr at
+    // runtime makes the broadcast contribute 0 (i.e. no bias).
+    //
+    // When UseGelu_ is true, GELU (tanh approximation) is fused into the
+    // epilogue after the bias add, eliminating a separate activation kernel.
+    using BiasOnlyOp = std::conditional_t<
+        swap_ab,
+        cutlass::epilogue::fusion::
+            LinCombPerRowBias<ElementD, ElementCompute, ElementD, ElementC, ElementScalar, AlignmentBias, RoundStyle>,
+        cutlass::epilogue::fusion::
+            LinCombPerColBias<ElementD, ElementCompute, ElementD, ElementC, ElementScalar, AlignmentBias, RoundStyle>>;
+
+    using BiasGeluOp =
+        std::conditional_t<swap_ab,
+                           cutlass::epilogue::fusion::LinCombPerRowBiasEltAct<cutlass::epilogue::thread::GELU_taylor,
+                                                                              ElementD,
+                                                                              ElementCompute,
+                                                                              ElementD,
+                                                                              ElementC,
+                                                                              ElementScalar,
+                                                                              AlignmentBias,
+                                                                              RoundStyle>,
+                           cutlass::epilogue::fusion::LinCombPerColBiasEltAct<cutlass::epilogue::thread::GELU_taylor,
+                                                                              ElementD,
+                                                                              ElementCompute,
+                                                                              ElementD,
+                                                                              ElementC,
+                                                                              ElementScalar,
+                                                                              AlignmentBias,
+                                                                              RoundStyle>>;
+
+    using DefaultOperation = std::conditional_t<UseGelu_, BiasGeluOp, BiasOnlyOp>;
 
     using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
         ArchTag,
@@ -234,28 +265,44 @@ struct cutlass_3x_gemm_fp8_blockwise {
     struct GemmKernel: public KernelType {};
 };
 
-// Tile configurations (verbatim from vllm dispatch.cuh)
-template<typename OutType>
+// Tile configurations (verbatim from vllm dispatch.cuh, extended with UseGelu)
+template<typename OutType, bool UseGelu = false>
 struct sm120_blockwise_fp8_config_default {
     using KernelSchedule   = cutlass::gemm::collective::KernelScheduleAuto;
     using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
     using TileShape        = Shape<_128, _128, _128>;
     using ClusterShape     = Shape<_1, _1, _1>;
-    using Gemm =
-        cutlass_3x_gemm_fp8_blockwise<OutType, 1, 128, 128, TileShape, ClusterShape, EpilogueSchedule, KernelSchedule>;
+    using Gemm             = cutlass_3x_gemm_fp8_blockwise<OutType,
+                                                           1,
+                                                           128,
+                                                           128,
+                                                           TileShape,
+                                                           ClusterShape,
+                                                           EpilogueSchedule,
+                                                           KernelSchedule,
+                                                           false,
+                                                           UseGelu>;
 };
 
-template<typename OutType>
+template<typename OutType, bool UseGelu = false>
 struct sm120_blockwise_fp8_config_pingpong {
     using KernelSchedule   = cutlass::gemm::KernelTmaWarpSpecializedBlockwisePingpongSm120;
     using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
     using TileShape        = Shape<_64, _128, _128>;
     using ClusterShape     = Shape<_1, _1, _1>;
-    using Gemm =
-        cutlass_3x_gemm_fp8_blockwise<OutType, 1, 128, 128, TileShape, ClusterShape, EpilogueSchedule, KernelSchedule>;
+    using Gemm             = cutlass_3x_gemm_fp8_blockwise<OutType,
+                                                           1,
+                                                           128,
+                                                           128,
+                                                           TileShape,
+                                                           ClusterShape,
+                                                           EpilogueSchedule,
+                                                           KernelSchedule,
+                                                           false,
+                                                           UseGelu>;
 };
 
-template<typename OutType>
+template<typename OutType, bool UseGelu = false>
 struct sm120_blockwise_fp8_config_swapab {
     using KernelSchedule   = cutlass::gemm::KernelTmaWarpSpecializedBlockwiseCooperativeSm120;
     using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
@@ -269,7 +316,8 @@ struct sm120_blockwise_fp8_config_swapab {
                                                            ClusterShape,
                                                            EpilogueSchedule,
                                                            KernelSchedule,
-                                                           true>;
+                                                           true,
+                                                           UseGelu>;
 };
 
 // Launcher (port of vllm cutlass_gemm_caller_blockwise; uses torch::empty for
@@ -280,6 +328,7 @@ void launch_one(torch::Tensor&       D,
                 torch::Tensor const& B,
                 torch::Tensor const& A_sf,
                 torch::Tensor const& B_sf,
+                torch::Tensor const* bias,
                 int                  M,
                 int                  N,
                 int                  K,
@@ -334,6 +383,9 @@ void launch_one(torch::Tensor&       D,
 
     auto                                   cd = static_cast<ElementD*>(D.data_ptr());
     typename GemmKernel::EpilogueArguments epilogue_args{{}, cd, c_stride, cd, c_stride};
+    if (bias != nullptr) {
+        epilogue_args.thread.bias_ptr = static_cast<ElementD const*>(bias->const_data_ptr());
+    }
 
     auto                        device_props = get_cached_device_properties(A.get_device());
     cutlass::KernelHardwareInfo hw_info;
@@ -350,9 +402,6 @@ void launch_one(torch::Tensor&       D,
     torch::Tensor workspace;
     void*         workspace_ptr = nullptr;
     if (workspace_size > 0) {
-        // PyTorch's CUDA-graph-aware allocator keeps allocations made during
-        // capture in the graph-private pool, so this pointer remains valid for
-        // replay even after the temporary Tensor wrapper leaves this scope.
         auto const workspace_options = torch::TensorOptions().dtype(torch::kUInt8).device(A.device());
         workspace                    = torch::empty(static_cast<int64_t>(workspace_size), workspace_options);
         workspace_ptr                = workspace.data_ptr();
@@ -362,13 +411,14 @@ void launch_one(torch::Tensor&       D,
 }
 
 // M-tier dispatch + M<=64 swap-AB heuristic (verbatim from vllm
-// cutlass_gemm_blockwise_sm120_fp8_dispatch).
-template<typename OutType>
+// cutlass_gemm_blockwise_sm120_fp8_dispatch, extended with UseGelu).
+template<typename OutType, bool UseGelu = false>
 void dispatch_blockwise_sm120(torch::Tensor&       D,
                               torch::Tensor const& A,
                               torch::Tensor const& B,
                               torch::Tensor const& A_sf,
                               torch::Tensor const& B_sf,
+                              torch::Tensor const* bias,
                               int                  M,
                               int                  N,
                               int                  K,
@@ -376,14 +426,15 @@ void dispatch_blockwise_sm120(torch::Tensor&       D,
     bool swap_ab = (M <= 64) || (M % 4 != 0);
     if (!swap_ab) {
         if (M <= 256) {
-            launch_one<typename sm120_blockwise_fp8_config_pingpong<OutType>::Gemm>(
-                D, A, B, A_sf, B_sf, M, N, K, stream);
+            launch_one<typename sm120_blockwise_fp8_config_pingpong<OutType, UseGelu>::Gemm>(
+                D, A, B, A_sf, B_sf, bias, M, N, K, stream);
         } else {
-            launch_one<typename sm120_blockwise_fp8_config_default<OutType>::Gemm>(
-                D, A, B, A_sf, B_sf, M, N, K, stream);
+            launch_one<typename sm120_blockwise_fp8_config_default<OutType, UseGelu>::Gemm>(
+                D, A, B, A_sf, B_sf, bias, M, N, K, stream);
         }
     } else {
-        launch_one<typename sm120_blockwise_fp8_config_swapab<OutType>::Gemm>(D, A, B, A_sf, B_sf, M, N, K, stream);
+        launch_one<typename sm120_blockwise_fp8_config_swapab<OutType, UseGelu>::Gemm>(
+            D, A, B, A_sf, B_sf, bias, M, N, K, stream);
     }
 }
 
@@ -399,11 +450,13 @@ bool has_cutlass_scaled_mm_blockwise_sm120_fp8() {
 #endif
 }
 
-void cutlass_scaled_mm_blockwise_sm120_fp8(torch::Tensor&       D,
-                                           torch::Tensor const& A,
-                                           torch::Tensor const& B,
-                                           torch::Tensor const& A_sf,
-                                           torch::Tensor const& B_sf) {
+void cutlass_scaled_mm_blockwise_sm120_fp8(torch::Tensor&                      D,
+                                           torch::Tensor const&                A,
+                                           torch::Tensor const&                B,
+                                           torch::Tensor const&                A_sf,
+                                           torch::Tensor const&                B_sf,
+                                           std::optional<torch::Tensor> const& bias,
+                                           bool                                use_gelu) {
 #if defined(CUTLASS_ARCH_MMA_SM120_SUPPORTED)
     TORCH_CHECK(A.is_cuda(), "A must be a CUDA tensor");
     auto device = A.device();
@@ -446,12 +499,10 @@ void cutlass_scaled_mm_blockwise_sm120_fp8(torch::Tensor&       D,
 
     at::cuda::CUDAGuard device_guard{(char)A.get_device()};
     auto                device_props = get_cached_device_properties(A.get_device());
-    auto                device_major = device_props.major;
-    auto                device_minor = device_props.minor;
-    TORCH_CHECK(device_major == 12 && device_minor == 0,
+    TORCH_CHECK(device_props.major == 12 && device_props.minor == 0,
                 "cutlass_scaled_mm_blockwise_sm120_fp8 was compiled for sm_120, got sm_",
-                device_major,
-                device_minor,
+                device_props.major,
+                device_props.minor,
                 " on device ",
                 A.get_device(),
                 "; use a backend compiled for the current device architecture");
@@ -496,9 +547,24 @@ void cutlass_scaled_mm_blockwise_sm120_fp8(torch::Tensor&       D,
                 B_sf.stride(1),
                 ")");
 
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream(A.get_device());
+    torch::Tensor const* bias_ptr = nullptr;
+    torch::Tensor        bias_contig;
+    if (bias.has_value()) {
+        check_cuda_same_device(*bias, "bias", device);
+        TORCH_CHECK(bias->dtype() == D.dtype(), "bias dtype must match D dtype");
+        TORCH_CHECK(bias->dim() == 1 || bias->dim() == 2, "bias must be 1D [N] or 2D [1, N], got ", bias->dim(), "D");
+        TORCH_CHECK(bias->dim() == 1 || bias->size(0) == 1, "2D bias first dimension must be 1, got ", bias->size(0));
+        TORCH_CHECK(bias->numel() == N, "bias must have N (", N, ") elements, got ", bias->numel());
+        bias_contig = bias->contiguous();
+        bias_ptr    = &bias_contig;
+    }
 
-    dispatch_blockwise_sm120<cutlass::bfloat16_t>(D, A, B, A_sf, B_sf, M, N, K, stream);
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream(A.get_device());
+    if (use_gelu) {
+        dispatch_blockwise_sm120<cutlass::bfloat16_t, true>(D, A, B, A_sf, B_sf, bias_ptr, M, N, K, stream);
+    } else {
+        dispatch_blockwise_sm120<cutlass::bfloat16_t, false>(D, A, B, A_sf, B_sf, bias_ptr, M, N, K, stream);
+    }
 #else
     TORCH_CHECK(false,
                 "cutlass_scaled_mm_blockwise_sm120_fp8 was not compiled with "
