@@ -82,10 +82,7 @@ class KimiK3KDA(nn.Module):
                 "Kimi K3 supports only PREFILL, DECODE, or PDFUSION roles, got "
                 f"{parallelism_config.role_type}"
             )
-        # PDFUSION is used by the standalone BatchDecodeScheduler benchmark.
-        # Its synthetic streams are converted directly to Decode before model
-        # execution, so KDA must use the Decode kernel/cache layout here.
-        self._is_prefill_role = parallelism_config.role_type == RoleType.PREFILL
+        self._role_type = parallelism_config.role_type
 
         converter = LinearCacheConverter(
             local_num_v_heads=self.local_heads,
@@ -132,7 +129,7 @@ class KimiK3KDA(nn.Module):
 
         self.prefill_executor: Optional[KimiK3KDAPrefill]
         self.decode_executor: Optional[KimiK3KDADecode]
-        if self._is_prefill_role:
+        if self._role_type in (RoleType.PREFILL, RoleType.PDFUSION):
             self.prefill_executor = KimiK3KDAPrefill(
                 weights=weights,
                 cache=self.cache,
@@ -142,9 +139,10 @@ class KimiK3KDA(nn.Module):
                 gate_lower_bound=self.gate_lower_bound,
                 fused_conv=fused_conv,
             )
-            self.decode_executor = None
         else:
             self.prefill_executor = None
+
+        if self._role_type in (RoleType.DECODE, RoleType.PDFUSION):
             self.decode_executor = KimiK3KDADecode(
                 weights=weights,
                 cache=self.cache,
@@ -155,6 +153,8 @@ class KimiK3KDA(nn.Module):
                 gate_lower_bound=self.gate_lower_bound,
                 fused_conv=fused_conv,
             )
+        else:
+            self.decode_executor = None
 
     def _project_fused_kda_inputs(
         self,
@@ -317,13 +317,13 @@ class KimiK3KDA(nn.Module):
             attention_inputs is not None
             and getattr(attention_inputs, "is_target_verify", False)
         )
-        if is_target_verify and self._is_prefill_role:
+        if is_target_verify and self._role_type == RoleType.PREFILL:
             raise RuntimeError(
                 "Kimi K3 target verify requires the direct paged Decode path"
             )
-        if self._is_prefill_role and mode != "prefill":
+        if self._role_type == RoleType.PREFILL and mode != "prefill":
             raise RuntimeError("Kimi K3 Prefill role cannot execute Decode")
-        if not self._is_prefill_role and mode != "decode":
+        if self._role_type == RoleType.DECODE and mode != "decode":
             raise RuntimeError("Kimi K3 Decode role cannot execute Prefill")
         if kv_cache is None or attention_inputs is None:
             raise RuntimeError(
@@ -378,7 +378,7 @@ class KimiK3KDA(nn.Module):
             1, token_count, self.local_heads, self.head_dim
         )
 
-        if self._is_prefill_role:
+        if mode == "prefill":
             assert self.prefill_executor is not None
             output = self.prefill_executor(
                 mixed_qkv_projected,
