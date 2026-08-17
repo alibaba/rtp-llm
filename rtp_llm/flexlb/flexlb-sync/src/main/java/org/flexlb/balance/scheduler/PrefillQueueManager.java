@@ -153,13 +153,18 @@ public final class PrefillQueueManager {
             return jumpWaitMs;
         }
         // Depth term: full-queue drain horizon, independent of the probe's
-        // priority. depthCycles is bounded by the queue capacity. A
-        // misconfigured factor (NaN/Infinite or <= 0) is treated as the
-        // default 1.0, and the product is clamped to 1<<40 ms (~13 days) so
-        // an extreme factor can never wrap negative in the score sum.
+        // priority. depthCycles is bounded by the queue capacity. An exact
+        // 0 factor (config javadoc: "0 makes the term a no-op") returns the
+        // jump-only estimate, while a misconfigured factor (NaN/Infinite or
+        // < 0) falls back to the default 1.0. The product is clamped to
+        // 1<<40 ms (~13 days) so an extreme factor can never wrap negative
+        // in the score sum.
         long depthCycles = queueSize / maxBatchSize;
         double factor = ctx.cfg().getFlexlbQueueDepthPenaltyFactor();
-        if (!Double.isFinite(factor) || factor <= 0) {
+        if (factor == 0) {
+            return jumpWaitMs;
+        }
+        if (!Double.isFinite(factor) || factor < 0) {
             factor = 1.0;
         }
         long depthWaitMs = Math.min((long) (depthCycles * (double) intervalMs * factor), 1L << 40);

@@ -168,18 +168,20 @@ public class BatchSchedulerReporter {
     }
 
     /**
-     * Report one batcher park decision via {@code app.flexlb.batcher.park.qps},
+     * Report batcher park decisions via {@code app.flexlb.batcher.park.qps},
      * tagged by park reason (inflight_full / outside_window /
      * wait_for_min_batch / wait_for_target_batch).
      * <p>Aggregated across endpoints (no engineIp tag): the park QPS by reason
      * is the cluster-level signal that requests are silently waiting on
-     * backpressure instead of being dispatched or rejected.
+     * backpressure instead of being dispatched or rejected. {@code count} is
+     * the parks accumulated since the caller's previous flush (one report per
+     * reason per 10s window — hotspot-free under backpressure storms).
      */
-    public void reportBatcherPark(String reason) {
+    public void reportBatcherPark(String reason, long count) {
         FlexMetricTags tags = FlexMetricTags.of(
                 "role", RoleType.PREFILL.name(),
                 "reason", reason);
-        monitor.report(BATCHER_PARK_QPS, tags, 1.0);
+        monitor.report(BATCHER_PARK_QPS, tags, count);
     }
 
     /**

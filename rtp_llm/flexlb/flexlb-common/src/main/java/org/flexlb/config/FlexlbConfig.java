@@ -375,6 +375,7 @@ public class FlexlbConfig {
      * inflight.max.age.ms metric — forever.  Must comfortably exceed the
      * longest legitimate request lifecycle (admission SLO caps at seconds,
      * prefill execution at minutes).  {@code <= 0} disables the cap.
+     * Environment variable: FLEXLB_INFLIGHT_HARD_MAX_AGE_MS.
      */
     private long flexlbInflightHardMaxAgeMs = 1_800_000L;
 

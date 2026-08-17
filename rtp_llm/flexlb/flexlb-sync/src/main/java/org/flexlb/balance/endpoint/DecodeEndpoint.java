@@ -1156,6 +1156,21 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return isConfirmedTracked(requestId);
     }
 
+    /**
+     * Whether this endpoint still holds the request's shadow reservation
+     * ({@code inflightRequests}, the pre-queue admission layer). The
+     * scheduler's post-ACK inflight audit (F1) must treat such a reservation
+     * as decode-side visibility: a request queued inside a saturated decode
+     * engine is not yet engine-confirmed (no KV allocated), yet force-settling
+     * its ledger entry would roll the reservation back and oversell
+     * admission KV. Lock-free CHM probe — unlike {@link #reservedView()} it
+     * takes no admission lock and copies nothing, so it is safe to call
+     * outside the entry monitor.
+     */
+    public boolean isReserved(long requestId) {
+        return inflightRequests.containsKey(requestId);
+    }
+
     @Override
     public long getLoadMetric() {
         return getTotalLoad();

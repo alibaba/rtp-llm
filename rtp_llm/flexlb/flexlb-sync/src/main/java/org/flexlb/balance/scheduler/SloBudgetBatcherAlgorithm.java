@@ -371,21 +371,26 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
     }
 
     /**
-     * F3 observability: count every park decision per reason (metric
-     * {@code app.flexlb.batcher.park.qps}) and flush a rate-limited INFO log
-     * ({@code event=flexlb_batch_park}) per 10s window so a parked queue is
-     * visible without flooding the log at park frequency (the batcher loop
-     * can park every ~1ms).
+     * F3 observability, hotspot-free: a park decision only bumps an in-memory
+     * per-reason counter; once per {@link #PARK_LOG_INTERVAL_MS} window the
+     * counters are flushed as ONE monitor report per reason (metric
+     * {@code app.flexlb.batcher.park.qps}, aggregated count) plus ONE INFO
+     * log per reason carrying the worker key — so a backpressure storm that
+     * parks every ~1ms cannot create 10^3~10^4 monitor report allocations
+     * per second, yet the storm stays both visible and attributable to a
+     * specific endpoint.
      */
     private synchronized void reportPark(BatcherContext ctx, String reason, long nowMs) {
-        ctx.reporter().reportBatcherPark(reason);
         parkCountsSinceLastLog.merge(reason, 1L, Long::sum);
         if (lastParkLogMs > 0 && nowMs - lastParkLogMs < PARK_LOG_INTERVAL_MS) {
             return;
         }
         lastParkLogMs = nowMs;
-        parkCountsSinceLastLog.forEach((parkReason, count) -> Logger.info(
-                "event=flexlb_batch_park reason={} count_last_interval={}", parkReason, count));
+        parkCountsSinceLastLog.forEach((parkReason, count) -> {
+            ctx.reporter().reportBatcherPark(parkReason, count);
+            Logger.info("event=flexlb_batch_park worker={} reason={} count_last_interval={}",
+                    ctx.key(), parkReason, count);
+        });
         parkCountsSinceLastLog.clear();
     }
 

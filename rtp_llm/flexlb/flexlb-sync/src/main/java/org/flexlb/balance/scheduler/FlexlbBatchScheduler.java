@@ -1225,19 +1225,35 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
      *   <li>no fence retains it (preemption claim / dispatch reconciliation /
      *       cleanup ownership — those have their own reconciliation),</li>
      *   <li>neither side is visible: the prefill batch ledger no longer
-     *       tracks the request and the decode engine never confirmed it
-     *       (or either endpoint is absent).</li>
+     *       tracks the request, and on the decode side neither the engine-
+     *       confirmed registry (KV allocated / running) nor the shadow
+     *       reservation layer still holds it (or either endpoint is
+     *       absent).</li>
      * </ol>
      * Such an entry is a post-ACK leak: nothing observable can settle it, yet
      * it keeps charging the inflight capacity and the endpoint ledgers until
      * the TTL/hard-cap eviction notices it minutes later. The audit clears it
      * in seconds.
      *
-     * <p>Lock order mirrors {@link #cleanupInflight()}: iterate the inflight
-     * map, take the entry monitor, re-verify {@code inflight.get(key) == entry},
-     * then settle via {@link #timeoutEntry} (which only takes the entry monitor
-     * — never the dispatch fence — so nesting it here cannot invert the
-     * global order).
+     * <p>Decode visibility spans BOTH admission layers (R1): a request queued
+     * inside a saturated decode engine is not yet engine-confirmed (no KV
+     * allocated), but its shadow reservation is still live — force-settling
+     * the entry would roll that reservation back and oversell admission KV.
+     * Only when neither layer holds the request is decode truly invisible.
+     *
+     * <p>Lock order mirrors {@link #cleanupInflight()} (R5): the visibility
+     * probes ({@link PrefillEndpoint#tracksRequest} /
+     * {@link DecodeEndpoint#isEngineConfirmed} /
+     * {@link DecodeEndpoint#isReserved}) are lock-free CHM reads and run
+     * OUTSIDE the entry monitor so the O(batches × members) prefill scan
+     * never extends a monitor critical section; the monitor is then taken
+     * only for the re-verify ({@code inflight.get(key) == entry}), the fence
+     * checks, and the settlement via {@link #timeoutEntry} (which never
+     * takes the dispatch fence — so nesting it here cannot invert the global
+     * order). A visibility verdict sampled before the monitor can only be
+     * stale in the conservative direction: a request that became visible
+     * after sampling is still protected by the entry's fence/future checks
+     * on the next audit tick.
      */
     @Scheduled(fixedRateString = "${flexlb.inflight.audit.rate.ms:10000}")
     public void auditInflight() {
@@ -1252,6 +1268,16 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             if (ageMs <= auditAfterMs) {
                 continue;
             }
+            // Visibility probes outside the entry monitor (R5) — lock-free
+            // CHM reads. Decode visible = engine-confirmed OR shadow
+            // reservation still held (R1); a null endpoint stays invisible.
+            PrefillEndpoint prefillEp = entry.item.prefillEp();
+            DecodeEndpoint decodeEp = entry.item.decodeEp();
+            boolean prefillVisible = prefillEp != null
+                    && prefillEp.tracksRequest(candidate.getKey());
+            boolean decodeVisible = decodeEp != null
+                    && (decodeEp.isEngineConfirmed(candidate.getKey())
+                            || decodeEp.isReserved(candidate.getKey()));
             synchronized (entry) {
                 if (inflight.get(candidate.getKey()) != entry) {
                     continue;
@@ -1262,13 +1288,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 if (!entry.item.future().isDone()) {
                     continue;
                 }
-                PrefillEndpoint prefillEp = entry.item.prefillEp();
-                DecodeEndpoint decodeEp = entry.item.decodeEp();
-                boolean prefillInvisible = prefillEp == null
-                        || !prefillEp.tracksRequest(candidate.getKey());
-                boolean decodeInvisible = decodeEp == null
-                        || !decodeEp.isEngineConfirmed(candidate.getKey());
-                if (!prefillInvisible || !decodeInvisible) {
+                if (prefillVisible || decodeVisible) {
                     continue;
                 }
                 Logger.warn("event=scheduler_inflight_audit_release request_id={} "
@@ -2211,6 +2231,16 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         final BatchItem item;
         final RequestLifecycle lifecycle;
         final boolean autoTpmAdmission;
+        /**
+         * Cached lifecycle creation timestamp. {@link #createdAtMs()} sits on
+         * the 2s gauge hot path ({@code InflightEvictor.maxAgeMs} over every
+         * entry) and on the TTL/audit age probes; reading this final field
+         * avoids the per-call {@link RequestLifecycle#snapshot()} allocation
+         * (~8.5k snapshots/s at 17k entries) and its monitor contention with
+         * the dispatch/ACK state transitions. The lifecycle timestamp is
+         * itself final, so the cached copy is an invariant.
+         */
+        final long createdAtMs;
         final AtomicBoolean rolledBack = new AtomicBoolean(false);
         AdmissionLease admissionLease;
         DispatchOwnership dispatchOwnership = DispatchOwnership.ACK_PENDING;
@@ -2226,11 +2256,13 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             this.item = Objects.requireNonNull(item);
             Objects.requireNonNull(item.prefill(), "BatchItem.prefill must not be null");
             this.lifecycle = new RequestLifecycle(item.requestId());
+            this.createdAtMs = this.lifecycle.snapshot().createdAtMs();
             this.autoTpmAdmission = autoTpmAdmission;
         }
 
+        @Override
         public long createdAtMs() {
-            return lifecycle.snapshot().createdAtMs();
+            return createdAtMs;
         }
 
         boolean hasPreemption(long attemptToken) {
