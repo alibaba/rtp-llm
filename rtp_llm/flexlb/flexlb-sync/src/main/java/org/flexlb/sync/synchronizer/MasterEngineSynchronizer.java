@@ -2,6 +2,8 @@ package org.flexlb.sync.synchronizer;
 
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.RoleType;
@@ -28,8 +30,6 @@ import java.util.concurrent.atomic.LongAdder;
 @Component
 public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
 
-    private static final long DEFAULT_SYNC_REQUEST_TIMEOUT_MS = 200L;
-
     private final List<String> modelNames = new ArrayList<>();
     private final EngineGrpcService engineGrpcService;
     private final CacheAwareService cacheAwareService;
@@ -42,19 +42,17 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                     EngineWorkerStatus engineWorkerStatus,
                                     EngineGrpcService engineGrpcService,
                                     ModelMetaConfig modelMetaConfig,
-                                    CacheAwareService cacheAwareService) {
+                                    CacheAwareService cacheAwareService,
+                                    ConfigService configService) {
 
         super(workerAddressService, engineHealthReporter, engineWorkerStatus, modelMetaConfig);
 
         this.engineGrpcService = engineGrpcService;
         this.cacheAwareService = cacheAwareService;
 
-        this.syncEngineStatusInterval = System.getenv("SYNC_STATUS_INTERVAL") != null
-                ? Long.parseLong(System.getenv("SYNC_STATUS_INTERVAL"))
-                : 20;
-        this.syncRequestTimeoutMs = System.getenv("SYNC_REQUEST_TIMEOUT_MS") != null
-                ? Long.parseLong(System.getenv("SYNC_REQUEST_TIMEOUT_MS"))
-                : DEFAULT_SYNC_REQUEST_TIMEOUT_MS;
+        FlexlbConfig flexlbConfig = configService.loadBalanceConfig();
+        this.syncEngineStatusInterval = flexlbConfig.getSyncStatusInterval();
+        this.syncRequestTimeoutMs = flexlbConfig.getSyncRequestTimeoutMs();
         modelMetaConfig.getServiceRoutes().stream()
                 .map(ServiceRoute::getServiceId)
                 .map(IdUtils::getModelNameByServiceId)

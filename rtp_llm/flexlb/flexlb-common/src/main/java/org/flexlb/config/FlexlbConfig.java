@@ -151,6 +151,18 @@ public class FlexlbConfig {
      */
     private long resourceCheckIntervalMs = 10;
 
+    // ========== Worker Status Synchronization Configuration ==========
+
+    /**
+     * Worker status synchronization interval in milliseconds.
+     */
+    private long syncStatusInterval = 20;
+
+    /**
+     * Worker status synchronization request timeout in milliseconds.
+     */
+    private long syncRequestTimeoutMs = 200;
+
     // ========== Resource Water Level Configuration ==========
 
     /**
