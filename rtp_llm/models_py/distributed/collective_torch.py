@@ -36,6 +36,7 @@ _initialized: bool = False  # Track if we've initialized (to prevent double init
 _cpu_tp_broadcaster_base_path: Optional[str] = None
 _rocm_rccl = None
 _symm_mem = None
+_flashinfer_allreduce = None
 
 
 def _get_rocm_rccl():
@@ -60,6 +61,25 @@ def _get_symm_mem():
 
         _symm_mem = symm_mem
     return _symm_mem
+
+
+def _get_flashinfer_allreduce():
+    global _flashinfer_allreduce
+    if _flashinfer_allreduce is None:
+        from rtp_llm.models_py.distributed import flashinfer_all_reduce
+
+        _flashinfer_allreduce = flashinfer_all_reduce
+    return _flashinfer_allreduce
+
+
+def _init_flashinfer_allreduce(parallelism_config: ParallelismConfig) -> None:
+    if parallelism_config.tp_size <= 1:
+        return
+    _get_flashinfer_allreduce().init_flashinfer_allreduce(
+        _get_group(Group.TP),
+        torch.device("cuda", parallelism_config.local_rank),
+        single_node=parallelism_config.tp_size <= parallelism_config.local_world_size,
+    )
 
 
 def _make_cpu_tp_broadcaster_base_path(
@@ -152,6 +172,7 @@ def init_distributed_environment(
         rocm_rccl = _get_rocm_rccl()
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
+        _init_flashinfer_allreduce(parallelism_config)
         return
 
     _normalize_parallelism_ranks(parallelism_config)
@@ -181,6 +202,7 @@ def init_distributed_environment(
         _register_process_groups_to_cpp()
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
+        _init_flashinfer_allreduce(parallelism_config)
         return
 
     logging.info(
@@ -216,6 +238,7 @@ def init_distributed_environment(
     if rocm_rccl is not None and parallelism_config.tp_size > 1:
         rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
     init_user_buffers_environment(parallelism_config)
+    _init_flashinfer_allreduce(parallelism_config)
 
 
 def _create_process_groups(
@@ -565,6 +588,7 @@ def destroy_distributed_environment():
         )
 
         destroy_user_buffers_communicator()
+        _get_flashinfer_allreduce().destroy_flashinfer_allreduce()
 
     try:
         import librtp_compute_ops
@@ -708,6 +732,10 @@ def all_reduce(tensor: torch.Tensor, group: Group) -> torch.Tensor:
             return rocm_rccl.capture_all_reduce(tensor, _get_group(group))
 
     if group == Group.TP:
+        flashinfer_ar = _get_flashinfer_allreduce().get_flashinfer_allreduce()
+        if flashinfer_ar is not None and flashinfer_ar.should_use(tensor):
+            return flashinfer_ar.all_reduce(tensor)
+
         symm_mem_comm = _get_symm_mem().get_symm_mem_communicator()
         if symm_mem_comm is not None and symm_mem_comm.should_torch_symm_mem_allreduce(
             tensor
