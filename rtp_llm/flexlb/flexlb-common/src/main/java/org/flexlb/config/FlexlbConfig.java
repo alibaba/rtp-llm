@@ -708,6 +708,27 @@ public class FlexlbConfig {
      */
     private long workerTimeoutMs = 10000L;
 
+    // ========== Worker Status Sync Failure Tolerance Configuration ==========
+
+    /**
+     * Max consecutive DEADLINE_EXCEEDED (timeout) GetWorkerStatus failures before
+     * a worker is marked dead and its endpoint removed.
+     * <p>Slow != dead: an engine busy with long prefill batches (10-15s per batch)
+     * keeps timing out on sync without being disconnected. Removing it drains the
+     * batcher and fails every queued request with 8510, so this tier tolerates far
+     * more consecutive failures than the connection tier.
+     * <p>Environment variable: FLEXLB_SYNC_TIMEOUT_MAX_CONSECUTIVE_FAILURES.
+     */
+    private int flexlbSyncTimeoutMaxConsecutiveFailures = 10;
+
+    /**
+     * Max consecutive connection-class (UNAVAILABLE / IO / any non-timeout)
+     * GetWorkerStatus failures before a worker is marked dead and its endpoint
+     * removed. Preserves the original hard-failure semantics.
+     * <p>Environment variable: FLEXLB_SYNC_HARD_MAX_CONSECUTIVE_FAILURES.
+     */
+    private int flexlbSyncHardMaxConsecutiveFailures = 3;
+
     /**
      * Get load balancing strategy for a role type
      * This method handles the logic of selecting the appropriate strategy based on role type and configuration

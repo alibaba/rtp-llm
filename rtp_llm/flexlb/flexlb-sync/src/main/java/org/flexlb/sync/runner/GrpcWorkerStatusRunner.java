@@ -1,5 +1,6 @@
 package org.flexlb.sync.runner;
 
+import io.grpc.Status;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
@@ -41,7 +42,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final long createTimeUs = System.nanoTime() / 1000;
     private final String id = IdUtils.fastUuid();
     private final long syncRequestTimeoutMs;
-    private static final int MAX_CONSECUTIVE_FAILURES = 3;
+    private final int syncTimeoutMaxConsecutiveFailures;
+    private final int syncHardMaxConsecutiveFailures;
     private final EndpointRegistry endpointRegistry;
     private final Executor callbackExecutor;
 
@@ -51,6 +53,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                   EngineHealthReporter engineHealthReporter,
                                   EngineGrpcService engineGrpcService,
                                   long syncRequestTimeoutMs,
+                                  int syncTimeoutMaxConsecutiveFailures,
+                                  int syncHardMaxConsecutiveFailures,
                                   FlexlbBatchScheduler batchScheduler,
                                   EndpointRegistry endpointRegistry,
                                   Executor callbackExecutor) {
@@ -67,6 +71,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
+        this.syncTimeoutMaxConsecutiveFailures = syncTimeoutMaxConsecutiveFailures;
+        this.syncHardMaxConsecutiveFailures = syncHardMaxConsecutiveFailures;
         this.batchScheduler = batchScheduler;
         this.endpointRegistry = endpointRegistry;
         this.callbackExecutor = callbackExecutor;
@@ -89,16 +95,31 @@ public class GrpcWorkerStatusRunner implements Runnable {
                             if (ex != null) {
                                 Throwable throwable = ex instanceof CompletionException ? ex.getCause() : ex;
                                 handleException(throwable);
-                                long failures = workerStatus.getConsecutiveFailures().incrementAndGet();
-                                logger.debug("gRPC status check failed, consecutiveFailures={}/{}, msg={}",
-                                        failures, MAX_CONSECUTIVE_FAILURES, throwable.getMessage());
-                                if (failures >= MAX_CONSECUTIVE_FAILURES) {
+                                // Slow (timeout) != dead (disconnected): a busy engine doing long
+                                // prefill batches keeps timing out on GetWorkerStatus while still
+                                // healthy, so timeout failures get their own, higher threshold.
+                                Status.Code statusCode = Status.fromThrowable(throwable).getCode();
+                                boolean isTimeout = statusCode == Status.Code.DEADLINE_EXCEEDED;
+                                long failures = isTimeout
+                                        ? workerStatus.getConsecutiveTimeoutFailures().incrementAndGet()
+                                        : workerStatus.getConsecutiveFailures().incrementAndGet();
+                                int threshold = isTimeout ? syncTimeoutMaxConsecutiveFailures : syncHardMaxConsecutiveFailures;
+                                logger.debug("gRPC status check failed, status={}, timeoutFailures={}/{}, hardFailures={}/{}, msg={}",
+                                        statusCode,
+                                        workerStatus.getConsecutiveTimeoutFailures().get(), syncTimeoutMaxConsecutiveFailures,
+                                        workerStatus.getConsecutiveFailures().get(), syncHardMaxConsecutiveFailures,
+                                        throwable.getMessage());
+                                if (failures >= threshold) {
                                     workerStatus.setAlive(false);
                                     if (endpointRegistry != null) {
                                         endpointRegistry.remove(roleType, ipPort, workerStatus);
                                     }
-                                    if (failures == MAX_CONSECUTIVE_FAILURES) {
-                                        logger.error("worker {} marked dead after {} consecutive gRPC failures", ipPort, failures);
+                                    if (failures == threshold) {
+                                        logger.error("worker {} marked dead after {} consecutive {} gRPC failures, "
+                                                        + "status={}, timeoutFailures={}/{}, hardFailures={}/{}",
+                                                ipPort, failures, isTimeout ? "timeout" : "connection", statusCode,
+                                                workerStatus.getConsecutiveTimeoutFailures().get(), syncTimeoutMaxConsecutiveFailures,
+                                                workerStatus.getConsecutiveFailures().get(), syncHardMaxConsecutiveFailures);
                                     }
                                 }
                             } else {
@@ -138,6 +159,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 return;
             }
             workerStatus.getConsecutiveFailures().set(0);
+            workerStatus.getConsecutiveTimeoutFailures().set(0);
 
             workerStatus.setSite(site);
             workerStatus.setGroup(group);

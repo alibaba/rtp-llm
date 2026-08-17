@@ -109,7 +109,10 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                 modelName, modelWorkerStatus.getRoleStatusMap(roleType),
                                 workerAddressService, statusCheckExecutor, engineHealthReporter,
                                 engineGrpcService, roleType, localKvCacheAwareManager,
-                                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
+                                syncRequestTimeoutMs,
+                                flexlbConfig.getFlexlbSyncTimeoutMaxConsecutiveFailures(),
+                                flexlbConfig.getFlexlbSyncHardMaxConsecutiveFailures(),
+                                syncCount, syncEngineStatusInterval,
                                 batchScheduler, endpointRegistry
                         ));
                     } else {

@@ -46,6 +46,10 @@ public class EngineSyncRunner implements Runnable {
 
     private final long syncRequestTimeoutMs;
 
+    private final int syncTimeoutMaxConsecutiveFailures;
+
+    private final int syncHardMaxConsecutiveFailures;
+
     private final LongAdder syncCount;
 
     private final Long syncEngineStatusInterval;
@@ -63,6 +67,8 @@ public class EngineSyncRunner implements Runnable {
                             RoleType roleType,
                             CacheAwareService localKvCacheAwareManager,
                             long syncRequestTimeoutMs,
+                            int syncTimeoutMaxConsecutiveFailures,
+                            int syncHardMaxConsecutiveFailures,
                             LongAdder syncCount,
                             Long syncEngineStatusInterval,
                             FlexlbBatchScheduler batchScheduler,
@@ -77,6 +83,8 @@ public class EngineSyncRunner implements Runnable {
         this.roleType = roleType;
         this.localKvCacheAwareManager = localKvCacheAwareManager;
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
+        this.syncTimeoutMaxConsecutiveFailures = syncTimeoutMaxConsecutiveFailures;
+        this.syncHardMaxConsecutiveFailures = syncHardMaxConsecutiveFailures;
         this.syncCount = syncCount;
         this.syncEngineStatusInterval = syncEngineStatusInterval;
         this.batchScheduler = batchScheduler;
@@ -144,7 +152,8 @@ public class EngineSyncRunner implements Runnable {
                         GrpcWorkerStatusRunner grpcWorkerStatusRunner
                                 = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, host.getGroup(),
                                 workerStatus, cachedWorkerStatuses, engineHealthReporter, engineGrpcService,
-                                syncRequestTimeoutMs, batchScheduler, endpointRegistry, statusCheckExecutor);
+                                syncRequestTimeoutMs, syncTimeoutMaxConsecutiveFailures, syncHardMaxConsecutiveFailures,
+                                batchScheduler, endpointRegistry, statusCheckExecutor);
                         statusCheckExecutor.submit(grpcWorkerStatusRunner);
                     } catch (RejectedExecutionException e) {
                         workerStatus.getStatusCheckInProgress().set(false);

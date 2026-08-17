@@ -53,6 +53,8 @@ public class WorkerStatus {
     private AtomicBoolean cacheCheckInProgress = new AtomicBoolean(false);
     private AtomicLong statusVersion = new AtomicLong(-1L);
     private AtomicLong consecutiveFailures = new AtomicLong(0);
+    /** Consecutive DEADLINE_EXCEEDED sync failures — tracked separately so a slow (busy) engine is not judged dead. */
+    private AtomicLong consecutiveTimeoutFailures = new AtomicLong(0);
 
     /**
      * Absorb all dynamic engine fields from a gRPC status response.
