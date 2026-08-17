@@ -104,6 +104,11 @@ _SANITIZE_WARN_INTERVAL = 300  # seconds
 _last_sanitize_warn_time: float = 0.0
 _last_downgrade_warn_time: float = 0.0
 
+# Fields owned by trusted renderer/RPC code. Request parsing must consume and
+# ignore client values for these names; internal model_copy(update=...) calls
+# deliberately bypass validation when enabling the side channel.
+INTERNAL_GENERATE_CONFIG_FIELDS = frozenset({"frontend_metric_streaming"})
+
 
 def _reset_sanitize_warn_state():
     """Reset rate-limiting state for testing. NOT for production use."""
@@ -236,6 +241,9 @@ class GenerateConfig(BaseModel):
     # lora
     adapter_name: Optional[Union[str, List[str]]] = None
     is_streaming: bool = False
+    # Internal backend side-channel: emit private counter progress frames for
+    # frontend TPS accounting without changing public streaming semantics.
+    frontend_metric_streaming: bool = Field(default=False, exclude=True)
 
     # multimodal preprocess
     resized_shape: Optional[List[int]] = None
@@ -270,6 +278,18 @@ class GenerateConfig(BaseModel):
     unique_key: str = ""
 
     # --- validators（统一放在所有 field 声明之后） ---
+
+    @model_validator(mode="before")
+    @classmethod
+    def _ignore_external_internal_fields(cls, values: Any) -> Any:
+        if not isinstance(values, dict):
+            return values
+        if not INTERNAL_GENERATE_CONFIG_FIELDS.intersection(values):
+            return values
+        sanitized = dict(values)
+        for key in INTERNAL_GENERATE_CONFIG_FIELDS:
+            sanitized.pop(key, None)
+        return sanitized
 
     @staticmethod
     def _sanitize_diverge_start_combo(v: "int | str | None") -> int:
@@ -509,6 +529,8 @@ class GenerateConfig(BaseModel):
             自动重启用启发式不会覆盖其显式意图。
         """
         for key, value in new.items():
+            if key in INTERNAL_GENERATE_CONFIG_FIELDS:
+                continue
             if hasattr(self, key):
                 setattr(self, key, self._parse_update_value(key, value))
         # setattr 不会触发 field_validator / model_validator，手动补偿：
@@ -532,6 +554,9 @@ class GenerateConfig(BaseModel):
         """批量更新字段并返回未被消费的 key。校验策略同 update()。"""
         to_remove: List[str] = []
         for key, value in new.items():
+            if key in INTERNAL_GENERATE_CONFIG_FIELDS:
+                to_remove.append(key)
+                continue
             if hasattr(self, key):
                 setattr(self, key, self._parse_update_value(key, value))
                 to_remove.append(key)

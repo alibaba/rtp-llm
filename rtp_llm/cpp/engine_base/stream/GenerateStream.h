@@ -60,9 +60,30 @@ struct StreamSpecUpdateInfo {
     // path will skip D2H and consume this GPU tensor directly.
     torch::Tensor draft_token_gpu;
 
+    // Compact raw-target log probabilities for the accepted content suffix.
+    // Shapes use `num_new_tokens - logprobs_offset` as their token dimension.
+    // Non-const so MTP assembly can fill them after constructing the rest of
+    // the update.
+    torch::Tensor token_logprobs;
+    torch::Tensor top_logprob_token_ids;
+    torch::Tensor top_logprobs;
+
     bool                     update_remote_generate = true;
     bool                     force_update_info      = false;
     std::optional<ErrorInfo> error_info;
+
+    // Number of newly committed tokens before the compact logprob suffix.
+    // Thinking-only packets use num_new_tokens; ordinary/content-only packets
+    // use zero.  Kept trailing so existing aggregate initializers retain their
+    // source compatibility.
+    int32_t logprobs_offset = 0;
+
+    // Authoritative speculative sampler accounting for this verify update.
+    // Accepted tokens include the mandatory target token; proposed draft
+    // tokens do not.
+    int64_t speculative_verify_rounds         = 0;
+    int64_t speculative_accepted_token_num    = 0;
+    int64_t speculative_proposed_draft_tokens = 0;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -242,8 +263,16 @@ public:
     int              currentExecuteTokenSize();
     std::vector<int> currentExecuteTokens(int batch_idx = 0) const;
 
-    void step();
-    void spStep();
+    void    step();
+    void    spStep();
+    void    addFrontendContextExecuteMetrics(int64_t execute_time_us,
+                                             int64_t context_token_num,
+                                             int64_t context_token_num_with_cache);
+    void    addFrontendGenerateExecuteMetrics(int64_t execute_time_us, int64_t generate_token_num);
+    int64_t frontendContextTokenNum() const;
+    int64_t frontendContextTokenNumWithCache() const;
+    int64_t frontendContextExecuteTimeUs() const;
+    int64_t frontendContextExecuteTimeWithCacheUs() const;
 
     // Raw multimodal accessors — return the full per-image vectors/tensor unfiltered.
     // Stream is a pure data holder; NormalModelInputGatherer omits fully reused images
@@ -760,8 +789,11 @@ protected:
     std::optional<ErrorInfo> updateLogitProcessorStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens);
     void                     updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
     std::optional<ErrorInfo> validateLogitsProcessorState();
+    void                     markSubGenerateFinished(size_t batch_id);
     void                     fillSubGenerateStatus(StreamState state);
     void                     resizeSubGenerateStatus(size_t new_size);
+
+    int64_t subGenerateOutputLength(size_t batch_id) const;
 
     void reportStreamMetrics();
     void reportCacheReuseMetrics() const;
@@ -772,31 +804,49 @@ protected:
     std::shared_ptr<GenerateInput>        generate_input_;
     std::shared_ptr<GenerateStateMachine> generate_status_;
     std::vector<StreamState>              sub_generate_status_;
-    int                                   max_seq_len_;
-    int64_t                               vocab_size_;
-    size_t                                output_vocab_size_;
-    std::shared_ptr<CompleteTokenIds>     complete_token_ids_;
-    int64_t                               begin_time_us_;
-    int64_t                               wait_time_us_                = 0;
-    bool                                  metrics_reported_            = false;
-    int64_t                               scheduler_enqueue_time_us_   = 0;
-    int64_t                               can_run_time_us_             = 0;
-    int64_t                               loading_cache_start_time_us_ = 0;
-    int64_t                               loading_cache_done_time_us_  = 0;
-    int64_t                               first_running_time_us_       = 0;
-    int64_t                               loading_cache_latency_us_    = 0;
-    int64_t                               load_done_to_running_us_     = 0;
-    std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
-    std::shared_ptr<bool>                 is_context_stream_;
-    size_t                                iter_count_           = 0;
-    size_t                                sp_iter_count_        = 0;
-    size_t                                last_output_pos_      = 0;
-    int                                   initial_reuse_length_ = 0;
-    int                                   reuse_length_         = 0;
-    int                                   local_reuse_length_   = 0;
-    int                                   device_reuse_length_  = 0;
-    int                                   remote_reuse_length_  = 0;
-    int                                   memory_reuse_length_  = 0;
+    // Non-beam return sequences can finish at different steps. Keep the
+    // terminal length before finished rows are padded with EOS while the
+    // remaining rows continue decoding.
+    std::vector<int64_t>                 sub_generate_output_lengths_;
+    int                                  max_seq_len_;
+    int64_t                              vocab_size_;
+    size_t                               output_vocab_size_;
+    std::shared_ptr<CompleteTokenIds>    complete_token_ids_;
+    int64_t                              begin_time_us_;
+    int64_t                              wait_time_us_                = 0;
+    bool                                 metrics_reported_            = false;
+    int64_t                              scheduler_enqueue_time_us_   = 0;
+    int64_t                              can_run_time_us_             = 0;
+    int64_t                              loading_cache_start_time_us_ = 0;
+    int64_t                              loading_cache_done_time_us_  = 0;
+    int64_t                              first_running_time_us_       = 0;
+    int64_t                              loading_cache_latency_us_    = 0;
+    int64_t                              load_done_to_running_us_     = 0;
+    std::shared_ptr<StreamCacheResource> stream_cache_resource_;
+    std::shared_ptr<bool>                is_context_stream_;
+    size_t                               iter_count_                        = 0;
+    size_t                               sp_iter_count_                     = 0;
+    int64_t                              speculative_verify_rounds_         = 0;
+    int64_t                              speculative_accepted_token_num_    = 0;
+    int64_t                              speculative_proposed_draft_tokens_ = 0;
+    // Private cumulative contributions used only by the frontend TPS side
+    // channel. One stream owns each complete engine step, so token/time pairs
+    // cannot be split by unordered RPC delivery or a heartbeat boundary.
+    int64_t frontend_context_token_num_                  = 0;
+    int64_t frontend_context_token_num_with_cache_       = 0;
+    int64_t frontend_context_execute_time_us_            = 0;
+    int64_t frontend_context_execute_time_with_cache_us_ = 0;
+    int64_t frontend_generate_token_num_                 = 0;
+    int64_t frontend_generate_execute_time_us_           = 0;
+    size_t  last_output_pos_                             = 0;
+    size_t  last_frontend_metric_output_pos_             = 0;
+    int     initial_reuse_length_                        = 0;
+    int     reuse_length_                                = 0;
+    int     local_reuse_length_                          = 0;
+    int     device_reuse_length_                         = 0;
+    int     remote_reuse_length_                         = 0;
+    int     memory_reuse_length_                         = 0;
+    int     reuse_mm_length_                             = 0;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     int64_t prefill_total_reuse_len_  = 0;
     int64_t prefill_local_reuse_len_  = 0;

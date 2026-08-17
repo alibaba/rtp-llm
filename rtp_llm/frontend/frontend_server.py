@@ -16,6 +16,10 @@ from rtp_llm.config.model_config import (
     update_stop_words_from_env,
     update_tokenizer_special_tokens,
 )
+from rtp_llm.frontend.frontend_request_metrics import (
+    FrontendRequestMetrics,
+    FrontendRequestMetricState,
+)
 from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
@@ -62,6 +66,14 @@ class FrontendServer(object):
         self.rank_id = str(rank_id)
         self.server_id = str(server_id)
         kmonitor.init()
+        monitor_interval = getattr(
+            getattr(py_env_configs, "server_config", None),
+            "monitor_interval",
+            1,
+        )
+        self._request_metrics = FrontendRequestMetrics(
+            concurrency_report_interval_s=max(float(monitor_interval or 1), 0.1)
+        )
 
     def start(self):
         if (
@@ -130,13 +142,115 @@ class FrontendServer(object):
             )
             self.is_embedding = True
 
+        self._request_metrics.start()
+
     async def close(self):
-        if self._frontend_worker is not None:
-            await self._frontend_worker.close()
+        try:
+            if self._frontend_worker is not None:
+                # Drain backend generators while the metric heartbeat remains
+                # alive, then flush the final partial TPS window below.
+                await self._frontend_worker.close()
+        finally:
+            await asyncio.to_thread(self._request_metrics.close)
 
     def stop(self):
         if self._frontend_worker is not None:
             self._frontend_worker.stop()
+
+    @staticmethod
+    def _request_aux_info_enabled(request: Dict[str, Any]) -> bool:
+        def parse(value: Any) -> bool:
+            if value is None:
+                return False
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in {"false", "0", "off", "no"}:
+                    return False
+                if normalized in {"true", "1", "on", "yes"}:
+                    return True
+            return bool(value)
+
+        if "aux_info" in request:
+            return parse(request["aux_info"])
+        config = request.get(
+            "generation_config",
+            request.get("generate_config", {}),
+        )
+        if isinstance(config, dict) and "aux_info" in config:
+            return parse(config["aux_info"])
+        return True
+
+    @staticmethod
+    def _copy_for_internal_aux_info(request: Dict[str, Any]) -> Dict[str, Any]:
+        """Copy only the dictionaries mutated by the private metrics path."""
+        copied = dict(request)
+        config_name = (
+            "generation_config" if "generation_config" in request else "generate_config"
+        )
+        config = request.get(config_name)
+        if isinstance(config, dict):
+            copied[config_name] = dict(config)
+        FrontendServer._force_internal_aux_info(copied)
+        return copied
+
+    @staticmethod
+    def _force_internal_aux_info(request: Dict[str, Any]) -> None:
+        config_name = (
+            "generation_config" if "generation_config" in request else "generate_config"
+        )
+        config = request.get(config_name)
+        if isinstance(config, dict):
+            config["aux_info"] = True
+        request["aux_info"] = True
+
+    @staticmethod
+    def _hide_aux_info(response: Any) -> None:
+        response_batch = (
+            response.get("response_batch")
+            if isinstance(response, dict)
+            else getattr(response, "response_batch", None)
+        )
+        if response_batch:
+            for item in response_batch:
+                FrontendServer._hide_aux_info(item)
+            return
+        if isinstance(response, dict):
+            response.pop("aux_info", None)
+            return
+        if not hasattr(response, "aux_info"):
+            return
+        aux_info = getattr(response, "aux_info")
+        if isinstance(aux_info, dict):
+            response.aux_info = {}
+        elif isinstance(aux_info, (list, tuple)):
+            response.aux_info = []
+        else:
+            response.aux_info = None
+
+    @staticmethod
+    def _client_exception_payload(
+        request: Dict[str, Any], exception_json: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        payload = dict(exception_json)
+        # Keep the established error aux_info contract. Only strip internal
+        # stack locations from the client-facing message; the access logger
+        # receives the original exception payload before this projection.
+        message = payload.get("message")
+        if isinstance(message, str) and "\n Traceback:" in message:
+            payload["message"] = message.split("\n Traceback:", 1)[0].rstrip()
+        return payload
+
+    @staticmethod
+    def _request_disables_speculative(request: Dict[str, Any]) -> bool:
+        if "force_disable_sp_run" in request:
+            return bool(request["force_disable_sp_run"])
+        config = request.get(
+            "generation_config",
+            request.get("generate_config", {}),
+        )
+        if isinstance(config, dict) and "force_disable_sp_run" in config:
+            return bool(config["force_disable_sp_run"])
+        return False
 
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
         start_time = time.time()
@@ -233,8 +347,9 @@ class FrontendServer(object):
                     "error_code": str(format_e.get("error_code_str", -1)),
                 },
             )
+            client_error = self._client_exception_payload(request, format_e)
             yield response_data_prefix + json.dumps(
-                format_e, ensure_ascii=False
+                client_error, ensure_ascii=False
             ) + "\r\n\r\n"
         finally:
             self._global_controller.decrement()
@@ -255,14 +370,40 @@ class FrontendServer(object):
             request_headers = extract_request_headers(
                 getattr(raw_request, "headers", None)
             )
+            generation_req = (
+                self._copy_for_internal_aux_info(req)
+                if self._request_metrics.enabled
+                else req
+            )
         except Exception as e:
             return self._handle_exception(req, e)
 
-        def generate_call():
+        def generate_call(_request_metrics: FrontendRequestMetricState):
             assert self._frontend_worker is not None
+            metric_tags = (
+                {
+                    "rank_id": self.rank_id,
+                    "server_id": self.server_id,
+                    "source": str(req.get("source", "unknown")),
+                }
+                if self._request_metrics.enabled
+                else {}
+            )
+            metric_observer = (
+                _request_metrics.observe_tps if self._request_metrics.enabled else None
+            )
             if request_headers:
-                return self._frontend_worker.inference(**req, headers=request_headers)
-            return self._frontend_worker.inference(**req)
+                return self._frontend_worker.inference(
+                    **generation_req,
+                    headers=request_headers,
+                    frontend_metric_tags=metric_tags,
+                    frontend_metric_observer=metric_observer,
+                )
+            return self._frontend_worker.inference(
+                **generation_req,
+                frontend_metric_tags=metric_tags,
+                frontend_metric_observer=metric_observer,
+            )
 
         try:
             rep = await self._infer_wrap(req, raw_request, generate_call)
@@ -279,7 +420,9 @@ class FrontendServer(object):
         self,
         req: Dict[str, Any],
         raw_request: RawRequest,
-        generate_call: Callable[[], CompleteResponseAsyncGenerator],
+        generate_call: Callable[
+            [FrontendRequestMetricState], CompleteResponseAsyncGenerator
+        ],
     ):
         try:
             rep = await self._infer_impl(req, raw_request, generate_call)
@@ -298,10 +441,41 @@ class FrontendServer(object):
             sequence,
         )
 
-        def generate_call():
+        if request.prompt_logprobs is not None:
+            request.stream = False
+        elif request.extra_configs is not None and getattr(
+            request.extra_configs, "return_prompt_logits", False
+        ):
+            request.stream = False
+
+        # Copy only after applying the public forced-nonstream contract so the
+        # backend, renderer, and frontend response path agree on streaming.
+        internal_request = (
+            request.model_copy(update={"aux_info": True})
+            if self._request_metrics.enabled
+            else request
+        )
+
+        def generate_call(request_metrics: FrontendRequestMetricState):
             assert self._openai_endpoint != None
             response = self._openai_endpoint.chat_completion(
-                request_id, request, raw_request
+                request_id,
+                internal_request,
+                raw_request,
+                frontend_metric_tags=(
+                    {
+                        "rank_id": self.rank_id,
+                        "server_id": self.server_id,
+                        "source": str(getattr(request, "source", "unknown")),
+                    }
+                    if self._request_metrics.enabled
+                    else {}
+                ),
+                frontend_metric_observer=(
+                    request_metrics.observe_tps
+                    if self._request_metrics.enabled
+                    else None
+                ),
             )
             assert isinstance(
                 response, CompleteResponseAsyncGenerator
@@ -309,13 +483,10 @@ class FrontendServer(object):
             return response
 
         try:
-            if request.prompt_logprobs is not None:
-                request.stream = False
-            elif request.extra_configs is not None and getattr(
-                request.extra_configs, "return_prompt_logits", False
-            ):
-                request.stream = False
             request_dict = request.model_dump(exclude_none=True)
+            # Preserve the client's explicit Optional[bool] intent after the
+            # backend-only copy above forces AuxInfo collection on.
+            request_dict["aux_info"] = request.aux_info
             request_dict[request_id_field_name] = request_id
             rep = await self._infer_wrap(request_dict, raw_request, generate_call)
         except BaseException as e:
@@ -413,68 +584,85 @@ class FrontendServer(object):
             )
             self._access_logger.log_exception_access(request, e, exception_json)
 
-        rep = ORJSONResponse(exception_json, status_code=500)
+        rep = ORJSONResponse(
+            self._client_exception_payload(request, exception_json), status_code=500
+        )
         return rep
 
     async def _call_generate_with_report(
-        self, generate_call: Callable[[], CompleteResponseAsyncGenerator]
+        self,
+        generate_call: Callable[
+            [FrontendRequestMetricState], CompleteResponseAsyncGenerator
+        ],
+        request_metrics: FrontendRequestMetricState,
+        expose_aux_info: bool,
     ):
         async def __gen_response_with_report(start_time: float, response_generator):
             last_iterate_time = current_time_ms()
             first_token = True
             iter_count = 0
-            async for response in response_generator:
-                end_time = current_time_ms()
-                if first_token:
-                    first_token = False
-                    kmonitor.report(
-                        GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC,
-                        end_time - last_iterate_time,
-                    )
-                else:
-                    step_output_len = 1
-                    if hasattr(response, "aux_info"):
-                        if isinstance(response.aux_info, list):
-                            step_output_len = 0
-                            for info in response.aux_info:
-                                step_output_len += info.get("step_output_len", 1)
-                        elif isinstance(response.aux_info, dict):
-                            step_output_len = max(
-                                response.aux_info.get("step_output_len", 1),
-                                step_output_len,
-                            )
+            try:
+                async for response in response_generator:
+                    end_time = current_time_ms()
+                    request_metrics.observe(response)
+                    if first_token:
+                        first_token = False
+                        kmonitor.report(
+                            GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC,
+                            end_time - last_iterate_time,
+                        )
+                    else:
+                        step_output_len = 1
+                        # Internal metrics may force AuxInfo on, but the legacy
+                        # iteration metric must retain the client's original
+                        # aux_info=false behavior (one outward frame = one step).
+                        if expose_aux_info and hasattr(response, "aux_info"):
+                            if isinstance(response.aux_info, list):
+                                step_output_len = 0
+                                for info in response.aux_info:
+                                    step_output_len += info.get("step_output_len", 1)
+                                step_output_len = max(step_output_len, 1)
+                            elif isinstance(response.aux_info, dict):
+                                step_output_len = max(
+                                    response.aux_info.get("step_output_len", 1),
+                                    step_output_len,
+                                )
 
+                        kmonitor.report(
+                            GaugeMetrics.RESPONSE_ITER_RT_METRIC,
+                            (end_time - last_iterate_time) / step_output_len,
+                        )
                     kmonitor.report(
-                        GaugeMetrics.RESPONSE_ITER_RT_METRIC,
-                        (end_time - last_iterate_time) / step_output_len,
+                        AccMetrics.ITER_QPS_METRIC,
+                        1,
+                        {
+                            "rank_id": self.rank_id,
+                            "server_id": self.server_id,
+                        },
                     )
+                    last_iterate_time = end_time
+                    iter_count += 1
+                    if not expose_aux_info:
+                        self._hide_aux_info(response)
+                    yield response
+                kmonitor.report(GaugeMetrics.RESPONSE_ITERATE_COUNT, iter_count)
                 kmonitor.report(
-                    AccMetrics.ITER_QPS_METRIC,
+                    GaugeMetrics.LANTENCY_METRIC, current_time_ms() - start_time
+                )
+                kmonitor.report(
+                    AccMetrics.SUCCESS_QPS_METRIC,
                     1,
                     {
                         "rank_id": self.rank_id,
                         "server_id": self.server_id,
                     },
                 )
-                last_iterate_time = end_time
-                iter_count += 1
-                yield response
-            kmonitor.report(GaugeMetrics.RESPONSE_ITERATE_COUNT, iter_count)
-            kmonitor.report(
-                GaugeMetrics.LANTENCY_METRIC, current_time_ms() - start_time
-            )
-            kmonitor.report(
-                AccMetrics.SUCCESS_QPS_METRIC,
-                1,
-                {
-                    "rank_id": self.rank_id,
-                    "server_id": self.server_id,
-                },
-            )
+            finally:
+                request_metrics.finish()
 
         assert self._frontend_worker is not None
         start_time = current_time_ms()
-        response_generator = generate_call()
+        response_generator = generate_call(request_metrics)
         return CompleteResponseAsyncGenerator(
             __gen_response_with_report(start_time, response_generator),
             response_generator._collect_complete_response_func,
@@ -497,7 +685,9 @@ class FrontendServer(object):
         self,
         req: Dict[Any, Any],
         raw_request: RawRequest,
-        generate_call: Callable[[], CompleteResponseAsyncGenerator],
+        generate_call: Callable[
+            [FrontendRequestMetricState], CompleteResponseAsyncGenerator
+        ],
     ):
         assert self._frontend_worker is not None
         kmonitor.report(
@@ -511,9 +701,23 @@ class FrontendServer(object):
         )
         self._access_logger.log_query_access(req)
         is_streaming = self._frontend_worker.is_streaming(req)
-        if await raw_request.is_disconnected():
-            raise asyncio.CancelledError("client disconnects")
-        res = await self._call_generate_with_report(generate_call)
+        request_metrics = self._request_metrics.begin(
+            rank_id=self.rank_id,
+            server_id=self.server_id,
+            source=str(req.get("source", "unkown")),
+            streaming=is_streaming,
+        )
+        try:
+            if await raw_request.is_disconnected():
+                raise asyncio.CancelledError("client disconnects")
+            res = await self._call_generate_with_report(
+                generate_call,
+                request_metrics,
+                self._request_aux_info_enabled(req),
+            )
+        except BaseException:
+            request_metrics.finish()
+            raise
 
         if is_streaming:
             return StreamingResponse(

@@ -37,18 +37,19 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
         // that explicitly opt out of target_logprobs.
         generate_config->return_target_logprob = config_proto->return_target_logprob();
     }
-    generate_config->return_incremental       = config_proto->return_incremental();
-    generate_config->return_hidden_states     = config_proto->return_hidden_states();
-    generate_config->return_all_hidden_states = config_proto->return_all_hidden_states();
-    generate_config->hidden_states_cut_dim    = config_proto->hidden_states_cut_dim();
-    generate_config->normalized_hidden_states = config_proto->normalized_hidden_states();
-    generate_config->calculate_loss           = config_proto->calculate_loss();
-    generate_config->is_streaming             = config_proto->is_streaming();
-    generate_config->timeout_ms               = config_proto->timeout_ms();
-    generate_config->sp_edit                  = config_proto->sp_edit();
-    generate_config->force_disable_sp_run     = config_proto->force_disable_sp_run();
-    generate_config->force_sp_accept          = config_proto->force_sp_accept();
-    generate_config->return_cum_log_probs     = config_proto->return_cum_log_probs();
+    generate_config->return_incremental        = config_proto->return_incremental();
+    generate_config->return_hidden_states      = config_proto->return_hidden_states();
+    generate_config->return_all_hidden_states  = config_proto->return_all_hidden_states();
+    generate_config->hidden_states_cut_dim     = config_proto->hidden_states_cut_dim();
+    generate_config->normalized_hidden_states  = config_proto->normalized_hidden_states();
+    generate_config->calculate_loss            = config_proto->calculate_loss();
+    generate_config->is_streaming              = config_proto->is_streaming();
+    generate_config->frontend_metric_streaming = config_proto->frontend_metric_streaming();
+    generate_config->timeout_ms                = config_proto->timeout_ms();
+    generate_config->sp_edit                   = config_proto->sp_edit();
+    generate_config->force_disable_sp_run      = config_proto->force_disable_sp_run();
+    generate_config->force_sp_accept           = config_proto->force_sp_accept();
+    generate_config->return_cum_log_probs      = config_proto->return_cum_log_probs();
     if (config_proto->return_all_probs_mode() != 0) {
         // new client: explicit mode (offset 1). Clamp out-of-range values to NONE
         // so a malformed client can't synthesize an undefined ReturnAllProbsMode.
@@ -408,6 +409,47 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
                                    const int32_t          eos_token_id) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     outputs->set_request_id(responses->request_id);
+    outputs->set_frontend_metric_only(responses->frontend_metric_only);
+    if (responses->frontend_input_len.has_value()) {
+        outputs->mutable_frontend_input_len()->set_value(responses->frontend_input_len.value());
+    }
+    if (responses->frontend_output_len.has_value()) {
+        outputs->mutable_frontend_output_len()->set_value(responses->frontend_output_len.value());
+    }
+    if (responses->frontend_generate_token_num.has_value()) {
+        outputs->mutable_frontend_generate_token_num()->set_value(responses->frontend_generate_token_num.value());
+    }
+    if (responses->frontend_context_token_num.has_value()) {
+        outputs->mutable_frontend_context_token_num()->set_value(responses->frontend_context_token_num.value());
+    }
+    if (responses->frontend_context_token_num_with_cache.has_value()) {
+        outputs->mutable_frontend_context_token_num_with_cache()->set_value(
+            responses->frontend_context_token_num_with_cache.value());
+    }
+    if (responses->frontend_context_execute_time_us.has_value()) {
+        outputs->mutable_frontend_context_execute_time_us()->set_value(
+            responses->frontend_context_execute_time_us.value());
+    }
+    if (responses->frontend_context_execute_time_with_cache_us.has_value()) {
+        outputs->mutable_frontend_context_execute_time_with_cache_us()->set_value(
+            responses->frontend_context_execute_time_with_cache_us.value());
+    }
+    if (responses->frontend_generate_execute_time_us.has_value()) {
+        outputs->mutable_frontend_generate_execute_time_us()->set_value(
+            responses->frontend_generate_execute_time_us.value());
+    }
+    if (responses->frontend_speculative_verify_rounds.has_value()) {
+        outputs->mutable_frontend_speculative_verify_rounds()->set_value(
+            responses->frontend_speculative_verify_rounds.value());
+    }
+    if (responses->frontend_speculative_accepted_token_num.has_value()) {
+        outputs->mutable_frontend_speculative_accepted_token_num()->set_value(
+            responses->frontend_speculative_accepted_token_num.value());
+    }
+    if (responses->frontend_speculative_proposed_draft_tokens.has_value()) {
+        outputs->mutable_frontend_speculative_proposed_draft_tokens()->set_value(
+            responses->frontend_speculative_proposed_draft_tokens.value());
+    }
     const auto& source_outputs = responses->generate_outputs;
     if (source_outputs.empty()) {
         return;

@@ -4,7 +4,17 @@ import logging
 import queue
 import threading
 from dataclasses import asdict
-from typing import Any, AsyncGenerator, Dict, Iterator, List, Optional, Tuple, Union
+from typing import (
+    Any,
+    AsyncGenerator,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Tuple,
+    Union,
+)
 
 import torch
 
@@ -28,6 +38,7 @@ from rtp_llm.ops import (
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.request_headers import normalize_request_headers
 from rtp_llm.utils.base_model_datatypes import (
+    FrontendMetricFrame,
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
@@ -390,7 +401,7 @@ class Pipeline(object):
             skip_special_tokens=generate_config.skip_special_tokens,
             **kwargs,
         )
-        newly_decoded_texts = [text.rstrip("\uFFFD") for text in decoded_batch]
+        newly_decoded_texts = [text.rstrip("\ufffd") for text in decoded_batch]
         all_texts = newly_decoded_texts
 
         final_texts = []
@@ -515,19 +526,53 @@ class Pipeline(object):
     ) -> AsyncGenerator[GenerateResponse, None]:
         token_type_ids = []
         request_headers = normalize_request_headers(kwargs.pop("headers", None))
+        frontend_metric_observer: Optional[Callable[[Any], None]] = kwargs.pop(
+            "frontend_metric_observer", None
+        )
+        frontend_metric_unit_id = int(kwargs.pop("frontend_metric_unit_id", 0))
+        frontend_metric_side_channel = frontend_metric_observer is not None
+
+        # Preserve the public streaming/retry contract while asking the backend
+        # for private counter frames used by the frontend TPS accumulator.
+        backend_generate_config = generate_config
+        if frontend_metric_side_channel:
+            backend_generate_config = generate_config.model_copy(
+                update={"frontend_metric_streaming": True, "aux_info": True},
+                deep=True,
+            )
+        context_batch_size = (
+            1
+            if generate_config.has_num_beams()
+            else max(generate_config.num_return_sequences, 1)
+        )
 
         token_ids = torch.tensor(token_ids, dtype=torch.int)
+
+        raw_metric_observer = None
+        if frontend_metric_observer is not None:
+
+            def raw_metric_observer(output: GenerateOutputs, attempt: int) -> None:
+                frontend_metric_observer(
+                    FrontendMetricFrame.from_output(
+                        output,
+                        attempt=attempt,
+                        context_batch_size=context_batch_size,
+                        unit_id=frontend_metric_unit_id,
+                    )
+                )
 
         input = GenerateInput(
             request_id=request_id,
             token_ids=token_ids,
             mm_inputs=mm_inputs,
-            generate_config=generate_config,
+            generate_config=backend_generate_config,
             tokenizer=self.tokenizer,
             token_type_ids=token_type_ids,
             batch_group_size=kwargs.get("batch_group_size", 1),
             batch_group_id=kwargs.get("batch_group_id", -1),
             headers=request_headers,
+            frontend_metric_tags=dict(kwargs.get("frontend_metric_tags", {})),
+            frontend_metric_observer=raw_metric_observer,
         )
 
         stop_word_strs = generate_config.stop_words_str

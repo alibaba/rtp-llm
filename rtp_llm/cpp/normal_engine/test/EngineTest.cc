@@ -110,6 +110,87 @@ TEST_F(NormalEngineTest, testSimple) {
         auto output2 = stream->nextOutput();
         ASSERT_TRUE(!output2.ok());
     }
+
+    // test non-streaming query with AuxInfo-only frontend metric progress
+    {
+        std::shared_ptr<GenerateInput> query              = make_shared<GenerateInput>();
+        query->input_ids                                  = torch::tensor({1, 2, 3, 4, 5, 6, 7}, torch::kInt32);
+        query->generate_config                            = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens            = 5;
+        query->generate_config->is_streaming              = false;
+        query->generate_config->frontend_metric_streaming = true;
+
+        shared_ptr<GenerateStream> stream = engine->enqueue(query);
+        ASSERT_TRUE(stream != nullptr);
+
+        GenerateOutputs final_output;
+        int             previous_output_len     = 0;
+        int64_t         previous_generate_count = 0;
+        while (true) {
+            auto output = stream->nextOutput();
+            ASSERT_TRUE(output.ok());
+            if (!output.value().frontend_metric_only) {
+                final_output = std::move(output.value());
+                break;
+            }
+            const auto& generated = output.value().generate_outputs[0];
+            ASSERT_FALSE(generated.output_ids.defined());
+            ASSERT_GE(generated.aux_info.step_output_len, 1);
+            ASSERT_GE(generated.aux_info.output_len, previous_output_len);
+            ASSERT_LE(generated.aux_info.output_len, 5);
+            previous_output_len = generated.aux_info.output_len;
+            ASSERT_TRUE(output.value().frontend_context_token_num.has_value());
+            ASSERT_EQ(output.value().frontend_context_token_num.value(), 7);
+            ASSERT_TRUE(output.value().frontend_context_token_num_with_cache.has_value());
+            ASSERT_EQ(output.value().frontend_context_token_num_with_cache.value(), 7);
+            ASSERT_TRUE(output.value().frontend_context_execute_time_us.has_value());
+            ASSERT_TRUE(output.value().frontend_context_execute_time_with_cache_us.has_value());
+            ASSERT_TRUE(output.value().frontend_generate_token_num.has_value());
+            ASSERT_GE(output.value().frontend_generate_token_num.value(), previous_generate_count);
+            previous_generate_count = output.value().frontend_generate_token_num.value();
+            ASSERT_TRUE(output.value().frontend_generate_execute_time_us.has_value());
+        }
+
+        ASSERT_FALSE(final_output.frontend_metric_only);
+        const auto& generated = final_output.generate_outputs[0];
+        ASSERT_TRUE(generated.output_ids.defined());
+        ASSERT_EQ(generated.output_ids.numel(), 5);
+        ASSERT_EQ(generated.aux_info.output_len, 5);
+        ASSERT_TRUE(final_output.frontend_generate_token_num.has_value());
+        ASSERT_EQ(final_output.frontend_generate_token_num.value(), 4);
+        ASSERT_TRUE(final_output.frontend_context_token_num.has_value());
+        ASSERT_EQ(final_output.frontend_context_token_num.value(), 7);
+        ASSERT_TRUE(final_output.frontend_generate_execute_time_us.has_value());
+        ASSERT_GT(final_output.frontend_generate_execute_time_us.value(), 0);
+
+        auto exhausted = stream->nextOutput();
+        ASSERT_FALSE(exhausted.ok());
+    }
+
+    // A one-token request has no later decode frame. Its terminal response must
+    // therefore carry the prefill counters from the same engine step.
+    {
+        std::shared_ptr<GenerateInput> query              = make_shared<GenerateInput>();
+        query->input_ids                                  = torch::tensor({1, 2, 3, 4, 5, 6, 7}, torch::kInt32);
+        query->generate_config                            = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens            = 1;
+        query->generate_config->is_streaming              = false;
+        query->generate_config->frontend_metric_streaming = true;
+
+        shared_ptr<GenerateStream> stream = engine->enqueue(query);
+        ASSERT_TRUE(stream != nullptr);
+
+        auto final_output = stream->nextOutput();
+        ASSERT_TRUE(final_output.ok());
+        ASSERT_FALSE(final_output.value().frontend_metric_only);
+        ASSERT_TRUE(final_output.value().frontend_context_token_num.has_value());
+        ASSERT_EQ(final_output.value().frontend_context_token_num.value(), 7);
+        ASSERT_TRUE(final_output.value().frontend_context_execute_time_us.has_value());
+        ASSERT_GT(final_output.value().frontend_context_execute_time_us.value(), 0);
+
+        auto exhausted = stream->nextOutput();
+        ASSERT_FALSE(exhausted.ok());
+    }
 }
 
 TEST_F(NormalEngineTest, testSystemPrompt) {

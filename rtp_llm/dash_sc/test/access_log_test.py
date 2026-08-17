@@ -442,6 +442,73 @@ class CorrelationHeaderTest(TestCase):
 
 
 class BuildRecordTest(TestCase):
+    def test_frontend_old_backend_falls_back_only_to_public_lengths(self) -> None:
+        rec = _make_record()
+        rec.record_frontend_backend_output(
+            SimpleNamespace(
+                generate_outputs=[
+                    SimpleNamespace(
+                        aux_info=SimpleNamespace(
+                            input_len=10,
+                            reuse_len=2,
+                            output_len=6,
+                            # These fields were never part of public AuxInfo and
+                            # must not be mistaken for a rolling-upgrade path.
+                            context_execute_time_us=999,
+                            speculative_verify_rounds=999,
+                        )
+                    )
+                ]
+            )
+        )
+
+        counters = rec.frontend_combined_metric_counters
+        self.assertEqual(counters.input_len, 10)
+        self.assertEqual(counters.reuse_len, 2)
+        self.assertEqual(counters.generate_token_num, 5)
+        self.assertEqual(counters.context_execute_time_us, 0)
+        self.assertEqual(counters.speculative_verify_rounds, 0)
+
+    def test_frontend_mtp_generate_tokens_match_backend_tps_numerator(self) -> None:
+        rec = _make_record()
+        rec.record_frontend_backend_output(
+            SimpleNamespace(
+                frontend_speculative_verify_rounds=4,
+                frontend_speculative_accepted_token_num=7,
+                frontend_speculative_proposed_draft_tokens=12,
+                frontend_context_execute_time_us=100,
+                frontend_context_execute_time_with_cache_us=100,
+                frontend_generate_execute_time_us=200,
+                frontend_generate_token_num=7,
+                frontend_input_len=10,
+                generate_outputs=[
+                    SimpleNamespace(aux_info=SimpleNamespace(reuse_len=2, output_len=6))
+                ],
+            )
+        )
+
+        self.assertEqual(rec.frontend_combined_metric_counters[-1], 7)
+
+    def test_frontend_normal_generate_tokens_exclude_first_token(self) -> None:
+        rec = _make_record()
+        rec.record_frontend_backend_output(
+            SimpleNamespace(
+                frontend_speculative_verify_rounds=0,
+                frontend_speculative_accepted_token_num=0,
+                frontend_speculative_proposed_draft_tokens=0,
+                frontend_context_execute_time_us=100,
+                frontend_context_execute_time_with_cache_us=100,
+                frontend_generate_execute_time_us=200,
+                frontend_generate_token_num=5,
+                frontend_input_len=10,
+                generate_outputs=[
+                    SimpleNamespace(aux_info=SimpleNamespace(reuse_len=2, output_len=6))
+                ],
+            )
+        )
+
+        self.assertEqual(rec.frontend_combined_metric_counters[-1], 5)
+
     def test_struct_mode_token_accounting(self) -> None:
         rec = _make_record()
         rec.capture_structured_request(

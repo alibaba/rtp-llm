@@ -1,8 +1,8 @@
+import asyncio
 import logging
 import os
 import time
-import asyncio
-from typing import TYPE_CHECKING, AsyncGenerator, List, Optional
+from typing import TYPE_CHECKING, Any, AsyncGenerator, List, Optional
 
 import torch
 
@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from rtp_llm.config.py_config_modules import PyEnvConfigs
 
 route_logger = logging.getLogger("route_logger")
+
 
 PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE"
 DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE = 3
@@ -118,6 +119,7 @@ class BackendRPCServerVisitor:
             master_config=master_config,
         )
         self.recent_cache_key_window = RecentCacheKeyWindow()
+        self.frontend_recent_cache_key_window = RecentCacheKeyWindow()
         self.pd_route_retry_on_unavailable = self._pd_route_retry_on_unavailable()
 
     @staticmethod
@@ -200,23 +202,26 @@ class BackendRPCServerVisitor:
         return role_list
 
     async def get_master_route_addrs(
-        self, input: GenerateInput
+        self,
+        input: GenerateInput,
+        block_cache_keys: Optional[List[int]] = None,
     ) -> Optional[FlexlbResponse]:
         """
         Resolve role addrs from FlexLB master (and slave on connection failure).
         Returns None on success; on failure returns FlexlbResponse for routing decisions.
         request_id is frontend-generated and is not overwritten.
         """
-        token_ids = (
-            input.token_ids.tolist()[0]
-            if len(input.token_ids.shape) == 2
-            else input.token_ids.tolist()
-        )
-        # Keep hash generation at the physical KV block granularity. Page-RR
-        # routing samples canonical keys from this full logical-block key list;
-        # it must not recompute request hashes with the virtual block size.
-        full_block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
-        block_cache_keys = self._route_cache_keys(full_block_cache_keys)
+        if block_cache_keys is None:
+            token_ids = (
+                input.token_ids.tolist()[0]
+                if len(input.token_ids.shape) == 2
+                else input.token_ids.tolist()
+            )
+            # Keep hash generation at the physical KV block granularity.
+            full_block_cache_keys = get_block_cache_keys(
+                token_ids, self.seq_size_per_block
+            )
+            block_cache_keys = self._route_cache_keys(full_block_cache_keys)
         self._report_recent_cache_key_metrics(block_cache_keys)
 
         try:
@@ -281,6 +286,58 @@ class BackendRPCServerVisitor:
         except Exception:
             route_logger.exception("failed to report recent cache key metrics")
 
+    def _frontend_route_cache_keys(self, input: GenerateInput) -> List[List[int]]:
+        token_ids = input.token_ids.tolist()
+        prompts = token_ids if len(input.token_ids.shape) == 2 else [token_ids]
+        return [
+            self._route_cache_keys(
+                get_block_cache_keys(prompt_token_ids, self.seq_size_per_block)
+            )
+            for prompt_token_ids in prompts
+        ]
+
+    def _report_frontend_cache_key_metrics(
+        self, input: GenerateInput, prompt_cache_keys: List[List[int]]
+    ) -> None:
+        try:
+            tags = dict(input.frontend_metric_tags)
+            for block_cache_keys in prompt_cache_keys:
+                snapshot = self.frontend_recent_cache_key_window.record(
+                    block_cache_keys
+                )
+                kmonitor.report(
+                    AccMetrics.FRONTEND_RECENT_CACHE_KEY_REQUEST_COUNT_METRIC,
+                    1,
+                    tags,
+                )
+                if snapshot.request_occurrences <= 0:
+                    kmonitor.report(
+                        AccMetrics.FRONTEND_RECENT_CACHE_KEY_EMPTY_REQUEST_COUNT_METRIC,
+                        1,
+                        tags,
+                    )
+                kmonitor.report(
+                    AccMetrics.FRONTEND_RECENT_CACHE_KEY_HIT_COUNT_METRIC,
+                    snapshot.request_hit_occurrences,
+                    tags,
+                )
+                kmonitor.report(
+                    AccMetrics.FRONTEND_RECENT_CACHE_KEY_TOTAL_COUNT_METRIC,
+                    snapshot.request_occurrences,
+                    tags,
+                )
+                kmonitor.report(
+                    GaugeMetrics.FRONTEND_RECENT_CACHE_KEY_HIT_RATIO_METRIC,
+                    snapshot.request_hit_ratio,
+                    tags,
+                )
+        except Exception:
+            route_logger.exception("failed to report frontend recent cache key metrics")
+
+    @staticmethod
+    def _frontend_cache_metrics_enabled(input: GenerateInput) -> bool:
+        return bool(input.frontend_metric_tags)
+
     def _route_cache_keys(self, block_cache_keys: List[int]) -> List[int]:
         return route_cache_keys_for_page_rr(
             block_cache_keys, self._page_rr_route_cache_keys, self._page_rr_cp_size
@@ -317,7 +374,11 @@ class BackendRPCServerVisitor:
                 missing_roles,
             )
 
-    async def route_ips(self, input: GenerateInput):
+    async def route_ips(
+        self,
+        input: GenerateInput,
+        frontend_master_cache_keys: Optional[List[int]] = None,
+    ):
         # proactive rejection: check cached queue length before making request to master
         if self.master_config:
             threshold = self.master_config.master_queue_reject_threshold
@@ -345,7 +406,9 @@ class BackendRPCServerVisitor:
             master_route_result: Optional[FlexlbResponse] = None
             if not role_addrs_specified and master_addr and not input_token_batched:
                 with Timer() as master_route_timer:
-                    master_route_result = await self.get_master_route_addrs(input)
+                    master_route_result = await self.get_master_route_addrs(
+                        input, frontend_master_cache_keys
+                    )
                 kmonitor.report(
                     GaugeMetrics.MASTER_ROUTE_RT_METRIC, master_route_timer.cost_ms()
                 )
@@ -490,27 +553,64 @@ class BackendRPCServerVisitor:
             set_aux_info(e)
             raise
 
+        # Keep route_ips()'s legacy series intact. This independently named,
+        # tagged frontend series covers every route mode without double-counting
+        # queries over the original RECENT_CACHE_KEY metrics.
+        frontend_master_cache_keys = None
+        if self._frontend_cache_metrics_enabled(input):
+            prompt_cache_keys = self._frontend_route_cache_keys(input)
+            self._report_frontend_cache_key_metrics(input, prompt_cache_keys)
+            if len(prompt_cache_keys) == 1:
+                frontend_master_cache_keys = prompt_cache_keys[0]
+
         async def route_and_enqueue(attempt: int):
             if attempt > 0:
                 input.generate_config.role_addrs = []
             if self.host_service.service_available:
-                await self.route_ips(input)
+                if frontend_master_cache_keys is None:
+                    await self.route_ips(input)
+                else:
+                    await self.route_ips(input, frontend_master_cache_keys)
             return self.model_rpc_client.enqueue(input)
 
         async def stream_with_aux_info():
             attempt = 0
-            is_streaming = bool(getattr(input.generate_config, "is_streaming", False))
+            is_streaming = input.generate_config.is_streaming
+            observer_failure_logged = False
+
+            def observe_backend_output(output: Any, output_attempt: int) -> None:
+                nonlocal observer_failure_logged
+                observer = input.frontend_metric_observer
+                if observer is None:
+                    return
+                try:
+                    observer(output, output_attempt)
+                except Exception:
+                    # Metrics are best-effort and must never change inference
+                    # response or retry behavior.
+                    if not observer_failure_logged:
+                        observer_failure_logged = True
+                        logging.exception(
+                            "failed to observe raw backend frontend metrics"
+                        )
+
             while True:
                 yielded_output = False
                 try:
                     stream = await route_and_enqueue(attempt)
                     if is_streaming:
                         async for output in stream:
+                            observe_backend_output(output, attempt)
+                            if getattr(output, "frontend_metric_only", False):
+                                continue
                             yielded_output = True
                             yield output
                     else:
                         buffered_outputs = []
                         async for output in stream:
+                            observe_backend_output(output, attempt)
+                            if getattr(output, "frontend_metric_only", False):
+                                continue
                             buffered_outputs.append(output)
                         yielded_output = True
                         for output in buffered_outputs:

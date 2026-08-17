@@ -539,8 +539,8 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
                 model_input.sequence_lengths = committedLenToDraftDecodePosition(committed_len, host_holder);
                 model_input.prefix_lengths   = (model_input.sequence_lengths - 1).to(torch::kInt32);
             } else if (model_input.sequence_lengths.defined()) {
-                auto target_prefix_lengths   = toCudaInt32(model_input.sequence_lengths, host_holder);
-                model_input.prefix_lengths   = target_prefix_lengths;
+                auto target_prefix_lengths = toCudaInt32(model_input.sequence_lengths, host_holder);
+                model_input.prefix_lengths = target_prefix_lengths;
                 model_input.sequence_lengths =
                     normalDecodePositionToDraftDecodePosition(target_prefix_lengths, host_holder);
             }
@@ -556,10 +556,9 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
         model_input.combo_tokens      = std::move(combo_tokens_gpu);
         model_input.lm_output_indexes = makeCudaInt32Range(model_input.combo_tokens.numel());
         model_input.input_lengths     = toCudaInt32(model_input.input_lengths, host_holder);
-        auto target_prefix_lengths   = toCudaInt32(model_input.sequence_lengths, host_holder);
-        model_input.prefix_lengths   = target_prefix_lengths;
-        model_input.sequence_lengths =
-            normalDecodePositionToDraftDecodePosition(target_prefix_lengths, host_holder);
+        auto target_prefix_lengths    = toCudaInt32(model_input.sequence_lengths, host_holder);
+        model_input.prefix_lengths    = target_prefix_lengths;
+        model_input.sequence_lengths  = normalDecodePositionToDraftDecodePosition(target_prefix_lengths, host_holder);
         return;
     }
 
@@ -574,10 +573,9 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
 
     model_input.combo_tokens      = toCudaInt32(combo_tokens, host_holder);
     model_input.input_lengths     = toCudaInt32(model_input.input_lengths, host_holder);
-    auto target_prefix_lengths   = toCudaInt32(model_input.sequence_lengths, host_holder);
-    model_input.prefix_lengths   = target_prefix_lengths;
-    model_input.sequence_lengths =
-        normalDecodePositionToDraftDecodePosition(target_prefix_lengths, host_holder);
+    auto target_prefix_lengths    = toCudaInt32(model_input.sequence_lengths, host_holder);
+    model_input.prefix_lengths    = target_prefix_lengths;
+    model_input.sequence_lengths  = normalDecodePositionToDraftDecodePosition(target_prefix_lengths, host_holder);
     model_input.lm_output_indexes = makeCudaInt32Range(static_cast<int64_t>(batch_size));
 }
 
@@ -799,9 +797,9 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
             && speculative_sampler_output.accept_len_cpu.is_pinned()) {
             speculative_sampler_output.transfer_done_event->synchronize();
         }
-        auto accept_lens_cpu = speculative_sampler_output.accept_len_cpu.defined() ?
-                                   speculative_sampler_output.accept_len_cpu.contiguous() :
-                                   speculative_sampler_output.accept_len.cpu().contiguous();
+        auto accept_lens_cpu   = speculative_sampler_output.accept_len_cpu.defined() ?
+                                     speculative_sampler_output.accept_len_cpu.contiguous() :
+                                     speculative_sampler_output.accept_len.cpu().contiguous();
         auto accept_tokens_cpu = speculative_sampler_output.accept_tokens_cpu.defined() ?
                                      speculative_sampler_output.accept_tokens_cpu.contiguous() :
                                      speculative_sampler_output.accept_tokens.cpu().contiguous();
@@ -818,15 +816,15 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
             total_accept_len += accept_lens[i];
         }
 
-        auto combo_tokens =
-            torch::empty({static_cast<int64_t>(total_accept_len)}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+        auto combo_tokens = torch::empty({static_cast<int64_t>(total_accept_len)},
+                                         torch::TensorOptions(torch::kInt32).pinned_memory(true));
         auto input_lengths =
             torch::empty({static_cast<int64_t>(batch_size)}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
         auto lm_output_indexes =
             torch::empty({static_cast<int64_t>(batch_size)}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
-        const auto* accept_tokens_ptr = accept_tokens_cpu.data_ptr<int32_t>();
-        auto*       combo_tokens_ptr  = combo_tokens.data_ptr<int32_t>();
-        auto*       input_lengths_ptr = input_lengths.data_ptr<int32_t>();
+        const auto* accept_tokens_ptr  = accept_tokens_cpu.data_ptr<int32_t>();
+        auto*       combo_tokens_ptr   = combo_tokens.data_ptr<int32_t>();
+        auto*       input_lengths_ptr  = input_lengths.data_ptr<int32_t>();
         auto*       output_indexes_ptr = lm_output_indexes.data_ptr<int32_t>();
 
         size_t                     token_offset = 0;
@@ -843,15 +841,15 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
                    accept_lens[i] * sizeof(int32_t));
             hidden_states_list.push_back(
                 model_output.all_hidden_states.narrow(0, i * (propose_step_ + 1), accept_lens[i]));
-            input_lengths_ptr[i]  = accept_lens[i];
+            input_lengths_ptr[i] = accept_lens[i];
             token_offset += accept_lens[i];
             output_indexes_ptr[i] = static_cast<int32_t>(token_offset - 1);
         }
 
-        model_input.combo_tokens      = std::move(combo_tokens);
-        model_input.input_lengths     = std::move(input_lengths);
-        model_input.lm_output_indexes = std::move(lm_output_indexes);
-        hidden_states_d_t             = torch::cat(hidden_states_list).contiguous();
+        model_input.combo_tokens       = std::move(combo_tokens);
+        model_input.input_lengths      = std::move(input_lengths);
+        model_input.lm_output_indexes  = std::move(lm_output_indexes);
+        hidden_states_d_t              = torch::cat(hidden_states_list).contiguous();
         model_input.last_hidden_states = hidden_states_d_t;
         auto position_ids = model_input.combo_position_ids.defined() && model_input.combo_position_ids.is_cuda() ?
                                 model_input.combo_position_ids.cpu().contiguous() :
@@ -898,7 +896,7 @@ void MtpBatchStreamProcessor::updateOneStepDraftSamplerOutput(const StreamGroups
 
         // Prefer main-thread device-state all_probs; fallback is safe after
         // worker clear because clear runs after specUpdate writes all_probs.
-        const auto& dev_probs = stream->getDraftAllProbsGpu();
+        const auto& dev_probs     = stream->getDraftAllProbsGpu();
         const bool  use_dev_probs = useMtpDeviceState() && dev_probs.defined();
         RTP_LLM_CHECK_WITH_INFO(use_dev_probs || (sp_output_buffer && sp_output_buffer->all_probs.defined()),
                                 "one-step MTP draft all_probs missing for stream %ld",
@@ -933,8 +931,8 @@ void MtpBatchStreamProcessor::updateMultiStepDraftSamplerOutput(const StreamGrou
         // Prefer device-state draft_all_probs (see comment in
         // updateOneStepDraftSamplerOutput for the same fallback contract).
         const auto& dev_probs = stream->getDraftAllProbsGpu();
-        prev_draft_token_probs_list.push_back(
-            useMtpDeviceState() && dev_probs.defined() ? dev_probs : sp_output_buffer->all_probs);
+        prev_draft_token_probs_list.push_back(useMtpDeviceState() && dev_probs.defined() ? dev_probs :
+                                                                                           sp_output_buffer->all_probs);
     }
 
     auto pre_draft_token_probs = torch::stack(prev_draft_token_probs_list, 0).contiguous();
@@ -1060,6 +1058,9 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         if (stream_idx < spec_decode_output.processor_errors.size()) {
             spec_update_info.error_info = spec_decode_output.processor_errors[stream_idx];
         }
+        spec_update_info.speculative_verify_rounds         = 1;
+        spec_update_info.speculative_accepted_token_num    = cur_accept_len;
+        spec_update_info.speculative_proposed_draft_tokens = propose_step_;
         spec_update_infos.push_back(std::move(spec_update_info));
 
         // Draft hidden layout differs per mode: the device-state path keeps a

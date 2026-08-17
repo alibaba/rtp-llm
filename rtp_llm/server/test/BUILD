@@ -51,3 +51,12 @@ py_test(
     ],
     tags = ["manual"],
 )
+
+py_test(
+    name = "backend_rpc_server_visitor_test",
+    srcs = ["backend_rpc_server_visitor_test.py"],
+    deps = [
+        "//rtp_llm/server:server",
+        "//rtp_llm:testlib",
+    ],
+)

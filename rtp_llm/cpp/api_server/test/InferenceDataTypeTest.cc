@@ -44,6 +44,16 @@ TEST(InferenceDataTypeTest, RawRequest_GenerateConfig_TopK) {
     ASSERT_EQ(req.generate_config.value().top_k, 1);
 }
 
+TEST(InferenceDataTypeTest, RawRequestIgnoresInternalFrontendMetricStreaming) {
+    const std::string json_str = R"({"generate_config": {"frontend_metric_streaming": true}})";
+    RawRequest        request;
+
+    FromJsonString(request, json_str);
+
+    ASSERT_TRUE(request.generate_config.has_value());
+    EXPECT_FALSE(request.generate_config->frontend_metric_streaming);
+}
+
 TEST(InferenceDataTypeTest, RawRequest_GenerateConfig_HiddenStates_False) {
     std::string jsonStr = R"({"generate_config": {"top_k": 1}})";
     RawRequest  req;
@@ -120,6 +130,9 @@ TEST(InferenceDataTypeTest, AuxInfoAdapter) {
     ASSERT_TRUE(jsonStr.find(R"("step_output_len":0)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("beam_responses":[])") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("cum_log_probs":)") == std::string::npos);
+    ASSERT_TRUE(jsonStr.find("speculative_verify_rounds") == std::string::npos);
+    ASSERT_TRUE(jsonStr.find("context_execute_time_us") == std::string::npos);
+    ASSERT_TRUE(jsonStr.find("generate_execute_time_us") == std::string::npos);
 }
 
 TEST(InferenceDataTypeTest, MultiSeqsResponse) {
