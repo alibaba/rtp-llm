@@ -900,7 +900,7 @@ class MegaCSARTPEagerTest(unittest.TestCase):
             ).mul_(0.05)
             reference_metadata = self._metadata(context_length - 1, reference_pools)
             mega_metadata = self._metadata(context_length - 1, mega_pools)
-            if context_length == _MODEL_MAX_SEQ_LEN:
+            if context_length > _TEST_MAX_SEQ_LEN:
                 _fill_random_context(reference_pools, self.device, seed=4242)
                 _fill_random_context(mega_pools, self.device, seed=4242)
             reference_check = self._forward_reference(
