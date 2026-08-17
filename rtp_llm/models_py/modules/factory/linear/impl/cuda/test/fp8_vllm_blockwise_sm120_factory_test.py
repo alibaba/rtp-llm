@@ -44,7 +44,7 @@ class SM120FactoryDiagnosticTest(unittest.TestCase):
     ):
         quant_config = init_quant_config("FP8_PER_BLOCK")
         weight = torch.empty((128, 128), dtype=torch.float8_e4m3fn)
-        float_scales = torch.ones((1, 1), dtype=torch.float32)
+        float_scales = torch.ones((1, 128), dtype=torch.float32)
         int_scales = torch.zeros((128, 1), dtype=torch.int32)
 
         for requested, expect_cutlass in (
@@ -93,8 +93,8 @@ class SM120FactoryDiagnosticTest(unittest.TestCase):
         weights = {
             "a": physical_a.reshape(K, 128),
             "b": physical_b.reshape(K, 256),
-            "sa": torch.tensor([[1.0]]),
-            "sb": torch.tensor([[2.0], [3.0]]).reshape(1, 2),
+            "sa": torch.arange(128, dtype=torch.float32).reshape(1, 128),
+            "sb": (torch.arange(256, dtype=torch.float32) + 100).reshape(1, 256),
         }
 
         with mock.patch.object(LinearFactory, "create_linear") as create_linear:
@@ -114,7 +114,8 @@ class SM120FactoryDiagnosticTest(unittest.TestCase):
             merged_weight.reshape(384, K), torch.cat([physical_a, physical_b])
         )
         torch.testing.assert_close(
-            merged_scales.reshape(3, 1), torch.tensor([[1.0], [2.0], [3.0]])
+            merged_scales.reshape(384, 1),
+            torch.cat([weights["sa"].reshape(128, 1), weights["sb"].reshape(256, 1)]),
         )
 
     def test_factory_ignores_broken_rejection_diagnostic(self):
@@ -144,7 +145,7 @@ class SM120FactoryDiagnosticTest(unittest.TestCase):
 
     def test_restore_non_square_blockwise_layout(self):
         weight = torch.arange(384 * 256, device="cuda").reshape(384, 256)
-        weight_scales = torch.arange(3 * 2, device="cuda").reshape(3, 2)
+        weight_scales = torch.arange(3 * 256, device="cuda").reshape(3, 256)
 
         restored = CudaFp8VllmBlockwiseLinear._restore_blockwise_weight_layout(
             weight, weight_scales
@@ -153,13 +154,13 @@ class SM120FactoryDiagnosticTest(unittest.TestCase):
         restored_weight, restored_scales, K, N, scale_K, scale_N = restored
         self.assertEqual((N, K), restored_weight.shape)
         self.assertEqual((scale_N, scale_K), restored_scales.shape)
-        self.assertEqual((K, N, scale_K, scale_N), (384, 256, 3, 2))
+        self.assertEqual((K, N, scale_K, scale_N), (384, 256, 3, 256))
         torch.testing.assert_close(restored_weight.flatten(), weight.flatten())
         torch.testing.assert_close(restored_scales.flatten(), weight_scales.flatten())
 
     def test_restore_rejects_scale_shape_mismatch(self):
         weight = torch.empty((384, 256), device="cuda")
-        weight_scales = torch.empty((2, 2), device="cuda")
+        weight_scales = torch.empty((2, 256), device="cuda")
         with self.assertRaisesRegex(ValueError, "scale dimension mismatch"):
             CudaFp8VllmBlockwiseLinear._restore_blockwise_weight_layout(
                 weight, weight_scales
@@ -167,7 +168,7 @@ class SM120FactoryDiagnosticTest(unittest.TestCase):
 
     def test_restore_rejects_non_contiguous_inputs(self):
         weight = torch.empty((256, 384), device="cuda").transpose(0, 1)
-        weight_scales = torch.empty((2, 3), device="cuda").transpose(0, 1)
+        weight_scales = torch.empty((256, 3), device="cuda").transpose(0, 1)
         with self.assertRaisesRegex(ValueError, "weight must be contiguous"):
             CudaFp8VllmBlockwiseLinear._restore_blockwise_weight_layout(
                 weight, torch.empty((3, 2), device="cuda")

@@ -6,9 +6,11 @@ Selected by LinearFactory only on the compiled sm_120 architecture; sm_9x / sm_1
 keep using DeepGEMM via `CudaFp8GEMMLinear`.
 """
 
+import os
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.modules.factory.linear import LinearBase
@@ -51,9 +53,9 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
     required; its Optional annotation only preserves the LinearBase/factory
     constructor signature.
 
-    Scale layout (matches CUTLASS Sm120BlockwiseScaleConfig<1, 128, 128, MN, K>):
+    Scale layout (matches CUTLASS Sm120BlockwiseScaleConfig<1, 1, 128, MN, K>):
       - input_scales : (M, K//128), MN-major (M-stride=1, K-group-stride=M)
-      - weight_scales: (N//128, K//128), K-major  (K-stride = 1)
+      - weight_scales: (N, K//128), K-major  (K-stride = 1)
     Input scales use column_major_scales=True, scale_tma_aligned=False
     because CUTLASS tile_atom_to_shape_SFA computes K-group stride as exactly
     M (no alignment padding).  scale_tma_aligned=True would pad to ceil4(M),
@@ -79,16 +81,14 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
             raise ValueError("SM120 FP8 blockwise weight scales must be contiguous")
         K, N = weight.shape
         scale_K, scale_N = weight_scales.shape
-        if (N + block_size - 1) // block_size != scale_N or (
-            K + block_size - 1
-        ) // block_size != scale_K:
+        if N != scale_N or (K + block_size - 1) // block_size != scale_K:
             raise ValueError(
                 "SM120 FP8 blockwise weight scale dimension mismatch: "
                 f"N={N}, scale_N={scale_N}, K={K}, scale_K={scale_K}"
             )
         return (
             weight.reshape(N, K),
-            weight_scales.reshape(scale_N, scale_K),
+            weight_scales.reshape(N, scale_K),
             K,
             N,
             scale_K,
@@ -196,6 +196,9 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
         self.weight_scales = weight_scales
         self.input_scales = input_scales
         self.bias = bias
+        self.fast_gelu_min_m = int(
+            os.environ.get("RTP_LLM_SM120_CUTLASS_FAST_GELU_MIN_M", "0")
+        )
 
         if self.weight.dim() != 2 or self.weight_scales.dim() != 2:
             raise ValueError(
@@ -240,7 +243,7 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
                 raise ValueError(f"Bias dtype must be bfloat16, got {self.bias.dtype}")
             self.bias = self.bias.to(device=self.weight.device)
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def _forward_impl(self, input: torch.Tensor, use_gelu: bool) -> torch.Tensor:
         if input.dtype != torch.bfloat16:
             raise ValueError(f"Input tensor dtype must be bfloat16, got {input.dtype}")
         if input.dim() != 2:
@@ -273,7 +276,17 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
             self.weight,
             input_scales,
             self.weight_scales,
+            self.bias,
+            use_gelu,
         )
-        if self.bias is not None:
-            output.add_(self.bias)
         return output
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return self._forward_impl(input, use_gelu=False)
+
+    def forward_with_bias_gelu(self, input: torch.Tensor) -> torch.Tensor:
+        if self.fast_gelu_min_m > 0 and input.shape[0] >= self.fast_gelu_min_m:
+            return self._forward_impl(input, use_gelu=True)
+        # Small-M and default path retain exact GELU. The fast epilogue is
+        # opt-in because GELU_taylor can change borderline classifications.
+        return F.gelu(self._forward_impl(input, use_gelu=False))
