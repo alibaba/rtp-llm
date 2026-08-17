@@ -1508,45 +1508,42 @@ void standalone_stable_radix_topk_one_block_(void* buf, size_t& buf_size, T cons
 
 template <typename T, typename idxT, bool sorted = false>
 void standalone_stable_radix_11bits(void* buf, size_t& buf_size, T const* in, int batch_size, idxT len, idxT k, T* out,
-    idxT* out_idx, bool greater, std::optional<T> mask_val, cudaStream_t stream = 0)
+    idxT* out_idx, bool greater, std::optional<T> mask_val, cudaStream_t stream = 0, int force_path = 0)
 {
     constexpr int items_per_thread = 32;
     constexpr int block_dim = 512;
     constexpr bool fused_last_filter = false;
     constexpr int topk_bits = 11;
-    if (len <= block_dim * items_per_thread)
-    {
-        standalone_stable_radix_topk_one_block_<T, idxT, topk_bits, block_dim>(buf, buf_size, in, 
-            static_cast<idxT*>(nullptr), batch_size, len, k, out, out_idx, !greater, mask_val, stream, sorted);
-    }
-    else
+
+    // See topkLastDim.h for the force_path legend.
+    bool auto_one_block = (len <= block_dim * items_per_thread);
+    unsigned grid_dim = 0;
+    if (!auto_one_block && force_path != 2)
     {
         int sm_cnt = tensorrt_llm::common::getMultiProcessorCount();
-        unsigned grid_dim = air_topk_stable::calc_grid_dim<T, idxT, topk_bits, block_dim>(batch_size, len, sm_cnt);
+        grid_dim = air_topk_stable::calc_grid_dim<T, idxT, topk_bits, block_dim>(batch_size, len, sm_cnt);
 
 #if USING_ROCM
         // On ROCm, the one-block kernel with vectorized reads is faster than the
         // multi-block path for small grid_dim values, because the multi-block path
         // has inter-block sync overhead and multiple kernel launches (3 passes +
         // last_filter + sort). Force one-block when grid_dim is small.
-        if (grid_dim <= 4)
-        {
-            standalone_stable_radix_topk_one_block_<T, idxT, topk_bits, block_dim>(buf, buf_size, in,
-                static_cast<idxT*>(nullptr), batch_size, len, k, out, out_idx, !greater, mask_val, stream, sorted);
-            return;
-        }
+        auto_one_block = (grid_dim <= 4);
+#else
+        auto_one_block = (grid_dim == 1);
 #endif
+    }
 
-        if (grid_dim == 1)
-        {
-            standalone_stable_radix_topk_one_block_<T, idxT, topk_bits, block_dim>(buf, buf_size, in,
-                static_cast<idxT*>(nullptr), batch_size, len, k, out, out_idx, !greater, mask_val, stream, sorted);
-        }
-        else
-        {
-            standalone_stable_radix_topk_<T, idxT, topk_bits, block_dim>(buf, buf_size, in, static_cast<idxT*>(nullptr),
-                batch_size, len, k, out, out_idx, !greater, fused_last_filter, grid_dim, mask_val, stream, sorted);
-        }
+    bool const one_block = (force_path == 2) || (force_path == 0 && auto_one_block);
+    if (one_block)
+    {
+        standalone_stable_radix_topk_one_block_<T, idxT, topk_bits, block_dim>(buf, buf_size, in,
+            static_cast<idxT*>(nullptr), batch_size, len, k, out, out_idx, !greater, mask_val, stream, sorted);
+    }
+    else
+    {
+        standalone_stable_radix_topk_<T, idxT, topk_bits, block_dim>(buf, buf_size, in, static_cast<idxT*>(nullptr),
+            batch_size, len, k, out, out_idx, !greater, fused_last_filter, grid_dim, mask_val, stream, sorted);
     }
 }
 
@@ -1588,7 +1585,7 @@ void rocm_efficient_topk(SizeType32 batchSize, SizeType32 inputLength, SizeType3
 
 template <typename T>
 size_t invokeComputeTopkLastDimWorkspaceSize(
-    SizeType32 batchSize, SizeType32 inputLength, SizeType32 k, bool is_largest)
+    SizeType32 batchSize, SizeType32 inputLength, SizeType32 k, bool is_largest, int force_path)
 {
 #if USING_ROCM
     if (k <= 512) {
@@ -1601,13 +1598,13 @@ size_t invokeComputeTopkLastDimWorkspaceSize(
     T* out_val = nullptr;
     SizeType32* out_idx = nullptr;
     standalone_stable_radix_11bits<T, SizeType32, true>(
-        workspace, buf_size, in, batchSize, inputLength, k, out_val, out_idx, is_largest, 0);
+        workspace, buf_size, in, batchSize, inputLength, k, out_val, out_idx, is_largest, 0, 0, force_path);
     return buf_size;
 }
 
 #define INSTANTIATE_COMPUTE_TOPK_LastDim_WORKSPACE_SIZE_DATA_TYPE(T)                                                   \
     template size_t invokeComputeTopkLastDimWorkspaceSize<T>(                                                          \
-        SizeType32 batchSize, SizeType32 inputLength, SizeType32 k, bool is_largest)
+        SizeType32 batchSize, SizeType32 inputLength, SizeType32 k, bool is_largest, int force_path)
 
 INSTANTIATE_COMPUTE_TOPK_LastDim_WORKSPACE_SIZE_DATA_TYPE(int);
 INSTANTIATE_COMPUTE_TOPK_LastDim_WORKSPACE_SIZE_DATA_TYPE(float);
@@ -1623,8 +1620,8 @@ INSTANTIATE_COMPUTE_TOPK_LastDim_WORKSPACE_SIZE_DATA_TYPE(__nv_bfloat16);
 
 template <typename T>
 void invokeTopkLastDim(SizeType32 batchSize, SizeType32 inputLength, SizeType32 k, bool is_largest,
-    std::optional<T> mask_val, void const* __restrict__ input, void* __restrict__ out_val, void* __restrict__ out_idx, 
-    void* workspace, cudaStream_t stream)
+    std::optional<T> mask_val, void const* __restrict__ input, void* __restrict__ out_val, void* __restrict__ out_idx,
+    void* workspace, cudaStream_t stream, bool sorted, int force_path)
 {
     T const* in = reinterpret_cast<T const*>(input);
     T* out_val_ = reinterpret_cast<T*>(out_val);
@@ -1636,14 +1633,22 @@ void invokeTopkLastDim(SizeType32 batchSize, SizeType32 inputLength, SizeType32 
     }
 #endif
     size_t buf_size = 0;
-    standalone_stable_radix_11bits<T, SizeType32, true>(
-        workspace, buf_size, in, batchSize, inputLength, k, out_val_, out_idx_, is_largest, mask_val, stream);
+    if (sorted)
+    {
+        standalone_stable_radix_11bits<T, SizeType32, true>(
+            workspace, buf_size, in, batchSize, inputLength, k, out_val_, out_idx_, is_largest, mask_val, stream, force_path);
+    }
+    else
+    {
+        standalone_stable_radix_11bits<T, SizeType32, false>(
+            workspace, buf_size, in, batchSize, inputLength, k, out_val_, out_idx_, is_largest, mask_val, stream, force_path);
+    }
 }
 
 #define INSTANTIATE_TOPK_LastDim_DATA_TYPE(T)                                                                          \
     template void invokeTopkLastDim<T>(SizeType32 batchSize, SizeType32 inputLength, SizeType32 k, bool is_largest,    \
         std::optional<T> mask_val, void const* __restrict__ input, void* __restrict__ out_val, void* __restrict__ out_idx, \
-        void* workspace, cudaStream_t stream)
+        void* workspace, cudaStream_t stream, bool sorted, int force_path)
 
 INSTANTIATE_TOPK_LastDim_DATA_TYPE(int);
 INSTANTIATE_TOPK_LastDim_DATA_TYPE(float);

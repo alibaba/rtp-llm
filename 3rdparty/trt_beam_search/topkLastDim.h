@@ -24,14 +24,20 @@ namespace tensorrt_llm
 namespace kernels
 {
 
+// force_path: 0 = auto route, 1 = force multi-block radix, 2 = force one-block radix.
+// Testing/benchmarking knob; production callers keep the default 0.
+// Workspace size depends on the path, so queries must pass the same force_path as the run.
 template <typename T>
 size_t invokeComputeTopkLastDimWorkspaceSize(
-    runtime::SizeType32 batchSize, runtime::SizeType32 inputLength, runtime::SizeType32 k, bool is_largest);
+    runtime::SizeType32 batchSize, runtime::SizeType32 inputLength, runtime::SizeType32 k, bool is_largest,
+    int force_path = 0);
 
+// sorted = false skips the trailing StableSortPairsDescending; out_val/out_idx then come out
+// ordered by original index instead of by value.
 template <typename T>
-void invokeTopkLastDim(runtime::SizeType32 batchSize, runtime::SizeType32 inputLength, runtime::SizeType32 k, bool is_largest, 
+void invokeTopkLastDim(runtime::SizeType32 batchSize, runtime::SizeType32 inputLength, runtime::SizeType32 k, bool is_largest,
     std::optional<T> mask_val, void const* __restrict__ input, void* __restrict__ out_val, void* __restrict__ out_ind,
-    void* workspace, cudaStream_t stream);
+    void* workspace, cudaStream_t stream, bool sorted = true, int force_path = 0);
 
 } // namespace kernels
 } // namespace tensorrt_llm
