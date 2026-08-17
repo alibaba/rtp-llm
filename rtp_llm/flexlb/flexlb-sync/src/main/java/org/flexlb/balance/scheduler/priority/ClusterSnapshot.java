@@ -28,6 +28,9 @@ public record ClusterSnapshot(
         Map<String, DecodeEndpointSnapshot> decodes = new HashMap<>();
         registry.getDecodeEndpoints().forEach((key, ep) ->
                 decodes.put(key, DecodeEndpointSnapshot.capture(ep, config.getDecodeConcurrencyLimit())));
-        return new ClusterSnapshot(prefills, decodes);
+        // Immutable maps: the snapshot may be shared across requests by the
+        // short-TTL cache (flexlbClusterSnapshotCacheTtlMs), so it must not
+        // be mutable anywhere downstream.
+        return new ClusterSnapshot(Map.copyOf(prefills), Map.copyOf(decodes));
     }
 }

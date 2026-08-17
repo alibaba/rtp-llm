@@ -639,6 +639,20 @@ public class FlexlbConfig {
      */
     private String autoTpmVictimGuardMode = "victim_presence";
 
+    /**
+     * TTL in milliseconds for the shared {@code ClusterSnapshot} cache on the
+     * priority admission path. Capturing a snapshot walks every endpoint under
+     * its admission lock and deep-copies the layered views; doing that
+     * per-request×retry (~6000 captures/s at 2000 QPS) is an O(N) allocation
+     * flood (~740MB/s with high inflight) that stalls the master in GC.
+     * Endpoint state only refreshes on the ~3.2s sync cadence, so requests and
+     * retries inside one TTL window safely share a single immutable snapshot
+     * (OCC-conflict retries force a refresh — see the scheduler cache doc).
+     * 0 disables the cache and falls back to per-call capture (legacy
+     * behavior). Environment variable: FLEXLB_CLUSTER_SNAPSHOT_CACHE_TTL_MS.
+     */
+    private long flexlbClusterSnapshotCacheTtlMs = 200;
+
     // ========== Worker Expiration Configuration ==========
 
     /**
