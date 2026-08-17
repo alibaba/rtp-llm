@@ -1,9 +1,9 @@
 """sm12x-only numerical sanity tests for CudaFp8VllmBlockwiseLinear.
 
 Quantizes a BF16 weight with per_block_cast_to_fp8 (block 128x128), runs
-the kernel and compares against a fp32 reference matmul (+ optional bias).
+the kernel and compares against a fp32 reference matmul (+ optional bias/GELU).
 Catches regressions in the three M-tier dispatch branches
-(swap_ab / pingpong / default) and wrapper-level bias handling.
+(swap_ab / pingpong / default) and fused bias/GELU epilogues.
 """
 
 import os
@@ -11,6 +11,7 @@ import unittest
 from unittest import mock
 
 import torch
+import torch.nn.functional as F
 
 from rtp_llm.config.quant_config import init_quant_config
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_vllm_blockwise_sm120_linear import (
@@ -64,7 +65,7 @@ class CudaFp8VllmBlockwiseLinearNumericalTest(unittest.TestCase):
         self.weight_fp8 = weight_fp8.reshape(K, N)
         self.weight_scales = weight_scales.reshape(scale_K, scale_N)
 
-    def _run(self, M: int, K: int, N: int, with_bias: bool):
+    def _run(self, M: int, K: int, N: int, with_bias: bool, use_gelu: bool = False):
         self._make_weight(K, N)
         bias = (
             torch.randn(N, dtype=torch.bfloat16, device=self.device) * 0.01
@@ -78,14 +79,18 @@ class CudaFp8VllmBlockwiseLinearNumericalTest(unittest.TestCase):
             quant_config=self.quant_config,
         )
         x = torch.randn(M, K, dtype=torch.bfloat16, device=self.device) * 0.1
-        out = linear(x)
+        out = linear.forward_with_bias_gelu(x) if use_gelu else linear(x)
         ref = x.float() @ self.weight_bf16.float().t()
         if bias is not None:
             ref = ref + bias.float()
+        if use_gelu:
+            ref = F.gelu(ref, approximate="tanh")
         ref = ref.to(torch.bfloat16)
         diff = calc_diff(out, ref)
         self.assertLess(
-            diff, 0.0011, f"M={M} K={K} N={N} with_bias={with_bias} diff={diff}"
+            diff,
+            0.0011,
+            f"M={M} K={K} N={N} with_bias={with_bias} use_gelu={use_gelu} diff={diff}",
         )
         self.assertEqual(out.shape, (M, N))
         self.assertEqual(out.dtype, torch.bfloat16)
@@ -98,11 +103,16 @@ class CudaFp8VllmBlockwiseLinearNumericalTest(unittest.TestCase):
                 with self.subTest(M=M, K=K, N=N):
                     self._run(M, K=K, N=N, with_bias=False)
 
-    def test_with_unfused_bias(self):
+    def test_with_fused_bias(self):
         for K, N in (self.test_shapes[0], self.test_shapes[2]):
             for M in [1, 33, 128, 257, 512]:
                 with self.subTest(M=M, K=K, N=N):
                     self._run(M, K=K, N=N, with_bias=True)
+
+    def test_with_fused_bias_gelu(self):
+        for M in [1, 65, 257]:
+            with self.subTest(M=M):
+                self._run(M, K=256, N=256, with_bias=True, use_gelu=True)
 
     def test_reject_fp16_input(self):
         K, N = self.test_shapes[0]
