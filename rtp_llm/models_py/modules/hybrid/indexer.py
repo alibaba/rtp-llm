@@ -172,7 +172,19 @@ class Indexer(nn.Module):
         attention_inputs: Any,
         cp_params: Optional[Any],
     ) -> torch.Tensor:
-        if not attention_inputs.is_prefill:
+        is_target_verify = getattr(attention_inputs, "is_target_verify", False)
+        if is_target_verify and self._prefill_cp_enabled():
+            # CP hands this rank only its slice of the query rows, while the paged
+            # metadata (expanded_seq_lens, batch_indice_d) is full length. At
+            # next_n + 1 == 2 the two row counts coincide for cp_size 2, 4 and 8, so
+            # the paged entry-count guard would not catch the mismatch and the topk
+            # would be silently wrong.
+            raise ValueError(
+                "MTP target verification is not supported together with prefill "
+                "context parallel: the paged indexer needs full-length per-query "
+                "metadata while context parallel supplies rank-local query rows"
+            )
+        if not attention_inputs.is_prefill or is_target_verify:
             return self.indexer_op._get_topk_paged(
                 q_fp8, weights, kv_cache, fmha_params, attention_inputs
             )
