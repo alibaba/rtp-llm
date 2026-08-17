@@ -186,19 +186,8 @@ class GroupTopK(nn.Module):
             renormalize,
             routed_scaling_factor,
         )
-        if self.can_use_fused(
-            topk_weights,
-            topk_ids,
-            scores,
-            correction_bias,
-            n_group,
-            topk_group,
-            topk,
-            use_fused=use_fused,
-        ):
-            self.forward_fused(*args)
-        else:
-            self.forward_legacy(*args)
+        enable_fused = self.use_fused and (use_fused is None or use_fused)
+        self.group_topk_op.forward_auto(*args, enable_fused=enable_fused)
 
 
 class FakeBalanceExpert(nn.Module):

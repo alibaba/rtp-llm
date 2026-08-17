@@ -26,7 +26,6 @@ from rtp_llm.models_py.modules import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
-from rtp_llm.models_py.utils.fuse_config import glm5_prefill_refine_enabled
 from rtp_llm.models_py.modules.factory.linear.fixed_m_linear import fixed_m_linear
 from rtp_llm.models_py.modules.hybrid.glm5_cmp import (
     Glm5Cmp,
@@ -255,8 +254,18 @@ class GenericMoeLayer(nn.Module):
             self.shared_expert_gate = None
             self.sigmoid_gate_scale_add = None
 
-        # for group topk
+        # GroupTopK is the router used before both the ordinary fused-MoE
+        # executors and MegaMoE. It owns fused/legacy dispatch so callers can
+        # pass the original BF16 gate output without materializing FP32 scores.
         self.correction_bias = weights.get(W.e_score_correction_b, None)
+        if self.correction_bias is not None:
+            self.group_topk = GroupTopK(hw_kernel_config=hw_kernel_config)
+            self.renormalize = self.config.has_moe_norm
+            self.num_expert_group = self.config.moe_n_group
+            self.topk_group = self.config.moe_topk_group
+            self.routed_scaling_factor = self.config.routed_scaling_factor
+        else:
+            self.group_topk = None
 
     def clone_for_cuda_graph(self) -> "GenericMoeLayer":
         clone = object.__new__(type(self))
@@ -286,6 +295,12 @@ class GenericMoeLayer(nn.Module):
         clone.shared_expert_gate = self.shared_expert_gate
         clone.sigmoid_gate_scale_add = self.sigmoid_gate_scale_add
         clone.correction_bias = self.correction_bias
+        clone.group_topk = self.group_topk
+        if self.group_topk is not None:
+            clone.renormalize = self.renormalize
+            clone.num_expert_group = self.num_expert_group
+            clone.topk_group = self.topk_group
+            clone.routed_scaling_factor = self.routed_scaling_factor
         clone._use_mega_moe_fused_shared = self._use_mega_moe_fused_shared
         return clone
 
@@ -319,10 +334,6 @@ class GenericMoeLayer(nn.Module):
             router_logits = self.gate(
                 hidden_states
             )  # fuse kernel: nvjet_tst_64x8_64x16_2x4_h_bz_NNT (bf16 nn.Linear router, every layer)
-        router_logits_fp32 = (
-            router_logits.float()
-        )  # fuse kernel: at::native::unrolled_elementwise_kernel<direct_copy_kernel_cuda> (bf16 -> fp32 cast)
-
         topk_weights = torch.empty(
             (num_tokens, self.top_k),
             dtype=torch.float32,
@@ -337,29 +348,22 @@ class GenericMoeLayer(nn.Module):
         )
 
         if self.correction_bias is not None:
-            self.group_topk = GroupTopK(hw_kernel_config=None)
-            self.renormalize = self.config.has_moe_norm
-            self.num_expert_group = self.config.moe_n_group
-
-            self.topk_group = self.config.moe_topk_group
-            self.n_routed_experts = self.config.expert_num  # config.n_routed_experts
-            self.routed_scaling_factor = self.config.routed_scaling_factor
-            use_fused_group_topk = is_prefill and glm5_prefill_refine_enabled()
+            assert self.group_topk is not None
             self.group_topk(
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                scores=router_logits if use_fused_group_topk else router_logits_fp32,
+                scores=router_logits,
                 correction_bias=self.correction_bias,
                 n_group=self.num_expert_group,
                 topk_group=self.topk_group,
                 topk=self.top_k,
                 renormalize=self.renormalize,
                 routed_scaling_factor=self.routed_scaling_factor,
-                use_fused=use_fused_group_topk,
+                use_fused=is_prefill,
             )
         else:
             # Top-K selection using C++ SelectTopkOp
-            self.select_topk(router_logits_fp32, topk_ids, topk_weights)
+            self.select_topk(router_logits.float(), topk_ids, topk_weights)
 
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
@@ -747,7 +751,11 @@ class GenericMoeDecoderLayer(nn.Module):
                     hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
                 )
 
-            hidden_states, residual = self._fwd_mlp_or_moe(hidden_states, residual, bool(attention_inputs and attention_inputs.is_prefill))
+        hidden_states, residual = self._fwd_mlp_or_moe(
+            hidden_states,
+            residual,
+            bool(attention_inputs and attention_inputs.is_prefill),
+        )
 
         return DecodeLayerOutput(hidden_states, residual, topk_indices)
 

@@ -66,8 +66,10 @@ cc_library(
         "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
         ":cuda_utils_common",
         "//rtp_llm/cpp/utils:core_utils",
+        "@local_config_cuda//cuda:cuda_headers",
     ],
     copts = cuda_copts(),
+    visibility = ["//visibility:public"],
 )
 
 cc_library(

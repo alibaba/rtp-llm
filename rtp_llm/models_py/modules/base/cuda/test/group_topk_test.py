@@ -86,6 +86,15 @@ class GroupTopKTest(TestCase):
             renormalize,
             routed_scaling_factor,
         )
+        auto_values, auto_indices = self._call(
+            group_topk,
+            "forward",
+            logits,
+            correction_bias,
+            index_dtype,
+            renormalize,
+            routed_scaling_factor,
+        )
         torch.testing.assert_close(
             fused_values,
             legacy_values,
@@ -94,6 +103,14 @@ class GroupTopKTest(TestCase):
             equal_nan=True,
         )
         torch.testing.assert_close(fused_indices, legacy_indices, rtol=0, atol=0)
+        torch.testing.assert_close(
+            auto_values,
+            legacy_values,
+            rtol=0,
+            atol=0,
+            equal_nan=True,
+        )
+        torch.testing.assert_close(auto_indices, legacy_indices, rtol=0, atol=0)
 
     def test_bf16_matches_legacy_bit_exact(self) -> None:
         token_counts = (0, 1, 7, 16, 17, 33, 64, 257, 6954, 8192)
@@ -252,6 +269,34 @@ class GroupTopKTest(TestCase):
                 use_fused=True,
             )
         )
+        disabled_values, disabled_indices = self._call(
+            disabled_group_topk,
+            "forward",
+            bf16_logits,
+            correction_bias,
+            torch.int64,
+            True,
+            1.0,
+        )
+        disabled_legacy_values, disabled_legacy_indices = self._call(
+            disabled_group_topk,
+            "forward_legacy",
+            bf16_logits,
+            correction_bias,
+            torch.int64,
+            True,
+            1.0,
+        )
+        torch.testing.assert_close(
+            disabled_values,
+            disabled_legacy_values,
+            rtol=0,
+            atol=0,
+            equal_nan=True,
+        )
+        torch.testing.assert_close(
+            disabled_indices, disabled_legacy_indices, rtol=0, atol=0
+        )
         self.assertFalse(
             group_topk.can_use_fused(
                 values,
@@ -405,6 +450,18 @@ class GroupTopKTest(TestCase):
                         topk_group=1,
                         topk=8,
                     )
+                    auto_values, auto_indices = self._call(
+                        group_topk,
+                        "forward",
+                        logits,
+                        correction_bias,
+                        index_dtype,
+                        renormalize,
+                        2.5,
+                        n_group=1,
+                        topk_group=1,
+                        topk=8,
+                    )
                     torch.testing.assert_close(
                         fused_values,
                         legacy_values,
@@ -413,6 +470,14 @@ class GroupTopKTest(TestCase):
                         equal_nan=True,
                     )
                     torch.testing.assert_close(fused_indices, legacy_indices, rtol=0, atol=0)
+                    torch.testing.assert_close(
+                        auto_values,
+                        legacy_values,
+                        rtol=0,
+                        atol=0,
+                        equal_nan=True,
+                    )
+                    torch.testing.assert_close(auto_indices, legacy_indices, rtol=0, atol=0)
                     self.assertTrue(
                         group_topk.can_use_fused(
                             fused_values,

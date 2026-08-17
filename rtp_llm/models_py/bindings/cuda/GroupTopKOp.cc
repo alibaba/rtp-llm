@@ -1,8 +1,32 @@
 #include "rtp_llm/models_py/bindings/cuda/GroupTopKOp.h"
 
+#include "rtp_llm/models_py/bindings/cuda/kernels/no_aux_tc_kernels.h"
+
 #include <c10/cuda/CUDAGuard.h>
 
 namespace rtp_llm {
+
+namespace {
+bool canUseFused(const torch::Tensor& values,
+                 const torch::Tensor& indices,
+                 const torch::Tensor& logits,
+                 const torch::Tensor& bias,
+                 int64_t n_group,
+                 int64_t topk_group,
+                 int64_t topk) {
+    return logits.is_cuda() && logits.is_contiguous() && logits.dim() == 2 && logits.size(1) == 256
+        && logits.scalar_type() == torch::kBFloat16 && bias.is_cuda() && bias.is_contiguous()
+        && bias.dim() == 1 && bias.numel() == 256 && bias.scalar_type() == torch::kFloat32
+        && values.is_cuda() && values.is_contiguous() && values.scalar_type() == torch::kFloat32
+        && values.dim() == 2 && values.size(0) == logits.size(0) && values.size(1) == topk
+        && indices.is_cuda() && indices.is_contiguous() && indices.dim() == 2
+        && indices.size(0) == logits.size(0) && indices.size(1) == topk
+        && (indices.scalar_type() == torch::kInt32 || indices.scalar_type() == torch::kInt64)
+        && logits.device() == bias.device() && logits.device() == values.device()
+        && logits.device() == indices.device()
+        && canUseFusedNoAuxTcBf16(logits.size(1), n_group, topk_group, topk);
+}
+}  // namespace
 
 GroupTopKOp::GroupTopKOp() {}
 
@@ -85,8 +109,7 @@ void GroupTopKOp::forwardFused(torch::Tensor&       topk_values,
     TORCH_CHECK(correction_bias.dim() == 1 && correction_bias.numel() == 256
                     && correction_bias.scalar_type() == torch::kFloat32,
                 "GroupTopK fused path requires a contiguous FP32 correction bias with 256 elements");
-    TORCH_CHECK((n_group == 8 && topk_group == 4 && topk == 8)
-                    || (n_group == 1 && topk_group == 1 && topk == 8),
+    TORCH_CHECK(canUseFusedNoAuxTcBf16(logits.size(1), n_group, topk_group, topk),
                 "GroupTopK fused path requires (n_group, topk_group, topk)=(8,4,8) or (1,1,8)");
     TORCH_CHECK(topk_values.scalar_type() == torch::kFloat32 && topk_values.dim() == 2
                     && topk_values.size(0) == logits.size(0) && topk_values.size(1) == topk,
@@ -99,66 +122,46 @@ void GroupTopKOp::forwardFused(torch::Tensor&       topk_values,
                     && logits.get_device() == topk_indices.get_device(),
                 "GroupTopK fused inputs and outputs must be on the same CUDA device");
 
-    const int64_t num_tokens = logits.size(0);
-    if (num_tokens == 0) {
+    c10::cuda::CUDAGuard device_guard(logits.device());
+    auto stream = c10::cuda::getCurrentCUDAStream(logits.get_device());
+    const auto index_type = topk_indices.scalar_type() == torch::kInt64 ? FusedNoAuxTcIndexType::INT64
+                                                                        : FusedNoAuxTcIndexType::INT32;
+    const bool launched = invokeFusedNoAuxTcBf16(logits.data_ptr<at::BFloat16>(),
+                                                  correction_bias.data_ptr<float>(),
+                                                  topk_values.data_ptr<float>(),
+                                                  topk_indices.mutable_data_ptr(),
+                                                  index_type,
+                                                  logits.size(0),
+                                                  logits.size(1),
+                                                  n_group,
+                                                  topk_group,
+                                                  topk,
+                                                  renormalize,
+                                                  routed_scaling_factor,
+                                                  stream);
+    TORCH_CHECK(launched, "GroupTopK fused path requires an ENABLE_BF16 CUDA build");
+}
+
+void GroupTopKOp::forwardAuto(torch::Tensor&       topk_values,
+                              torch::Tensor&       topk_indices,
+                              torch::Tensor const& logits,
+                              torch::Tensor const& correction_bias,
+                              int64_t              n_group,
+                              int64_t              topk_group,
+                              int64_t              topk,
+                              bool                 renormalize,
+                              double               routed_scaling_factor,
+                              bool                 enable_fused) {
+    if (enable_fused && canUseFused(topk_values, topk_indices, logits, correction_bias,
+                                    n_group, topk_group, topk)) {
+        forwardFused(topk_values, topk_indices, logits, correction_bias, n_group, topk_group, topk,
+                     renormalize, routed_scaling_factor);
         return;
     }
-#ifdef ENABLE_BF16
-    c10::cuda::CUDAGuard device_guard(logits.device());
-    auto                 stream     = c10::cuda::getCurrentCUDAStream(logits.get_device());
-    const auto*          logits_ptr = reinterpret_cast<const __nv_bfloat16*>(logits.data_ptr<at::BFloat16>());
-    const float*         bias_ptr   = correction_bias.data_ptr<float>();
-    float*               values_ptr = topk_values.data_ptr<float>();
-
-    switch (topk_indices.scalar_type()) {
-        case torch::kInt64:
-            if (n_group == 1) {
-                invokeFusedNoAuxTcSingleGroup<__nv_bfloat16, int64_t>(logits_ptr,
-                                                                      bias_ptr,
-                                                                      values_ptr,
-                                                                      topk_indices.data_ptr<int64_t>(),
-                                                                      num_tokens,
-                                                                      renormalize,
-                                                                      routed_scaling_factor,
-                                                                      stream);
-            } else {
-                invokeFusedNoAuxTc<__nv_bfloat16, int64_t>(logits_ptr,
-                                                           bias_ptr,
-                                                           values_ptr,
-                                                           topk_indices.data_ptr<int64_t>(),
-                                                           num_tokens,
-                                                           renormalize,
-                                                           routed_scaling_factor,
-                                                           stream);
-            }
-            break;
-        case torch::kInt32:
-            if (n_group == 1) {
-                invokeFusedNoAuxTcSingleGroup<__nv_bfloat16, int32_t>(logits_ptr,
-                                                                      bias_ptr,
-                                                                      values_ptr,
-                                                                      topk_indices.data_ptr<int32_t>(),
-                                                                      num_tokens,
-                                                                      renormalize,
-                                                                      routed_scaling_factor,
-                                                                      stream);
-            } else {
-                invokeFusedNoAuxTc<__nv_bfloat16, int32_t>(logits_ptr,
-                                                           bias_ptr,
-                                                           values_ptr,
-                                                           topk_indices.data_ptr<int32_t>(),
-                                                           num_tokens,
-                                                           renormalize,
-                                                           routed_scaling_factor,
-                                                           stream);
-            }
-            break;
-        default:
-            TORCH_CHECK(false, "GroupTopK fused indices must use int32 or int64");
-    }
-#else
-    TORCH_CHECK(false, "GroupTopK fused path requires ENABLE_BF16");
-#endif
+    auto scores = logits.to(torch::kFloat32).sigmoid();
+    auto scores_with_bias = scores + correction_bias.unsqueeze(0);
+    forward(topk_values, topk_indices, scores, scores_with_bias, n_group, topk_group, topk,
+            renormalize, routed_scaling_factor);
 }
 
 void registerGroupTopKOp(const pybind11::module& m) {
@@ -185,6 +188,18 @@ void registerGroupTopKOp(const pybind11::module& m) {
              pybind11::arg("topk_group"),
              pybind11::arg("topk"),
              pybind11::arg("renormalize"),
-             pybind11::arg("routed_scaling_factor"));
+             pybind11::arg("routed_scaling_factor"))
+        .def("forward_auto",
+             &GroupTopKOp::forwardAuto,
+             pybind11::arg("topk_values"),
+             pybind11::arg("topk_indices"),
+             pybind11::arg("logits"),
+             pybind11::arg("correction_bias"),
+             pybind11::arg("n_group"),
+             pybind11::arg("topk_group"),
+             pybind11::arg("topk"),
+             pybind11::arg("renormalize"),
+             pybind11::arg("routed_scaling_factor"),
+             pybind11::arg("enable_fused"));
 }
 }  // namespace rtp_llm

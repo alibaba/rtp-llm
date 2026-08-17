@@ -174,6 +174,9 @@ class GroupTopKOp:
     def forward_fused(self, topk_values: torch.Tensor, topk_indices: torch.Tensor, logits: torch.Tensor, correction_bias: torch.Tensor, n_group: int, topk_group: int, topk: int, renormalize: bool, routed_scaling_factor: float) -> None:
         ...
 
+    def forward_auto(self, topk_values: torch.Tensor, topk_indices: torch.Tensor, logits: torch.Tensor, correction_bias: torch.Tensor, n_group: int, topk_group: int, topk: int, renormalize: bool, routed_scaling_factor: float, enable_fused: bool) -> None:
+        ...
+
 class SelectTopkOp:
     def __init__(self, model_config: libth_transformer_config.ModelConfig) -> None:
         ...

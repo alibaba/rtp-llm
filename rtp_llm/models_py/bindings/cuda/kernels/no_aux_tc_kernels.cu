@@ -883,6 +883,98 @@ void invokeFusedNoAuxTcSingleGroup(const InputT* logits,
     check_cuda_error();
 }
 
+bool canUseFusedNoAuxTcBf16(int64_t num_experts, int64_t n_group, int64_t topk_group, int64_t topk) {
+#ifdef ENABLE_BF16
+    return num_experts == 256 && topk == 8
+        && ((n_group == 1 && topk_group == 1) || (n_group == 8 && topk_group == 4));
+#else
+    return false;
+#endif
+}
+
+bool invokeFusedNoAuxTcBf16(const void*           logits,
+                            const float*          correction_bias,
+                            float*                topk_values,
+                            void*                 topk_indices,
+                            FusedNoAuxTcIndexType index_type,
+                            int64_t               num_tokens,
+                            int64_t               num_experts,
+                            int64_t               n_group,
+                            int64_t               topk_group,
+                            int64_t               topk,
+                            bool                  renormalize,
+                            double                routed_scaling_factor,
+                            cudaStream_t          stream) {
+    if (!canUseFusedNoAuxTcBf16(num_experts, n_group, topk_group, topk)) {
+        return false;
+    }
+    if (num_tokens < 0) {
+        return false;
+    }
+    if (num_tokens == 0) {
+        return true;
+    }
+    if (logits == nullptr || correction_bias == nullptr || topk_values == nullptr || topk_indices == nullptr) {
+        return false;
+    }
+#ifdef ENABLE_BF16
+    const auto* logits_bf16 = static_cast<const __nv_bfloat16*>(logits);
+    switch (index_type) {
+        case FusedNoAuxTcIndexType::INT64: {
+            auto* indices = static_cast<int64_t*>(topk_indices);
+            if (n_group == 1) {
+                invokeFusedNoAuxTcSingleGroup<__nv_bfloat16, int64_t>(logits_bf16,
+                                                                      correction_bias,
+                                                                      topk_values,
+                                                                      indices,
+                                                                      num_tokens,
+                                                                      renormalize,
+                                                                      routed_scaling_factor,
+                                                                      stream);
+            } else {
+                invokeFusedNoAuxTc<__nv_bfloat16, int64_t>(logits_bf16,
+                                                            correction_bias,
+                                                            topk_values,
+                                                            indices,
+                                                            num_tokens,
+                                                            renormalize,
+                                                            routed_scaling_factor,
+                                                            stream);
+            }
+            break;
+        }
+        case FusedNoAuxTcIndexType::INT32: {
+            auto* indices = static_cast<int32_t*>(topk_indices);
+            if (n_group == 1) {
+                invokeFusedNoAuxTcSingleGroup<__nv_bfloat16, int32_t>(logits_bf16,
+                                                                      correction_bias,
+                                                                      topk_values,
+                                                                      indices,
+                                                                      num_tokens,
+                                                                      renormalize,
+                                                                      routed_scaling_factor,
+                                                                      stream);
+            } else {
+                invokeFusedNoAuxTc<__nv_bfloat16, int32_t>(logits_bf16,
+                                                            correction_bias,
+                                                            topk_values,
+                                                            indices,
+                                                            num_tokens,
+                                                            renormalize,
+                                                            routed_scaling_factor,
+                                                            stream);
+            }
+            break;
+        }
+        default:
+            return false;
+    }
+    return true;
+#else
+    return false;
+#endif
+}
+
 template<typename T, typename IdxT>
 void invokeNoAuxTc(T*                 scores,
                    T*                 group_scores,
