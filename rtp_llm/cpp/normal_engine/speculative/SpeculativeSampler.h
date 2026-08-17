@@ -33,6 +33,23 @@ struct FastTopKSamplerOutput {
     torch::Tensor token_ids;
 };
 
+// Whether the proposal probabilities still need scattering into target-vocabulary space. Takes only
+// the map, never the vocab widths: keying this on the widths differing is what left the equal-width
+// case unremapped, and a defined but empty map means "no mapping" to match mappingDraft2Target.
+bool draftProbsNeedTargetVocabRemap(const torch::Tensor& d2t_map);
+
+// Scatters draft-vocabulary proposal probabilities into target-vocabulary space through the same
+// d2t map that rewrote the proposal token ids. Rejection sampling reads the proposal probability at
+// the sampled target id, so skipping this makes that read a spurious 0.0 and the acceptance test
+// u * p < q true for every u, accepting every draft token unconditionally. Declared here, outside
+// the private sampler internals, so that contract is reachable by a test without an engine.
+// `padding_buffer` is grow-only and reused across calls to keep the decode path allocation-free.
+torch::Tensor remapDraftProbsToTargetVocab(const torch::Tensor& draft_probs,
+                                           const torch::Tensor& d2t_map,
+                                           int64_t              batch_size,
+                                           int64_t              target_vocab_size,
+                                           torch::Tensor&       padding_buffer);
+
 class FastTopKSampler {
 public:
     // Default: no draft-to-target vocab mapping (execMappingDraft2Target

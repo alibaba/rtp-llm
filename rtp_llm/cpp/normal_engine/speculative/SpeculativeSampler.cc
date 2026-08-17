@@ -1,24 +1,55 @@
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 #include <algorithm>
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
 namespace speculative {
 
-FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int top_k) {
-    FastTopKSamplerOutput output;
-    output.all_probs = torch::softmax(logits, -1);
+bool draftProbsNeedTargetVocabRemap(const torch::Tensor& d2t_map) {
+    return d2t_map.defined() && d2t_map.numel() > 0;
+}
 
-    std::tuple<torch::Tensor, torch::Tensor> sample_res;
-    if (top_k == 1) {
-        sample_res = torch::max(output.all_probs, -1, true);
-    } else {
-        sample_res = torch::topk(output.all_probs, top_k, -1);
+torch::Tensor remapDraftProbsToTargetVocab(const torch::Tensor& draft_probs,
+                                           const torch::Tensor& d2t_map,
+                                           int64_t              batch_size,
+                                           int64_t              target_vocab_size,
+                                           torch::Tensor&       padding_buffer) {
+    const int64_t num_spec = draft_probs.size(1);
+
+    // Reuse pre-allocated padding buffer to avoid per-forward GPU allocation.
+    // Grow-only along batch / num_spec dims; vocab dim must match exactly.
+    const bool need_realloc = !padding_buffer.defined() || padding_buffer.size(0) < batch_size
+                              || padding_buffer.size(1) < num_spec || padding_buffer.size(2) != target_vocab_size
+                              || padding_buffer.dtype() != draft_probs.dtype()
+                              || padding_buffer.device() != draft_probs.device();
+    if (need_realloc) {
+        const int64_t cap_b = std::max(batch_size, padding_buffer.defined() ? padding_buffer.size(0) : (int64_t)0);
+        const int64_t cap_s = std::max(num_spec, padding_buffer.defined() ? padding_buffer.size(1) : (int64_t)0);
+        padding_buffer      = torch::zeros({cap_b, cap_s, target_vocab_size}, draft_probs.options());
     }
 
-    output.token_ids = std::get<1>(sample_res);
+    auto draft_probs_padding = padding_buffer.narrow(0, 0, batch_size).narrow(1, 0, num_spec);
+    draft_probs_padding.zero_();
+    draft_probs_padding.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), d2t_map}, draft_probs);
+    return draft_probs_padding;
+}
+
+FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int top_k) {
+    RTP_LLM_CHECK_WITH_INFO(top_k == 1, "greedy speculative proposal sampling requires top_k == 1, got %d", top_k);
+
+    FastTopKSamplerOutput output;
+    // softmax is monotone, so the argmax over the logits is the argmax over the probabilities.
+    // Taking it on the logits avoids materialising a full-vocabulary softmax whose every value the
+    // one-hot below would overwrite.
+    output.token_ids = std::get<1>(torch::max(logits, -1, true));
+
+    // Rejection sampling must receive the distribution that actually selected the proposal token.
+    // The scatter happens while token_ids are still draft-vocabulary indices, because all_probs is
+    // indexed in draft-vocabulary space and batchSample remaps it with the same d2t map later.
+    output.all_probs = torch::zeros_like(logits).scatter_(-1, output.token_ids, 1.0);
 
     int batch_size = output.token_ids.size(0);
     execMappingDraft2Target({output.token_ids, d2t_map_, batch_size, 0, 1});
@@ -96,33 +127,20 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     torch::Tensor output_accepted_token_num_d = torch::zeros(
         {(long)batch_size}, torch::TensorOptions().device(target_device).dtype(torch::kInt32).requires_grad(false));
 
-    if (draft_token_probs_d_t.size(2) != target_token_probs_d_t.size(2)) {
-        const int64_t target_vocab_size = target_token_probs_d_t.size(2);
-        const int64_t num_spec          = draft_token_probs_d_t.size(1);
-
-        // Reuse pre-allocated padding buffer to avoid per-forward GPU allocation.
-        // Grow-only along batch / num_spec dims; vocab dim must match exactly.
-        const bool need_realloc = !draft_probs_padding_buffer_.defined()
-                                  || draft_probs_padding_buffer_.size(0) < (int64_t)batch_size
-                                  || draft_probs_padding_buffer_.size(1) < num_spec
-                                  || draft_probs_padding_buffer_.size(2) != target_vocab_size
-                                  || draft_probs_padding_buffer_.dtype() != draft_token_probs_d_t.dtype()
-                                  || draft_probs_padding_buffer_.device() != draft_token_probs_d_t.device();
-        if (need_realloc) {
-            const int64_t cap_b =
-                std::max((int64_t)batch_size,
-                         draft_probs_padding_buffer_.defined() ? draft_probs_padding_buffer_.size(0) : (int64_t)0);
-            const int64_t cap_s = std::max(
-                num_spec, draft_probs_padding_buffer_.defined() ? draft_probs_padding_buffer_.size(1) : (int64_t)0);
-            draft_probs_padding_buffer_ =
-                torch::zeros({cap_b, cap_s, target_vocab_size}, draft_token_probs_d_t.options());
-        }
-
-        auto draft_probs_padding = draft_probs_padding_buffer_.narrow(0, 0, (int64_t)batch_size).narrow(1, 0, num_spec);
-        draft_probs_padding.zero_();
-        draft_probs_padding.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), d2t_map_},
-                                       draft_token_probs_d_t);
-        draft_token_probs_d_t = draft_probs_padding;
+    // Whenever a draft->target vocab map is defined, all_probs left FastTopKSampler::forward in
+    // draft-vocabulary space while token_ids were rewritten into target-vocabulary ids. Rejection
+    // sampling indexes the proposal probabilities with the sampled target id, so they must be
+    // scattered into target-vocabulary space via the same d2t_map_ regardless of whether the two
+    // vocab widths happen to match. Keying this on the vocab-width inequality alone left the
+    // equal-width d2t case unremapped, so q at the sampled id was a spurious 0.0 and u * p < q
+    // accepted unconditionally (a rejection could never fire). The emptiness check mirrors
+    // mappingDraft2Target, which treats a defined but empty map as "no mapping".
+    if (draftProbsNeedTargetVocabRemap(d2t_map_)) {
+        draft_token_probs_d_t = remapDraftProbsToTargetVocab(draft_token_probs_d_t,
+                                                             d2t_map_,
+                                                             (int64_t)batch_size,
+                                                             target_token_probs_d_t.size(2),
+                                                             draft_probs_padding_buffer_);
     }
 
     {
