@@ -76,9 +76,10 @@ arch_with_version_dep = select({
     "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
 })
 
-# The internal PPU and ROCm locks omit watchdog, so those platforms use the
-# manager's polling fallback. ROCm also omits zstandard and uses gzip snapshots;
-# PPU reuses the CUDA 12 zstandard wheel, which has no CUDA runtime dependency.
+# PPU, ROCm, and CUDA ARM pip repositories do not consistently expose Bazel
+# packages for these optional dependencies. Those platforms use the manager's
+# polling fallback when watchdog is unavailable and gzip snapshots when
+# zstandard is unavailable. PPU reuses the CUDA 12 zstandard package.
 py_library(
     name = "watchdog",
     deps = select({
@@ -86,8 +87,8 @@ py_library(
         "@//:cuda_pre_12_9": ["@pip_gpu_cuda12_torch//watchdog"],
         "@//:using_cuda13_x86": ["@pip_gpu_cuda13_torch//watchdog"],
         "@//:using_cuda12_9_x86": ["@pip_gpu_cuda12_9_torch//watchdog"],
-        "@//:using_cuda13_arm": ["@pip_cuda13_arm_torch//watchdog"],
-        "@//:using_cuda12_arm": ["@pip_cuda12_arm_torch//watchdog"],
+        "@//:using_cuda13_arm": [],
+        "@//:using_cuda12_arm": [],
         "@//:using_rocm": [],
         "@//:using_arm": ["@pip_arm_torch//watchdog"],
         "//conditions:default": ["@pip_cpu_torch//watchdog"],
@@ -101,8 +102,8 @@ py_library(
         "@//:cuda_pre_12_9": ["@pip_gpu_cuda12_torch//zstandard"],
         "@//:using_cuda13_x86": ["@pip_gpu_cuda13_torch//zstandard"],
         "@//:using_cuda12_9_x86": ["@pip_gpu_cuda12_9_torch//zstandard"],
-        "@//:using_cuda13_arm": ["@pip_cuda13_arm_torch//zstandard"],
-        "@//:using_cuda12_arm": ["@pip_cuda12_arm_torch//zstandard"],
+        "@//:using_cuda13_arm": [],
+        "@//:using_cuda12_arm": [],
         "@//:using_rocm": [],
         "@//:using_arm": ["@pip_arm_torch//zstandard"],
         "//conditions:default": ["@pip_cpu_torch//zstandard"],
