@@ -1,5 +1,6 @@
 import types
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -57,6 +58,20 @@ class MtpHiddenBufferTest(unittest.TestCase):
         self.assertIs(first, second)
         # No MTP requested → no shared storage allocated at all.
         self.assertIsNone(first._mtp_hidden_storage)
+
+    def test_dynamic_hidden_capacity_is_opt_in(self) -> None:
+        module = _RuntimeModule()
+        module._bind_runtime_buffers(torch.zeros(2, 3, dtype=torch.bfloat16))
+        with patch.dict("os.environ", {}, clear=False):
+            V4Transformer._ensure_mtp_hidden_capacity(module, 5)
+            self.assertEqual(module._mtp_hidden_buffer.size(0), 2)
+        with patch.dict(
+            "os.environ", {"DSV4_SM120_DYNAMIC_PREFILL_WORKSPACE": "1"}
+        ):
+            V4Transformer._ensure_mtp_hidden_capacity(module, 5)
+        self.assertEqual(tuple(module._mtp_hidden_buffer.shape), (5, 3))
+        self.assertTrue(torch.equal(module._mtp_hidden_buffer[:2], torch.zeros(2, 3)))
+
 
     def test_accessor_slices_requested_rows(self) -> None:
         v4 = types.SimpleNamespace()

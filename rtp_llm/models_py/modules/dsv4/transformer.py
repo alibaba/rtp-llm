@@ -7,6 +7,7 @@ all experts on one device). Used to validate end-to-end correctness with
 mock per-layer KV cache before wiring into RTP-LLM's GptModelBase.
 """
 
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
@@ -302,6 +303,20 @@ class V4Transformer(nn.Module):
             )
         self.capture_aux_hidden_layer_ids = capture_ids
 
+    def _ensure_mtp_hidden_capacity(self, rows: int) -> None:
+        """Grow CP-prefill DSpARK hand-off storage only for the opt-in SM120 path."""
+        buf = self._mtp_hidden_buffer
+        if buf is None or int(rows) <= int(buf.size(0)):
+            return
+        if os.environ.get("DSV4_SM120_DYNAMIC_PREFILL_WORKSPACE", "0") != "1":
+            return
+        grown = torch.empty(
+            int(rows), int(buf.size(1)), dtype=buf.dtype, device=buf.device
+        )
+        grown[: buf.size(0)].copy_(buf)
+        self.register_buffer("_mtp_hidden_buffer", grown, persistent=False)
+
+
     def capture_aux_hidden(self, layer_id: int, hidden: torch.Tensor) -> None:
         """Write one selected layer's mean-pooled hidden into the shared
         runtime buffer.
@@ -329,6 +344,8 @@ class V4Transformer(nn.Module):
         pooled = hidden.mean(dim=-2)
         flat = pooled.reshape(-1, pooled.size(-1))
         rows, dim = flat.shape
+        self._ensure_mtp_hidden_capacity(rows)
+        buf = self._mtp_hidden_buffer
         assert (segment + 1) * dim <= buf.size(1), (
             f"aux segment overflow: segment={segment} dim={dim} "
             f"row_width={buf.size(1)}"
