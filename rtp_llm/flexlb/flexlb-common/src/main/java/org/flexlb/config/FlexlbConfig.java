@@ -390,6 +390,28 @@ public class FlexlbConfig {
     private boolean flexlbAckOnlyReleaseEnabled = true;
 
     /**
+     * Grace window (ms) before a fenced uncertain dispatch whose Cancel
+     * target has disappeared from the EndpointRegistry is force-settled as
+     * an ordinary terminal (fence-leak fix A). Registry removal already lags
+     * real pod death by workerTimeoutMs, so the effective settle delay is
+     * roughly the sum of both. Set to 0 or below to disable the guard and
+     * restore the legacy unbounded reconciliation retry loop.
+     * Environment variable: FLEXLB_RECONCILE_TARGET_MISSING_TERMINAL_MS.
+     */
+    private long flexlbReconcileTargetMissingTerminalMs = 15_000L;
+
+    /**
+     * Maximum consecutive failed reconciliation Cancels (FAILED / NOT_FOUND /
+     * UNSUPPORTED) before the entry is force-settled as an ordinary terminal
+     * (fence-leak fix B, the D3 backstop). 36 tries at the 5s retry-backoff
+     * ceiling is about 3 minutes — far past the EnqueueBatch deadline, so a
+     * late enqueue can no longer land. Set to 0 or below to disable the cap
+     * and restore the legacy unbounded reconciliation retry loop.
+     * Environment variable: FLEXLB_RECONCILE_MAX_CONSECUTIVE_FAILURES.
+     */
+    private int flexlbReconcileMaxConsecutiveFailures = 36;
+
+    /**
      * Flush-path top-k sort gate (task61 M1): when true (default) the
      * SLO-budget batcher picks its greedy-fill candidates with a bounded-heap
      * top-k selection instead of a per-flush full sort of the queue. Only

@@ -1646,6 +1646,9 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         if (prefill != null && batchId > 0) {
             prefill.beginDispatchReconciliation(batchId, entry.item.requestId());
         }
+        Logger.info("event=dispatch_reconciliation_start request_id={} batch_id={} target={}",
+                entry.item.requestId(), batchId,
+                prefill != null ? prefill.ipPort() : "unknown");
         return true;
     }
 
@@ -1660,6 +1663,9 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     return;
                 }
                 ServerStatus prefill = entry.item.prefill();
+                if (settleIfReconcileTargetDeregisteredLocked(entry, prefill, attempt)) {
+                    return;
+                }
                 EngineCancelChannel.CancelTarget target = prefill == null ? null
                         : new EngineCancelChannel.CancelTarget(
                                 prefill.getServerIp(), prefill.getGrpcPort());
@@ -1714,6 +1720,10 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 }
                 switch (outcome.ack()) {
                     case TOMBSTONED -> {
+                        Logger.info("event=dispatch_reconciliation_settled "
+                                        + "request_id={} batch_id={} attempt={}",
+                                entry.item.requestId(),
+                                entry.lifecycle.snapshot().batchId(), attempt);
                         reduceOrdinaryTerminalLocked(entry, DeferredTerminal.timeout(
                                 "EnqueueBatch deadline exceeded; engine fenced late enqueue"));
                     }
@@ -1728,9 +1738,11 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                                         + "request_id={} batch_id={} attempt={}",
                                 entry.item.requestId(),
                                 entry.lifecycle.snapshot().batchId(), attempt);
+                        entry.reconcileConsecutiveFailures = 0;
                         retry = true;
                     }
-                    case NOT_FOUND, FAILED, UNSUPPORTED -> retry = true;
+                    case NOT_FOUND, FAILED, UNSUPPORTED -> retry =
+                            !settleIfReconcileFailureCapReachedLocked(entry, outcome, attempt);
                 }
             }
         }
@@ -1741,11 +1753,100 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         }
     }
 
+    /**
+     * Fix A (source-level stop): terminal-settles a fenced uncertain dispatch
+     * whose Cancel target has left the EndpointRegistry. The Cancel address is
+     * frozen at dispatch time ({@code entry.item.prefill()}), so after a
+     * rolling deploy the retry chain keeps calling a dead pod forever (FAILED
+     * loop) while the TTL sweep skips fenced entries. Registry removal is
+     * driven by ExpirationCleaner only after workerTimeoutMs of status
+     * silence, and a second grace window is applied here, so a deregistered
+     * target means the engine process is gone and the request cannot still be
+     * running — the ordinary terminal path (rollback + fence release) is safe.
+     *
+     * <p>Called with {@code dispatchFence} and {@code entry} locked.
+     *
+     * @return true when the entry was settled and the retry chain must stop
+     */
+    private boolean settleIfReconcileTargetDeregisteredLocked(InflightEntry entry,
+                                                              ServerStatus prefill,
+                                                              int attempt) {
+        long graceMs = configService.loadBalanceConfig()
+                .getFlexlbReconcileTargetMissingTerminalMs();
+        if (graceMs <= 0 || prefill == null) {
+            return false;
+        }
+        String ipPort = prefill.getServerIp() + ":" + prefill.getHttpPort();
+        RoleType role = prefill.getRole() != null ? prefill.getRole() : RoleType.PREFILL;
+        if (endpointRegistry.get(role, ipPort) != null) {
+            entry.reconcileTargetMissingSinceMs = 0;
+            return false;
+        }
+        long now = System.currentTimeMillis();
+        if (entry.reconcileTargetMissingSinceMs == 0) {
+            entry.reconcileTargetMissingSinceMs = now;
+            return false;
+        }
+        if (now - entry.reconcileTargetMissingSinceMs < graceMs) {
+            return false;
+        }
+        Logger.warn("event=dispatch_reconciliation_forced_terminal "
+                        + "reason=target_deregistered request_id={} batch_id={} "
+                        + "target={} attempt={} missing_ms={}",
+                entry.item.requestId(), entry.lifecycle.snapshot().batchId(),
+                ipPort, attempt, now - entry.reconcileTargetMissingSinceMs);
+        reduceOrdinaryTerminalLocked(entry, DeferredTerminal.timeout(
+                "dispatch reconciliation target deregistered: " + ipPort));
+        return true;
+    }
+
+    /**
+     * Fix B (D3 backstop): caps the otherwise unbounded reconciliation retry
+     * chain. FAILED, UNSUPPORTED and NOT_FOUND all count — NOT_FOUND must not
+     * settle immediately because only TOMBSTONED installs the absent fence on
+     * the engine; a buffered late EnqueueBatch could still land after a bare
+     * NOT_FOUND. At the default cap (36 tries ≈ 3 minutes at the 5s backoff
+     * ceiling) the EnqueueBatch deadline has long expired, so the
+     * late-landing window is closed and forcing the ordinary terminal is safe.
+     *
+     * <p>Called with {@code dispatchFence} and {@code entry} locked.
+     *
+     * @return true when the entry was settled and the retry chain must stop
+     */
+    private boolean settleIfReconcileFailureCapReachedLocked(
+            InflightEntry entry,
+            EngineCancelChannel.CancelOutcome outcome,
+            int attempt) {
+        int maxFailures = configService.loadBalanceConfig()
+                .getFlexlbReconcileMaxConsecutiveFailures();
+        if (maxFailures <= 0) {
+            return false;
+        }
+        entry.reconcileConsecutiveFailures++;
+        if (entry.reconcileConsecutiveFailures < maxFailures) {
+            return false;
+        }
+        ServerStatus prefill = entry.item.prefill();
+        Logger.warn("event=dispatch_reconciliation_forced_terminal "
+                        + "reason=failure_cap request_id={} batch_id={} target={} "
+                        + "attempt={} consecutive_failures={} last_outcome={}",
+                entry.item.requestId(), entry.lifecycle.snapshot().batchId(),
+                prefill == null ? "unknown"
+                        : prefill.getServerIp() + ":" + prefill.getGrpcPort(),
+                attempt, entry.reconcileConsecutiveFailures, outcome.ack());
+        reduceOrdinaryTerminalLocked(entry, DeferredTerminal.timeout(
+                "dispatch reconciliation exhausted after "
+                        + entry.reconcileConsecutiveFailures + " failed cancels"));
+        return true;
+    }
+
     private void clearDispatchReconciliation(InflightEntry entry) {
         if (!entry.dispatchReconciliation) {
             return;
         }
         entry.dispatchReconciliation = false;
+        entry.reconcileConsecutiveFailures = 0;
+        entry.reconcileTargetMissingSinceMs = 0;
         long batchId = entry.lifecycle.snapshot().batchId();
         PrefillEndpoint prefill = entry.item.prefillEp();
         if (prefill != null && batchId > 0) {
@@ -2024,6 +2125,10 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         boolean cleanupOwned;
         PreemptionRegistration preemption;
         boolean dispatchReconciliation;
+        /** Consecutive failed reconciliation Cancels; reset on ACCEPTED or fence clear. */
+        int reconcileConsecutiveFailures;
+        /** First millis the Cancel target was missing from the registry; 0 = present. */
+        long reconcileTargetMissingSinceMs;
 
         InflightEntry(BatchItem item, boolean autoTpmAdmission) {
             this.item = Objects.requireNonNull(item);
