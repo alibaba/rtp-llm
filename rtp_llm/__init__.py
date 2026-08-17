@@ -1,6 +1,7 @@
 import importlib
 from typing import Any
 
+from rtp_llm.utils.import_util import has_internal_source
 from rtp_llm.utils.triton_compile_patch import maybe_enable_compile_monitor
 
 # Opt-in and side-effect free unless RTP_LLM_TRITON_COMPILE_MONITOR is set, so it
@@ -8,6 +9,14 @@ from rtp_llm.utils.triton_compile_patch import maybe_enable_compile_monitor
 # anything triggers a Triton compile, and importing this module is the only point
 # guaranteed to run first. It patches nothing when the variable is unset.
 maybe_enable_compile_monitor()
+
+# The internal entrypoint registers models and extends the server argument parser,
+# so it has to run before anything builds that parser -- start_server imports
+# setup_args at module level, which leaves importing this package as the only
+# guaranteed-earlier point. It stays outside the lazy __getattr__ below for the
+# same reason, and is a no-op in open-source builds.
+if has_internal_source():
+    import internal_source.rtp_llm.models_py  # noqa: F401
 
 
 def __getattr__(name: str) -> Any:
