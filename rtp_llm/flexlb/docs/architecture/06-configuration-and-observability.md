@@ -2,11 +2,51 @@
 
 ## 配置加载机制
 
-`ConfigService`（flexlb-common `config/`，`@Component` 具体类）：
+`ConfigService`（flexlb-common `config/`，`@Component` 具体类）是 FlexLB 运行配置的
+统一读取入口。配置来源统一实现 `ConfigSource` 并注册为 Spring Bean：
+`EnvironmentConfigSource` 负责环境变量，`NacosConfigSource` 负责 Nacos 初始读取和监听。
+各来源 Bean 在自身初始化完成后，根据启用条件主动调用 `ConfigService.register`，注册到静态容器。
+`ConfigService` 根据来源自身声明的 priority 从低到高依次加载。
+当前环境变量 priority 为 1，Nacos priority 为 2：
+
+Nacos 来源在 Bean 初始化阶段创建 client、注册 Nacos listener 并缓存首次读取结果；
+`load()` 只返回已经缓存的配置内容。
 
 1. 读 env `FLEXLB_CONFIG`（JSON）反序列化为 `FlexlbConfig`，缺省时全部用默认值；
 2. **逐字段环境变量覆盖**：字段名的 UPPER_SNAKE_CASE 形式即覆盖变量
-   （如 `enableQueueing` → `ENABLE_QUEUEING`），支持基本类型/包装类型/枚举。
+   （如 `enableQueueing` → `ENABLE_QUEUEING`），支持基本类型/包装类型/枚举；
+3. 如果配置了 `FLEXLB_NACOS_SERVER_ADDR`，启动时从 Nacos 获取一个非空的部分
+   `FlexlbConfig` JSON，并以 Nacos 中实际存在的字段覆盖环境变量基线；未出现在 Nacos
+   中的字段仍使用环境变量或默认值；
+4. Nacos listener 收到合法更新后，以当前内存配置为基础覆盖推送中存在的字段，并原子
+   替换配置快照。删除或省略 Nacos 字段时保留当前内存值，不再回退环境变量。
+
+最终优先级为：`FlexlbConfig 默认值 < FLEXLB_CONFIG < 逐字段环境变量 < Nacos 字段`。
+
+### Nacos 配置
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `FLEXLB_NACOS_SERVER_ADDR` | 无 | Nacos server address；不配置时完全禁用 Nacos |
+| `FLEXLB_NACOS_DATA_ID` | `HIPPO_ROLE` | 显式 DataId；为空时使用当前部署的 `HIPPO_ROLE` |
+| `FLEXLB_NACOS_GROUP` | `DEFAULT_GROUP` | Nacos group |
+| `FLEXLB_NACOS_NAMESPACE` | 空 | Nacos namespace |
+
+配置了 Nacos 地址后，`FLEXLB_NACOS_DATA_ID` 和 `HIPPO_ROLE` 至少一个必须非空。
+Nacos DataId 必须存在，内容必须是非空 JSON object。可识别的 `FlexlbConfig` 字段会覆盖
+当前配置，未知字段会被忽略。例如：
+
+```json
+{
+  "enableQueueing": true,
+  "cacheAffinityFirstOutstandingUncachedTokensThreshold": 800000
+}
+```
+
+启动阶段连接、读取、DataId 缺失、空配置或 Jackson 无法反序列化的内容都会阻止应用启动。
+运行阶段的非法推送不会修改当前配置，应用保留 last-known-good 快照并记录错误；下一次
+启动仍会被该非法配置阻止。配置管理层不标记配置是否支持运行时生效：动态读取的调用方
+会看到新快照，构造时复制的配置需要重启后生效。
 
 ### FLEXLB_CONFIG 全量字段（`FlexlbConfig.java`）
 

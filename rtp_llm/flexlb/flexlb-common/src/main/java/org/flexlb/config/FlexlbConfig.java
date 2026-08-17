@@ -14,7 +14,7 @@ import static org.flexlb.enums.ResourceMeasureIndicatorEnum.REMAINING_KV_CACHE;
 import static org.flexlb.enums.ResourceMeasureIndicatorEnum.WAIT_TIME;
 
 /**
- * Supports environment variable override configuration
+ * Supports environment variable and Nacos override configuration
  * Environment variable naming rule: {FIELD_NAME_UPPER_SNAKE_CASE}
  * Example: enableQueueing -> ENABLE_QUEUEING
  */

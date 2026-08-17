@@ -41,6 +41,7 @@
         <micrometer.version>1.10.13</micrometer.version>
         <!-- 高版本 Mockito，摆脱 powermock 和 JUnit4 的限制 -->
         <mockito.version>5.20.0</mockito.version>
+        <nacos.version>2.4.2</nacos.version>
         <byte-buddy.version>1.17.6</byte-buddy.version>
         <!-- 5.3.x 的最新小版本，提供了一些 BUG 修复 -->
         <spring-framework.version>5.3.39</spring-framework.version>
@@ -198,6 +199,11 @@
                 <version>${project.version}</version>
             </dependency>
             <!-- util tools 依赖 start -->
+            <dependency>
+                <groupId>com.alibaba.nacos</groupId>
+                <artifactId>nacos-client</artifactId>
+                <version>${nacos.version}</version>
+            </dependency>
             <dependency>
                 <groupId>com.google.guava</groupId>
                 <artifactId>guava</artifactId>
