@@ -31,14 +31,14 @@ from rtp_llm.models_py.distributed.collective_torch import (
     barrier,
     get_process_group,
 )
-from rtp_llm.models_py.distributed.symm_mem import (
-    reserve_fused_all_gather_matmul_workspace,
-)
 from rtp_llm.models_py.distributed.sequence_parallel import (
     TokenShardLayout,
     shard_tokens,
     shard_tokens_with_padding,
     token_shard_layout,
+)
+from rtp_llm.models_py.distributed.symm_mem import (
+    reserve_fused_all_gather_matmul_workspace,
 )
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
@@ -50,18 +50,12 @@ from rtp_llm.models_py.modules.base.common.kvcache_store import (
 from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
     MultimodalEmbeddingInjector,
 )
-from rtp_llm.models_py.modules.hybrid.dense_mlp import (
-    DenseMLP,
-    DenseMLPParallelExecutor,
-)
 from rtp_llm.models_py.modules.factory.linear.parallel import (
     should_use_fused_all_gather_matmul,
 )
-from rtp_llm.models_py.modules.kimi_k3.kda import KDAExecutionMode, KimiK3KDA
-from rtp_llm.models_py.modules.kimi_k3.kda.prefill import (
-    KimiKDACurrentStateRegistry,
-    KimiKDAPrefillMetadata,
-    prepare_kimi_kda_prefill_metadata,
+from rtp_llm.models_py.modules.hybrid.dense_mlp import (
+    DenseMLP,
+    DenseMLPParallelExecutor,
 )
 from rtp_llm.models_py.modules.kimi_k3.chunk_prefill import (
     KimiK3ChunkRound,
@@ -72,6 +66,12 @@ from rtp_llm.models_py.modules.kimi_k3.chunk_prefill import (
     plan_kimi_k3_chunk_rounds,
     prepare_round_fmha,
     validate_whole_chunk_prefill,
+)
+from rtp_llm.models_py.modules.kimi_k3.kda import KDAExecutionMode, KimiK3KDA
+from rtp_llm.models_py.modules.kimi_k3.kda.prefill import (
+    KimiKDACurrentStateRegistry,
+    KimiKDAPrefillMetadata,
+    prepare_kimi_kda_prefill_metadata,
 )
 from rtp_llm.models_py.triton_kernels.common.activation import SituAndMul
 from rtp_llm.ops import HybridAttentionType, ParallelismConfig
@@ -89,6 +89,7 @@ if TYPE_CHECKING:
 
 from rtp_llm.models_py.modules.kimi_k3.mla import KimiK3MLA
 from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
+from rtp_llm.models_py.modules.kimi_k3.moe_se import KimiK3LatentMoESE
 from rtp_llm.models_py.modules.kimi_k3.residual import KimiK3AttentionResidual
 from rtp_llm.models_py.modules.kimi_k3.utils import (
     fused_ag_workspace_global_tokens,
@@ -96,6 +97,20 @@ from rtp_llm.models_py.modules.kimi_k3.utils import (
     prefill_chunk_tokens,
     resolve_cu_seqlens,
 )
+
+
+def resolve_kimi_k3_moe_strategy(moe_config: Optional[Any]) -> str:
+    """Resolve K3's explicit MegaMoE strategy while preserving ``auto``."""
+
+    strategy = str(getattr(moe_config, "moe_strategy", "auto") or "auto")
+    if strategy == "auto":
+        return "mega_moe"
+    if strategy not in ("mega_moe", "mega_moe_se"):
+        raise ValueError(
+            "Kimi K3 supports only moe_strategy=mega_moe or mega_moe_se "
+            f"(auto aliases mega_moe); got {strategy!r}"
+        )
+    return strategy
 
 
 @dataclass(frozen=True)
@@ -157,6 +172,7 @@ class KimiK3DecoderLayer(nn.Module):
         weights: Dict[str, torch.Tensor],
         layer_idx: int,
         hw_kernel_config: Optional[Any] = None,
+        moe_strategy: str = "mega_moe",
     ) -> None:
         super().__init__()
         self.weights = weights
@@ -183,10 +199,20 @@ class KimiK3DecoderLayer(nn.Module):
             if self.is_kda
             else KimiK3MLA(config, parallelism_config, weights, layer_idx)
         )
-        self.mlp: nn.Module = (
-            KimiK3LatentMoE(config, parallelism_config, weights, layer_idx)
-            if layer_idx in set(config.moe_layer_index)
-            else DenseMLP(
+        self.mlp: nn.Module
+        if layer_idx in set(config.moe_layer_index):
+            if moe_strategy == "mega_moe":
+                self.mlp = KimiK3LatentMoE(
+                    config, parallelism_config, weights, layer_idx
+                )
+            elif moe_strategy == "mega_moe_se":
+                self.mlp = KimiK3LatentMoESE(
+                    config, parallelism_config, weights, layer_idx
+                )
+            else:
+                raise ValueError(f"unsupported Kimi K3 MoE strategy {moe_strategy!r}")
+        else:
+            self.mlp = DenseMLP(
                 config.activation_type,
                 parallelism_config,
                 weights,
@@ -203,7 +229,6 @@ class KimiK3DecoderLayer(nn.Module):
                     gated=True,
                 ),
             )
-        )
 
     @property
     def is_kda(self) -> bool:
@@ -347,6 +372,7 @@ class KimiK3Model(GptModelBase):
         fmha_config=None,
         py_hw_kernel_config=None,
         device_resource_config=None,
+        moe_config=None,
     ) -> None:
         super().__init__(
             model_config,
@@ -370,6 +396,8 @@ class KimiK3Model(GptModelBase):
             self.layer_num + self.attn_res_block_size - 1
         ) // self.attn_res_block_size
         self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
+        self.moe_strategy = resolve_kimi_k3_moe_strategy(moe_config)
+        logging.info("Kimi K3 MoE strategy: %s", self.moe_strategy)
         self.layers = nn.ModuleList(
             [
                 KimiK3DecoderLayer(
@@ -378,6 +406,7 @@ class KimiK3Model(GptModelBase):
                     weights.weights[layer_idx],
                     layer_idx,
                     hw_kernel_config=py_hw_kernel_config,
+                    moe_strategy=self.moe_strategy,
                 )
                 for layer_idx in range(self.layer_num)
             ]
@@ -413,17 +442,15 @@ class KimiK3Model(GptModelBase):
 
         super().initialize(init_resource)
         self._is_decode_role = bool(init_resource.is_decode_role)
-        if (
-            self._is_decode_role
-            and os.environ.get("SP_TYPE", "").lower() == "eagle3"
-        ):
+        if self._is_decode_role and os.environ.get("SP_TYPE", "").lower() == "eagle3":
             tokens_per_batch = max(int(self.config.gen_num_per_cycle) + 1, 1)
             graph_batch_capacity = int(
                 getattr(init_resource, "max_decode_graph_batch_size", 1)
             )
-            token_capacity = max(
-                self._max_generate_batch_size, graph_batch_capacity
-            ) * tokens_per_batch
+            token_capacity = (
+                max(self._max_generate_batch_size, graph_batch_capacity)
+                * tokens_per_batch
+            )
             if (
                 self._mtp_hidden_buffer is None
                 or int(self._mtp_hidden_buffer.size(0)) < token_capacity
@@ -587,9 +614,7 @@ class KimiK3Model(GptModelBase):
             return self._forward_whole_chunk_prefill(inputs, fmha_impl, chunk_tokens)
         return self._forward_impl_one(inputs, fmha_impl)
 
-    def _publish_whole_chunk_cache(
-        self, attention_inputs: PyAttentionInputs
-    ) -> None:
+    def _publish_whole_chunk_cache(self, attention_inputs: PyAttentionInputs) -> None:
         writer = create_write_cache_store_impl(attention_inputs, self.kv_cache)
         if writer is None or self.kv_cache is None:
             return
@@ -873,9 +898,8 @@ class KimiK3Model(GptModelBase):
         # A target-only request must stay target-only on Prefill as well.  In
         # particular, do not retain, concatenate, all-gather, or transfer the
         # three full-sequence Eagle3 auxiliary hidden states.
-        eagle3_enabled = (
-            os.environ.get("SP_TYPE", "").lower() == "eagle3"
-            and not bool(getattr(inputs, "force_disable_sp_run", False))
+        eagle3_enabled = os.environ.get("SP_TYPE", "").lower() == "eagle3" and not bool(
+            getattr(inputs, "force_disable_sp_run", False)
         )
         if eagle3_enabled:
             raw_aux_layers = os.environ.get("KIMI_K3_EAGLE3_AUX_LAYER_IDS")
