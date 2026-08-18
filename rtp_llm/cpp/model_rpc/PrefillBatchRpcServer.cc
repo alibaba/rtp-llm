@@ -505,6 +505,19 @@ void DeferredPrefillContextMap::expire(int64_t request_id, const DeferredPrefill
         active_contexts_.erase(request_id);
         rememberRecentlySeenRequest(request_id, autil::TimeUtility::currentTimeInMilliSeconds());
     }
+    // Observability: fetch never attached before the context TTL fired. This is
+    // the direct evidence line for "dispatched + ACKed but never fetched"
+    // (e.g. a master restart breaking the schedule-response chain leaves the
+    // frontend never issuing FetchResponse; the batch executes, output sits
+    // unconsumed, and the master-visible finish never fires because dequeue
+    // waits on fetch). Without this line the expiry is silent and the
+    // resulting per-engine inflight-gate pin is unattributable.
+    RTP_LLM_LOG_WARNING("event=fetch_context_ttl_expired request [%ld] batch [%ld] seq_len [%d]: "
+                        "FetchResponse never attached before context TTL; output unconsumed, "
+                        "cancel path engaged",
+                        request_id,
+                        deferred->input ? deferred->input->group_id().value() : -1,
+                        deferred->input ? static_cast<int>(deferred->input->input_ids_size()) : -1);
     deferred->cancel(grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "FetchResponse context TTL expired"));
 }
 
