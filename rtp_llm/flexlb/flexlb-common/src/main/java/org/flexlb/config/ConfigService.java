@@ -330,6 +330,10 @@ public class ConfigService {
             config.isFlexlbQueueDepthPenaltyEnabled(), config.getFlexlbQueueDepthPenaltyFactor());
         log.info("congestedQueueFilterEnabled={}, congestedQueueRatio={}",
             config.isFlexlbCongestedQueueFilterEnabled(), config.getFlexlbCongestedQueueRatio());
+        log.info("engineWaitPenaltyEnabled={}, engineWaitPenaltyMsPerWaitStream={}",
+            config.isFlexlbEngineWaitPenaltyEnabled(), config.getFlexlbEngineWaitPenaltyMsPerWaitStream());
+        log.info("engineWaitHardFilterEnabled={}, engineWaitHardFilterThreshold={}",
+            config.isFlexlbEngineWaitHardFilterEnabled(), config.getFlexlbEngineWaitHardFilterThreshold());
         log.info("maxNewTokensCap={}", config.getMaxNewTokensCap());
         log.info("workerTimeoutMs={}",
             config.getWorkerTimeoutMs());

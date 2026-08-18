@@ -875,9 +875,14 @@ grpc::Status PrefillBatchRpcServer::admitGroup(const EnqueueGroupRequestPB* requ
     const int64_t batch_stream_default_timeout_ms = batchStreamDefaultTimeoutMs();
     // GenerateConfigPB.timeout_ms is int32: clamp the env value (int64) to
     // INT32_MAX before writing so a huge knob cannot wrap around on the
-    // implicit narrowing conversion (R1d).
+    // implicit narrowing conversion; validate in the int64 domain first so
+    // an out-of-range negative value cannot sign-flip into a huge positive
+    // (R1d).
     const int32_t batch_stream_default_timeout_clamped =
-        static_cast<int32_t>(std::min<int64_t>(batch_stream_default_timeout_ms, std::numeric_limits<int32_t>::max()));
+        batch_stream_default_timeout_ms > 0 ?
+            static_cast<int32_t>(
+                std::min<int64_t>(batch_stream_default_timeout_ms, std::numeric_limits<int32_t>::max())) :
+            0;
     for (const auto* input : all_inputs) {
         auto input_copy = std::make_shared<GenerateInputPB>(*input);
         // Worker status derives batch_id from stream metadata; the batch RPC envelope is authoritative.

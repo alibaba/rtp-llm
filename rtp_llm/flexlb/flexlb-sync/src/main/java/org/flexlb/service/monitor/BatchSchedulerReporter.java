@@ -12,7 +12,11 @@ import org.springframework.stereotype.Component;
 import javax.annotation.PostConstruct;
 
 import static org.flexlb.constant.MetricConstant.BATCHER_PARK_QPS;
+import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_ENTER_QPS;
+import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_LEAVE_QPS;
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_SIZE;
+import static org.flexlb.constant.MetricConstant.ENGINE_WAIT_FILTERED_QPS;
+import static org.flexlb.constant.MetricConstant.SELECTION_FALLBACK_QPS;
 import static org.flexlb.constant.MetricConstant.BATCH_ACTUAL_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICTED_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICT_GAP_MS;
@@ -103,6 +107,16 @@ public class BatchSchedulerReporter {
         monitor.register(BATCHER_QUEUE_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         // Batcher park — requests parked by the batcher instead of dispatched (inflight_full etc.), QPS tagged by reason
         monitor.register(BATCHER_PARK_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        // Batcher queue enter/leave — per-engine admission & departure rates (QPS); leave is
+        // tagged by reason (dispatched / deadline_evicted / admission_timeout /
+        // token_capacity_rejected / drained / dispatch_aborted / removed) so the
+        // enter-vs-leave gap pinpoints where queued requests actually go (na130_4)
+        monitor.register(BATCHER_QUEUE_ENTER_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(BATCHER_QUEUE_LEAVE_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        // Prefill selection telemetry — engine-wait hard-filter hits and all-filtered
+        // least-loaded fallbacks (cluster-level, tagged by role only)
+        monitor.register(ENGINE_WAIT_FILTERED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(SELECTION_FALLBACK_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
         // Decode total load and inflight KV reserved — per decode worker (FlexLB scheduler view)
         monitor.register(DECODE_TOTAL_LOAD, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -137,7 +151,7 @@ public class BatchSchedulerReporter {
         // ACK-to-response time — from engine ACK to schedule response sent to client (timer for distribution)
         monitor.register(ACK_TO_RESPONSE_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
-        log.info("BatchSchedulerReporter initialized (26 metrics)");
+        log.info("BatchSchedulerReporter initialized (32 metrics)");
     }
 
     // ==================== Queue metrics ====================
@@ -200,6 +214,67 @@ public class BatchSchedulerReporter {
                 "role", RoleType.PREFILL.name(),
                 "reason", reason);
         monitor.report(BATCHER_PARK_QPS, tags, count);
+    }
+
+    /**
+     * Report one batcher queue admission via
+     * {@code app.flexlb.batcher.queue.enter.qps}, tagged by engineIp + role.
+     * Counted at the single enqueue success point shared by offer / tryOffer
+     * / versioned re-offer, so every path that puts an item into a per-engine
+     * batcher queue is counted exactly once.
+     */
+    public void reportBatcherQueueEnter(String role, String engineIp) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
+                "role", role);
+        monitor.report(BATCHER_QUEUE_ENTER_QPS, tags, 1.0);
+    }
+
+    /**
+     * Report batcher queue departures via
+     * {@code app.flexlb.batcher.queue.leave.qps}, tagged by engineIp + role
+     * + reason:
+     * dispatched (flush-time dispatch to the engine),
+     * deadline_evicted (SLO-budget dropHead expiry),
+     * admission_timeout (queue admission timeout sweep),
+     * token_capacity_rejected (strict padded batch-token capacity reject),
+     * drained (batcher shutdown stopAndDrainTo, queued + staged),
+     * dispatch_aborted (pre-send revalidation drop / claim-or-send failure),
+     * removed (all other removals — cancel/replace paths).
+     *
+     * @param count number of items that left the queue with this reason
+     */
+    public void reportBatcherQueueLeave(String role, String engineIp, String reason, int count) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
+                "role", role,
+                "reason", reason);
+        monitor.report(BATCHER_QUEUE_LEAVE_QPS, tags, count);
+    }
+
+    /**
+     * Report engine-wait hard-filter hits via
+     * {@code app.flexlb.engine.wait.filtered.qps}, tagged by role (PREFILL).
+     * Aggregated per prefill selection round ({@code count} = candidate
+     * endpoints excluded); the filter decision is cluster-level so there is
+     * no single engineIp tag.
+     *
+     * @param count endpoints excluded by the engine-wait hard filter this round
+     */
+    public void reportEngineWaitFiltered(int count) {
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", RoleType.PREFILL.name());
+        monitor.report(ENGINE_WAIT_FILTERED_QPS, tags, count);
+    }
+
+    /**
+     * Report one least-loaded fallback prefill selection via
+     * {@code app.flexlb.selection.fallback.qps}, tagged by role (PREFILL) —
+     * every feasible candidate was filtered out and the strategy kept
+     * routing by falling back to the least-loaded endpoint.
+     */
+    public void reportSelectionFallback() {
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", RoleType.PREFILL.name());
+        monitor.report(SELECTION_FALLBACK_QPS, tags, 1.0);
     }
 
     /**

@@ -10,6 +10,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_ENTER_QPS;
+import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_LEAVE_QPS;
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_SIZE;
 import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_DISPATCH_REASON;
@@ -211,5 +213,34 @@ class BatchSchedulerReporterTest {
                 "engineIp", "10.0.0.2",
                 "role", "DECODE");
         verify(monitor).report(DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS, tags, 8_192.0);
+    }
+
+    @Test
+    void should_register_batcher_queue_enter_and_leave_metrics_on_init() {
+        reporter.init();
+
+        verify(monitor).register(BATCHER_QUEUE_ENTER_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        verify(monitor).register(BATCHER_QUEUE_LEAVE_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+    }
+
+    @Test
+    void should_report_batcher_queue_enter_with_engine_and_role_tags() {
+        reporter.reportBatcherQueueEnter("PREFILL", "10.0.0.1");
+
+        FlexMetricTags tags = FlexMetricTags.of(
+                "engineIp", "10.0.0.1",
+                "role", "PREFILL");
+        verify(monitor).report(BATCHER_QUEUE_ENTER_QPS, tags, 1.0);
+    }
+
+    @Test
+    void should_report_batcher_queue_leave_with_reason_tag_and_count() {
+        reporter.reportBatcherQueueLeave("PREFILL", "10.0.0.1", "dispatched", 4);
+
+        FlexMetricTags tags = FlexMetricTags.of(
+                "engineIp", "10.0.0.1",
+                "role", "PREFILL",
+                "reason", "dispatched");
+        verify(monitor).report(BATCHER_QUEUE_LEAVE_QPS, tags, 4.0);
     }
 }

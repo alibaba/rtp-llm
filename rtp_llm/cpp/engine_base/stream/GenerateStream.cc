@@ -223,7 +223,25 @@ int GenerateStream::pendingAsyncBookkeepingCount() const {
 }
 
 void GenerateStream::markDeferredRelease() {
-    async_bookkeeping_->defer_release.store(true, std::memory_order_release);
+    bool last_worker_already_gone = false;
+    {
+        // Handshake with the last async worker's decrement path: either it
+        // observes our flag (and performs the release), or we observe
+        // count == 0 (it already left without taking over) and release here.
+        // Without this, a plain store can strand the flag with nobody left
+        // to consume it and defer the KV release to stream destruction.
+        std::lock_guard<std::mutex> lk(async_bookkeeping_->mu);
+        if (async_bookkeeping_->count.load(std::memory_order_acquire) == 0) {
+            last_worker_already_gone = true;
+        } else {
+            async_bookkeeping_->defer_release.store(true, std::memory_order_release);
+        }
+    }
+    if (last_worker_already_gone) {
+        // count == 0, so releaseResource()'s internal bookkeeping wait
+        // returns immediately — this cannot block.
+        releaseResource();
+    }
 }
 
 bool GenerateStream::isDeferredReleasePending() const {

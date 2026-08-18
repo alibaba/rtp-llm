@@ -2862,8 +2862,9 @@ TEST_F(FIFOSchedulerTest, testSweepErroredGroupStreamsTimesOutStarvedNonHeadMemb
         query->generate_config               = make_shared<GenerateConfig>();
         if (timeout_ms.has_value()) {
             query->generate_config->timeout_ms = timeout_ms.value();
-            // begin_time 100ms in the past: the timeout is already overdue.
-            query->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - 100 * 1000;
+            // begin_time 1s in the past: the timeout is unambiguously
+            // overdue even on fast machines (integer-truncation margin).
+            query->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - 1000 * 1000;
         }
         return make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     };
