@@ -151,13 +151,18 @@ cc_test(
 cc_test(
     name = "tree_workload_generator_test",
     srcs = ["TreeWorkloadGeneratorTest.cc"],
-    copts = copts(),
-    tags = ["manual"],
+    copts = copts() + ["-fno-access-control"],
     deps = [
+        ":online_tree_scheduler",
+        ":tree_benchmark_runner",
         ":tree_workload_generator",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-    ],
+    ] + select({
+        "@//:using_cuda": ["//3rdparty:cuda_driver"],
+        "//conditions:default": [],
+    }),
 )
 
 cc_binary(

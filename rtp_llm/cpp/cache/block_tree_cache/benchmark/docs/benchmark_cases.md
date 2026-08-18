@@ -68,7 +68,7 @@ Tree 的逻辑 block 固定覆盖 256 tokens。20 个请求长度桶（tokens）
 | `forward_batches` / `forward_requests` | 固定 100ms sleep batch 数及覆盖请求数 |
 | `loads_committed` / `loads_succeeded` | lower-tier load 尝试与成功数 |
 | `held_request_blocks_peak` | 跨 forward 持有 blocks 峰值 |
-| `joined_holder_blocks_total` | joined descriptor 的真实 target blocks 获得独立 REQUEST holder 的累计数 |
+| `joined_target_blocks_total` | joined descriptor 通过 match 转移给 request 的真实 target blocks 累计数 |
 | `dependency_skip_count` | 因 parent 未就绪而跳过的 CONTINUATION 请求数 |
 | `dependency_failed_descendants` | 因 parent 失败而阻断的 descendants 数 |
 | `pressure_ready` | warmup 后压力观察值，不是硬 PASS 条件 |
