@@ -40,11 +40,11 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.triton_kv_scatter import (
     triton_kv_scatter,
 )
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 from rtp_llm.models_py.triton_kernels.sparse_mla.topk_index_postprocess import (
     fused_stage2_global_indices,
 )
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
+from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 
 from .flashmla_sparse_impl import (
     SparseMlaFp8DecodeParams,
@@ -922,7 +922,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         ).reshape(-1, local_fused.size(-1))
         restore_indices = self.sharded_kv_restore_indices
         direct_restore = (
-            getattr(self, "_glm5_prefill_refine_enabled", False)
+            self._fuse_prefill_index_ops
             and gathered.is_cuda
             and gathered.is_contiguous()
             and ws.fused_kv.is_cuda
@@ -1001,7 +1001,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         offsets = ws.workspace_starts[self.precomputed_req_ids]
         topk_2d = _topk_2d(topk)
         global_indices = None
-        if getattr(self, "_glm5_prefill_refine_enabled", False):
+        if self._fuse_prefill_index_ops:
             global_indices = fused_stage2_global_indices(topk_2d, offsets)
         if global_indices is None:
             # Preserve -1 padding so flash_mla_sparse_fwd skips invalid positions.

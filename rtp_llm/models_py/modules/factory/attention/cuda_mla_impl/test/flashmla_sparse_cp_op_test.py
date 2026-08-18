@@ -398,7 +398,7 @@ class SparseMlaFp8CPOpTest(TestCase):
             device=device,
         )
 
-        def run_variant(enable_fused: bool) -> torch.Tensor:
+        def run_variant(enable_fused: bool) -> Tuple[torch.Tensor, int]:
             op = object.__new__(flashmla_sparse_cp_impl.SparseMlaFp8CPOp)
             op._fuse_prefill_index_ops = enable_fused
             op._gather = SimpleNamespace(
@@ -417,9 +417,7 @@ class SparseMlaFp8CPOpTest(TestCase):
             op.sharded_kv_restore_indices = restore_indices
             op.sharded_total_local_kv_len = rows
             op.sharded_actual_total_local_kv_len = rows
-            op.block_table = torch.zeros(
-                (1, 1), dtype=torch.int32, device=device
-            )
+            op.block_table = torch.zeros((1, 1), dtype=torch.int32, device=device)
 
             def fake_gather_cache(_src, dst, *_args):
                 dst.copy_(gathered_source)
@@ -446,13 +444,17 @@ class SparseMlaFp8CPOpTest(TestCase):
                 flashmla_sparse_cp_impl,
                 "all_gather",
                 side_effect=lambda tensor, group=None, role=None: tensor,
-            ):
+            ), patch.object(
+                torch, "index_select", wraps=torch.index_select
+            ) as index_select:
                 op._gather_sharded_kv_cache(kv_cache)
-            return op._gather.fused_kv.clone()
+            return op._gather.fused_kv.clone(), index_select.call_count
 
-        unfused = run_variant(enable_fused=False)
-        fused = run_variant(enable_fused=True)
+        unfused, unfused_index_select_calls = run_variant(enable_fused=False)
+        fused, fused_index_select_calls = run_variant(enable_fused=True)
         torch.cuda.synchronize()
+        self.assertEqual(unfused_index_select_calls, 0)
+        self.assertEqual(fused_index_select_calls, 1)
 
         torch.testing.assert_close(unfused, expected, rtol=0, atol=0)
         torch.testing.assert_close(fused, expected, rtol=0, atol=0)

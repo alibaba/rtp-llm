@@ -775,29 +775,29 @@ void invokeFusedNoAuxTc(const InputT*      logits,
 
 template<typename InputT, typename IdxT>
 __global__ void fused_glm5_no_aux_tc_single_group_kernel(const InputT* logits,
-                                                         const float* correction_bias,
-                                                         float* topk_values,
-                                                         IdxT* topk_indices,
-                                                         int64_t num_tokens,
-                                                         int norm_node,
-                                                         double routed_scaling_factor) {
+                                                         const float*  correction_bias,
+                                                         float*        topk_values,
+                                                         IdxT*         topk_indices,
+                                                         int64_t       num_tokens,
+                                                         int           norm_node,
+                                                         double        routed_scaling_factor) {
     constexpr int32_t NUM_EXPERTS = 256;
-    constexpr int32_t TOPK = 8;
-    __shared__ float shared_scores[NUM_WARPS_PER_BLOCK * NUM_EXPERTS];
-    __shared__ float shared_scores_with_bias[NUM_WARPS_PER_BLOCK * NUM_EXPERTS];
+    constexpr int32_t TOPK        = 8;
+    __shared__ float  shared_scores[NUM_WARPS_PER_BLOCK * NUM_EXPERTS];
+    __shared__ float  shared_scores_with_bias[NUM_WARPS_PER_BLOCK * NUM_EXPERTS];
 
-    const int32_t warp_id = threadIdx.x / WARP_SIZE;
-    const int32_t lane_id = threadIdx.x % WARP_SIZE;
-    const int64_t token_id = static_cast<int64_t>(blockIdx.x) * NUM_WARPS_PER_BLOCK + warp_id;
-    const bool valid = token_id < num_tokens;
-    float* warp_scores = shared_scores + warp_id * NUM_EXPERTS;
-    float* warp_scores_with_bias = shared_scores_with_bias + warp_id * NUM_EXPERTS;
+    const int32_t warp_id               = threadIdx.x / WARP_SIZE;
+    const int32_t lane_id               = threadIdx.x % WARP_SIZE;
+    const int64_t token_id              = static_cast<int64_t>(blockIdx.x) * NUM_WARPS_PER_BLOCK + warp_id;
+    const bool    valid                 = token_id < num_tokens;
+    float*        warp_scores           = shared_scores + warp_id * NUM_EXPERTS;
+    float*        warp_scores_with_bias = shared_scores_with_bias + warp_id * NUM_EXPERTS;
 
     if (valid) {
         const InputT* token_logits = logits + token_id * NUM_EXPERTS;
 #pragma unroll
         for (int32_t expert = lane_id; expert < NUM_EXPERTS; expert += WARP_SIZE) {
-            const float score = strict_group_topk_sigmoid(strict_group_topk_input_to_float(token_logits[expert]));
+            const float score   = strict_group_topk_sigmoid(strict_group_topk_input_to_float(token_logits[expert]));
             warp_scores[expert] = score;
             warp_scores_with_bias[expert] = score + correction_bias[expert];
         }
@@ -806,16 +806,15 @@ __global__ void fused_glm5_no_aux_tc_single_group_kernel(const InputT* logits,
 
     warp_topk::WarpSelect<WARP_SIZE, true, float, int32_t, true> queue(TOPK, -INFINITY);
     for (int32_t expert = lane_id; expert < NUM_EXPERTS; expert += WARP_SIZE) {
-        const float candidate = valid && isfinite(warp_scores_with_bias[expert])
-                                    ? warp_scores_with_bias[expert]
-                                    : -INFINITY;
+        const float candidate =
+            valid && isfinite(warp_scores_with_bias[expert]) ? warp_scores_with_bias[expert] : -INFINITY;
         queue.add(candidate, expert);
     }
     // WarpSelect::done contains a block-wide barrier; invalid tail warps participate too.
     queue.done();
 
     extern __shared__ char smem_buf[];
-    int32_t* selected = reinterpret_cast<int32_t*>(smem_buf);
+    int32_t*               selected = reinterpret_cast<int32_t*>(smem_buf);
     selected += warp_id * TOPK;
     bool lane_has_valid = false;
     if (valid) {
@@ -824,7 +823,7 @@ __global__ void fused_glm5_no_aux_tc_single_group_kernel(const InputT* logits,
             lane_has_valid = lane_has_valid || isfinite(warp_scores_with_bias[expert]);
         }
     }
-    lane_has_valid = valid && lane_has_valid;
+    lane_has_valid       = valid && lane_has_valid;
     const bool any_valid = __any_sync(FULL_WARP_MASK, lane_has_valid);
     if (any_valid) {
         __syncwarp();
@@ -834,7 +833,7 @@ __global__ void fused_glm5_no_aux_tc_single_group_kernel(const InputT* logits,
     __syncthreads();
 
     float topk_sum = norm_node == 0 ? 1.0f : 1e-20f;
-    float value = 0.0f;
+    float value    = 0.0f;
     if (any_valid && lane_id < TOPK) {
         value = warp_scores[selected[lane_id]];
     }
@@ -848,45 +847,34 @@ __global__ void fused_glm5_no_aux_tc_single_group_kernel(const InputT* logits,
         const int64_t output_offset = token_id * TOPK + lane_id;
         if (any_valid) {
             topk_indices[output_offset] = static_cast<IdxT>(selected[lane_id]);
-            topk_values[output_offset] = value / topk_sum * routed_scaling_factor;
+            topk_values[output_offset]  = value / topk_sum * routed_scaling_factor;
         } else {
             topk_indices[output_offset] = static_cast<IdxT>(lane_id);
-            topk_values[output_offset] = 1.0f / TOPK;
+            topk_values[output_offset]  = 1.0f / TOPK;
         }
     }
 }
 
 template<typename InputT, typename IdxT>
 void invokeFusedNoAuxTcSingleGroup(const InputT* logits,
-                                   const float* correction_bias,
-                                   float* topk_values,
-                                   IdxT* topk_indices,
-                                   int64_t num_tokens,
-                                   int norm_node,
-                                   double routed_scaling_factor,
-                                   cudaStream_t stream) {
+                                   const float*  correction_bias,
+                                   float*        topk_values,
+                                   IdxT*         topk_indices,
+                                   int64_t       num_tokens,
+                                   int           norm_node,
+                                   double        routed_scaling_factor,
+                                   cudaStream_t  stream) {
     const int64_t num_blocks = (num_tokens - 1) / NUM_WARPS_PER_BLOCK + 1;
-    const size_t dynamic_smem_in_bytes =
+    const size_t  dynamic_smem_in_bytes =
         warp_topk::calc_smem_size_for_block_wide<float, int32_t>(NUM_WARPS_PER_BLOCK, 8);
-    LAUNCH_KERNEL_WITH_PDL((fused_glm5_no_aux_tc_single_group_kernel<InputT, IdxT>),
-                           num_blocks,
-                           BLOCK_SIZE,
-                           dynamic_smem_in_bytes,
-                           stream,
-                           logits,
-                           correction_bias,
-                           topk_values,
-                           topk_indices,
-                           num_tokens,
-                           norm_node,
-                           routed_scaling_factor);
+    fused_glm5_no_aux_tc_single_group_kernel<InputT, IdxT><<<num_blocks, BLOCK_SIZE, dynamic_smem_in_bytes, stream>>>(
+        logits, correction_bias, topk_values, topk_indices, num_tokens, norm_node, routed_scaling_factor);
     check_cuda_error();
 }
 
 bool canUseFusedNoAuxTcBf16(int64_t num_experts, int64_t n_group, int64_t topk_group, int64_t topk) {
 #ifdef ENABLE_BF16
-    return num_experts == 256 && topk == 8
-        && ((n_group == 1 && topk_group == 1) || (n_group == 8 && topk_group == 4));
+    return num_experts == 256 && topk == 8 && ((n_group == 1 && topk_group == 1) || (n_group == 8 && topk_group == 4));
 #else
     return false;
 #endif
@@ -933,13 +921,13 @@ bool invokeFusedNoAuxTcBf16(const void*           logits,
                                                                       stream);
             } else {
                 invokeFusedNoAuxTc<__nv_bfloat16, int64_t>(logits_bf16,
-                                                            correction_bias,
-                                                            topk_values,
-                                                            indices,
-                                                            num_tokens,
-                                                            renormalize,
-                                                            routed_scaling_factor,
-                                                            stream);
+                                                           correction_bias,
+                                                           topk_values,
+                                                           indices,
+                                                           num_tokens,
+                                                           renormalize,
+                                                           routed_scaling_factor,
+                                                           stream);
             }
             break;
         }
@@ -956,13 +944,13 @@ bool invokeFusedNoAuxTcBf16(const void*           logits,
                                                                       stream);
             } else {
                 invokeFusedNoAuxTc<__nv_bfloat16, int32_t>(logits_bf16,
-                                                            correction_bias,
-                                                            topk_values,
-                                                            indices,
-                                                            num_tokens,
-                                                            renormalize,
-                                                            routed_scaling_factor,
-                                                            stream);
+                                                           correction_bias,
+                                                           topk_values,
+                                                           indices,
+                                                           num_tokens,
+                                                           renormalize,
+                                                           routed_scaling_factor,
+                                                           stream);
             }
             break;
         }
@@ -1065,15 +1053,15 @@ INSTANTIATE_NOAUX_TC(float, int64_t);
 INSTANTIATE_FUSED_NOAUX_TC(__nv_bfloat16, int32_t);
 INSTANTIATE_FUSED_NOAUX_TC(__nv_bfloat16, int64_t);
 
-#define INSTANTIATE_FUSED_NOAUX_TC_SINGLE_GROUP(InputT, IdxT)                                                         \
-    template void invokeFusedNoAuxTcSingleGroup<InputT, IdxT>(const InputT* logits,                                  \
-                                                               const float* correction_bias,                          \
-                                                               float* topk_values,                                    \
-                                                               IdxT* topk_indices,                                    \
-                                                               int64_t const num_tokens,                              \
-                                                               int norm_node,                                         \
-                                                               double const routed_scaling_factor,                    \
-                                                               cudaStream_t const stream);
+#define INSTANTIATE_FUSED_NOAUX_TC_SINGLE_GROUP(InputT, IdxT)                                                          \
+    template void invokeFusedNoAuxTcSingleGroup<InputT, IdxT>(const InputT*      logits,                               \
+                                                              const float*       correction_bias,                      \
+                                                              float*             topk_values,                          \
+                                                              IdxT*              topk_indices,                         \
+                                                              int64_t const      num_tokens,                           \
+                                                              int                norm_node,                            \
+                                                              double const       routed_scaling_factor,                \
+                                                              cudaStream_t const stream);
 
 INSTANTIATE_FUSED_NOAUX_TC_SINGLE_GROUP(__nv_bfloat16, int32_t);
 INSTANTIATE_FUSED_NOAUX_TC_SINGLE_GROUP(__nv_bfloat16, int64_t);
