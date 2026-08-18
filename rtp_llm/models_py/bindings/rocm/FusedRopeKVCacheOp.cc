@@ -3,6 +3,7 @@
 #include "rtp_llm/models_py/bindings/core/Dispatch.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/rocm/mrope_config_validation.h"
+#include <algorithm>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -100,6 +101,60 @@ static void copyTensorExactInPlace(torch::Tensor& dst, const torch::Tensor& src,
     dst_flat.copy_(src_match, true);
 }
 
+void rebuildPaddingOffsetForCaptureStride(CKAttn& params, const torch_ext::PyAttentionInputs& attn_inputs) {
+    TORCH_CHECK(attn_inputs.input_lengths.defined(), "prepare_in_place expects input_lengths");
+    TORCH_CHECK(params.padding_offset.defined(), "prepare_in_place expects a captured padding_offset tensor");
+    TORCH_CHECK(params.padding_offset.scalar_type() == at::kInt,
+                "captured padding_offset must be int32, got ",
+                params.padding_offset.scalar_type());
+    TORCH_CHECK(params.padding_offset.is_contiguous(), "captured padding_offset must be contiguous");
+    TORCH_CHECK(params.prefill_capture_max_seq_len > 0,
+                "captured prefill query stride must be positive, got ",
+                params.prefill_capture_max_seq_len);
+    TORCH_CHECK(params.max_seq_len >= 0 && params.max_seq_len <= params.prefill_capture_max_seq_len,
+                "replay input length exceeds captured prefill query stride: capture=",
+                params.prefill_capture_max_seq_len,
+                ", replay=",
+                params.max_seq_len);
+
+    const auto  input_lengths     = attn_inputs.input_lengths.to(torch::kCPU).to(at::kInt).contiguous().reshape({-1});
+    const auto* input_lengths_ptr = input_lengths.data_ptr<int32_t>();
+    const auto  batch_size        = input_lengths.numel();
+    int64_t     total_tokens      = 0;
+    for (int64_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
+        const int32_t input_length = input_lengths_ptr[batch_idx];
+        TORCH_CHECK(input_length >= 0, "input length must be non-negative, got ", input_length);
+        TORCH_CHECK(input_length <= params.prefill_capture_max_seq_len,
+                    "replay input length exceeds captured prefill query stride: capture=",
+                    params.prefill_capture_max_seq_len,
+                    ", replay=",
+                    input_length);
+        total_tokens += input_length;
+    }
+
+    auto padding_offset_flat = params.padding_offset.reshape({-1});
+    TORCH_CHECK(total_tokens <= padding_offset_flat.numel(),
+                "captured padding_offset is too small: capacity=",
+                padding_offset_flat.numel(),
+                ", replay tokens=",
+                total_tokens);
+    auto host_padding_offset =
+        params.padding_offset.is_cuda() ?
+            torch::empty({total_tokens}, torch::TensorOptions().dtype(at::kInt).device(at::kCPU)) :
+            padding_offset_flat;
+    auto*   host_padding_offset_ptr = host_padding_offset.data_ptr<int32_t>();
+    int64_t token_cursor            = 0;
+    for (int64_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
+        const int32_t input_length = input_lengths_ptr[batch_idx];
+        const int32_t offset = static_cast<int32_t>(batch_idx * params.prefill_capture_max_seq_len - token_cursor);
+        std::fill_n(host_padding_offset_ptr + token_cursor, input_length, offset);
+        token_cursor += input_length;
+    }
+    if (params.padding_offset.is_cuda() && total_tokens > 0) {
+        padding_offset_flat.slice(0, 0, total_tokens).copy_(host_padding_offset, false);
+    }
+}
+
 void updateKvCacheOffset(CKAttn& params, const torch::Tensor& kv_cache_block_id_device) {
     if (!params.kv_cache_offset.defined() || !kv_cache_block_id_device.defined()
         || kv_cache_block_id_device.numel() == 0) {
@@ -131,9 +186,18 @@ void prepareInPlace(CKAttn& params, const torch_ext::PyAttentionInputs& attn_inp
     if (has_prefix) {
         max_prefix_len = attn_inputs.prefix_lengths.max().item<int32_t>();
     }
-    params.prefill_runtime_max_seq_len         = params.max_seq_len;
+
+    if (params.prefill_capture_max_seq_len > 0) {
+        rebuildPaddingOffsetForCaptureStride(params, attn_inputs);
+    }
+
+    // Only padded-Q graph replay freezes the fused RoPE row stride. All other
+    // callers retain the existing live-length metadata path without rebuilding
+    // padding_offset.
+    params.prefill_runtime_max_seq_len =
+        params.prefill_capture_max_seq_len > 0 ? params.prefill_capture_max_seq_len : params.max_seq_len;
     params.prefill_runtime_max_prefix_len      = max_prefix_len;
-    params.prefill_runtime_seq_len_with_prefix = params.max_seq_len + max_prefix_len;
+    params.prefill_runtime_seq_len_with_prefix = params.prefill_runtime_max_seq_len + max_prefix_len;
 
     updateKvCacheOffset(params, attn_inputs.kv_cache_kernel_block_id_device);
 }
@@ -168,11 +232,14 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
     } else {
         attn_params = std::make_shared<CKAttn>();
     }
-    attn_params->attn_type      = torchDTypeToDataType(attn_inputs.dtype);
-    attn_params->cu_seqlens     = attn_inputs.cu_seqlens_device;
-    attn_params->cu_kv_seqlens  = attn_inputs.cu_kv_seqlens_device;
-    attn_params->input_lengths  = attn_inputs.input_lengths;
-    attn_params->max_seq_len    = attn_inputs.input_lengths.max().item<int32_t>();
+    attn_params->attn_type     = torchDTypeToDataType(attn_inputs.dtype);
+    attn_params->cu_seqlens    = attn_inputs.cu_seqlens_device;
+    attn_params->cu_kv_seqlens = attn_inputs.cu_kv_seqlens_device;
+    attn_params->input_lengths = attn_inputs.input_lengths;
+    attn_params->max_seq_len   = attn_inputs.input_lengths.max().item<int32_t>();
+    if (pad_query) {
+        attn_params->prefill_capture_max_seq_len = attn_params->max_seq_len;
+    }
     attn_params->padding_offset = attn_inputs.padding_offset;
 
     // 处理 prefix_lengths：确保在 CUDA 上且连续

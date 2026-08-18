@@ -432,6 +432,7 @@ class GrammarConfig:
 
 class FMHAConfig:
     absorb_opt_len: int
+    disable_flashinfer_hybrid_prefill: bool
     disable_flashinfer_native: bool
     enable_flashinfer_trtllm_gen: bool
     enable_flashinfer_trt_fmha_v2: bool
@@ -851,7 +852,7 @@ class MMPreprocessConfig:
     width: int
     def __getstate__(self) -> tuple:
         ...
-    def __init__(self, width: int, height: int, min_pixels: int, max_pixels: int, fps: int, min_frames: int, max_frames: int, crop_positions: list[float], mm_timeout_ms: int) -> None:
+    def __init__(self, width: int = -1, height: int = -1, min_pixels: int = -1, max_pixels: int = -1, fps: int = -1, min_frames: int = -1, max_frames: int = -1, crop_positions: list[float] = ..., mm_timeout_ms: int = -1) -> None:
         ...
     def __setstate__(self, arg0: tuple) -> None:
         ...
@@ -1053,6 +1054,8 @@ class ModelConfig:
     swiglu_limit: float
     num_hash_layers: int
     num_layers: int
+    output_vocab_ids: list[int]
+    output_vocab_padded_size: int
     partial_rotary_factor: float
     position_ids_style: int
     pre_seq_len: int

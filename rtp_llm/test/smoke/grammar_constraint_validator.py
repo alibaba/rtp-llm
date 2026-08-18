@@ -240,10 +240,47 @@ def validate_structural_format(content: str, fmt: Dict[str, Any], idx: int) -> N
         validate_triggered_tags(content, fmt, idx)
     elif fmt_type == "sequence":
         validate_reasoning_sequence(content, fmt, idx)
+    elif fmt_type == "or":
+        validate_or_format(content, fmt, idx)
+    elif fmt_type == "any_text":
+        for excluded in fmt.get("excludes") or []:
+            if excluded and excluded in content:
+                raise ValueError(
+                    f"choice[{idx}] any_text content contains excluded marker "
+                    f"{excluded!r}: {content!r}"
+                )
+    elif fmt_type == "regex":
+        pattern = fmt.get("pattern")
+        if not isinstance(pattern, str) or re.fullmatch(pattern, content) is None:
+            raise ValueError(
+                f"choice[{idx}] structural_tag content {content!r} does not match "
+                f"regex {pattern!r}"
+            )
     else:
         raise ValueError(
             f"choice[{idx}] structural_tag validator does not handle format.type={fmt_type!r}"
         )
+
+
+def validate_or_format(content: str, fmt: Dict[str, Any], idx: int) -> None:
+    elements = fmt.get("elements") or []
+    if not elements:
+        raise ValueError(f"choice[{idx}] structural_tag or format has no elements")
+
+    errors = []
+    for element in elements:
+        if not isinstance(element, dict):
+            errors.append("branch is not an object")
+            continue
+        try:
+            validate_structural_format(content, element, idx)
+            return
+        except ValueError as error:
+            errors.append(str(error))
+    raise ValueError(
+        f"choice[{idx}] structural_tag content did not match any or branch: "
+        + "; ".join(errors)
+    )
 
 
 def validate_reasoning_sequence(content: str, fmt: Dict[str, Any], idx: int) -> None:
@@ -258,11 +295,12 @@ def validate_reasoning_sequence(content: str, fmt: Dict[str, Any], idx: int) -> 
     reasoning_content = (
         reasoning.get("content") if isinstance(reasoning, dict) else None
     )
+    begin = reasoning.get("begin") if isinstance(reasoning, dict) else None
     end = reasoning.get("end") if isinstance(reasoning, dict) else None
     if (
         not isinstance(reasoning, dict)
         or reasoning.get("type") != "tag"
-        or reasoning.get("begin", "") != ""
+        or not isinstance(begin, str)
         or not isinstance(reasoning_content, dict)
         or reasoning_content.get("type") != "any_text"
         or not isinstance(end, str)
@@ -272,7 +310,12 @@ def validate_reasoning_sequence(content: str, fmt: Dict[str, Any], idx: int) -> 
             f"choice[{idx}] first sequence element is not a text reasoning tag"
         )
 
-    end_pos = content.find(end)
+    if begin and not content.startswith(begin):
+        raise ValueError(
+            f"choice[{idx}] reasoning output does not start with {begin!r}: {content!r}"
+        )
+
+    end_pos = content.find(end, len(begin))
     if end_pos < 0:
         raise ValueError(
             f"choice[{idx}] reasoning output did not reach end marker {end!r}: "

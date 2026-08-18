@@ -88,6 +88,61 @@ def get_aiter_envs(name, envs):
     # files in bazel-out/k8-opt/bin
     return ["AITER_ASM_DIR=../../../../../../../bin/internal_source/rtp_llm/test/smoke/" + name + ".runfiles/pip_gpu_rocm_torch_aiter/site-packages/aiter_meta/hsa/"]
 
+SMOKE_FRAMEWORK_DEPS = [
+    "//rtp_llm/test/utils:maga_server_manager",
+    "//rtp_llm/test/utils:test_util",  # smoke srcs import port_util/coredump_util
+    "//rtp_llm:uvicorn",
+    "//rtp_llm:fastapi",
+    "//rtp_llm:psutil",
+    "//rtp_llm:tiktoken",
+    "//rtp_llm:testlib",
+    "//rtp_llm:pydantic",
+    "//rtp_llm:json5",
+    "//rtp_llm:dashscope",
+    "//rtp_llm:jieba",
+    "//rtp_llm:partial_json_parser",
+    "//rtp_llm:openai",
+    "//rtp_llm/test/utils:device_resource",
+]
+
+SMOKE_CASE_TAGS = ["smoke_case", "manual"]
+
+def custom_smoke_test(name, main, smoke_args="", args=[], gpu_type=[], tags=[], data=[], deps=[]):
+    """Defines a smoke_case py_test with its own unittest main.
+
+    Bypasses the entry.py framework while inheriting the framework deps, tags,
+    GPU exec_properties and legacy_create_init guarantees. smoke_args is the
+    single source for GPU reservation, server arguments and WORLD_SIZE."""
+    gpu_count = get_world_size_from_smoke_args(smoke_args)
+    if not gpu_type:
+        fail("custom_smoke_test %s: gpu_type must be non-empty" % name)
+    native.py_test(
+        name = name,
+        main = main,
+        srcs = [main],
+        args = args,
+        timeout = "eternal",
+        deps = SMOKE_FRAMEWORK_DEPS + deps,
+        data = data,
+        env = {
+            "GPU_COUNT": str(gpu_count),
+            "SMOKE_ARGS": smoke_args,
+            "WORLD_SIZE": str(gpu_count),
+            "PYTHONNOUSERSITE": "1",
+        },
+        # Local runs inherit the shared root from the shell; CI overrides it with
+        # --test_env. Declared here only: these are the remote-cache smoke cases.
+        env_inherit = ["REMOTE_JIT_DIR"],
+        exec_properties = {
+            "gpu": gpu_type[0],
+            "gpu_count": str(gpu_count),
+        },
+        tags = tags + SMOKE_CASE_TAGS + gpu_type,
+        legacy_create_init = 0,
+        visibility = ["//visibility:public"],
+    )
+    return name
+
 def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_args="",
                kvcm_envs=[], sleep_time_qr=0, kill_remote=False, concurrency_test=False):
     path = '/'.join(task_info.split('/')[:-1])
@@ -150,22 +205,7 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
         srcs = all_srcs,
         timeout = "eternal",
         imports = [".."] if has_entry else ["../../../../rtp_llm/test", ".."],
-        deps = [
-            "//rtp_llm/test/utils:maga_server_manager",
-            "//rtp_llm:uvicorn",
-            "//rtp_llm:fastapi",
-            "//rtp_llm:psutil",
-            "//rtp_llm:tiktoken",
-            "//rtp_llm:testlib",
-            "//rtp_llm:pydantic",
-            "//rtp_llm:json5",
-            "//rtp_llm:dashscope",
-            "//rtp_llm:jieba",
-            "//rtp_llm:partial_json_parser",
-            "//rtp_llm:openai",
-            "//rtp_llm/test/utils:device_resource",
-            "//rtp_llm/test/utils:test_util",
-        ] + extra_deps + select({
+        deps = SMOKE_FRAMEWORK_DEPS + extra_deps + select({
             "//conditions:default": [],
         }),
         data = data + [
@@ -173,7 +213,7 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
             "data/prompt_candidates.json",
             "//rtp_llm:sdk",
         ],
-        tags = tags + ["smoke_case", "manual"] + gpu_type,
+        tags = tags + SMOKE_CASE_TAGS + gpu_type,
         legacy_create_init=0,
         args = [
             "--suite_name", name,

@@ -11,8 +11,9 @@ GenerateContext::~GenerateContext() {
 }
 
 void GenerateContext::reset() {
+    error_info   = ErrorInfo::OkStatus();
     error_status = grpc::Status::OK;
-    error_info   = ErrorInfo();
+    retryable_   = true;
 }
 
 bool GenerateContext::ok() const {
@@ -21,6 +22,14 @@ bool GenerateContext::ok() const {
 
 bool GenerateContext::hasError() const {
     return !ok();
+}
+
+bool GenerateContext::shouldRetry() const {
+    return retryable_;
+}
+
+void GenerateContext::setRetryable(bool retryable) {
+    retryable_ = retryable;
 }
 
 bool GenerateContext::cancelled() const {

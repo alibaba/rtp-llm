@@ -57,6 +57,12 @@ message RoleAddrPB {
 }
 
 message GenerateConfigPB {
+    enum ThinkingModePB {
+        THINKING_MODE_UNSPECIFIED = 0;
+        THINKING_MODE_DISABLED = 1;
+        THINKING_MODE_ADAPTIVE = 2;
+        THINKING_MODE_ENABLED = 3;
+    }
     int32 max_new_tokens = 1;
     int32 num_beams = 2;
     int32 num_return_sequences = 3;
@@ -136,6 +142,8 @@ message GenerateConfigPB {
     google.protobuf.StringValue regex = 70;
     google.protobuf.StringValue ebnf = 71;
     google.protobuf.StringValue structural_tag = 72;
+    ThinkingModePB thinking_mode = 73;
+    reserved 74;
 }
 
 message MMPreprocessConfigPB {

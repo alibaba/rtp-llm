@@ -34,7 +34,11 @@ from rtp_llm.config.exceptions import (
     ExceptionType,
     FtRuntimeException,
 )
-from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.generate_config import (
+    GenerateConfig,
+    ThinkingMode,
+    thinking_mode_from_value,
+)
 from rtp_llm.config.response_format import normalize_think_tag
 from rtp_llm.config.response_format_compiler import (
     ReasoningFormat,
@@ -60,6 +64,7 @@ from rtp_llm.dash_sc.codec import (
     build_dash_error_response,
     build_stream_response_from_generate_outputs,
     parse_dash_sc_grpc_request,
+    parse_multimodal_parts_from_request,
     prepend_to_generated_ids_tensor,
 )
 from rtp_llm.dash_sc.grpc_metrics import (
@@ -103,6 +108,33 @@ _EMPTY_THINK_PHASE2_MODEL_TYPES = {"deepseek_v4"}
 _INT32_MAX = 2_147_483_647
 _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
 GrpcMetadata = Iterable[tuple[object, object]]
+
+
+def _build_mm_inputs_from_request(
+    request: predict_v2_pb2.ModelInferRequest,
+) -> list:
+    """Convert DashSc message parts to the engine's generic multimodal inputs."""
+    parts = parse_multimodal_parts_from_request(request)
+    if not parts:
+        return []
+
+    from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+
+    return [
+        MultimodalInput(
+            part.url,
+            part.mm_type,
+            torch.empty(0),
+            MMPreprocessConfig(
+                min_pixels=part.min_pixels,
+                max_pixels=part.max_pixels,
+                fps=part.fps,
+                min_frames=part.min_frames,
+                max_frames=part.max_frames,
+            ),
+        )
+        for part in parts
+    ]
 
 
 def _exception_metric_code(error_code: int | ExceptionType) -> str:
@@ -279,9 +311,8 @@ def _dash_sc_reasoning_format(
     """Build the Dash-SC-local reasoning grammar envelope.
 
     Dash SC receives tokenized input, so it owns the decision whether the
-    grammar must generate the think begin tag. The shared OpenAI path keeps its
-    existing ``begin=""`` behavior through
-    :meth:`ReasoningFormat.from_generate_env_config`.
+    grammar must generate the think begin tag. The OpenAI path makes the same
+    decision after rendering its prompt.
     """
     base_format = ReasoningFormat.from_generate_env_config(generate_env_config)
     tag_begin = ""
@@ -297,6 +328,7 @@ def _dash_sc_reasoning_format(
         tag_begin=tag_begin,
         tag_end=base_format.tag_end,
         suffix=base_format.suffix,
+        no_think_excludes=base_format.no_think_excludes,
     )
 
 
@@ -459,6 +491,7 @@ def _make_generate_input(
     generate_config: GenerateConfig,
     invocation_metadata: Optional[GrpcMetadata],
     request_headers: Optional[dict[str, str]] = None,
+    mm_inputs: Optional[list] = None,
 ) -> GenerateInput:
     headers = dict(request_headers or {})
     headers.update(_headers_from_invocation_metadata(invocation_metadata))
@@ -466,7 +499,7 @@ def _make_generate_input(
     return GenerateInput(
         request_id=request_id,
         token_ids=torch.tensor(input_ids_list, dtype=torch.int),
-        mm_inputs=[],
+        mm_inputs=list(mm_inputs) if mm_inputs else [],
         generate_config=generate_config,
         headers=headers,
         request_info=RequestInfo(
@@ -521,35 +554,52 @@ def _apply_dash_sc_controls_to_generate_config(
     sampling: SamplingParams,
     request_controls: DashScRequestControls,
     runtime: _ThinkRuntime,
+    default_thinking_mode: ThinkingMode,
 ) -> None:
-    """Apply DashSC request-level controls over process defaults."""
+    """Apply DashSC request controls over the deployment THINK_MODE default."""
     request_max_think = sampling.max_new_think_tokens
     if request_max_think is None:
         request_max_think = request_controls.max_new_think_tokens
     if request_max_think is not None:
         max_think = int(request_max_think)
         generate_config.max_thinking_tokens = _INT32_MAX if max_think < 0 else max_think
-    # Only the selected budget disables thinking; ``max_think_length`` may
-    # intentionally override a zero ``max_new_think_tokens`` alias.
-    disable_by_budget = request_max_think == 0
-    # DashLLM/sglang-compatible Dash requests stay in chat mode unless the
-    # caller explicitly asks for thinking or a request-scoped think budget.
-    disable_by_default = (
-        request_controls.enable_thinking is None and request_max_think is None
+    if request_max_think == 0 or request_controls.enable_thinking is False:
+        thinking_mode = ThinkingMode.DISABLED
+    elif request_controls.enable_thinking is True or request_max_think is not None:
+        thinking_mode = ThinkingMode.ENABLED
+    else:
+        thinking_mode = default_thinking_mode
+    implicit_adaptive = (
+        request_controls.enable_thinking is None
+        and request_max_think is None
+        and thinking_mode == ThinkingMode.ADAPTIVE
     )
     if (
-        request_controls.enable_thinking is False
-        or disable_by_budget
-        or disable_by_default
+        thinking_mode == ThinkingMode.ADAPTIVE
+        and implicit_adaptive
+        and (
+            generate_config.has_num_beams() or generate_config.num_return_sequences > 1
+        )
     ):
-        generate_config.in_think_mode = False
+        logging.warning(
+            "DashSC implicit adaptive thinking is disabled for multi-sequence generation"
+        )
+        thinking_mode = ThinkingMode.DISABLED
+
+    generate_config.thinking_mode = thinking_mode
+    generate_config.in_think_mode = False
+    if thinking_mode == ThinkingMode.DISABLED:
         generate_config.max_thinking_tokens = 0
-    elif (
-        request_controls.enable_thinking is True or request_max_think is not None
-    ) and (generate_config.end_think_token_ids or runtime.eos_tokens):
+    elif thinking_mode == ThinkingMode.ENABLED and (
+        generate_config.end_think_token_ids or runtime.eos_tokens
+    ):
         generate_config.in_think_mode = True
         if not generate_config.end_think_token_ids:
             generate_config.end_think_token_ids = list(runtime.eos_tokens)
+    elif thinking_mode == ThinkingMode.ENABLED:
+        # Preserve the legacy DashSC gate: fixed thinking requires a runtime
+        # end boundary. A request budget alone cannot make that state usable.
+        generate_config.thinking_mode = ThinkingMode.DISABLED
     if request_controls.timeout_ms is not None:
         generate_config.timeout_ms = int(request_controls.timeout_ms)
         generate_config.ttft_timeout_ms = int(request_controls.timeout_ms)
@@ -585,6 +635,7 @@ async def iter_real_model_stream_infer(
     phase2_request_id_factory: Optional[Callable[[], int]] = None,
     access_agg: GrpcAccessRecord | None = None,
     yield_access_stats: bool = False,
+    mm_inputs: Optional[list] = None,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
 
@@ -630,19 +681,36 @@ async def iter_real_model_stream_infer(
     try:
         generate_config = sampling.to_generate_config(request_controls=request_controls)
         generate_config.trace_id = trace_str
-        if generate_env_config is not None:
-            generate_config.in_think_mode = bool(generate_env_config.think_mode)
-        begin_think_tokens = list(runtime.bos_tokens or tuple(echo_prefix_ids or ()))
-        if begin_think_tokens:
-            generate_config.begin_think_token_ids = begin_think_tokens
-        _apply_dash_sc_controls_to_generate_config(
-            generate_config, sampling, request_controls, runtime
+        default_thinking_mode = (
+            thinking_mode_from_value(generate_env_config.think_mode)
+            if generate_env_config is not None
+            else ThinkingMode.DISABLED
         )
+        begin_think_tokens = list(runtime.bos_tokens or tuple(echo_prefix_ids or ()))
+        _apply_dash_sc_controls_to_generate_config(
+            generate_config,
+            sampling,
+            request_controls,
+            runtime,
+            default_thinking_mode,
+        )
+        configured_thinking_mode = generate_config.thinking_mode
         matched_think_bos_ids = matched_echo_ids or _matched_echo_prefix_ids(
             input_ids_list, begin_think_tokens
         )
+        if configured_thinking_mode == ThinkingMode.ADAPTIVE and matched_think_bos_ids:
+            generate_config.thinking_mode = ThinkingMode.ENABLED
+            generate_config.in_think_mode = True
+            configured_thinking_mode = ThinkingMode.ENABLED
+        # Boundary IDs are request metadata as well as processor inputs. Keep
+        # them available even when this request disables thinking.
+        if begin_think_tokens:
+            generate_config.begin_think_token_ids = begin_think_tokens
         reasoning_format = None
-        if generate_config.in_think_mode and generate_env_config is not None:
+        if generate_env_config is not None and configured_thinking_mode in (
+            ThinkingMode.ENABLED,
+            ThinkingMode.ADAPTIVE,
+        ):
             reasoning_format = _dash_sc_reasoning_format(
                 generate_env_config,
                 prompt_end_with_think=bool(matched_think_bos_ids),
@@ -668,7 +736,11 @@ async def iter_real_model_stream_infer(
             final_constraint = generate_config.add_thinking_params(
                 _hf_tokenizer(tokenizer),
                 generate_env_config,
-                enable_thinking=generate_config.in_think_mode,
+                enable_thinking=(
+                    None
+                    if configured_thinking_mode == ThinkingMode.ADAPTIVE
+                    else generate_config.in_think_mode
+                ),
                 reasoning_format=reasoning_format,
             )
         if runtime.eos_tokens and not generate_config.end_think_token_ids:
@@ -683,7 +755,12 @@ async def iter_real_model_stream_infer(
         # ``runtime.phase2_enabled`` is the init-time gate (model_type + empty_tokens
         # availability). ``in_think_mode`` is per-request — ``add_thinking_params``
         # sets it from generate_config and a request can override it.
-        phase2_enabled = runtime.phase2_enabled and bool(generate_config.in_think_mode)
+        phase2_enabled = runtime.phase2_enabled and (
+            configured_thinking_mode == ThinkingMode.ENABLED
+        )
+        adaptive_phase2_pending = runtime.phase2_enabled and (
+            configured_thinking_mode == ThinkingMode.ADAPTIVE
+        )
         cumulative_sent_ids: list[int] = []
         generate_think_token_num: Optional[int] = None
         generate_input = _make_generate_input(
@@ -692,6 +769,7 @@ async def iter_real_model_stream_infer(
             generate_config=generate_config,
             invocation_metadata=invocation_metadata,
             request_headers=request_controls.request_headers,
+            mm_inputs=mm_inputs,
         )
         is_streaming = bool(generate_config.is_streaming)
         logging.debug("[DashScGrpc] [%s] generate_input: %s", tag, generate_input)
@@ -714,6 +792,12 @@ async def iter_real_model_stream_infer(
                 raise ValueError("empty generate_outputs in backend chunk")
             out_py = go.generate_outputs[0]
             generated_ids = _token_ids_list_from_generate_output(out_py)
+            if adaptive_phase2_pending and generated_ids:
+                phase2_enabled = bool(
+                    generate_config.begin_think_token_ids
+                    and generated_ids[0] == generate_config.begin_think_token_ids[0]
+                )
+                adaptive_phase2_pending = False
             aux_info = out_py.aux_info
             prompt_token_num = (
                 int(aux_info.input_len) if aux_info is not None else len(input_ids_list)
@@ -975,6 +1059,8 @@ async def iter_real_model_stream_infer(
         if phase2_needed:
             phase2_config = _clone_generate_config(generate_config)
             phase2_config.in_think_mode = False
+            phase2_config.thinking_mode = ThinkingMode.DISABLED
+            phase2_config.max_thinking_tokens = 0
             restore_final_constraint(phase2_config, final_constraint)
             if sampling.max_new_tokens_from_completion_alias:
                 phase2_config.max_new_tokens = (
@@ -1004,6 +1090,7 @@ async def iter_real_model_stream_infer(
                 generate_config=phase2_config,
                 invocation_metadata=invocation_metadata,
                 request_headers=request_controls.request_headers,
+                mm_inputs=mm_inputs,
             )
             logging.debug(
                 "[DashScGrpc] [%s] phase-2 generate_input: %s",
@@ -1376,6 +1463,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     input_ids_list, sampling, request_controls = (
                         parse_dash_sc_grpc_request(request)
                     )
+                    mm_inputs = _build_mm_inputs_from_request(request)
                 except DashScParameterError as e:
                     if first_request:
                         record.record_request_frame(request)
@@ -1477,6 +1565,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     phase2_request_id_factory=self._next_rtp_llm_request_id,
                     access_agg=record,
                     yield_access_stats=True,
+                    mm_inputs=mm_inputs,
                 ):
                     (
                         delta_len,

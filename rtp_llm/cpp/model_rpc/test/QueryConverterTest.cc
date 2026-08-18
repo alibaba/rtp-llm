@@ -2,6 +2,7 @@
 #include <array>
 #include <memory>
 #include <optional>
+#include <tuple>
 
 #define private public
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -41,6 +42,7 @@ TEST_F(QueryConverterTest, testTransInput) {
     generate_config_pb->mutable_task_id()->set_value("8");
     generate_config_pb->set_calculate_loss(1);
     generate_config_pb->set_return_hidden_states(true);
+    generate_config_pb->set_thinking_mode(GenerateConfigPB::THINKING_MODE_ADAPTIVE);
     for (int i = 0; i < 2; ++i) {
         auto* stop_words = generate_config_pb->mutable_stop_words_list()->add_rows();
         for (int j = 0; j < 3; ++j) {
@@ -71,11 +73,46 @@ TEST_F(QueryConverterTest, testTransInput) {
     ASSERT_EQ(generate_config->calculate_loss, 1);
     ASSERT_TRUE(generate_config->return_hidden_states);
     ASSERT_FALSE(generate_config->return_logits);
+    ASSERT_EQ(generate_config->thinking_mode, ThinkingMode::ADAPTIVE);
     ASSERT_EQ(generate_config->stop_words_list.size(), 2);
     vector<int> stop_words_1{0, 1, 2};
     vector<int> stop_words_2{3, 4, 5};
     ASSERT_EQ(generate_config->stop_words_list[0], stop_words_1);
     ASSERT_EQ(generate_config->stop_words_list[1], stop_words_2);
+}
+
+TEST_F(QueryConverterTest, TransGenerateConfigResolvesThinkingState) {
+    using Case = std::tuple<GenerateConfigPB::ThinkingModePB, bool, ThinkingMode, bool>;
+    const std::array<Case, 5> cases{{
+        {GenerateConfigPB::THINKING_MODE_UNSPECIFIED, false, ThinkingMode::UNSPECIFIED, false},
+        {GenerateConfigPB::THINKING_MODE_UNSPECIFIED, true, ThinkingMode::UNSPECIFIED, true},
+        {GenerateConfigPB::THINKING_MODE_DISABLED, true, ThinkingMode::DISABLED, false},
+        {GenerateConfigPB::THINKING_MODE_ADAPTIVE, true, ThinkingMode::ADAPTIVE, false},
+        {GenerateConfigPB::THINKING_MODE_ENABLED, false, ThinkingMode::ENABLED, true},
+    }};
+
+    for (const auto& [proto_mode, legacy_in_think_mode, expected_mode, expected_in_think_mode] : cases) {
+        GenerateConfigPB config_pb;
+        config_pb.set_thinking_mode(proto_mode);
+        config_pb.set_in_think_mode(legacy_in_think_mode);
+
+        const auto config = QueryConverter::transGenerateConfig(&config_pb);
+
+        EXPECT_EQ(config->thinking_mode, expected_mode);
+        EXPECT_EQ(config->in_think_mode, expected_in_think_mode);
+    }
+}
+
+TEST(ThinkingModeTest, NormalizeThinkingModeRejectsOutOfRangeValues) {
+    EXPECT_EQ(normalizeThinkingMode(-1), ThinkingMode::UNSPECIFIED);
+    EXPECT_EQ(normalizeThinkingMode(4), ThinkingMode::UNSPECIFIED);
+}
+
+TEST(ThinkingModeTest, NormalizeThinkingModePreservesValidValues) {
+    EXPECT_EQ(normalizeThinkingMode(0), ThinkingMode::UNSPECIFIED);
+    EXPECT_EQ(normalizeThinkingMode(1), ThinkingMode::DISABLED);
+    EXPECT_EQ(normalizeThinkingMode(2), ThinkingMode::ADAPTIVE);
+    EXPECT_EQ(normalizeThinkingMode(3), ThinkingMode::ENABLED);
 }
 
 TEST_F(QueryConverterTest, testTransOutput) {

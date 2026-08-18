@@ -278,6 +278,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                                 params.mtp_cache_config_index);
 
     if (device_props_.enable_prefill_cp) {
+        RTP_LLM_CHECK_WITH_INFO(params.sp_config.type == SP_TYPE_NONE,
+                                "Context parallel does not support MTP/speculative decoding");
         context_parallel_processor_ =
             ContextParallelProcessorFactory::create(ProcessorType::ZIG_ZAG, params.parallelism_config);
         RTP_LLM_LOG_INFO("Context parallel processor initialized with ZIG_ZAG strategy.");

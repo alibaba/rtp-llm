@@ -123,6 +123,12 @@ def _is_fmha_impl_disabled(
     # FlashInfer TRT-LLM Gen implementations (SM100)
     elif impl_class_name in FLASHINFER_TRTLLM_GEN_IMPLS:
         return not fmha_config.enable_flashinfer_trtllm_gen
+    # FlashInfer native Hybrid Prefill
+    elif impl_class_name == "PyFlashinferHybridPrefillImpl":
+        return (
+            fmha_config.disable_flashinfer_hybrid_prefill
+            or fmha_config.disable_flashinfer_native
+        )
     # FlashInfer native implementations
     elif "FlashInfer" in impl_class_name or "Flashinfer" in impl_class_name:
         return fmha_config.disable_flashinfer_native

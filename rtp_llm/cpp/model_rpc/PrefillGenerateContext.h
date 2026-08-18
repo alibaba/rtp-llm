@@ -72,6 +72,20 @@ public:
     void         nextStage();
     grpc::Status closeGrpcStream();
     void         closeGrpcConnection();
+    bool         multimodalProcessed() const {
+        return multimodal_processed_;
+    }
+    bool tokenIdsExpanded() const {
+        return token_ids_expanded_;
+    }
+    void markMultimodalAttemptStarted() {
+        multimodal_attempt_started_ = true;
+    }
+    // Marks the stage complete; text-only requests also complete it as a no-op.
+    void markMultimodalProcessed(bool token_ids_expanded) {
+        multimodal_processed_ = true;
+        token_ids_expanded_   = token_ids_expanded;
+    }
 
 private:
     void markRequestEnd();
@@ -94,6 +108,15 @@ public:
     grpc::Status                         last_grpc_stream_closed_status = grpc::Status::OK;
     PrefillStatInfo                      stat_info;
     int64_t                              loading_cache_requests = 0;
+
+private:
+    // A successful VIT result survives reset() so decode-allocation retries do
+    // not repeat preprocessing. The expansion marker is updated atomically
+    // with completion and is valid only while generate_input is retained. An
+    // incomplete attempt is rebuilt from the immutable protobuf on retry.
+    bool multimodal_attempt_started_ = false;
+    bool multimodal_processed_       = false;
+    bool token_ids_expanded_         = false;
 };
 
 }  // namespace rtp_llm
