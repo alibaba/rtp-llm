@@ -3,6 +3,14 @@ py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
 
+py_test(
+    name = "test_deepgemm_warmup",
+    srcs = ["test_deepgemm_warmup.py"],
+    deps = py_test_deps,
+    tags = ["open_skip", "H20"],
+    exec_properties = {'gpu': 'H20'},
+)
+
 py_test (
     name = "per_token_group_quant_8bit_test",
     srcs = ["per_token_group_quant_8bit_test.py"],

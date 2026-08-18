@@ -114,3 +114,19 @@ class GptModelBase(nn.Module):
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         raise NotImplementedError("forward method must be implemented in subclass")
+
+    def kernel_warmup(self) -> None:
+        try:
+            from rtp_llm.models_py.kernels.cuda.deepgemm_warmup import deep_gemm_warmup
+
+            mode = getattr(self.config, "deepgemm_warmup_mode", "relax")
+            max_tokens = self.config.max_seq_len
+            deep_gemm_warmup(
+                self,
+                max_tokens,
+                mode=mode,
+                local_rank=self.parallelism_config.local_rank,
+                local_world_size=self.parallelism_config.local_world_size,
+            )
+        except Exception as e:
+            logging.warning(f"DeepGEMM warmup failed (non-fatal): {e}", exc_info=True)
