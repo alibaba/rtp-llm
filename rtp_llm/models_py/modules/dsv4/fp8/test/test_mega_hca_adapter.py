@@ -9,23 +9,24 @@ import rtp_kernel
 import torch
 
 from rtp_llm.models_py.modules.dsv4.block import Block
-from rtp_llm.models_py.modules.dsv4.decode.forward import forward_layers
-from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_adapter import MegaCSAAdapter
 from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_runtime import MegaCSARuntime
 from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_weights import (
     DIM,
     HC,
     HEAD_DIM,
-    INDEX_HEAD_DIM,
-    INDEX_HEADS,
     MAIN_HEADS,
     MAX_BATCH,
     O_GROUPS,
     O_LORA_RANK,
     Q_LORA_RANK,
     ROPE_DIM,
-    MegaCSAWeights,
-    _cat_rows,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_hca_adapter import MegaHCAAdapter
+from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_hca_weights import (
+    HCA_APE_ROWS,
+    HCA_COMPRESS_RATIO,
+    HCA_STATE_WIDTH,
+    MegaHCAWeights,
 )
 from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
 from rtp_llm.utils.model_weight import W
@@ -39,9 +40,9 @@ class _IdentityNorm:
 def _block_stub(adapter: object | None) -> Block:
     block = Block.__new__(Block)
     torch.nn.Module.__init__(block)
-    block.layer_id = 2
-    block._mega_csa_adapter = adapter
-    block._mega_hca_adapter = None
+    block.layer_id = 3
+    block._mega_csa_adapter = None
+    block._mega_hca_adapter = adapter
     block.attn_norm = _IdentityNorm()
     block.ffn_norm = _IdentityNorm()
     block.attn = MagicMock()
@@ -60,12 +61,13 @@ def _block_stub(adapter: object | None) -> Block:
     return block
 
 
-class MegaCSARoutingTest(unittest.TestCase):
-    def test_pdfusion_role_can_attach_mega_adapter(self) -> None:
+class MegaHCARoutingTest(unittest.TestCase):
+    def test_transformer_switch_attaches_hca_adapters(self) -> None:
         class _Layer(torch.nn.Module):
             def __init__(self) -> None:
                 super().__init__()
                 self.enable_mega_csa = MagicMock()
+                self.enable_mega_hca = MagicMock()
 
         layer = _Layer()
         global_weights = MagicMock()
@@ -74,13 +76,15 @@ class MegaCSARoutingTest(unittest.TestCase):
         args = V4Args(
             n_layers=1,
             n_mtp_layers=0,
-            compress_ratios=[4],
+            compress_ratios=[128],
             is_decode_role=False,
             fp8_kv_cache=True,
             tp_size=1,
         )
 
-        with patch.dict(os.environ, {"DSV4_MEGA_CSA": "1"}), patch(
+        with patch.dict(
+            os.environ, {"DSV4_MEGA_HCA": "1", "DSV4_MEGA_CSA": "0"}
+        ), patch(
             "rtp_llm.models_py.modules.dsv4.transformer._build_block",
             return_value=layer,
         ), patch(
@@ -96,11 +100,12 @@ class MegaCSARoutingTest(unittest.TestCase):
             transformer = V4Transformer(args, model_weights)
 
         self.assertIsNotNone(transformer._mega_csa_runtime)
-        layer.enable_mega_csa.assert_called_once_with(
+        layer.enable_mega_hca.assert_called_once_with(
             transformer._mega_csa_runtime, model_weights.weights[0]
         )
+        layer.enable_mega_csa.assert_not_called()
 
-    def test_decode_q_len_one_uses_complete_mega_sublayer(self) -> None:
+    def test_decode_q_len_one_uses_complete_hca_sublayer(self) -> None:
         adapter = MagicMock()
         adapter.supports_decode_shape.return_value = True
         adapter.forward_attention_sublayer.side_effect = (
@@ -132,18 +137,7 @@ class MegaCSARoutingTest(unittest.TestCase):
         block.attn_hc.pre.assert_called_once()
         block.attn.forward_decode.assert_called_once()
 
-    def test_batch_above_kernel_limit_keeps_existing_attention_path(self) -> None:
-        adapter = MagicMock(wraps=MegaCSAAdapter.__new__(MegaCSAAdapter))
-        block = _block_stub(adapter)
-        hidden = torch.zeros(MAX_BATCH + 1, 1, 1, 4)
-        metadata = SimpleNamespace(q_len_per_req=1)
-
-        block.forward_decode(hidden, metadata, torch.zeros(MAX_BATCH + 1, 1))
-
-        adapter.forward_attention_sublayer.assert_not_called()
-        block.attn.forward_decode.assert_called_once()
-
-    def test_mega_failure_is_not_retried_on_existing_path(self) -> None:
+    def test_hca_failure_is_not_retried_on_existing_path(self) -> None:
         adapter = MagicMock()
         adapter.supports_decode_shape.return_value = True
         adapter.forward_attention_sublayer.side_effect = RuntimeError("kernel failed")
@@ -158,65 +152,30 @@ class MegaCSARoutingTest(unittest.TestCase):
         block.attn_hc.pre.assert_not_called()
         block.attn.forward_decode.assert_not_called()
 
-    def test_adapter_is_attached_only_to_csa_layers(self) -> None:
+    def test_adapter_is_attached_only_to_hca_layers(self) -> None:
         runtime = object()
         weights = {}
         with patch(
-            "rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_adapter.MegaCSAAdapter"
+            "rtp_llm.models_py.modules.dsv4.fp8.decode.mega_hca_adapter.MegaHCAAdapter"
         ) as adapter_cls:
-            csa = Block.__new__(Block)
-            torch.nn.Module.__init__(csa)
-            csa.attn = SimpleNamespace(compress_ratio=4)
-            csa._mega_csa_adapter = None
-            csa.enable_mega_csa(runtime, weights)
-            adapter_cls.assert_called_once_with(csa, weights, runtime)
+            hca = Block.__new__(Block)
+            torch.nn.Module.__init__(hca)
+            hca.attn = SimpleNamespace(compress_ratio=128)
+            hca._mega_hca_adapter = None
+            hca.enable_mega_hca(runtime, weights)
+            adapter_cls.assert_called_once_with(hca, weights, runtime)
 
-            swa = Block.__new__(Block)
-            torch.nn.Module.__init__(swa)
-            swa.attn = SimpleNamespace(compress_ratio=0)
-            swa._mega_csa_adapter = None
-            swa.enable_mega_csa(runtime, weights)
-            self.assertIsNone(swa._mega_csa_adapter)
+            for ratio in (0, 4):
+                other = Block.__new__(Block)
+                torch.nn.Module.__init__(other)
+                other.attn = SimpleNamespace(compress_ratio=ratio)
+                other._mega_hca_adapter = None
+                other.enable_mega_hca(runtime, weights)
+                self.assertIsNone(other._mega_hca_adapter)
             adapter_cls.assert_called_once()
 
-    def test_production_layer_loop_advances_runtime_first(self) -> None:
-        events: list[str] = []
 
-        class _Layer:
-            layer_id = 0
-
-            def forward_decode(self, hidden, *_args, **_kwargs):
-                events.append("layer")
-                return hidden
-
-        class _V4:
-            hc_mult = 1
-            layers = [_Layer()]
-            norm = _IdentityNorm()
-            _mtp_hidden_buffer = None
-
-            def __init__(self) -> None:
-                self.embed = torch.nn.Embedding(8, 4)
-
-            def begin_decode(self, _metadata) -> None:
-                events.append("begin")
-
-            @staticmethod
-            def _hc_head_reduce(hidden):
-                return hidden.squeeze(2)
-
-            @staticmethod
-            def finish_aux_hidden_capture(_capture) -> None:
-                return None
-
-        metadata = SimpleNamespace(batch_size=2, q_len_per_req=1)
-        result = forward_layers(_V4(), None, torch.tensor([1, 2]), metadata)
-
-        self.assertEqual(events, ["begin", "layer"])
-        self.assertEqual(tuple(result.shape), (2, 1, 4))
-
-
-class MegaCSAWeightsTest(unittest.TestCase):
+class MegaHCAWeightsTest(unittest.TestCase):
     @staticmethod
     def _meta(shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
         return torch.empty(shape, dtype=dtype, device="meta")
@@ -230,19 +189,12 @@ class MegaCSAWeightsTest(unittest.TestCase):
             W.v4_attn_wkv_s: meta((4, 56), torch.float8_e8m0fnu),
             W.v4_attn_wq_b_w: meta((65536, Q_LORA_RANK), torch.float8_e4m3fn),
             W.v4_attn_wq_b_s: meta((512, 12), torch.float8_e8m0fnu),
-            W.v4_indexer_wq_b_w: meta((8192, Q_LORA_RANK), torch.float8_e4m3fn),
-            W.v4_indexer_wq_b_s: meta((64, 12), torch.float8_e8m0fnu),
-            W.v4_compressor_wkv: meta((1024, DIM), torch.bfloat16),
-            W.v4_compressor_wgate: meta((1024, DIM), torch.bfloat16),
-            W.v4_indexer_compressor_wkv: meta((256, DIM), torch.bfloat16),
-            W.v4_indexer_compressor_wgate: meta((256, DIM), torch.bfloat16),
-            W.v4_indexer_weights_proj_w: meta((INDEX_HEADS, DIM), torch.bfloat16),
+            W.v4_compressor_wkv: meta((HCA_STATE_WIDTH, DIM), torch.bfloat16),
+            W.v4_compressor_wgate: meta((HCA_STATE_WIDTH, DIM), torch.bfloat16),
             W.v4_attn_q_norm: meta((Q_LORA_RANK,), torch.bfloat16),
             W.v4_attn_kv_norm: meta((HEAD_DIM,), torch.bfloat16),
-            W.v4_indexer_compressor_norm: meta((INDEX_HEAD_DIM,), torch.bfloat16),
             W.v4_compressor_norm: meta((HEAD_DIM,), torch.bfloat16),
-            W.v4_compressor_ape: meta((4, 1024), torch.float32),
-            W.v4_indexer_compressor_ape: meta((4, 256), torch.float32),
+            W.v4_compressor_ape: meta((HCA_APE_ROWS, HCA_STATE_WIDTH), torch.float32),
             W.v4_hc_attn_fn: meta((24, HC * DIM), torch.float32),
             W.v4_hc_attn_base: meta((24,), torch.float32),
             W.v4_hc_attn_scale: meta((3,), torch.float32),
@@ -250,26 +202,28 @@ class MegaCSAWeightsTest(unittest.TestCase):
         }
 
     def test_production_checkpoint_layout_is_accepted_without_repacking(self) -> None:
-        packed = MegaCSAWeights.from_layer_weights(self._layer_weights())
+        packed = MegaHCAWeights.from_layer_weights(self._layer_weights())
         self.assertEqual(tuple(packed.front_fp8.shape), (2048, DIM))
         self.assertEqual(tuple(packed.front_sf.shape), (16, 56))
-        self.assertEqual(tuple(packed.front_bf16.shape), (2624, DIM))
-        self.assertEqual(tuple(packed.wq_b_fp8.shape), (73728, Q_LORA_RANK))
-        self.assertEqual(tuple(packed.wq_b_sf.shape), (576, 12))
+        self.assertEqual(tuple(packed.front_bf16.shape), (2 * HCA_STATE_WIDTH, DIM))
+        self.assertEqual(tuple(packed.wq_b_fp8.shape), (65536, Q_LORA_RANK))
+        self.assertEqual(tuple(packed.wq_b_sf.shape), (512, 12))
+        self.assertEqual(
+            tuple(packed.compressor_ape.shape), (HCA_APE_ROWS, HCA_STATE_WIDTH)
+        )
         self.assertEqual(packed.front_sf.dtype, torch.float8_e8m0fnu)
 
-    def test_row_concatenation_preserves_declared_order(self) -> None:
-        first = torch.tensor([[1.0], [2.0]])
-        second = torch.tensor([[3.0]])
-        result = _cat_rows("rows", (first, second), (3, 1))
-        self.assertEqual(result.flatten().tolist(), [1.0, 2.0, 3.0])
+    def test_csa_shaped_compressor_is_rejected(self) -> None:
+        weights = self._layer_weights()
+        weights[W.v4_compressor_wkv] = self._meta((1024, DIM), torch.bfloat16)
+        with self.assertRaisesRegex(ValueError, "hca_compressor_wkv"):
+            MegaHCAWeights.from_layer_weights(weights)
 
     def test_geometry_validation_rejects_non_tp1(self) -> None:
-        indexer = SimpleNamespace(n_heads=INDEX_HEADS, head_dim=INDEX_HEAD_DIM)
         attn = SimpleNamespace(
             tp_size=2,
             tp_rank=0,
-            compress_ratio=4,
+            compress_ratio=HCA_COMPRESS_RATIO,
             dim=DIM,
             q_lora_rank=Q_LORA_RANK,
             n_heads=MAIN_HEADS,
@@ -277,21 +231,37 @@ class MegaCSAWeightsTest(unittest.TestCase):
             rope_head_dim=ROPE_DIM,
             n_groups=O_GROUPS,
             o_lora_rank=O_LORA_RANK,
-            indexer=indexer,
+            indexer=None,
         )
         with self.assertRaisesRegex(ValueError, "tp_size=2"):
-            MegaCSAAdapter._validate_geometry(SimpleNamespace(attn=attn))
+            MegaHCAAdapter._validate_geometry(SimpleNamespace(attn=attn))
+
+    def test_geometry_validation_rejects_an_indexer(self) -> None:
+        attn = SimpleNamespace(
+            tp_size=1,
+            tp_rank=0,
+            compress_ratio=HCA_COMPRESS_RATIO,
+            dim=DIM,
+            q_lora_rank=Q_LORA_RANK,
+            n_heads=MAIN_HEADS,
+            head_dim=HEAD_DIM,
+            rope_head_dim=ROPE_DIM,
+            n_groups=O_GROUPS,
+            o_lora_rank=O_LORA_RANK,
+            indexer=object(),
+        )
+        with self.assertRaisesRegex(ValueError, "must not have an indexer"):
+            MegaHCAAdapter._validate_geometry(SimpleNamespace(attn=attn))
 
     def test_runtime_check_rejects_an_old_named_but_incompatible_abi(self) -> None:
         old_abi = SimpleNamespace(
-            geometry_csa=lambda: {},
+            geometry_hca=lambda: {},
             hc_reduce_fuse_out=lambda: None,
-            front_mixed_gemm_csa=lambda: None,
-            wq_b_proj_gemm_merged_csa=lambda: None,
-            mqa_logits_fp8_decode_out=lambda: None,
+            front_mixed_gemm_hca=lambda: None,
+            wq_b_proj_gemm_merged_hca=lambda: None,
             mla_o_inv_rope_quant=lambda: None,
         )
-        adapter = MegaCSAAdapter.__new__(MegaCSAAdapter)
+        adapter = MegaHCAAdapter.__new__(MegaHCAAdapter)
         adapter._runtime_checked = False
         with patch.object(rtp_kernel, "dsv4_mega", old_abi, create=True), patch(
             "torch.cuda.get_device_capability", return_value=(10, 3)
@@ -323,69 +293,38 @@ class _FakeSource:
         return self
 
 
-class MegaCSARuntimeTest(unittest.TestCase):
+class MegaHCARuntimeTest(unittest.TestCase):
     @staticmethod
     def _metadata(pointer_base: int, is_cuda_graph: bool = False):
-        from rtp_llm.models_py.modules.dsv4.attn_type import (
-            CSA_KV,
-            CSA_STATE,
-            INDEXER_KV,
-            INDEXER_STATE,
-            SWA_KV,
-        )
+        from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV, HCA_STATE, SWA_KV
 
-        sources = [_FakeSource(pointer_base + index) for index in range(5)]
+        sources = [_FakeSource(pointer_base + index) for index in range(3)]
         return SimpleNamespace(
             is_cuda_graph=is_cuda_graph,
-            compressor_state_slot_mappings={
-                CSA_STATE: sources[0],
-                INDEXER_STATE: sources[1],
-            },
-            pool_write_slot_mappings={
-                CSA_KV: sources[2],
-                INDEXER_KV: sources[3],
-                SWA_KV: sources[4],
-            },
+            compressor_state_slot_mappings={HCA_STATE: sources[0]},
+            pool_write_slot_mappings={HCA_KV: sources[1], SWA_KV: sources[2]},
         )
 
     def test_slot_access_requires_model_step_boundary(self) -> None:
         runtime = MegaCSARuntime()
         metadata = self._metadata(100)
         with self.assertRaisesRegex(RuntimeError, "begin_decode"):
-            runtime.slot_mappings(metadata, 2)
+            runtime.hca_slot_mappings(metadata, 2)
 
     def test_slots_reuse_framework_tensors_without_allocation(self) -> None:
         runtime = MegaCSARuntime()
         metadata = self._metadata(100)
         with patch("torch.empty", side_effect=AssertionError("unexpected allocation")):
             runtime.begin_decode(metadata)
-            slots = runtime.slot_mappings(metadata, 2)
+            slots = runtime.hca_slot_mappings(metadata, 2)
 
-        sources = (
-            *metadata.compressor_state_slot_mappings.values(),
-            *metadata.pool_write_slot_mappings.values(),
+        self.assertIs(
+            slots.state_rows,
+            next(iter(metadata.compressor_state_slot_mappings.values())),
         )
-        actual = (
-            slots.main_state_rows,
-            slots.indexer_state_rows,
-            slots.main_destinations,
-            slots.indexer_destinations,
-            slots.swa_destinations,
-        )
-        for source, result in zip(sources, actual):
+        actual = (slots.compressed_destinations, slots.window_destinations)
+        for source, result in zip(metadata.pool_write_slot_mappings.values(), actual):
             self.assertIs(source, result)
-
-    def test_slots_follow_active_metadata(self) -> None:
-        runtime = MegaCSARuntime()
-        first_meta = self._metadata(100, is_cuda_graph=True)
-        second_meta = self._metadata(200, is_cuda_graph=True)
-        runtime.begin_decode(first_meta)
-        first = runtime.slot_mappings(first_meta, 2)
-        runtime.begin_decode(second_meta)
-        second = runtime.slot_mappings(second_meta, 2)
-
-        self.assertEqual(first.main_state_rows.data_ptr(), 100)
-        self.assertEqual(second.main_state_rows.data_ptr(), 200)
 
     def test_slots_reject_non_framework_dtype(self) -> None:
         runtime = MegaCSARuntime()
@@ -395,7 +334,7 @@ class MegaCSARuntimeTest(unittest.TestCase):
         ].dtype = torch.int32
         runtime.begin_decode(metadata)
         with self.assertRaisesRegex(TypeError, "must be int64"):
-            runtime.slot_mappings(metadata, 2)
+            runtime.hca_slot_mappings(metadata, 2)
 
 
 if __name__ == "__main__":

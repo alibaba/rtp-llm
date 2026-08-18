@@ -19,6 +19,7 @@ from .mega_csa_weights import (
     O_GROUPS,
     Q_LORA_RANK,
 )
+from .mega_hca_weights import HCA_FRONT_OUT_DIM
 
 
 @dataclass
@@ -52,6 +53,30 @@ class MegaCSASlotMappings:
     swa_destinations: torch.Tensor
 
 
+@dataclass
+class MegaHCALayerWorkspace:
+    hc_partial: torch.Tensor
+    hc_sum_sq: torch.Tensor
+    collapsed: torch.Tensor
+    pre: torch.Tensor
+    post: torch.Tensor
+    comb: torch.Tensor
+    mix: torch.Tensor
+    hidden_fp8: torch.Tensor
+    hidden_sf: torch.Tensor
+    front_out: torch.Tensor
+    q_raw: torch.Tensor
+    o_proj_fp8: torch.Tensor
+    o_proj_scale: torch.Tensor
+
+
+@dataclass
+class MegaHCASlotMappings:
+    state_rows: torch.Tensor
+    compressed_destinations: torch.Tensor
+    window_destinations: torch.Tensor
+
+
 class MegaCSARuntime:
     """Storage shared by all CSA layers in one transformer instance."""
 
@@ -60,6 +85,9 @@ class MegaCSARuntime:
         self._metadata_id: Optional[int] = None
         self._active_is_cuda_graph = False
         self._layer_workspaces: Dict[Tuple[str, int, int], MegaCSALayerWorkspace] = {}
+        self._hca_layer_workspaces: Dict[
+            Tuple[str, int, int], MegaHCALayerWorkspace
+        ] = {}
         self._logits: Dict[Tuple[str, int, int], torch.Tensor] = {}
         self._schedule_step = -1
         self._schedule_key: Optional[Tuple[str, int, int]] = None
@@ -240,5 +268,101 @@ class MegaCSARuntime:
             self._rope_cache[key] = tables
         return tables
 
+    def hca_layer_workspace(
+        self, m: int, num_split: int, device: torch.device
+    ) -> MegaHCALayerWorkspace:
+        """HCA twin of :meth:`layer_workspace`.
 
-__all__ = ["MegaCSARuntime", "MegaCSASlotMappings"]
+        The HCA front op zeroes rows ``[m, physical_m)`` itself, so the three
+        activation buffers it reads are allocated at the padded row count.
+        """
+        key = (str(device), m, num_split)
+        workspace = self._hca_layer_workspaces.get(key)
+        if workspace is None:
+            physical_m = max(m, 16)
+            o_heads_per_group = MAIN_HEADS // O_GROUPS
+            o_aligned_m = ((m + 3) // 4) * 4
+            o_proj_fp8 = torch.empty(
+                O_GROUPS,
+                m,
+                o_heads_per_group * HEAD_DIM,
+                dtype=torch.float8_e4m3fn,
+                device=device,
+            ).transpose(0, 1)
+            o_proj_scale = (
+                torch.empty(
+                    O_GROUPS * o_heads_per_group * o_aligned_m,
+                    dtype=torch.int32,
+                    device=device,
+                )
+                .as_strided(
+                    (O_GROUPS, m, o_heads_per_group),
+                    (o_heads_per_group * o_aligned_m, 1, o_aligned_m),
+                )
+                .transpose(0, 1)
+            )
+            workspace = MegaHCALayerWorkspace(
+                hc_partial=torch.empty(
+                    num_split, m, HC_MIX, dtype=torch.float32, device=device
+                ),
+                hc_sum_sq=torch.empty(num_split, m, dtype=torch.float32, device=device),
+                collapsed=torch.empty(
+                    physical_m, DIM, dtype=torch.bfloat16, device=device
+                ),
+                pre=torch.empty(m, HC, dtype=torch.float32, device=device),
+                post=torch.empty(m, HC, dtype=torch.float32, device=device),
+                comb=torch.empty(m, HC, HC, dtype=torch.float32, device=device),
+                mix=torch.empty(m, HC_MIX, dtype=torch.float32, device=device),
+                hidden_fp8=torch.empty(
+                    physical_m, DIM, dtype=torch.float8_e4m3fn, device=device
+                ),
+                hidden_sf=torch.empty(
+                    physical_m, DIM // 128, dtype=torch.uint8, device=device
+                ),
+                front_out=torch.empty(
+                    physical_m, HCA_FRONT_OUT_DIM, dtype=torch.bfloat16, device=device
+                ),
+                q_raw=torch.empty(
+                    m, MAIN_HEADS * HEAD_DIM, dtype=torch.bfloat16, device=device
+                ),
+                o_proj_fp8=o_proj_fp8,
+                o_proj_scale=o_proj_scale,
+            )
+            self._hca_layer_workspaces[key] = workspace
+        return workspace
+
+    def hca_slot_mappings(self, metadata: Any, m: int) -> MegaHCASlotMappings:
+        from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV, HCA_STATE, SWA_KV
+
+        if self._metadata_id != id(metadata):
+            raise RuntimeError(
+                "MegaCSARuntime.begin_decode() must run before the HCA layer loop"
+            )
+
+        state = metadata.compressor_state_slot_mappings
+        writes = metadata.pool_write_slot_mappings
+        sources = (
+            state.get(HCA_STATE),
+            writes.get(HCA_KV),
+            writes.get(SWA_KV),
+        )
+        names = ("HCA_STATE", "HCA_KV", "SWA_KV")
+        for name, source in zip(names, sources):
+            if source is None or int(source.numel()) < m:
+                raise RuntimeError(f"DSV4 mega metadata is missing {name} slots")
+            if not source.is_cuda or not source.is_contiguous():
+                raise TypeError(
+                    f"DSV4 mega {name} slots must be contiguous CUDA tensors"
+                )
+            if source.dtype != torch.int64:
+                raise TypeError(f"DSV4 mega {name} slots must be int64")
+
+        return MegaHCASlotMappings(*sources)
+
+
+__all__ = [
+    "MegaCSARuntime",
+    "MegaCSASlotMappings",
+    "MegaHCALayerWorkspace",
+    "MegaHCASlotMappings",
+]
