@@ -16,8 +16,6 @@ import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_ENTER_QPS;
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_LEAVE_QPS;
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_SIZE;
 import static org.flexlb.constant.MetricConstant.BATCH_INFLIGHT_AGE_CAPPED_QPS;
-import static org.flexlb.constant.MetricConstant.ENGINE_WAIT_FILTERED_QPS;
-import static org.flexlb.constant.MetricConstant.SELECTION_FALLBACK_QPS;
 import static org.flexlb.constant.MetricConstant.BATCH_ACTUAL_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICTED_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICT_GAP_MS;
@@ -114,10 +112,6 @@ public class BatchSchedulerReporter {
         // enter-vs-leave gap pinpoints where queued requests actually go (na130_4)
         monitor.register(BATCHER_QUEUE_ENTER_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(BATCHER_QUEUE_LEAVE_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        // Prefill selection telemetry — engine-wait hard-filter hits and all-filtered
-        // least-loaded fallbacks (cluster-level, tagged by role only)
-        monitor.register(ENGINE_WAIT_FILTERED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(SELECTION_FALLBACK_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
         // Decode total load and inflight KV reserved — per decode worker (FlexLB scheduler view)
         monitor.register(DECODE_TOTAL_LOAD, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -155,7 +149,7 @@ public class BatchSchedulerReporter {
         // ACK-to-response time — from engine ACK to schedule response sent to client (timer for distribution)
         monitor.register(ACK_TO_RESPONSE_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
-        log.info("BatchSchedulerReporter initialized (33 metrics)");
+        log.info("BatchSchedulerReporter initialized (31 metrics)");
     }
 
     // ==================== Queue metrics ====================
@@ -252,33 +246,6 @@ public class BatchSchedulerReporter {
                 "role", role,
                 "reason", reason);
         monitor.report(BATCHER_QUEUE_LEAVE_QPS, tags, count);
-    }
-
-    /**
-     * Report engine-wait hard-filter hits via
-     * {@code app.flexlb.engine.wait.filtered.qps}, tagged by role (PREFILL).
-     * Aggregated per prefill selection round ({@code count} = candidate
-     * endpoints excluded); the filter decision is cluster-level so there is
-     * no single engineIp tag.
-     *
-     * @param count endpoints excluded by the engine-wait hard filter this round
-     */
-    public void reportEngineWaitFiltered(int count) {
-        FlexMetricTags tags = FlexMetricTags.of(
-                "role", RoleType.PREFILL.name());
-        monitor.report(ENGINE_WAIT_FILTERED_QPS, tags, count);
-    }
-
-    /**
-     * Report one least-loaded fallback prefill selection via
-     * {@code app.flexlb.selection.fallback.qps}, tagged by role (PREFILL) —
-     * every feasible candidate was filtered out and the strategy kept
-     * routing by falling back to the least-loaded endpoint.
-     */
-    public void reportSelectionFallback() {
-        FlexMetricTags tags = FlexMetricTags.of(
-                "role", RoleType.PREFILL.name());
-        monitor.report(SELECTION_FALLBACK_QPS, tags, 1.0);
     }
 
     /**

@@ -13,12 +13,10 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.Arrays;
@@ -34,40 +32,18 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
     private final CacheAwareService cacheAwareService;
     private final ResourceMeasureFactory resourceMeasureFactory;
     private final EngineHealthReporter engineHealthReporter;
-    /**
-     * Selection telemetry sink (engine-wait filter hits, least-loaded
-     * fallback). Nullable: the test/legacy constructor passes null and the
-     * telemetry call sites degrade to no-ops.
-     */
-    private final BatchSchedulerReporter batchSchedulerReporter;
     private final ThreadLocal<CandidateSet> candidateSets =
             ThreadLocal.withInitial(CandidateSet::new);
 
-    @Autowired
-    public CostBasedPrefillStrategy(EngineWorkerStatus engineWorkerStatus,
-                                    CacheAwareService cacheAwareService,
-                                    ResourceMeasureFactory resourceMeasureFactory,
-                                    EngineHealthReporter engineHealthReporter,
-                                    BatchSchedulerReporter batchSchedulerReporter) {
-        this.engineWorkerStatus = engineWorkerStatus;
-        this.cacheAwareService = cacheAwareService;
-        this.resourceMeasureFactory = resourceMeasureFactory;
-        this.engineHealthReporter = engineHealthReporter;
-        this.batchSchedulerReporter = batchSchedulerReporter;
-        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_PREFILL, this);
-    }
-
-    /**
-     * Test/backward-compatible constructor without the metrics reporter —
-     * selection telemetry (engine-wait filter hits, least-loaded fallback)
-     * silently degrades to a no-op.
-     */
     public CostBasedPrefillStrategy(EngineWorkerStatus engineWorkerStatus,
                                     CacheAwareService cacheAwareService,
                                     ResourceMeasureFactory resourceMeasureFactory,
                                     EngineHealthReporter engineHealthReporter) {
-        this(engineWorkerStatus, cacheAwareService, resourceMeasureFactory,
-                engineHealthReporter, null);
+        this.engineWorkerStatus = engineWorkerStatus;
+        this.cacheAwareService = cacheAwareService;
+        this.resourceMeasureFactory = resourceMeasureFactory;
+        this.engineHealthReporter = engineHealthReporter;
+        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_PREFILL, this);
     }
 
     @Override
@@ -364,20 +340,6 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             survivorCount = 1;
         }
         feasible.size = survivorCount;
-
-        // na130_4 observability: selection telemetry at the single exit of
-        // the hard-filter round — engine-wait filter hits aggregated per
-        // round and the all-filtered least-loaded fallback. Null reporter
-        // (test constructor) degrades to a no-op.
-        if (batchSchedulerReporter != null) {
-            int engineWaitFiltered = rejections.getOrDefault("ENGINE_WAIT_FILTERED", 0);
-            if (engineWaitFiltered > 0) {
-                batchSchedulerReporter.reportEngineWaitFiltered(engineWaitFiltered);
-            }
-            if (fallbackSelected) {
-                batchSchedulerReporter.reportSelectionFallback();
-            }
-        }
 
         return new FilterResult(feasible, rejections);
     }
