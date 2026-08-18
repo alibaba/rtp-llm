@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include <c10/core/InferenceMode.h>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -146,23 +147,43 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     batch_idx_out = 0;
     RTP_LLM_LOG_DEBUG("new_tokens = [%s]", tensorDebugStringWithData<int32_t>(new_tokens_all).c_str());
 
+    std::vector<autil::ThreadPoolBase::Future<void>> futures;
+    if (thread_pool_) {
+        futures.reserve(stream_groups.size());
+    }
+    const auto dispatch_stream = cuda_graph::graphGetCurrentStream();
+
     for (auto& stream : stream_groups.allStreams()) {
         auto cur_batch_size  = stream->currentBatchSize();
         auto next_batch_size = stream->nextBatchSize();
         auto token_size      = stream->currentExecuteTokenSize();
 
-        dispatchSingleStream(stream,
-                             merge_outputs,
-                             batch_idx_in,
-                             batch_idx_out,
-                             token_offset,
-                             return_all_probs,
-                             new_tokens_all,
-                             success_cpu);
+        auto task = [&, stream, batch_idx_in, batch_idx_out, token_offset, dispatch_stream]() {
+            c10::InferenceMode           inference_guard(true);
+            cuda_graph::GraphStreamGuard stream_guard(dispatch_stream);
+            dispatchSingleStream(stream,
+                                 merge_outputs,
+                                 batch_idx_in,
+                                 batch_idx_out,
+                                 token_offset,
+                                 return_all_probs,
+                                 new_tokens_all,
+                                 success_cpu);
+        };
+
+        if (thread_pool_) {
+            futures.emplace_back(thread_pool_->async(std::move(task)));
+        } else {
+            task();
+        }
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
         token_offset += token_size;
+    }
+
+    for (auto& future : futures) {
+        future.wait();
     }
 
     RTP_LLM_LOG_DEBUG("dispatch done");

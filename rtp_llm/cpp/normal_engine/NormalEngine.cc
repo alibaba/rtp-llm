@@ -157,6 +157,20 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     initCacheManager(warm_up_result);
     RTP_LLM_LOG_INFO("create cache manager done");
 
+    const int async_worker_count = params.device_resource_config.engine_async_worker_count;
+    if (async_worker_count > 0) {
+        thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(
+            async_worker_count, 2 * async_worker_count, nullptr, "EngineThreadPool");
+        if (!thread_pool_->start()) {
+            RTP_LLM_LOG_WARNING("failed to start engine async worker thread pool; falling back to serial dispatch");
+            thread_pool_.reset();
+        } else {
+            RTP_LLM_LOG_INFO("created engine async worker thread pool with %d workers", async_worker_count);
+        }
+    } else {
+        RTP_LLM_LOG_INFO("engine async worker count is not positive; using serial dispatch");
+    }
+
     initExecutor(params, propose_params_);
 
     RTP_LLM_LOG_INFO("create normal executor done");
@@ -184,7 +198,8 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
             0,
             mla_ops_type_,
             [this]() { step_profiler_.startStep(); },
-            [this]() { step_profiler_.finishStep(); }));
+            [this]() { step_profiler_.finishStep(); },
+            thread_pool_));
     }
 }
 
@@ -480,6 +495,14 @@ absl::Status NormalEngine::stop() {
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
+    // Destroy the executor first so its optional async dispatch runner cannot
+    // submit nested work while the shared engine pool is shutting down.
+    executor_.reset();
+    if (thread_pool_) {
+        thread_pool_->stop();
+        thread_pool_->waitFinish();
+        thread_pool_.reset();
+    }
     return absl::OkStatus();
 }
 
