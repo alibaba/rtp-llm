@@ -3,6 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.PriorityOrdering;
 
@@ -282,6 +283,10 @@ public class BatcherContext {
 
     void rejectForBatchTokenCapacity(BatchItem item, long capacity) {
         if (remove(item)) {
+            // na130_4 observability: strict padded batch-token capacity
+            // rejection leaves the queue with its own reason bucket so the
+            // enter-vs-leave balance attributes these removals correctly.
+            reportQueueLeave("token_capacity_rejected", 1);
             handler.onOfferFailure(item, new BatchTokenCapacityExceededException(
                     "request seq_len=" + item.seqLen()
                             + " cannot fit strict padded batch token capacity=" + capacity));
@@ -510,6 +515,7 @@ public class BatcherContext {
      * claimed an item owns finishing or restoring it.
      */
     void stopAndDrainTo(List<BatchItem> dst) {
+        int drainedCount = 0;
         queueLock.lock();
         try {
             stopped = true;
@@ -517,7 +523,7 @@ public class BatcherContext {
             if (drained > 0) {
                 queueDepth.addAndGet(-drained);
             }
-            boolean stagedDrained = false;
+            int stagedCount = 0;
             java.util.Iterator<Map.Entry<BatchItem, PendingDispatch>> iterator =
                     dispatchPending.entrySet().iterator();
             while (iterator.hasNext()) {
@@ -526,14 +532,21 @@ public class BatcherContext {
                     dst.add(pending.item());
                     iterator.remove();
                     queueDepth.decrementAndGet();
-                    stagedDrained = true;
+                    stagedCount++;
                 }
             }
-            if (drained > 0 || stagedDrained) {
+            if (drained > 0 || stagedCount > 0) {
                 queueVersion.incrementAndGet();
             }
+            drainedCount = drained + stagedCount;
         } finally {
             queueLock.unlock();
+        }
+        // na130_4 observability: shutdown-drained items (queued + staged)
+        // leave with reason=drained; counted once here after the lock is
+        // released so the report can never run inside the queue lock.
+        if (drainedCount > 0) {
+            reportQueueLeave("drained", drainedCount);
         }
     }
 
@@ -552,8 +565,23 @@ public class BatcherContext {
      * Caller is responsible for algorithm-specific logging and state cleanup.
      */
     void dropHead(BatchItem head) {
-        remove(head);
+        if (remove(head)) {
+            reportQueueLeave("deadline_evicted", 1);
+        }
         handler.onExpired(head);
+    }
+
+    /**
+     * na130_4 observability: SLO dropHead eviction count via
+     * {@code whale-lb.app.flexlb.batcher.queue.leave.qps} (reason
+     * deadline_evicted). Counted here — the single funnel for every
+     * algorithm-driven head drop (SloBudgetBatcherAlgorithm and friends).
+     */
+    private void reportQueueLeave(String reason, int count) {
+        if (reporter != null) {
+            reporter.reportBatcherQueueLeave(RoleType.PREFILL.name(),
+                    prefillEp != null ? prefillEp.getIp() : key, reason, count);
+        }
     }
 
     // ---- dispatch interval estimation (design doc 8.4) ----

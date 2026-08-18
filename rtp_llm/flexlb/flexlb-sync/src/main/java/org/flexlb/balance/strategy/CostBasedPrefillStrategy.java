@@ -13,10 +13,12 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.Arrays;
@@ -32,18 +34,40 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
     private final CacheAwareService cacheAwareService;
     private final ResourceMeasureFactory resourceMeasureFactory;
     private final EngineHealthReporter engineHealthReporter;
+    /**
+     * Selection telemetry sink (engine-wait filter hits, least-loaded
+     * fallback). Nullable: the test/legacy constructor passes null and the
+     * telemetry call sites degrade to no-ops.
+     */
+    private final BatchSchedulerReporter batchSchedulerReporter;
     private final ThreadLocal<CandidateSet> candidateSets =
             ThreadLocal.withInitial(CandidateSet::new);
 
+    @Autowired
     public CostBasedPrefillStrategy(EngineWorkerStatus engineWorkerStatus,
                                     CacheAwareService cacheAwareService,
                                     ResourceMeasureFactory resourceMeasureFactory,
-                                    EngineHealthReporter engineHealthReporter) {
+                                    EngineHealthReporter engineHealthReporter,
+                                    BatchSchedulerReporter batchSchedulerReporter) {
         this.engineWorkerStatus = engineWorkerStatus;
         this.cacheAwareService = cacheAwareService;
         this.resourceMeasureFactory = resourceMeasureFactory;
         this.engineHealthReporter = engineHealthReporter;
+        this.batchSchedulerReporter = batchSchedulerReporter;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_PREFILL, this);
+    }
+
+    /**
+     * Test/backward-compatible constructor without the metrics reporter —
+     * selection telemetry (engine-wait filter hits, least-loaded fallback)
+     * silently degrades to a no-op.
+     */
+    public CostBasedPrefillStrategy(EngineWorkerStatus engineWorkerStatus,
+                                    CacheAwareService cacheAwareService,
+                                    ResourceMeasureFactory resourceMeasureFactory,
+                                    EngineHealthReporter engineHealthReporter) {
+        this(engineWorkerStatus, cacheAwareService, resourceMeasureFactory,
+                engineHealthReporter, null);
     }
 
     @Override
@@ -244,8 +268,21 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                     ? ep.batcherEstimatedWaitMs(balanceContext.getPriority(),
                             balanceContext.getDeadlineMs(), balanceContext.getRequestId())
                     : ep.batcherWaitMs();
+            // Engine-reported wait penalty: each engine-side queued request
+            // (waitingQueryLen, ~20ms sync) adds penaltyMsPerWaitStream to the
+            // score, so engines whose engine-side queue keeps growing lose
+            // routing attractiveness even when the master-side view looks
+            // clean. Gated on autoTpmEnabled like the congested-queue filter
+            // (legacy deployments keep the untouched score); gate off ⇒ the
+            // term is exactly 0. Clamped at 1L<<40 so a pathological
+            // waitingQueryLen × weight cannot overflow the long score.
+            long engineWaitMs = config.isFlexlbEngineWaitPenaltyEnabled()
+                    && config.isAutoTpmEnabled()
+                    ? Math.min((long) (ep.getReportedWaitingQueryLen()
+                            * engineWaitPenaltyMsPerWaitStream(config)), 1L << 40)
+                    : 0L;
             feasible.setCandidate(feasibleCount++, ep, cacheHit,
-                    singlePrefillMs + endpointWaitMs + batcherWaitMs,
+                    singlePrefillMs + endpointWaitMs + batcherWaitMs + engineWaitMs,
                     endpointWaitMs, pendingCount);
             sumWaitMs += endpointWaitMs;
             sumPendingCount += pendingCount;
@@ -272,6 +309,16 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         boolean congestedQueueFilterEnabled = config.isFlexlbCongestedQueueFilterEnabled()
                 && config.isAutoTpmEnabled();
         long congestedQueueThreshold = congestedQueueThreshold(config);
+        // na130_4 engine-wait hard filter: an engine whose reported
+        // waitingQueryLen has reached flexlbEngineWaitHardFilterThreshold is
+        // excluded from candidates outright ("ENGINE_WAIT_FILTERED") —
+        // same shape as the congested-queue filter above, gated on
+        // autoTpmEnabled like it, after the least-loaded tracking and ahead
+        // of the hotspot filter, so the all-filtered case still falls back
+        // to the least-loaded endpoint.
+        boolean engineWaitHardFilterEnabled = config.isFlexlbEngineWaitHardFilterEnabled()
+                && config.isAutoTpmEnabled();
+        long engineWaitHardFilterThreshold = engineWaitHardFilterThreshold(config);
         int survivorCount = 0;
         PrefillEndpoint leastLoadedEndpoint = null;
         long leastLoadedCacheHit = 0;
@@ -294,6 +341,11 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                 rejections.merge("CONGESTED_QUEUE_FILTERED", 1, Integer::sum);
                 continue;
             }
+            if (engineWaitHardFilterEnabled
+                    && feasible.endpoint(i).getReportedWaitingQueryLen() >= engineWaitHardFilterThreshold) {
+                rejections.merge("ENGINE_WAIT_FILTERED", 1, Integer::sum);
+                continue;
+            }
             if (hotspotMultiplier > 0 && avgPendingCount > 0 && pendingCount > avgPendingCount * hotspotMultiplier) {
                 rejections.merge("HOTSPOT_FILTERED", 1, Integer::sum);
                 continue;
@@ -306,11 +358,26 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             feasible.moveSelectionFields(i, survivorCount++);
         }
 
-        if (survivorCount == 0 && leastLoadedEndpoint != null) {
+        boolean fallbackSelected = survivorCount == 0 && leastLoadedEndpoint != null;
+        if (fallbackSelected) {
             feasible.setSelectionFields(0, leastLoadedEndpoint, leastLoadedCacheHit, leastLoadedScore);
             survivorCount = 1;
         }
         feasible.size = survivorCount;
+
+        // na130_4 observability: selection telemetry at the single exit of
+        // the hard-filter round — engine-wait filter hits aggregated per
+        // round and the all-filtered least-loaded fallback. Null reporter
+        // (test constructor) degrades to a no-op.
+        if (batchSchedulerReporter != null) {
+            int engineWaitFiltered = rejections.getOrDefault("ENGINE_WAIT_FILTERED", 0);
+            if (engineWaitFiltered > 0) {
+                batchSchedulerReporter.reportEngineWaitFiltered(engineWaitFiltered);
+            }
+            if (fallbackSelected) {
+                batchSchedulerReporter.reportSelectionFallback();
+            }
+        }
 
         return new FilterResult(feasible, rejections);
     }
@@ -418,6 +485,27 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             return Long.MAX_VALUE;
         }
         return (long) Math.ceil(queueCapacity * ratio);
+    }
+
+    private static double engineWaitPenaltyMsPerWaitStream(FlexlbConfig config) {
+        double weight = config.getFlexlbEngineWaitPenaltyMsPerWaitStream();
+        // A misconfigured weight (NaN/Infinite or <= 0) falls back to the
+        // default 20.0 ms per waiting stream.
+        if (!Double.isFinite(weight) || weight <= 0) {
+            return 20.0;
+        }
+        return weight;
+    }
+
+    private static long engineWaitHardFilterThreshold(FlexlbConfig config) {
+        int threshold = config.getFlexlbEngineWaitHardFilterThreshold();
+        // A non-positive threshold is a misconfiguration that would filter
+        // out every engine — treat as disabled (the >= never fires on any
+        // long waitingQueryLen).
+        if (threshold <= 0) {
+            return Long.MAX_VALUE;
+        }
+        return threshold;
     }
 
     private Map<String, Integer> getCacheMatchResults(BalanceContext balanceContext, RoleType roleType, String group) {

@@ -251,6 +251,51 @@ public class MetricConstant {
     public static final String BATCHER_PARK_QPS = "app.flexlb.batcher.park.qps";
 
     /**
+     * FlexLB batcher queue admission rate — items that successfully entered
+     * a per-engine batcher queue (offer / tryOffer / versioned re-offer).
+     * COUNTER semantics (reported as QPS), tagged by engineIp + role.
+     * Paired with {@link #BATCHER_QUEUE_LEAVE_QPS} to expose per-engine
+     * enter/leave balance: a persistently positive gap is the queue
+     * build-up signature (na130_4).
+     */
+    public static final String BATCHER_QUEUE_ENTER_QPS = "app.flexlb.batcher.queue.enter.qps";
+
+    /**
+     * FlexLB batcher queue departure rate — items that left a per-engine
+     * batcher queue, tagged by engineIp + role + reason:
+     * dispatched (flush-time dispatch to the engine),
+     * deadline_evicted (SLO-budget dropHead),
+     * admission_timeout (queue admission timeout sweep),
+     * token_capacity_rejected (strict padded batch-token capacity reject),
+     * drained (batcher shutdown stopAndDrainTo, queued + staged),
+     * dispatch_aborted (pre-send revalidation drop / claim-or-send failure),
+     * removed (all other removals — cancel/replace paths).
+     * COUNTER semantics (reported as QPS).
+     */
+    public static final String BATCHER_QUEUE_LEAVE_QPS = "app.flexlb.batcher.queue.leave.qps";
+
+    /**
+     * FlexLB prefill selection engine-wait hard-filter hits — candidate
+     * endpoints excluded because their engine-reported waitingQueryLen
+     * reached flexlbEngineWaitHardFilterThreshold, tagged by role (PREFILL;
+     * the filter decision is cluster-level, candidates carry no single
+     * engineIp). Aggregated per selection round. COUNTER semantics
+     * (reported as QPS).
+     */
+    public static final String ENGINE_WAIT_FILTERED_QPS =
+            "app.flexlb.engine.wait.filtered.qps";
+
+    /**
+     * FlexLB prefill selection least-loaded fallback hits — selections where
+     * every feasible candidate was filtered out (congested-queue /
+     * engine-wait / hotspot / imbalance) and the strategy still routed by
+     * falling back to the least-loaded endpoint, tagged by role (PREFILL).
+     * COUNTER semantics (reported as QPS).
+     */
+    public static final String SELECTION_FALLBACK_QPS =
+            "app.flexlb.selection.fallback.qps";
+
+    /**
      * Engine finished task list size
      */
     public static final String ENGINE_FINISHED_TASK_LIST_SIZE = "app.engine.health.check.finished.task.list.size";

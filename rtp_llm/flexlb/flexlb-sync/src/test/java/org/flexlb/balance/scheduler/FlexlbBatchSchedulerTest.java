@@ -258,6 +258,53 @@ class FlexlbBatchSchedulerTest {
         assertEquals(0, scheduler.getInflightSize());
         assertFalse(realDecode.reservedView().containsKey(requestId));
         assertTrue(sentBatches.isEmpty());
+        // na130_4 observability: the claimed-but-failed item leaves the
+        // batcher queue with reason=dispatch_aborted (count=1), never
+        // dispatched.
+        verify(reporter).reportBatcherQueueLeave(
+                RoleType.PREFILL.name(), "10.0.0.1", "dispatch_aborted", 1);
+    }
+
+    @Test
+    void queueLeaveDispatchedCountMatchesDispatchableSize() throws Exception {
+        // na130_4 observability: the flush-time leave count (reason=dispatched)
+        // equals the post-revalidation dispatchable size (both members of one
+        // full batch), and the clean path never reports dispatch_aborted or
+        // drained — revalidated-out members would be counted under their own
+        // reason, never as dispatched.
+        config.setAutoTpmEnabled(true);
+        config.setFlexlbBatchAlgorithm("fixed_window");
+        config.setFlexlbBatchSizeMax(2);
+        PrefillEndpoint prefill = replacePrefillEndpoint();
+        DecodeEndpoint decode = ensureDecodeEndpoint("10.0.0.2", 8081, 8082);
+
+        List<Long> requestIds = List.of(2_300L, 2_301L);
+        List<CompletableFuture<Response>> futures = new java.util.ArrayList<>();
+        for (long requestId : requestIds) {
+            decode.reserve(requestId, 128, 136, 50, 0);
+            decode.markQueuedPhase(requestId);
+            BatchItem item = new BatchItem(context(requestId), new CompletableFuture<>(),
+                    successRoute(requestId),
+                    server(RoleType.PREFILL, "10.0.0.1", 8080, 8081, requestId),
+                    server(RoleType.DECODE, "10.0.0.2", 8081, 8082, requestId),
+                    prefill, decode, System.currentTimeMillis());
+            assertTrue(scheduler.registerInflight(item));
+            prefill.getBatcher().offer(item);
+            futures.add(item.future());
+        }
+
+        assertTrue(futures.get(0).get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(futures.get(1).get(2, TimeUnit.SECONDS).isSuccess());
+        awaitCondition(() -> sentBatches.size() == 1);
+        assertEquals(2, batchInputs(sentBatches.getFirst()).size(),
+                "both members form one full batch");
+
+        verify(reporter).reportBatcherQueueLeave(
+                RoleType.PREFILL.name(), "10.0.0.1", "dispatched", 2);
+        verify(reporter, never()).reportBatcherQueueLeave(
+                anyString(), anyString(), eq("dispatch_aborted"), anyInt());
+        verify(reporter, never()).reportBatcherQueueLeave(
+                anyString(), anyString(), eq("drained"), anyInt());
     }
 
     @Test
