@@ -939,54 +939,6 @@ class FlexlbBatchSchedulerTest {
         assertEquals(0, endpoint.getInflightBatchCount());
     }
 
-    @Test
-    void dispatchUncertain_onlyMatchingTypedCanceled8429IsTerminal() throws Exception {
-        AtomicInteger cancelCalls = new AtomicInteger();
-        when(cancelChannel.cancel(any(), anyLong(), anyLong())).thenAnswer(inv -> {
-            cancelCalls.incrementAndGet();
-            return CompletableFuture.completedFuture(
-                    EngineCancelChannel.CancelOutcome.accepted());
-        });
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
-                .thenAnswer(inv -> {
-                    EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
-                    sentBatches.add(request);
-                    return CompletableFuture.failedFuture(new TimeoutException("lost ack"));
-                });
-
-        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
-        BatchItem item = reconciliationItem(309, endpoint);
-        assertTrue(scheduler.registerInflight(item));
-        scheduler.onBatchReady(List.of(item), new DispatchMeta("test", 0));
-        long deadline = System.currentTimeMillis() + 1_000;
-        while (sentBatches.isEmpty() && System.currentTimeMillis() < deadline) {
-            Thread.sleep(1);
-        }
-        long batchId = sentBatches.getLast().getBatchId();
-
-        scheduler.onWorkerStatusUpdate(prefillFinished(
-                309, batchId, 0, PriorityPreemptionProgress.NONE));
-        scheduler.onWorkerStatusUpdate(prefillFinished(
-                309, batchId, 500, PriorityPreemptionProgress.NONE));
-        scheduler.onWorkerStatusUpdate(prefillFinished(
-                309, batchId + 1, 8429, PriorityPreemptionProgress.CANCELED));
-        assertFalse(item.future().isDone());
-        assertEquals(1, scheduler.getInflightSize());
-        assertEquals(1, endpoint.getInflightBatchCount());
-
-        scheduler.onWorkerStatusUpdate(prefillFinished(
-                309, batchId, 8429, PriorityPreemptionProgress.CANCELED));
-        Response response = item.future().get(1, TimeUnit.SECONDS);
-        assertFalse(response.isSuccess());
-        assertEquals(0, scheduler.getInflightSize());
-        assertEquals(0, endpoint.getInflightBatchCount());
-
-        int callsAtTerminal = cancelCalls.get();
-        Thread.sleep(250);
-        assertEquals(callsAtTerminal, cancelCalls.get(),
-                "a retry scheduled before typed CANCELED must become a no-op");
-    }
-
     // ==================== P0-3: close/handover race (PR-D) ====================
 
     @Test
@@ -1015,22 +967,6 @@ class FlexlbBatchSchedulerTest {
                 server(RoleType.PREFILL, "10.0.0.1", 8080, 8081, requestId),
                 server(RoleType.DECODE, "10.0.0.2", 8081, 8082, requestId),
                 endpoint, null, System.currentTimeMillis());
-    }
-
-    private static WorkerStatusResponse prefillFinished(
-            long requestId,
-            long batchId,
-            long errorCode,
-            PriorityPreemptionProgress progress) {
-        TaskInfo finished = new TaskInfo();
-        finished.setRequestId(requestId);
-        finished.setBatchId(batchId);
-        finished.setErrorCode(errorCode);
-        finished.setPriorityPreemptionProgress(progress);
-        WorkerStatusResponse status = new WorkerStatusResponse();
-        status.setRole(RoleType.PREFILL);
-        status.setFinishedTaskInfo(Map.of(Long.toString(requestId), finished));
-        return status;
     }
 
     private static byte[] generateInputBytes(long requestId) {

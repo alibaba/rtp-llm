@@ -18,7 +18,13 @@ public:
                          kmonitor::MetricsReporterPtr          metrics_reporter,
                          size_t                                extra_reserve_token_num = 0,
                          bool                                  perf_test               = false):
-        GenerateStream(query, model_config, runtime_config, resource_context, metrics_reporter, extra_reserve_token_num, perf_test),
+        GenerateStream(query,
+                       model_config,
+                       runtime_config,
+                       resource_context,
+                       metrics_reporter,
+                       extra_reserve_token_num,
+                       perf_test),
         request_id_(query->request_id) {
         generate_outputs_queue_.setCapacity(1000);
     }
@@ -30,6 +36,17 @@ public:
     bool                         hasOutput() override;
     ErrorResult<GenerateOutputs> nextOutput() override;
     void                         updateOutput(const StreamUpdateInfo& update_info) override;
+    // C-1 (Z1) thread-level exit: un-park any FetchResponse thread blocked in
+    // nextOutput()->waitNotEmpty() so it re-evaluates the loop condition
+    // (hasError / FINISHED) and unwinds. wakeup() is the queue's own
+    // destructor-grade wake (same primitive ~NormalGenerateStream relies on);
+    // it is idempotent, and buffered outputs already in the queue remain
+    // consumable via getAndPopFront() — only the blocking WAIT is terminated.
+    // Deliberately no output-sentinel push: a sentinel would be delivered to
+    // the client as a real GenerateOutputs frame.
+    void terminateOutputWait() override {
+        generate_outputs_queue_.wakeup();
+    }
 
 private:
     GenerateOutputs prepareGenerateOutput(const StreamUpdateInfo& update_info);

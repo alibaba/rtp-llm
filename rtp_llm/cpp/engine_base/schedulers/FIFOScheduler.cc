@@ -258,8 +258,7 @@ bool FIFOScheduler::fitsPrefillTokenLimits(size_t                   admitted_str
                                            const GenerateStreamPtr& candidate) const {
     // Preserve the historical singleton boundary; checkInputLength() has already
     // validated the candidate's standalone token cost.
-    if (admitted_stream_count == 0
-        && candidate->contextLength() + running_streams_.size() < int(max_seq_len_)) {
+    if (admitted_stream_count == 0 && candidate->contextLength() + running_streams_.size() < int(max_seq_len_)) {
         return true;
     }
 
@@ -286,8 +285,8 @@ bool FIFOScheduler::fitsPrefillTokenLimits(size_t                   admitted_str
     // sequence length (prefix included) and the real sequence width represented
     // by currentBatchSize(). Division avoids overflow in max_seq_len * width.
     const auto candidate_sequence_count = static_cast<size_t>(candidate->currentBatchSize());
-    const auto sequence_count = admitted_sequence_count + candidate_sequence_count;
-    const auto max_seq_len     = std::max(admitted_max_seq_len, prefillSeqLenWithCache(candidate));
+    const auto sequence_count           = admitted_sequence_count + candidate_sequence_count;
+    const auto max_seq_len              = std::max(admitted_max_seq_len, prefillSeqLenWithCache(candidate));
     return max_seq_len == 0 || sequence_count <= (available_tokens - 1) / max_seq_len;
 }
 
@@ -590,12 +589,12 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
         return;
     }
 
-    StreamGroup admitted_streams;
-    const size_t inited_kv_streams = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
+    StreamGroup  admitted_streams;
+    const size_t inited_kv_streams       = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
     size_t       newly_inited_kv_streams = 0;
     for (auto it = group.begin(); it != group.end();) {
-        auto  current = it++;
-        auto& stream  = *current;
+        auto       current           = it++;
+        auto&      stream            = *current;
         const bool already_inited_kv = stream->curBlocksNum() > 0;
         if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv
             && inited_kv_streams + newly_inited_kv_streams >= max_inited_kv_cache_streams_) {
@@ -648,6 +647,39 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
     }
 }
 
+// Terminal-error sweep for explicit group queues. evaluateWaitingGroupQueue only
+// inspects the queue head and is skipped entirely while any running/new work or
+// loading group exists, so an errored victim inside a NON-head group would never
+// receive its terminal moveToNext(): its priority-cancel finalizer (or ordinary
+// error teardown) would retry forever and pin the request in the engine. This
+// sweep therefore walks every group of the queue independently of admission:
+//   - hasError() members are already terminal in intent; moveToNext() drives
+//     them to FINISHED (releasing resources via the stream state machine) and
+//     is idempotent for already-FINISHED streams;
+//   - admission order is untouched: healthy members stay in their groups, the
+//     queue keeps its FIFO ordering, and no CanRun/admission event is produced;
+//   - cost is O(total queued streams) per scheduling round, the same order as
+//     the existing evaluate scans running under the same lock_.
+// Called from schedule() with lock_ held, like every other evaluate helper.
+void FIFOScheduler::sweepErroredGroupStreams(StreamGroupQueue& group_queue) {
+    for (auto group_it = group_queue.begin(); group_it != group_queue.end();) {
+        auto& group = *group_it;
+        for (auto it = group.begin(); it != group.end();) {
+            if ((*it)->hasError()) {
+                (*it)->moveToNext();
+                it = group.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (group.empty()) {
+            group_it = group_queue.erase(group_it);
+        } else {
+            ++group_it;
+        }
+    }
+}
+
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
     if (need_fill_fake_stream_) {
@@ -660,6 +692,14 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     last_waiting_oldest_age_us_       = 0;
 
     evaluateAndUpdateStreams(running_streams_);
+
+    // Sweep errored members out of every waiting/loading group BEFORE any
+    // admission decision: the admission guards below intentionally skip the
+    // whole group queue while other work exists, but must not delay terminal
+    // cleanup (see sweepErroredGroupStreams). Same O(queued streams) order as
+    // the evaluate scans sharing this lock_ domain.
+    sweepErroredGroupStreams(waiting_group_queue_);
+    sweepErroredGroupStreams(loading_cache_group_queue_);
 
     if (running_streams_.empty()) {
         active_admission_lane_ = AdmissionLane::NONE;

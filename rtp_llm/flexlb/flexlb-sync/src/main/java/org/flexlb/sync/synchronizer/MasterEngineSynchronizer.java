@@ -45,6 +45,18 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
     private final Long syncEngineStatusInterval;
     private volatile int completedSyncCount = 0;
 
+    /**
+     * Two-tier sync failure fencing: soft tier — consecutive sync timeouts
+     * (deadline exceeded, engine alive) before the endpoint is fenced from
+     * dispatch.
+     */
+    private static final int SYNC_TIMEOUT_MAX_CONSECUTIVE_FAILURES = 10;
+    /**
+     * Hard tier — consecutive failures of any kind before the endpoint is
+     * removed from the registry (worker-status runner stops reporting).
+     */
+    private static final int SYNC_HARD_MAX_CONSECUTIVE_FAILURES = 3;
+
     public MasterEngineSynchronizer(WorkerAddressService workerAddressService,
                                     EngineHealthReporter engineHealthReporter,
                                     EngineWorkerStatus engineWorkerStatus,
@@ -109,7 +121,10 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                 modelName, modelWorkerStatus.getRoleStatusMap(roleType),
                                 workerAddressService, statusCheckExecutor, engineHealthReporter,
                                 engineGrpcService, roleType, localKvCacheAwareManager,
-                                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
+                                syncRequestTimeoutMs,
+                                SYNC_TIMEOUT_MAX_CONSECUTIVE_FAILURES,
+                                SYNC_HARD_MAX_CONSECUTIVE_FAILURES,
+                                syncCount, syncEngineStatusInterval,
                                 batchScheduler, endpointRegistry
                         ));
                     } else {

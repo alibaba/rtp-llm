@@ -131,6 +131,14 @@ public:
     virtual bool                         hasOutput() {
         return false;
     }
+    // C-1 (Z1) thread-level exit: wake any consumer thread parked on this
+    // stream's output wait (e.g. NormalGenerateStream's nextOutput ->
+    // waitNotEmpty) so it re-evaluates its loop condition (hasError /
+    // FINISHED) instead of sleeping until the stream is destroyed. Called on
+    // error latch and on the terminal FINISHED transition. Base streams
+    // without a blocking output queue have nothing to wake; subclasses that
+    // own one override this (see NormalGenerateStream::terminateOutputWait).
+    virtual void terminateOutputWait() {}
 
     virtual void updateOutput(const StreamUpdateInfo& update_info) = 0;
     void         update(const StreamUpdateInfo& update_info);
@@ -503,7 +511,15 @@ public:
     void incPendingAsyncBookkeeping();
     void decPendingAsyncBookkeepingAndMaybeRelease();
     bool hasPendingAsyncBookkeeping() const;
+    // Bounded variant (R4/W-1): waits up to timeout_ms and returns whether the
+    // pending count reached zero. timeout_ms < 0 keeps the historical
+    // unbounded wait (and always returns true). The existing no-arg overload
+    // preserves the old call sites' semantics.
+    bool waitPendingAsyncBookkeeping(int64_t timeout_ms);
     void waitPendingAsyncBookkeeping();
+    // Current pending async-bookkeeping worker count (observability for the
+    // bounded-wait timeout warning).
+    int  pendingAsyncBookkeepingCount() const;
     void markDeferredRelease();
     bool isDeferredReleasePending() const;
 

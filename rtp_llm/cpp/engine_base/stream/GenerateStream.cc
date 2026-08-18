@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <memory>
@@ -198,12 +199,49 @@ bool GenerateStream::hasPendingAsyncBookkeeping() const {
 }
 
 void GenerateStream::waitPendingAsyncBookkeeping() {
+    // Historical unbounded semantics, preserved for existing callers.
+    (void)waitPendingAsyncBookkeeping(/*timeout_ms=*/-1);
+}
+
+bool GenerateStream::waitPendingAsyncBookkeeping(int64_t timeout_ms) {
     std::unique_lock<std::mutex> lk(async_bookkeeping_->mu);
-    async_bookkeeping_->cv.wait(lk, [this] { return async_bookkeeping_->count.load(std::memory_order_acquire) == 0; });
+    if (timeout_ms < 0) {
+        async_bookkeeping_->cv.wait(lk,
+                                    [this] { return async_bookkeeping_->count.load(std::memory_order_acquire) == 0; });
+        return true;
+    }
+    // R4/W-1: bounded wait so a wedged async worker can never pin the caller
+    // (e.g. the priority finalizer) forever. Returns false on timeout; the
+    // caller decides whether to defer the release instead of blocking on.
+    return async_bookkeeping_->cv.wait_for(lk, std::chrono::milliseconds(timeout_ms), [this] {
+        return async_bookkeeping_->count.load(std::memory_order_acquire) == 0;
+    });
+}
+
+int GenerateStream::pendingAsyncBookkeepingCount() const {
+    return async_bookkeeping_->count.load(std::memory_order_acquire);
 }
 
 void GenerateStream::markDeferredRelease() {
-    async_bookkeeping_->defer_release.store(true, std::memory_order_release);
+    bool last_worker_already_gone = false;
+    {
+        // Handshake with the last async worker's decrement path: either it
+        // observes our flag (and performs the release), or we observe
+        // count == 0 (it already left without taking over) and release here.
+        // Without this, a plain store can strand the flag with nobody left
+        // to consume it and defer the KV release to stream destruction.
+        std::lock_guard<std::mutex> lk(async_bookkeeping_->mu);
+        if (async_bookkeeping_->count.load(std::memory_order_acquire) == 0) {
+            last_worker_already_gone = true;
+        } else {
+            async_bookkeeping_->defer_release.store(true, std::memory_order_release);
+        }
+    }
+    if (last_worker_already_gone) {
+        // count == 0, so releaseResource()'s internal bookkeeping wait
+        // returns immediately — this cannot block.
+        releaseResource();
+    }
 }
 
 bool GenerateStream::isDeferredReleasePending() const {
@@ -634,11 +672,21 @@ void GenerateStream::recordRunningTime() {
 // 统一的事件上报接口，替代原先所有 reportXX 方法。
 // 外部线程调用时自动加锁保护 error_info 和 events_ 的一致性。
 void GenerateStream::reportEvent(StreamEvents::EventType event, ErrorCode error_code, const std::string& error_msg) {
-    std::lock_guard<std::mutex> lock(*mutex_);
-    if (event == StreamEvents::CanRun) {
-        recordCanRunTime();
+    {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        if (event == StreamEvents::CanRun) {
+            recordCanRunTime();
+        }
+        generate_status_->reportEvent(event, error_code, error_msg);
     }
-    generate_status_->reportEvent(event, error_code, error_msg);
+    if (event == StreamEvents::Error) {
+        // C-1 (Z1): the error is latched (outside mutex_); a consumer parked in
+        // nextOutput()->waitNotEmpty() must re-evaluate hasError() now instead
+        // of sleeping until the stream is destroyed. Covers checkTimeout()'s
+        // GENERATE_TIMEOUT latch on the Fetch thread itself: the wakeup makes
+        // its own subsequent waitNotEmpty return immediately.
+        terminateOutputWait();
+    }
 }
 
 // 无锁版本，供已持有 mutex_ 的内部调用路径使用（如 update/specUpdate/moveToNext 链路）。
@@ -652,8 +700,13 @@ void GenerateStream::reportEventWithoutLock(StreamEvents::EventType event,
 }
 
 void GenerateStream::reportError(ErrorCode error_code, const std::string& error_msg) {
-    std::lock_guard<std::mutex> lock(*mutex_);
-    generate_status_->reportEvent(StreamEvents::Error, error_code, error_msg);
+    {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        generate_status_->reportEvent(StreamEvents::Error, error_code, error_msg);
+    }
+    // C-1 (Z1): mirror reportEvent's Error branch — wake parked output
+    // consumers so they observe the latched error and unwind.
+    terminateOutputWait();
 }
 
 void GenerateStream::reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg) {
@@ -699,6 +752,12 @@ StreamState GenerateStream::moveToNext() {
             reportMetricOnce();
         }
         cv_->notify_one();
+        // C-1 (Z1) terminal-path exit: a consumer parked in nextOutput()'s
+        // waitNotEmpty() with an empty queue must observe FINISHED. Harmless
+        // when queued outputs remain: they stay consumable one getAndPopFront
+        // at a time; the queue's terminated latch only ends the WAIT, not the
+        // buffered data.
+        terminateOutputWait();
     }
     return state;
 }
@@ -906,7 +965,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     if (update_info.draft_token >= 0) {
         RTP_LLM_CHECK_WITH_INFO(sp_output_buffer_->tokens.numel() >= 2,
                                 "speculative token buffer must contain target and draft slots");
-        spec_tokens[1]  = update_info.draft_token;
+        spec_tokens[1] = update_info.draft_token;
         propose_token_ = {target_last_token, update_info.draft_token};
     } else {
         // Commit-only speculative steps (DSpARK prefill/decode tail) publish
@@ -1202,8 +1261,8 @@ void GenerateStream::reportStreamMetrics() {
         collector.is_streaming_qps  = generate_input_->generate_config->is_streaming;
         collector.not_streaming_qps = !generate_input_->generate_config->is_streaming;
         if (getStatus() == StreamState::FINISHED || cancelled || timeout) {
-            collector.reuse_length           = initial_reuse_length_;
-            collector.input_token_length     = inputLength();
+            collector.reuse_length       = initial_reuse_length_;
+            collector.input_token_length = inputLength();
             collector.effective_context_length =
                 std::max<int64_t>(0, collector.input_token_length - initial_reuse_length_);
             collector.output_token_length    = outputTokenLen();

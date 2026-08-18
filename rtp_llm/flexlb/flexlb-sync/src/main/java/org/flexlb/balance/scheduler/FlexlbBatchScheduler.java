@@ -4,6 +4,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.RequestInflight;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.priority.AdmissionFailure;
 import org.flexlb.balance.scheduler.priority.AdmissionFailureClassifier;
 import org.flexlb.balance.scheduler.priority.AdmissionLease;
@@ -47,6 +48,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.LongAdder;
 
 /**
  * Coordinates batch scheduling for FlexLB disaggregated inference.
@@ -79,6 +81,23 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     private final BatchIdGenerator batchIdGenerator;
     /** Linearizes the final endpoint-ledger commit/RPC handoff with fencing. */
     private final Object dispatchFence = new Object();
+    /** Hard age cap for fenced inflight entries (preemption / reconciliation / cleanup): 30 minutes. */
+    private static final long INFLIGHT_HARD_MAX_AGE_MS = 30 * 60 * 1000L;
+    /** Post-ACK invisibility audit grace: entries older than this qualify for the F1 backstop. */
+    private static final long INFLIGHT_AUDIT_AFTER_MS = 30_000L;
+    /** Grace before terminal-settling a reconciliation whose Cancel target left the registry. */
+    private static final long RECONCILE_TARGET_MISSING_GRACE_MS = 15_000L;
+    /** Consecutive failed reconciliation Cancels before the D3 backstop forces the terminal. */
+    private static final int RECONCILE_MAX_CONSECUTIVE_FAILURES = 36;
+
+    /**
+     * Post-ACK invisible releases accumulated since the last metrics flush,
+     * split by settlement path (audit fallback vs decode-vanish sync).
+     * Window-aggregated: incremented per settlement, flushed once per
+     * {@link #reportBatchMetrics()} tick — never reported per event.
+     */
+    private final LongAdder postAckAuditReleases = new LongAdder();
+    private final LongAdder postAckSyncSettles = new LongAdder();
 
     public FlexlbBatchScheduler(ConfigService configService,
                                 Router router,
@@ -295,14 +314,6 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     return;
                 }
                 if (entry.lifecycle.hasDispatchClaim()) {
-                    if (entry.dispatchOwnership == DispatchOwnership.DECODE_OWNED) {
-                        // Decode WorkerStatus is stronger than the missing
-                        // Enqueue ACK. Publish the logical ACK now; otherwise
-                        // the admission future would remain pending forever.
-                        applyAcknowledgeLocked(entry,
-                                entry.lifecycle.snapshot().batchId());
-                        return;
-                    }
                     // startDispatch(batchId) is the point of no return. The
                     // batcher already owns a local snapshot and may publish it
                     // after this lock is released. Completing 8431 and deleting
@@ -702,6 +713,16 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     // ==================== Completion from worker status ====================
 
     public void onWorkerStatusUpdate(WorkerStatusResponse response) {
+        onWorkerStatusUpdate(response, null);
+    }
+
+    /**
+     * @param endpoint the endpoint whose calibrate just processed this same
+     *                 response (nullable — legacy/test call sites); a decode
+     *                 endpoint additionally supplies the vanish signals for
+     *                 immediate post-ACK ghost settlement.
+     */
+    public void onWorkerStatusUpdate(WorkerStatusResponse response, WorkerEndpoint endpoint) {
         if (response == null) {
             return;
         }
@@ -727,7 +748,21 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         if (isPrefill && response.getRunningTaskInfo() != null) {
             for (TaskInfo task : response.getRunningTaskInfo().values()) {
                 reconcilePreemptionActive(task.getRequestId());
+                // Ack-only release: an active Prefill observation of the same
+                // dispatch generation proves the engine stored the fetch slot
+                // even though the Enqueue ACK never fired.
+                releaseOnPrefillObserved(task.getRequestId(), task.getBatchId());
             }
+        }
+
+        // A-class ghost convergence: settle post-ACK entries whose request
+        // vanished from this decode engine without a finished record. Placed
+        // BEFORE the finished-task early return on purpose — the ghost case
+        // by definition arrives on reports whose finished delta was lost.
+        // Runs outside the endpoint admission lock (calibrate already
+        // returned) so the entry-monitor -> admission-lock order holds.
+        if (isDecode && endpoint instanceof DecodeEndpoint decodeEndpoint) {
+            settleVanishedDecodeRequests(decodeEndpoint);
         }
 
         Map<String, TaskInfo> finishedTaskInfo = response.getFinishedTaskInfo();
@@ -760,6 +795,19 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                         // not roll back the Master ledgers underneath it.
                         reduceOrdinaryTerminalLocked(entry, DeferredTerminal.timeout(
                                 "EnqueueBatch reconciled by typed Prefill CANCELED"));
+                    } else if (task.getErrorCode() == 0
+                            && task.getBatchId() == snapshot.batchId()) {
+                        // Ack-only release: a successful Prefill terminal of the
+                        // exact dispatch generation proves the engine accepted
+                        // and stored this batch member even though the Enqueue
+                        // ACK never fired (covers members whose running window
+                        // was skipped by polling). Release through the single
+                        // S1 semantic instead of retaining on the cancel fence.
+                        Logger.info("event=ack_only_release source=prefill_finished "
+                                        + "request_id={} batch_id={}",
+                                requestId, snapshot.batchId());
+                        clearDispatchReconciliation(entry);
+                        applyAcknowledgeLocked(entry, snapshot.batchId());
                     } else {
                         Logger.debug("Ignoring non-authoritative Prefill terminal during "
                                         + "dispatch reconciliation: request_id={} "
@@ -816,14 +864,9 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     return;
                 }
                 markDecodeAcceptedLocked(entry);
-                if (entry.dispatchReconciliation) {
-                    // Decode KV ownership is stronger than a missing Prefill
-                    // Enqueue ACK. Stop the Prefill cancel-fence retry chain
-                    // and publish the logical ACK while both ownership paths
-                    // are linearized by the same dispatch fence.
-                    clearDispatchReconciliation(entry);
-                    applyAcknowledgeLocked(entry, entry.lifecycle.snapshot().batchId());
-                }
+                // Ack-only release: Decode observations only record ownership;
+                // release waits for the S1 semantic (late ACK / Prefill
+                // observation) instead of this legacy Decode shortcut.
             }
         }
     }
@@ -841,6 +884,35 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     }
 
     /**
+     * Ack-only release: a Prefill WorkerStatus observation (running task or
+     * successful terminal) of the exact dispatch generation happens strictly
+     * after the engine stored the deferred fetch slot, so it carries the same
+     * "prefill accepted" semantic as the EnqueueBatch ACK. It releases entries
+     * whose ACK never fired (uncertain dispatch) instead of the legacy Decode
+     * shortcut, keeping the release gate single-sourced on Prefill evidence.
+     */
+    private void releaseOnPrefillObserved(long requestId, long batchId) {
+        InflightEntry entry = inflight.get(requestId);
+        if (entry == null || !entry.dispatchReconciliation) {
+            return;
+        }
+        synchronized (dispatchFence) {
+            synchronized (entry) {
+                if (inflight.get(requestId) != entry || entry.cleanupOwned
+                        || !entry.dispatchReconciliation
+                        || batchId != entry.lifecycle.snapshot().batchId()) {
+                    return;
+                }
+                Logger.info("event=ack_only_release source=prefill_observed "
+                                + "request_id={} batch_id={}",
+                        requestId, batchId);
+                clearDispatchReconciliation(entry);
+                applyAcknowledgeLocked(entry, batchId);
+            }
+        }
+    }
+
+    /**
      * Single reducer for every non-priority terminal. A live preemption claim
      * owns Decode accounting, so the first real ordinary outcome is retained
      * instead of rolling back/unregistering underneath the Cancel protocol.
@@ -853,22 +925,9 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         if (entry.cleanupOwned) {
             return;
         }
-        if (entry.dispatchOwnership == DispatchOwnership.DECODE_OWNED
-                && terminal.dispatchAckFailure()) {
-            // KV_ALLOCATED/RUNNING is a stronger ownership observation than
-            // an absent/failed Enqueue ACK. Preserve the live inflight entry,
-            // Decode accounting, and public schedule success.
-            if (entry.preemption != null) {
-                PreemptionRegistration registration = entry.preemption;
-                long batchId = entry.lifecycle.snapshot().batchId();
-                if (registration.pendingAcknowledgeBatchId == 0) {
-                    registration.pendingAcknowledgeBatchId = batchId;
-                }
-            } else {
-                applyAcknowledgeLocked(entry, entry.lifecycle.snapshot().batchId());
-            }
-            return;
-        }
+        // Ack-only release: an explicit Enqueue failure/timeout takes its
+        // ordinary terminal below — a rejected member must not be published
+        // as schedule success (its fetch slot never exists).
         if (entry.preemption != null) {
             deferOrdinaryTerminalLocked(entry, terminal);
             return;
@@ -1025,6 +1084,17 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         return inflight.size();
     }
 
+    /**
+     * Whether the scheduler still owns an inflight entry for {@code requestId}.
+     * Used by endpoint hard-age eviction as a race guard: an endpoint ledger
+     * entry must not be force-evicted while the scheduler lifecycle still
+     * references the same request id (the scheduler's own cleanup — TTL or
+     * hard cap — will cascade the endpoint release instead).
+     */
+    public boolean hasInflightRequest(long requestId) {
+        return inflight.containsKey(requestId);
+    }
+
     /** Production RTP-LLM raw {@code ErrorCode::PRIORITY_PREEMPTED}. */
     private static final long ENGINE_ERROR_PRIORITY_PREEMPTED = 8429;
 
@@ -1047,8 +1117,15 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     @Scheduled(fixedRate = 60000L)
     public void cleanupInflight() {
         long ttlMs = configService.loadBalanceConfig().getFlexlbInflightTtlMs();
+        long hardMaxAgeMs = INFLIGHT_HARD_MAX_AGE_MS;
         long now = System.currentTimeMillis();
         int expiredCount = 0;
+        // Hard-age-cap subset of expiredCount, split out for the reason tag.
+        int hardCapCount = 0;
+        // F3 observability: entries past the TTL retained only by a fence
+        // (preemption / dispatch reconciliation / cleanup ownership). A
+        // persistently non-zero rate is the inflight-leak signature.
+        int skippedFenced = 0;
         long oldestExpiredAgeMs = 0;
         List<Long> expiredRequestSamples = new ArrayList<>(3);
         for (Map.Entry<Long, InflightEntry> candidate : inflight.entrySet()) {
@@ -1064,7 +1141,29 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 if (entry.preemption != null || entry.dispatchReconciliation || entry.cleanupOwned) {
                     // Cancel ambiguity is reconciled by token/WorkerStatus;
                     // a concurrent cleanup owner is likewise already settling
-                    // the entry and must not be raced by TTL.
+                    // the entry and must not be raced by TTL. The hard age cap
+                    // still applies: a reconciliation that never settles (e.g.
+                    // zombie cancel overlay in the engine report) must not pin
+                    // the entry — and its endpoint ledgers — forever.
+                    if (ageMs <= hardMaxAgeMs) {
+                        skippedFenced++;
+                        continue;
+                    }
+                    RequestLifecycleSnapshot snapshot = entry.lifecycle.snapshot();
+                    Logger.warn("event=scheduler_inflight_hard_age_eviction request_id={} "
+                                    + "age_ms={} hard_max_age_ms={} created_at_ms={} preemption={} "
+                                    + "dispatch_reconciliation={} cleanup_owned={} lifecycle_state={} "
+                                    + "lifecycle_detail={}",
+                            candidate.getKey(), ageMs, hardMaxAgeMs, entry.createdAtMs(),
+                            entry.preemption != null, entry.dispatchReconciliation,
+                            entry.cleanupOwned, snapshot.state(), snapshot.detail());
+                    timeoutEntry(entry, "inflight hard age cap exceeded");
+                    oldestExpiredAgeMs = Math.max(oldestExpiredAgeMs, ageMs);
+                    if (expiredRequestSamples.size() < 3) {
+                        expiredRequestSamples.add(candidate.getKey());
+                    }
+                    expiredCount++;
+                    hardCapCount++;
                     continue;
                 }
                 oldestExpiredAgeMs = Math.max(oldestExpiredAgeMs, ageMs);
@@ -1075,11 +1174,16 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 expiredCount++;
             }
         }
-        if (expiredCount > 0) {
-            reporter.reportInflightTtlExpired(expiredCount);
+        if (expiredCount - hardCapCount > 0) {
+            reporter.reportSchedulerInflightTtlExpired("ttl", expiredCount - hardCapCount);
+        }
+        if (hardCapCount > 0) {
+            reporter.reportSchedulerInflightTtlExpired("hard_age_cap", hardCapCount);
+        }
+        if (expiredCount > 0 || skippedFenced > 0) {
             Logger.info("event=scheduler_inflight_ttl_eviction evicted={} "
-                            + "oldest_age_ms={} ttl_ms={} request_samples={}",
-                    expiredCount, oldestExpiredAgeMs, ttlMs, expiredRequestSamples);
+                            + "oldest_age_ms={} ttl_ms={} skipped_fenced={} request_samples={}",
+                    expiredCount, oldestExpiredAgeMs, ttlMs, skippedFenced, expiredRequestSamples);
         }
         long cutoff = System.currentTimeMillis() - ttlMs;
         terminalStates.entrySet().removeIf(entry -> entry.getValue().updatedAtMs() < cutoff);
@@ -1092,15 +1196,161 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         for (Map.Entry<String, DecodeEndpoint> decodeEntry
                 : endpointRegistry.getDecodeEndpoints().entrySet()) {
             DecodeEndpoint decodeEp = decodeEntry.getValue();
+            int orphanReclaimed = 0;
             for (Map.Entry<Long, RequestInflight> reserved : decodeEp.reservedView().entrySet()) {
                 long requestId = reserved.getKey();
                 if (now - reserved.getValue().createdAtMs() > ttlMs
                         && !inflight.containsKey(requestId)) {
                     decodeEp.release(requestId);
+                    orphanReclaimed++;
                     Logger.warn("orphan decode reservation reclaimed: request_id={} worker={} age_ms={}",
                             requestId, decodeEntry.getKey(),
                             now - reserved.getValue().createdAtMs());
                 }
+            }
+            if (orphanReclaimed > 0) {
+                reporter.reportEndpointInflightTtlExpired(RoleType.DECODE.name(),
+                        decodeEp.getIp(), "orphan_reservation", orphanReclaimed);
+            }
+        }
+    }
+
+    // ==================== Post-ACK inflight audit (F1) ====================
+
+    /**
+     * F1 backstop: force-settle ledger entries the ordinary paths can no
+     * longer reach. An entry qualifies only when ALL of the following hold:
+     * <ol>
+     *   <li>age exceeds {@value #INFLIGHT_AUDIT_AFTER_MS} ms (the ACK round
+     *       is long over),</li>
+     *   <li>its public future is already completed — the client saw a
+     *       terminal response, so no one is waiting,</li>
+     *   <li>no fence retains it (preemption claim / dispatch reconciliation /
+     *       cleanup ownership — those have their own reconciliation),</li>
+     *   <li>neither side is visible: the prefill batch ledger no longer
+     *       tracks the request, and on the decode side neither the engine-
+     *       confirmed registry (KV allocated / running) nor the shadow
+     *       reservation layer still holds it (or either endpoint is
+     *       absent).</li>
+     * </ol>
+     * Such an entry is a post-ACK leak: nothing observable can settle it, yet
+     * it keeps charging the inflight capacity and the endpoint ledgers until
+     * the TTL/hard-cap eviction notices it minutes later. The audit clears it
+     * in seconds.
+     *
+     * <p>Decode visibility spans BOTH admission layers (R1): a request queued
+     * inside a saturated decode engine is not yet engine-confirmed (no KV
+     * allocated), but its shadow reservation is still live — force-settling
+     * the entry would roll that reservation back and oversell admission KV.
+     * Only when neither layer holds the request is decode truly invisible.
+     *
+     * <p>Lock order mirrors {@link #cleanupInflight()} (R5): the visibility
+     * probes ({@link PrefillEndpoint#tracksRequest} /
+     * {@link DecodeEndpoint#isEngineConfirmed} /
+     * {@link DecodeEndpoint#isReserved}) are lock-free CHM reads and run
+     * OUTSIDE the entry monitor so the O(batches × members) prefill scan
+     * never extends a monitor critical section; the monitor is then taken
+     * only for the re-verify ({@code inflight.get(key) == entry}), the fence
+     * checks, and the settlement via {@link #timeoutEntry} (which never
+     * takes the dispatch fence — so nesting it here cannot invert the global
+     * order). A visibility verdict sampled before the monitor can only be
+     * stale in the conservative direction: a request that became visible
+     * after sampling is still protected by the entry's fence/future checks
+     * on the next audit tick.
+     */
+    @Scheduled(fixedRate = 10000L)
+    public void auditInflight() {
+        long auditAfterMs = INFLIGHT_AUDIT_AFTER_MS;
+        long now = System.currentTimeMillis();
+        for (Map.Entry<Long, InflightEntry> candidate : inflight.entrySet()) {
+            InflightEntry entry = candidate.getValue();
+            long ageMs = now - entry.createdAtMs();
+            if (ageMs <= auditAfterMs) {
+                continue;
+            }
+            if (tryReleasePostAckInvisible(candidate.getKey(), entry, false,
+                    "post-ACK inflight audit: both endpoints invisible")) {
+                Logger.warn("event=scheduler_inflight_audit_release request_id={} "
+                                + "age_ms={} threshold_ms={} reason=post_ack_both_sides_invisible",
+                        candidate.getKey(), ageMs, auditAfterMs);
+                postAckAuditReleases.increment();
+            }
+        }
+    }
+
+    /**
+     * Shared post-ACK invisibility verdict + settlement, used by both the
+     * periodic {@link #auditInflight()} fallback and the immediate
+     * decode-vanish sync path. Visibility probes are lock-free CHM reads
+     * taken OUTSIDE the entry monitor (R5/R1 — see the audit javadoc for the
+     * full safety argument); the monitor is then taken only for the
+     * re-verify, the fence exclusions (preemption / dispatch reconciliation
+     * / cleanup ownership — D/E-class entries are never touched), the
+     * post-ACK proof ({@code future.isDone()}) and the settlement via
+     * {@link #timeoutEntry}.
+     *
+     * @param requireDecodeOwned additionally require the linearized
+     *                           DECODE_OWNED ownership proof — the sync path
+     *                           only settles entries whose decode acceptance
+     *                           was already observed, so a request that never
+     *                           reached the decode engine keeps its ordinary
+     *                           lifecycle
+     * @param detail             terminal detail recorded by the lifecycle
+     * @return true when this call settled the entry
+     */
+    private boolean tryReleasePostAckInvisible(long requestId, InflightEntry entry,
+                                               boolean requireDecodeOwned, String detail) {
+        PrefillEndpoint prefillEp = entry.item.prefillEp();
+        DecodeEndpoint decodeEp = entry.item.decodeEp();
+        boolean prefillVisible = prefillEp != null
+                && prefillEp.tracksRequest(requestId);
+        boolean decodeVisible = decodeEp != null
+                && (decodeEp.isEngineConfirmed(requestId)
+                        || decodeEp.isReserved(requestId));
+        synchronized (entry) {
+            if (inflight.get(requestId) != entry) {
+                return false;
+            }
+            if (entry.preemption != null || entry.dispatchReconciliation || entry.cleanupOwned) {
+                return false;
+            }
+            if (requireDecodeOwned
+                    && entry.dispatchOwnership != DispatchOwnership.DECODE_OWNED) {
+                return false;
+            }
+            if (!entry.item.future().isDone()) {
+                return false;
+            }
+            if (prefillVisible || decodeVisible) {
+                return false;
+            }
+            timeoutEntry(entry, detail);
+            return true;
+        }
+    }
+
+    /**
+     * Drain the vanish signals produced by this decode endpoint's calibrate
+     * of the same WorkerStatus response and settle the matching post-ACK
+     * scheduler entries immediately — per-id probes, never a full-table
+     * scan. The audit predicate is reused verbatim plus the DECODE_OWNED
+     * guard; {@link #auditInflight()} stays as the fallback for signals
+     * dropped by the bounded endpoint queue.
+     */
+    private void settleVanishedDecodeRequests(DecodeEndpoint decodeEndpoint) {
+        for (long requestId : decodeEndpoint.drainVanishedEngineConfirmed()) {
+            InflightEntry entry = inflight.get(requestId);
+            if (entry == null) {
+                continue;
+            }
+            long ageMs = System.currentTimeMillis() - entry.createdAtMs();
+            if (tryReleasePostAckInvisible(requestId, entry, true,
+                    "post-ACK sync settle: decode vanished, both endpoints invisible")) {
+                Logger.info("event=scheduler_inflight_sync_settle request_id={} "
+                                + "age_ms={} trigger=decode_vanish "
+                                + "reason=post_ack_both_sides_invisible",
+                        requestId, ageMs);
+                postAckSyncSettles.increment();
             }
         }
     }
@@ -1372,10 +1622,15 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 return;
             }
             if (entry.dispatchReconciliation) {
-                Logger.debug("Retaining late EnqueueBatch ACK during reconciliation: "
+                // Ack-only release: the ACK is the S1 release semantic itself.
+                // It proves the engine stored the fetch slot for this exact
+                // dispatch generation (batch id already validated above), so a
+                // late arrival dissolves the reconciliation uncertainty instead
+                // of being dropped.
+                Logger.info("event=ack_only_release source=late_enqueue_ack "
                                 + "request_id={} batch_id={}",
                         item.requestId(), batchId);
-                return;
+                clearDispatchReconciliation(entry);
             }
             if (entry.preemption != null) {
                 PreemptionRegistration registration = entry.preemption;
@@ -1498,10 +1753,6 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                         || snapshot.batchId() != batchId) {
                     return;
                 }
-                if (entry.dispatchOwnership == DispatchOwnership.DECODE_OWNED) {
-                    applyAcknowledgeLocked(entry, batchId);
-                    return;
-                }
                 start = startDispatchReconciliationLocked(entry);
             }
         }
@@ -1520,16 +1771,15 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         if (entry.dispatchReconciliation || entry.preemption != null) {
             return false;
         }
-        if (entry.dispatchOwnership == DispatchOwnership.DECODE_OWNED) {
-            applyAcknowledgeLocked(entry, entry.lifecycle.snapshot().batchId());
-            return false;
-        }
         entry.dispatchReconciliation = true;
         long batchId = entry.lifecycle.snapshot().batchId();
         PrefillEndpoint prefill = entry.item.prefillEp();
         if (prefill != null && batchId > 0) {
             prefill.beginDispatchReconciliation(batchId, entry.item.requestId());
         }
+        Logger.info("event=dispatch_reconciliation_start request_id={} batch_id={} target={}",
+                entry.item.requestId(), batchId,
+                prefill != null ? prefill.ipPort() : "unknown");
         return true;
     }
 
@@ -1544,6 +1794,9 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     return;
                 }
                 ServerStatus prefill = entry.item.prefill();
+                if (settleIfReconcileTargetDeregisteredLocked(entry, prefill, attempt)) {
+                    return;
+                }
                 EngineCancelChannel.CancelTarget target = prefill == null ? null
                         : new EngineCancelChannel.CancelTarget(
                                 prefill.getServerIp(), prefill.getGrpcPort());
@@ -1598,6 +1851,10 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 }
                 switch (outcome.ack()) {
                     case TOMBSTONED -> {
+                        Logger.info("event=dispatch_reconciliation_settled "
+                                        + "request_id={} batch_id={} attempt={}",
+                                entry.item.requestId(),
+                                entry.lifecycle.snapshot().batchId(), attempt);
                         reduceOrdinaryTerminalLocked(entry, DeferredTerminal.timeout(
                                 "EnqueueBatch deadline exceeded; engine fenced late enqueue"));
                     }
@@ -1612,9 +1869,11 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                                         + "request_id={} batch_id={} attempt={}",
                                 entry.item.requestId(),
                                 entry.lifecycle.snapshot().batchId(), attempt);
+                        entry.reconcileConsecutiveFailures = 0;
                         retry = true;
                     }
-                    case NOT_FOUND, FAILED, UNSUPPORTED -> retry = true;
+                    case NOT_FOUND, FAILED, UNSUPPORTED -> retry =
+                            !settleIfReconcileFailureCapReachedLocked(entry, outcome, attempt);
                 }
             }
         }
@@ -1625,11 +1884,94 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         }
     }
 
+    /**
+     * Fix A (source-level stop): terminal-settles a fenced uncertain dispatch
+     * whose Cancel target has left the EndpointRegistry. The Cancel address is
+     * frozen at dispatch time ({@code entry.item.prefill()}), so after a
+     * rolling deploy the retry chain keeps calling a dead pod forever (FAILED
+     * loop) while the TTL sweep skips fenced entries. Registry removal is
+     * driven by ExpirationCleaner only after workerTimeoutMs of status
+     * silence, and a second grace window is applied here, so a deregistered
+     * target means the engine process is gone and the request cannot still be
+     * running — the ordinary terminal path (rollback + fence release) is safe.
+     *
+     * <p>Called with {@code dispatchFence} and {@code entry} locked.
+     *
+     * @return true when the entry was settled and the retry chain must stop
+     */
+    private boolean settleIfReconcileTargetDeregisteredLocked(InflightEntry entry,
+                                                              ServerStatus prefill,
+                                                              int attempt) {
+        if (prefill == null) {
+            return false;
+        }
+        long graceMs = RECONCILE_TARGET_MISSING_GRACE_MS;
+        String ipPort = prefill.getServerIp() + ":" + prefill.getHttpPort();
+        RoleType role = prefill.getRole() != null ? prefill.getRole() : RoleType.PREFILL;
+        if (endpointRegistry.get(role, ipPort) != null) {
+            entry.reconcileTargetMissingSinceMs = 0;
+            return false;
+        }
+        long now = System.currentTimeMillis();
+        if (entry.reconcileTargetMissingSinceMs == 0) {
+            entry.reconcileTargetMissingSinceMs = now;
+            return false;
+        }
+        if (now - entry.reconcileTargetMissingSinceMs < graceMs) {
+            return false;
+        }
+        Logger.warn("event=dispatch_reconciliation_forced_terminal "
+                        + "reason=target_deregistered request_id={} batch_id={} "
+                        + "target={} attempt={} missing_ms={}",
+                entry.item.requestId(), entry.lifecycle.snapshot().batchId(),
+                ipPort, attempt, now - entry.reconcileTargetMissingSinceMs);
+        reduceOrdinaryTerminalLocked(entry, DeferredTerminal.timeout(
+                "dispatch reconciliation target deregistered: " + ipPort));
+        return true;
+    }
+
+    /**
+     * Fix B (D3 backstop): caps the otherwise unbounded reconciliation retry
+     * chain. FAILED, UNSUPPORTED and NOT_FOUND all count — NOT_FOUND must not
+     * settle immediately because only TOMBSTONED installs the absent fence on
+     * the engine; a buffered late EnqueueBatch could still land after a bare
+     * NOT_FOUND. At the default cap (36 tries ≈ 3 minutes at the 5s backoff
+     * ceiling) the EnqueueBatch deadline has long expired, so the
+     * late-landing window is closed and forcing the ordinary terminal is safe.
+     *
+     * <p>Called with {@code dispatchFence} and {@code entry} locked.
+     *
+     * @return true when the entry was settled and the retry chain must stop
+     */
+    private boolean settleIfReconcileFailureCapReachedLocked(
+            InflightEntry entry,
+            EngineCancelChannel.CancelOutcome outcome,
+            int attempt) {
+        entry.reconcileConsecutiveFailures++;
+        if (entry.reconcileConsecutiveFailures < RECONCILE_MAX_CONSECUTIVE_FAILURES) {
+            return false;
+        }
+        ServerStatus prefill = entry.item.prefill();
+        Logger.warn("event=dispatch_reconciliation_forced_terminal "
+                        + "reason=failure_cap request_id={} batch_id={} target={} "
+                        + "attempt={} consecutive_failures={} last_outcome={}",
+                entry.item.requestId(), entry.lifecycle.snapshot().batchId(),
+                prefill == null ? "unknown"
+                        : prefill.getServerIp() + ":" + prefill.getGrpcPort(),
+                attempt, entry.reconcileConsecutiveFailures, outcome.ack());
+        reduceOrdinaryTerminalLocked(entry, DeferredTerminal.timeout(
+                "dispatch reconciliation exhausted after "
+                        + entry.reconcileConsecutiveFailures + " failed cancels"));
+        return true;
+    }
+
     private void clearDispatchReconciliation(InflightEntry entry) {
         if (!entry.dispatchReconciliation) {
             return;
         }
         entry.dispatchReconciliation = false;
+        entry.reconcileConsecutiveFailures = 0;
+        entry.reconcileTargetMissingSinceMs = 0;
         long batchId = entry.lifecycle.snapshot().batchId();
         PrefillEndpoint prefill = entry.item.prefillEp();
         if (prefill != null && batchId > 0) {
@@ -1716,7 +2058,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             admissionFailure = classifyAdmissionTimeout(entry.item, prefill);
             if (prefill != null) {
                 prefill.getBatcher().queueManager().tryRemove(
-                        entry.item.requestId(), "ADMISSION_TIMEOUT");
+                        entry.item.requestId(), WorkerBatcher.REASON_ADMISSION_TIMEOUT);
             }
         }
         RequestLifecycleSnapshot terminal = entry.lifecycle.timeout(detail);
@@ -1873,6 +2215,22 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     @Scheduled(fixedRateString = "${report.interval.ms:2000}")
     public void reportBatchMetrics() {
         reporter.reportSchedulerInflightSize(inflight.size());
+        // F3 observability: age of the oldest inflight entry. With a healthy
+        // TTL the size gauge alone cannot distinguish "busy" from "leaking";
+        // a max age creeping toward the TTL window is the leak signature.
+        reporter.reportSchedulerInflightMaxAgeMs(
+                InflightEvictor.maxAgeMs(inflight, System.currentTimeMillis()));
+
+        // Post-ACK invisible releases — window-aggregated flush of the
+        // per-settlement counters (project rule: no per-event reporting on
+        // the sync hot path). Only non-zero windows are reported to keep the
+        // series sparse; both settlement paths (audit fallback and
+        // decode-vanish sync) share the reason=post_ack_lost tag.
+        long postAckSettles = postAckAuditReleases.sumThenReset()
+                + postAckSyncSettles.sumThenReset();
+        if (postAckSettles > 0) {
+            reporter.reportSchedulerInflightAuditRelease(postAckSettles);
+        }
 
         // Per-worker metrics: prefill endpoints
         for (Map.Entry<String, PrefillEndpoint> entry : endpointRegistry.getPrefillEndpoints().entrySet()) {
@@ -1898,26 +2256,47 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
     // ==================== Inflight entry ====================
 
-    private static final class InflightEntry {
+    /**
+     * Implements {@link InflightEvictor.TtlTracked} so the scheduler-level
+     * max-age gauge can reuse {@link InflightEvictor#maxAgeMs} (same package,
+     * no import needed).
+     */
+    private static final class InflightEntry implements InflightEvictor.TtlTracked {
         final BatchItem item;
         final RequestLifecycle lifecycle;
         final boolean autoTpmAdmission;
+        /**
+         * Cached lifecycle creation timestamp. {@link #createdAtMs()} sits on
+         * the 2s gauge hot path ({@code InflightEvictor.maxAgeMs} over every
+         * entry) and on the TTL/audit age probes; reading this final field
+         * avoids the per-call {@link RequestLifecycle#snapshot()} allocation
+         * (~8.5k snapshots/s at 17k entries) and its monitor contention with
+         * the dispatch/ACK state transitions. The lifecycle timestamp is
+         * itself final, so the cached copy is an invariant.
+         */
+        final long createdAtMs;
         final AtomicBoolean rolledBack = new AtomicBoolean(false);
         AdmissionLease admissionLease;
         DispatchOwnership dispatchOwnership = DispatchOwnership.ACK_PENDING;
         boolean cleanupOwned;
         PreemptionRegistration preemption;
         boolean dispatchReconciliation;
+        /** Consecutive failed reconciliation Cancels; reset on ACCEPTED or fence clear. */
+        int reconcileConsecutiveFailures;
+        /** First millis the Cancel target was missing from the registry; 0 = present. */
+        long reconcileTargetMissingSinceMs;
 
         InflightEntry(BatchItem item, boolean autoTpmAdmission) {
             this.item = Objects.requireNonNull(item);
             Objects.requireNonNull(item.prefill(), "BatchItem.prefill must not be null");
             this.lifecycle = new RequestLifecycle(item.requestId());
+            this.createdAtMs = this.lifecycle.snapshot().createdAtMs();
             this.autoTpmAdmission = autoTpmAdmission;
         }
 
+        @Override
         public long createdAtMs() {
-            return lifecycle.snapshot().createdAtMs();
+            return createdAtMs;
         }
 
         boolean hasPreemption(long attemptToken) {

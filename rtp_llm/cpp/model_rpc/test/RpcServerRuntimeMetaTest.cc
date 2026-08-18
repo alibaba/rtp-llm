@@ -19,6 +19,17 @@ public:
 
     void updateOutput(const StreamUpdateInfo&) override {}
 
+    // Terminal-state drivers for A2 promotion tests: the scheduler normally
+    // moves a stream through moveToNext(); these write the same public state
+    // machine fields directly.
+    void forceFinished() {
+        generate_status_->status.store(StreamState::FINISHED, std::memory_order_release);
+    }
+
+    void forceError(ErrorCode code, const std::string& msg) {
+        generate_status_->reportEvent(StreamEvents::Error, code, msg);
+    }
+
 private:
     static ModelConfig modelConfig() {
         ModelConfig config;
@@ -99,8 +110,7 @@ TEST(RpcServerRuntimeMetaTest, PriorityCancelDecoratesExistingTaskWithoutDuplica
     ASSERT_EQ(info.running_task_info_list.size(), 1);
     EXPECT_EQ(info.running_task_info_list[0].request_id, input->request_id);
     EXPECT_EQ(info.running_task_info_list[0].batch_id, 77);
-    EXPECT_EQ(info.running_task_info_list[0].priority_preemption_progress,
-              PriorityPreemptionProgress::CANCELING);
+    EXPECT_EQ(info.running_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELING);
 
     ASSERT_TRUE(meta.markPriorityPreemptionCanceled(
         input->request_id, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "priority preempted"));
@@ -127,10 +137,8 @@ TEST(RpcServerRuntimeMetaTest, PriorityCanceledIsPublishedOnceAndClearsControlOv
     ASSERT_EQ(info.finished_task_info_list.size(), 1);
     EXPECT_EQ(info.finished_task_info_list[0].request_id, 405);
     EXPECT_EQ(info.finished_task_info_list[0].batch_id, -1);
-    EXPECT_EQ(info.finished_task_info_list[0].error_code,
-              static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
-    EXPECT_EQ(info.finished_task_info_list[0].priority_preemption_progress,
-              PriorityPreemptionProgress::CANCELED);
+    EXPECT_EQ(info.finished_task_info_list[0].error_code, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+    EXPECT_EQ(info.finished_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELED);
 }
 
 TEST(RpcServerRuntimeMetaTest, PriorityCanceledReplacesRunningTaskWithSingleTypedFinishedRecord) {
@@ -159,10 +167,8 @@ TEST(RpcServerRuntimeMetaTest, PriorityCanceledReplacesRunningTaskWithSingleType
     ASSERT_EQ(info.finished_task_info_list.size(), 1);
     EXPECT_EQ(info.finished_task_info_list[0].request_id, input->request_id);
     EXPECT_EQ(info.finished_task_info_list[0].batch_id, 88);
-    EXPECT_EQ(info.finished_task_info_list[0].priority_preemption_progress,
-              PriorityPreemptionProgress::CANCELED);
-    EXPECT_EQ(info.finished_task_info_list[0].error_code,
-              static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+    EXPECT_EQ(info.finished_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELED);
+    EXPECT_EQ(info.finished_task_info_list[0].error_code, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
 }
 
 TEST(RpcServerRuntimeMetaTest, ConcurrentEarlyCancelAndEnqueueKeepOneBatchIdentity) {
@@ -181,7 +187,7 @@ TEST(RpcServerRuntimeMetaTest, ConcurrentEarlyCancelAndEnqueueKeepOneBatchIdenti
         const TaskIdentity identity{input->request_id, input->group_id};
         std::atomic<int>   ready{0};
         std::atomic<bool>  start{false};
-        const auto await_start = [&]() {
+        const auto         await_start = [&]() {
             ready.fetch_add(1, std::memory_order_release);
             while (!start.load(std::memory_order_acquire)) {
                 std::this_thread::yield();
@@ -245,8 +251,7 @@ TEST(RpcServerRuntimeMetaTest, OrdinaryDequeueCannotRegressPriorityCancelingToUn
     ASSERT_EQ(canceling.running_task_info_list.size(), 1);
     EXPECT_TRUE(canceling.finished_task_info_list.empty());
     EXPECT_EQ(canceling.running_task_info_list[0].batch_id, 89);
-    EXPECT_EQ(canceling.running_task_info_list[0].priority_preemption_progress,
-              PriorityPreemptionProgress::CANCELING);
+    EXPECT_EQ(canceling.running_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELING);
 
     ASSERT_TRUE(meta.markPriorityPreemptionCanceled(
         input->request_id, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "priority preempted"));
@@ -254,10 +259,8 @@ TEST(RpcServerRuntimeMetaTest, OrdinaryDequeueCannotRegressPriorityCancelingToUn
     EXPECT_TRUE(canceled.running_task_info_list.empty());
     ASSERT_EQ(canceled.finished_task_info_list.size(), 1);
     EXPECT_EQ(canceled.finished_task_info_list[0].batch_id, 89);
-    EXPECT_EQ(canceled.finished_task_info_list[0].priority_preemption_progress,
-              PriorityPreemptionProgress::CANCELED);
-    EXPECT_EQ(canceled.finished_task_info_list[0].error_code,
-              static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+    EXPECT_EQ(canceled.finished_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELED);
+    EXPECT_EQ(canceled.finished_task_info_list[0].error_code, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
 }
 
 // Engine execution time is the turnaround (finish - begin) minus the queue wait.
@@ -270,6 +273,70 @@ TEST(RpcServerRuntimeMetaTest, ComputeExecutionTimeExcludesQueueWait) {
     EXPECT_EQ(RpcServerRuntimeMeta::computeExecutionTimeMs(
                   /*finish_time_ms=*/1800, /*begin_time_us=*/1'000'000, /*waiting_time_ms=*/0),
               800);
+}
+
+// A2: a stream that reached FINISHED must be promoted into the finished
+// report even while its Decode-side fetch()/dequeue() call has not arrived
+// yet — the Master's next GetWorkerStatus poll settles the member without
+// waiting for the P/D fetch link.
+TEST(RpcServerRuntimeMetaTest, GetEngineScheduleInfoPromotesFinishedStreamWithoutDequeue) {
+    RpcServerRuntimeMeta meta;
+
+    auto make_stream = [](int64_t request_id, int64_t batch_id) {
+        auto input             = std::make_shared<GenerateInput>();
+        input->request_id      = request_id;
+        input->group_id        = batch_id;
+        input->generate_config = std::make_shared<GenerateConfig>();
+        input->input_ids       = torch::tensor({1, 2, 3}, torch::kInt32);
+        return std::make_shared<RuntimeMetaTestStream>(input);
+    };
+
+    auto running = make_stream(/*request_id=*/501, /*batch_id=*/91);
+    meta.enqueue(501, running);
+    auto done = make_stream(/*request_id=*/502, /*batch_id=*/91);
+    meta.enqueue(502, done);
+    done->forceFinished();
+
+    auto info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(info.running_task_info_list.size(), 1);
+    EXPECT_EQ(info.running_task_info_list[0].request_id, 501);
+    ASSERT_EQ(info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(info.finished_task_info_list[0].request_id, 502);
+    EXPECT_EQ(info.finished_task_info_list[0].batch_id, 91);
+    EXPECT_EQ(info.finished_task_info_list[0].error_code, 0);
+
+    // Incremental semantics: replaying with the returned version marker
+    // reports nothing new; the promoted member does not duplicate.
+    auto next = meta.getEngineScheduleInfo(info.latest_finished_version);
+    EXPECT_EQ(next.running_task_info_list.size(), 1);
+    EXPECT_TRUE(next.finished_task_info_list.empty());
+
+    // A late fetch-driven dequeue of the already-promoted member is an
+    // idempotent no-op: it must not publish a second finished record.
+    meta.dequeue(502, done);
+    auto after = meta.getEngineScheduleInfo(next.latest_finished_version);
+    EXPECT_TRUE(after.finished_task_info_list.empty());
+}
+
+// A2 error terminal: an errored stream (not yet FINISHED state-wise) is
+// promoted too, and the finished record carries the stream's error_code.
+TEST(RpcServerRuntimeMetaTest, GetEngineScheduleInfoPromotesErroredStreamWithErrorCode) {
+    RpcServerRuntimeMeta meta;
+    auto                 input = std::make_shared<GenerateInput>();
+    input->request_id          = 503;
+    input->group_id            = 92;
+    input->generate_config     = std::make_shared<GenerateConfig>();
+    input->input_ids           = torch::tensor({1, 2, 3}, torch::kInt32);
+    auto failed                = std::make_shared<RuntimeMetaTestStream>(input);
+    meta.enqueue(503, failed);
+    failed->forceError(ErrorCode::LONG_PROMPT_ERROR, "prompt exceeds context window");
+
+    auto info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    EXPECT_TRUE(info.running_task_info_list.empty());
+    ASSERT_EQ(info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(info.finished_task_info_list[0].request_id, 503);
+    EXPECT_EQ(info.finished_task_info_list[0].batch_id, 92);
+    EXPECT_EQ(info.finished_task_info_list[0].error_code, static_cast<int64_t>(ErrorCode::LONG_PROMPT_ERROR));
 }
 
 }  // namespace rtp_llm::test

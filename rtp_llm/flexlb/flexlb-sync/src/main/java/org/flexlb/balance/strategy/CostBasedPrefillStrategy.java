@@ -32,6 +32,16 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
     private final CacheAwareService cacheAwareService;
     private final ResourceMeasureFactory resourceMeasureFactory;
     private final EngineHealthReporter engineHealthReporter;
+
+    /**
+     * Fixed engine-wait penalty weight: milliseconds added to the Round-1
+     * score per engine-reported waiting stream (waitingQueryLen). 20ms
+     * matches one engine status-sync period, so a steadily growing
+     * engine-side queue makes the endpoint lose routing attractiveness in
+     * real time even when the master-side ledger looks clean.
+     */
+    private static final double ENGINE_WAIT_PENALTY_MS_PER_WAIT_STREAM = 20.0;
+
     private final ThreadLocal<CandidateSet> candidateSets =
             ThreadLocal.withInitial(CandidateSet::new);
 
@@ -244,8 +254,17 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                     ? ep.batcherEstimatedWaitMs(balanceContext.getPriority(),
                             balanceContext.getDeadlineMs(), balanceContext.getRequestId())
                     : ep.batcherWaitMs();
+            // Engine-reported wait penalty: each engine-side queued request
+            // (waitingQueryLen, ~20ms sync) adds the fixed weight below to
+            // the score, so engines whose engine-side queue keeps growing
+            // lose routing attractiveness even when the master-side view
+            // looks clean. Clamped at 1L<<40 so a pathological
+            // waitingQueryLen × weight cannot overflow the long score.
+            long engineWaitMs = Math.min(
+                    (long) (ep.getReportedWaitingQueryLen() * ENGINE_WAIT_PENALTY_MS_PER_WAIT_STREAM),
+                    1L << 40);
             feasible.setCandidate(feasibleCount++, ep, cacheHit,
-                    singlePrefillMs + endpointWaitMs + batcherWaitMs,
+                    singlePrefillMs + endpointWaitMs + batcherWaitMs + engineWaitMs,
                     endpointWaitMs, pendingCount);
             sumWaitMs += endpointWaitMs;
             sumPendingCount += pendingCount;

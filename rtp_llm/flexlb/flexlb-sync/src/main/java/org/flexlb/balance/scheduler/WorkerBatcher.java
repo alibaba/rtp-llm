@@ -39,6 +39,14 @@ public class WorkerBatcher {
             TimeUnit.MILLISECONDS.toNanos(1);
 
     /**
+     * Removal reason literal for admission-timeout evictions, shared by
+     * WorkerBatcher (leave-reason bucketing in the version-agnostic remove)
+     * and FlexlbBatchScheduler (timeoutEntry queue removal) so the string
+     * exists exactly once and the two call sites cannot drift apart.
+     */
+    public static final String REASON_ADMISSION_TIMEOUT = "ADMISSION_TIMEOUT";
+
+    /**
      * Auto-TPM queue order (PR-B unification): delegates to
      * {@link PriorityOrdering#STRICT} (priority desc → enqueue-seq asc for
      * same-priority FIFO) with {@code requestId} as the final deterministic
