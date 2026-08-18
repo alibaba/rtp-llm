@@ -189,11 +189,9 @@ bool PrefillGenerateContext::isPriorityPreempted() const {
 
 bool PrefillGenerateContext::tryMarkOtherTerminal() {
     std::lock_guard<std::mutex> lock(terminal_transition_mu_);
-    auto expected = PrefillTerminalCause::ACTIVE;
-    if (terminal_cause_.compare_exchange_strong(expected,
-                                                PrefillTerminalCause::OTHER,
-                                                std::memory_order_acq_rel,
-                                                std::memory_order_acquire)) {
+    auto                        expected = PrefillTerminalCause::ACTIVE;
+    if (terminal_cause_.compare_exchange_strong(
+            expected, PrefillTerminalCause::OTHER, std::memory_order_acq_rel, std::memory_order_acquire)) {
         return true;
     }
     return expected == PrefillTerminalCause::OTHER;
@@ -221,7 +219,7 @@ void PrefillGenerateContext::setLocalStreamSchedulerOwned(bool owned) {
     local_stream_scheduler_owned_ = owned;
 }
 
-bool PrefillGenerateContext::finalizePriorityPreemption() {
+bool PrefillGenerateContext::finalizePriorityPreemption(bool force_advance_stream) {
     std::lock_guard<std::mutex> lock(priority_finalize_mu_);
     if (priority_finalized_) {
         return true;
@@ -236,9 +234,8 @@ bool PrefillGenerateContext::finalizePriorityPreemption() {
     details.set_error_message(error_info.ToString());
     std::string serialized_details;
     details.SerializeToString(&serialized_details);
-    error_status = grpc::Status(transErrorCodeToGrpc(ErrorCode::PRIORITY_PREEMPTED),
-                                error_info.ToString(),
-                                serialized_details);
+    error_status =
+        grpc::Status(transErrorCodeToGrpc(ErrorCode::PRIORITY_PREEMPTED), error_info.ToString(), serialized_details);
 
     // TryCancel is only the stop trigger. Finish joins the existing P->D RPC
     // execution; Decode's cancellation finalizer runs before Finish returns.
@@ -251,7 +248,21 @@ bool PrefillGenerateContext::finalizePriorityPreemption() {
         // managed finalizer executor until the scheduler has completed its
         // terminal transition; never occupy a worker with an unbounded poll.
         if (local_stream_scheduler_owned_ && stream_->getStatus() != StreamState::FINISHED) {
-            return false;
+            if (!force_advance_stream) {
+                return false;
+            }
+            // Bounded-wait exhaustion path (caller retried ~30s). The error
+            // event is already latched above, so one forced moveToNext() must
+            // reach FINISHED, where the stream state machine releases its
+            // resources. The scheduler may be running its own moveToNext() in
+            // the same rare window: both calls serialize on the per-stream
+            // mutex and the FINISHED transition itself is idempotent, so this
+            // cannot double-release or corrupt stream state.
+            RTP_LLM_LOG_WARNING("request [%ld] priority finalizer forcing stream terminal transition after "
+                                "scheduler-wait budget exhausted (stream state [%d])",
+                                request_id,
+                                static_cast<int>(stream_->getStatus()));
+            stream_->moveToNext();
         }
         stream_->waitPendingAsyncBookkeeping();
         stream_->releaseResource();
@@ -260,9 +271,8 @@ bool PrefillGenerateContext::finalizePriorityPreemption() {
     }
 
     if (meta) {
-        meta->markPriorityPreemptionCanceled(request_id,
-                                             static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED),
-                                             "preempted by a higher-priority request");
+        meta->markPriorityPreemptionCanceled(
+            request_id, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "preempted by a higher-priority request");
     }
     priority_finalized_ = true;
     return true;
@@ -295,8 +305,13 @@ void PrefillGenerateContext::markRequestEnd() {
         }
         auto          stub = connect_status.value().stub.get();
         ClientContext client_context;
-        EmptyPB       response;
-        auto          grpc_status = stub->RemoteFinish(&client_context, finish_request, &response);
+        // Best-effort notification semantics: a remote worker that never
+        // answers must not block the finalizer/prefill thread pool forever.
+        // Failures are already warned and ignored below; the deadline only
+        // bounds each synchronous wait.
+        client_context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+        EmptyPB response;
+        auto    grpc_status = stub->RemoteFinish(&client_context, finish_request, &response);
         if (!grpc_status.ok()) {
             RTP_LLM_LOG_WARNING("request [%d], remote finish for ip %s failed, ignore markRequestEnd for it",
                                 real_id,

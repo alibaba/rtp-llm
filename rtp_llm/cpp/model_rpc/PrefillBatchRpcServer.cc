@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/AtomicUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "autil/EnvUtil.h"
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -151,6 +152,24 @@ int64_t batchErrorCode(const grpc::Status& status) {
 // need to cover the rolling dispatch/reconciliation window. Keeping the two
 // registries on the same bounded lifetime also prevents unbounded id history.
 constexpr int64_t kPriorityCancelRegistryTtlMs = 10 * 60 * 1000;
+
+// Bounded wait for the scheduler's terminal transition in the priority
+// finalizer. Each retry costs one executor turn plus a 1ms sleep, so
+// 30000 retries is approximately 30 seconds before the forced advance.
+constexpr int64_t kMaxPriorityFinalizeSchedulerWaitIters = 30000;
+
+// Z1 backstop: FlexLB batch traffic normally carries no per-request
+// timeout_ms, so a FetchResponse thread blocked in pollStreamOutput/nextOutput
+// would wait forever (NormalGenerateStream's waitNotEmpty has no timeout and
+// checkTimeout only fires when timeout_ms > 0). When a batch request did not
+// set an explicit timeout, install this default on the per-slot input copy so
+// the whole chain (context request_timeout in buildSlotContexts, stream
+// checkTimeout via QueryConverter) gets a bound. 0 disables the backstop.
+int64_t batchStreamDefaultTimeoutMs() {
+    static const int64_t default_timeout_ms =
+        autil::EnvUtil::getEnv("RTP_LLM_BATCH_STREAM_DEFAULT_TIMEOUT_MS", int64_t(300000));
+    return default_timeout_ms;
+}
 
 }  // namespace
 
@@ -558,9 +577,28 @@ void PrefillBatchRpcServer::finalizePriorityPreemption(int64_t                  
                                                        std::shared_ptr<DeferredPrefillContext> deferred) {
     if (!deferred->context->finalizePriorityPreemption()) {
         // The scheduler still owns the local stream. Retry in a later executor
-        // turn rather than occupying a worker in an unbounded polling loop.
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        schedulePriorityFinalization(request_id, std::move(deferred));
+        // turn rather than occupying a worker in an unbounded polling loop,
+        // but cap the total wait so a wedged scheduler cannot pin the CANCELING
+        // overlay forever: kMaxPriorityFinalizeSchedulerWaitIters retries with
+        // a 1ms sleep each ~= 30s.
+        if (++deferred->priority_finalize_scheduler_wait_iters < kMaxPriorityFinalizeSchedulerWaitIters) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            schedulePriorityFinalization(request_id, std::move(deferred));
+            return;
+        }
+        // Budget exhausted. The context has already latched the PRIORITY_PREEMPTED
+        // error on the stream, so a forced moveToNext() must reach FINISHED and
+        // release resources (idempotent; serialized on the stream mutex against
+        // a concurrent scheduler moveToNext() in the same rare window). The
+        // runtime-meta overlay aging sweep remains the ledger backstop if even
+        // this path fails.
+        RTP_LLM_LOG_WARNING("request [%ld] priority finalizer exceeded %ld scheduler-wait retries (~%ld ms); "
+                            "forcing terminal transition",
+                            request_id,
+                            kMaxPriorityFinalizeSchedulerWaitIters,
+                            kMaxPriorityFinalizeSchedulerWaitIters);
+        deferred->context->finalizePriorityPreemption(/*force_advance_stream=*/true);
+        deferred_contexts_->publishPriorityPreemptionCanceled(request_id, deferred.get());
         return;
     }
     deferred_contexts_->publishPriorityPreemptionCanceled(request_id, deferred.get());
@@ -795,12 +833,23 @@ grpc::Status PrefillBatchRpcServer::admitGroup(const EnqueueGroupRequestPB* requ
     }
 
     slots.reserve(all_inputs.size());
-    const int group_size = static_cast<int>(all_inputs.size());
+    const int     group_size                      = static_cast<int>(all_inputs.size());
+    const int64_t batch_stream_default_timeout_ms = batchStreamDefaultTimeoutMs();
     for (const auto* input : all_inputs) {
         auto input_copy = std::make_shared<GenerateInputPB>(*input);
         // Worker status derives batch_id from stream metadata; the batch RPC envelope is authoritative.
         input_copy->set_group_size(group_size);
         input_copy->mutable_group_id()->set_value(request->batch_id());
+        if (batch_stream_default_timeout_ms > 0 && input_copy->generate_config().timeout_ms() <= 0) {
+            // Respect an explicit per-request timeout; only install the
+            // default when the caller sent none. Written on the per-slot proto
+            // copy, so upstream request data is untouched. buildSlotContexts
+            // (context request_timeout) and QueryConverter (stream
+            // GenerateConfig.timeout_ms -> checkTimeout) both read this field,
+            // so one write bounds the entire chain including the
+            // FetchResponse nextOutput wait.
+            input_copy->mutable_generate_config()->set_timeout_ms(batch_stream_default_timeout_ms);
+        }
 
         BatchSlot slot;
         slot.input                   = std::move(input_copy);

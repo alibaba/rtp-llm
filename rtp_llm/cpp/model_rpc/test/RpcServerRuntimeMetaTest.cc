@@ -2,6 +2,7 @@
 
 #include <thread>
 
+#include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/model_rpc/RpcServerRuntimeMeta.h"
 
 namespace rtp_llm::test {
@@ -99,8 +100,7 @@ TEST(RpcServerRuntimeMetaTest, PriorityCancelDecoratesExistingTaskWithoutDuplica
     ASSERT_EQ(info.running_task_info_list.size(), 1);
     EXPECT_EQ(info.running_task_info_list[0].request_id, input->request_id);
     EXPECT_EQ(info.running_task_info_list[0].batch_id, 77);
-    EXPECT_EQ(info.running_task_info_list[0].priority_preemption_progress,
-              PriorityPreemptionProgress::CANCELING);
+    EXPECT_EQ(info.running_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELING);
 
     ASSERT_TRUE(meta.markPriorityPreemptionCanceled(
         input->request_id, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "priority preempted"));
@@ -127,10 +127,8 @@ TEST(RpcServerRuntimeMetaTest, PriorityCanceledIsPublishedOnceAndClearsControlOv
     ASSERT_EQ(info.finished_task_info_list.size(), 1);
     EXPECT_EQ(info.finished_task_info_list[0].request_id, 405);
     EXPECT_EQ(info.finished_task_info_list[0].batch_id, -1);
-    EXPECT_EQ(info.finished_task_info_list[0].error_code,
-              static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
-    EXPECT_EQ(info.finished_task_info_list[0].priority_preemption_progress,
-              PriorityPreemptionProgress::CANCELED);
+    EXPECT_EQ(info.finished_task_info_list[0].error_code, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+    EXPECT_EQ(info.finished_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELED);
 }
 
 TEST(RpcServerRuntimeMetaTest, PriorityCanceledReplacesRunningTaskWithSingleTypedFinishedRecord) {
@@ -159,10 +157,8 @@ TEST(RpcServerRuntimeMetaTest, PriorityCanceledReplacesRunningTaskWithSingleType
     ASSERT_EQ(info.finished_task_info_list.size(), 1);
     EXPECT_EQ(info.finished_task_info_list[0].request_id, input->request_id);
     EXPECT_EQ(info.finished_task_info_list[0].batch_id, 88);
-    EXPECT_EQ(info.finished_task_info_list[0].priority_preemption_progress,
-              PriorityPreemptionProgress::CANCELED);
-    EXPECT_EQ(info.finished_task_info_list[0].error_code,
-              static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+    EXPECT_EQ(info.finished_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELED);
+    EXPECT_EQ(info.finished_task_info_list[0].error_code, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
 }
 
 TEST(RpcServerRuntimeMetaTest, ConcurrentEarlyCancelAndEnqueueKeepOneBatchIdentity) {
@@ -181,7 +177,7 @@ TEST(RpcServerRuntimeMetaTest, ConcurrentEarlyCancelAndEnqueueKeepOneBatchIdenti
         const TaskIdentity identity{input->request_id, input->group_id};
         std::atomic<int>   ready{0};
         std::atomic<bool>  start{false};
-        const auto await_start = [&]() {
+        const auto         await_start = [&]() {
             ready.fetch_add(1, std::memory_order_release);
             while (!start.load(std::memory_order_acquire)) {
                 std::this_thread::yield();
@@ -245,8 +241,7 @@ TEST(RpcServerRuntimeMetaTest, OrdinaryDequeueCannotRegressPriorityCancelingToUn
     ASSERT_EQ(canceling.running_task_info_list.size(), 1);
     EXPECT_TRUE(canceling.finished_task_info_list.empty());
     EXPECT_EQ(canceling.running_task_info_list[0].batch_id, 89);
-    EXPECT_EQ(canceling.running_task_info_list[0].priority_preemption_progress,
-              PriorityPreemptionProgress::CANCELING);
+    EXPECT_EQ(canceling.running_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELING);
 
     ASSERT_TRUE(meta.markPriorityPreemptionCanceled(
         input->request_id, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "priority preempted"));
@@ -254,10 +249,8 @@ TEST(RpcServerRuntimeMetaTest, OrdinaryDequeueCannotRegressPriorityCancelingToUn
     EXPECT_TRUE(canceled.running_task_info_list.empty());
     ASSERT_EQ(canceled.finished_task_info_list.size(), 1);
     EXPECT_EQ(canceled.finished_task_info_list[0].batch_id, 89);
-    EXPECT_EQ(canceled.finished_task_info_list[0].priority_preemption_progress,
-              PriorityPreemptionProgress::CANCELED);
-    EXPECT_EQ(canceled.finished_task_info_list[0].error_code,
-              static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+    EXPECT_EQ(canceled.finished_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELED);
+    EXPECT_EQ(canceled.finished_task_info_list[0].error_code, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
 }
 
 // Engine execution time is the turnaround (finish - begin) minus the queue wait.
@@ -270,6 +263,104 @@ TEST(RpcServerRuntimeMetaTest, ComputeExecutionTimeExcludesQueueWait) {
     EXPECT_EQ(RpcServerRuntimeMeta::computeExecutionTimeMs(
                   /*finish_time_ms=*/1800, /*begin_time_us=*/1'000'000, /*waiting_time_ms=*/0),
               800);
+}
+
+// P1 ledger backstop: an aged CANCELING overlay is swept with a typed CANCELED
+// finished record (8429) and disappears from the running projection; a fresh
+// overlay is never swept; the late finalizer stays idempotent afterwards.
+TEST(RpcServerRuntimeMetaTest, SweepStalePriorityOverlayPublishesTypedCanceledAndClearsOverlay) {
+    RpcServerRuntimeMeta meta;
+    const TaskIdentity   identity{/*request_id=*/501, /*batch_id=*/91};
+    meta.markPriorityPreemptionCanceling(identity);
+
+    const int64_t now_ms = autil::TimeUtility::currentTimeInMilliSeconds();
+    // Fresh overlay: below the age threshold, nothing is swept.
+    EXPECT_EQ(meta.sweepStalePriorityOverlays(now_ms, /*max_age_ms=*/300000), 0u);
+    auto fresh = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(fresh.running_task_info_list.size(), 1);
+    EXPECT_EQ(fresh.running_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELING);
+    EXPECT_TRUE(fresh.finished_task_info_list.empty());
+
+    // Aged overlay: swept once, typed CANCELED published, overlay gone.
+    EXPECT_EQ(meta.sweepStalePriorityOverlays(now_ms + 300001, /*max_age_ms=*/300000), 1u);
+    // Second sweep is a no-op (nothing left to age out).
+    EXPECT_EQ(meta.sweepStalePriorityOverlays(now_ms + 300002, /*max_age_ms=*/300000), 0u);
+
+    auto swept = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    EXPECT_TRUE(swept.running_task_info_list.empty());
+    ASSERT_EQ(swept.finished_task_info_list.size(), 1);
+    EXPECT_EQ(swept.finished_task_info_list[0].request_id, 501);
+    EXPECT_EQ(swept.finished_task_info_list[0].batch_id, 91);
+    EXPECT_EQ(swept.finished_task_info_list[0].error_code, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+    EXPECT_EQ(swept.finished_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELED);
+
+    // Idempotent with the finalizer chain: no overlay left, so a late
+    // markPriorityPreemptionCanceled keeps its "not found -> false" semantics.
+    EXPECT_FALSE(meta.markPriorityPreemptionCanceled(
+        501, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "late finalizer"));
+    auto after_late = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(after_late.finished_task_info_list.size(), 1);
+}
+
+// The sweep must never remove a live stream's running entry: the typed CANCELED
+// record is published for the control ledger, while the live runtime entry
+// stays for its own teardown path to close.
+TEST(RpcServerRuntimeMetaTest, SweepStaleOverlayKeepsLiveRunningStreamEntry) {
+    RpcServerRuntimeMeta meta;
+    auto                 input = std::make_shared<GenerateInput>();
+    input->request_id          = 502;
+    input->group_id            = 92;
+    input->generate_config     = std::make_shared<GenerateConfig>();
+    input->input_ids           = torch::tensor({1, 2, 3}, torch::kInt32);
+    auto stream                = std::make_shared<RuntimeMetaTestStream>(input);
+    // RuntimeMetaTestStream stays in its initial WAITING state: a live stream.
+
+    const TaskIdentity identity{502, 92};
+    meta.markPriorityPreemptionCanceling(identity);
+    meta.enqueue(identity, stream);
+
+    auto canceling = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(canceling.running_task_info_list.size(), 1);
+    EXPECT_EQ(canceling.running_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELING);
+
+    const int64_t now_ms = autil::TimeUtility::currentTimeInMilliSeconds();
+    ASSERT_EQ(meta.sweepStalePriorityOverlays(now_ms + 300001, /*max_age_ms=*/300000), 1u);
+
+    auto info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    // Ledger side: exactly one typed CANCELED finished record.
+    ASSERT_EQ(info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(info.finished_task_info_list[0].request_id, 502);
+    EXPECT_EQ(info.finished_task_info_list[0].error_code, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+    EXPECT_EQ(info.finished_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELED);
+    // Live stream side: the running entry survives, no longer CANCELING.
+    ASSERT_EQ(info.running_task_info_list.size(), 1);
+    EXPECT_EQ(info.running_task_info_list[0].request_id, 502);
+    EXPECT_EQ(info.running_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::NONE);
+}
+
+// The automatic entry point (getEngineScheduleInfo) must not sweep fresh
+// overlays with the production default threshold, and a disabled sweep
+// (max_age <= 0) never removes anything.
+TEST(RpcServerRuntimeMetaTest, GetEngineScheduleInfoKeepsFreshOverlayAndHonorsDisabledSweep) {
+    RpcServerRuntimeMeta meta;
+    const TaskIdentity   identity{/*request_id=*/503, /*batch_id=*/93};
+    meta.markPriorityPreemptionCanceling(identity);
+
+    // Automatic path with the production threshold: the overlay is fresh, so
+    // repeated snapshots keep the CANCELING control record.
+    for (int i = 0; i < 3; ++i) {
+        auto info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+        ASSERT_EQ(info.running_task_info_list.size(), 1);
+        EXPECT_EQ(info.running_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELING);
+    }
+
+    // Disabled sweep (<=0) must not touch even a logically-aged overlay.
+    const int64_t now_ms = autil::TimeUtility::currentTimeInMilliSeconds();
+    EXPECT_EQ(meta.sweepStalePriorityOverlays(now_ms + 10'000'000, /*max_age_ms=*/0), 0u);
+    EXPECT_EQ(meta.sweepStalePriorityOverlays(now_ms + 10'000'000, /*max_age_ms=*/-1), 0u);
+    auto info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(info.running_task_info_list.size(), 1);
+    EXPECT_EQ(info.running_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELING);
 }
 
 }  // namespace rtp_llm::test

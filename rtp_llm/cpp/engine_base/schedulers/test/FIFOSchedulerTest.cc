@@ -18,9 +18,8 @@ namespace rtp_llm {
 namespace {
 
 bool enqueueIndividually(FIFOScheduler& scheduler, const vector<GenerateStreamPtr>& streams) {
-    return std::all_of(streams.begin(), streams.end(), [&scheduler](const auto& stream) {
-        return scheduler.enqueue(stream).ok();
-    });
+    return std::all_of(
+        streams.begin(), streams.end(), [&scheduler](const auto& stream) { return scheduler.enqueue(stream).ok(); });
 }
 
 }  // namespace
@@ -569,8 +568,8 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesPostAllocationContextLengthAndSto
     auto tail_stream               = make_stream(1);
     auto errored_tail_stream       = make_stream(1);
     errored_tail_stream->reportError(ErrorCode::CANCELLED, "cancelled before admission");
-    ASSERT_TRUE(enqueueIndividually(
-        scheduler, {cached_stream, threshold_crossing_stream, tail_stream, errored_tail_stream}));
+    ASSERT_TRUE(
+        enqueueIndividually(scheduler, {cached_stream, threshold_crossing_stream, tail_stream, errored_tail_stream}));
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
@@ -1225,8 +1224,7 @@ TEST_F(FIFOSchedulerTest, prefillShapeIncludesReusedPrefixLength) {
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
-    auto cached_stream =
-        makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(60, 1));
+    auto cached_stream = makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(60, 1));
     cached_stream->reportEvent(StreamEvents::CanRun);
     ASSERT_EQ(cached_stream->moveToNext(), StreamState::RUNNING);
     cached_stream->setReuseLength(59);
@@ -1234,8 +1232,7 @@ TEST_F(FIFOSchedulerTest, prefillShapeIncludesReusedPrefixLength) {
     ASSERT_EQ(cached_stream->contextLength(), 1);
     ASSERT_EQ(cached_stream->prefixLength(), 59);
 
-    auto short_stream =
-        makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(39, 1));
+    auto short_stream = makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(39, 1));
     ASSERT_TRUE(enqueueIndividually(scheduler, {cached_stream, short_stream}));
 
     auto result = scheduler.schedule();
@@ -1263,9 +1260,8 @@ TEST_F(FIFOSchedulerTest, prefillShapeUsesCurrentBatchSizeAsWidth) {
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
-    auto long_single =
-        makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(40, 1));
-    auto batched_query                                   = std::make_shared<GenerateInput>();
+    auto long_single   = makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(40, 1));
+    auto batched_query = std::make_shared<GenerateInput>();
     batched_query->input_ids                             = torch::ones({10}, torch::kInt32);
     batched_query->generate_config                       = std::make_shared<GenerateConfig>();
     batched_query->generate_config->num_return_sequences = 3;
@@ -1919,8 +1915,7 @@ TEST_F(FIFOSchedulerTest, blockedNormalLaneLeavesResidualCapacityToExplicitGroup
 
     // This ordinary stream is permanently too large for the per-round token
     // budget but valid against the Engine's total KV capacity.
-    auto blocked_normal = makeSingleStream(
-        model_config, runtime_config, resource_context, std::vector<int>(6, 1));
+    auto blocked_normal = makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(6, 1));
     vector<GenerateStreamPtr> small_group = {
         makeSingleStream(model_config, runtime_config, resource_context, {1}),
         makeSingleStream(model_config, runtime_config, resource_context, {2}),
@@ -2705,6 +2700,136 @@ TEST_F(FIFOSchedulerTest, testDifferentGroupMetadataDoesNotIsolateWaitingStreams
     ASSERT_EQ(result.value().size(), 4);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 4);
+}
+
+// Z3 regression: evaluateWaitingGroupQueue's admission guard skips the whole
+// group queue while the running lane is occupied and only ever inspects the
+// queue head. An errored victim inside a NON-head group must still reach
+// FINISHED via sweepErroredGroupStreams, without admitting anything.
+TEST_F(FIFOSchedulerTest, testSweepErroredGroupStreamsFinalizesNonHeadGroupVictim) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    auto make_stream = [&](int token) {
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids                     = torch::tensor({token}, torch::kInt32);
+        query->generate_config               = make_shared<GenerateConfig>();
+        return make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    };
+
+    // Occupy the NORMAL running lane so evaluateWaitingGroupQueue's admission
+    // guard (running non-empty) blocks all group admission in every round below.
+    auto runner = make_stream(1);
+    ASSERT_TRUE(scheduler.enqueue(runner).ok());
+    auto first = scheduler.schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(first.value().size(), 1);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
+
+    // Head group: healthy members only.
+    auto head_1       = make_stream(2);
+    auto head_2       = make_stream(3);
+    auto head_enqueue = scheduler.enqueueGroup({head_1, head_2});
+    ASSERT_EQ(head_enqueue.first, std::vector<bool>({true, true}));
+
+    // Non-head group: one healthy member plus one errored victim (the Z3 shape
+    // the admission guard can never reach).
+    auto tail_1      = make_stream(4);
+    auto tail_victim = make_stream(5);
+    tail_victim->reportError(ErrorCode::PRIORITY_PREEMPTED, "preempted by a higher-priority request");
+    auto tail_enqueue = scheduler.enqueueGroup({tail_1, tail_victim});
+    ASSERT_EQ(tail_enqueue.first, std::vector<bool>({true, true}));
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 4);
+
+    // One scheduling round with the running lane occupied: group admission is
+    // blocked, but the sweep must still finalize the non-head victim.
+    auto second = scheduler.schedule();
+    ASSERT_TRUE(second.ok());
+    ASSERT_EQ(second.value().size(), 1);
+
+    EXPECT_EQ(tail_victim->getStatus(), StreamState::FINISHED);
+    EXPECT_TRUE(tail_victim->hasError());
+    EXPECT_EQ(tail_victim->statusInfo().code(), ErrorCode::PRIORITY_PREEMPTED);
+    // Healthy members of both groups are untouched by the sweep.
+    EXPECT_EQ(head_1->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(head_2->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(tail_1->getStatus(), StreamState::WAITING);
+    // The victim was erased from its (non-head) group: 4 queued - 1 swept.
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 3);
+    EXPECT_EQ(scheduler.runningStreamsSize(), 1);
+}
+
+// A group whose members are ALL errored must be popped entirely, and the sweep
+// must not disturb a healthy head group ahead of it.
+TEST_F(FIFOSchedulerTest, testSweepErroredGroupStreamsPopsFullyErroredNonHeadGroup) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    auto make_stream = [&](int token) {
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids                     = torch::tensor({token}, torch::kInt32);
+        query->generate_config               = make_shared<GenerateConfig>();
+        return make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    };
+
+    auto runner = make_stream(1);
+    ASSERT_TRUE(scheduler.enqueue(runner).ok());
+    auto first = scheduler.schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
+
+    auto head_1       = make_stream(2);
+    auto head_2       = make_stream(3);
+    auto head_enqueue = scheduler.enqueueGroup({head_1, head_2});
+    ASSERT_EQ(head_enqueue.first, std::vector<bool>({true, true}));
+
+    auto victim_1 = make_stream(4);
+    auto victim_2 = make_stream(5);
+    victim_1->reportError(ErrorCode::PRIORITY_PREEMPTED, "preempted by a higher-priority request");
+    victim_2->reportError(ErrorCode::CANCELLED, "cancelled");
+    auto tail_enqueue = scheduler.enqueueGroup({victim_1, victim_2});
+    ASSERT_EQ(tail_enqueue.first, std::vector<bool>({true, true}));
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 4);
+
+    auto second = scheduler.schedule();
+    ASSERT_TRUE(second.ok());
+
+    EXPECT_EQ(victim_1->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(victim_2->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(head_1->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(head_2->getStatus(), StreamState::WAITING);
+    // The fully-errored non-head group was popped; only the head group remains.
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 2);
+    // runner + 2 head members.
+    EXPECT_EQ(scheduler.onflightStreams(), 3);
 }
 
 }  // namespace rtp_llm
