@@ -11,6 +11,7 @@
 #include <deque>
 #include <exception>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -161,13 +162,22 @@ constexpr int64_t kMaxPriorityFinalizeSchedulerWaitIters = 30000;
 // Z1 backstop: FlexLB batch traffic normally carries no per-request
 // timeout_ms, so a FetchResponse thread blocked in pollStreamOutput/nextOutput
 // would wait forever (NormalGenerateStream's waitNotEmpty has no timeout and
-// checkTimeout only fires when timeout_ms > 0). When a batch request did not
-// set an explicit timeout, install this default on the per-slot input copy so
-// the whole chain (context request_timeout in buildSlotContexts, stream
-// checkTimeout via QueryConverter) gets a bound. 0 disables the backstop.
+// checkTimeout only fires when timeout_ms > 0). When enabled and a batch
+// request did not set an explicit timeout, this installs the default on the
+// per-slot input copy so the prefill-side chain (context request_timeout in
+// buildSlotContexts, stream checkTimeout via QueryConverter) gets a bound.
+//
+// DISABLED BY DEFAULT (R1 review finding): the injected value also flows into
+// the downstream GenerateInputPB and into PrefillGenerateContext's
+// request_timeout_ms, which would tighten the P->D streaming RPC deadline and
+// truncate long decode generations far below max_rpc_timeout_ms's default 2h.
+// The prefill-side consumers are still isolated from that (timeout stripping
+// in remoteAllocateResource + buildSlotContexts), but out of caution the knob
+// stays off until those strips are proven in production. 0 disables the
+// backstop.
 int64_t batchStreamDefaultTimeoutMs() {
     static const int64_t default_timeout_ms =
-        autil::EnvUtil::getEnv("RTP_LLM_BATCH_STREAM_DEFAULT_TIMEOUT_MS", int64_t(300000));
+        autil::EnvUtil::getEnv("RTP_LLM_BATCH_STREAM_DEFAULT_TIMEOUT_MS", int64_t(0));
     return default_timeout_ms;
 }
 
@@ -486,6 +496,22 @@ void DeferredPrefillContextMap::publishPriorityPreemptionCanceled(int64_t       
     }
 }
 
+void DeferredPrefillContextMap::dropActiveEntryAfterLedgerSweep(int64_t request_id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    // Mirror publishPriorityPreemptionCanceled's bookkeeping, but
+    // unconditionally (the ledger sweep has no DeferredPrefillContext*
+    // identity for this request): the typed CANCELED record is already
+    // observable in WorkerStatus, so downgrade the ACTIVE_CANCEL tombstone to
+    // an absent-request fence (duplicate Cancels then return TOMBSTONED
+    // idempotently) and drop the stale active entry.
+    auto tombstone = priority_preemption_tombstones_.find(request_id);
+    if (tombstone != priority_preemption_tombstones_.end()
+        && tombstone->second.kind == PriorityPreemptionTombstoneKind::ACTIVE_CANCEL) {
+        tombstone->second.kind = PriorityPreemptionTombstoneKind::ABSENT_FENCE;
+    }
+    active_contexts_.erase(request_id);
+}
+
 void DeferredPrefillContextMap::finish(int64_t request_id, const DeferredPrefillContext* expected) {
     std::lock_guard<std::mutex> lock(mu_);
     auto                        it = active_contexts_.find(request_id);
@@ -639,6 +665,18 @@ grpc::Status PrefillBatchRpcServer::init(const EngineInitParams&                
     auto ret = PrefillRpcServer::init(maga_init_params, mm_process_engine, std::move(propose_params));
     if (!ret.ok()) {
         return ret;
+    }
+    // W-2 registry linkage: when the runtime-meta ledger ages out a CANCELING
+    // overlay (finalizer chain lost/stalled), mirror the publication here so
+    // the deferred-context registry drops the active entry in the same
+    // round instead of holding it until shutdown. The hook runs on the
+    // WorkerStatus polling thread, OUTSIDE the runtime-meta lock (see
+    // sweepStalePriorityOverlays); installing it before thread pools start
+    // provides the needed happens-before.
+    if (meta_) {
+        auto registry = deferred_contexts_;
+        meta_->setStaleOverlaySweptHook(
+            [registry](int64_t request_id) { registry->dropActiveEntryAfterLedgerSweep(request_id); });
     }
     initThreadPools();
     return grpc::Status::OK;
@@ -835,23 +873,29 @@ grpc::Status PrefillBatchRpcServer::admitGroup(const EnqueueGroupRequestPB* requ
     slots.reserve(all_inputs.size());
     const int     group_size                      = static_cast<int>(all_inputs.size());
     const int64_t batch_stream_default_timeout_ms = batchStreamDefaultTimeoutMs();
+    // GenerateConfigPB.timeout_ms is int32: clamp the env value (int64) to
+    // INT32_MAX before writing so a huge knob cannot wrap around on the
+    // implicit narrowing conversion (R1d).
+    const int32_t batch_stream_default_timeout_clamped =
+        static_cast<int32_t>(std::min<int64_t>(batch_stream_default_timeout_ms, std::numeric_limits<int32_t>::max()));
     for (const auto* input : all_inputs) {
         auto input_copy = std::make_shared<GenerateInputPB>(*input);
         // Worker status derives batch_id from stream metadata; the batch RPC envelope is authoritative.
         input_copy->set_group_size(group_size);
         input_copy->mutable_group_id()->set_value(request->batch_id());
-        if (batch_stream_default_timeout_ms > 0 && input_copy->generate_config().timeout_ms() <= 0) {
+        BatchSlot slot;
+        if (batch_stream_default_timeout_clamped > 0 && input_copy->generate_config().timeout_ms() <= 0) {
             // Respect an explicit per-request timeout; only install the
             // default when the caller sent none. Written on the per-slot proto
-            // copy, so upstream request data is untouched. buildSlotContexts
-            // (context request_timeout) and QueryConverter (stream
-            // GenerateConfig.timeout_ms -> checkTimeout) both read this field,
-            // so one write bounds the entire chain including the
-            // FetchResponse nextOutput wait.
-            input_copy->mutable_generate_config()->set_timeout_ms(batch_stream_default_timeout_ms);
+            // copy, so upstream request data is untouched. The prefill-side
+            // consumers (buildSlotContexts context request_timeout, stream
+            // checkTimeout via QueryConverter) both read this field, so one
+            // write bounds the local chain including the FetchResponse
+            // nextOutput wait. Downstream propagation is stripped separately
+            // (see slot.default_timeout_injected / remoteAllocateResource).
+            input_copy->mutable_generate_config()->set_timeout_ms(batch_stream_default_timeout_clamped);
+            slot.default_timeout_injected = true;
         }
-
-        BatchSlot slot;
         slot.input                   = std::move(input_copy);
         slot.fetch_attach_timeout_ms = request->fetch_attach_timeout_ms();
         slots.push_back(std::move(slot));
@@ -930,10 +974,19 @@ grpc::Status PrefillBatchRpcServer::acceptGroup(std::vector<BatchSlot> slots, En
 void PrefillBatchRpcServer::buildSlotContexts(std::vector<BatchSlot>& slots) {
     for (auto& slot : slots) {
         RPCContext rpc_ctx{slot.input.get(), nullptr};
-        auto       pfx_ctx = std::make_unique<PrefillGenerateContext>(
+        // R1c: strip an admitGroup-injected default timeout before it becomes
+        // the context's request_timeout_ms. That field feeds final_timeout_ms
+        // in remoteAllocateResource (P->D streaming RPC deadline) and the
+        // publishSlot deadline/TTL logic; an injected default must only bound
+        // the prefill-side stream (checkTimeout reads the pb via
+        // QueryConverter), never the downstream RPC lifetime, which keeps
+        // max_rpc_timeout_ms (default 2h) authoritative.
+        const int64_t context_timeout_ms =
+            slot.default_timeout_injected ? 0 : slot.input->generate_config().timeout_ms();
+        auto pfx_ctx = std::make_unique<PrefillGenerateContext>(
             &this->resource(),
             rpc_ctx,
-            slot.input->generate_config().timeout_ms(),
+            context_timeout_ms,
             /*server_context=*/nullptr,
             metrics_reporter_,
             meta_,

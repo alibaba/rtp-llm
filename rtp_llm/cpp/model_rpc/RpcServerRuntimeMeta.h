@@ -1,6 +1,7 @@
 #pragma once
 #include <algorithm>
 #include <atomic>
+#include <functional>
 #include <list>
 #include <shared_mutex>
 #include <string>
@@ -21,6 +22,11 @@ struct TaskIdentity {
 struct RunningEntry {
     EngineScheduleInfo::TaskInfo task_info;
     GenerateStreamPtr            stream;
+    // S-1 single-record invariant: latched when the aging sweep published the
+    // typed CANCELED record while this live entry was preserved. The stream's
+    // own later dequeue() then removes the entry without publishing a second
+    // (untyped) finished record. C++-side bookkeeping only; never serialized.
+    bool canceled_published = false;
 };
 
 // Control-record overlay installed by priority Cancel. installed_at_ms anchors
@@ -151,11 +157,41 @@ public:
     // Publish the single authoritative completion delta for priority Cancel.
     // The caller must invoke this only after the Prefill request execution has
     // quiesced and its local/downstream cleanup path has returned.
+    //
+    // Return semantics (P1-1 defect A fix): true when this call closed the
+    // control record — including the sweep-meets-late-finalizer rendezvous
+    // where the aging sweep already consumed the overlay but the paired
+    // running entry still lingers: that entry is removed HERE so it can never
+    // leak permanently (the late finalizer's stream_.reset() skips the
+    // ordinary dequeue teardown). false only when neither overlay nor running
+    // entry exists, i.e. the request is already fully closed.
     bool markPriorityPreemptionCanceled(int64_t request_id, int64_t error_code, const std::string& error_message) {
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
         auto                                overlay = priority_preemption_overlays_.find(request_id);
         if (overlay == priority_preemption_overlays_.end()) {
-            return false;
+            auto running = running_streams_.find(request_id);
+            if (running == running_streams_.end()) {
+                return false;
+            }
+            if (running->second.canceled_published) {
+                // The sweep already published the typed CANCELED record while
+                // preserving this live entry (single-record invariant): remove
+                // the entry WITHOUT publishing anything.
+                running_streams_.erase(running);
+                return true;
+            }
+            // Defensive branch, unreachable through current callers (the only
+            // overlay consumer besides this method is the sweep, which always
+            // latches canceled_published on a preserved entry). If some future
+            // path still drops the overlay without publishing, guarantee at
+            // least one terminal record by reusing the finalizer's own
+            // merge-and-publish body rather than silently erasing the entry.
+            publishCanceledRecordLocked(request_id,
+                                        running->second.task_info,
+                                        error_code,
+                                        error_message,
+                                        /*keep_live_running_entry=*/false);
+            return true;
         }
         auto task_info = overlay->second.task_info;
         priority_preemption_overlays_.erase(overlay);
@@ -175,6 +211,14 @@ public:
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
         auto                                ptr = running_streams_.find(request_id);
         if (ptr == running_streams_.end()) {
+            return;
+        }
+        // S-1 single-record invariant (P1-1 defect B fix): the aging sweep
+        // already published the typed CANCELED record while this live stream
+        // kept running. Ordinary teardown must only remove the entry — never
+        // emit a second untyped finished record for the same request.
+        if (ptr->second.canceled_published) {
+            running_streams_.erase(ptr);
             return;
         }
         auto&   task_info           = ptr->second.task_info;
@@ -256,8 +300,12 @@ public:
     // accounting cannot pin the request forever. Public because tests drive it
     // with an explicit clock; production entry is getEngineScheduleInfo above.
     // Idempotent with the finalizer chain: once the overlay is erased here, a
-    // late markPriorityPreemptionCanceled keeps its "not found -> false"
-    // semantics and publishes nothing.
+    // late markPriorityPreemptionCanceled either finds a preserved running
+    // entry (canceled_published latch -> silent removal) or nothing (false).
+    //
+    // S-2 DRIVER CAVEAT: this sweep is driven by getEngineScheduleInfo, i.e.
+    // the master's WorkerStatus polling loop. If the master stops polling,
+    // this backstop stops firing as well — it is not a local timer.
     size_t sweepStalePriorityOverlays(int64_t now_ms, int64_t max_age_ms) {
         if (max_age_ms <= 0) {
             return 0;
@@ -286,7 +334,9 @@ public:
                 priority_preemption_overlays_.erase(overlay);
                 // keep_live_running_entry=true: never touch a live stream's
                 // runtime entry. Its own teardown will close that entry later;
-                // the sweep only closes the control record.
+                // the sweep only closes the control record (and latches
+                // canceled_published on the preserved entry for the S-1
+                // single-record invariant).
                 publishCanceledRecordLocked(request_id,
                                             std::move(task_info),
                                             static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED),
@@ -303,8 +353,27 @@ public:
                                 stale_request_ids.size(),
                                 oldest_stale_age_ms,
                                 max_age_ms);
+            // W-2 registry linkage: mirror the aged-CANCELED publication into
+            // the deferred-context registry (drop the active entry so a lost
+            // finalizer task cannot keep it referenced until shutdown).
+            // Deliberately OUTSIDE read_write_lock_: the cancel chain takes
+            // registry-mu -> terminal-transition-mu -> read_write_lock_, and
+            // calling the hook under the sweep's lock would invert that order.
+            if (stale_overlay_swept_hook_) {
+                for (int64_t request_id : stale_request_ids) {
+                    stale_overlay_swept_hook_(request_id);
+                }
+            }
         }
         return stale_request_ids.size();
+    }
+
+    // W-2 linkage hook (see sweepStalePriorityOverlays). Installed once during
+    // server init — before the WorkerStatus polling threads that drive
+    // getEngineScheduleInfo start — and only read afterwards, so plain
+    // std::function assignment is sufficient (no lock needed).
+    void setStaleOverlaySweptHook(std::function<void(int64_t)> hook) {
+        stale_overlay_swept_hook_ = std::move(hook);
     }
 
 protected:
@@ -338,7 +407,9 @@ protected:
     // finalizer only runs after the stream quiesced).
     // keep_live_running_entry=true (sweep) removes the running entry only when
     // its stream is already gone or FINISHED; a live stream is never disturbed
-    // by the sweep — the published record then carries the overlay snapshot.
+    // by the sweep — the published record then carries the overlay snapshot
+    // and the preserved entry is latched canceled_published so its own later
+    // dequeue() cannot emit a second untyped record (S-1).
     void publishCanceledRecordLocked(int64_t                      request_id,
                                      EngineScheduleInfo::TaskInfo task_info,
                                      int64_t                      error_code,
@@ -361,6 +432,12 @@ protected:
                         computeExecutionTimeMs(current, stream->beginTimeUs(), task_info.waiting_time_ms);
                 }
                 running_streams_.erase(running);
+            } else {
+                // Sweep publication over a LIVE stream: the typed CANCELED
+                // record is published now; latch canceled_published so this
+                // entry's later ordinary dequeue() only removes it (S-1
+                // single-record invariant).
+                running->second.canceled_published = true;
             }
         }
         if (task_info.end_time_ms < 0) {
@@ -444,6 +521,10 @@ protected:
     int64_t                   finished_capacity_ = 1000;
     // Rate-limit anchor for the stale-overlay observability log (P2).
     std::atomic<int64_t> last_stale_overlay_log_ms_{0};
+    // W-2 registry linkage hook, invoked by sweepStalePriorityOverlays after
+    // releasing read_write_lock_ (see the method comment for lock-order
+    // rationale). Installed once at init; see setStaleOverlaySweptHook.
+    std::function<void(int64_t)> stale_overlay_swept_hook_;
 };
 
 };  // namespace rtp_llm

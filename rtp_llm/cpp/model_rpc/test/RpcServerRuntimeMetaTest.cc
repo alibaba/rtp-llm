@@ -363,4 +363,105 @@ TEST(RpcServerRuntimeMetaTest, GetEngineScheduleInfoKeepsFreshOverlayAndHonorsDi
     EXPECT_EQ(info.running_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELING);
 }
 
+// R3/S-1 single-record invariant: after the sweep publishes the typed CANCELED
+// record while preserving a LIVE stream's running entry, that stream's own
+// ordinary dequeue() must remove the entry WITHOUT emitting a second untyped
+// finished record.
+TEST(RpcServerRuntimeMetaTest, SweepKeepLiveThenOrdinaryDequeuePublishesSingleRecord) {
+    RpcServerRuntimeMeta meta;
+    auto                 input = std::make_shared<GenerateInput>();
+    input->request_id          = 510;
+    input->group_id            = 94;
+    input->generate_config     = std::make_shared<GenerateConfig>();
+    input->input_ids           = torch::tensor({1, 2, 3}, torch::kInt32);
+    auto stream                = std::make_shared<RuntimeMetaTestStream>(input);
+    // RuntimeMetaTestStream stays WAITING: a live stream the sweep must keep.
+
+    const TaskIdentity identity{510, 94};
+    meta.markPriorityPreemptionCanceling(identity);
+    meta.enqueue(identity, stream);
+
+    const int64_t now_ms = autil::TimeUtility::currentTimeInMilliSeconds();
+    ASSERT_EQ(meta.sweepStalePriorityOverlays(now_ms + 300001, /*max_age_ms=*/300000), 1u);
+
+    // One typed CANCELED record from the sweep; the live entry survives.
+    auto after_sweep = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(after_sweep.finished_task_info_list.size(), 1);
+    ASSERT_EQ(after_sweep.running_task_info_list.size(), 1);
+
+    // The live stream finishes normally and tears down via ordinary dequeue:
+    // entry removed, and still exactly ONE finished record (no untyped dupe).
+    meta.dequeue(input->request_id, stream);
+
+    auto final_info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    EXPECT_TRUE(final_info.running_task_info_list.empty());
+    ASSERT_EQ(final_info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(final_info.finished_task_info_list[0].request_id, 510);
+    EXPECT_EQ(final_info.finished_task_info_list[0].error_code, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+    EXPECT_EQ(final_info.finished_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELED);
+}
+
+// R2/P1-1 defect A: sweep consumes the overlay (keep_live preserves the running
+// entry), then the LATE finalizer arrives. markPriorityPreemptionCanceled must
+// clean that leftover entry (true) instead of leaking it forever — and must
+// not publish a second record (the sweep already published the typed one).
+TEST(RpcServerRuntimeMetaTest, LateFinalizerAfterSweepCleansLeftoverRunningEntry) {
+    RpcServerRuntimeMeta meta;
+    auto                 input = std::make_shared<GenerateInput>();
+    input->request_id          = 511;
+    input->group_id            = 95;
+    input->generate_config     = std::make_shared<GenerateConfig>();
+    input->input_ids           = torch::tensor({1, 2, 3}, torch::kInt32);
+    auto stream                = std::make_shared<RuntimeMetaTestStream>(input);
+
+    const TaskIdentity identity{511, 95};
+    meta.markPriorityPreemptionCanceling(identity);
+    meta.enqueue(identity, stream);
+
+    const int64_t now_ms = autil::TimeUtility::currentTimeInMilliSeconds();
+    ASSERT_EQ(meta.sweepStalePriorityOverlays(now_ms + 300001, /*max_age_ms=*/300000), 1u);
+
+    // Late finalizer: overlay gone, leftover live entry present -> cleaned.
+    EXPECT_TRUE(meta.markPriorityPreemptionCanceled(
+        511, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "late finalizer"));
+
+    auto info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    EXPECT_TRUE(info.running_task_info_list.empty());
+    // Single record invariant holds: exactly the sweep's typed CANCELED record.
+    ASSERT_EQ(info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(info.finished_task_info_list[0].request_id, 511);
+    EXPECT_EQ(info.finished_task_info_list[0].error_code, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+}
+
+// R2 defensive branch: overlay missing WITHOUT the sweep's canceled_published
+// latch (no sweep ever ran — the entry was never priority-cancel-published).
+// The entry must still not leak: it is closed with exactly one typed record.
+TEST(RpcServerRuntimeMetaTest, MarkCanceledWithoutOverlayStillCleansRunningEntry) {
+    RpcServerRuntimeMeta meta;
+    auto                 input = std::make_shared<GenerateInput>();
+    input->request_id          = 512;
+    input->group_id            = 96;
+    input->generate_config     = std::make_shared<GenerateConfig>();
+    input->input_ids           = torch::tensor({1, 2, 3}, torch::kInt32);
+    auto stream                = std::make_shared<RuntimeMetaTestStream>(input);
+    // No markPriorityPreemptionCanceling: running entry exists, no overlay,
+    // no canceled_published latch — the unreachable-in-practice corner.
+
+    meta.enqueue(input->request_id, stream);
+
+    EXPECT_TRUE(
+        meta.markPriorityPreemptionCanceled(512, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "defensive"));
+
+    auto info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    EXPECT_TRUE(info.running_task_info_list.empty());
+    ASSERT_EQ(info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(info.finished_task_info_list[0].request_id, 512);
+    EXPECT_EQ(info.finished_task_info_list[0].error_code, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+    EXPECT_EQ(info.finished_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELED);
+
+    // Fully closed afterwards: nothing left for a second call to do.
+    EXPECT_FALSE(
+        meta.markPriorityPreemptionCanceled(512, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "second"));
+}
+
 }  // namespace rtp_llm::test

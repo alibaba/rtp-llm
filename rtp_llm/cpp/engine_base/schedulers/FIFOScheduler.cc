@@ -656,6 +656,13 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
 //   - hasError() members are already terminal in intent; moveToNext() drives
 //     them to FINISHED (releasing resources via the stream state machine) and
 //     is idempotent for already-FINISHED streams;
+//   - C-1 (W-3 starved-member timeout): HEALTHY members whose own
+//     begin_time + getTimeoutMs() has elapsed also get checkTimeout() first —
+//     it latches the GENERATE_TIMEOUT error and the common sweep path then
+//     finalizes them in the same round. Without this, a healthy non-head
+//     member that nobody ever calls moveToNext() for would starve forever
+//     while the admission guard keeps skipping its group. Members with
+//     getTimeoutMs() <= 0 keep their "no timeout" semantics and are skipped;
 //   - admission order is untouched: healthy members stay in their groups, the
 //     queue keeps its FIFO ordering, and no CanRun/admission event is produced;
 //   - cost is O(total queued streams) per scheduling round, the same order as
@@ -665,6 +672,14 @@ void FIFOScheduler::sweepErroredGroupStreams(StreamGroupQueue& group_queue) {
     for (auto group_it = group_queue.begin(); group_it != group_queue.end();) {
         auto& group = *group_it;
         for (auto it = group.begin(); it != group.end();) {
+            if (!(*it)->hasError()) {
+                // Starvation backstop: latch the overdue member's own timeout
+                // (same check moveToNext() performs), then fall through to the
+                // common sweep path below.
+                if ((*it)->getTimeoutMs() > 0) {
+                    (*it)->checkTimeout();
+                }
+            }
             if ((*it)->hasError()) {
                 (*it)->moveToNext();
                 it = group.erase(it);

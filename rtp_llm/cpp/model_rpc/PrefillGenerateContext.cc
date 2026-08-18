@@ -6,6 +6,14 @@ using grpc::ClientContext;
 
 namespace rtp_llm {
 
+namespace {
+// R4/W-1: bounded wait for async bookkeeping workers in the priority
+// finalizer. Far above any healthy worker turnaround; on expiry the finalizer
+// proceeds with markRequestEnd and hands the release to the deferred-release
+// path instead of blocking the finalizer executor forever.
+constexpr int64_t kPriorityFinalizeBookkeepingWaitMs = 30 * 1000;
+}  // namespace
+
 PrefillStatInfo::ExecuteStage PrefillStatInfo::saveStage() const {
     return stage;
 }
@@ -243,6 +251,9 @@ bool PrefillGenerateContext::finalizePriorityPreemption(bool force_advance_strea
     (void)closeGrpcStream();
 
     if (stream_) {
+        // R2: keep a handle past stream_.reset() below — the sweep-meets-
+        // finalizer fallback needs it for the runtime-meta dequeue backstop.
+        GenerateStreamPtr stream_for_meta_cleanup = stream_;
         stream_->reportError(ErrorCode::PRIORITY_PREEMPTED, "preempted by a higher-priority request");
         // A Prefill stream is scheduler-owned once published. Retry on the
         // managed finalizer executor until the scheduler has completed its
@@ -264,10 +275,39 @@ bool PrefillGenerateContext::finalizePriorityPreemption(bool force_advance_strea
                                 static_cast<int>(stream_->getStatus()));
             stream_->moveToNext();
         }
-        stream_->waitPendingAsyncBookkeeping();
-        stream_->releaseResource();
+        // R4/W-1: bounded wait instead of the unbounded cv.wait. On expiry the
+        // release itself is handed to the deferred-release path: the last
+        // async worker to decrement the pending count performs
+        // releaseResource() (see decPendingAsyncBookkeepingAndMaybeRelease), so
+        // we must NOT fall into releaseResource()'s own unbounded wait here.
+        if (stream_->waitPendingAsyncBookkeeping(kPriorityFinalizeBookkeepingWaitMs)) {
+            stream_->releaseResource();
+        } else {
+            stream_->markDeferredRelease();
+            RTP_LLM_LOG_WARNING("request [%ld] priority finalizer timed out (%ld ms) waiting for [%d] pending async "
+                                "bookkeeping worker(s); deferring resource release to the last worker",
+                                request_id,
+                                kPriorityFinalizeBookkeepingWaitMs,
+                                stream_->pendingAsyncBookkeepingCount());
+        }
         markRequestEnd();
         stream_.reset();
+
+        if (meta
+            && !meta->markPriorityPreemptionCanceled(request_id,
+                                                     static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED),
+                                                     "preempted by a higher-priority request")) {
+            // R2 double-insurance backstop (equivalent to
+            // dequeueStreamFromRuntimeMeta, which cannot be reused here
+            // because the member stream_ is already reset): when the aging
+            // sweep consumed the overlay AND this request's running entry was
+            // already fully closed, an ordinary dequeue is a no-op; in any
+            // leftover corner it removes the entry one last time.
+            meta->dequeue(request_id, stream_for_meta_cleanup);
+        }
+        stream_for_meta_cleanup.reset();
+        priority_finalized_ = true;
+        return true;
     }
 
     if (meta) {

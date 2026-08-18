@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include "torch/all.h"
 #include "gmock/gmock-actions.h"
 #include "gmock/gmock-function-mocker.h"
@@ -2830,6 +2831,84 @@ TEST_F(FIFOSchedulerTest, testSweepErroredGroupStreamsPopsFullyErroredNonHeadGro
     EXPECT_EQ(scheduler.waitingStreamsSize(), 2);
     // runner + 2 head members.
     EXPECT_EQ(scheduler.onflightStreams(), 3);
+}
+
+// W-3/C-1 starved-member timeout: a HEALTHY member of a non-head group whose
+// own timeout has elapsed must be finalized by one scheduling round even
+// though nobody will ever call moveToNext() for it (the admission guard keeps
+// skipping the whole group queue while the running lane is occupied).
+// Members without a timeout keep their "no timeout" semantics.
+TEST_F(FIFOSchedulerTest, testSweepErroredGroupStreamsTimesOutStarvedNonHeadMember) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    auto make_stream = [&](int token, std::optional<int> timeout_ms) {
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids                     = torch::tensor({token}, torch::kInt32);
+        query->generate_config               = make_shared<GenerateConfig>();
+        if (timeout_ms.has_value()) {
+            query->generate_config->timeout_ms = timeout_ms.value();
+            // begin_time 100ms in the past: the timeout is already overdue.
+            query->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - 100 * 1000;
+        }
+        return make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    };
+
+    // Occupy the NORMAL running lane so the group admission guard blocks all
+    // group admission in every round below.
+    auto healthy_no_timeout = make_stream(1, std::nullopt);
+    ASSERT_TRUE(scheduler.enqueue(healthy_no_timeout).ok());
+    auto first = scheduler.schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(first.value().size(), 1);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
+
+    // Head group: healthy, no timeout — must never be disturbed.
+    auto head_1       = make_stream(2, std::nullopt);
+    auto head_enqueue = scheduler.enqueueGroup({head_1});
+    ASSERT_EQ(head_enqueue.first, std::vector<bool>({true}));
+
+    // Non-head group: one overdue (but otherwise HEALTHY, error-free) member
+    // and one healthy member without a timeout.
+    auto starved      = make_stream(3, /*timeout_ms=*/100);
+    auto tail_healthy = make_stream(4, std::nullopt);
+    ASSERT_FALSE(starved->hasError());
+    auto tail_enqueue = scheduler.enqueueGroup({starved, tail_healthy});
+    ASSERT_EQ(tail_enqueue.first, std::vector<bool>({true, true}));
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 3);
+
+    // One scheduling round with admission blocked: the starved member's own
+    // timeout latches GENERATE_TIMEOUT and the sweep finalizes it.
+    auto second = scheduler.schedule();
+    ASSERT_TRUE(second.ok());
+    ASSERT_EQ(second.value().size(), 1);
+
+    EXPECT_EQ(starved->getStatus(), StreamState::FINISHED);
+    EXPECT_TRUE(starved->hasError());
+    EXPECT_EQ(starved->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+    // Members without a timeout keep "no timeout" semantics: untouched.
+    EXPECT_EQ(head_1->getStatus(), StreamState::WAITING);
+    EXPECT_FALSE(head_1->hasError());
+    EXPECT_EQ(tail_healthy->getStatus(), StreamState::WAITING);
+    EXPECT_FALSE(tail_healthy->hasError());
+    EXPECT_EQ(healthy_no_timeout->getStatus(), StreamState::RUNNING);
+    // 3 queued - 1 timed out.
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 2);
+    EXPECT_EQ(scheduler.runningStreamsSize(), 1);
 }
 
 }  // namespace rtp_llm
