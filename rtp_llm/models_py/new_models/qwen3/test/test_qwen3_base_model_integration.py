@@ -31,6 +31,7 @@ def _model_config():
         ),
         layernorm_eps=1e-6,
         enable_fp32_lm_head=False,
+        enable_output_vocab_pruning=False,
         tie_word_embeddings=True,
         compute_dtype=torch.float32,
         generate_env_config=None,
@@ -393,6 +394,18 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         base_model.force_cpu_load_weights = False
 
         with self.assertRaisesRegex(ValueError, "EPLB is not supported"):
+            base_model._load_with_new_loader()
+
+    def test_output_vocab_pruning_is_rejected_before_model_loading(self):
+        config = _model_config()
+        config.enable_output_vocab_pruning = True
+        base_model = object.__new__(BaseModel)
+        base_model.model_config = config
+        base_model.force_cpu_load_weights = False
+
+        with self.assertRaisesRegex(
+            ValueError, "output vocabulary pruning is not supported"
+        ):
             base_model._load_with_new_loader()
 
     def test_layer_micro_batch_is_rejected_by_public_load(self):
