@@ -647,7 +647,7 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteMatchReceivesCompleteKeysAndExplicitLoca
     EXPECT_EQ(matched_blocks, 1u);
     EXPECT_TRUE(context->success());
 
-    cache->releaseMatchedResources(result.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache, result.matched_device_resources);
     BlockReleaseBatch releases;
     releaseInsertedRequestBlocks(allocator, request_blocks, releases);
     submitBlockReleases(cache, releases);
@@ -958,7 +958,7 @@ TEST_F(BlockTreeCacheFactoryTest, CompatibleInsertPacksOneGroupSetResourceInGrou
     ASSERT_EQ(match.matched_device_blocks, 1u);
     ASSERT_EQ(cache->matchedBlocksForGroup(0, match.matched_device_resources), (BlockIndicesType{blocks[0]}));
     ASSERT_EQ(cache->matchedBlocksForGroup(1, match.matched_device_resources), (BlockIndicesType{blocks[1]}));
-    cache->releaseMatchedResources(match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache, match.matched_device_resources);
 
     BlockReleaseBatch releases;
     releaseInsertedRequestBlocks(allocator, blocks, releases);
@@ -1022,7 +1022,7 @@ TEST_F(BlockTreeCacheFactoryTest, MiddleDisabledGroupIsExcludedWithoutShiftingRe
         ASSERT_EQ(cache->matchedBlocksForGroup(group_id, match.matched_device_resources),
                   (BlockIndicesType{blocks[group_id]}));
     }
-    cache->releaseMatchedResources(match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache, match.matched_device_resources);
 
     BlockReleaseBatch releases;
     releaseInsertedRequestBlocks(allocator, blocks, releases);
@@ -1174,7 +1174,7 @@ TEST_F(BlockTreeCacheFactoryTest, IncompatibleGroupsKeepSeparateGroupSetResource
     // Each block has one request holder, one tree holder, and one match holder.
     EXPECT_EQ(cache->groupSets()[0]->devicePools()[0]->refCount(blocks[0]), 3u);
     EXPECT_EQ(cache->groupSets()[1]->devicePools()[0]->refCount(blocks[1]), 3u);
-    cache->releaseMatchedResources(match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache, match.matched_device_resources);
     // Releasing the match leaves the request and tree holders alive.
     EXPECT_EQ(cache->groupSets()[0]->devicePools()[0]->refCount(blocks[0]), 2u);
     EXPECT_EQ(cache->groupSets()[1]->devicePools()[0]->refCount(blocks[1]), 2u);
