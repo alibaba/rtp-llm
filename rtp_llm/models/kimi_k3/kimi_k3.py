@@ -204,6 +204,7 @@ class KimiK3(BaseModel):
         config.special_tokens.stop_words_id_list = [
             [config.special_tokens.eos_token_id]
         ]
+
     @classmethod
     def _parse_attention_config(
         cls, text_config: Dict[str, Any], config: KimiK3ModelConfig
@@ -416,6 +417,7 @@ class KimiK3(BaseModel):
             fmha_config=self.fmha_config,
             py_hw_kernel_config=self.hw_kernel_config,
             device_resource_config=self.device_resource_config,
+            moe_config=self.moe_config,
         )
         # Release rank-dependent inactive blocks before the native engine
         # allocates KV cache and workspaces.
