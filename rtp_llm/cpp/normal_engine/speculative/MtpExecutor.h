@@ -56,6 +56,10 @@ public:
         draft_model_ = std::move(model);
     }
 
+    void setDraftPrefillModel(std::unique_ptr<ModelBase> model) {
+        sp_prefill_draft_model_ = std::move(model);
+    }
+
     void setFastTopKSampler(std::unique_ptr<speculative::FastTopKSampler> sampler) {
         fast_topk_sampler_ = std::move(sampler);
     }
@@ -81,13 +85,7 @@ public:
                                                        bool                   is_dspark = false);
 
 protected:
-    struct DraftPrefillGraphPolicy {
-        bool create_propose_graph = false;
-        bool create_commit_graph  = false;
-    };
-
     static bool dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type);
-    static DraftPrefillGraphPolicy draftPrefillGraphPolicy(bool enable_cuda_graph, bool is_dspark, RoleType role_type);
     struct AcceptLenMetricsSnapshot {
         int64_t total_accept_len        = 0;
         int64_t total_stream_num        = 0;
@@ -223,15 +221,14 @@ private:
     size_t   propose_step_;
     // Fixed-width block diffusion: one draft forward emits gamma proposals;
     // unlike MTP there is no autoregressive draft loop or hidden-state chain.
-    bool                       is_dspark_ = false;
-    size_t                     draft_vocab_size_;
-    torch::Tensor              dspark_markov_w1_;
-    torch::Tensor              dspark_markov_w2_;
-    std::shared_ptr<ModelBase> draft_model_;
-    // DSpARK uses two prefill-shaped graph contracts: gamma query rows for
-    // proposal and gamma+1 verified rows for commit. They must not share one
-    // capture-width/phase identity.
-    std::shared_ptr<ModelBase>                       sp_prefill_draft_propose_model_;
+    bool          is_dspark_ = false;
+    size_t        draft_vocab_size_;
+    torch::Tensor dspark_markov_w1_;
+    torch::Tensor dspark_markov_w2_;
+    // The two wrappers keep stable runtime roles. Ordinary MTP uses decode and
+    // post-verify prefill roles; DSpARK supplies propose and commit construction
+    // parameters to the same two slots.
+    std::shared_ptr<ModelBase>                       draft_model_;
     std::shared_ptr<ModelBase>                       sp_prefill_draft_model_;
     std::unique_ptr<speculative::SpeculativeSampler> speculative_sampler_;
     std::unique_ptr<speculative::FastTopKSampler>    fast_topk_sampler_;

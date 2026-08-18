@@ -930,7 +930,6 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkRuntimeGammaThreePrefillInputShape
     EXPECT_EQ((std::vector<int32_t>{10, 6}), toVec<int32_t>(model_input.prefix_lengths));
     EXPECT_EQ((std::vector<int32_t>{gamma, gamma}), toVec<int32_t>(model_input.input_lengths));
     EXPECT_EQ((std::vector<int32_t>{0, 1, 2, 3, 4, 5}), toVec<int32_t>(model_input.lm_output_indexes));
-    EXPECT_EQ(model_input.dspark_call_phase, DSparkCallPhase::PROPOSE);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testDSparkPrepareAndVerifyUsePerStreamDeviceState) {
@@ -980,7 +979,6 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrepareAndVerifyUsePerStreamDevice
     EXPECT_EQ((std::vector<int32_t>{102, 255, 255, 22, 255, 255}), toVec<int32_t>(model_input.combo_tokens));
     EXPECT_EQ((std::vector<int32_t>{gamma, gamma}), toVec<int32_t>(model_input.input_lengths));
     EXPECT_EQ((std::vector<int32_t>{9, 2}), toVec<int32_t>(model_input.prefix_lengths));
-    EXPECT_EQ(model_input.dspark_call_phase, DSparkCallPhase::PROPOSE);
 
     auto proposals = torch::tensor({{31, 32, 33}, {41, 42, 43}}, torch::kInt32).to(torch::kCUDA);
     processor.updateDSparkTargetVerifyModelInput(round_head, model_input, proposals, host_holder);
@@ -988,7 +986,6 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrepareAndVerifyUsePerStreamDevice
     EXPECT_EQ((std::vector<int32_t>{gamma + 1, gamma + 1}), toVec<int32_t>(model_input.input_lengths));
     EXPECT_EQ((std::vector<int32_t>{9, 2}), toVec<int32_t>(model_input.prefix_lengths));
     EXPECT_EQ((std::vector<int32_t>{0, 1, 2, 3, 4, 5, 6, 7}), toVec<int32_t>(model_input.lm_output_indexes));
-    EXPECT_EQ(model_input.dspark_call_phase, DSparkCallPhase::NONE);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testDSparkDecodeCommitPreservesDenseVerifyGeometry) {
@@ -1011,6 +1008,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkDecodeCommitPreservesDenseVerifyGe
     model_input.input_lengths     = torch::tensor({gamma + 1, gamma + 1}, torch::kInt32);
     model_input.prefix_lengths    = torch::tensor({7, 15}, torch::kInt32);
     model_input.lm_output_indexes = torch::tensor({3, 7}, torch::kInt32);
+    model_input.is_target_verify  = false;
     const auto combo_tokens       = model_input.combo_tokens.clone();
     const auto input_lengths      = model_input.input_lengths.clone();
     const auto prefix_lengths     = model_input.prefix_lengths.clone();
@@ -1025,7 +1023,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkDecodeCommitPreservesDenseVerifyGe
     EXPECT_TRUE(torch::equal(model_input.prefix_lengths, prefix_lengths));
     EXPECT_TRUE(torch::equal(model_input.lm_output_indexes, lm_output_indexes));
     EXPECT_TRUE(torch::equal(model_input.last_hidden_states, target_features));
-    EXPECT_EQ(model_input.dspark_call_phase, DSparkCallPhase::COMMIT);
+    EXPECT_TRUE(model_input.is_target_verify);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
@@ -1129,7 +1127,8 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
     auto         model_input_status = processor.gatherModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input_status.ok());
 
-    auto& model_input = model_input_status.value();
+    auto& model_input            = model_input_status.value();
+    model_input.is_target_verify = true;
 
     speculative::SpeculativeSamplerOutput spec_decode_output;
     spec_decode_output.accept_len_cpu    = torch::tensor({3, 1}, torch::kInt32);
@@ -1159,6 +1158,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
     auto          last_hidden_states        = model_input.last_hidden_states;
     vector<float> expect_last_hidden_states = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 1.1f, 1.2f, 1.3f, 1.4f, 1.5f, 1.6f};
     EXPECT_EQ(expect_last_hidden_states, toVec<float>(last_hidden_states));
+    EXPECT_FALSE(model_input.is_target_verify);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutput) {

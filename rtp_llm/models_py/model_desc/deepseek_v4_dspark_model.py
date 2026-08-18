@@ -19,9 +19,10 @@ projection into each draft layer's paged SWA cache before evaluating the next
 query block.
 
 The width is fixed for the lifetime of a service and comes only from
-``GEN_NUM_PER_CIRCLE``. Decode proposal and commit calls use separate prefill
-CUDA-graph contracts (``gamma`` versus ``gamma + 1`` rows per request); prompt
-seeding keeps the standard prefill/CP path.
+``GEN_NUM_PER_CIRCLE``. Decode proposal and commit calls use separate
+batch-keyed decode CUDA-graph contracts (``gamma`` versus ``gamma + 1`` rows
+per request); prompt seeding calls the same commit role through the standard
+prefill/CP path and does not match its target-verify graph contract.
 """
 
 from __future__ import annotations
@@ -61,7 +62,7 @@ from rtp_llm.models_py.speculative.dspark_proposer_mixin import (
     DSparkProposerMixin,
     optional_tensor,
 )
-from rtp_llm.ops.compute_ops import DSparkCallPhase, PyModelInputs, PyModelOutputs
+from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 
@@ -767,45 +768,53 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         head_hidden = self.v4._hc_head_reduce(hidden).reshape(batch_size * gamma, dim)
         return self.v4.norm(head_hidden)
 
-    @torch.inference_mode()
-    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+    def _forward_device(self) -> torch.device:
         if self.v4 is None:
             raise RuntimeError("DeepSeekV4DSparkModel is not initialized")
         device = self.v4.embed.weight.device
-        gamma = self._gen_num_per_cycle
-        phase = getattr(inputs, "dspark_call_phase", DSparkCallPhase.NONE)
-        if phase == DSparkCallPhase.NONE:
-            raise RuntimeError(
-                "DSpark forward requires an explicit proposal/commit phase"
-            )
-        is_commit = phase == DSparkCallPhase.COMMIT
+        if self.kv_cache is not None and not bool(self.fp8_kv_cache):
+            raise RuntimeError("DeepSeekV4DSparkModel currently requires FP8 KV cache")
+        return device
 
+    @torch.inference_mode()
+    def forward_propose(
+        self, inputs: PyModelInputs, fmha_impl: Any = None
+    ) -> PyModelOutputs:
+        device = self._forward_device()
         # PyWrappedModel warmup intentionally has no KVCache.  Produce stable
         # shapes without invoking any paged-cache or FlashMLA kernels.
         if self.kv_cache is None:
+            gamma = self._gen_num_per_cycle
             input_tokens = int(inputs.input_ids.numel())
             batch_size = max((input_tokens + gamma - 1) // gamma, 1)
             logging.warning(
-                "[DeepSeekV4DSparkModel] forward with kv_cache=None; "
+                "[DeepSeekV4DSparkModel] proposal forward with kv_cache=None; "
                 "returning warmup placeholders for batch=%d",
                 batch_size,
             )
-            if is_commit:
-                return PyModelOutputs(
-                    torch.zeros(
-                        (0, int(self._v4_args.dim)),
-                        dtype=torch.bfloat16,
-                        device=device,
-                    )
-                )
             return self.dspark_empty_outputs(batch_size, device)
-
-        if not bool(self.fp8_kv_cache):
-            raise RuntimeError("DeepSeekV4DSparkModel currently requires FP8 KV cache")
-
-        if is_commit:
-            return self.run_commit_step(inputs, device)
         return self.run_propose_step(inputs, fmha_impl, device)
+
+    @torch.inference_mode()
+    def forward_commit(
+        self, inputs: PyModelInputs, fmha_impl: Any = None
+    ) -> PyModelOutputs:
+        device = self._forward_device()
+        if self.kv_cache is None:
+            return PyModelOutputs(
+                torch.zeros(
+                    (0, int(self._v4_args.dim)),
+                    dtype=torch.bfloat16,
+                    device=device,
+                )
+            )
+        return self.run_commit_step(inputs, device)
+
+    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        raise RuntimeError(
+            "DeepSeekV4DSparkModel requires a fixed forward_propose or "
+            "forward_commit entrypoint"
+        )
 
 
 __all__ = ["DeepSeekV4DSparkModel"]

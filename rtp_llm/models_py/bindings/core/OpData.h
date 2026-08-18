@@ -8,7 +8,6 @@
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
-#include "rtp_llm/models_py/bindings/core/DSparkCallPhase.h"
 #include <cstddef>
 #include <optional>
 #include <memory>
@@ -97,9 +96,6 @@ struct GptModelInputs {
     // So, the model has different inference logic for target verify and normal inference.
     // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
-
-    // Only interpreted by a DSpARK draft model. All other models leave NONE.
-    DSparkCallPhase dspark_call_phase = DSparkCallPhase::NONE;
 
     // not sync to other tp rank
     std::vector<std::string> trace_ids;

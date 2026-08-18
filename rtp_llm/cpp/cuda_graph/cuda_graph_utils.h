@@ -39,8 +39,6 @@ public:
         py_model_inputs_.attention_inputs.kv_cache_layer_to_group = inputs.attention_inputs.kv_cache_layer_to_group;
         py_model_inputs_.attention_inputs.prefix_lengths          = inputs.attention_inputs.prefix_lengths;
         py_model_inputs_.input_ids                                = inputs.input_ids;
-        py_model_inputs_.dspark_call_phase                        = inputs.dspark_call_phase;
-
         // for spec
         py_model_inputs_.input_hiddens                            = inputs.input_hiddens;
         py_model_inputs_.attention_inputs.cu_seqlens              = inputs.attention_inputs.cu_seqlens;

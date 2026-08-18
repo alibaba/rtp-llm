@@ -840,7 +840,6 @@ void MtpBatchStreamProcessor::buildDSparkProposeInput(GptModelInputs&      model
     model_input.input_lengths      = dsparkDraftInputLengths(batch_size);
     model_input.sequence_lengths   = emptyInt32OnCuda({0});
     model_input.lm_output_indexes  = dsparkDraftLmIndexes(batch_size);
-    model_input.dspark_call_phase  = DSparkCallPhase::PROPOSE;
 }
 
 MtpBatchStreamProcessor::DSparkRoundHead MtpBatchStreamProcessor::buildDSparkRoundHead(
@@ -884,7 +883,6 @@ void MtpBatchStreamProcessor::updateDSparkTargetVerifyModelInput(const DSparkRou
     auto verify                = torch::cat({anchor_col, proposals.to(torch::kInt32)}, 1).reshape({-1});
     model_input.prefix_lengths = round_head.committed_ends;
     setVerifyPairInputs(model_input, std::move(verify), batch_size, propose_step_ + 1, host_holder);
-    model_input.dspark_call_phase = DSparkCallPhase::NONE;
 }
 
 void MtpBatchStreamProcessor::updateDecodePostDSparkCommitInput(GptModelInputs&      model_input,
@@ -902,8 +900,8 @@ void MtpBatchStreamProcessor::updateDecodePostDSparkCommitInput(GptModelInputs& 
     // combo_tokens remains [anchor, p1, ..., p_gamma], independent of the
     // rejection result; later rounds overwrite rows beyond the accepted
     // prefix. Only the rank-local target feature tensor is rebound here.
+    model_input.is_target_verify   = true;
     model_input.last_hidden_states = target_features;
-    model_input.dspark_call_phase  = DSparkCallPhase::COMMIT;
 }
 
 void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
@@ -916,7 +914,8 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     // Keep dense accept_tokens for CUDA graph reuse; lm_output_indexes selects
     // only the last accepted position. All outputs stay on CUDA so the next
     // stream-async step can prepare without waiting for worker D2H.
-    int total_tokens = (propose_step_ + 1) * batch_size;
+    model_input.is_target_verify = false;
+    int total_tokens             = (propose_step_ + 1) * batch_size;
     model_input.combo_tokens =
         toCudaInt32(speculative_sampler_output.accept_tokens.reshape({(int64_t)total_tokens}), host_holder);
     auto accept_len_d = toCudaInt32(speculative_sampler_output.accept_len, host_holder);

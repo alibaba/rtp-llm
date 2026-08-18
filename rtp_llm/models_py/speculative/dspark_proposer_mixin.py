@@ -16,13 +16,13 @@ hidden-state reduction/normalization.
 Engine input contract — two standard-slot calls per round (all token rows
 are request-major):
 
-* **Commit** (``dspark_call_phase=COMMIT``, incremental-prefill shape): ``input_ids`` = the committed
+* **Commit** (``forward_commit``, incremental-prefill shape): ``input_ids`` = the committed
   tokens, ``attention_inputs.input_lengths`` = newly committed rows per
   request, ``attention_inputs.prefix_lengths`` = where they start,
   ``input_hiddens`` = the matching target feature rows, flattenable to
   ``[rows, aux_feature_dim]`` (a zero-copy view of the shared MTP hidden
   buffer).
-* **Propose** (``dspark_call_phase=PROPOSE``, fixed-width block): ``input_ids`` = ``[B * width]`` query
+* **Propose** (``forward_propose``, fixed-width block): ``input_ids`` = ``[B * width]`` query
   block (column zero is the anchor; the remaining columns are forced to
   the configured noise token here), ``attention_inputs.prefix_lengths`` =
   committed sequence length immediately before the query block. No
@@ -290,7 +290,7 @@ class DSparkProposerMixin:
             inputs,
             commit_ctx=commit_ctx,
         )
-        # The generic prefill CUDA graph owns a row-aligned output buffer even
+        # The fixed-width commit CUDA graph owns a row-aligned output buffer even
         # though the executor only needs this call's KV-cache side effect.
         return PyModelOutputs(main_x)
 

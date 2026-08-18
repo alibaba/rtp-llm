@@ -35,23 +35,15 @@ namespace rtp_llm {
 using namespace std;
 namespace spec = speculative;
 
-TEST(MtpExecutorPolicyTest, DSparkSeparatesPrefillCPFromDecodeGraphs) {
+TEST(MtpExecutorPolicyTest, DSparkPrefillCPRequiresPrefillRole) {
     PrefillCPConfig prefill_cp_config;
     prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
     EXPECT_TRUE(MtpExecutor::dsparkPrefillCPRoleIsValid(prefill_cp_config, RoleType::PREFILL));
-    const auto prefill_graphs =
-        MtpExecutor::draftPrefillGraphPolicy(/*enable_cuda_graph=*/true, /*is_dspark=*/true, RoleType::PREFILL);
-    EXPECT_FALSE(prefill_graphs.create_propose_graph);
-    EXPECT_FALSE(prefill_graphs.create_commit_graph);
 
     PrefillCPConfig decode_cp_config;
     decode_cp_config.method = CPRotateMethod::PREFILL_CP;
     EXPECT_FALSE(decode_cp_config.is_enabled());
     EXPECT_TRUE(MtpExecutor::dsparkPrefillCPRoleIsValid(decode_cp_config, RoleType::DECODE));
-    const auto decode_graphs =
-        MtpExecutor::draftPrefillGraphPolicy(/*enable_cuda_graph=*/true, /*is_dspark=*/true, RoleType::DECODE);
-    EXPECT_TRUE(decode_graphs.create_propose_graph);
-    EXPECT_TRUE(decode_graphs.create_commit_graph);
 
     // A split-enabled decode/colocated engine would conflate the two roles:
     // its proposal block would be fed through the prefill CP splitter.
@@ -183,6 +175,9 @@ public:
 
     void checkInputs(const GptModelInputs& inputs) {
         GptModelInputs expected_inputs = input_holder.get();
+        if (expected_is_target_verify_.has_value()) {
+            EXPECT_EQ(inputs.is_target_verify, expected_is_target_verify_.value());
+        }
         checkTensorField("combo_tokens", inputs.combo_tokens, expected_inputs.combo_tokens);
         checkTensorField("input_lengths", inputs.input_lengths, expected_inputs.input_lengths);
         checkTensorField("sequence_lengths", inputs.sequence_lengths, expected_inputs.sequence_lengths);
@@ -201,6 +196,10 @@ public:
 
     void setPrepareInputs(const vector<GptModelInputs>& inputs) {
         prepare_input_holder.push(inputs);
+    }
+
+    void expectTargetVerify(bool expected) {
+        expected_is_target_verify_ = expected;
     }
 
     bool hasPendingPrepareInputs() const {
@@ -227,6 +226,7 @@ private:
     TestDataHolder<GptModelInputs>  prepare_input_holder;
     TestDataHolder<GptModelOutputs> output_holder;
     torch::Tensor                   mtp_target_hidden_rows_;
+    std::optional<bool>             expected_is_target_verify_;
 };
 
 class FakeFastTopKSampler: public spec::FastTopKSampler {
@@ -396,6 +396,7 @@ struct MtpExecutorComponents {
     std::unique_ptr<MtpExecutor>            executor;
     std::unique_ptr<FakeModel>              fake_target_model;
     std::unique_ptr<FakeModel>              fake_draft_model;
+    std::unique_ptr<FakeModel>              fake_draft_prefill_model;
     std::unique_ptr<FakeFastTopKSampler>    fake_fast_topk_sampler;
     std::unique_ptr<FakeSpeculativeSampler> fake_speculative_sampler;
     std::unique_ptr<FakeSampler>            fake_sampler;
@@ -547,6 +548,7 @@ public:
 
         auto fake_target_model        = std::make_unique<FakeModel>(target_model_params);
         auto fake_draft_model         = std::make_unique<FakeModel>(draft_model_params);
+        auto fake_draft_prefill_model = std::make_unique<FakeModel>(draft_model_params);
         auto fake_fast_topk_sampler   = std::make_unique<FakeFastTopKSampler>();
         auto fake_speculative_sampler = std::make_unique<FakeSpeculativeSampler>(sp_config.gen_num_per_cycle);
         auto fake_sampler             = std::make_unique<FakeSampler>(SamplerInitParams{});
@@ -555,6 +557,7 @@ public:
         components.executor                 = std::move(executor);
         components.fake_target_model        = std::move(fake_target_model);
         components.fake_draft_model         = std::move(fake_draft_model);
+        components.fake_draft_prefill_model = std::move(fake_draft_prefill_model);
         components.fake_fast_topk_sampler   = std::move(fake_fast_topk_sampler);
         components.fake_speculative_sampler = std::move(fake_speculative_sampler);
         components.fake_sampler             = std::move(fake_sampler);
@@ -570,9 +573,13 @@ public:
                          std::unique_ptr<FakeModel>              fake_draft_model,
                          std::unique_ptr<FakeFastTopKSampler>    fake_fast_topk_sampler,
                          std::unique_ptr<FakeSpeculativeSampler> fake_speculative_sampler,
-                         std::unique_ptr<FakeSampler>            fake_sampler) {
+                         std::unique_ptr<FakeSampler>            fake_sampler,
+                         std::unique_ptr<FakeModel>              fake_draft_prefill_model = nullptr) {
         executor->setTargetModel(std::move(fake_target_model));
         executor->setDraftModel(std::move(fake_draft_model));
+        if (fake_draft_prefill_model) {
+            executor->setDraftPrefillModel(std::move(fake_draft_prefill_model));
+        }
         executor->setFastTopKSampler(std::move(fake_fast_topk_sampler));
         executor->setSpeculativeSampler(std::move(fake_speculative_sampler));
         executor->setSampler(std::move(fake_sampler));
@@ -654,6 +661,55 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
 
     // check stream result
     checkOutput(stream1, {0, 1, 2, 3, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.17, 0.18});
+}
+
+TEST_F(MtpExecutorTest, testDSparkPrefillCommitDoesNotUseTargetVerifyContract) {
+    MtpExecutorTestConfig test_config;
+    test_config.gen_num_per_cycle    = 3;
+    test_config.vocab_size_override  = test_config.vocab_size;
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.dspark_mask_token_id = 0;
+    auto components                  = createMtpExecutorComponents(test_config);
+
+    GenerateStreamPtr stream = createContextStream(
+        components.model_config, components.runtime_config, components.resource_context, {0, 1, 2, 3});
+
+    GptModelInputs target_input;
+    target_input.combo_tokens      = torch::tensor({0, 1, 2, 3}, torch::kInt32);
+    target_input.input_lengths     = torch::tensor({4}, torch::kInt32);
+    target_input.prefix_lengths    = torch::tensor({0}, torch::kInt32);
+    target_input.lm_output_indexes = torch::tensor({3}, torch::kInt32);
+
+    GptModelOutputs target_output;
+    target_output.logits = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f}).reshape({1, 4});
+    target_output.all_hidden_states =
+        torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f, 0.07f, 0.08f}).reshape({4, 2});
+    components.fake_target_model->setInputs({target_input});
+    components.fake_target_model->setOutputs({target_output});
+
+    GptModelInputs commit_input     = target_input;
+    commit_input.last_hidden_states = target_output.all_hidden_states;
+    components.fake_draft_prefill_model->setInputs({commit_input});
+    components.fake_draft_prefill_model->setOutputs({GptModelOutputs{}});
+    components.fake_draft_prefill_model->expectTargetVerify(false);
+
+    auto sampler_input  = SamplerInputs{target_output.logits};
+    auto sampler_output = SamplerOutput{torch::tensor({1}, torch::kInt32).reshape({1, 1})};
+    components.fake_sampler->setInputs({sampler_input});
+    components.fake_sampler->setOutputs({sampler_output});
+
+    setupFakeModels(components.executor.get(),
+                    std::move(components.fake_target_model),
+                    std::move(components.fake_draft_model),
+                    std::move(components.fake_fast_topk_sampler),
+                    std::move(components.fake_speculative_sampler),
+                    std::move(components.fake_sampler),
+                    std::move(components.fake_draft_prefill_model));
+
+    auto status = components.executor->process({stream});
+    ASSERT_TRUE(status.ok()) << status.ToString();
+    EXPECT_EQ((std::vector<int>{0, 1, 2, 3, 1}), stream->getCompleteTokenIds()->completeTokenIdsVec(0));
+    EXPECT_TRUE(stream->getProposeToken().empty());
 }
 
 TEST_F(MtpExecutorTest, testMultiBatchPrefill) {
@@ -823,8 +879,12 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
 
     next_draft_input.last_hidden_states = target_output.all_hidden_states;
 
-    components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3, next_draft_input});
-    components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3, next_draft_output});
+    components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3});
+    components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3});
+    components.fake_draft_model->expectTargetVerify(false);
+    components.fake_draft_prefill_model->setInputs({next_draft_input});
+    components.fake_draft_prefill_model->setOutputs({next_draft_output});
+    components.fake_draft_prefill_model->expectTargetVerify(false);
 
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
@@ -889,7 +949,8 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
                     std::move(components.fake_draft_model),
                     std::move(components.fake_fast_topk_sampler),
                     std::move(components.fake_speculative_sampler),
-                    std::move(components.fake_sampler));
+                    std::move(components.fake_sampler),
+                    std::move(components.fake_draft_prefill_model));
 
     // Verify executor was created successfully
     auto status = components.executor->process({stream1});
@@ -1082,8 +1143,12 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     draft_output.logits = torch::tensor({0.1f, 0.2f, 0.9f, 0.3f, 0.1f, 0.8f, 0.2f, 0.3f, 0.1f, 0.2f, 0.3f, 0.9f})
                               .reshape({gamma, vocab_size})
                               .to(torch::kCUDA);
-    components.fake_draft_model->setInputs({draft_input, commit_input});
-    components.fake_draft_model->setOutputs({draft_output, commit_output});
+    components.fake_draft_model->setInputs({draft_input});
+    components.fake_draft_model->setOutputs({draft_output});
+    components.fake_draft_model->expectTargetVerify(true);
+    components.fake_draft_prefill_model->setInputs({commit_input});
+    components.fake_draft_prefill_model->setOutputs({commit_output});
+    components.fake_draft_prefill_model->expectTargetVerify(true);
 
     components.fake_sampler->setInputs({sampler_input});
     components.fake_sampler->setOutputs({target_sampler_output});
@@ -1093,7 +1158,8 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
                     std::move(components.fake_draft_model),
                     std::move(components.fake_fast_topk_sampler),
                     std::move(components.fake_speculative_sampler),
-                    std::move(components.fake_sampler));
+                    std::move(components.fake_sampler),
+                    std::move(components.fake_draft_prefill_model));
 
     auto status = components.executor->process({stream});
     ASSERT_TRUE(status.ok()) << status.ToString();

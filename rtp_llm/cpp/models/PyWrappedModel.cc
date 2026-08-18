@@ -126,7 +126,8 @@ bool PyWrappedModel::hasMtpTargetHiddenBuffer() const {
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
-        held_attn_pyobj_ = py::object();
+        held_attn_pyobj_   = py::object();
+        py_forward_method_ = py::object();
         // Always release py_model_ since it's always initialized now
         py_model_.release();
         if (graph_runner_ != nullptr) {
@@ -632,10 +633,9 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
         fusedCopy(d2d_copies_);
     }
 
-    graph_state_      = CudaGraphState();
-    auto empty_tensor = torch::Tensor();
-    auto py_model_inputs =
-        PyModelInputs(empty_tensor, empty_tensor, attention_inputs_, BertEmbeddingInputs{}, inputs.dspark_call_phase);
+    graph_state_         = CudaGraphState();
+    auto empty_tensor    = torch::Tensor();
+    auto py_model_inputs = PyModelInputs(empty_tensor, empty_tensor, attention_inputs_, BertEmbeddingInputs{});
 
     if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
@@ -671,8 +671,7 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
     // via the focused graph_runner hook (no replay of unrelated D2D copies).
     if (enable_cuda_graph_) {
         auto empty_tensor    = torch::Tensor();
-        auto py_model_inputs = PyModelInputs(
-            empty_tensor, empty_tensor, attention_inputs_, BertEmbeddingInputs{}, inputs.dspark_call_phase);
+        auto py_model_inputs = PyModelInputs(empty_tensor, empty_tensor, attention_inputs_, BertEmbeddingInputs{});
         if (graph_runner_->canRun(py_model_inputs, graph_state_)) {
             graph_runner_->updateKVCacheKernelBlockId(py_model_inputs, graph_state_);
         }
@@ -737,8 +736,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // and combo_tokens above used direct .to(non_blocking=true). Both are async on
         // the current stream and will be ordered correctly with the kernels below.
 
-        auto py_model_inputs =
-            PyModelInputs(token_ids, input_hiddens, attention_inputs_, bert_embedding_inputs, inputs.dspark_call_phase);
+        auto py_model_inputs = PyModelInputs(token_ids, input_hiddens, attention_inputs_, bert_embedding_inputs);
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
@@ -762,11 +760,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
                               py_model_inputs.attention_inputs.is_target_verify,
                               py_model_inputs.attention_inputs.is_prefill);
-            held_attn_pyobj_      = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
-            auto py_model_forward = py_model_.attr("forward");
-            auto outputs          = py_model_forward(py_model_inputs, held_attn_pyobj_);
-            py_model_outputs      = outputs.cast<PyModelOutputs>();
-            hidden_states         = py_model_outputs.hidden_states.clone();
+            held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
+            auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
+            py_model_outputs = outputs.cast<PyModelOutputs>();
+            hidden_states    = py_model_outputs.hidden_states.clone();
         }
         if (!inputs.warmup && inputs.pd_separation) {
             cache_store_async_writer_->waitAllDone();
@@ -782,8 +779,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // this by reusing the standard "has any context stream" test
         // already used by callForwardPostLayers.
         const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
-        if (is_dspark_draft_) {
-            if (inputs.dspark_call_phase == DSparkCallPhase::PROPOSE) {
+        if (dspark_model_role_ != DSparkModelRole::NONE) {
+            if (dspark_model_role_ == DSparkModelRole::PROPOSE) {
                 // Python returns normalized [B*gamma, hidden_dim]. Reuse the
                 // regular C++ lm_head and TP logits gather for every proposal
                 // row; the speculative executor owns only Markov sampling.
