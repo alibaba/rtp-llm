@@ -23,9 +23,9 @@ cc_library(
         "@local_config_cuda//cuda:cublas_headers",
         "@local_config_cuda//cuda:nvml",
     ] + select({
-        # The PPU SDK supplies the driver API through its runtime. Its
-        # cuda_driver stub additionally links nvToolsExt, which is not shipped
-        # in the PPU build image.
+        # The PPU cuda_driver stub additionally links nvToolsExt, which is not
+        # shipped in the PPU image. cuda_host_utils uses numeric CUresult
+        # diagnostics on PPU, so it does not need the driver library.
         "@//:using_ppu": [],
         "//conditions:default": ["@local_config_cuda//cuda:cuda_driver"],
     }),
