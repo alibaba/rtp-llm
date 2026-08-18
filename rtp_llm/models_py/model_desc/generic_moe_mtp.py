@@ -284,14 +284,13 @@ class GenericMoeMTPModel(GptModelBase):
             if reuse_topk_indices
             else None
         )
-        # The CMP path owns indexer execution when enabled. Reuse iterations
-        # must take the regular MLA path so the shared TopK indices are honored.
-        enable_cmp = not reuse_topk_indices and should_enable_glm5_cmp(
+        enable_cmp = should_enable_glm5_cmp(
             self.layers,
             self.layer_num,
             hidden_states,
             fmha_impl,
             self.kv_cache,
+            force_reuse_topk_indices=reuse_topk_indices,
         )
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             select_block_map_for_layer(inputs.attention_inputs, i)

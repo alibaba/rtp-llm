@@ -13,6 +13,8 @@ import torch
 from rtp_llm.utils.model_weight import W
 
 _ENABLE_ENV = "RTP_LLM_GLM5_CMP"
+_DISABLE_ATTENTION_POST_MOE_PRE_ENV = "RTP_LLM_GLM5_DISABLE_ATTENTION_POST_MOE_PRE"
+_DISABLE_DEEP_GEMM_PDL_ENV = "RTP_LLM_GLM5_DISABLE_DEEP_GEMM_PDL"
 _SUPPORTED_MODEL_TYPES = frozenset(("glm_5", "glm_5_mtp"))
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,24 @@ def resolve_glm5_cmp_enabled() -> bool:
     if value in ("0", "false", "no", "off", ""):
         return False
     raise ValueError(f"invalid {_ENABLE_ENV}={value!r}")
+
+
+def resolve_attention_post_moe_pre_disabled() -> bool:
+    value = os.environ.get(_DISABLE_ATTENTION_POST_MOE_PRE_ENV, "0").strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off", ""):
+        return False
+    raise ValueError(f"invalid {_DISABLE_ATTENTION_POST_MOE_PRE_ENV}={value!r}")
+
+
+def resolve_deep_gemm_pdl_disabled() -> bool:
+    value = os.environ.get(_DISABLE_DEEP_GEMM_PDL_ENV, "0").strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off", ""):
+        return False
+    raise ValueError(f"invalid {_DISABLE_DEEP_GEMM_PDL_ENV}={value!r}")
 
 
 def _is_capturing() -> bool:
@@ -132,6 +152,8 @@ class Glm5Cmp:
         self._events: _StreamEvents | None = None
         self._packed_head_gate_weight: torch.Tensor | None = None
         self._draft_prefill_clone = False
+        self.disable_attention_post_moe_pre = resolve_attention_post_moe_pre_disabled()
+        self.disable_deep_gemm_pdl = resolve_deep_gemm_pdl_disabled()
         self._disabled_reason = self._static_disabled_reason()
         self._moe_prepack_disabled_reason = None
         self._moe_prepack_abi_validated = False
@@ -164,15 +186,6 @@ class Glm5Cmp:
             return "attention is not MLA"
         if int(getattr(attn, "kernel_tokens_per_block", 0)) != 64:
             return "GLM5 CMP requires 64-token KV pages"
-        if (
-            self.has_indexer
-            and os.environ.get("GLM5_INDEXER_TOPK_BACKEND", "dsv4_persistent")
-            .strip()
-            .lower()
-            != "topk_v3"
-        ):
-            return "GLM5 CMP requires GLM5_INDEXER_TOPK_BACKEND=topk_v3"
-
         if not self.is_moe_layer:
             if not (
                 bool(getattr(self.mlp, "accepts_fp8_input", False))
@@ -285,7 +298,11 @@ class Glm5Cmp:
         torch.Tensor | None,
     ]:
         """Return writable FP8 MegaMoE views, or four empty slots."""
-        if not self.is_moe_layer or self._moe_prepack_disabled_reason is not None:
+        if (
+            getattr(self, "disable_attention_post_moe_pre", False)
+            or not self.is_moe_layer
+            or self._moe_prepack_disabled_reason is not None
+        ):
             return None, None, None, None
         try:
             views = self.mlp.fused_moe.prepacked_input_views(int(rows))
@@ -333,6 +350,8 @@ class Glm5Cmp:
         clone._events = None
         clone._packed_head_gate_weight = self._packed_head_gate_weight
         clone._draft_prefill_clone = bool(draft_prefill)
+        clone.disable_attention_post_moe_pre = self.disable_attention_post_moe_pre
+        clone.disable_deep_gemm_pdl = self.disable_deep_gemm_pdl
         clone._disabled_reason = self._disabled_reason
         clone._moe_prepack_disabled_reason = self._moe_prepack_disabled_reason
         clone._moe_prepack_abi_validated = False
@@ -357,6 +376,32 @@ class Glm5Cmp:
         self, hidden_states: torch.Tensor, fmha_impl: Any, kv_cache: Any
     ) -> str | None:
         """Validate the dynamic call once before the model enters GLM5 CMP."""
+        return self._dynamic_call_disabled_reason(
+            hidden_states,
+            fmha_impl,
+            kv_cache,
+            require_indexer_metadata=True,
+        )
+
+    def _unsupported_reuse_call_reason(
+        self, hidden_states: torch.Tensor, fmha_impl: Any, kv_cache: Any
+    ) -> str | None:
+        """Validate an MTP call that reuses previously computed TopK indices."""
+        return self._dynamic_call_disabled_reason(
+            hidden_states,
+            fmha_impl,
+            kv_cache,
+            require_indexer_metadata=False,
+        )
+
+    def _dynamic_call_disabled_reason(
+        self,
+        hidden_states: torch.Tensor,
+        fmha_impl: Any,
+        kv_cache: Any,
+        *,
+        require_indexer_metadata: bool,
+    ) -> str | None:
         implementation = self._attention_impl(fmha_impl)
         attn_inputs = implementation.attn_inputs
         params = implementation.fmha_params
@@ -377,9 +422,14 @@ class Glm5Cmp:
             return "KV cache is unavailable"
         if hidden_states.dim() != 2 or rows <= 0 or hidden_states.size(1) != 6144:
             return "unsupported hidden-state shape"
+        # RTP-kernel's GLM5 projection kernels currently support at most 256
+        # rows. Larger CUDA Graph capture batches must use RTP-LLM's regular
+        # forward instead of entering CMP and failing inside the first layer.
+        if rows > 256:
+            return "GLM5 CMP supports at most 256 rows"
         if is_prefill and not is_target_verify and not is_draft_prefill:
             return "ordinary prefill is unsupported"
-        if self.has_indexer and tokens_per_request is None:
+        if self.has_indexer and require_indexer_metadata and tokens_per_request is None:
             return "invalid Indexer request metadata"
         if is_draft_prefill:
             expected = int(getattr(self.config, "gen_num_per_cycle", 0) or 0) + 1
@@ -429,6 +479,43 @@ class Glm5Cmp:
         prev_topk_indices: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Run MLA preparation Ops; RTP only supplies the stream schedule."""
+        return self._mla_prologue(
+            hidden_states,
+            residual,
+            fmha_impl,
+            kv_cache,
+            prev_topk_indices,
+            reuse_topk_indices=False,
+        )
+
+    def mla_prologue_reusing_topk(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        fmha_impl: Any,
+        kv_cache: Any,
+        prev_topk_indices: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run MLA preparation while reusing TopK indices from the seed model."""
+        return self._mla_prologue(
+            hidden_states,
+            residual,
+            fmha_impl,
+            kv_cache,
+            prev_topk_indices,
+            reuse_topk_indices=True,
+        )
+
+    def _mla_prologue(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        fmha_impl: Any,
+        kv_cache: Any,
+        prev_topk_indices: torch.Tensor | None,
+        *,
+        reuse_topk_indices: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         implementation = self._attention_impl(fmha_impl)
         ops = self.ops
         rows = int(hidden_states.size(0))
@@ -441,9 +528,9 @@ class Glm5Cmp:
             mla_cache = mla_cache.view(torch.uint8)
         mla_cache = mla_cache.view(-1, 64, 656)
 
-        if not self.has_indexer:
+        if not self.has_indexer or reuse_topk_indices:
             if prev_topk_indices is None:
-                raise RuntimeError("main-only layer requires prior TopK indices")
+                raise RuntimeError("reused Indexer path requires prior TopK indices")
             # Residual add + RMSNorm, then group-128 FP8 quantization for the
             # following attention projections.
             residual_out, _, hidden_fp8, hidden_scale = ops.add_norm_quant(
@@ -664,6 +751,9 @@ class Glm5Cmp:
         routed_weights: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, ...]:
         """Project the MLA output and prepare an optional routed MoE input."""
+        if getattr(self, "disable_attention_post_moe_pre", False):
+            return self._standard_mla_post(mla_output, fmha_impl), residual
+
         ops = self.ops
         implementation = self._attention_impl(fmha_impl)
         mla_weight = implementation.weights[self.layer_idx][W.mla_vc]
@@ -713,6 +803,15 @@ class Glm5Cmp:
             return moe_norm, moe_residual, routed_indices, routed_weights
         return attention_output, residual
 
+    def _standard_mla_post(
+        self, mla_output: torch.Tensor, fmha_impl: Any
+    ) -> torch.Tensor:
+        """Run RTP-LLM's existing MLA output BMM and output projection."""
+        implementation = self._attention_impl(fmha_impl)
+        attention_output = implementation._apply_output_bmm(mla_output, self.layer_idx)
+        attention_output = attention_output.reshape(mla_output.size(0), -1).contiguous()
+        return self.self_attn.o_proj(attention_output)
+
 
 def should_enable_glm5_cmp(
     layers: Any,
@@ -720,6 +819,7 @@ def should_enable_glm5_cmp(
     hidden_states: torch.Tensor,
     fmha_impl: Any,
     kv_cache: Any,
+    force_reuse_topk_indices: bool = False,
 ) -> bool:
     """Return whether the complete model forward should use GLM5 CMP."""
     if layer_num <= 0:
@@ -738,11 +838,12 @@ def should_enable_glm5_cmp(
     # It validates the dynamic attention contract shared by the complete model.
     cmp = cmps[0]
     first_cache = kv_cache.get_layer_cache(0) if kv_cache is not None else None
-    if (
-        not cmp.has_indexer
-        or cmp._unsupported_call_reason(hidden_states, fmha_impl, first_cache)
-        is not None
-    ):
+    call_disabled_reason = (
+        cmp._unsupported_reuse_call_reason(hidden_states, fmha_impl, first_cache)
+        if force_reuse_topk_indices
+        else cmp._unsupported_call_reason(hidden_states, fmha_impl, first_cache)
+    )
+    if not cmp.has_indexer or call_disabled_reason is not None:
         return False
 
     # Initialize RTP-kernel and its DeepGEMM PDL contract only after this
@@ -758,6 +859,17 @@ def should_enable_glm5_cmp(
             ops = _load_ops()
         for layer_cmp in uninitialized:
             layer_cmp._initialize_for_cmp(ops)
-        _configure_deep_gemm_pdl(ops)
+        if not getattr(cmp, "disable_deep_gemm_pdl", False):
+            _configure_deep_gemm_pdl(ops)
         logger.info("GLM5 CMP activated for %d layers", layer_num)
+        if getattr(cmp, "disable_deep_gemm_pdl", False):
+            logger.info(
+                "GLM5 CMP DeepGEMM PDL disabled by %s",
+                _DISABLE_DEEP_GEMM_PDL_ENV,
+            )
+        if getattr(cmp, "disable_attention_post_moe_pre", False):
+            logger.info(
+                "GLM5 CMP attention_post_moe_pre disabled by %s",
+                _DISABLE_ATTENTION_POST_MOE_PRE_ENV,
+            )
     return True
