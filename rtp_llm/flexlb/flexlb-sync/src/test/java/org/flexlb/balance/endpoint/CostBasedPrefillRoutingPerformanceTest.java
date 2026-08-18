@@ -3,7 +3,7 @@ package org.flexlb.balance.endpoint;
 import ch.qos.logback.classic.Level;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.service.CacheAwareService;
@@ -119,8 +119,8 @@ class CostBasedPrefillRoutingPerformanceTest {
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(config);
         BatchSchedulerReporter reporter = Mockito.mock(BatchSchedulerReporter.class, withSettings().stubOnly());
-        FlexlbBatchScheduler scheduler = Mockito.mock(
-                FlexlbBatchScheduler.class, withSettings().stubOnly());
+        PriorityScheduler scheduler = Mockito.mock(
+                PriorityScheduler.class, withSettings().stubOnly());
         endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
 
         for (int index = 0; index < ENGINE_COUNT; index++) {

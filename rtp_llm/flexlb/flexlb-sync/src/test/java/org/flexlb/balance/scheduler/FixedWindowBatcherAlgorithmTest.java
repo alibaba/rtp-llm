@@ -7,6 +7,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.ScheduleBudget;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -26,6 +27,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class FixedWindowBatcherAlgorithmTest {
@@ -64,7 +66,7 @@ class FixedWindowBatcherAlgorithmTest {
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
         when(predictor.predictBatchMs(anyList())).thenReturn(500.0);
 
-        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         BatcherContext context = context(
                 "test", endpoint, config, handler,
                 queueWith(enqueuedItem(1, System.currentTimeMillis()),
@@ -74,8 +76,8 @@ class FixedWindowBatcherAlgorithmTest {
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
         ArgumentCaptor<List<BatchItem>> items = ArgumentCaptor.forClass(List.class);
-        ArgumentCaptor<DispatchMeta> meta = ArgumentCaptor.forClass(DispatchMeta.class);
-        verify(handler).onBatchReady(items.capture(), meta.capture());
+        ArgumentCaptor<DecisionGroupMetadata> meta = ArgumentCaptor.forClass(DecisionGroupMetadata.class);
+        verify(handler).onDecisionGroupReady(items.capture(), meta.capture());
         assertEquals(2, items.getValue().size());
         assertEquals("predict_threshold", meta.getValue().reason());
     }
@@ -86,7 +88,7 @@ class FixedWindowBatcherAlgorithmTest {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getIp()).thenReturn("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
-        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         BatcherContext context = context(
                 "test", endpoint, config, handler,
                 queueWith(enqueuedItem(1, System.currentTimeMillis() - 170)),
@@ -94,8 +96,8 @@ class FixedWindowBatcherAlgorithmTest {
 
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
-        ArgumentCaptor<DispatchMeta> meta = ArgumentCaptor.forClass(DispatchMeta.class);
-        verify(handler).onBatchReady(anyList(), meta.capture());
+        ArgumentCaptor<DecisionGroupMetadata> meta = ArgumentCaptor.forClass(DecisionGroupMetadata.class);
+        verify(handler).onDecisionGroupReady(anyList(), meta.capture());
         assertEquals("fixed_window_timeout", meta.getValue().reason());
     }
 
@@ -105,7 +107,7 @@ class FixedWindowBatcherAlgorithmTest {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getIp()).thenReturn("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
-        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         BatchItem[] items = new BatchItem[32];
         long now = System.currentTimeMillis() - 1_000;
         for (int index = 0; index < items.length; index++) {
@@ -118,8 +120,8 @@ class FixedWindowBatcherAlgorithmTest {
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
         ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
-        ArgumentCaptor<DispatchMeta> meta = ArgumentCaptor.forClass(DispatchMeta.class);
-        verify(handler).onBatchReady(dispatched.capture(), meta.capture());
+        ArgumentCaptor<DecisionGroupMetadata> meta = ArgumentCaptor.forClass(DecisionGroupMetadata.class);
+        verify(handler).onDecisionGroupReady(dispatched.capture(), meta.capture());
         assertEquals(32, dispatched.getValue().size());
         assertEquals("batch_full", meta.getValue().reason());
     }
@@ -138,7 +140,7 @@ class FixedWindowBatcherAlgorithmTest {
         when(endpoint.getIp()).thenReturn("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
 
-        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         long now = System.currentTimeMillis() - 1_000;
         BatcherContext context = context(
                 "test", endpoint, config, handler,
@@ -150,7 +152,7 @@ class FixedWindowBatcherAlgorithmTest {
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
         ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
-        verify(handler).onBatchReady(dispatched.capture(), org.mockito.ArgumentMatchers.any());
+        verify(handler).onDecisionGroupReady(dispatched.capture(), org.mockito.ArgumentMatchers.any());
         assertEquals(List.of(1L), dispatched.getValue().stream().map(BatchItem::requestId).toList());
         assertEquals(60L, dispatched.getValue().stream().mapToLong(BatchItem::seqLen).sum());
         assertEquals(2, context.size());
@@ -181,7 +183,7 @@ class FixedWindowBatcherAlgorithmTest {
             items[index] = enqueuedItem(index + 1L, now + index, 9_192L);
         }
 
-        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         BatcherContext context = context(
                 "test", endpoint, config, handler, queueWith(items),
                 mock(BatchSchedulerReporter.class));
@@ -189,7 +191,7 @@ class FixedWindowBatcherAlgorithmTest {
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
         ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
-        verify(handler).onBatchReady(dispatched.capture(), org.mockito.ArgumentMatchers.any());
+        verify(handler).onDecisionGroupReady(dispatched.capture(), org.mockito.ArgumentMatchers.any());
         assertEquals(List.of(1L), dispatched.getValue().stream().map(BatchItem::requestId).toList());
         assertEquals(12, context.size());
     }
@@ -209,7 +211,7 @@ class FixedWindowBatcherAlgorithmTest {
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
 
         long now = System.currentTimeMillis() - 1_000;
-        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         BatcherContext context = context(
                 "test", endpoint, config, handler,
                 queueWith(enqueuedItem(1, now, 60),
@@ -220,7 +222,7 @@ class FixedWindowBatcherAlgorithmTest {
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
         ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
-        verify(handler).onBatchReady(dispatched.capture(), org.mockito.ArgumentMatchers.any());
+        verify(handler).onDecisionGroupReady(dispatched.capture(), org.mockito.ArgumentMatchers.any());
         assertEquals(List.of(1L), dispatched.getValue().stream().map(BatchItem::requestId).toList());
         assertEquals(2, context.size());
         assertEquals(2L, context.peek().requestId());
@@ -250,7 +252,7 @@ class FixedWindowBatcherAlgorithmTest {
         for (int index = 0; index < requestCount; index++) {
             items[index] = enqueuedItem(index + 1L, now + index, seqLen);
         }
-        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         BatcherContext context = context(
                 "test", endpoint, config, handler, queueWith(items),
                 mock(BatchSchedulerReporter.class));
@@ -260,7 +262,7 @@ class FixedWindowBatcherAlgorithmTest {
         algorithm.processQueue(context);
 
         ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
-        verify(handler, times(2)).onBatchReady(
+        verify(handler, times(2)).onDecisionGroupReady(
                 dispatched.capture(), org.mockito.ArgumentMatchers.any());
         List<List<BatchItem>> batches = dispatched.getAllValues();
 
@@ -287,7 +289,7 @@ class FixedWindowBatcherAlgorithmTest {
         when(endpoint.getIp()).thenReturn("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
 
-        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         long now = System.currentTimeMillis();
         BatcherContext context = context(
                 "test", endpoint, config, handler,
@@ -297,7 +299,7 @@ class FixedWindowBatcherAlgorithmTest {
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
         ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
-        verify(handler).onBatchReady(dispatched.capture(), org.mockito.ArgumentMatchers.any());
+        verify(handler).onDecisionGroupReady(dispatched.capture(), org.mockito.ArgumentMatchers.any());
         assertEquals(List.of(1L), dispatched.getValue().stream().map(BatchItem::requestId).toList());
         assertEquals(1, context.size());
     }
@@ -314,7 +316,7 @@ class FixedWindowBatcherAlgorithmTest {
         when(endpoint.getStatus()).thenReturn(status);
 
         BatchItem item = enqueuedItem(1, 1, 100);
-        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         BatcherContext context = context(
                 "test", endpoint, config, handler, queueWith(item),
                 mock(BatchSchedulerReporter.class));
@@ -322,8 +324,136 @@ class FixedWindowBatcherAlgorithmTest {
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
         verify(handler).onOfferFailure(eq(item), any(IllegalArgumentException.class));
-        verify(handler, never()).onBatchReady(anyList(), any(DispatchMeta.class));
+        verify(handler, never()).onDecisionGroupReady(anyList(), any(DecisionGroupMetadata.class));
         assertEquals(0, context.size());
+    }
+
+    @Test
+    void routeRequestCapDoesNotChangeLogicalBatchDecisionTiming()
+            throws InterruptedException {
+        FlexlbConfig config = sloCaseConfig();
+        config.setAutoTpmEnabled(true);
+        config.setFlexlbBatchPredictThresholdMs(0);
+        config.setFlexlbBatchFixedWaitMs(60_000);
+        config.setFlexlbBatchSizeMax(4);
+        config.setAutoTpmPrefillMaxInflightRequestsPerWorker(1);
+
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.availableRequestSlots(1)).thenReturn(1);
+        DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
+        long now = System.currentTimeMillis();
+        BatcherContext context = context(
+                "test", endpoint, config, handler,
+                queueWith(
+                        routeDecisionItem(1, now),
+                        routeDecisionItem(2, now + 1),
+                        routeDecisionItem(3, now + 2)),
+                mock(BatchSchedulerReporter.class));
+
+        new FixedWindowBatcherAlgorithm().processQueue(context);
+
+        verify(handler, never()).onDecisionGroupReady(anyList(), any(DecisionGroupMetadata.class));
+        assertEquals(3, context.size());
+    }
+
+    @Test
+    void routeRequestCapLimitsDeliveryOnlyAfterLogicalGroupIsReady()
+            throws InterruptedException {
+        FlexlbConfig config = sloCaseConfig();
+        config.setAutoTpmEnabled(true);
+        config.setFlexlbBatchPredictThresholdMs(0);
+        config.setFlexlbBatchFixedWaitMs(60_000);
+        config.setFlexlbBatchSizeMax(4);
+        config.setAutoTpmPrefillMaxInflightRequestsPerWorker(1);
+
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.availableRequestSlots(1)).thenReturn(1, 0, 1);
+        when(endpoint.getIp()).thenReturn("127.0.0.1");
+        DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
+        BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
+        long now = System.currentTimeMillis();
+        BatcherContext context = context(
+                "test", endpoint, config, handler,
+                queueWith(
+                        routeDecisionItem(1, now),
+                        routeDecisionItem(2, now + 1),
+                        routeDecisionItem(3, now + 2),
+                        routeDecisionItem(4, now + 3)),
+                reporter);
+
+        new FixedWindowBatcherAlgorithm().processQueue(context);
+
+        ArgumentCaptor<List<BatchItem>> delivered = ArgumentCaptor.forClass(List.class);
+        ArgumentCaptor<DecisionGroupMetadata> meta = ArgumentCaptor.forClass(DecisionGroupMetadata.class);
+        verify(handler).onDecisionGroupReady(delivered.capture(), meta.capture());
+        assertEquals(List.of(1L), delivered.getValue().stream()
+                .map(BatchItem::requestId).toList());
+        assertEquals("batch_full", meta.getValue().reason());
+        assertEquals(3, context.size());
+        assertTrue(context.isActiveEmpty());
+        assertEquals(3, context.readyDeliveryCount());
+        verifyNoInteractions(reporter);
+
+        // The logical group is already ready. A full request cap must not
+        // send it back through the fixed-window decision, and freeing one
+        // slot must hand off the next member immediately in original order.
+        assertEquals(BatcherContext.ReadyDeliveryResult.CAPACITY_BLOCKED,
+                context.deliverReadyRequests());
+        assertEquals(BatcherContext.ReadyDeliveryResult.DELIVERED,
+                context.deliverReadyRequests());
+
+        ArgumentCaptor<List<BatchItem>> allDeliveries = ArgumentCaptor.forClass(List.class);
+        ArgumentCaptor<DecisionGroupMetadata> allMeta = ArgumentCaptor.forClass(DecisionGroupMetadata.class);
+        verify(handler, times(2)).onDecisionGroupReady(allDeliveries.capture(), allMeta.capture());
+        assertEquals(List.of(2L), allDeliveries.getAllValues().get(1).stream()
+                .map(BatchItem::requestId).toList());
+        assertEquals("batch_full", allMeta.getAllValues().get(1).reason());
+        assertEquals(2, context.size());
+        assertEquals(2, context.readyDeliveryCount());
+    }
+
+    @Test
+    void routeHeadStopsAtModeBoundaryAndCannotBypassBatchInflightGate()
+            throws InterruptedException {
+        FlexlbConfig config = sloCaseConfig();
+        config.setAutoTpmEnabled(true);
+        config.setFlexlbBatchPredictThresholdMs(0);
+        config.setFlexlbBatchFixedWaitMs(0);
+        config.setFlexlbBatchSizeMax(2);
+        config.setFlexlbBatchFixedMaxInflightBatches(1);
+        config.setAutoTpmPrefillMaxInflightRequestsPerWorker(1);
+
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.availableRequestSlots(1)).thenReturn(1);
+        when(endpoint.getInflightBatchCount()).thenReturn(1);
+        when(endpoint.getIp()).thenReturn("127.0.0.1");
+        DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
+        long now = System.currentTimeMillis();
+        BatchItem route = routeDecisionItem(1, now - 2);
+        BatchItem batch = enqueuedItem(2, now - 1, 1);
+        BatcherContext context = context(
+                "test", endpoint, config, handler, queueWith(route, batch),
+                mock(BatchSchedulerReporter.class));
+        FixedWindowBatcherAlgorithm algorithm = new FixedWindowBatcherAlgorithm();
+
+        algorithm.processQueue(context);
+
+        ArgumentCaptor<List<BatchItem>> firstDelivery = ArgumentCaptor.forClass(List.class);
+        verify(handler).onDecisionGroupReady(firstDelivery.capture(), any(DecisionGroupMetadata.class));
+        assertEquals(List.of(1L), firstDelivery.getValue().stream()
+                .map(BatchItem::requestId).toList());
+        assertEquals(1, context.size());
+        assertEquals(batch, context.peek());
+        verify(endpoint, never()).getInflightBatchCount();
+
+        // Once the BATCH_ENQUEUE item becomes head, its own inflight gate applies.
+        // It must not have ridden along with the preceding route decision.
+        algorithm.processQueue(context);
+
+        verify(handler, times(1)).onDecisionGroupReady(anyList(), any(DecisionGroupMetadata.class));
+        verify(endpoint).getInflightBatchCount();
+        assertEquals(1, context.size());
+        assertEquals(batch, context.peek());
     }
 
     // ---- queue_deadline_exceeded valve gating ----
@@ -339,7 +469,7 @@ class FixedWindowBatcherAlgorithmTest {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getIp()).thenReturn("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
-        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         BatchItem head = enqueuedItem(1, System.currentTimeMillis() - 11_000, 100);
         BatcherContext context = context(
                 "test", endpoint, config, handler, queueWith(head),
@@ -348,8 +478,8 @@ class FixedWindowBatcherAlgorithmTest {
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
         verify(handler, never()).onExpired(any(BatchItem.class));
-        ArgumentCaptor<DispatchMeta> meta = ArgumentCaptor.forClass(DispatchMeta.class);
-        verify(handler).onBatchReady(anyList(), meta.capture());
+        ArgumentCaptor<DecisionGroupMetadata> meta = ArgumentCaptor.forClass(DecisionGroupMetadata.class);
+        verify(handler).onDecisionGroupReady(anyList(), meta.capture());
         assertEquals("fixed_window_timeout", meta.getValue().reason());
     }
 
@@ -360,7 +490,7 @@ class FixedWindowBatcherAlgorithmTest {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getIp()).thenReturn("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
-        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         BatchItem head = enqueuedItem(1, System.currentTimeMillis() - 11_000, 100, 50);
         BatcherContext context = context(
                 "test", endpoint, config, handler, queueWith(head),
@@ -369,15 +499,15 @@ class FixedWindowBatcherAlgorithmTest {
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
         verify(handler, never()).onExpired(any(BatchItem.class));
-        ArgumentCaptor<DispatchMeta> meta = ArgumentCaptor.forClass(DispatchMeta.class);
-        verify(handler).onBatchReady(anyList(), meta.capture());
+        ArgumentCaptor<DecisionGroupMetadata> meta = ArgumentCaptor.forClass(DecisionGroupMetadata.class);
+        verify(handler).onDecisionGroupReady(anyList(), meta.capture());
         assertEquals("fixed_window_timeout", meta.getValue().reason());
     }
 
     @Test
     void autoTpmOffLegacyHeadPastQueueDeadlineIsDroppedParity() throws InterruptedException {
         FlexlbConfig config = sloCaseConfig();
-        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         BatchItem head = enqueuedItem(1, System.currentTimeMillis() - 11_000, 100);
         BatcherContext context = context(
                 "test", null, config, handler, queueWith(head),
@@ -394,7 +524,7 @@ class FixedWindowBatcherAlgorithmTest {
         // Pre-fix behavior: with the switch off, priority carried on the item
         // has no effect — the legacy drop applies to everyone.
         FlexlbConfig config = sloCaseConfig();
-        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         BatchItem head = enqueuedItem(1, System.currentTimeMillis() - 11_000, 100, 50);
         BatcherContext context = context(
                 "test", null, config, handler, queueWith(head),
@@ -445,6 +575,19 @@ class FixedWindowBatcherAlgorithmTest {
         return item;
     }
 
+    private static BatchItem routeDecisionItem(long requestId, long enqueuedAtMs) {
+        Request request = new Request();
+        request.setRequestId(requestId);
+        request.setSeqLen(1);
+        BalanceContext context = new BalanceContext();
+        context.setRequest(request);
+        context.setScheduleMode(ScheduleModeEnum.QUEUE);
+        BatchItem item = new BatchItem(
+                context, null, null, null, null, null, null, enqueuedAtMs);
+        item.setSortKey(enqueuedAtMs);
+        return item;
+    }
+
     private static PriorityBlockingQueue<BatchItem> queueWith(BatchItem... items) {
         PriorityBlockingQueue<BatchItem> queue = new PriorityBlockingQueue<>(11, Comparator.comparingLong(BatchItem::sortKey));
         for (BatchItem item : items) {
@@ -454,7 +597,7 @@ class FixedWindowBatcherAlgorithmTest {
     }
 
     private static BatcherContext context(String key, PrefillEndpoint endpoint,
-                                          FlexlbConfig config, BatchDecisionHandler handler,
+                                          FlexlbConfig config, DecisionGroupHandler handler,
                                           PriorityBlockingQueue<BatchItem> queue,
                                           BatchSchedulerReporter reporter) {
         return new BatcherContext(key, endpoint, config, handler, queue,

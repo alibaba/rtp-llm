@@ -1,8 +1,8 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.BatchDecisionHandler;
+import org.flexlb.balance.scheduler.DecisionGroupHandler;
 import org.flexlb.balance.scheduler.BatchItem;
-import org.flexlb.balance.scheduler.DispatchMeta;
+import org.flexlb.balance.scheduler.DecisionGroupMetadata;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.ScheduleBudget;
@@ -20,19 +20,26 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.AbstractList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -94,6 +101,25 @@ class PrefillEndpointTest {
     }
 
     @Test
+    void releaseBatchRetainsOnlyProtectedMembers() {
+        endpoint.commitBatch(7L, 100, List.of(
+                createBatchItem(101L, 500, 200),
+                createBatchItem(102L, 300, 100)));
+        assertTrue(endpoint.tryProtectBatchMember(7L, 101L));
+
+        endpoint.releaseBatch(7L);
+
+        assertEquals(1, endpoint.getInflightBatchCount());
+        assertEquals(1, endpoint.realPendingCount(),
+                "a delivery failure must not reopen capacity owned by an Engine fence");
+
+        endpoint.releaseBatchMemberProtection(7L, 101L);
+        endpoint.releaseBatch(7L);
+        assertEquals(0, endpoint.getInflightBatchCount());
+        assertEquals(0, endpoint.realPendingCount());
+    }
+
+    @Test
     void commitMultipleBatches() {
         BatchItem item1 = createBatchItem(1L, 500, 200);
         BatchItem item2 = createBatchItem(2L, 300, 100);
@@ -145,6 +171,22 @@ class PrefillEndpointTest {
         calibrate(finished, Map.of());
 
         assertEquals(0, endpoint.getInflightBatchCount());
+    }
+
+    @Test
+    void completion_observer_failure_does_not_escape_finished_settlement() {
+        endpoint.commitBatch(9L, 100, List.of(createBatchItem(9L, 500, 200)));
+        doThrow(new IllegalStateException("metrics unavailable"))
+                .when(endpointReporter)
+                .reportBatchPredictedTimeMs("PREFILL", "127.0.0.1", 100);
+
+        TaskInfo finished = taskInfo(9L, 9L, null, 0, 125);
+        assertDoesNotThrow(() -> calibrate(Map.of("9", finished), Map.of()));
+
+        assertEquals(0, endpoint.getInflightBatchCount());
+        assertEquals(0, endpoint.realPendingCount());
+        verify(endpointReporter).reportBatchActualTimeMs("PREFILL", "127.0.0.1", 125);
+        verify(endpointReporter).reportBatchPredictGapMs("PREFILL", "127.0.0.1", 25);
     }
 
     @Test
@@ -332,12 +374,13 @@ class PrefillEndpointTest {
         status.setRole(RoleType.PREFILL);
 
         CountDownLatch dispatched = new CountDownLatch(1);
-        BatchDecisionHandler handler = new BatchDecisionHandler() {
+        DecisionGroupHandler handler = new DecisionGroupHandler() {
             @Override public void onExpired(BatchItem head) {}
-            @Override public void onBatchReady(List<BatchItem> items, DispatchMeta meta) {
+            @Override public void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata meta) {
                 dispatched.countDown();
             }
             @Override public void onOfferFailure(BatchItem item, Throwable error) {}
+            @Override public void onDeliveryFailure(BatchItem item, Throwable error) {}
         };
         PrefillEndpoint limited = new PrefillEndpoint(
                 status, limitedConfig, handler, mock(BatchSchedulerReporter.class));
@@ -471,11 +514,11 @@ class PrefillEndpointTest {
     }
 
     @Test
-    void calibrateMissingBatchIdPreservesDispatchReconciliationFence() {
+    void calibrateMissingBatchIdPreservesProtectedBatchMember() {
         endpoint.commitBatch(700L, 100, List.of(
                 createBatchItem(101L, 500, 200),
                 createBatchItem(102L, 300, 100)));
-        endpoint.beginDispatchReconciliation(700L, 101L);
+        endpoint.tryProtectBatchMember(700L, 101L);
 
         calibrate(Map.of("102", priorityCanceledTask(102L, -1L)), Map.of());
         assertEquals(1, endpoint.getInflightBatchCount(),
@@ -488,9 +531,84 @@ class PrefillEndpointTest {
                 "generic endpoint calibration must not bypass the reconciliation owner");
         assertEquals(1, endpoint.realPendingCount());
 
-        endpoint.endDispatchReconciliation(700L, 101L);
+        endpoint.releaseBatchMemberProtection(700L, 101L);
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0, endpoint.realPendingCount());
+    }
+
+    @Test
+    void batchMemberProtectionWinsConcurrentFinishedSettlement() throws Exception {
+        BlockingReadList<BatchItem> requests = new BlockingReadList<>(
+                List.of(createBatchItem(101L, 500, 200)));
+        endpoint.commitBatch(700L, 100, requests);
+        requests.blockNextRead();
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch settlementStarted = new CountDownLatch(1);
+        try {
+            CompletableFuture<Boolean> protection =
+                    CompletableFuture.supplyAsync(
+                            () -> endpoint.tryProtectBatchMember(700L, 101L), executor);
+            assertTrue(requests.awaitReadBlocked(),
+                    "protection must enter the batch-key critical section");
+
+            TaskInfo finished = taskInfo(101L, 700L, null, 0, 10);
+            CompletableFuture<Void> settlement = CompletableFuture.runAsync(() -> {
+                settlementStarted.countDown();
+                calibrate(Map.of("101", finished), Map.of());
+            }, executor);
+            assertTrue(settlementStarted.await(2, TimeUnit.SECONDS));
+
+            requests.releaseRead();
+            assertTrue(protection.get(2, TimeUnit.SECONDS));
+            settlement.get(2, TimeUnit.SECONDS);
+
+            assertEquals(1, endpoint.getInflightBatchCount());
+            assertEquals(1, endpoint.realPendingCount(),
+                    "the terminal racing after protection must be deferred");
+            endpoint.releaseBatchMemberProtection(700L, 101L);
+            assertEquals(0, endpoint.getInflightBatchCount());
+            assertEquals(0, endpoint.realPendingCount());
+        } finally {
+            requests.releaseRead();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(2, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void finishedSettlementWinsConcurrentBatchMemberProtection() throws Exception {
+        BlockingReadList<BatchItem> requests = new BlockingReadList<>(
+                List.of(createBatchItem(101L, 500, 200)));
+        endpoint.commitBatch(700L, 100, requests);
+        requests.blockNextRead();
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch protectionStarted = new CountDownLatch(1);
+        try {
+            TaskInfo finished = taskInfo(101L, 700L, null, 0, 10);
+            CompletableFuture<Void> settlement = CompletableFuture.runAsync(
+                    () -> calibrate(Map.of("101", finished), Map.of()), executor);
+            assertTrue(requests.awaitReadBlocked(),
+                    "settlement must enter the batch-key critical section");
+
+            CompletableFuture<Boolean> protection =
+                    CompletableFuture.supplyAsync(() -> {
+                        protectionStarted.countDown();
+                        return endpoint.tryProtectBatchMember(700L, 101L);
+                    }, executor);
+            assertTrue(protectionStarted.await(2, TimeUnit.SECONDS));
+
+            requests.releaseRead();
+            settlement.get(2, TimeUnit.SECONDS);
+            assertFalse(protection.get(2, TimeUnit.SECONDS));
+            assertEquals(0, endpoint.getInflightBatchCount());
+            assertEquals(0, endpoint.realPendingCount());
+        } finally {
+            requests.releaseRead();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(2, TimeUnit.SECONDS));
+        }
     }
 
     @Test
@@ -510,12 +628,13 @@ class PrefillEndpointTest {
         status.setRole(RoleType.PREFILL);
 
         CountDownLatch dispatched = new CountDownLatch(1);
-        BatchDecisionHandler handler = new BatchDecisionHandler() {
+        DecisionGroupHandler handler = new DecisionGroupHandler() {
             @Override public void onExpired(BatchItem head) {}
-            @Override public void onBatchReady(List<BatchItem> items, DispatchMeta meta) {
+            @Override public void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata meta) {
                 dispatched.countDown();
             }
             @Override public void onOfferFailure(BatchItem item, Throwable error) {}
+            @Override public void onDeliveryFailure(BatchItem item, Throwable error) {}
         };
         PrefillEndpoint limited = new PrefillEndpoint(
                 status, limitedConfig, handler, mock(BatchSchedulerReporter.class));
@@ -581,7 +700,7 @@ class PrefillEndpointTest {
         BatchItem reconciling = createBatchItem(101L, 500, 200);
         BatchItem sibling = createBatchItem(102L, 300, 100);
         endpoint.commitBatch(7L, 100, List.of(reconciling, sibling));
-        endpoint.beginDispatchReconciliation(7L, 101L);
+        endpoint.tryProtectBatchMember(7L, 101L);
 
         TaskInfo siblingSuccess = new TaskInfo();
         siblingSuccess.setBatchId(7L);
@@ -602,7 +721,7 @@ class PrefillEndpointTest {
                 "ordinary success is not a reconciliation terminal");
         assertEquals(1, endpoint.realPendingCount());
 
-        endpoint.endDispatchReconciliation(7L, 101L);
+        endpoint.releaseBatchMemberProtection(7L, 101L);
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0, endpoint.realPendingCount());
     }
@@ -612,7 +731,7 @@ class PrefillEndpointTest {
         endpoint.commitBatch(7L, 100, List.of(
                 createBatchItem(101L, 500, 200),
                 createBatchItem(102L, 300, 100)));
-        endpoint.beginDispatchReconciliation(7L, 101L);
+        endpoint.tryProtectBatchMember(7L, 101L);
 
         TaskInfo protectedFailure = taskInfo(101L, 7L, null, 500, 40);
         TaskInfo siblingFailure = taskInfo(102L, 7L, null, 501, 50);
@@ -621,13 +740,13 @@ class PrefillEndpointTest {
         assertEquals(1, endpoint.getInflightBatchCount());
         assertEquals(1, endpoint.realPendingCount());
 
-        endpoint.endDispatchReconciliation(7L, 101L);
+        endpoint.releaseBatchMemberProtection(7L, 101L);
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0, endpoint.realPendingCount());
         verify(endpointReporter, never()).reportBatchPredictedTimeMs(
                 anyString(), anyString(), org.mockito.ArgumentMatchers.anyLong());
 
-        endpoint.endDispatchReconciliation(7L, 101L);
+        endpoint.releaseBatchMemberProtection(7L, 101L);
         assertEquals(0, endpoint.realPendingCount());
     }
 
@@ -702,13 +821,13 @@ class PrefillEndpointTest {
             throws InterruptedException {
         BatchItem item = createBatchItem(1L, 500, 200);
         endpoint.commitBatch(1L, 100, List.of(item));
-        endpoint.beginDispatchReconciliation(1L, item.requestId());
+        endpoint.tryProtectBatchMember(1L, item.requestId());
         Thread.sleep(10);
 
         assertEquals(0, endpoint.evictExpiredBatches(1));
         assertEquals(1, endpoint.getInflightBatchCount());
 
-        endpoint.endDispatchReconciliation(1L, item.requestId());
+        endpoint.releaseBatchMemberProtection(1L, item.requestId());
         assertEquals(0, endpoint.evictExpiredBatches(1),
                 "authoritative reconciliation settlement refreshes batch activity");
         Thread.sleep(10);
@@ -946,11 +1065,59 @@ class PrefillEndpointTest {
         return task;
     }
 
-    private static BatchDecisionHandler noopHandler() {
-        return new BatchDecisionHandler() {
+    private static DecisionGroupHandler noopHandler() {
+        return new DecisionGroupHandler() {
             @Override public void onExpired(BatchItem head) {}
-            @Override public void onBatchReady(List<BatchItem> items, DispatchMeta meta) {}
+            @Override public void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata meta) {}
             @Override public void onOfferFailure(BatchItem item, Throwable error) {}
+            @Override public void onDeliveryFailure(BatchItem item, Throwable error) {}
         };
+    }
+
+    /** One-shot read barrier used to hold a real batch-key computation in place. */
+    private static final class BlockingReadList<E> extends AbstractList<E> {
+        private final List<E> delegate;
+        private final AtomicBoolean blockNextRead = new AtomicBoolean();
+        private final CountDownLatch readBlocked = new CountDownLatch(1);
+        private final CountDownLatch releaseRead = new CountDownLatch(1);
+
+        private BlockingReadList(List<E> delegate) {
+            this.delegate = List.copyOf(delegate);
+        }
+
+        private void blockNextRead() {
+            if (!blockNextRead.compareAndSet(false, true)) {
+                throw new IllegalStateException("read barrier is already armed");
+            }
+        }
+
+        private boolean awaitReadBlocked() throws InterruptedException {
+            return readBlocked.await(2, TimeUnit.SECONDS);
+        }
+
+        private void releaseRead() {
+            releaseRead.countDown();
+        }
+
+        @Override
+        public E get(int index) {
+            if (blockNextRead.compareAndSet(true, false)) {
+                readBlocked.countDown();
+                try {
+                    if (!releaseRead.await(5, TimeUnit.SECONDS)) {
+                        throw new AssertionError("timed out waiting to release batch read");
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError("batch read interrupted", interrupted);
+                }
+            }
+            return delegate.get(index);
+        }
+
+        @Override
+        public int size() {
+            return delegate.size();
+        }
     }
 }

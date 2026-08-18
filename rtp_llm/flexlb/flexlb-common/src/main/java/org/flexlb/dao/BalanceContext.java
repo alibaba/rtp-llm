@@ -69,7 +69,7 @@ public class BalanceContext implements Prioritized {
 
     /**
      * Timestamp (ms) when the engine acknowledges the batch in BATCH mode.
-     * Set by FlexlbBatchScheduler.onSuccess() when the ACK is received.
+     * Set when PriorityScheduler confirms the EnqueueBatch acknowledgement.
      * Used to compute ack_to_response_time_ms in FlexlbServiceImpl.completeSchedule().
      * Remains 0 for non-BATCH paths or when ACK was not received.
      */

@@ -23,6 +23,7 @@ public enum StrategyErrorType {
     // queue error
     QUEUE_FULL(8502, false, "TooManyRequests"),
     QUEUE_TIMEOUT(8503, false, "GatewayTimeout"),
+    REQUEST_CANCELLED(8504, false),
 
     // batch dispatch error
     BATCH_DISPATCH_FAILED(8510, true),

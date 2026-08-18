@@ -35,16 +35,16 @@ import static org.mockito.Mockito.when;
  * <p>Core invariants under test:
  * <ol>
  *   <li>close() is exactly-once — a second call is a no-op;</li>
- *   <li>handoverToEngine() is exactly-once — a second call is a no-op;</li>
- *   <li>close() and handoverToEngine() are mutually exclusive — whichever
+ *   <li>markDeliverySucceeded() is exactly-once — a second call is a no-op;</li>
+ *   <li>close() and markDeliverySucceeded() are mutually exclusive — whichever
  *       runs first seals the lease, the other is a no-op;</li>
- *   <li>bindTo(future) on success → handoverToEngine (no resource release);</li>
+ *   <li>bindTo(future) on success → markDeliverySucceeded (no resource release);</li>
  *   <li>bindTo(future) on failure → close (all resources released);</li>
  *   <li>bindTo(future) on exceptional completion → close;</li>
  *   <li>null decodeEp / null prefillQueue are safe (skip the corresponding
  *       cleanup step, still execute the remaining steps).</li>
  *   <li>onCloseCallback is decremented exactly once on every terminal path:
- *       close(), forceCloseAfterHandover(), markDecodeAccepted();</li>
+ *       close(), reconcileAfterDeliveryTimeout(), markDecodeAccepted();</li>
  *   <li>onCloseCallback is called even if releaseResources() throws
  *       (try-finally guarantee).</li>
  * </ol>
@@ -65,16 +65,16 @@ class AdmissionLeaseTest {
         verify(registrar, times(1)).unregisterInflight(item);
     }
 
-    // ==================== handoverToEngine() exactly-once ====================
+    // ==================== markDeliverySucceeded() exactly-once ====================
 
     @Test
-    void handoverToEngine_is_exactly_once() {
+    void markDeliverySucceeded_is_exactly_once() {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         BatchItem item = batchItem(1002L, new CompletableFuture<>());
         AdmissionLease lease = new AdmissionLease(item, null, null, registrar);
 
-        lease.handoverToEngine();
-        lease.handoverToEngine();
+        lease.markDeliverySucceeded();
+        lease.markDeliverySucceeded();
 
         verify(registrar, never()).unregisterInflight(any());
     }
@@ -82,40 +82,37 @@ class AdmissionLeaseTest {
     // ==================== mutual exclusivity ====================
 
     @Test
-    void close_then_handover_is_noop() {
+    void close_then_delivery_is_noop() {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         BatchItem item = batchItem(1003L, new CompletableFuture<>());
         AdmissionLease lease = new AdmissionLease(item, null, null, registrar);
 
         lease.close();
-        lease.handoverToEngine();
+        lease.markDeliverySucceeded();
 
         verify(registrar, times(1)).unregisterInflight(item);
     }
 
-    /**
-     * close() from HANDED_OVER is now a no-op (Warning 2 fix). Post-handover
-     * cleanup routes through forceCloseAfterHandover() or markDecodeAccepted()
-     * only.
-     */
     @Test
-    void handover_then_close_is_noop() {
+    void prefill_only_delivery_closes_engine_owned_and_close_is_noop() {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         BatchItem item = batchItem(1004L, new CompletableFuture<>());
         AdmissionLease lease = new AdmissionLease(item, null, null, registrar);
 
-        lease.handoverToEngine();
+        lease.markDeliverySucceeded();
         lease.close();
 
-        // close() from HANDED_OVER is a no-op — no resource release
+        // No Decode observation can arrive for a Prefill-only plan. Successful
+        // delivery is therefore terminal and must release the admission permit
+        // without scheduling reconciliation or releasing engine resources.
         verify(registrar, never()).unregisterInflight(any());
-        assertEquals(1, lease.leaseState()); // still HANDED_OVER
+        assertEquals(3, lease.leaseState()); // CLOSED_ENGINE_OWNED
     }
 
-    // ==================== bindTo: success → handover ====================
+    // ==================== bindTo: success → delivery ====================
 
     @Test
-    void bindTo_success_completes_handover_not_close() {
+    void bindTo_success_completes_delivery_not_close() {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         CompletableFuture<Response> future = new CompletableFuture<>();
         BatchItem item = batchItem(1005L, future);
@@ -124,7 +121,7 @@ class AdmissionLeaseTest {
 
         future.complete(successResponse(1005L));
 
-        // handover seals the lease — close (unregisterInflight) must not run
+        // delivery seals the lease — close (unregisterInflight) must not run
         verify(registrar, never()).unregisterInflight(any());
     }
 
@@ -222,38 +219,41 @@ class AdmissionLeaseTest {
     // ==================== onCloseCallback counter guarantee ====================
 
     /**
-     * onCloseCallback must decrement on the forceCloseAfterHandover path:
-     * create (increment) → handover → forceClose (decrement).
+     * onCloseCallback must decrement on the reconcileAfterDeliveryTimeout path:
+     * create (increment) → delivery → reconcile (decrement).
      */
     @Test
-    void onCloseCallback_decrements_on_forceCloseAfterHandover() {
+    void onCloseCallback_decrements_on_reconcileAfterDeliveryTimeout() {
         AtomicInteger activeCount = new AtomicInteger(0);
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         DecodeEndpoint decodeEp = mock(DecodeEndpoint.class);
         PrefillQueueManager prefillQueue = mock(PrefillQueueManager.class);
         BatchItem item = batchItemWithDecode(2001L, new CompletableFuture<>(), 2001L);
 
-        when(decodeEp.isConfirmedTracked(2001L)).thenReturn(false);
+        when(registrar.fenceAfterDeliveryTimeout(item, "post_delivery_soft_timeout"))
+                .thenReturn(InflightRegistrar.PostDeliveryFenceResult.STARTED);
 
         activeCount.incrementAndGet();
         AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar,
-                0, activeCount::decrementAndGet);
-        lease.handoverToEngine();
-        assertEquals(1, lease.leaseState()); // HANDED_OVER
+                0, activeCount::decrementAndGet, null);
+        lease.markDeliverySucceeded();
+        assertEquals(1, lease.leaseState()); // DELIVERY_WAIT
         assertEquals(1, activeCount.get());
 
-        lease.forceCloseAfterHandover();
+        lease.reconcileAfterDeliveryTimeout();
 
-        assertEquals(2, lease.leaseState()); // CLOSED_CLEANUP
+        assertEquals(2, lease.leaseState()); // CLOSED
         assertEquals(0, activeCount.get()); // counter decremented
-        // Resources released on force-close (decode not accepted)
-        verify(registrar, times(1)).unregisterInflight(item);
-        verify(registrar, times(1)).finishYieldedById(2001L, "post_success_soft_timeout");
+        // Scheduler owns the Engine fence; the lease cannot release ledgers.
+        verify(registrar, times(1))
+                .fenceAfterDeliveryTimeout(item, "post_delivery_soft_timeout");
+        verify(registrar, never()).unregisterInflight(item);
+        verify(decodeEp, never()).release(anyLong());
     }
 
     /**
      * onCloseCallback must decrement on the markDecodeAccepted path:
-     * create (increment) → handover → decodeAccept (decrement).
+     * create (increment) → delivery → decodeAccept (decrement).
      */
     @Test
     void onCloseCallback_decrements_on_markDecodeAccepted() {
@@ -265,8 +265,8 @@ class AdmissionLeaseTest {
 
         activeCount.incrementAndGet();
         AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar,
-                0, activeCount::decrementAndGet);
-        lease.handoverToEngine();
+                0, activeCount::decrementAndGet, null);
+        lease.markDeliverySucceeded();
         assertEquals(1, activeCount.get());
 
         lease.markDecodeAccepted();
@@ -279,12 +279,12 @@ class AdmissionLeaseTest {
     }
 
     /**
-     * CAS mutex: close() (UNSET→CLOSED) then forceCloseAfterHandover()
-     * (HANDED_OVER→CLOSED) — the second CAS fails, onCloseCallback is
+     * CAS mutex: close() (UNSET→CLOSED) then reconcileAfterDeliveryTimeout()
+     * (DELIVERY_WAIT→CLOSED) — the second CAS fails, onCloseCallback is
      * called exactly once.
      */
     @Test
-    void onCloseCallback_only_decrement_once_close_then_forceClose() {
+    void onCloseCallback_only_decrement_once_close_then_reconcile() {
         AtomicInteger activeCount = new AtomicInteger(0);
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         DecodeEndpoint decodeEp = mock(DecodeEndpoint.class);
@@ -293,14 +293,14 @@ class AdmissionLeaseTest {
 
         activeCount.incrementAndGet();
         AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar,
-                0, activeCount::decrementAndGet);
+                0, activeCount::decrementAndGet, null);
 
         // close() succeeds: UNSET→CLOSED
         lease.close();
         assertEquals(0, activeCount.get()); // counter decremented
 
-        // forceCloseAfterHandover() CAS fails (state is CLOSED, not HANDED_OVER)
-        lease.forceCloseAfterHandover();
+        // reconcileAfterDeliveryTimeout() CAS fails (state is CLOSED, not DELIVERY_WAIT)
+        lease.reconcileAfterDeliveryTimeout();
         assertEquals(0, activeCount.get()); // NOT decremented again
 
         // Resources released exactly once (by close())
@@ -326,44 +326,47 @@ class AdmissionLeaseTest {
 
         activeCount.incrementAndGet();
         AdmissionLease lease = new AdmissionLease(item, null, prefillQueue, registrar,
-                0, activeCount::decrementAndGet);
+                0, activeCount::decrementAndGet, null);
 
         // close() should catch the exception and still call notifyCloseCallback
         lease.close();
 
-        assertEquals(2, lease.leaseState()); // CLOSED_CLEANUP — CAS succeeded
+        assertEquals(2, lease.leaseState()); // CLOSED — CAS succeeded
         assertEquals(0, activeCount.get()); // counter decremented despite exception
         verify(prefillQueue, times(1)).tryRemove(2004L, "LEASE_RELEASE");
     }
 
     /**
-     * try-finally guarantee for forceCloseAfterHandover: if
-     * finishYieldedById throws, onCloseCallback must still be called.
+     * try-finally guarantee for reconcileAfterDeliveryTimeout: if the registrar
+     * fence delegation throws, onCloseCallback must still be called and the
+     * lease must not fall back to an unsafe local release.
      */
     @Test
-    void onCloseCallback_called_even_if_finishYieldedById_throws() {
+    void onCloseCallback_called_even_if_engineFenceDelegation_throws() {
         AtomicInteger activeCount = new AtomicInteger(0);
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         DecodeEndpoint decodeEp = mock(DecodeEndpoint.class);
         PrefillQueueManager prefillQueue = mock(PrefillQueueManager.class);
         BatchItem item = batchItemWithDecode(2005L, new CompletableFuture<>(), 2005L);
 
-        when(decodeEp.isConfirmedTracked(2005L)).thenReturn(false);
-        // Make finishYieldedById throw
         doThrow(new RuntimeException("simulated cancel error"))
-                .when(registrar).finishYieldedById(2005L, "post_success_soft_timeout");
+                .when(registrar)
+                .fenceAfterDeliveryTimeout(item, "post_delivery_soft_timeout");
 
         activeCount.incrementAndGet();
         AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar,
-                0, activeCount::decrementAndGet);
-        lease.handoverToEngine();
+                0, activeCount::decrementAndGet, null);
+        lease.markDeliverySucceeded();
 
-        // forceCloseAfterHandover should catch the exception and still call notifyCloseCallback
-        lease.forceCloseAfterHandover();
+        // reconcileAfterDeliveryTimeout should catch the exception and still call notifyCloseCallback
+        lease.reconcileAfterDeliveryTimeout();
 
-        assertEquals(2, lease.leaseState()); // CLOSED_CLEANUP
+        assertEquals(2, lease.leaseState()); // CLOSED
         assertEquals(0, activeCount.get()); // counter decremented despite exception
-        verify(registrar, times(1)).finishYieldedById(2005L, "post_success_soft_timeout");
+        verify(registrar, times(1))
+                .fenceAfterDeliveryTimeout(item, "post_delivery_soft_timeout");
+        verify(registrar, never()).unregisterInflight(item);
+        verify(decodeEp, never()).release(anyLong());
     }
 
     // ==================== helpers ====================

@@ -61,7 +61,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
     @Override
     public void rollBack(WorkerEndpoint ep, long requestId) {
         // Release non-batch prefill inflight reservation on routing failure.
-        // Batch path inflight is managed by FlexlbBatchScheduler — no-op here.
+        // Batch path inflight is managed by PriorityScheduler — no-op here.
         if (ep instanceof PrefillEndpoint pe) {
             pe.releaseBatch(requestId);
         }
@@ -342,11 +342,19 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             // Cache 收益已折进 estimate(predictor, cacheHit)（hitTokens 参与公式求值），不再单列扣减
             long singlePrefillMs = Math.max(0L, formulaEstimateMemo.estimate(predictor, cacheHit));
 
-            long endpointWaitMs = Math.max(0L, ep.realWaitTimeMs());
+            long endpointWaitMs = ep.realWaitTimeMs();
+            if (endpointWaitMs == Long.MAX_VALUE) {
+                // An unavailable ledger estimate is deliberately not a numeric wait
+                // estimate. Treat this worker as unavailable for this selection;
+                // adding the sentinel would wrap the score negative and make the
+                // least observable worker look best.
+                rejections.merge("WAIT_ESTIMATE_UNAVAILABLE", 1, Integer::sum);
+                continue;
+            }
+            endpointWaitMs = Math.max(0L, endpointWaitMs);
 
-            if (sloFilterEnabled
-                    && saturatingAdd(endpointWaitMs, singlePrefillMs)
-                            > sloMs - sloRiskMarginMs) {
+            long serviceWaitMs = saturatingAdd(endpointWaitMs, singlePrefillMs);
+            if (sloFilterEnabled && serviceWaitMs > sloMs - sloRiskMarginMs) {
                 rejections.merge("SLO_VIOLATION", 1, Integer::sum);
                 continue;
             }
@@ -357,9 +365,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             // When Auto-TPM is on, all requests carry a normalized priority
             // (1-100), so the priority-aware estimate always applies.
             long batcherWaitMs = estimatedBatcherWaitMs(ep, balanceContext, config);
-            long score = saturatingAdd(
-                    singlePrefillMs,
-                    saturatingAdd(endpointWaitMs, batcherWaitMs));
+            long score = saturatingAdd(serviceWaitMs, batcherWaitMs);
             feasible.setCandidate(feasibleCount++, ep, cacheHit, score, singlePrefillMs,
                     endpointWaitMs, pendingCount);
             sumWaitMs = saturatingAdd(sumWaitMs, endpointWaitMs);
@@ -423,7 +429,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
     private long estimatedBatcherWaitMs(PrefillEndpoint ep,
                                         BalanceContext balanceContext,
                                         FlexlbConfig config) {
-        if (!isBatchPath(balanceContext)) {
+        if (!usesPriorityScheduler(balanceContext)) {
             return 0L;
         }
         long waitMs = config.isAutoTpmEnabled()
@@ -570,9 +576,9 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                                            long selectedPrefillMs,
                                            BalanceContext balanceContext,
                                            long bestCacheHit) {
-        // Non-batch path: reserve prefill inflight for load-aware scoring.
-        // Batch path uses FlexlbBatchScheduler.commitBatch() instead — skip here to avoid double-counting.
-        if (!isBatchPath(balanceContext)) {
+        // DIRECT (including a BATCH fallback) and legacy QUEUE reserve here.
+        // PriorityScheduler owns BATCH and QUEUE+AutoTPM reservations.
+        if (usesStrategyInflightTracking(balanceContext)) {
             ep.commitBatch(requestId, selectedPrefillMs, Collections.emptyList());
         }
 
@@ -611,8 +617,22 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
     }
 
     /** Request-level mode is authoritative because configured BATCH may downgrade to DIRECT. */
-    private static boolean isBatchPath(BalanceContext balanceContext) {
-        return balanceContext != null
-                && balanceContext.getScheduleMode() == ScheduleModeEnum.BATCH;
+    private static boolean usesPriorityScheduler(BalanceContext balanceContext) {
+        if (balanceContext == null) {
+            return false;
+        }
+        ScheduleModeEnum mode = balanceContext.getScheduleMode();
+        if (mode == ScheduleModeEnum.BATCH) {
+            return true;
+        }
+        FlexlbConfig config = balanceContext.getConfig();
+        return mode == ScheduleModeEnum.QUEUE
+                && config != null
+                && config.isAutoTpmEnabled();
+    }
+
+    /** Whether this strategy, rather than PriorityScheduler, owns Prefill accounting. */
+    private static boolean usesStrategyInflightTracking(BalanceContext balanceContext) {
+        return !usesPriorityScheduler(balanceContext);
     }
 }

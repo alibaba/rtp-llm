@@ -35,7 +35,7 @@ import static org.mockito.Mockito.when;
  * <ul>
  *   <li>Proto field {@code is_waiting} replaced by {@code TaskPhase phase}</li>
  *   <li>{@code WorkerStatus.runningTaskList} replaces old {@code waitingTaskList + localTaskMap}</li>
- *   <li>Constructor requires {@code FlexlbBatchScheduler + EndpointRegistry} (nullable)</li>
+ *   <li>Constructor requires {@code PriorityScheduler + EndpointRegistry} (nullable)</li>
  *   <li>Task list refresh only occurs when status version advances (not on equal version)</li>
  * </ul>
  */
@@ -74,7 +74,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
                 org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(CompletableFuture.completedFuture(workerStatusPB));
 
-        // Act — pass null for FlexlbBatchScheduler and EndpointRegistry (not needed in unit test)
+        // Act — pass null for PriorityScheduler and EndpointRegistry (not needed in unit test)
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
                 modelName, ipPort, site,
                 RoleType.PREFILL,

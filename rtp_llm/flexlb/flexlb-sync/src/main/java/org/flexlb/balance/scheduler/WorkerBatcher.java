@@ -16,17 +16,20 @@ import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * Per-worker request batcher that owns the queue and lifecycle, delegating
- * dispatch decision logic to a pluggable {@link BatcherAlgorithm}.
+ * Per-worker scheduling queue that owns request grouping and delivery staging,
+ * delegating grouping decisions to a pluggable {@link BatcherAlgorithm}.
  *
  * <p>One instance per Prefill worker. Requests are submitted via
- * {@link #offer(BatchItem)} and batched by the configured algorithm.
+ * {@link #offer(BatchItem)} and grouped by the configured algorithm. A group
+ * may be delivered through EnqueueBatch or as individual route decisions.
  *
- * <p>The queue is the single source of truth for pending requests. In
- * Auto-TPM mode it is ordered by the explicit priority comparator
+ * <p>The context-owned active queue and ready-delivery backlog together are
+ * the single source of truth for pending requests. In Auto-TPM mode both are
+ * ordered by the explicit priority comparator
  * ({@link #AUTO_TPM_QUEUE_ORDER}, design doc 8.1); in legacy mode the
  * algorithm-computed {@link BatchItem#sortKey()} order is preserved
  * byte-for-byte. All mutations go through {@link BatcherContext} (or the
@@ -35,7 +38,7 @@ import java.util.concurrent.locks.ReentrantLock;
  */
 public class WorkerBatcher {
 
-    private static final long DISPATCH_CAPACITY_RETRY_NANOS =
+    private static final long DELIVERY_CAPACITY_RETRY_NANOS =
             TimeUnit.MILLISECONDS.toNanos(1);
 
     /**
@@ -51,8 +54,9 @@ public class WorkerBatcher {
      * <p>{@link #LEGACY_QUEUE_ORDER} is unchanged.
      */
     public static final Comparator<BatchItem> AUTO_TPM_QUEUE_ORDER =
-            PriorityOrdering.<BatchItem>strict()
-                    .thenComparingLong(BatchItem::requestId);
+            (left, right) -> PriorityOrdering.compareWithRequestId(
+                    left.priority(), left.enqueueSeq(), left.requestId(),
+                    right.priority(), right.enqueueSeq(), right.requestId());
 
     /** Legacy order: algorithm-computed sort key (unchanged behavior). */
     public static final Comparator<BatchItem> LEGACY_QUEUE_ORDER =
@@ -60,13 +64,13 @@ public class WorkerBatcher {
 
     private final String key;
     private final FlexlbConfig cfg;
-    private final BatchDecisionHandler handler;
+    private final DecisionGroupHandler decisionHandler;
     private final boolean autoTpm;
     private final PriorityBlockingQueue<BatchItem> queue;
     private final AtomicInteger queueDepth = new AtomicInteger();
     /**
      * Monotonic queue version bumped on every queue mutation (enqueue,
-     * remove, dispatch, drain). Captured in Auto-TPM cluster snapshots and
+     * remove, delivery, drain). Captured in Auto-TPM cluster snapshots and
      * re-checked at plan commit time to detect concurrent queue mutations
      * (optimistic concurrency control).
      */
@@ -82,25 +86,32 @@ public class WorkerBatcher {
      * change).
      */
     private final ReentrantLock queueLock = new ReentrantLock();
+    /**
+     * One per-worker condition for both new queue work and route-slot release.
+     * Every predicate transition and signal is serialized by queueLock, so a
+     * release cannot race between the cap re-check and await.
+     */
+    private final Condition stateChanged = queueLock.newCondition();
     private final Thread workerThread;
     private volatile boolean stopped;
+    private volatile boolean waitingForSignal;
     private final BatcherAlgorithm algorithm;
     private final BatcherContext ctx;
     private final PrefillQueueManager queueManager;
-    private volatile long dispatchRetryNotBeforeNanos;
+    private volatile long deliveryRetryNotBeforeNanos;
 
     public WorkerBatcher(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
-                         BatchDecisionHandler handler,
+                         DecisionGroupHandler decisionHandler,
                          BatchSchedulerReporter reporter) {
         this.key = key;
         this.cfg = cfg;
-        this.handler = handler;
+        this.decisionHandler = decisionHandler;
         this.autoTpm = cfg.isAutoTpmEnabled();
         Comparator<BatchItem> queueOrder = autoTpm ? AUTO_TPM_QUEUE_ORDER : LEGACY_QUEUE_ORDER;
         this.queue = new PriorityBlockingQueue<>(11, queueOrder);
         this.algorithm = createAlgorithm(cfg);
         this.ctx = new BatcherContext(
-                key, prefillEp, cfg, handler, queue, queueDepth, queueVersion, queueLock,
+                key, prefillEp, cfg, decisionHandler, queue, queueDepth, queueVersion, queueLock,
                 queueOrder, reporter);
         this.queueManager = new PrefillQueueManager(this, ctx);
         this.workerThread = new Thread(this::runLoop, "flexlb-batcher-" + key);
@@ -124,25 +135,30 @@ public class WorkerBatcher {
 
     public void offer(BatchItem item) {
         if (stopped) {
-            handler.onOfferFailure(item, new IllegalStateException("FlexLB batcher stopped"));
+            decisionHandler.onOfferFailure(item,
+                    new IllegalStateException("FlexLB worker scheduling queue stopped"));
             return;
         }
         int maxSize = cfg.getFlexlbBatchQueueMaxSize();
         if (!reserveQueueSlot(maxSize)) {
-            handler.onOfferFailure(item,
-                    new IllegalStateException("FlexLB batcher queue full, maxSize=" + maxSize));
+            decisionHandler.onOfferFailure(item,
+                    new IllegalStateException(
+                            "FlexLB worker scheduling queue full, maxSize=" + maxSize));
             return;
         }
-        enqueue(item);
+        if (!enqueue(item)) {
+            decisionHandler.onOfferFailure(item,
+                    new IllegalStateException("FlexLB worker scheduling queue stopped"));
+        }
     }
 
     /**
      * Auto-TPM variant of {@link #offer(BatchItem)} that reports failure via
-     * return value instead of the {@link BatchDecisionHandler#onOfferFailure}
+     * return value instead of the {@link DecisionGroupHandler#onOfferFailure}
      * callback, letting the caller (PlanCommitter) roll back its decode
      * reservation and decide on retry.
      *
-     * @return true when the item was enqueued; false when the batcher is
+     * @return true when the item was enqueued; false when the worker queue is
      *         stopped or the queue is full (item not enqueued)
      */
     public boolean tryOffer(BatchItem item) {
@@ -152,19 +168,29 @@ public class WorkerBatcher {
         if (!reserveQueueSlot(cfg.getFlexlbBatchQueueMaxSize())) {
             return false;
         }
-        enqueue(item);
-        return true;
+        return enqueue(item);
     }
 
-    private void enqueue(BatchItem item) {
+    private boolean enqueue(BatchItem item) {
         try {
             long sortKey = algorithm.computeSortKey(ctx, item);
             item.setSortKey(sortKey);
             algorithm.onOffer(ctx, item, System.currentTimeMillis());
             queueLock.lock();
             try {
+                // Linearize the final stopped check with shutdown/drain. An
+                // offer that reserved capacity just before shutdown must not
+                // enqueue after the drain has completed.
+                if (stopped) {
+                    queueDepth.decrementAndGet();
+                    return false;
+                }
                 queue.add(item);
                 queueVersion.incrementAndGet();
+                if (autoTpm) {
+                    stateChanged.signal();
+                }
+                return true;
             } finally {
                 queueLock.unlock();
             }
@@ -181,27 +207,29 @@ public class WorkerBatcher {
     /**
      * Snapshot of the current queue depth bucketed by normalized Auto-TPM
      * priority ({@code 0} for legacy items without a budget — same convention
-     * as the batch wait-time-by-priority series). Uses the queue's
-     * weakly-consistent iterator without taking {@link #queueLock}, so the
-     * periodic metrics reporter never contends with the dispatch hot path.
-     * Only priorities present in the queue appear in the result — same
-     * empty-bucket behavior as the batch wait-time-by-priority series.
+     * as the batch wait-time-by-priority series). The active queue uses its
+     * weakly-consistent iterator; the usually small ready-delivery backlog is
+     * copied under {@link #queueLock} so a staged route decision remains
+     * visible without racing removal or delivery. Only priorities present in
+     * either queue appear in the result — the same empty-bucket behavior as
+     * the batch wait-time-by-priority series.
      */
     public Map<Integer, Integer> queueSizeByPriority() {
         Map<Integer, Integer> sizeByPriority = new HashMap<>();
         for (BatchItem item : queue) {
             sizeByPriority.merge(item.priority(), 1, Integer::sum);
         }
+        ctx.addReadyQueueSizeByPriority(sizeByPriority);
         return sizeByPriority;
     }
 
-    /** Current queue version for Auto-TPM optimistic plan validation. */
+    /** Current active/ready queue version for Auto-TPM optimistic plan validation. */
     public long queueVersion() {
         return queueVersion.get();
     }
 
     /**
-     * Estimated time a new request would wait in the queue before dispatch.
+     * Estimated time a new request would wait in the queue before delivery.
      * Delegates to the algorithm-specific {@link BatcherAlgorithm#queueWaitMs}.
      */
     public long queueWaitMs() {
@@ -213,19 +241,19 @@ public class WorkerBatcher {
         return queueManager;
     }
 
-    /** Resolve a staged item as dispatched/terminal and release its queue slot. */
-    boolean completePendingDispatch(BatchItem item) {
-        return ctx.completePendingDispatch(item);
+    /** Resolve a staged item as delivered or terminal and release its queue slot. */
+    boolean completePendingDelivery(BatchItem item) {
+        return ctx.completePendingDelivery(item);
     }
 
     /** Claim callback ownership, atomically fenced against batcher shutdown. */
-    BatcherContext.PendingClaimResult claimPendingDispatch(BatchItem item) {
+    BatcherContext.PendingClaimResult claimPendingDelivery(BatchItem item) {
         // Do not consult WorkerBatcher.stopped outside queueLock. shutdown()
         // publishes that flag immediately before ctx.stopAndDrainTo(); an
         // out-of-lock early return in that window would leave the item STAGED
         // while the callback incorrectly assumes shutdown already drained it.
         // BatcherContext is the authoritative atomic claim-vs-drain fence.
-        return ctx.claimPendingDispatch(item);
+        return ctx.claimPendingDelivery(item);
     }
 
     /**
@@ -233,29 +261,38 @@ public class WorkerBatcher {
      * ordering metadata. Returns false when it was not pending or shutdown
      * already owns the batcher.
      */
-    BatcherContext.PendingRestoreResult restorePendingDispatch(BatchItem item) {
-        BatcherContext.PendingRestoreResult result = ctx.restorePendingDispatch(item);
+    BatcherContext.PendingRestoreResult restorePendingDelivery(BatchItem item) {
+        BatcherContext.PendingRestoreResult result = ctx.restorePendingDelivery(item);
         if (result == BatcherContext.PendingRestoreResult.RESTORED) {
-            long retryAt = System.nanoTime() + DISPATCH_CAPACITY_RETRY_NANOS;
-            dispatchRetryNotBeforeNanos = Math.max(dispatchRetryNotBeforeNanos, retryAt);
+            long retryAt = System.nanoTime() + DELIVERY_CAPACITY_RETRY_NANOS;
+            deliveryRetryNotBeforeNanos = Math.max(deliveryRetryNotBeforeNanos, retryAt);
         }
         return result;
     }
 
-    int dispatchPendingSize() {
-        return ctx.dispatchPendingSize();
+    int pendingDeliveryCount() {
+        return ctx.pendingDeliveryCount();
     }
 
     public void shutdown() {
-        stopped = true;
         List<BatchItem> remaining = new ArrayList<>();
-        ctx.stopAndDrainTo(remaining);
+        queueLock.lock();
+        try {
+            stopped = true;
+            // Reentrant on the same per-worker lock: drain and wake publish as
+            // one state transition to both empty and capacity waiters.
+            ctx.stopAndDrainTo(remaining);
+            stateChanged.signalAll();
+        } finally {
+            queueLock.unlock();
+        }
         workerThread.interrupt();
         algorithm.onShutdown(ctx);
         for (BatchItem item : remaining) {
             try {
-                handler.onOfferFailure(item,
-                        new CancellationException("FlexLB batcher stopped: " + key));
+                decisionHandler.onOfferFailure(item,
+                        new CancellationException(
+                                "FlexLB worker scheduling queue stopped: " + key));
             } catch (Throwable callbackFailure) {
                 Logger.error("WorkerBatcher[{}] shutdown callback failed request_id={}",
                         key, item.requestId(), callbackFailure);
@@ -396,12 +433,7 @@ public class WorkerBatcher {
     }
 
     private BatchItem findQueued(long requestId) {
-        for (BatchItem item : queue) {
-            if (item.requestId() == requestId) {
-                return item;
-            }
-        }
-        return null;
+        return ctx.findQueued(requestId);
     }
 
     /**
@@ -412,9 +444,9 @@ public class WorkerBatcher {
      * not enqueued) — then remove all victims and enqueue the incoming item.
      *
      * <p>"Still queued" is a sufficient guard: a BatchItem leaves the queue
-     * only via dispatch / eviction / drop, all under {@link #queueLock} and
+     * only via delivery / eviction / drop, all under {@link #queueLock} and
      * all removing it from the queue — so an in-lock {@code findQueued} hit
-     * proves the victim has not been dispatched. Unrelated queue mutations
+     * proves the victim has not been delivered. Unrelated queue mutations
      * (which the legacy whole-queue version guard treated as conflicts) no
      * longer abort the commit.
      */
@@ -466,7 +498,22 @@ public class WorkerBatcher {
         while (!stopped && !Thread.currentThread().isInterrupted()) {
             try {
                 waitForNonEmpty();
-                waitForDispatchRetry();
+                waitForDeliveryRetry();
+                BatcherContext.ReadyDeliveryResult readyDelivery =
+                        ctx.deliverReadyRequests();
+                if (readyDelivery == BatcherContext.ReadyDeliveryResult.CAPACITY_BLOCKED) {
+                    if (ctx.isActiveEmpty()) {
+                        awaitDeliveryCapacityOrActiveWork();
+                        continue;
+                    }
+                    // A live config transition can leave BATCH_ENQUEUE work behind
+                    // a route backlog. Ready route work remains preferred when
+                    // capacity exists, but a full route cap must not HOL-block
+                    // undecided active work.
+                }
+                if (readyDelivery == BatcherContext.ReadyDeliveryResult.DELIVERED) {
+                    continue;
+                }
                 algorithm.processQueue(ctx);
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
@@ -479,10 +526,13 @@ public class WorkerBatcher {
 
     private void waitForNonEmpty() throws InterruptedException {
         if (autoTpm) {
-            // Non-destructive wait: take()+put() transiently hides the head
-            // from concurrent snapshots and version-checked replaces.
-            while (!stopped && queue.isEmpty()) {
-                TimeUnit.MILLISECONDS.sleep(1);
+            queueLock.lockInterruptibly();
+            try {
+                while (!stopped && !ctx.hasProcessableWork()) {
+                    awaitStateChange();
+                }
+            } finally {
+                queueLock.unlock();
             }
             return;
         }
@@ -490,8 +540,54 @@ public class WorkerBatcher {
         queue.put(item);
     }
 
-    private void waitForDispatchRetry() throws InterruptedException {
-        long remaining = dispatchRetryNotBeforeNanos - System.nanoTime();
+    /**
+     * Wait only while ready work is the sole work and the request cap is
+     * still full. Enqueue and slot release both signal under queueLock; the
+     * in-lock predicate re-check closes every missed-wakeup window.
+     */
+    private void awaitDeliveryCapacityOrActiveWork() throws InterruptedException {
+        queueLock.lockInterruptibly();
+        try {
+            while (!stopped
+                    && ctx.isActiveEmpty()
+                    && ctx.readyDeliveryCount() > 0
+                    && ctx.availableDeliverySlots() == 0) {
+                awaitStateChange();
+            }
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
+    private void awaitStateChange() throws InterruptedException {
+        waitingForSignal = true;
+        try {
+            stateChanged.await();
+        } finally {
+            waitingForSignal = false;
+        }
+    }
+
+    /** Called after Prefill releases a request-mode slot, outside its stripe. */
+    public void signalDeliveryCapacityAvailable() {
+        if (!autoTpm || ctx.readyDeliveryCount() == 0) {
+            return;
+        }
+        queueLock.lock();
+        try {
+            stateChanged.signal();
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
+    /** Package-private deterministic wait-state probe for scheduler tests. */
+    boolean isWaitingForSignal() {
+        return waitingForSignal;
+    }
+
+    private void waitForDeliveryRetry() throws InterruptedException {
+        long remaining = deliveryRetryNotBeforeNanos - System.nanoTime();
         if (remaining > 0) {
             TimeUnit.NANOSECONDS.sleep(remaining);
         }

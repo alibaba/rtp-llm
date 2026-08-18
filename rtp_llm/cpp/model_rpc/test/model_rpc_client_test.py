@@ -303,6 +303,33 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(input_pb.request_info.request_id, "source-request-id")
         self.assertEqual(input_pb.request_info.source_role, "frontend")
 
+    def test_trans_input_priority_uses_shared_qos_resolution(self):
+        cases = (
+            ({"x-dashscope-inner-qos-level": "70"}, None, 70),
+            ({"X-DashScope-Inner-QoS-Level": "60"}, None, 60),
+            ({}, 77, 77),
+            ({"x-dashscope-inner-qos-level": "invalid"}, 40, 40),
+            ({"x-dashscope-inner-qos-level": "101"}, None, 50),
+            ({}, None, 50),
+        )
+
+        for headers, config_priority, expected in cases:
+            with self.subTest(
+                headers=headers,
+                config_priority=config_priority,
+                expected=expected,
+            ):
+                input_pb = trans_input(
+                    GenerateInput(
+                        token_ids=torch.tensor([1, 2, 3]),
+                        generate_config=GenerateConfig(qos_priority=config_priority),
+                        request_id=123,
+                        mm_inputs=[],
+                        headers=headers,
+                    )
+                )
+                self.assertEqual(input_pb.priority, expected)
+
     def test_trans_input_dual_writes_role_addrs(self):
         input_pb = trans_input(
             GenerateInput(
@@ -408,6 +435,7 @@ class ModelRpcClientTest(TestCase):
             generate_config=GenerateConfig(timeout_ms=1000),
             request_id=322,
             mm_inputs=[],
+            headers={"x-dashscope-inner-qos-level": "70"},
         )
 
         with patch(
@@ -419,6 +447,7 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(len(responses), 1)
         self.assertEqual(len(stub.generate_calls), 1)
         self.assertEqual(stub.generate_calls[0][0].request_id, 322)
+        self.assertEqual(stub.generate_calls[0][0].priority, 70)
         self.assertEqual(stub.fetch_calls, [])
 
     def test_enqueue_cancels_fetch_stream_on_early_close(self):

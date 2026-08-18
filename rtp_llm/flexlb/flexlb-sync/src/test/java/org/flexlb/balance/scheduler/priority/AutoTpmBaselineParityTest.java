@@ -4,8 +4,11 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.BatchDispatcher;
+import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.PriorityScheduler;
+import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
+import org.flexlb.balance.scheduler.RequestLifecycleState;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -77,19 +80,53 @@ class AutoTpmBaselineParityTest {
         try {
             Response first = h.submit(1, 50).get(2, TimeUnit.SECONDS);
             assertTrue(first.isSuccess());
-            assertEquals(1, h.activeLeaseCount());
+            assertEquals(1, h.activeAdmissionCount());
 
             h.reportDecodePhase(1, TaskPhase.RECEIVED);
-            assertEquals(1, h.activeLeaseCount(),
+            assertEquals(1, h.activeAdmissionCount(),
                     "Decode RECEIVED is not Decode ownership");
 
             h.reportDecodePhase(1, TaskPhase.KV_ALLOCATED);
-            assertEquals(0, h.activeLeaseCount());
+            assertEquals(0, h.activeAdmissionCount());
             // Duplicate/later acceptance observations are idempotent.
             h.reportDecodePhase(1, TaskPhase.RUNNING);
 
             Response second = h.submit(2, 50).get(2, TimeUnit.SECONDS);
             assertTrue(second.isSuccess(), second.getErrorMessage());
+        } finally {
+            h.close();
+        }
+    }
+
+    @Test
+    void authoritativeCancelSettlementReleasesPostSuccessPermitAndTimer()
+            throws Exception {
+        Harness h = new Harness(cfg -> {
+            Harness.enableAll(cfg);
+            cfg.setFlexlbBatchSizeMax(1);
+            cfg.setAutoTpmPostSuccessBackpressureLimit(1);
+            cfg.setAutoTpmPostSuccessSoftTimeoutMs(60_000);
+        });
+        try {
+            Response delivered = h.submit(3, 50).get(2, TimeUnit.SECONDS);
+            assertTrue(delivered.isSuccess());
+            await(() -> h.activeAdmissionCount() == 1
+                    && h.pendingSoftTimeoutCount() == 1);
+            assertEquals(1, h.activeAdmissionCount());
+            assertEquals(1, h.pendingSoftTimeoutCount());
+
+            RequestLifecycleSnapshot pending = h.cancel(3);
+            assertEquals(RequestLifecycleState.CANCEL_REQUESTED, pending.state());
+            h.reportDecodeTerminal(3, 2);
+
+            await(() -> h.activeAdmissionCount() == 0
+                    && h.pendingSoftTimeoutCount() == 0
+                    && h.softTimeoutQueueSize() == 0);
+            assertEquals(RequestLifecycleState.CANCELLED,
+                    h.cancel(3).state());
+            h.reportDecodeTerminal(3, 2);
+            assertEquals(0, h.activeAdmissionCount());
+            assertEquals(0, h.pendingSoftTimeoutCount());
         } finally {
             h.close();
         }
@@ -261,7 +298,7 @@ class AutoTpmBaselineParityTest {
         final PrioritySchedulerReporter priorityReporter = mock(PrioritySchedulerReporter.class);
         final FlexlbConfig config = new FlexlbConfig();
         final EndpointRegistry endpointRegistry;
-        final FlexlbBatchScheduler scheduler;
+        final PriorityScheduler scheduler;
         final DefaultBatchDispatcher dispatcher;
         final PriorityAdmissionScheduler priorityScheduler;
         private final List<Long> submittedIds = new ArrayList<>();
@@ -306,7 +343,7 @@ class AutoTpmBaselineParityTest {
                     new PrioritySloPolicy(PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
                             PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
                     priorityReporter, reporter, new UnsupportedEngineCancelChannel());
-            scheduler = new FlexlbBatchScheduler(configService, router,
+            scheduler = new PriorityScheduler(configService, router,
                     endpointRegistry, dispatcher, reporter, priorityScheduler, null);
 
             WorkerStatus prefillWs = new WorkerStatus();
@@ -333,7 +370,7 @@ class AutoTpmBaselineParityTest {
             // PR-D: rescue removed — orTimeout + AdmissionLease handle stuck/deadline requests
         }
 
-        private FlexlbBatchScheduler getScheduler() {
+        private PriorityScheduler getScheduler() {
             return scheduler;
         }
 
@@ -401,8 +438,33 @@ class AutoTpmBaselineParityTest {
             scheduler.onWorkerStatusUpdate(response);
         }
 
-        int activeLeaseCount() {
-            return priorityScheduler.activeLeaseCount();
+        int activeAdmissionCount() {
+            return priorityScheduler.activeAdmissionCount();
+        }
+
+        int pendingSoftTimeoutCount() {
+            return priorityScheduler.pendingSoftTimeoutLeaseCount();
+        }
+
+        int softTimeoutQueueSize() {
+            return priorityScheduler.softTimeoutQueueSize();
+        }
+
+        RequestLifecycleSnapshot cancel(long requestId) {
+            return scheduler.cancelRequest(
+                    requestId, 0, CancelReason.CLIENT_CANCELLED);
+        }
+
+        void reportDecodeTerminal(long requestId, long errorCode) {
+            TaskInfo task = new TaskInfo();
+            task.setRequestId(requestId);
+            task.setErrorCode(errorCode);
+            WorkerStatusResponse response = new WorkerStatusResponse();
+            response.setRole(RoleType.DECODE);
+            response.setFinishedTaskInfo(Map.of(String.valueOf(requestId), task));
+            endpointRegistry.getDecode(DECODE_IP_PORT)
+                    .onWorkerStatusUpdate(new WorkerStatus(), response);
+            scheduler.onWorkerStatusUpdate(response);
         }
 
         /** admitted = 拿到 decode 占位（future 未失败）。 */
@@ -454,6 +516,7 @@ class AutoTpmBaselineParityTest {
         }
 
         void close() {
+            priorityScheduler.shutdown();
             scheduler.shutdown();
             dispatcher.shutdown();
         }

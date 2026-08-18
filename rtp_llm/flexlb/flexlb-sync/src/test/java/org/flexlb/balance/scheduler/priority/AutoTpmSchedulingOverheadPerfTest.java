@@ -3,7 +3,7 @@ package org.flexlb.balance.scheduler.priority;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -49,7 +49,7 @@ import static org.mockito.Mockito.when;
  *
  * <p>Measures the per-request overhead of the PriorityAdmissionScheduler
  * plan/commit path vs the legacy direct-enqueue path. Both paths share the
- * same underlying FlexlbBatchScheduler batch/dispatch pipeline — only the
+ * same underlying PriorityScheduler batch/dispatch pipeline — only the
  * admission layer differs.
  *
  * <p>Topology: 1 prefill + 2 decode (mirroring MasterBatchEndToEndPerformanceTest
@@ -258,7 +258,8 @@ class AutoTpmSchedulingOverheadPerfTest {
 
     private static final class PerfHarness implements AutoCloseable {
         final FlexlbConfig config = new FlexlbConfig();
-        final FlexlbBatchScheduler scheduler;
+        final PriorityScheduler scheduler;
+        final PriorityAdmissionScheduler priorityScheduler;
         final EndpointRegistry endpointRegistry;
         final AtomicLong dispatchCount = new AtomicLong();
         final WorkerStatus decodeStatus = decodeWs();
@@ -296,7 +297,7 @@ class AutoTpmSchedulingOverheadPerfTest {
             customize.accept(config);
             when(configService.loadBalanceConfig()).thenReturn(config);
 
-            AtomicReference<FlexlbBatchScheduler> schedulerRef = new AtomicReference<>();
+            AtomicReference<PriorityScheduler> schedulerRef = new AtomicReference<>();
             AtomicReference<EndpointRegistry> endpointRegistryRef = new AtomicReference<>();
 
             // Mock gRPC: immediate success followed by the same Decode
@@ -346,13 +347,13 @@ class AutoTpmSchedulingOverheadPerfTest {
             dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
 
             // Build priority scheduler (always created; only active when autoTpmEnabled=true)
-            PriorityAdmissionScheduler priorityScheduler = new PriorityAdmissionScheduler(
+            priorityScheduler = new PriorityAdmissionScheduler(
                     configService, router, endpointRegistry, new PlanCommitter(),
                     new PrioritySloPolicy(PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
                             PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
                     priorityReporter, reporter, new UnsupportedEngineCancelChannel());
 
-            scheduler = new FlexlbBatchScheduler(configService, router,
+            scheduler = new PriorityScheduler(configService, router,
                     endpointRegistry, dispatcher, reporter, priorityScheduler, null);
             schedulerRef.set(scheduler);
 
@@ -368,7 +369,7 @@ class AutoTpmSchedulingOverheadPerfTest {
                     .onWorkerStatusUpdate(decodeStatus, new WorkerStatusResponse());
         }
 
-        private static void reportDecodeAccepted(FlexlbBatchScheduler scheduler,
+        private static void reportDecodeAccepted(PriorityScheduler scheduler,
                                                  EndpointRegistry registry,
                                                  WorkerStatus decodeStatus,
                                                  List<Long> requestIds) {
@@ -403,6 +404,7 @@ class AutoTpmSchedulingOverheadPerfTest {
 
         @Override
         public void close() {
+            priorityScheduler.shutdown();
             scheduler.shutdown();
             dispatcher.shutdown();
         }

@@ -4,7 +4,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -276,7 +276,8 @@ class PriorityConcurrencyStressTest {
         final Router router = mock(Router.class);
         final FlexlbConfig config = new FlexlbConfig();
         final EndpointRegistry endpointRegistry;
-        final FlexlbBatchScheduler scheduler;
+        final PriorityScheduler scheduler;
+        final PriorityAdmissionScheduler priorityScheduler;
         final DefaultBatchDispatcher dispatcher;
         final WorkerStatus decodeWs;
 
@@ -308,7 +309,7 @@ class PriorityConcurrencyStressTest {
 
             endpointRegistry = new EndpointRegistry(configService, this::getScheduler, reporter);
             dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
-            PriorityAdmissionScheduler priorityScheduler = new PriorityAdmissionScheduler(
+            priorityScheduler = new PriorityAdmissionScheduler(
                     configService, router, endpointRegistry, new PlanCommitter(),
                     new PrioritySloPolicy(PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
                             PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
@@ -320,7 +321,7 @@ class PriorityConcurrencyStressTest {
                     return server(RoleType.PREFILL, "10.0.0.1", 8080, 8081, ctx.getRequestId());
                 }
             };
-            scheduler = new FlexlbBatchScheduler(configService, router,
+            scheduler = new PriorityScheduler(configService, router,
                     endpointRegistry, dispatcher, reporter, priorityScheduler, null);
 
             registerPrefill(PREFILL_IP_PORT, "10.0.0.1");
@@ -337,7 +338,7 @@ class PriorityConcurrencyStressTest {
                     .onWorkerStatusUpdate(decodeWs, new WorkerStatusResponse());
         }
 
-        private FlexlbBatchScheduler getScheduler() {
+        private PriorityScheduler getScheduler() {
             return scheduler;
         }
 
@@ -379,6 +380,7 @@ class PriorityConcurrencyStressTest {
         }
 
         void close() {
+            priorityScheduler.shutdown();
             scheduler.shutdown();
             // 每轮独立 Harness：dispatcher 线程池（生产由 Spring @PreDestroy 管理）
             // 必须显式回收，否则多轮狩猎会耗尽 native 线程

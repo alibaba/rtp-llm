@@ -22,6 +22,7 @@ TEST_F(QueryConverterTest, testTransInput) {
     input.mutable_request_info()->set_trace_id("trace-123");
     input.mutable_request_info()->set_request_id("source-request-123");
     input.mutable_request_info()->set_source_role("frontend");
+    input.set_priority(70);
     input.add_token_ids(0);
     input.add_token_ids(1);
 
@@ -55,6 +56,7 @@ TEST_F(QueryConverterTest, testTransInput) {
     ASSERT_EQ(generate_input->request_info.trace_id, "trace-123");
     ASSERT_EQ(generate_input->request_info.request_id, "source-request-123");
     ASSERT_EQ(generate_input->request_info.source_role, "frontend");
+    ASSERT_EQ(generate_input->priority, 70);
     auto generate_config = generate_input->generate_config;
     ASSERT_EQ(generate_config->min_new_tokens, 4);
     ASSERT_EQ(generate_config->max_new_tokens, 5);

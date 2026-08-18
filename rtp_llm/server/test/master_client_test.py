@@ -216,6 +216,34 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.is_ok)
         self.assertEqual(client.calls[0]["request_pb"].priority, 50)
 
+    async def test_schedule_payload_priority_falls_back_to_generate_config(self):
+        client = _CaptureMasterClient()
+        input = _FakeInput(headers={})
+        input.generate_config.qos_priority = 77
+
+        await client.get_backend_role_addrs(
+            block_cache_keys=[1],
+            cache_key_block_size=1024,
+            input=input,
+            request_id=104,
+            input_pb=_FakeInputPB(),
+        )
+
+        self.assertEqual(client.calls[0]["request_pb"].priority, 77)
+
+    async def test_schedule_payload_priority_out_of_range_defaults(self):
+        client = _CaptureMasterClient()
+
+        await client.get_backend_role_addrs(
+            block_cache_keys=[1],
+            cache_key_block_size=1024,
+            input=_FakeInput(headers={"x-dashscope-inner-qos-level": "101"}),
+            request_id=105,
+            input_pb=_FakeInputPB(),
+        )
+
+        self.assertEqual(client.calls[0]["request_pb"].priority, 50)
+
     async def test_schedule_deadline_does_not_retry_slave(self):
         client = _DeadlineMasterClient()
 

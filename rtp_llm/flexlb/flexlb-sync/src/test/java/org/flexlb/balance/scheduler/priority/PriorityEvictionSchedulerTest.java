@@ -5,7 +5,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.BatchDispatcher;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.config.ConfigService;
@@ -43,6 +43,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -52,7 +53,7 @@ import static org.mockito.Mockito.when;
 /**
  * Phase 3 tests for the prefill-queue eviction path of
  * {@link PriorityAdmissionScheduler} wired through
- * {@link FlexlbBatchScheduler#submit}: higher priority evicts strictly lower
+ * {@link PriorityScheduler#submit}: higher priority evicts strictly lower
  * priority on a full queue (the queued victim yields with the retryable
  * NO_AVAILABLE_WORKER, contract 5.3), equal priority never yields, the gate
  * keeps the legacy retry path, victim termination is idempotent, and Auto-TPM
@@ -68,7 +69,8 @@ class PriorityEvictionSchedulerTest {
     private EngineGrpcClient grpcClient;
     private BatchSchedulerReporter reporter;
     private PrioritySchedulerReporter priorityReporter;
-    private FlexlbBatchScheduler scheduler;
+    private PriorityAdmissionScheduler priorityScheduler;
+    private PriorityScheduler scheduler;
     private EndpointRegistry endpointRegistry;
     private FlexlbConfig config;
     private final List<EngineRpcService.EnqueueBatchRequestPB> sentBatches = new CopyOnWriteArrayList<>();
@@ -110,12 +112,12 @@ class PriorityEvictionSchedulerTest {
 
         endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
         BatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
-        PriorityAdmissionScheduler priorityScheduler = new PriorityAdmissionScheduler(
+        priorityScheduler = new PriorityAdmissionScheduler(
                 configService, router, endpointRegistry, new PlanCommitter(),
                 new PrioritySloPolicy(PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
                         PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
                 priorityReporter, reporter, new UnsupportedEngineCancelChannel());
-        scheduler = new FlexlbBatchScheduler(configService, router,
+        scheduler = new PriorityScheduler(configService, router,
                 endpointRegistry, dispatcher, reporter, priorityScheduler, null);
 
         WorkerStatus prefillWs = new WorkerStatus();
@@ -135,6 +137,7 @@ class PriorityEvictionSchedulerTest {
 
     @AfterEach
     void tearDown() {
+        priorityScheduler.shutdown();
         scheduler.shutdown();
     }
 
@@ -167,6 +170,47 @@ class PriorityEvictionSchedulerTest {
         verify(priorityReporter).reportEvictionPlan(eq(70), eq("prefill_queue_full"), eq("feasible"));
         verify(priorityReporter).reportEvictionCommit(eq(70), eq("prefill_queue_full"), eq("success"));
         verify(priorityReporter).reportVictim(eq(30), eq(70), eq("prefill_queued"), eq("prefill_queue_full"));
+    }
+
+    @Test
+    void telemetry_failure_does_not_interrupt_committed_victim_settlement() throws Exception {
+        WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
+        DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
+
+        // Admit two victims, then lower the live hard limit so the next
+        // request must atomically replace both of them.
+        config.setFlexlbBatchQueueMaxSize(2);
+        CompletableFuture<Response> firstVictim = scheduler.submit(context(3, 20));
+        CompletableFuture<Response> secondVictim = scheduler.submit(context(4, 30));
+        await(() -> batcher.queueSize() == 2);
+        config.setFlexlbBatchQueueMaxSize(1);
+
+        doThrow(new IllegalStateException("victim metrics unavailable"))
+                .doNothing()
+                .when(priorityReporter)
+                .reportVictim(anyInt(), anyInt(), anyString(), anyString());
+        doThrow(new IllegalStateException("commit metrics unavailable"))
+                .when(priorityReporter)
+                .reportEvictionCommit(eq(70), eq("prefill_queue_full"), eq("success"));
+
+        CompletableFuture<Response> incoming = scheduler.submit(context(5, 70));
+
+        Response firstResponse = firstVictim.get(2, TimeUnit.SECONDS);
+        Response secondResponse = secondVictim.get(2, TimeUnit.SECONDS);
+        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(),
+                firstResponse.getCode());
+        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(),
+                secondResponse.getCode());
+
+        // The replacement remains committed even though both observer paths
+        // fail: every removed victim is settled and only the incoming Decode
+        // reservation/queue member remains.
+        await(() -> batcher.queueSize() == 1 && decodeEp.getInflightCount() == 1);
+        assertFalse(incoming.isDone());
+        verify(priorityReporter, times(2)).reportVictim(
+                anyInt(), eq(70), eq("prefill_queued"), eq("prefill_queue_full"));
+        verify(priorityReporter).reportEvictionCommit(
+                eq(70), eq("prefill_queue_full"), eq("success"));
     }
 
     // ==================== equal priority never yields ====================
@@ -308,8 +352,8 @@ class PriorityEvictionSchedulerTest {
     private BatchItem dummyItem(long requestId) {
         Response route = successRoute(requestId);
         return new BatchItem(context(requestId, 50), new CompletableFuture<>(), route,
-                FlexlbBatchScheduler.findServer(route, RoleType.PREFILL),
-                FlexlbBatchScheduler.findServer(route, RoleType.DECODE),
+                PriorityScheduler.findServer(route, RoleType.PREFILL),
+                PriorityScheduler.findServer(route, RoleType.DECODE),
                 endpointRegistry.getPrefill(PREFILL_IP_PORT),
                 endpointRegistry.getDecode(DECODE_IP_PORT),
                 System.currentTimeMillis());

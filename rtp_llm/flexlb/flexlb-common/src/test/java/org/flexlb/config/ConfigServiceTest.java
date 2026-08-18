@@ -166,6 +166,7 @@ class ConfigServiceTest {
         assertFalse(config.isAutoTpmPrefillQueueEvictEnabled());
         assertFalse(config.isAutoTpmDecodeReservedEvictEnabled());
         assertEquals(50, config.getAutoTpmDefaultPriority());
+        assertEquals(0, config.getAutoTpmPrefillMaxInflightRequestsPerWorker());
         // PR-D removed rescue fields (autoTpmPriorityLevels, autoTpmDeadlineRescueEnabled,
         // autoTpmRescueScanIntervalMs, autoTpmMaxRescuePerTick, autoTpmMaxRescuePerEndpointPerTick,
         // autoTpmMaxTransferCount, autoTpmDangerThresholdMs) — replaced by AdmissionLease + orTimeout.
@@ -182,6 +183,7 @@ class ConfigServiceTest {
                 "AUTO_TPM_DEFAULT_PRIORITY", "60",
                 "AUTO_TPM_SLO_LENGTH_BUCKETS", "512:200,*:3000",
                 "AUTO_TPM_PRIORITY_SLO_MULTIPLIERS", "30:3.0,50:1.0",
+                "AUTO_TPM_PREFILL_MAX_INFLIGHT_REQUESTS_PER_WORKER", "32",
                 "AUTO_TPM_PREFILL_QUEUE_EVICT_ENABLED", "true",
                 "AUTO_TPM_DECODE_RESERVED_EVICT_ENABLED", "true"));
 
@@ -190,6 +192,7 @@ class ConfigServiceTest {
         assertEquals(60, config.getAutoTpmDefaultPriority());
         assertEquals("512:200,*:3000", config.getAutoTpmSloLengthBuckets());
         assertEquals("30:3.0,50:1.0", config.getAutoTpmPrioritySloMultipliers());
+        assertEquals(32, config.getAutoTpmPrefillMaxInflightRequestsPerWorker());
         assertTrue(config.isAutoTpmPrefillQueueEvictEnabled());
         assertTrue(config.isAutoTpmDecodeReservedEvictEnabled());
     }
@@ -225,6 +228,13 @@ class ConfigServiceTest {
                 .toList();
         assertTrue(lines.stream().anyMatch(line -> line.contains("autoTpmEnabled=true")),
                 "dumpEffectiveConfig should log autoTpmEnabled");
+        assertTrue(lines.stream().anyMatch(line ->
+                        line.contains("prioritySchedulerEnabled=true")
+                                && line.contains("deliveryMode=BATCH_ENQUEUE")),
+                "dumpEffectiveConfig should log the derived scheduler delivery mode");
+        assertTrue(lines.stream().anyMatch(line ->
+                        line.contains("autoTpmPrefillMaxInflightRequestsPerWorker=0")),
+                "dumpEffectiveConfig should log the route-decision request cap");
         assertTrue(lines.stream().anyMatch(line -> line.contains("autoTpmSloLengthBuckets=")),
                 "dumpEffectiveConfig should log autoTpmSloLengthBuckets");
         assertTrue(lines.stream().anyMatch(line -> line.contains("autoTpmDecodeAcceptedEvictEnabled=")),
@@ -237,6 +247,49 @@ class ConfigServiceTest {
                 "dumpEffectiveConfig should log loadBalanceStrategy");
         assertTrue(lines.stream().anyMatch(line -> line.contains("cacheAffinityEnabled=")),
                 "dumpEffectiveConfig should log cache-affinity configuration");
+    }
+
+    @Test
+    void prefill_request_cap_outside_route_mode_is_reported_as_ineffective() {
+        Logger logger = (Logger) LoggerFactory.getLogger(ConfigService.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            new ConfigService(Map.of(
+                    "DEFAULT_SCHEDULE_MODE", "batch",
+                    "AUTO_TPM_ENABLED", "true",
+                    "AUTO_TPM_PREFILL_MAX_INFLIGHT_REQUESTS_PER_WORKER", "16"));
+        } finally {
+            logger.detachAppender(appender);
+        }
+
+        assertTrue(appender.list.stream()
+                        .map(ILoggingEvent::getFormattedMessage)
+                        .anyMatch(line -> line.contains(
+                                "AUTO_TPM_PREFILL_MAX_INFLIGHT_REQUESTS_PER_WORKER is set to 16")),
+                "an inactive request cap should be visible to operators");
+    }
+
+    @Test
+    void route_delivery_without_prefill_request_cap_is_reported_as_unbounded() {
+        Logger logger = (Logger) LoggerFactory.getLogger(ConfigService.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            new ConfigService(Map.of(
+                    "DEFAULT_SCHEDULE_MODE", "queue",
+                    "AUTO_TPM_ENABLED", "true"));
+        } finally {
+            logger.detachAppender(appender);
+        }
+
+        assertTrue(appender.list.stream()
+                        .map(ILoggingEvent::getFormattedMessage)
+                        .anyMatch(line -> line.contains(
+                                "QUEUE + Auto-TPM route delivery has no per-Prefill inflight request limit")),
+                "an unbounded route-delivery worker cap should be visible to operators");
     }
 
     // ---- F3 (P0-3): unmatched env var scan ----
@@ -320,6 +373,22 @@ class ConfigServiceTest {
                 () -> new ConfigService(Map.of("CACHE_AFFINITY_MIN_HIT_RATE", "NaN")));
         assertThrows(ConfigValidationException.class,
                 () -> new ConfigService(Map.of("CACHE_AFFINITY_MIN_HIT_RATE", "101")));
+    }
+
+    @Test
+    void invalid_prefill_inflight_limit_type_aborts_startup() {
+        assertThrows(ConfigValidationException.class,
+                () -> new ConfigService(Map.of(
+                        "AUTO_TPM_PREFILL_MAX_INFLIGHT_REQUESTS_PER_WORKER", "not-a-number")));
+    }
+
+    @Test
+    void negative_prefill_inflight_limit_aborts_startup() {
+        ConfigValidationException exception = assertThrows(ConfigValidationException.class,
+                () -> new ConfigService(Map.of(
+                        "AUTO_TPM_PREFILL_MAX_INFLIGHT_REQUESTS_PER_WORKER", "-1")));
+
+        assertTrue(exception.getMessage().contains("autoTpmPrefillMaxInflightRequestsPerWorker"));
     }
 
     @Test

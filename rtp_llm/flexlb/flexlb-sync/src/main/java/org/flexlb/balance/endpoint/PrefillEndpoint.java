@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.BatchDecisionHandler;
+import org.flexlb.balance.scheduler.DecisionGroupHandler;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.InflightEvictor;
 import org.flexlb.balance.scheduler.WorkerBatcher;
@@ -18,6 +18,7 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.lang.invoke.VarHandle;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -27,12 +28,25 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.LongPredicate;
 import java.util.stream.Collectors;
 
 public class PrefillEndpoint extends WorkerEndpoint {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
+    private static final int COMBINED_WAIT_SNAPSHOT_MAX_ATTEMPTS = 4;
+
+    enum WaitSnapshotStage {
+        AFTER_REQUEST_QUEUED_READ,
+        BEFORE_CACHE_PUBLISH
+    }
+
+    @FunctionalInterface
+    interface WaitSnapshotHook {
+        void onStage(WaitSnapshotStage stage);
+    }
 
     private record FinishedObservation(long requestId,
                                        long executionTimeMs,
@@ -52,36 +66,46 @@ public class PrefillEndpoint extends WorkerEndpoint {
         }
     }
 
-    private record ReconciliationState(FinishedObservation deferredTerminal) {}
+    private record BatchMemberProtection(FinishedObservation deferredTerminal) {}
 
     private final PrefillTimePredictor predictor;
     private final ConcurrentHashMap<Long, BatchInflight> inflightBatches = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<Long, ConcurrentHashMap<Long, ReconciliationState>>
-            reconciliationRequests = new ConcurrentHashMap<>();
-    private final AtomicInteger inflightRequestCount = new AtomicInteger(0);
+    private final ConcurrentHashMap<Long, ConcurrentHashMap<Long, BatchMemberProtection>>
+            batchMemberProtections = new ConcurrentHashMap<>();
+    private final AtomicInteger inflightBatchRequestCount = new AtomicInteger();
     private final WorkerBatcher batcher;
+    private final PrefillRequestLedger requestLedger;
     private final BatchSchedulerReporter reporter;
 
     /** Active Engine tasks not already represented in the local batch ledger. */
     private volatile long engineUntrackedRequestCount = 0;
 
-    private static final long WAIT_TIME_CACHE_TTL_MS = 2;
-    private volatile long cachedWaitTimeMs = 0;
-    private volatile long cachedWaitTimeExpireAtMs = 0;
+    /**
+     * Independent batch-ledger epoch used with the request-ledger epoch to form a
+     * coherent combined wait snapshot without acquiring locks across ledgers.
+     */
+    private final AtomicLong batchWaitMutationsStarted = new AtomicLong();
+    private final AtomicLong batchWaitMutationsCompleted = new AtomicLong();
+    private final AtomicReference<WaitSnapshotHook> waitSnapshotHook = new AtomicReference<>();
 
     public PrefillEndpoint(WorkerStatus status, FlexlbConfig config,
-                           BatchDecisionHandler handler,
+                           DecisionGroupHandler decisionHandler,
                            BatchSchedulerReporter reporter) {
         super(status);
         this.reporter = reporter;
         this.predictor = createPredictor(config);
-        this.batcher = createBatcher(config, handler, reporter);
+        this.batcher = createBatcher(config, decisionHandler, reporter);
+        AtomicReference<WaitSnapshotHook> snapshotHook = waitSnapshotHook;
+        this.requestLedger = new PrefillRequestLedger(
+                batcher::signalDeliveryCapacityAvailable,
+                System::currentTimeMillis,
+                stage -> notifyWaitSnapshotHook(snapshotHook, stage));
         this.batcher.start();
     }
 
-    private WorkerBatcher createBatcher(FlexlbConfig config, BatchDecisionHandler handler,
+    private WorkerBatcher createBatcher(FlexlbConfig config, DecisionGroupHandler decisionHandler,
                                         BatchSchedulerReporter reporter) {
-        return new WorkerBatcher(status.getIpPort(), this, config, handler, reporter);
+        return new WorkerBatcher(status.getIpPort(), this, config, decisionHandler, reporter);
     }
 
     public WorkerBatcher getBatcher() {
@@ -118,31 +142,136 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     public void commitBatch(long batchId, long predictMs, List<BatchItem> requests) {
         BatchInflight newBatch = new BatchInflight(predictMs, requests);
-        BatchInflight prev = inflightBatches.putIfAbsent(batchId, newBatch);
-        if (prev != null) {
-            // batchId already exists — subtract the old request count before overwriting,
-            // otherwise the old value is silently lost and the counter stays inflated.
-            inflightRequestCount.addAndGet(-prev.requests().size());
-            inflightBatches.put(batchId, newBatch);
+        beginBatchWaitMutation();
+        try {
+            inflightBatches.compute(batchId, (id, previous) -> {
+                int previousSize = previous != null ? previous.requests().size() : 0;
+                inflightBatchRequestCount.addAndGet(
+                        newBatch.requests().size() - previousSize);
+                return newBatch;
+            });
+        } finally {
+            endBatchWaitMutation();
         }
-        inflightRequestCount.addAndGet(requests.size());
-        cachedWaitTimeExpireAtMs = 0;
     }
 
     public void releaseBatch(long batchId) {
-        AtomicReference<BatchInflight> removedBatch = new AtomicReference<>();
-        inflightBatches.compute(batchId, (id, batch) -> {
-            // Keep the lock order consistent with begin/calibration:
-            // inflight batch key first, reconciliation key second.
-            reconciliationRequests.remove(id);
-            removedBatch.set(batch);
-            return null;
-        });
-        BatchInflight removed = removedBatch.get();
-        if (removed != null) {
-            inflightRequestCount.addAndGet(-removed.requests().size());
-            cachedWaitTimeExpireAtMs = 0;
+        long statusMs = System.currentTimeMillis();
+        beginBatchWaitMutation();
+        try {
+            inflightBatches.compute(batchId, (id, batch) -> {
+                // Keep the lock order consistent with protection/calibration:
+                // inflight batch key first, batch-member protection key second.
+                ConcurrentHashMap<Long, BatchMemberProtection> protectedRequests =
+                        batchMemberProtections.get(id);
+                if (batch == null || protectedRequests == null
+                        || protectedRequests.isEmpty()) {
+                    batchMemberProtections.remove(id);
+                    if (batch != null) {
+                        inflightBatchRequestCount.addAndGet(-batch.requests().size());
+                    }
+                    return null;
+                }
+
+                // A transport failure can race an Engine fence installation.
+                // Retain exactly those members whose protection owner won the
+                // batch-key linearization point; unprotected siblings are safe to
+                // release immediately.
+                List<BatchItem> survivors = batch.requests().stream()
+                        .filter(item -> protectedRequests.containsKey(item.requestId()))
+                        .toList();
+                int removed = batch.requests().size() - survivors.size();
+                if (survivors.isEmpty()) {
+                    batchMemberProtections.remove(id, protectedRequests);
+                    inflightBatchRequestCount.addAndGet(-batch.requests().size());
+                    return null;
+                }
+                if (removed == 0) {
+                    batch.touch(statusMs);
+                    batch.observeFailure();
+                    return batch;
+                }
+                batch.touch(statusMs);
+                batch.observeFailure();
+                long newPredMs = (long) predictor.predictBatchMs(survivors);
+                BatchInflight repacked = batch.repack(newPredMs, survivors);
+                inflightBatchRequestCount.addAndGet(-removed);
+                return repacked;
+            });
+        } finally {
+            endBatchWaitMutation();
         }
+    }
+
+    /**
+     * Atomically account for one route-decision request.
+     *
+     * <p>A positive {@code maxPerWorker} is a hard admission cap over
+     * individually delivered route requests. Real batch members retain their
+     * independent batch-count controls and contribute only to the total request metric. A
+     * non-positive limit disables the route cap. Repeating the same live request id
+     * is idempotent and returns {@code true} without replacing its original prediction
+     * or incrementing either counter.
+     * Request ids are delivery identities and must not be reused while an old
+     * WorkerStatus terminal for the id can still arrive; Engine status does not
+     * carry a route-delivery generation token that could disambiguate such reuse.
+     *
+     * <p>Mutations for a request id are serialized by a fixed stripe. No request
+     * stripe is acquired while holding a batch/protection map lock (or vice
+     * versa), so request accounting cannot participate in a cross-ledger lock cycle.
+     */
+    public boolean tryCommitRequest(long requestId, long predictMs, int maxPerWorker) {
+        return requestLedger.tryAcquire(requestId, predictMs, maxPerWorker);
+    }
+
+    /**
+     * Idempotently release an individually-accounted request.
+     *
+     * @return {@code true} only when this call removed the live ledger entry
+     */
+    public boolean releaseRequest(long requestId) {
+        return requestLedger.release(requestId);
+    }
+
+    /**
+     * Protect one route-request ledger entry while an EngineFence reconciles
+     * ambiguous delivery ownership.
+     *
+     * <p>The flag lives on the request entry and is mutated under the same fixed
+     * stripe as progress, terminal settlement, and TTL eviction. There is no
+     * auxiliary set to leak after an authoritative release/status terminal. This
+     * method never acquires the batcher queue lock or calls back into the scheduler.
+     *
+     * @return {@code true} when the request is still locally accounted (including
+     *         an already-protected request), otherwise {@code false}
+     */
+    public boolean beginEngineFenceProtection(long requestId) {
+        return requestLedger.protect(requestId);
+    }
+
+    /**
+     * End request-scoped EngineFence protection without refreshing its TTL age.
+     * A request that was already released or authoritatively settled is a no-op.
+     *
+     * @return {@code true} only when a live protection flag was cleared
+     */
+    public boolean endEngineFenceProtection(long requestId) {
+        return requestLedger.unprotect(requestId);
+    }
+
+    /** Advisory capacity snapshot; {@link #tryCommitRequest} is the hard gate. */
+    public int availableRequestSlots(int maxPerWorker) {
+        return requestLedger.available(maxPerWorker);
+    }
+
+    /** Total locally-accounted Prefill requests, including real batch members. */
+    public int getInflightRequestCount() {
+        return inflightBatchRequestCount.get() + requestLedger.count();
+    }
+
+    /** Individually-accounted route-decision requests only. */
+    public int getInflightRouteRequestCount() {
+        return requestLedger.count();
     }
 
     /**
@@ -151,56 +280,70 @@ public class PrefillEndpoint extends WorkerEndpoint {
      */
     public void repackBatch(long batchId, Set<Long> failedRequestIds) {
         long statusMs = System.currentTimeMillis();
-        inflightBatches.computeIfPresent(batchId, (id, old) -> {
-            List<BatchItem> survivors = old.requests().stream()
-                    .filter(r -> !failedRequestIds.contains(r.requestId()))
-                    .toList();
-            int removed = old.requests().size() - survivors.size();
-            if (removed == 0) {
-                return old;
-            }
-            old.touch(statusMs);
-            old.observeFailure();
-            if (survivors.isEmpty()) {
-                inflightRequestCount.addAndGet(-old.requests().size());
-                cachedWaitTimeExpireAtMs = 0;
-                return null; // removes entry from map
-            }
-            long newPredMs = (long) predictor.predictBatchMs(survivors);
-            BatchInflight repacked = old.repack(newPredMs, survivors);
-            inflightRequestCount.addAndGet(-removed);
-            cachedWaitTimeExpireAtMs = 0;
-            return repacked;
-        });
+        beginBatchWaitMutation();
+        try {
+            inflightBatches.computeIfPresent(batchId, (id, old) -> {
+                List<BatchItem> survivors = old.requests().stream()
+                        .filter(r -> !failedRequestIds.contains(r.requestId()))
+                        .toList();
+                int removed = old.requests().size() - survivors.size();
+                if (removed == 0) {
+                    return old;
+                }
+                old.touch(statusMs);
+                old.observeFailure();
+                if (survivors.isEmpty()) {
+                    inflightBatchRequestCount.addAndGet(-old.requests().size());
+                    return null; // removes entry from map
+                }
+                long newPredMs = (long) predictor.predictBatchMs(survivors);
+                BatchInflight repacked = old.repack(newPredMs, survivors);
+                inflightBatchRequestCount.addAndGet(-removed);
+                return repacked;
+            });
+        } finally {
+            endBatchWaitMutation();
+        }
     }
 
     @Override
     public void onWorkerStatusUpdate(WorkerStatus ws, WorkerStatusResponse resp) {
         super.onWorkerStatusUpdate(ws, resp);
-        calibrate(resp.getFinishedTaskInfo(), resp.getRunningTaskInfo());
-        updateEngineUntrackedRequestCount(resp);
+        Set<Long> activeNonRouteRequestIds =
+                calibrate(resp.getFinishedTaskInfo(), resp.getRunningTaskInfo());
+        updateEngineUntrackedRequestCount(resp, activeNonRouteRequestIds);
     }
 
     /**
      * Full calibration against worker status report.
      */
-    private void calibrate(Map<String, TaskInfo> finishedTaskInfo, Map<String, TaskInfo> runningTaskInfo) {
+    private Set<Long> calibrate(Map<String, TaskInfo> finishedTaskInfo,
+                                Map<String, TaskInfo> runningTaskInfo) {
         long statusMs = System.currentTimeMillis();
 
         int finishedSize = finishedTaskInfo != null ? finishedTaskInfo.size() : 0;
         int runningSize = runningTaskInfo != null ? runningTaskInfo.size() : 0;
-        if (finishedSize > 0 || !inflightBatches.isEmpty()) {
-            logger.debug("Prefill calibrate: finishedTasks={}, runningTasks={}, inflightBatches={}",
-                    finishedSize, runningSize, inflightBatches.size());
+        if (logger.isDebugEnabled()
+                && (finishedSize > 0 || !inflightBatches.isEmpty() || requestLedger.count() > 0)) {
+            logger.debug("Prefill calibrate: finishedTasks={}, runningTasks={}, "
+                            + "inflightBatches={}, inflightRouteRequests={}",
+                    finishedSize, runningSize, inflightBatches.size(), requestLedger.count());
         }
 
-        // Phase 1: collect request-level terminal observations and reconcile tasks whose Engine
-        // status omitted batch_id. Legacy non-batch requests use requestId as
-        // the inflight key; real batch members are resolved by membership.
+        // Phase 1: settle route-decision requests directly by request id, then collect
+        // terminal observations owned by real batches. Checking the request ledger
+        // first also tolerates Engine versions that attach a synthetic batch id to an
+        // individually submitted request.
         Map<Long, List<FinishedObservation>> finishedByBatch = new HashMap<>();
 
         if (finishedTaskInfo != null) {
             for (TaskInfo task : finishedTaskInfo.values()) {
+                if (task == null) {
+                    continue;
+                }
+                if (settleRequest(task)) {
+                    continue;
+                }
                 FinishedObservation observation = FinishedObservation.from(task);
                 long batchId = task.getBatchId();
                 if (batchId < 0) {
@@ -222,8 +365,18 @@ public class PrefillEndpoint extends WorkerEndpoint {
         // Phase 3: update progress anchors. A queued batch cannot spend
         // predicted forward time until the worker reports it as RUNNING.
         Map<Long, List<TaskInfo>> activeByBatch = new HashMap<>();
+        Set<Long> activeNonRouteRequestIds = new HashSet<>();
         if (runningTaskInfo != null) {
             for (TaskInfo task : runningTaskInfo.values()) {
+                if (task == null) {
+                    continue;
+                }
+                if (observeRequestProgress(task, statusMs)) {
+                    continue;
+                }
+                if (!isPriorityCancelOverlayOnly(task)) {
+                    activeNonRouteRequestIds.add(task.getRequestId());
+                }
                 long batchId = task.getBatchId();
                 if (batchId >= 0) {
                     activeByBatch.computeIfAbsent(batchId, ignored -> new ArrayList<>()).add(task);
@@ -247,36 +400,61 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 if (!observedCurrentMember) {
                     return batch;
                 }
-                if (observedRunningMember) {
-                    batch.markRunning(statusMs);
-                } else {
-                    batch.markQueued(statusMs);
+                beginBatchWaitMutation();
+                try {
+                    if (observedRunningMember) {
+                        batch.markRunning(statusMs);
+                    } else {
+                        batch.markQueued(statusMs);
+                    }
+                } finally {
+                    endBatchWaitMutation();
                 }
                 return batch;
             });
         }
 
-        // Phase 4: check running requests for anomalies
-        if (runningTaskInfo != null) {
-            for (TaskInfo task : runningTaskInfo.values()) {
-                long batchId = task.getBatchId();
-                if (batchId < 0) {
-                    continue;
-                }
-                if (!inflightBatches.containsKey(batchId)) {
+        // Phase 4: check non-route running requests for anomalies.
+        for (Map.Entry<Long, List<TaskInfo>> entry : activeByBatch.entrySet()) {
+            if (!inflightBatches.containsKey(entry.getKey())) {
+                for (TaskInfo task : entry.getValue()) {
                     logger.debug("Prefill calibrate: running request reqId={} batchId={} not in inflight",
-                            task.getRequestId(), batchId);
+                            task.getRequestId(), entry.getKey());
                 }
             }
         }
+        return activeNonRouteRequestIds;
+    }
+
+    private boolean settleRequest(TaskInfo task) {
+        long requestId = task.getRequestId();
+        if (!requestLedger.settle(requestId)) {
+            return false;
+        }
+        if (task.getErrorCode() != 0) {
+            logger.debug("Prefill calibrate: request failure reqId={} error={}",
+                    requestId, task.getErrorMessage());
+        }
+        return true;
+    }
+
+    private boolean observeRequestProgress(TaskInfo task, long statusMs) {
+        return requestLedger.observe(task.getRequestId(),
+                task.getPhase() == TaskPhase.RUNNING, statusMs);
     }
 
     private void settleFinishedMembers(long batchId,
                                        List<FinishedObservation> observations,
                                        long statusMs) {
         AtomicReference<BatchInflight> completed = new AtomicReference<>();
-        inflightBatches.computeIfPresent(batchId, (id, batch) ->
-                applyFinishedObservations(id, batch, observations, statusMs, true, completed));
+        beginBatchWaitMutation();
+        try {
+            inflightBatches.computeIfPresent(batchId, (id, batch) ->
+                    applyFinishedObservations(
+                            id, batch, observations, statusMs, true, completed));
+        } finally {
+            endBatchWaitMutation();
+        }
 
         BatchInflight completedBatch = completed.get();
         if (completedBatch != null) {
@@ -288,7 +466,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                                                      BatchInflight batch,
                                                      List<FinishedObservation> observations,
                                                      long statusMs,
-                                                     boolean deferReconciliation,
+                                                     boolean deferProtectedMembers,
                                                      AtomicReference<BatchInflight> completed) {
         Set<Long> localRequestIds = batch.requests().stream()
                 .map(BatchItem::requestId)
@@ -315,7 +493,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
             } else {
                 batch.observeFailure();
             }
-            if (deferReconciliation && deferIfReconciling(batchId, observation)) {
+            if (deferProtectedMembers
+                    && deferIfBatchMemberProtected(batchId, observation)) {
                 continue;
             }
 
@@ -338,8 +517,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
         List<BatchItem> survivors = batch.requests().stream()
                 .filter(item -> !finishedIds.contains(item.requestId()))
                 .toList();
-        inflightRequestCount.addAndGet(-(batch.requests().size() - survivors.size()));
-        cachedWaitTimeExpireAtMs = 0;
+        inflightBatchRequestCount.addAndGet(
+                -(batch.requests().size() - survivors.size()));
         if (survivors.isEmpty()) {
             completed.set(batch);
             return null;
@@ -369,16 +548,20 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private void reconcileFinishedWithoutBatchId(FinishedObservation observation, long statusMs) {
         long requestId = observation.requestId();
         AtomicBoolean removedNonBatch = new AtomicBoolean(false);
-        inflightBatches.computeIfPresent(requestId, (id, batch) -> {
-            if (!batch.requests().isEmpty()) {
-                return batch;
-            }
-            removedNonBatch.set(true);
-            reconciliationRequests.remove(id);
-            inflightRequestCount.addAndGet(-batch.requests().size());
-            cachedWaitTimeExpireAtMs = 0;
-            return null;
-        });
+        beginBatchWaitMutation();
+        try {
+            inflightBatches.computeIfPresent(requestId, (id, batch) -> {
+                if (!batch.requests().isEmpty()) {
+                    return batch;
+                }
+                removedNonBatch.set(true);
+                batchMemberProtections.remove(id);
+                inflightBatchRequestCount.addAndGet(-batch.requests().size());
+                return null;
+            });
+        } finally {
+            endBatchWaitMutation();
+        }
         if (removedNonBatch.get()) {
             return;
         }
@@ -410,35 +593,30 @@ public class PrefillEndpoint extends WorkerEndpoint {
         settleFinishedMembers(resolvedBatchId, List.of(observation), statusMs);
     }
 
-    private void updateEngineUntrackedRequestCount(WorkerStatusResponse response) {
-        Set<Long> localRequestIds = new HashSet<>();
+    private void updateEngineUntrackedRequestCount(
+            WorkerStatusResponse response, Set<Long> activeNonRouteRequestIds) {
+        // Real batches are few and need a membership set. Route membership was
+        // classified while applying the same WorkerStatus observation, avoiding
+        // a second request-ledger lookup or a copy of all live route ids.
+        Set<Long> localBatchRequestIds = new HashSet<>();
         for (BatchInflight batch : inflightBatches.values()) {
             for (BatchItem request : batch.requests()) {
-                localRequestIds.add(request.requestId());
+                localBatchRequestIds.add(request.requestId());
             }
         }
 
-        Set<Long> untracked = new HashSet<>();
-        Map<String, TaskInfo> runningTasks = response.getRunningTaskInfo();
-        if (runningTasks != null) {
-            for (TaskInfo task : runningTasks.values()) {
-                if (task == null || isPriorityCancelOverlayOnly(task)) {
-                    continue;
-                }
-                if (!localRequestIds.contains(task.getRequestId())) {
-                    untracked.add(task.getRequestId());
-                }
-            }
-        }
+        activeNonRouteRequestIds.removeAll(localBatchRequestIds);
 
         long reportedActive = Math.max(0, response.getWaitingQueryLen())
                 + Math.max(0, response.getRunningQueryLen());
-        long scalarLowerBound = Math.max(0, reportedActive - localRequestIds.size());
+        long scalarLowerBound = Math.max(
+                0, reportedActive - Math.max(0, getInflightRequestCount()));
         // The protobuf converter represents an absent detail list as an empty map,
         // while older/newer Engine variants may still populate only the scalar
         // counts. Keep the request-id union when details exist and conservatively
         // retain the scalar lower bound when the detail list is empty or partial.
-        engineUntrackedRequestCount = Math.max(untracked.size(), scalarLowerBound);
+        engineUntrackedRequestCount = Math.max(
+                activeNonRouteRequestIds.size(), scalarLowerBound);
     }
 
     private static boolean isPriorityCancelOverlayOnly(TaskInfo task) {
@@ -456,7 +634,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * not already represented in the local ledger.
      */
     public long realPendingCount() {
-        return inflightRequestCount.get() + batcher.queueSize() + engineUntrackedRequestCount;
+        return getInflightRequestCount() + batcher.queueSize() + engineUntrackedRequestCount;
     }
 
     // ==================== Wait Time ====================
@@ -465,8 +643,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * Real wait time: estimated time to drain current inflight batches.
      */
     public long realWaitTimeMs() {
-        long waitMs = estimateWaitingTimeMs(System.currentTimeMillis());
-        return waitMs;
+        return estimateWaitingTimeMs(System.currentTimeMillis());
     }
 
     public int getInflightBatchCount() {
@@ -480,87 +657,168 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * @return number of batches evicted
      */
     public int evictExpiredBatches(long ttlMs) {
+        return evictExpiredBatches(ttlMs, ignored -> false);
+    }
+
+    /** Evict only batches with no request generation still owned by the scheduler. */
+    public int evictExpiredBatches(long ttlMs,
+                                   LongPredicate schedulerOwnsRequest) {
         long nowMs = System.currentTimeMillis();
         AtomicInteger evictedCount = new AtomicInteger();
         for (Long batchId : inflightBatches.keySet()) {
+            BatchInflight candidate = inflightBatches.get(batchId);
+            if (candidate == null
+                    || hasProtectedBatchMember(batchId)
+                    || batchHasOwnedRequest(candidate, schedulerOwnsRequest)
+                    || nowMs - candidate.lastObservedAtMs() <= ttlMs) {
+                continue;
+            }
             AtomicReference<BatchInflight> evicted = new AtomicReference<>();
-            inflightBatches.computeIfPresent(batchId, (id, batch) -> {
-                if (hasDispatchReconciliation(id)
-                        || nowMs - batch.lastObservedAtMs() <= ttlMs) {
-                    return batch;
-                }
-                evicted.set(batch);
-                return null;
-            });
+            beginBatchWaitMutation();
+            try {
+                inflightBatches.computeIfPresent(batchId, (id, batch) -> {
+                    if (hasProtectedBatchMember(id)
+                            || batchHasOwnedRequest(batch, schedulerOwnsRequest)
+                            || nowMs - batch.lastObservedAtMs() <= ttlMs) {
+                        return batch;
+                    }
+                    evicted.set(batch);
+                    return null;
+                });
+            } finally {
+                endBatchWaitMutation();
+            }
             BatchInflight removed = evicted.get();
             if (removed != null) {
-                inflightRequestCount.addAndGet(-removed.requests().size());
-                cachedWaitTimeExpireAtMs = 0;
+                inflightBatchRequestCount.addAndGet(-removed.requests().size());
                 evictedCount.incrementAndGet();
             }
         }
         return evictedCount.get();
     }
 
-    /** Protect an ACK-ambiguous batch from age-only eviction. */
-    public void beginDispatchReconciliation(long batchId, long requestId) {
+    private static boolean batchHasOwnedRequest(
+            BatchInflight batch, LongPredicate schedulerOwnsRequest) {
+        for (BatchItem item : batch.requests()) {
+            if (schedulerOwnsRequest.test(item.requestId())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Evict individually-accounted requests that have not appeared in WorkerStatus
+     * for longer than {@code ttlMs}.
+     *
+     * <p>The stale check is repeated while holding the request's stripe. Progress
+     * observation, explicit release, and TTL removal are therefore linearizable and
+     * an observation racing the first optimistic check cannot be evicted as stale.
+     */
+    public int evictExpiredRequests(long ttlMs) {
+        return requestLedger.evict(ttlMs);
+    }
+
+    /** Evict route-request entries which have no live scheduler generation. */
+    public int evictExpiredRequests(long ttlMs,
+                                    LongPredicate schedulerOwnsRequest) {
+        return requestLedger.evict(ttlMs, schedulerOwnsRequest);
+    }
+
+    /** Evict stale entries from both Prefill accounting ledgers. */
+    public int evictExpiredInflight(long ttlMs) {
+        return evictExpiredBatches(ttlMs) + evictExpiredRequests(ttlMs);
+    }
+
+    /** Evict endpoint orphans without racing scheduler-owned generations. */
+    public int evictExpiredInflight(long ttlMs,
+                                    LongPredicate schedulerOwnsRequest) {
+        return evictExpiredBatches(ttlMs, schedulerOwnsRequest)
+                + evictExpiredRequests(ttlMs, schedulerOwnsRequest);
+    }
+
+    /**
+     * Protect an ACK-ambiguous batch member from settlement and age-only eviction.
+     *
+     * <p>The ownership check and guard publication run inside the same
+     * {@code inflightBatches} key computation used by WorkerStatus settlement,
+     * explicit release, and TTL revalidation. A {@code true} result therefore
+     * proves that every later destructive mutation for this batch observes the
+     * guard; {@code false} proves that settlement won first or the request did not
+     * belong to that batch, and no guard was installed.</p>
+     */
+    public boolean tryProtectBatchMember(long batchId, long requestId) {
         long nowMs = System.currentTimeMillis();
+        AtomicBoolean protectedMember = new AtomicBoolean();
         inflightBatches.computeIfPresent(batchId, (id, batch) -> {
-            boolean owned = batch.requests().stream()
-                    .anyMatch(item -> item.requestId() == requestId);
+            boolean owned = false;
+            for (BatchItem item : batch.requests()) {
+                if (item.requestId() == requestId) {
+                    owned = true;
+                    break;
+                }
+            }
             if (!owned) {
                 return batch;
             }
-            reconciliationRequests.compute(id, (ignored, requests) -> {
-                ConcurrentHashMap<Long, ReconciliationState> states = requests != null
+            batchMemberProtections.compute(id, (ignored, requests) -> {
+                ConcurrentHashMap<Long, BatchMemberProtection> states = requests != null
                         ? requests : new ConcurrentHashMap<>();
-                states.putIfAbsent(requestId, new ReconciliationState(null));
+                states.putIfAbsent(requestId, new BatchMemberProtection(null));
                 return states;
             });
             batch.touch(nowMs);
+            protectedMember.set(true);
             return batch;
         });
+        return protectedMember.get();
     }
 
-    /** Release one request's reconciliation fence after authoritative settlement. */
-    public void endDispatchReconciliation(long batchId, long requestId) {
+    /** Release one batch member's protection after authoritative settlement. */
+    public void releaseBatchMemberProtection(long batchId, long requestId) {
         long statusMs = System.currentTimeMillis();
         AtomicReference<BatchInflight> completed = new AtomicReference<>();
-        inflightBatches.compute(batchId, (id, batch) -> {
-            AtomicReference<FinishedObservation> deferredTerminal = new AtomicReference<>();
-            reconciliationRequests.computeIfPresent(id, (ignored, requests) -> {
-                ReconciliationState state = requests.remove(requestId);
-                if (state != null) {
-                    deferredTerminal.set(state.deferredTerminal());
+        beginBatchWaitMutation();
+        try {
+            inflightBatches.compute(batchId, (id, batch) -> {
+                AtomicReference<FinishedObservation> deferredTerminal = new AtomicReference<>();
+                batchMemberProtections.computeIfPresent(id, (ignored, requests) -> {
+                    BatchMemberProtection state = requests.remove(requestId);
+                    if (state != null) {
+                        deferredTerminal.set(state.deferredTerminal());
+                    }
+                    return requests.isEmpty() ? null : requests;
+                });
+                if (batch == null) {
+                    return null;
                 }
-                return requests.isEmpty() ? null : requests;
+                FinishedObservation observation = deferredTerminal.get();
+                if (observation == null) {
+                    batch.touch(statusMs);
+                    return batch;
+                }
+                // The protection was removed under the same inflight-key critical section,
+                // so apply the cached terminal directly instead of trying to defer it again.
+                return applyFinishedObservations(
+                        id, batch, List.of(observation), statusMs, false, completed);
             });
-            if (batch == null) {
-                return null;
-            }
-            FinishedObservation observation = deferredTerminal.get();
-            if (observation == null) {
-                batch.touch(statusMs);
-                return batch;
-            }
-            // The fence was removed under the same inflight-key critical section,
-            // so apply the cached terminal directly instead of trying to defer it again.
-            return applyFinishedObservations(
-                    id, batch, List.of(observation), statusMs, false, completed);
-        });
+        } finally {
+            endBatchWaitMutation();
+        }
         BatchInflight completedBatch = completed.get();
         if (completedBatch != null) {
             reportBatchCompletion(batchId, completedBatch);
         }
     }
 
-    private boolean deferIfReconciling(long batchId, FinishedObservation observation) {
+    private boolean deferIfBatchMemberProtected(
+            long batchId, FinishedObservation observation) {
         AtomicBoolean deferred = new AtomicBoolean(false);
-        reconciliationRequests.computeIfPresent(batchId, (ignored, requests) -> {
+        batchMemberProtections.computeIfPresent(batchId, (ignored, requests) -> {
             requests.computeIfPresent(observation.requestId(), (requestId, state) -> {
                 deferred.set(true);
                 FinishedObservation existing = state.deferredTerminal();
-                return new ReconciliationState(existing == null
+                return new BatchMemberProtection(existing == null
                         ? observation : existing.merge(observation));
             });
             return requests.isEmpty() ? null : requests;
@@ -568,8 +826,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return deferred.get();
     }
 
-    private boolean hasDispatchReconciliation(long batchId) {
-        ConcurrentHashMap<Long, ReconciliationState> requests = reconciliationRequests.get(batchId);
+    private boolean hasProtectedBatchMember(long batchId) {
+        ConcurrentHashMap<Long, BatchMemberProtection> requests =
+                batchMemberProtections.get(batchId);
         return requests != null && !requests.isEmpty();
     }
 
@@ -586,7 +845,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /**
      * Report per-worker batch metrics via the given reporter.
-     * Called periodically by {@link org.flexlb.balance.scheduler.FlexlbBatchScheduler}.
+     * Called periodically by {@link org.flexlb.balance.scheduler.PriorityScheduler}.
      */
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
         int queueSize = batcher.queueSize();
@@ -601,9 +860,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     reporter.reportBatcherQueueDepthByPriority(RoleType.PREFILL.name(), getIp(), priority, size));
         }
         reporter.reportInflightBatchCount(RoleType.PREFILL.name(), getIp(), getInflightBatchCount());
-        reporter.reportInflightRequestCount(RoleType.PREFILL.name(), getIp(), inflightRequestCount.get());
-        reporter.reportInflightMaxAgeMs(RoleType.PREFILL.name(), getIp(),
-                InflightEvictor.maxAgeMs(inflightBatches, System.currentTimeMillis()));
+        reporter.reportInflightRequestCount(RoleType.PREFILL.name(), getIp(), getInflightRequestCount());
+        long nowMs = System.currentTimeMillis();
+        long maxAgeMs = Math.max(
+                InflightEvictor.maxAgeMs(inflightBatches, nowMs),
+                requestLedger.maxAge(nowMs));
+        reporter.reportInflightMaxAgeMs(RoleType.PREFILL.name(), getIp(), maxAgeMs);
     }
 
     /**
@@ -628,39 +890,126 @@ public class PrefillEndpoint extends WorkerEndpoint {
         // A failed/removed member makes the original batch an invalid learning
         // sample even if another member completed successfully.
         if (batch.learningEligible()) {
-            predictor.learn(batch.originalFeatures(), predictedMs, actualMs);
+            try {
+                predictor.learn(batch.originalFeatures(), predictedMs, actualMs);
+            } catch (RuntimeException learningFailure) {
+                logger.warn("batch predictor learning failed after settlement: batchId={} engine={}",
+                        batchId, getIp(), learningFailure);
+            }
         }
 
-        reporter.reportBatchPredictedTimeMs(RoleType.PREFILL.name(), getIp(), predictedMs);
-        reporter.reportBatchActualTimeMs(RoleType.PREFILL.name(), getIp(), actualMs);
-        reporter.reportBatchPredictGapMs(RoleType.PREFILL.name(), getIp(), gapMs);
+        // These are post-settlement observers. Isolate them individually so
+        // a metrics outage cannot suppress the scheduler's WorkerStatus
+        // reducer or prevent the remaining observations.
+        try {
+            reporter.reportBatchPredictedTimeMs(RoleType.PREFILL.name(), getIp(), predictedMs);
+        } catch (RuntimeException telemetryFailure) {
+            logger.warn("batch predicted-time metric failed: batchId={} engine={}",
+                    batchId, getIp(), telemetryFailure);
+        }
+        try {
+            reporter.reportBatchActualTimeMs(RoleType.PREFILL.name(), getIp(), actualMs);
+        } catch (RuntimeException telemetryFailure) {
+            logger.warn("batch actual-time metric failed: batchId={} engine={}",
+                    batchId, getIp(), telemetryFailure);
+        }
+        try {
+            reporter.reportBatchPredictGapMs(RoleType.PREFILL.name(), getIp(), gapMs);
+        } catch (RuntimeException telemetryFailure) {
+            logger.warn("batch prediction-gap metric failed: batchId={} engine={}",
+                    batchId, getIp(), telemetryFailure);
+        }
     }
 
     private long estimateWaitingTimeMs(long nowMs) {
-        if (nowMs < cachedWaitTimeExpireAtMs) {
-            return cachedWaitTimeMs;
+        for (int attempt = 0; attempt < COMBINED_WAIT_SNAPSHOT_MAX_ATTEMPTS; attempt++) {
+            long batchVersionBefore = batchWaitMutationVersion();
+            long requestVersionBefore = requestLedger.mutationVersion();
+            if (batchVersionBefore < 0 || requestVersionBefore < 0) {
+                Thread.onSpinWait();
+                continue;
+            }
+
+            long batchWaitMs = computeBatchWaitingTimeMs(nowMs);
+            long requestWaitMs = requestLedger.estimate(nowMs);
+            if (requestWaitMs == Long.MAX_VALUE) {
+                return Long.MAX_VALUE;
+            }
+
+            // Validate in reverse order so both component reads are bracketed by
+            // their own monotonic epochs. This stays lock-free across ledgers while
+            // preventing a BATCH/QUEUE transition from publishing a torn low sum.
+            long requestVersionAfter = requestLedger.mutationVersion();
+            long batchVersionAfter = batchWaitMutationVersion();
+            if (batchVersionBefore == batchVersionAfter
+                    && requestVersionBefore == requestVersionAfter) {
+                return saturatedAdd(batchWaitMs, requestWaitMs);
+            }
+            Thread.onSpinWait();
         }
+
+        // Continuous cross-ledger mutation cannot produce a coherent bounded
+        // snapshot without blocking admission. Route away conservatively.
+        return Long.MAX_VALUE;
+    }
+
+    private long computeBatchWaitingTimeMs(long nowMs) {
         if (inflightBatches.isEmpty()) {
-            cachedWaitTimeMs = 0;
-            cachedWaitTimeExpireAtMs = nowMs + WAIT_TIME_CACHE_TTL_MS;
             return 0;
         }
-        long totalPredMs = 0;
-        long earliestProgressBaseMs = Long.MAX_VALUE;
+        long batchPredMs = 0;
+        long earliestBatchProgressBaseMs = Long.MAX_VALUE;
         for (BatchInflight batch : inflightBatches.values()) {
-            totalPredMs += Math.max(0, batch.predictTimeMs());
-            earliestProgressBaseMs = Math.min(earliestProgressBaseMs, batch.progressBaseMs());
+            batchPredMs = saturatedAdd(batchPredMs, Math.max(0, batch.predictTimeMs()));
+            // Preserve legacy batch semantics: an inflight batch begins aging at
+            // commit and WorkerStatus may subsequently re-anchor it.
+            earliestBatchProgressBaseMs = Math.min(
+                    earliestBatchProgressBaseMs, batch.progressBaseMs());
         }
-        long result;
-        if (earliestProgressBaseMs == Long.MAX_VALUE) {
-            result = 0;
-        } else {
-            long elapsedMs = Math.max(0, nowMs - earliestProgressBaseMs);
-            result = Math.max(0, totalPredMs - elapsedMs);
+        long batchWaitMs = earliestBatchProgressBaseMs == Long.MAX_VALUE
+                ? 0
+                : Math.max(0, batchPredMs
+                        - Math.max(0, nowMs - earliestBatchProgressBaseMs));
+        return batchWaitMs;
+    }
+
+    private void beginBatchWaitMutation() {
+        batchWaitMutationsStarted.incrementAndGet();
+        VarHandle.storeStoreFence();
+    }
+
+    private void endBatchWaitMutation() {
+        VarHandle.storeStoreFence();
+        batchWaitMutationsCompleted.incrementAndGet();
+    }
+
+    private long batchWaitMutationVersion() {
+        VarHandle.loadLoadFence();
+        long started = batchWaitMutationsStarted.get();
+        long completed = batchWaitMutationsCompleted.get();
+        return started == completed ? completed : -1;
+    }
+
+    /** Package-private deterministic interleaving hook; always null in production. */
+    void setWaitSnapshotHookForTest(WaitSnapshotHook hook) {
+        waitSnapshotHook.set(hook);
+    }
+
+    private static void notifyWaitSnapshotHook(
+            AtomicReference<WaitSnapshotHook> hookReference,
+            PrefillRequestLedger.WaitSnapshotStage ledgerStage) {
+        WaitSnapshotHook hook = hookReference.get();
+        if (hook != null) {
+            WaitSnapshotStage endpointStage = switch (ledgerStage) {
+                case AFTER_QUEUED_READ -> WaitSnapshotStage.AFTER_REQUEST_QUEUED_READ;
+                case BEFORE_CACHE_PUBLISH -> WaitSnapshotStage.BEFORE_CACHE_PUBLISH;
+            };
+            hook.onStage(endpointStage);
         }
-        cachedWaitTimeMs = result;
-        cachedWaitTimeExpireAtMs = nowMs + WAIT_TIME_CACHE_TTL_MS;
-        return result;
+    }
+
+    private static long saturatedAdd(long left, long right) {
+        return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
     }
 
 }

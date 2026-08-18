@@ -47,9 +47,9 @@ import java.util.Map;
  *   <li>If all CAS attempts fail, fall back to the lowest-TTFT candidate</li>
  * </ol>
  *
- * <p>Supports BATCH, DIRECT, and QUEUE routing. BATCH scoring includes the worker-batcher
- * wait while its inflight lifecycle remains owned by {@code FlexlbBatchScheduler}; DIRECT
- * and QUEUE reserve the selected request locally until completion or rollback.
+ * <p>Supports BATCH, DIRECT, and QUEUE routing. BATCH and QUEUE+AutoTPM scoring includes
+ * the worker-batcher wait while their inflight lifecycle remains owned by
+ * {@code PriorityScheduler}; DIRECT and legacy QUEUE reserve locally.
  */
 @Component("shortestTtftStrategy")
 public class ShortestTTFTStrategy implements LoadBalanceStrategy {
@@ -83,7 +83,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
     @Override
     public void rollBack(WorkerEndpoint ep, long requestId) {
         // Release non-batch prefill inflight reservation on routing failure.
-        // Batch path inflight is managed by FlexlbBatchScheduler — no-op here.
+        // Batch path inflight is managed by PriorityScheduler — no-op here.
         if (ep instanceof PrefillEndpoint pe) {
             pe.releaseBatch(requestId);
         }
@@ -336,12 +336,12 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
             long cacheHit = calculateCacheHit(ep, cacheMatchResults, request);
             long prefillMs = Math.max(0L, predictor.estimateMs(seqLen, cacheHit));
             long queueMs = estimatedQueueWaitMs(ep, balanceContext);
-            long ttft;
-            try {
-                ttft = Math.addExact(prefillMs, queueMs);
-            } catch (ArithmeticException overflow) {
-                ttft = Long.MAX_VALUE;
+            if (queueMs == Long.MAX_VALUE) {
+                Logger.debug("ShortestTTFT: skipping endpoint with unavailable wait estimate, ip={}",
+                        ep.getIp());
+                continue;
             }
+            long ttft = saturatingAdd(prefillMs, queueMs);
             Logger.debug("ShortestTTFT score - ip: {}, hitCache: {}, prefillMs: {}, queueMs: {}, ttft: {}",
                     ep.getIp(), cacheHit, prefillMs, queueMs, ttft);
             result.add(new ScoredEndpoint(
@@ -351,13 +351,17 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
     }
 
     /**
-     * Estimate all work already ahead of a request. In BATCH mode this includes both
-     * dispatched inflight work and the per-worker batcher queue; otherwise only the
-     * inflight ledger is relevant.
+     * Estimate all work already ahead of a request. PriorityScheduler-owned paths include
+     * both dispatched inflight work and the per-worker batcher queue; otherwise only the
+     * inflight ledger is relevant. Long.MAX_VALUE remains an unavailable sentinel.
      */
     protected long estimatedQueueWaitMs(PrefillEndpoint ep, BalanceContext balanceContext) {
-        long inflightWaitMs = Math.max(0L, ep.realWaitTimeMs());
-        if (!isBatchPath(balanceContext)) {
+        long inflightWaitMs = ep.realWaitTimeMs();
+        if (inflightWaitMs == Long.MAX_VALUE) {
+            return Long.MAX_VALUE;
+        }
+        inflightWaitMs = Math.max(0L, inflightWaitMs);
+        if (!usesPriorityScheduler(balanceContext)) {
             return inflightWaitMs;
         }
 
@@ -369,9 +373,17 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
                         balanceContext.getRequestId())
                 : ep.batcherWaitMs();
         batcherWaitMs = Math.max(0L, batcherWaitMs);
-        return inflightWaitMs > Long.MAX_VALUE - batcherWaitMs
-                ? Long.MAX_VALUE
-                : inflightWaitMs + batcherWaitMs;
+        return saturatingAdd(inflightWaitMs, batcherWaitMs);
+    }
+
+    private static long saturatingAdd(long left, long right) {
+        if (right > 0L && left > Long.MAX_VALUE - right) {
+            return Long.MAX_VALUE;
+        }
+        if (right < 0L && left < Long.MIN_VALUE - right) {
+            return Long.MIN_VALUE;
+        }
+        return left + right;
     }
 
     // ==================== Endpoint Filtering (mirrors CostBasedPrefillStrategy) ====================
@@ -504,9 +516,9 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         long ttft = selected.ttft();
         long bestCacheHit = selected.hitCache();
 
-        // Non-batch path: reserve prefill inflight for load-aware scoring.
-        // Batch path uses FlexlbBatchScheduler.commitBatch() instead — skip here to avoid double-counting.
-        if (!isBatchPath(balanceContext)) {
+        // DIRECT (including a BATCH fallback) and legacy QUEUE reserve here.
+        // PriorityScheduler owns BATCH and QUEUE+AutoTPM reservations.
+        if (usesStrategyInflightTracking(balanceContext)) {
             ep.commitBatch(requestId, selected.prefillMs(), Collections.emptyList());
         }
 
@@ -529,11 +541,25 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
     }
 
     /**
-     * Whether this request is actually using batch dispatch. The request-level mode is
-     * authoritative because RouteService may downgrade a configured BATCH request to DIRECT.
+     * Whether this request is actually owned by PriorityScheduler. The request-level mode
+     * is authoritative because RouteService may downgrade a configured BATCH request to DIRECT.
      */
-    private static boolean isBatchPath(BalanceContext balanceContext) {
-        return balanceContext != null
-                && balanceContext.getScheduleMode() == ScheduleModeEnum.BATCH;
+    private static boolean usesPriorityScheduler(BalanceContext balanceContext) {
+        if (balanceContext == null) {
+            return false;
+        }
+        ScheduleModeEnum mode = balanceContext.getScheduleMode();
+        if (mode == ScheduleModeEnum.BATCH) {
+            return true;
+        }
+        FlexlbConfig config = balanceContext.getConfig();
+        return mode == ScheduleModeEnum.QUEUE
+                && config != null
+                && config.isAutoTpmEnabled();
+    }
+
+    /** Whether this strategy, rather than PriorityScheduler, owns Prefill accounting. */
+    private static boolean usesStrategyInflightTracking(BalanceContext balanceContext) {
+        return !usesPriorityScheduler(balanceContext);
     }
 }

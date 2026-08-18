@@ -14,6 +14,8 @@ import java.util.stream.LongStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -67,6 +69,29 @@ class DecodeEndpointAdmissionTest {
         endpoint.release(1L);
         assertEquals(v0 + 2, endpoint.admissionVersion());
         assertEquals(0, endpoint.getTotalLoad());
+        assertEquals(0, endpoint.inflightHardKvReserved());
+        assertEquals(0, endpoint.inflightExpectedKvReserved());
+    }
+
+    @Test
+    void conditionalOrphanReleasePreservesReplacementReservation() {
+        long requestId = 2L;
+        endpoint.reserve(requestId, 100, 110, 30, 1_000);
+        RequestInflight staleSnapshot = endpoint.reservedView().get(requestId);
+
+        endpoint.reserve(requestId, 200, 220, 70, 2_000);
+        RequestInflight replacement = endpoint.reservedView().get(requestId);
+        assertNotSame(staleSnapshot, replacement);
+
+        assertFalse(endpoint.releaseReservationIfCurrent(
+                requestId, staleSnapshot));
+        assertSame(replacement, endpoint.reservedView().get(requestId));
+        assertEquals(200, endpoint.inflightHardKvReserved());
+        assertEquals(220, endpoint.inflightExpectedKvReserved());
+
+        assertTrue(endpoint.releaseReservationIfCurrent(
+                requestId, replacement));
+        assertFalse(endpoint.reservedView().containsKey(requestId));
         assertEquals(0, endpoint.inflightHardKvReserved());
         assertEquals(0, endpoint.inflightExpectedKvReserved());
     }
@@ -129,7 +154,7 @@ class DecodeEndpointAdmissionTest {
     @Test
     void dispatchAndLocalEvictionHaveOneAdmissionLockWinner() {
         // Eviction wins: it removes the reservation, so the batch item must be
-        // skipped before startDispatch / gRPC publication.
+        // skipped before the engine-dispatch claim / gRPC publication.
         endpoint.reserve(1L, 100, 110, 30, 1_000);
         endpoint.markQueuedPhase(1L);
         assertTrue(endpoint.releaseIfHeld(1L));

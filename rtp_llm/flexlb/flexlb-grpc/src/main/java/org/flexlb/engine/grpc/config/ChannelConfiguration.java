@@ -45,9 +45,9 @@ public class ChannelConfiguration {
      * <p>
      * Kept separate from {@link #managedChannelThreadPoolExecutor()} so that load
      * from {@code EngineGrpcClient} (engine status queries) cannot saturate the
-     * Forwarder's channel callback threads. The Forwarder already has fallback
-     * logic that routes locally when forwarding fails, so {@link ThreadPoolExecutor.AbortPolicy}
-     * is acceptable under saturation.
+     * Forwarder's channel callback threads. Only a request for which no Master
+     * was selected may fall back to local scheduling; after a Master is selected,
+     * any forwarding failure is terminal to prevent duplicate dispatch.
      */
     @Bean
     public ThreadPoolExecutor forwarderChannelExecutor() {

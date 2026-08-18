@@ -42,7 +42,7 @@ class PrefillQueueManagerTest {
 
     private WorkerBatcher newBatcher() {
         return new WorkerBatcher("test-worker", null, config,
-                mock(BatchDecisionHandler.class), mock(BatchSchedulerReporter.class));
+                mock(DecisionGroupHandler.class), mock(BatchSchedulerReporter.class));
     }
 
     // ==================== 8.1 queue order ====================
@@ -123,7 +123,7 @@ class PrefillQueueManagerTest {
 
         // P70 jumps ahead of both P50 items: 0 cycles ahead
         assertEquals(0, waitP70);
-        // P50/P30 wait behind both: 2 cycles x avgDispatchIntervalMs
+        // P50/P30 wait behind both: 2 cycles x avgDecisionIntervalMs
         // (no dispatch observed yet -> fixed_window fallback = fixedWaitMs)
         assertEquals(400, waitP50);
         assertEquals(400, waitP30);

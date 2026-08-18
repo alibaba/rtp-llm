@@ -5,7 +5,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.BatchItem;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -52,7 +52,7 @@ class ShortestTtftCacheAffinityTest {
         cacheAwareService = Mockito.mock(CacheAwareService.class);
         resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
-        FlexlbBatchScheduler batchScheduler = Mockito.mock(FlexlbBatchScheduler.class);
+        PriorityScheduler batchScheduler = Mockito.mock(PriorityScheduler.class);
 
         endpointRegistry = new EndpointRegistry(
                 configService,

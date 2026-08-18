@@ -136,11 +136,21 @@ public final class PreemptionAttempt {
         return true;
     }
 
+    /** Engine absence plus an atomic late-enqueue fence is terminal proof. */
+    public synchronized boolean recordTombstoned(long requestId) {
+        if (requireVictim(requestId) != VictimState.CANCEL_IN_FLIGHT) {
+            return false;
+        }
+        victimStates.put(requestId, VictimState.CANCELED_SETTLED);
+        return true;
+    }
+
     public synchronized void beginCanceledWait() {
         if (state != State.CANCEL_IN_FLIGHT) {
             throw new IllegalStateException("cannot wait for CANCELED from " + state);
         }
         state = State.WAITING_CANCELED;
+        advanceReadyIfSettled();
     }
 
     /** Exactly-once typed-CANCELED settlement for one victim. */
@@ -151,11 +161,7 @@ public final class PreemptionAttempt {
             return false;
         }
         victimStates.put(requestId, VictimState.CANCELED_SETTLED);
-        if (victimStates.values().stream()
-                .allMatch(value -> value == VictimState.CANCELED_SETTLED)
-                && state == State.WAITING_CANCELED) {
-            state = State.READY_COMMIT;
-        }
+        advanceReadyIfSettled();
         return true;
     }
 
@@ -185,5 +191,13 @@ public final class PreemptionAttempt {
             throw new IllegalArgumentException("request is not a victim: " + requestId);
         }
         return state;
+    }
+
+    private void advanceReadyIfSettled() {
+        if (state == State.WAITING_CANCELED
+                && victimStates.values().stream()
+                    .allMatch(value -> value == VictimState.CANCELED_SETTLED)) {
+            state = State.READY_COMMIT;
+        }
     }
 }

@@ -1,13 +1,15 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
+import org.flexlb.balance.scheduler.priority.InflightRegistrar;
+import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.ScheduleBudget;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -19,6 +21,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.PriorityPreemptionProgress;
+import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -31,31 +34,36 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-class FlexlbBatchSchedulerTest {
+class PrioritySchedulerTest {
 
     private ConfigService configService;
     private Router router;
     private EngineGrpcClient grpcClient;
     private BatchSchedulerReporter reporter;
-    private FlexlbBatchScheduler scheduler;
+    private PriorityScheduler scheduler;
     private EndpointRegistry endpointRegistry;
     private FlexlbConfig config;
     private EngineCancelChannel cancelChannel;
@@ -93,8 +101,9 @@ class FlexlbBatchSchedulerTest {
                 });
         endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
         BatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
-        scheduler = new FlexlbBatchScheduler(configService, router,
-                endpointRegistry, dispatcher, reporter, null, null, cancelChannel);
+        scheduler = new PriorityScheduler(configService, router,
+                endpointRegistry, dispatcher, reporter, null, null, cancelChannel,
+                new PriorityScheduler.EngineFencePolicy(2, 100, 100, 2));
 
         // Create endpoint and batcher for the worker that successRoute() returns
         String ipPort = "10.0.0.1:8080";
@@ -201,7 +210,7 @@ class FlexlbBatchSchedulerTest {
                 .toList();
 
         awaitCondition(() -> sentBatches.size() == 1
-                && prefill.getBatcher().dispatchPendingSize() == 0
+                && prefill.getBatcher().pendingDeliveryCount() == 0
                 && prefill.getBatcher().queueSize() == 19);
         List<Long> firstSent = batchInputs(sentBatches.getFirst()).stream()
                 .map(EngineRpcService.GenerateInputPB::getRequestId).toList();
@@ -217,7 +226,7 @@ class FlexlbBatchSchedulerTest {
         decode.release(firstSent.getFirst());
         config.setFlexlbBatchSizeMax(19);
         awaitCondition(() -> sentBatches.size() == 2
-                && prefill.getBatcher().dispatchPendingSize() == 0
+                && prefill.getBatcher().pendingDeliveryCount() == 0
                 && prefill.getBatcher().queueSize() == 18
                 && futures.stream().filter(CompletableFuture::isDone).count() >= 2);
         List<Long> allSent = sentBatches.stream()
@@ -253,7 +262,7 @@ class FlexlbBatchSchedulerTest {
 
         Response response = item.future().get(2, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
-        awaitCondition(() -> prefill.getBatcher().dispatchPendingSize() == 0
+        awaitCondition(() -> prefill.getBatcher().pendingDeliveryCount() == 0
                 && prefill.getBatcher().queueSize() == 0);
         assertEquals(0, scheduler.getInflightSize());
         assertFalse(realDecode.reservedView().containsKey(requestId));
@@ -290,7 +299,7 @@ class FlexlbBatchSchedulerTest {
         CompletableFuture<Response> allowed = scheduler.submit(context(2_002));
 
         assertTrue(allowed.get(2, TimeUnit.SECONDS).isSuccess());
-        awaitCondition(() -> prefill.getBatcher().dispatchPendingSize() == 0
+        awaitCondition(() -> prefill.getBatcher().pendingDeliveryCount() == 0
                 && prefill.getBatcher().queueSize() == 1);
         assertFalse(blocked.isDone());
         assertEquals(List.of(2_002L), batchInputs(sentBatches.getFirst()).stream()
@@ -419,6 +428,677 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
+    void routeDecisionMode_honorsRequestCap_withoutBatchEnqueue_andReleasesOnTerminal()
+            throws Exception {
+        config.setAutoTpmEnabled(true);
+        config.setFlexlbBatchAlgorithm("fixed_window");
+        config.setFlexlbBatchSizeMax(1);
+        config.setFlexlbBatchFixedWaitMs(60_000);
+        config.setAutoTpmPrefillMaxInflightRequestsPerWorker(1);
+
+        WorkerStatus prefillStatus = workerStatus("10.0.0.9", 8090, 8091);
+        PrefillEndpoint prefill = (PrefillEndpoint) endpointRegistry.ensureEndpoint(
+                RoleType.PREFILL, "10.0.0.9:8090", prefillStatus);
+        DecodeEndpoint decode = ensureDecodeEndpoint("10.0.0.8", 8180, 8181);
+        when(router.route(any(BalanceContext.class))).thenAnswer(invocation -> {
+            long requestId = ((BalanceContext) invocation.getArgument(0)).getRequestId();
+            decode.reserve(requestId, 128, 136, 50, 0);
+            decode.markQueuedPhase(requestId);
+            return successRoute(
+                    requestId,
+                    server(RoleType.PREFILL, "10.0.0.9", 8090, 8091, requestId),
+                    server(RoleType.DECODE, "10.0.0.8", 8180, 8181, requestId));
+        });
+
+        CompletableFuture<Response> first = scheduler.submit(routeDecisionContext(4_001));
+        Response firstDecision = first.get(2, TimeUnit.SECONDS);
+        assertTrue(firstDecision.isSuccess());
+        assertFalse(firstDecision.isEnqueuedByMaster());
+        assertEquals(0, prefill.getInflightBatchCount());
+        assertEquals(1, prefill.getInflightRouteRequestCount());
+        assertEquals(1, prefill.getInflightRequestCount());
+        assertEquals(DeliveryClaimKind.ROUTE_DECISION,
+                scheduler.getRequestState(4_001, 0).deliveryClaimKind());
+
+        CompletableFuture<Response> second = scheduler.submit(routeDecisionContext(4_002));
+        awaitCondition(() -> prefill.getBatcher().queueSize() == 1);
+        assertFalse(second.isDone(), "the per-worker request cap must hold the next decision");
+        assertEquals(1, prefill.getInflightRouteRequestCount());
+        assertTrue(sentBatches.isEmpty());
+        verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
+
+        WorkerStatusResponse prefillFinished = finishedStatus(RoleType.PREFILL, 4_001, -1, 0);
+        prefill.onWorkerStatusUpdate(prefillStatus, prefillFinished);
+        scheduler.onWorkerStatusUpdate(prefillFinished);
+
+        Response secondDecision = second.get(2, TimeUnit.SECONDS);
+        assertTrue(secondDecision.isSuccess());
+        assertFalse(secondDecision.isEnqueuedByMaster());
+        assertEquals(0, prefill.getInflightBatchCount());
+        assertEquals(1, prefill.getInflightRouteRequestCount());
+        assertTrue(sentBatches.isEmpty());
+
+        scheduler.onWorkerStatusUpdate(finishedStatus(RoleType.DECODE, 4_001, -1, 0));
+        scheduler.onWorkerStatusUpdate(finishedStatus(RoleType.DECODE, 4_002, -1, 0));
+        assertEquals(0, scheduler.getInflightSize());
+        assertEquals(0, prefill.getInflightRouteRequestCount());
+        assertEquals(0, prefill.getInflightRequestCount());
+        assertFalse(decode.reservedView().containsKey(4_001L));
+        assertFalse(decode.reservedView().containsKey(4_002L));
+    }
+
+    @Test
+    void routePublicationFenceRejectsPreemptionUntilAck_andUsesRequestIdForTerminal()
+            throws Exception {
+        PrefillEndpoint prefill = mock(PrefillEndpoint.class);
+        PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
+        when(prefill.getPredictor()).thenReturn(predictor);
+        when(prefill.tryCommitRequest(anyLong(), anyLong(), anyInt()))
+                .thenReturn(true);
+        when(prefill.releaseRequest(anyLong())).thenReturn(true);
+        when(prefill.getIp()).thenReturn("10.0.0.1");
+
+        CountDownLatch secondPredictionEntered = new CountDownLatch(1);
+        CountDownLatch releaseSecondPrediction = new CountDownLatch(1);
+        AtomicInteger predictions = new AtomicInteger();
+        when(predictor.estimateMs(anyLong(), anyLong())).thenAnswer(invocation -> {
+            if (predictions.incrementAndGet() == 2) {
+                secondPredictionEntered.countDown();
+                assertTrue(releaseSecondPrediction.await(2, TimeUnit.SECONDS));
+            }
+            return 1L;
+        });
+
+        BatchItem first = routeDecisionItem(4_101L, prefill);
+        BatchItem second = routeDecisionItem(4_102L, prefill);
+        assertTrue(scheduler.registerInflight(first));
+        assertTrue(scheduler.registerInflight(second));
+
+        CompletableFuture<Void> publication = CompletableFuture.runAsync(() ->
+                scheduler.onDecisionGroupReady(List.of(first, second),
+                        new DecisionGroupMetadata("route_fence_test", 0)));
+        assertTrue(secondPredictionEntered.await(1, TimeUnit.SECONDS));
+        assertEquals(RequestLifecycleState.DISPATCHING,
+                scheduler.getRequestState(first.requestId(), 0).state());
+        assertFalse(scheduler.claimForPreemption(
+                        first.requestId(), 91L, "must not preempt publication"),
+                "a DISPATCHING route is not yet visible to the frontend");
+
+        releaseSecondPrediction.countDown();
+        publication.get(1, TimeUnit.SECONDS);
+        assertEquals(RequestLifecycleState.ACKNOWLEDGED,
+                scheduler.getRequestState(first.requestId(), 0).state());
+        assertTrue(scheduler.claimForPreemption(
+                        first.requestId(), 92L, "acknowledged route is eligible"),
+                "the normal priority policy resumes after route publication");
+        assertTrue(scheduler.releasePreemptionClaim(first.requestId(), 92L));
+
+        // Frontends may assign a positive synthetic batch id when they send
+        // the delivered request. Route accounting is request-scoped, so the
+        // worker terminal must not be rejected as a batch-generation mismatch.
+        scheduler.onWorkerStatusUpdate(
+                finishedStatus(RoleType.PREFILL, first.requestId(), 77_777L, 9_001L));
+        assertEquals(RequestLifecycleState.FAILED,
+                scheduler.getRequestState(first.requestId(), 0).state());
+        scheduler.onWorkerStatusUpdate(
+                finishedStatus(RoleType.DECODE, second.requestId(), 88_888L, 0));
+        assertEquals(0, scheduler.getInflightSize());
+    }
+
+    @Test
+    void postDeliveryFenceRetainsLedgersForNonTerminalCancelOutcomes() throws Exception {
+        PrefillEndpoint prefill = endpointRegistry.getPrefill("10.0.0.1:8080");
+        DecodeEndpoint decode = ensureDecodeEndpoint("10.0.0.2", 8081, 8082);
+        Map<Long, EngineCancelChannel.CancelOutcome> firstOutcomes = Map.of(
+                4_201L, EngineCancelChannel.CancelOutcome.notFound(),
+                4_202L, EngineCancelChannel.CancelOutcome.failed(),
+                4_203L, EngineCancelChannel.CancelOutcome.accepted());
+        Map<Long, AtomicInteger> calls = new java.util.concurrent.ConcurrentHashMap<>();
+        when(cancelChannel.cancel(any(), anyLong(), anyLong())).thenAnswer(invocation -> {
+            long requestId = invocation.getArgument(1);
+            int call = calls.computeIfAbsent(requestId, ignored -> new AtomicInteger())
+                    .incrementAndGet();
+            if (requestId == 4_204L && call == 1) {
+                throw new IllegalStateException("synchronous transport failure");
+            }
+            return CompletableFuture.completedFuture(call == 1
+                    ? firstOutcomes.get(requestId)
+                    : EngineCancelChannel.CancelOutcome.tombstoned());
+        });
+
+        List<BatchItem> items = java.util.stream.LongStream.rangeClosed(4_201L, 4_204L)
+                .mapToObj(requestId -> {
+                    decode.reserve(requestId, 128, 136, 50, 0);
+                    decode.markQueuedPhase(requestId);
+                    BatchItem item = routeDecisionItem(requestId, prefill, decode);
+                    assertTrue(scheduler.registerInflight(item));
+                    return item;
+        }).toList();
+        scheduler.onDecisionGroupReady(items, new DecisionGroupMetadata("post_delivery_fence", 0));
+        awaitCondition(() -> items.stream().allMatch(item -> item.future().isDone()));
+
+        for (BatchItem item : items) {
+            assertEquals(
+                    InflightRegistrar.PostDeliveryFenceResult.STARTED,
+                    scheduler.fenceAfterDeliveryTimeout(item, "test_soft_timeout"));
+            assertTrue(decode.reservedView().containsKey(item.requestId()),
+                    "non-terminal Cancel outcome must retain Decode accounting");
+            assertEquals(RequestLifecycleState.ACKNOWLEDGED,
+                    scheduler.getRequestState(item.requestId(), 0).state());
+        }
+
+        awaitCondition(() -> items.stream().allMatch(item ->
+                scheduler.getRequestState(item.requestId(), 0).state()
+                        == RequestLifecycleState.TIMED_OUT));
+        for (BatchItem item : items) {
+            assertFalse(decode.reservedView().containsKey(item.requestId()));
+            assertEquals(2, calls.get(item.requestId()).get(),
+                    "one retained outcome must be followed by one authoritative TOMBSTONE");
+        }
+    }
+
+    @Test
+    void postDeliveryFenceRetriesConfigReadFailureWithoutReleasingLedger() throws Exception {
+        PrefillEndpoint prefill = endpointRegistry.getPrefill("10.0.0.1:8080");
+        DecodeEndpoint decode = ensureDecodeEndpoint("10.0.0.2", 8081, 8082);
+        long requestId = 4_205L;
+        decode.reserve(requestId, 128, 136, 50, 0);
+        decode.markQueuedPhase(requestId);
+        BatchItem item = routeDecisionItem(requestId, prefill, decode);
+        assertTrue(scheduler.registerInflight(item));
+        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("config_failure_fence", 0));
+
+        java.util.concurrent.atomic.AtomicBoolean failNextConfigRead =
+                new java.util.concurrent.atomic.AtomicBoolean(true);
+        when(configService.loadBalanceConfig()).thenAnswer(invocation -> {
+            if (failNextConfigRead.compareAndSet(true, false)) {
+                throw new IllegalStateException("transient config read failure");
+            }
+            return config;
+        });
+        when(cancelChannel.cancel(any(), eq(requestId), anyLong())).thenReturn(
+                CompletableFuture.completedFuture(
+                        EngineCancelChannel.CancelOutcome.tombstoned()));
+
+        assertEquals(
+                InflightRegistrar.PostDeliveryFenceResult.STARTED,
+                scheduler.fenceAfterDeliveryTimeout(item, "test_config_failure"));
+        assertTrue(decode.reservedView().containsKey(requestId));
+        assertEquals(RequestLifecycleState.ACKNOWLEDGED,
+                scheduler.getRequestState(requestId, 0).state());
+
+        awaitCondition(() -> scheduler.getRequestState(requestId, 0).state()
+                == RequestLifecycleState.TIMED_OUT);
+        assertFalse(decode.reservedView().containsKey(requestId));
+        verify(cancelChannel, times(1)).cancel(any(), eq(requestId), anyLong());
+    }
+
+    @Test
+    void blockingFrontendContinuationCannotHoldEntryLockOrBlockSiblingRoutePublication()
+            throws Exception {
+        PrefillEndpoint prefill = mock(PrefillEndpoint.class);
+        PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
+        when(prefill.getPredictor()).thenReturn(predictor);
+        when(prefill.tryCommitRequest(anyLong(), anyLong(), anyInt()))
+                .thenReturn(true);
+        when(prefill.releaseRequest(anyLong())).thenReturn(true);
+        when(prefill.getIp()).thenReturn("10.0.0.1");
+        when(predictor.estimateMs(anyLong(), anyLong())).thenReturn(1L);
+
+        BatchItem first = routeDecisionItem(4_211L, prefill);
+        BatchItem second = routeDecisionItem(4_212L, prefill);
+        assertTrue(scheduler.registerInflight(first));
+        assertTrue(scheduler.registerInflight(second));
+        CountDownLatch firstContinuationEntered = new CountDownLatch(1);
+        CountDownLatch releaseFirstContinuation = new CountDownLatch(1);
+        first.future().thenRun(() -> {
+            firstContinuationEntered.countDown();
+            try {
+                assertTrue(releaseFirstContinuation.await(2, TimeUnit.SECONDS));
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError(interrupted);
+            }
+        });
+
+        scheduler.onDecisionGroupReady(List.of(first, second),
+                new DecisionGroupMetadata("unlocked_publication", 0));
+        assertTrue(firstContinuationEntered.await(1, TimeUnit.SECONDS));
+        assertTrue(second.future().get(1, TimeUnit.SECONDS).isSuccess(),
+                "a blocked first continuation must not serialize its sibling publication");
+        assertEquals(RequestLifecycleState.ACKNOWLEDGED,
+                scheduler.getRequestState(first.requestId(), 0).state());
+        assertTrue(scheduler.claimForPreemption(
+                        first.requestId(), 9_211L, "reentrant lock probe"),
+                "the completion continuation must not retain the request-entry monitor");
+        assertTrue(scheduler.releasePreemptionClaim(first.requestId(), 9_211L));
+
+        releaseFirstContinuation.countDown();
+        scheduler.onWorkerStatusUpdate(
+                finishedStatus(RoleType.DECODE, first.requestId(), 0, 0));
+        scheduler.onWorkerStatusUpdate(
+                finishedStatus(RoleType.DECODE, second.requestId(), 0, 0));
+        assertEquals(0, scheduler.getInflightSize());
+    }
+
+    @Test
+    void completionExecutorBoundsRealRoutePublications_andBackpressuresOnCaller()
+            throws Exception {
+        recreateScheduler(
+                new PriorityScheduler.EngineFencePolicy(2, 10_000, 10_000, 2),
+                new PriorityScheduler.CompletionExecutorPolicy(1, 1));
+
+        PrefillEndpoint prefill = mock(PrefillEndpoint.class);
+        PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
+        when(prefill.getPredictor()).thenReturn(predictor);
+        when(prefill.tryCommitRequest(anyLong(), anyLong(), anyInt())).thenReturn(true);
+        when(prefill.releaseRequest(anyLong())).thenReturn(true);
+        when(prefill.getIp()).thenReturn("10.0.0.1");
+        when(predictor.estimateMs(anyLong(), anyLong())).thenReturn(1L);
+
+        BatchItem blocking = routeDecisionItem(4_221L, prefill);
+        BatchItem queued = routeDecisionItem(4_222L, prefill);
+        BatchItem callerRuns = routeDecisionItem(4_223L, prefill);
+        BatchItem shutdownRace = routeDecisionItem(4_224L, prefill);
+        assertTrue(scheduler.registerInflight(blocking));
+        assertTrue(scheduler.registerInflight(queued));
+        assertTrue(scheduler.registerInflight(callerRuns));
+        assertTrue(scheduler.registerInflight(shutdownRace));
+
+        CountDownLatch blockingContinuationEntered = new CountDownLatch(1);
+        CountDownLatch releaseBlockingContinuation = new CountDownLatch(1);
+        AtomicReference<Thread> completionWorker = new AtomicReference<>();
+        AtomicReference<Thread> backpressureCaller = new AtomicReference<>();
+        AtomicReference<Thread> shutdownCaller = new AtomicReference<>();
+        blocking.future().thenRun(() -> {
+            completionWorker.set(Thread.currentThread());
+            blockingContinuationEntered.countDown();
+            try {
+                releaseBlockingContinuation.await();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        callerRuns.future().thenRun(() -> backpressureCaller.set(Thread.currentThread()));
+        shutdownRace.future().thenRun(() -> shutdownCaller.set(Thread.currentThread()));
+
+        try {
+            scheduler.onDecisionGroupReady(List.of(blocking),
+                    new DecisionGroupMetadata("bounded_completion_worker", 0));
+            assertTrue(blockingContinuationEntered.await(1, TimeUnit.SECONDS));
+            scheduler.onDecisionGroupReady(List.of(queued),
+                    new DecisionGroupMetadata("bounded_completion_queue", 0));
+            awaitCondition(() -> scheduler.completionExecutorSnapshot().queueSize() == 1);
+
+            Thread submittingThread = Thread.currentThread();
+            scheduler.onDecisionGroupReady(List.of(callerRuns),
+                    new DecisionGroupMetadata("bounded_completion_backpressure", 0));
+            assertTrue(callerRuns.future().get(1, TimeUnit.SECONDS).isSuccess());
+            assertSame(submittingThread, backpressureCaller.get(),
+                    "a full completion queue must apply caller-runs backpressure");
+
+            PriorityScheduler.CompletionExecutorSnapshot saturated =
+                    scheduler.completionExecutorSnapshot();
+            assertEquals(1, saturated.workerLimit());
+            assertEquals(1, saturated.queueCapacity());
+            assertEquals(1, saturated.largestPoolSize());
+            assertTrue(saturated.queueSize() <= saturated.queueCapacity());
+            assertTrue(completionWorker.get().isDaemon());
+            assertFalse(completionWorker.get().isVirtual());
+            assertTrue(completionWorker.get().getName()
+                    .startsWith("priority-scheduler-completion-"));
+
+            scheduler.shutdown();
+            assertTrue(scheduler.completionExecutorSnapshot().shutdown());
+            scheduler.onDeliveryFailure(shutdownRace,
+                    new IllegalStateException("shutdown terminal race"));
+            assertFalse(shutdownRace.future().get(1, TimeUnit.SECONDS).isSuccess());
+            assertSame(submittingThread, shutdownCaller.get(),
+                    "an in-flight terminal publication racing shutdown must not be dropped");
+        } finally {
+            releaseBlockingContinuation.countDown();
+        }
+
+        assertTrue(queued.future().get(1, TimeUnit.SECONDS).isSuccess());
+        awaitCondition(() -> scheduler.completionExecutorSnapshot().completedTaskCount() == 2);
+        scheduler.onWorkerStatusUpdate(
+                finishedStatus(RoleType.DECODE, blocking.requestId(), 0, 0));
+        scheduler.onWorkerStatusUpdate(
+                finishedStatus(RoleType.DECODE, queued.requestId(), 0, 0));
+        scheduler.onWorkerStatusUpdate(
+                finishedStatus(RoleType.DECODE, callerRuns.requestId(), 0, 0));
+        scheduler.onWorkerStatusUpdate(
+                finishedStatus(RoleType.DECODE, shutdownRace.requestId(), 0, 0));
+        assertEquals(0, scheduler.getInflightSize());
+        assertTrue(scheduler.awaitCompletionExecutorTermination(1, TimeUnit.SECONDS));
+        assertTrue(scheduler.completionExecutorSnapshot().shutdown());
+    }
+
+    @Test
+    void synchronousBatchRejectionDrainsCallbacksOutsideDeliveryFence() throws Exception {
+        scheduler.shutdown();
+        endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
+        BatchDispatcher rejectingDispatcher = (items, prefill, batchId, predictedMs,
+                                                reason, callback) -> {
+            for (BatchItem item : items) {
+                callback.onFailure(item, new RejectedExecutionException("dispatch saturated"));
+            }
+        };
+        scheduler = new PriorityScheduler(
+                configService, router, endpointRegistry, rejectingDispatcher, reporter,
+                null, null, cancelChannel,
+                new PriorityScheduler.EngineFencePolicy(2, 10_000, 10_000, 2),
+                RouteDecisionDelivery.INSTANCE,
+                new PriorityScheduler.CompletionExecutorPolicy(1, 1));
+
+        PrefillEndpoint prefill = mock(PrefillEndpoint.class);
+        PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
+        when(prefill.getPredictor()).thenReturn(predictor);
+        when(prefill.tryCommitRequest(anyLong(), anyLong(), anyInt())).thenReturn(true);
+        when(prefill.releaseRequest(anyLong())).thenReturn(true);
+        when(prefill.getIp()).thenReturn("10.0.0.1");
+        when(predictor.estimateMs(anyLong(), anyLong())).thenReturn(1L);
+        when(predictor.predictBatchMs(any())).thenReturn(1.0);
+
+        BatchItem blocking = routeDecisionItem(4_231L, prefill);
+        BatchItem queued = routeDecisionItem(4_232L, prefill);
+        assertTrue(scheduler.registerInflight(blocking));
+        assertTrue(scheduler.registerInflight(queued));
+        CountDownLatch completionWorkerBlocked = new CountDownLatch(1);
+        CountDownLatch releaseCompletionWorker = new CountDownLatch(1);
+        blocking.future().thenRun(() -> {
+            completionWorkerBlocked.countDown();
+            awaitLatch(releaseCompletionWorker);
+        });
+        scheduler.onDecisionGroupReady(List.of(blocking),
+                new DecisionGroupMetadata("block_completion_worker", 0));
+        assertTrue(completionWorkerBlocked.await(1, TimeUnit.SECONDS));
+        scheduler.onDecisionGroupReady(List.of(queued),
+                new DecisionGroupMetadata("fill_completion_queue", 0));
+        assertEquals(1, scheduler.completionExecutorSnapshot().queueSize());
+
+        long failedRequestId = 4_233L;
+        Response route = successRoute(failedRequestId);
+        BatchItem rejected = new BatchItem(
+                context(failedRequestId), new CompletableFuture<>(), route,
+                PriorityScheduler.findServer(route, RoleType.PREFILL),
+                PriorityScheduler.findServer(route, RoleType.DECODE),
+                prefill, null, System.currentTimeMillis());
+        assertTrue(scheduler.registerInflight(rejected));
+        CountDownLatch rejectionContinuationEntered = new CountDownLatch(1);
+        CountDownLatch releaseRejectionContinuation = new CountDownLatch(1);
+        rejected.future().thenRun(() -> {
+            rejectionContinuationEntered.countDown();
+            awaitLatch(releaseRejectionContinuation);
+        });
+
+        CompletableFuture<Void> rejectedDelivery = CompletableFuture.runAsync(() ->
+                scheduler.onDecisionGroupReady(List.of(rejected),
+                        new DecisionGroupMetadata("synchronous_rejection", 0)));
+        try {
+            assertTrue(rejectionContinuationEntered.await(1, TimeUnit.SECONDS));
+
+            // WorkerStatus reduction uses the same global delivery fence. It
+            // must remain available while caller-runs backpressure blocks the
+            // synchronously rejected batch's response continuation.
+            CompletableFuture<Void> statusReduction = CompletableFuture.runAsync(() ->
+                    scheduler.onWorkerStatusUpdate(
+                            finishedStatus(RoleType.DECODE, blocking.requestId(), 0, 0)));
+            statusReduction.get(1, TimeUnit.SECONDS);
+        } finally {
+            releaseRejectionContinuation.countDown();
+            releaseCompletionWorker.countDown();
+        }
+        rejectedDelivery.get(1, TimeUnit.SECONDS);
+        assertFalse(rejected.future().get(1, TimeUnit.SECONDS).isSuccess());
+    }
+
+    @Test
+    void shutdownClosesDeliveryGateBeforeEndpointsAndWaitsForAcceptedGroup()
+            throws Exception {
+        scheduler.shutdown();
+
+        CountDownLatch deliveryEntered = new CountDownLatch(1);
+        CountDownLatch releaseDelivery = new CountDownLatch(1);
+        CountDownLatch endpointClosed = new CountDownLatch(1);
+        CountDownLatch shutdownStarted = new CountDownLatch(1);
+        AtomicInteger deliveryCalls = new AtomicInteger();
+        DecisionDelivery<List<BatchItem>> blockingDelivery = (items, callback) -> {
+            deliveryCalls.incrementAndGet();
+            deliveryEntered.countDown();
+            awaitLatch(releaseDelivery);
+            items.forEach(callback::onDelivered);
+        };
+
+        endpointRegistry = mock(EndpointRegistry.class);
+        doAnswer(invocation -> {
+            endpointClosed.countDown();
+            return null;
+        }).when(endpointRegistry).close();
+        scheduler = new PriorityScheduler(
+                configService, router, endpointRegistry, mock(BatchDispatcher.class), reporter,
+                null, null, cancelChannel,
+                new PriorityScheduler.EngineFencePolicy(2, 10_000, 10_000, 2),
+                blockingDelivery,
+                new PriorityScheduler.CompletionExecutorPolicy(1, 4));
+
+        PrefillEndpoint prefill = mock(PrefillEndpoint.class);
+        PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
+        when(prefill.getPredictor()).thenReturn(predictor);
+        when(prefill.tryCommitRequest(anyLong(), anyLong(), anyInt())).thenReturn(true);
+        when(prefill.releaseRequest(anyLong())).thenReturn(true);
+        when(predictor.estimateMs(anyLong(), anyLong())).thenReturn(1L);
+
+        BatchItem accepted = routeDecisionItem(4_234L, prefill);
+        BatchItem rejected = routeDecisionItem(4_235L, prefill);
+        assertTrue(scheduler.registerInflight(accepted));
+        assertTrue(scheduler.registerInflight(rejected));
+
+        CompletableFuture<Void> acceptedDelivery = CompletableFuture.runAsync(() ->
+                scheduler.onDecisionGroupReady(List.of(accepted),
+                        new DecisionGroupMetadata("accepted_before_shutdown", 0)));
+        assertTrue(deliveryEntered.await(1, TimeUnit.SECONDS));
+        assertEquals(1, scheduler.activeDeliveryPermitCount());
+
+        CompletableFuture<Void> shutdown = CompletableFuture.runAsync(() -> {
+            shutdownStarted.countDown();
+            scheduler.shutdown();
+        });
+        assertTrue(shutdownStarted.await(1, TimeUnit.SECONDS));
+        awaitDeliveryLifecycleClosed(scheduler);
+        assertFalse(shutdown.isDone());
+        assertFalse(endpointClosed.await(100, TimeUnit.MILLISECONDS),
+                "endpoint close must wait for a delivery which crossed the gate");
+
+        scheduler.onDecisionGroupReady(List.of(rejected),
+                new DecisionGroupMetadata("rejected_after_shutdown", 0));
+        Response rejection = rejected.future().get(1, TimeUnit.SECONDS);
+        assertFalse(rejection.isSuccess());
+        assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(),
+                rejection.getCode());
+        assertEquals(1, deliveryCalls.get(),
+                "a staged group must not enter delivery after the gate closes");
+        assertEquals(InflightRegistrar.PostDeliveryFenceResult.ALREADY_TERMINAL,
+                scheduler.fenceAfterDeliveryTimeout(accepted,
+                        "must not install a fence after the gate closes"));
+        verify(cancelChannel, never()).cancel(any(), eq(accepted.requestId()), anyLong());
+
+        releaseDelivery.countDown();
+        acceptedDelivery.get(1, TimeUnit.SECONDS);
+        shutdown.get(1, TimeUnit.SECONDS);
+        assertTrue(endpointClosed.await(1, TimeUnit.SECONDS));
+        assertTrue(accepted.future().get(1, TimeUnit.SECONDS).isSuccess());
+        assertEquals(0, scheduler.activeDeliveryPermitCount());
+    }
+
+    @Test
+    void shutdownCancelsEngineFenceRetry_andRejectsNewWork() throws Exception {
+        recreateScheduler(
+                new PriorityScheduler.EngineFencePolicy(2, 10_000, 10_000, 2),
+                new PriorityScheduler.CompletionExecutorPolicy(1, 4));
+
+        PrefillEndpoint prefill = mock(PrefillEndpoint.class);
+        PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
+        when(prefill.getPredictor()).thenReturn(predictor);
+        when(prefill.tryCommitRequest(anyLong(), anyLong(), anyInt())).thenReturn(true);
+        when(prefill.releaseRequest(anyLong())).thenReturn(true);
+        when(prefill.getIp()).thenReturn("10.0.0.1");
+        when(predictor.estimateMs(anyLong(), anyLong())).thenReturn(1L);
+
+        AtomicInteger cancelCalls = new AtomicInteger();
+        when(cancelChannel.cancel(any(), anyLong(), anyLong())).thenAnswer(invocation -> {
+            cancelCalls.incrementAndGet();
+            return CompletableFuture.completedFuture(
+                    EngineCancelChannel.CancelOutcome.failed());
+        });
+        BatchItem item = routeDecisionItem(4_224L, prefill);
+        assertTrue(scheduler.registerInflight(item));
+        scheduler.onDecisionGroupReady(List.of(item),
+                new DecisionGroupMetadata("shutdown_retry", 0));
+        assertTrue(item.future().get(1, TimeUnit.SECONDS).isSuccess());
+
+        assertEquals(InflightRegistrar.PostDeliveryFenceResult.STARTED,
+                scheduler.fenceAfterDeliveryTimeout(item, "shutdown_retry"));
+        assertEquals(1, cancelCalls.get());
+        assertEquals(1, scheduler.engineFenceRetryQueueSize());
+
+        scheduler.shutdown();
+        assertEquals(0, scheduler.engineFenceRetryQueueSize());
+        assertFalse(scheduler.registerInflight(routeDecisionItem(4_225L, prefill)));
+        Response rejected = scheduler.submit(context(4_226L)).get(1, TimeUnit.SECONDS);
+        assertFalse(rejected.isSuccess());
+        assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), rejected.getCode());
+        verify(router, never()).route(any(BalanceContext.class));
+        assertEquals(1, cancelCalls.get(),
+                "shutdown must cancel, rather than merely invalidate, the delayed retry");
+        scheduler.onWorkerStatusUpdate(
+                finishedStatus(RoleType.DECODE, item.requestId(), 0, 0));
+        assertEquals(0, scheduler.getInflightSize());
+    }
+
+    @Test
+    void completedAdmissionFuturesAreRemovedFromSharedDeadlineTimer() throws Exception {
+        assertTrue(scheduler.removesCanceledAdmissionTimeouts());
+        int baseline = scheduler.admissionTimeoutQueueSize();
+        int requestCount = 128;
+        long now = System.currentTimeMillis();
+        List<CompletableFuture<Response>> futures = new java.util.ArrayList<>(requestCount);
+        for (int i = 0; i < requestCount; i++) {
+            BalanceContext context = context(4_250L + i);
+            context.setBudget(ScheduleBudget.forDeadline(
+                    50, now, now + TimeUnit.MINUTES.toMillis(1)));
+            CompletableFuture<Response> future = new CompletableFuture<>();
+            futures.add(future);
+            scheduler.attachAdmissionTimeout(context, future);
+        }
+        awaitCondition(() -> scheduler.admissionTimeoutQueueSize()
+                == baseline + requestCount);
+
+        Response success = new Response();
+        success.setSuccess(true);
+        futures.forEach(future -> future.complete(success));
+        awaitCondition(() -> scheduler.admissionTimeoutQueueSize() == baseline);
+        assertEquals(baseline, scheduler.admissionTimeoutQueueSize(),
+                "completed requests must not be retained until their original deadline");
+    }
+
+    @Test
+    void quarantinedFencesStopDelayedRetries_andCleanupProbesRoundRobin() throws Exception {
+        config.setFlexlbInflightTtlMs(TimeUnit.MINUTES.toMillis(10));
+        PrefillEndpoint prefill = endpointRegistry.getPrefill("10.0.0.1:8080");
+        DecodeEndpoint decode = ensureDecodeEndpoint("10.0.0.2", 8081, 8082);
+        List<Long> requestIds = java.util.stream.LongStream.rangeClosed(4_301L, 4_305L)
+                .boxed().toList();
+        Map<Long, AtomicInteger> calls = new java.util.concurrent.ConcurrentHashMap<>();
+        java.util.concurrent.atomic.AtomicBoolean settleProbes =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        when(cancelChannel.cancel(any(), anyLong(), anyLong())).thenAnswer(invocation -> {
+            long requestId = invocation.getArgument(1);
+            int call = calls.computeIfAbsent(requestId, ignored -> new AtomicInteger())
+                    .incrementAndGet();
+            return CompletableFuture.completedFuture(settleProbes.get() && call >= 4
+                    ? EngineCancelChannel.CancelOutcome.tombstoned()
+                    : EngineCancelChannel.CancelOutcome.failed());
+        });
+
+        List<BatchItem> items = requestIds.stream().map(requestId -> {
+            decode.reserve(requestId, 128, 136, 50, 0);
+            decode.markQueuedPhase(requestId);
+            BatchItem item = routeDecisionItem(requestId, prefill, decode);
+            assertTrue(scheduler.registerInflight(item));
+            return item;
+        }).toList();
+        scheduler.onDecisionGroupReady(items, new DecisionGroupMetadata("quarantine_fairness", 0));
+        for (BatchItem item : items) {
+            assertEquals(InflightRegistrar.PostDeliveryFenceResult.STARTED,
+                    scheduler.fenceAfterDeliveryTimeout(item, "quarantine_test"));
+        }
+
+        awaitCondition(() -> requestIds.stream().allMatch(requestId ->
+                calls.getOrDefault(requestId, new AtomicInteger()).get() == 2));
+        Thread.sleep(250);
+        assertTrue(requestIds.stream().allMatch(requestId -> calls.get(requestId).get() == 2),
+                "quarantine must own no permanent delayed retry task");
+        assertEquals(items.size(), scheduler.getInflightSize());
+        assertTrue(requestIds.stream().allMatch(decode.reservedView()::containsKey));
+        assertEquals(items.size(), prefill.getInflightRouteRequestCount());
+
+        // Endpoint TTL is intentionally much shorter than the quarantined
+        // fence age. The scheduler-owned resource handle must keep both
+        // request ledgers charged until an authoritative Engine proof.
+        assertEquals(0, prefill.evictExpiredRequests(1));
+        assertEquals(0, decode.evictExpiredRequests(1));
+        assertEquals(items.size(), prefill.getInflightRouteRequestCount());
+        assertTrue(requestIds.stream().allMatch(decode.reservedView()::containsKey));
+
+        // Probe cap is two in this test. Three cleanup sweeps provide six
+        // slots for five live fences; FIFO rotation must visit every fence at
+        // least once instead of repeatedly selecting the same CHM prefix.
+        scheduler.cleanupInflight();
+        scheduler.cleanupInflight();
+        scheduler.cleanupInflight();
+        assertTrue(requestIds.stream().allMatch(requestId -> calls.get(requestId).get() >= 3),
+                "every quarantined generation must receive a fair low-frequency probe");
+        assertEquals(items.size(), scheduler.getInflightSize());
+        assertTrue(requestIds.stream().allMatch(decode.reservedView()::containsKey),
+                "non-terminal probes must retain every ledger");
+
+        settleProbes.set(true);
+        scheduler.cleanupInflight();
+        scheduler.cleanupInflight();
+        scheduler.cleanupInflight();
+        assertEquals(0, scheduler.getInflightSize());
+        assertTrue(requestIds.stream().noneMatch(decode.reservedView()::containsKey));
+        assertEquals(0, prefill.getInflightRouteRequestCount(),
+                "TOMBSTONED must release protected Prefill accounting exactly once");
+        assertTrue(requestIds.stream().allMatch(requestId ->
+                scheduler.getRequestState(requestId, 0).state()
+                        == RequestLifecycleState.TIMED_OUT));
+
+        assertTrue(scheduler.quarantinedProbeQueueSize() > 0,
+                "terminal probes are generation-checked and may leave lazy stale refs");
+        scheduler.cleanupInflight();
+        assertEquals(0, scheduler.quarantinedProbeQueueSize(),
+                "the next empty quarantine sweep must discard every stale generation ref");
+
+        long shutdownRequestId = 4_306L;
+        decode.reserve(shutdownRequestId, 128, 136, 50, 0);
+        decode.markQueuedPhase(shutdownRequestId);
+        BatchItem shutdownItem = routeDecisionItem(shutdownRequestId, prefill, decode);
+        assertTrue(scheduler.registerInflight(shutdownItem));
+        scheduler.onDecisionGroupReady(List.of(shutdownItem),
+                new DecisionGroupMetadata("quarantine_shutdown", 0));
+        assertEquals(InflightRegistrar.PostDeliveryFenceResult.STARTED,
+                scheduler.fenceAfterDeliveryTimeout(shutdownItem, "quarantine_shutdown"));
+        awaitCondition(() -> calls.getOrDefault(
+                shutdownRequestId, new AtomicInteger()).get() == 2);
+        awaitCondition(() -> scheduler.quarantinedProbeQueueSize() > 0);
+        scheduler.shutdown();
+        assertEquals(0, scheduler.quarantinedProbeQueueSize(),
+                "shutdown must not retain exact request/fence generations");
+    }
+
+    @Test
     void submit_rejects_when_global_inflight_limit_reached() throws Exception {
         config.setFlexlbBatchSizeMax(1);
         config.setFlexlbBatchMaxInflight(1);
@@ -480,13 +1160,31 @@ class FlexlbBatchSchedulerTest {
         Response response = item.future().get(1, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), response.getCode());
+        assertTrue(response.getErrorMessage().contains(
+                "Worker scheduling queue rejected request"));
+    }
+
+    @Test
+    void staged_delivery_failure_uses_delivery_reducer_and_neutral_message() throws Exception {
+        BatchItem item = offerFailureItem(63);
+        assertTrue(scheduler.registerInflight(item));
+
+        scheduler.onDeliveryFailure(item,
+                new IllegalStateException("callback lost delivery ownership"));
+
+        Response response = item.future().get(1, TimeUnit.SECONDS);
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), response.getCode());
+        assertTrue(response.getErrorMessage().contains("Decision delivery failed"));
+        assertFalse(response.getErrorMessage().contains("queue rejected"));
+        assertEquals(0, scheduler.getInflightSize());
     }
 
     private BatchItem offerFailureItem(long requestId) {
         Response route = successRoute(requestId);
         return new BatchItem(context(requestId), new CompletableFuture<>(), route,
-                FlexlbBatchScheduler.findServer(route, RoleType.PREFILL),
-                FlexlbBatchScheduler.findServer(route, RoleType.DECODE),
+                PriorityScheduler.findServer(route, RoleType.PREFILL),
+                PriorityScheduler.findServer(route, RoleType.DECODE),
                 endpointRegistry.getPrefill("10.0.0.1:8080"), null,
                 System.currentTimeMillis());
     }
@@ -709,26 +1407,27 @@ class FlexlbBatchSchedulerTest {
     // ==================== P0-1: onTimeout terminal handling (PR-D) ====================
 
     @Test
-    void onTimeout_beforeDispatchClaim_settlesPriorityAdmissionAsResourceExhausted() {
-        // A timeout is locally terminal only before startDispatch assigns a
+    void onTimeout_beforeDeliveryClaim_settlesPriorityAdmissionAsResourceExhausted()
+            throws Exception {
+        // A timeout is locally terminal only before a batch delivery assigns a
         // batch id. The engine provably cannot have observed this item yet.
         BatchItem item = offerFailureItem(301);
         assertTrue(scheduler.registerInflight(item));
 
         scheduler.onTimeout(item, new TimeoutException("test EnqueueBatch deadline"));
 
-        Response response = item.future().getNow(null);
+        Response response = item.future().get(1, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
 
         // Idempotent: a second timeout is also a no-op
         scheduler.onTimeout(item, new TimeoutException("second"));
-        Response stillUnchanged = item.future().getNow(null);
+        Response stillUnchanged = item.future().get(1, TimeUnit.SECONDS);
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), stillUnchanged.getCode());
     }
 
     @Test
-    void admissionDeadline_betweenStartDispatchAndCommit_fencesLateEnqueue_thenSettles8431()
+    void admissionDeadlineBeforeBatchCommitAbortsWithoutEngineFence()
             throws Exception {
         config.setAutoTpmEnabled(true);
 
@@ -739,12 +1438,12 @@ class FlexlbBatchSchedulerTest {
                 endpoint, null, System.currentTimeMillis());
         assertTrue(scheduler.registerInflight(item));
 
-        CountDownLatch dispatchClaimed = new CountDownLatch(1);
+        CountDownLatch deliveryClaimed = new CountDownLatch(1);
         CountDownLatch allowCommit = new CountDownLatch(1);
         PrefillTimePredictor predictor = endpoint.getPredictor();
         PrefillEndpoint blockingEndpoint = org.mockito.Mockito.spy(endpoint);
         when(blockingEndpoint.getPredictor()).thenAnswer(inv -> {
-            dispatchClaimed.countDown();
+            deliveryClaimed.countDown();
             assertTrue(allowCommit.await(5, TimeUnit.SECONDS));
             return predictor;
         });
@@ -754,18 +1453,18 @@ class FlexlbBatchSchedulerTest {
         assertTrue(scheduler.registerInflight(blockingItem));
 
         CompletableFuture<Void> flush = CompletableFuture.runAsync(() ->
-                scheduler.onBatchReady(List.of(blockingItem), new DispatchMeta("race", 0)));
-        assertTrue(dispatchClaimed.await(2, TimeUnit.SECONDS));
+                scheduler.onDecisionGroupReady(List.of(blockingItem), new DecisionGroupMetadata("race", 0)));
+        assertTrue(deliveryClaimed.await(2, TimeUnit.SECONDS));
 
         scheduler.onAdmissionDeadline(blockingItem.requestId(), blockingItem.future());
-        Response fenced = blockingItem.future().get(2, TimeUnit.SECONDS);
-        assertFalse(fenced.isSuccess());
-        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), fenced.getCode());
+        Response timedOut = blockingItem.future().get(2, TimeUnit.SECONDS);
+        assertFalse(timedOut.isSuccess());
+        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), timedOut.getCode());
 
         allowCommit.countDown();
         flush.get(2, TimeUnit.SECONDS);
         assertEquals(0, blockingEndpoint.getInflightBatchCount(),
-                "TOMBSTONED proves no late Engine ownership and releases the ledger");
+                "delivery revalidation must prevent a commit after local timeout");
 
         config.setFlexlbBatchSloMaxInflightBatches(1);
         config.setFlexlbBatchFixedMaxInflightBatches(1);
@@ -774,11 +1473,11 @@ class FlexlbBatchSchedulerTest {
         assertEquals(1, sentBatches.size(),
                 "after authoritative settlement, maxInflight=1 admits the next batch");
 
-        verify(cancelChannel).cancel(any(), eq(303L), anyLong());
+        verify(cancelChannel, never()).cancel(any(), eq(303L), anyLong());
     }
 
     @Test
-    void dispatchUncertain_legacyNotFoundRetainsFutureAndBothLedgers() throws Exception {
+    void uncertainBatchDelivery_legacyNotFoundRetainsFutureAndBothLedgers() throws Exception {
         when(cancelChannel.cancel(any(), anyLong(), anyLong())).thenReturn(
                 CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.notFound()));
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
@@ -793,7 +1492,7 @@ class FlexlbBatchSchedulerTest {
                 server(RoleType.DECODE, "10.0.0.2", 8081, 8082, 305),
                 endpoint, null, System.currentTimeMillis());
         assertTrue(scheduler.registerInflight(item));
-        scheduler.onBatchReady(List.of(item), new DispatchMeta("test", 0));
+        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
         long deadline = System.currentTimeMillis() + 1_000;
         while (sentBatches.isEmpty() && System.currentTimeMillis() < deadline) {
             Thread.sleep(1);
@@ -811,7 +1510,7 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
-    void dispatchUncertain_acceptedCancelWaitsForTypedPrefillFinished() throws Exception {
+    void uncertainBatchDelivery_acceptedCancelWaitsForTypedPrefillFinished() throws Exception {
         when(cancelChannel.cancel(any(), anyLong(), anyLong())).thenReturn(
                 CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.accepted()));
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
@@ -826,7 +1525,7 @@ class FlexlbBatchSchedulerTest {
                 server(RoleType.DECODE, "10.0.0.2", 8081, 8082, 306),
                 endpoint, null, System.currentTimeMillis());
         assertTrue(scheduler.registerInflight(item));
-        scheduler.onBatchReady(List.of(item), new DispatchMeta("test", 0));
+        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
         long deadline = System.currentTimeMillis() + 1_000;
         while (sentBatches.isEmpty() && System.currentTimeMillis() < deadline) {
             Thread.sleep(1);
@@ -853,7 +1552,7 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
-    void dispatchUncertainAfterAcknowledgedFutureDoesNotStartCancelReconciliation()
+    void uncertainBatchDeliveryAfterConfirmedFutureDoesNotStartCancelReconciliation()
             throws Exception {
         PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
         BatchItem item = new BatchItem(context(307), new CompletableFuture<>(), successRoute(307),
@@ -861,14 +1560,14 @@ class FlexlbBatchSchedulerTest {
                 server(RoleType.DECODE, "10.0.0.2", 8081, 8082, 307),
                 endpoint, null, System.currentTimeMillis());
         assertTrue(scheduler.registerInflight(item));
-        scheduler.onBatchReady(List.of(item), new DispatchMeta("test", 0));
+        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
         Response response = item.future().get(2, TimeUnit.SECONDS);
         assertTrue(response.isSuccess());
         long batchId = sentBatches.getLast().getBatchId();
         RequestLifecycleSnapshot acknowledged = scheduler.getRequestState(307L, batchId);
         assertEquals(RequestLifecycleState.ACKNOWLEDGED, acknowledged.state());
 
-        scheduler.onDispatchUncertain(item, batchId, new RuntimeException("late callback"));
+        scheduler.onUncertain(item, new RuntimeException("late callback"));
 
         verify(cancelChannel, never()).cancel(any(), eq(307L), anyLong());
         assertEquals(RequestLifecycleState.ACKNOWLEDGED,
@@ -876,7 +1575,7 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
-    void dispatchUncertain_acceptedRetriesUntilTombstoned() throws Exception {
+    void uncertainBatchDelivery_acceptedRetriesUntilTombstoned() throws Exception {
         AtomicInteger cancelCalls = new AtomicInteger();
         when(cancelChannel.cancel(any(), anyLong(), anyLong())).thenAnswer(inv ->
                 CompletableFuture.completedFuture(cancelCalls.getAndIncrement() == 0
@@ -892,7 +1591,7 @@ class FlexlbBatchSchedulerTest {
         PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
         BatchItem item = reconciliationItem(307, endpoint);
         assertTrue(scheduler.registerInflight(item));
-        scheduler.onBatchReady(List.of(item), new DispatchMeta("test", 0));
+        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
 
         Response response = item.future().get(2, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
@@ -910,7 +1609,7 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
-    void dispatchUncertain_synchronousCancelThrowIsRetried() throws Exception {
+    void uncertainBatchDelivery_synchronousCancelThrowIsRetried() throws Exception {
         AtomicInteger cancelCalls = new AtomicInteger();
         when(cancelChannel.cancel(any(), anyLong(), anyLong())).thenAnswer(inv -> {
             if (cancelCalls.getAndIncrement() == 0) {
@@ -925,7 +1624,7 @@ class FlexlbBatchSchedulerTest {
         PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
         BatchItem item = reconciliationItem(308, endpoint);
         assertTrue(scheduler.registerInflight(item));
-        scheduler.onBatchReady(List.of(item), new DispatchMeta("test", 0));
+        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
 
         Response response = item.future().get(2, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
@@ -940,10 +1639,12 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
-    void dispatchUncertain_onlyMatchingTypedCanceled8429IsTerminal() throws Exception {
+    void uncertainBatchDelivery_onlyMatchingTypedCanceled8429IsTerminal() throws Exception {
         AtomicInteger cancelCalls = new AtomicInteger();
+        CountDownLatch reconciliationStarted = new CountDownLatch(1);
         when(cancelChannel.cancel(any(), anyLong(), anyLong())).thenAnswer(inv -> {
             cancelCalls.incrementAndGet();
+            reconciliationStarted.countDown();
             return CompletableFuture.completedFuture(
                     EngineCancelChannel.CancelOutcome.accepted());
         });
@@ -957,12 +1658,14 @@ class FlexlbBatchSchedulerTest {
         PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
         BatchItem item = reconciliationItem(309, endpoint);
         assertTrue(scheduler.registerInflight(item));
-        scheduler.onBatchReady(List.of(item), new DispatchMeta("test", 0));
+        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
         long deadline = System.currentTimeMillis() + 1_000;
         while (sentBatches.isEmpty() && System.currentTimeMillis() < deadline) {
             Thread.sleep(1);
         }
         long batchId = sentBatches.getLast().getBatchId();
+        assertTrue(reconciliationStarted.await(1, TimeUnit.SECONDS),
+                "the uncertain EnqueueBatch callback must install its resource fence first");
 
         scheduler.onWorkerStatusUpdate(prefillFinished(
                 309, batchId, 0, PriorityPreemptionProgress.NONE));
@@ -987,7 +1690,7 @@ class FlexlbBatchSchedulerTest {
                 "a retry scheduled before typed CANCELED must become a no-op");
     }
 
-    // ==================== P0-3: close/handover race (PR-D) ====================
+    // ==================== P0-3: close/delivery race (PR-D) ====================
 
     @Test
     void concurrentTimeout_exactlyOneTerminalVerb() throws Exception {
@@ -1003,8 +1706,7 @@ class FlexlbBatchSchedulerTest {
                 scheduler.onTimeout(item, new TimeoutException("second")));
         CompletableFuture.allOf(t1, t2).get(3, TimeUnit.SECONDS);
 
-        assertTrue(item.future().isDone());
-        Response response = item.future().getNow(null);
+        Response response = item.future().get(1, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
     }
@@ -1068,6 +1770,15 @@ class FlexlbBatchSchedulerTest {
         return successRouteWithPrefillDp(requestId, 0);
     }
 
+    private static Response successRoute(long requestId,
+                                         ServerStatus prefill,
+                                         ServerStatus decode) {
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setServerStatus(List.of(prefill, decode));
+        return response;
+    }
+
     private static Response successRouteWithDecode(long requestId, String decodeIp) {
         Response response = new Response();
         response.setSuccess(true);
@@ -1089,6 +1800,51 @@ class FlexlbBatchSchedulerTest {
 
     private static ServerStatus server(RoleType role, String ip, int httpPort, int grpcPort, long requestId) {
         return server(role, ip, httpPort, grpcPort, requestId, 0);
+    }
+
+    private static BalanceContext routeDecisionContext(long requestId) {
+        BalanceContext context = context(requestId);
+        context.setScheduleMode(ScheduleModeEnum.QUEUE);
+        return context;
+    }
+
+    private static BatchItem routeDecisionItem(long requestId,
+                                               PrefillEndpoint prefillEndpoint) {
+        return routeDecisionItem(requestId, prefillEndpoint, null);
+    }
+
+    private static BatchItem routeDecisionItem(long requestId,
+                                               PrefillEndpoint prefillEndpoint,
+                                               DecodeEndpoint decodeEndpoint) {
+        BalanceContext context = routeDecisionContext(requestId);
+        Response route = successRoute(requestId);
+        return new BatchItem(context, new CompletableFuture<>(), route,
+                PriorityScheduler.findServer(route, RoleType.PREFILL),
+                PriorityScheduler.findServer(route, RoleType.DECODE),
+                prefillEndpoint, decodeEndpoint, System.currentTimeMillis());
+    }
+
+    private static WorkerStatus workerStatus(String ip, int httpPort, int grpcPort) {
+        WorkerStatus status = new WorkerStatus();
+        status.setIp(ip);
+        status.setPort(httpPort);
+        status.setGrpcPort(grpcPort);
+        status.setAlive(true);
+        return status;
+    }
+
+    private static WorkerStatusResponse finishedStatus(RoleType role,
+                                                       long requestId,
+                                                       long batchId,
+                                                       long errorCode) {
+        TaskInfo task = new TaskInfo();
+        task.setRequestId(requestId);
+        task.setBatchId(batchId);
+        task.setErrorCode(errorCode);
+        WorkerStatusResponse status = new WorkerStatusResponse();
+        status.setRole(role);
+        status.setFinishedTaskInfo(Map.of(Long.toString(requestId), task));
+        return status;
     }
 
     private static ServerStatus server(RoleType role,
@@ -1129,11 +1885,48 @@ class FlexlbBatchSchedulerTest {
                 RoleType.DECODE, ip + ":" + httpPort, ws);
     }
 
+    private void recreateScheduler(
+            PriorityScheduler.EngineFencePolicy engineFencePolicy,
+            PriorityScheduler.CompletionExecutorPolicy completionExecutorPolicy) {
+        scheduler.shutdown();
+        endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
+        scheduler = new PriorityScheduler(
+                configService,
+                router,
+                endpointRegistry,
+                mock(BatchDispatcher.class),
+                reporter,
+                null,
+                null,
+                cancelChannel,
+                engineFencePolicy,
+                RouteDecisionDelivery.INSTANCE,
+                completionExecutorPolicy);
+    }
+
     private static void awaitCondition(BooleanSupplier condition) throws InterruptedException {
         long deadline = System.currentTimeMillis() + 2_000;
         while (!condition.getAsBoolean() && System.currentTimeMillis() < deadline) {
             Thread.sleep(1);
         }
         assertTrue(condition.getAsBoolean(), "condition did not become true before timeout");
+    }
+
+    private static void awaitDeliveryLifecycleClosed(PriorityScheduler target) {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+        while (!target.isDeliveryLifecycleClosed() && System.nanoTime() < deadlineNanos) {
+            Thread.onSpinWait();
+        }
+        assertTrue(target.isDeliveryLifecycleClosed(),
+                "delivery lifecycle did not close before timeout");
+    }
+
+    private static void awaitLatch(CountDownLatch latch) {
+        try {
+            assertTrue(latch.await(2, TimeUnit.SECONDS), "latch did not open before timeout");
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError(interrupted);
+        }
     }
 }

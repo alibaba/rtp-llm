@@ -28,9 +28,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -52,7 +54,7 @@ class DecodeAcceptanceLinearizationTest {
     private static final String PREFILL_IP_PORT = "10.0.0.1:8080";
     private static final String DECODE_IP_PORT = "10.0.0.2:8081";
 
-    private FlexlbBatchScheduler scheduler;
+    private PriorityScheduler scheduler;
     private EndpointRegistry endpointRegistry;
     private DecodeEndpoint decodeEndpoint;
     private PrefillEndpoint prefillEndpoint;
@@ -71,11 +73,12 @@ class DecodeAcceptanceLinearizationTest {
         config.setAutoTpmEnabled(true);
         config.setFlexlbBatchFixedWaitMs(3_600_000);
         config.setFlexlbBatchSizeMax(100);
+        config.setAutoTpmCancelAckTimeoutMs(30_000);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
         cancelChannel = mock(EngineCancelChannel.class);
-        scheduler = new FlexlbBatchScheduler(configService, router, endpointRegistry,
+        scheduler = new PriorityScheduler(configService, router, endpointRegistry,
                 dispatcher, reporter, null, null, cancelChannel);
 
         WorkerStatus prefillStatus = new WorkerStatus();
@@ -97,13 +100,13 @@ class DecodeAcceptanceLinearizationTest {
         item = item();
         assertTrue(scheduler.registerInflight(item));
         lease = new AdmissionLease(item, decodeEndpoint,
-                prefillEndpoint.getBatcher().queueManager(), scheduler, 0, null);
+                prefillEndpoint.getBatcher().queueManager(), scheduler);
         assertTrue(scheduler.attachAdmissionLease(item, lease));
         lease.bindTo(item.future());
         decodeEndpoint.reserve(REQUEST_ID, 128, 136, 50,
                 System.currentTimeMillis() + 30_000);
         decodeEndpoint.markQueuedPhase(REQUEST_ID);
-        scheduler.onBatchReady(List.of(item), new DispatchMeta("test", 0));
+        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
         RequestLifecycleSnapshot dispatched = scheduler.getRequestState(REQUEST_ID, 0);
         assertEquals(RequestLifecycleState.DISPATCHING, dispatched.state());
         batchId = dispatched.batchId();
@@ -136,27 +139,38 @@ class DecodeAcceptanceLinearizationTest {
     void decodeAcceptanceBeforeUncertainAckSkipsCancelAndCompletesSuccess() {
         reportDecode(TaskPhase.KV_ALLOCATED);
 
-        scheduler.onDispatchUncertain(item, batchId, new TimeoutException("lost Enqueue ACK"));
+        scheduler.onUncertain(item, new TimeoutException("lost Enqueue ACK"));
 
         assertEngineOwnedScheduleSucceeded();
         verify(cancelChannel, never()).cancel(any(), anyLong(), anyLong());
     }
 
     @Test
-    void decodeAcceptanceAfterUncertainAckStopsCancelReconciliation() {
+    void decodeAcceptanceAfterCancelInvocationRetainsFenceUntilTombstoned()
+            throws Exception {
         CompletableFuture<EngineCancelChannel.CancelOutcome> cancelResult =
                 new CompletableFuture<>();
         when(cancelChannel.cancel(any(), anyLong(), anyLong())).thenReturn(cancelResult);
 
-        scheduler.onDispatchUncertain(item, batchId, new TimeoutException("lost Enqueue ACK"));
+        scheduler.onUncertain(item, new TimeoutException("lost Enqueue ACK"));
         verify(cancelChannel, times(1)).cancel(any(), anyLong(), anyLong());
         assertFalse(item.future().isDone());
 
         reportDecode(TaskPhase.KV_ALLOCATED);
 
-        assertEngineOwnedScheduleSucceeded();
+        // The active Decode sample raced after the Cancel invocation boundary.
+        // It proves that Decode owned the request at the sample instant, but it
+        // cannot prove that Prefill did not already install a cancel intent.
+        // Keep both the public result and accounting behind the Engine fence.
+        assertFalse(item.future().isDone());
+        assertTrue(decodeEndpoint.isConfirmedTracked(REQUEST_ID));
+
         cancelResult.complete(EngineCancelChannel.CancelOutcome.tombstoned());
-        assertEngineOwnedScheduleSucceeded();
+
+        Response terminal = item.future().get(5, TimeUnit.SECONDS);
+        assertFalse(terminal.isSuccess());
+        assertEquals(RequestLifecycleState.TIMED_OUT,
+                scheduler.getRequestState(REQUEST_ID, batchId).state());
         verify(cancelChannel, times(1)).cancel(any(), anyLong(), anyLong());
     }
 
@@ -164,15 +178,14 @@ class DecodeAcceptanceLinearizationTest {
     void failedAckBeforeDecodeAcceptanceWinsAndLateStatusCannotRevive() {
         scheduler.onFailure(item, new RuntimeException("failed Enqueue ACK"));
 
-        assertTrue(item.future().isDone());
-        assertFalse(item.future().join().isSuccess());
+        assertFalse(awaitTerminal().isSuccess());
         assertFalse(decodeEndpoint.reservedView().containsKey(REQUEST_ID));
         assertEquals(RequestLifecycleState.FAILED,
                 scheduler.getRequestState(REQUEST_ID, 0).state());
 
         reportDecode(TaskPhase.KV_ALLOCATED);
 
-        assertFalse(item.future().join().isSuccess());
+        assertFalse(awaitTerminal().isSuccess());
         assertEquals(RequestLifecycleState.FAILED,
                 scheduler.getRequestState(REQUEST_ID, 0).state());
     }
@@ -181,15 +194,14 @@ class DecodeAcceptanceLinearizationTest {
     void ackTimeoutBeforeDecodeAcceptanceWinsAndLateStatusCannotRevive() {
         scheduler.onTimeout(item, new TimeoutException("Enqueue ACK timeout"));
 
-        assertTrue(item.future().isDone());
-        assertFalse(item.future().join().isSuccess());
+        assertFalse(awaitTerminal().isSuccess());
         assertFalse(decodeEndpoint.reservedView().containsKey(REQUEST_ID));
         assertEquals(RequestLifecycleState.TIMED_OUT,
                 scheduler.getRequestState(REQUEST_ID, 0).state());
 
         reportDecode(TaskPhase.RUNNING);
 
-        assertFalse(item.future().join().isSuccess());
+        assertFalse(awaitTerminal().isSuccess());
         assertEquals(RequestLifecycleState.TIMED_OUT,
                 scheduler.getRequestState(REQUEST_ID, 0).state());
     }
@@ -198,7 +210,7 @@ class DecodeAcceptanceLinearizationTest {
     void decodeAcceptanceBeforeAdmissionDeadlineRetainsEngineOwnership() throws Exception {
         reportDecode(TaskPhase.KV_ALLOCATED);
 
-        Method deadline = FlexlbBatchScheduler.class.getDeclaredMethod(
+        Method deadline = PriorityScheduler.class.getDeclaredMethod(
                 "onAdmissionDeadline", long.class, CompletableFuture.class);
         deadline.setAccessible(true);
         deadline.invoke(scheduler, REQUEST_ID, item.future());
@@ -212,8 +224,7 @@ class DecodeAcceptanceLinearizationTest {
 
         scheduler.onFailure(item, new RuntimeException("failed Enqueue ACK"));
 
-        assertTrue(item.future().isDone());
-        assertFalse(item.future().join().isSuccess());
+        assertFalse(awaitTerminal().isSuccess());
         assertFalse(decodeEndpoint.reservedView().containsKey(REQUEST_ID));
         assertEquals(RequestLifecycleState.FAILED,
                 scheduler.getRequestState(REQUEST_ID, 0).state());
@@ -234,7 +245,7 @@ class DecodeAcceptanceLinearizationTest {
 
         reportDecodeFinishedError();
 
-        Response terminal = item.future().join();
+        Response terminal = awaitTerminal();
         assertFalse(terminal.isSuccess());
         assertFalse(decodeEndpoint.reservedView().containsKey(REQUEST_ID));
         assertEquals(RequestLifecycleState.FAILED,
@@ -261,13 +272,13 @@ class DecodeAcceptanceLinearizationTest {
             });
 
             start.countDown();
-            worker.get();
-            ack.get();
+            worker.get(5, TimeUnit.SECONDS);
+            ack.get(5, TimeUnit.SECONDS);
         } finally {
             executor.shutdownNow();
         }
 
-        assertFalse(item.future().join().isSuccess());
+        assertFalse(awaitTerminal().isSuccess());
         assertFalse(decodeEndpoint.reservedView().containsKey(REQUEST_ID));
         assertEquals(RequestLifecycleState.FAILED,
                 scheduler.getRequestState(REQUEST_ID, 0).state());
@@ -292,7 +303,7 @@ class DecodeAcceptanceLinearizationTest {
     }
 
     private void assertDecodeWorkerFailure() {
-        Response terminal = item.future().join();
+        Response terminal = awaitTerminal();
         assertFalse(terminal.isSuccess());
         assertEquals(StrategyErrorType.WORKER_EXECUTION_FAILED.getErrorCode(),
                 terminal.getCode());
@@ -302,7 +313,7 @@ class DecodeAcceptanceLinearizationTest {
     }
 
     private void assertEngineOwnedScheduleSucceeded() {
-        Response response = item.future().join();
+        Response response = awaitTerminal();
         assertTrue(response.isSuccess(), response.getErrorMessage());
         assertTrue(response.isEnqueuedByMaster());
         assertTrue(decodeEndpoint.isConfirmedTracked(REQUEST_ID));
@@ -359,6 +370,17 @@ class DecodeAcceptanceLinearizationTest {
         status.setGrpcPort(grpcPort);
         status.setRequestId(REQUEST_ID);
         return status;
+    }
+
+    private Response awaitTerminal() {
+        try {
+            return item.future().get(5, TimeUnit.SECONDS);
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError("interrupted while awaiting frontend publication", error);
+        } catch (ExecutionException | TimeoutException error) {
+            throw new AssertionError("frontend publication did not complete normally", error);
+        }
     }
 
     private static void await(CountDownLatch latch) {

@@ -2,7 +2,6 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.scheduler.priority.PrefillQueueSnapshot;
 import org.flexlb.balance.scheduler.priority.QueuedRequestSnapshot;
-import org.flexlb.util.Prioritized;
 import org.flexlb.util.PriorityOrdering;
 
 import java.util.ArrayList;
@@ -13,9 +12,10 @@ import java.util.List;
  *
  * <p>One instance per prefill endpoint, created by the batcher itself. It does
  * not own any state: every operation delegates to the batcher/context so the
- * queue stays the single source of truth and every mutation goes through the
- * shared queue lock and bumps {@code queueVersion} (optimistic plan
- * validation — "version unchanged ⇒ queue content unchanged").
+ * active queue plus ready-delivery backlog stay the single source of truth
+ * and every mutation goes through the shared queue lock and bumps
+ * {@code queueVersion} (optimistic plan validation — "version unchanged ⇒
+ * actionable queued content unchanged").
  *
  * <p>Read operations ({@link #snapshot()}, {@link #estimateWaitMs}) capture a
  * consistent view under the queue lock; version-checked mutations
@@ -53,7 +53,7 @@ public final class PrefillQueueManager {
             // Only live queue members are actionable eviction victims. A
             // staged callback member remains capacity-charged, but cannot be
             // removed by the versioned queue mutation APIs.
-            List<BatchItem> queued = ctx.sortedItems();
+            List<BatchItem> queued = ctx.sortedQueuedItems();
             List<QueuedRequestSnapshot> items = new ArrayList<>(queued.size());
             for (BatchItem item : queued) {
                 items.add(new QueuedRequestSnapshot(
@@ -70,36 +70,66 @@ public final class PrefillQueueManager {
 
     /**
      * Estimated queue wait for an incoming request (design doc 8.4):
-     * {@code itemsAhead → batchCyclesAhead → estimatedWaitMs}, using the
-     * dispatch-interval sliding average as the per-cycle cost and the head's
-     * remaining window as the partial first cycle.
+     * active {@code itemsAhead → batchCyclesAhead}, plus a request-accounted
+     * drain estimate for route decisions whose logical group is already
+     * ready. The decision-interval sliding average is the per-cycle cost and
+     * the active head's remaining window is the partial first cycle.
      */
     public long estimateWaitMs(int priority, long deadlineMs, long requestId) {
         long now = ctx.now();
-        int itemsAhead = 0;
+        int activeItemsAhead = 0;
+        int readyItemsAhead = 0;
         BatchItem head = null;
         ctx.queueLock().lock();
         try {
-            for (BatchItem item : ctx.sortedItems()) {
+            for (BatchItem item : ctx.sortedQueuedItems()) {
+                // A decided route request is drained before the active queue,
+                // regardless of a later arrival's priority. It is also
+                // request-accounted: batchSizeMax must not collapse several
+                // ready requests into one estimated cycle when the route cap
+                // permits only individual deliveries.
+                if (item.readyDeliveryReason() != null) {
+                    readyItemsAhead++;
+                    continue;
+                }
                 if (head == null) {
                     head = item;
                 }
                 if (ordersBefore(item, priority, deadlineMs, now, requestId)) {
-                    itemsAhead++;
+                    activeItemsAhead++;
                 }
             }
         } finally {
             ctx.queueLock().unlock();
         }
         int maxBatchSize = Math.max(1, ctx.cfg().getFlexlbBatchSizeMax());
-        long intervalMs = ctx.avgDispatchIntervalMs();
-        long batchCyclesAhead = itemsAhead / maxBatchSize;
+        long intervalMs = ctx.avgDecisionIntervalMs();
+        long batchCyclesAhead = activeItemsAhead / maxBatchSize;
         long headRemainingWindowMs = 0;
         if (head != null) {
             long headWaitedMs = Math.max(0, now - head.enqueuedAtMs());
             headRemainingWindowMs = Math.max(0, intervalMs - headWaitedMs);
         }
-        return batchCyclesAhead * intervalMs + headRemainingWindowMs;
+        // There is no trustworthy completion-rate signal for frontend-owned
+        // requests, so charge one interval per ready member. This is a
+        // deliberate conservative bound; it avoids the severe cap=1
+        // under-estimate while leaving active logical-batch timing unchanged.
+        long readyDrainWaitMs = saturatedMultiply(readyItemsAhead, intervalMs);
+        long activeWaitMs = saturatedMultiply(batchCyclesAhead, intervalMs);
+        return saturatedAdd(readyDrainWaitMs,
+                saturatedAdd(activeWaitMs, headRemainingWindowMs));
+    }
+
+    private static long saturatedMultiply(long count, long intervalMs) {
+        if (count <= 0 || intervalMs <= 0) {
+            return 0;
+        }
+        return count > Long.MAX_VALUE / intervalMs
+                ? Long.MAX_VALUE : count * intervalMs;
+    }
+
+    private static long saturatedAdd(long left, long right) {
+        return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
     }
 
     /**
@@ -108,24 +138,16 @@ public final class PrefillQueueManager {
      * asc → requestId asc). The probe's enqueue-seq is its would-be arrival
      * time ({@code now}) — it has not been enqueued yet.
      *
-     * <p>Delegates the priority + enqueue-seq comparison to
-     * {@link PriorityOrdering#STRICT} via a temporary {@link Prioritized}
-     * view of the probe, then breaks residual ties by {@code requestId}.
+     * <p>Delegates the priority + enqueue-seq + request-id comparison to the
+     * allocation-free primitive overload in {@link PriorityOrdering}.
      * The {@code deadlineMs} parameter is retained for call-site stability
      * but is no longer part of the ordering rule (PR-B removed the deadline
      * key).
      */
     private static boolean ordersBefore(BatchItem item, int priority, long deadlineMs,
                                         long arrivalMs, long requestId) {
-        Prioritized probe = new Prioritized() {
-            @Override public int priority() { return priority; }
-            @Override public long enqueueSeq() { return arrivalMs; }
-        };
-        int cmp = PriorityOrdering.STRICT.compare(item, probe);
-        if (cmp != 0) {
-            return cmp < 0;
-        }
-        return item.requestId() < requestId;
+        return PriorityOrdering.comesBefore(
+                item, item.requestId(), priority, arrivalMs, requestId);
     }
 
     /**
@@ -150,7 +172,7 @@ public final class PrefillQueueManager {
      * request from the queue without a version precondition. Used by
      * {@code AdmissionLease.close()} for deadline-timeout cleanup where the
      * snapshot version is long stale. No-op when the item is not queued
-     * (already dispatched / evicted / removed).
+     * (already delivered / evicted / removed).
      */
     public void tryRemove(long requestId, String reason) {
         batcher.tryRemoveNoVersion(List.of(requestId), reason);

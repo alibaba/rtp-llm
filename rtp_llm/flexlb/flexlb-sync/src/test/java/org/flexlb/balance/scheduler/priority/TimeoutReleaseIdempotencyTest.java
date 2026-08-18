@@ -32,7 +32,7 @@ import static org.mockito.Mockito.verify;
  *
  * <p>Design §2.2: "已 dispatch 的请求撞上超时属于竞争窗口：
  * close() 三步幂等无害". The {@link AdmissionLease#settled} CAS guarantees
- * that exactly one of {@code handoverToEngine()} / {@code close()} runs,
+ * that exactly one of {@code markDeliverySucceeded()} / {@code close()} runs,
  * even when the timeout fires concurrently with the dispatch pipeline.
  *
  * <p>Scenarios:
@@ -40,7 +40,7 @@ import static org.mockito.Mockito.verify;
  *   <li>orTimeout fires → close() runs → all three resources released;</li>
  *   <li>orTimeout fires + dispatch failure (double terminal) → close()
  *       runs exactly once (CAS);</li>
- *   <li>Dispatch success + orTimeout fires later → handoverToEngine
+ *   <li>Dispatch success + orTimeout fires later → markDeliverySucceeded
  *       already sealed → close() is a no-op (no resource release);</li>
  *   <li>Dispatch failure + orTimeout fires later → close() already sealed
  *       → second close() is a no-op (resources released exactly once).</li>
@@ -94,10 +94,10 @@ class TimeoutReleaseIdempotencyTest {
     }
 
     /**
-     * close() from HANDED_OVER is now a no-op (Warning 2 fix). After dispatch
-     * success triggers handoverToEngine (0→1), a subsequent close() does NOT
-     * transition 1→2. Post-handover cleanup routes through
-     * forceCloseAfterHandover() or markDecodeAccepted() only.
+     * close() from DELIVERY_PENDING is now a no-op (Warning 2 fix). After dispatch
+     * success triggers markDeliverySucceeded (0→1), a subsequent close() does NOT
+     * transition 1→2. Post-delivery cleanup routes through
+     * reconcileAfterDeliveryTimeout() or markDecodeAccepted() only.
      */
     @Test
     void dispatch_success_then_close_is_noop_from_handed_over() {
@@ -110,16 +110,16 @@ class TimeoutReleaseIdempotencyTest {
         AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar);
         lease.bindTo(future);
 
-        // Dispatch succeeds first → handoverToEngine (CAS 0→1)
+        // Dispatch succeeds first → markDeliverySucceeded (CAS 0→1)
         Response success = new Response();
         success.setSuccess(true);
         future.complete(success);
         awaitCallback(future);
 
-        // close() from HANDED_OVER is now a no-op (CAS fails)
+        // close() from DELIVERY_PENDING is now a no-op (CAS fails)
         lease.close();
 
-        // No resources released — close is a no-op from HANDED_OVER
+        // No resources released — close is a no-op from DELIVERY_PENDING
         verify(prefillQueue, never()).tryRemove(anyLong(), anyString());
         verify(decodeEp, never()).release(anyLong());
         verify(registrar, never()).unregisterInflight(any());

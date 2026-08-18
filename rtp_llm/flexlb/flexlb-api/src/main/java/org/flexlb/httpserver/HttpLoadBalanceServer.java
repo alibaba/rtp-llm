@@ -3,7 +3,7 @@ package org.flexlb.httpserver;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.TrafficPolicyConfig;
@@ -44,7 +44,7 @@ public class HttpLoadBalanceServer {
     private final LBStatusConsistencyService lbStatusConsistencyService;
     private final QueueManager queueManager;
     private final ConfigService configService;
-    private final FlexlbBatchScheduler batchScheduler;
+    private final PriorityScheduler priorityScheduler;
     private final EndpointRegistry endpointRegistry;
     private final MasterEngineSynchronizer masterEngineSynchronizer;
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
@@ -52,7 +52,7 @@ public class HttpLoadBalanceServer {
     public HttpLoadBalanceServer(LBStatusConsistencyService lbStatusConsistencyService,
                                  QueueManager queueManager,
                                  ConfigService configService,
-                                 FlexlbBatchScheduler batchScheduler,
+                                 PriorityScheduler priorityScheduler,
                                  EndpointRegistry endpointRegistry,
                                  @org.springframework.beans.factory.annotation.Autowired(required = false)
                                  MasterEngineSynchronizer masterEngineSynchronizer,
@@ -60,7 +60,7 @@ public class HttpLoadBalanceServer {
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.queueManager = queueManager;
         this.configService = configService;
-        this.batchScheduler = batchScheduler;
+        this.priorityScheduler = priorityScheduler;
         this.endpointRegistry = endpointRegistry;
         this.masterEngineSynchronizer = masterEngineSynchronizer;
         this.serverLatencyRecorder = serverLatencyRecorder;
@@ -210,13 +210,16 @@ public class HttpLoadBalanceServer {
     public Mono<ServerResponse> inflightStatus(ServerRequest request) {
         try {
             Map<String, Object> result = new LinkedHashMap<>();
-            result.put("scheduler_inflight", batchScheduler.getInflightSize());
+            result.put("scheduler_inflight", priorityScheduler.getInflightSize());
 
             List<Map<String, Object>> prefillList = new ArrayList<>();
             for (Map.Entry<String, PrefillEndpoint> entry : endpointRegistry.getPrefillEndpoints().entrySet()) {
                 Map<String, Object> ep = new LinkedHashMap<>();
                 ep.put("ip_port", entry.getKey());
                 ep.put("inflight_batches", entry.getValue().getInflightBatchCount());
+                ep.put("inflight_requests", entry.getValue().getInflightRequestCount());
+                ep.put("inflight_route_requests",
+                        entry.getValue().getInflightRouteRequestCount());
                 prefillList.add(ep);
             }
             result.put("prefill_endpoints", prefillList);

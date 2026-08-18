@@ -9,8 +9,9 @@ import java.util.Comparator;
  * <p>Before this refactor the ordering logic was duplicated: the
  * Auto-TPM batcher comparator in {@code WorkerBatcher} and the probe
  * comparison in {@code PrefillQueueManager.ordersBefore} were hand-mirrored
- * copies of the same rule. Both now delegate to {@link #STRICT}, so any
- * future change to the ordering rule is made in exactly one place.
+ * copies of the same rule. The object comparator and allocation-free probe
+ * helpers now delegate to the same primitive comparison, so any future
+ * change to the ordering rule is made in exactly one place.
  *
  * <p><b>Ordering rule (STRICT):</b>
  * <ol>
@@ -39,9 +40,51 @@ public final class PriorityOrdering {
      * ({@code QueueManager}) and the per-worker batcher queue
      * ({@code WorkerBatcher}).
      */
-    public static final Comparator<Prioritized> STRICT = Comparator
-            .comparingInt(Prioritized::priority).reversed()
-            .thenComparingLong(Prioritized::enqueueSeq);
+    public static final Comparator<Prioritized> STRICT = (left, right) -> compare(
+            left.priority(), left.enqueueSeq(),
+            right.priority(), right.enqueueSeq());
+
+    /**
+     * Allocation-free STRICT comparison over primitive ordering keys.
+     */
+    private static int compare(int leftPriority,
+                               long leftEnqueueSeq,
+                               int rightPriority,
+                               long rightEnqueueSeq) {
+        int priorityOrder = Integer.compare(rightPriority, leftPriority);
+        return priorityOrder != 0
+                ? priorityOrder : Long.compare(leftEnqueueSeq, rightEnqueueSeq);
+    }
+
+    /**
+     * Allocation-free deterministic total order used by worker queues and
+     * admission probes. Request id is consulted only after STRICT ties.
+     */
+    public static int compareWithRequestId(int leftPriority,
+                                           long leftEnqueueSeq,
+                                           long leftRequestId,
+                                           int rightPriority,
+                                           long rightEnqueueSeq,
+                                           long rightRequestId) {
+        int strictOrder = compare(leftPriority, leftEnqueueSeq,
+                rightPriority, rightEnqueueSeq);
+        return strictOrder != 0
+                ? strictOrder : Long.compare(leftRequestId, rightRequestId);
+    }
+
+    /**
+     * Whether an existing item precedes a primitive probe in the deterministic
+     * worker order, without allocating a temporary {@link Prioritized} view.
+     */
+    public static boolean comesBefore(Prioritized item,
+                                      long itemRequestId,
+                                      int probePriority,
+                                      long probeEnqueueSeq,
+                                      long probeRequestId) {
+        return compareWithRequestId(
+                item.priority(), item.enqueueSeq(), itemRequestId,
+                probePriority, probeEnqueueSeq, probeRequestId) < 0;
+    }
 
     /**
      * Returns {@link #STRICT} typed to a specific {@link Prioritized}

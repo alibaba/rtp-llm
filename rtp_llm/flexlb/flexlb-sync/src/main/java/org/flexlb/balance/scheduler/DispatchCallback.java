@@ -1,25 +1,25 @@
 package org.flexlb.balance.scheduler;
 
 /**
- * Receives per-item dispatch results from {@link BatchDispatcher}.
- * <p>
- * Implemented by the scheduler to manage inflight state in response to
- * engine acknowledgements. The dispatcher guarantees exactly one terminal
- * callback per item.
+ * Receives per-item EnqueueBatch transport outcomes from {@link BatchDispatcher}.
+ *
+ * <p>This lower-level callback deliberately carries the batch id required to
+ * reject stale transport callbacks. {@link BatchEnqueueDelivery} adapts it to
+ * the batch-agnostic {@link DecisionDelivery.Callback} used by the scheduler.
  */
 public interface DispatchCallback {
 
     /**
-     * Engine successfully accepted this item.
-     * Called once per item that appears in the gRPC success list.
+     * The engine acknowledged this item in the given batch.
      *
      * @param item    the dispatched item
-     * @param batchId the batch it was dispatched in
+     * @param batchId positive EnqueueBatch id
      */
     void onSuccess(BatchItem item, long batchId);
 
     /**
-     * Item definitely failed to be enqueued. Possible causes:
+     * EnqueueBatch failed before ownership became ambiguous. Possible causes
+     * include:
      * <ul>
      *   <li>gRPC request build failure (protobuf parsing)</li>
      *   <li>Engine rejected via error list in response</li>
@@ -28,12 +28,12 @@ public interface DispatchCallback {
      * When called due to a batch-level failure, the dispatcher has
      * already released the PrefillEndpoint batch before calling this.
      *
-     * @param item  the failed item
-     * @param error the underlying error
+     * @param item  item whose delivery failed
+     * @param error underlying error
      */
     void onFailure(BatchItem item, Throwable error);
 
-    /** Dispatch deadline elapsed before an acknowledgement could be reconciled. */
+    /** Batch dispatch deadline elapsed before an acknowledgement could be reconciled. */
     default void onTimeout(BatchItem item, Throwable error) {
         onFailure(item, error);
     }

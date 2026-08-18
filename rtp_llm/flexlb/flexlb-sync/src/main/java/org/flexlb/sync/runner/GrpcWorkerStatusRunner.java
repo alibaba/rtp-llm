@@ -2,7 +2,7 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
@@ -35,7 +35,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final Map<String, WorkerStatus> workerStatusMap;
     private final EngineHealthReporter engineHealthReporter;
     private final EngineGrpcService engineGrpcService;
-    private final FlexlbBatchScheduler batchScheduler;
+    private final PriorityScheduler priorityScheduler;
     private final String ip;
     private final int grpcPort;
     private final long createTimeUs = System.nanoTime() / 1000;
@@ -51,7 +51,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                   EngineHealthReporter engineHealthReporter,
                                   EngineGrpcService engineGrpcService,
                                   long syncRequestTimeoutMs,
-                                  FlexlbBatchScheduler batchScheduler,
+                                  PriorityScheduler priorityScheduler,
                                   EndpointRegistry endpointRegistry,
                                   Executor callbackExecutor) {
         this.ipPort = ipPort;
@@ -67,7 +67,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
-        this.batchScheduler = batchScheduler;
+        this.priorityScheduler = priorityScheduler;
         this.endpointRegistry = endpointRegistry;
         this.callbackExecutor = callbackExecutor;
     }
@@ -165,8 +165,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 }
 
                 // 3. Notify scheduler (cleanup finished requests)
-                if (batchScheduler != null) {
-                    batchScheduler.onWorkerStatusUpdate(newWorkerStatus);
+                if (priorityScheduler != null) {
+                    priorityScheduler.onWorkerStatusUpdate(newWorkerStatus);
                 }
 
                 Long latestFinishedVersion = newWorkerStatus.getLatestFinishedVersion();

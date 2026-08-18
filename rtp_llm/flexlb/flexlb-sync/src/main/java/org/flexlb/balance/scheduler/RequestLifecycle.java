@@ -4,7 +4,7 @@ import java.util.EnumSet;
 import java.util.Map;
 
 /**
- * Serialized request lifecycle. All mutations are synchronized so dispatch,
+ * Serialized request lifecycle. All mutations are synchronized so delivery,
  * timeout and worker-status callbacks observe one transition order.
  */
 final class RequestLifecycle {
@@ -41,8 +41,9 @@ final class RequestLifecycle {
     private RequestLifecycleState state = RequestLifecycleState.QUEUED;
     private long updatedAtMs;
     private String detail = "queued";
+    private DeliveryClaimKind deliveryClaimKind = DeliveryClaimKind.NONE;
     private long batchId;
-    private long dispatchedAtMs;
+    private long batchEnqueueStartedAtMs;
 
     RequestLifecycle(long requestId) {
         this.requestId = requestId;
@@ -50,39 +51,70 @@ final class RequestLifecycle {
         this.updatedAtMs = createdAtMs;
     }
 
-    synchronized void startDispatch(long assignedBatchId) {
+    /**
+     * Acquire the point-of-no-return claim for an EnqueueBatch delivery.
+     *
+     * <p>The claim is idempotent for the same batch and immutable afterwards.</p>
+     */
+    synchronized void startBatchEnqueue(long assignedBatchId) {
         if (assignedBatchId <= 0) {
             throw new IllegalArgumentException("batchId must be positive");
         }
-        if (batchId != 0 && batchId != assignedBatchId) {
-            throw new IllegalStateException("request already belongs to batch " + batchId);
-        }
-        if (batchId == 0) {
+        requireCompatibleDelivery(DeliveryClaimKind.BATCH_ENQUEUE, assignedBatchId);
+        ensureTransitionAllowed(RequestLifecycleState.DISPATCHING);
+        if (deliveryClaimKind == DeliveryClaimKind.NONE) {
+            deliveryClaimKind = DeliveryClaimKind.BATCH_ENQUEUE;
             batchId = assignedBatchId;
         }
-        transition(RequestLifecycleState.DISPATCHING, "dispatch started");
+        transition(RequestLifecycleState.DISPATCHING, "batch enqueue started");
     }
 
     /**
-     * Record the timestamp when the request is dispatched to the engine via gRPC.
-     * Used together with {@link #getDispatchedAtMs()} to compute dispatch-to-ACK latency.
+     * Acquire the point-of-no-return claim before publishing a route decision
+     * to the caller. Route-decision deliveries deliberately carry no batch
+     * id: accounting and terminal reconciliation remain request scoped.
      */
-    synchronized void markDispatched() {
-        dispatchedAtMs = System.currentTimeMillis();
+    synchronized void startRouteDecisionDelivery() {
+        requireCompatibleDelivery(DeliveryClaimKind.ROUTE_DECISION, 0);
+        ensureTransitionAllowed(RequestLifecycleState.DISPATCHING);
+        if (deliveryClaimKind == DeliveryClaimKind.NONE) {
+            deliveryClaimKind = DeliveryClaimKind.ROUTE_DECISION;
+        }
+        transition(RequestLifecycleState.DISPATCHING, "route decision delivery started");
     }
 
     /**
-     * @return the dispatch timestamp set by {@link #markDispatched()}, or 0 if not yet dispatched.
+     * Record the first EnqueueBatch send timestamp. Route-decision delivery
+     * deliberately does not use this batch transport metric.
      */
-    synchronized long getDispatchedAtMs() {
-        return dispatchedAtMs;
+    synchronized void markBatchEnqueueStarted() {
+        if (deliveryClaimKind != DeliveryClaimKind.BATCH_ENQUEUE) {
+            throw new IllegalStateException(
+                    "batch enqueue timestamp requires a batch delivery claim");
+        }
+        if (batchEnqueueStartedAtMs == 0) {
+            batchEnqueueStartedAtMs = System.currentTimeMillis();
+        }
     }
 
-    synchronized RequestLifecycleSnapshot acknowledge() {
+    /**
+     * @return the timestamp set by {@link #markBatchEnqueueStarted()}, or 0 if not yet sent.
+     */
+    synchronized long getBatchEnqueueStartedAtMs() {
+        return batchEnqueueStartedAtMs;
+    }
+
+    synchronized RequestLifecycleSnapshot markDeliveryConfirmed() {
         if (state.isTerminal() || state == RequestLifecycleState.CANCEL_REQUESTED) {
             return snapshot();
         }
-        return transition(RequestLifecycleState.ACKNOWLEDGED, "engine acknowledged batch");
+        String confirmationDetail = switch (deliveryClaimKind) {
+            case BATCH_ENQUEUE -> "batch enqueue acknowledged";
+            case ROUTE_DECISION -> "route decision delivered";
+            case NONE -> throw new IllegalStateException(
+                    "cannot confirm delivery without a delivery claim");
+        };
+        return transition(RequestLifecycleState.ACKNOWLEDGED, confirmationDetail);
     }
 
     synchronized RequestLifecycleSnapshot timeout(String message) {
@@ -128,26 +160,43 @@ final class RequestLifecycle {
     }
 
     /**
-     * Whether dispatch has crossed the point where the engine may observe the
-     * request. Once a batch id is assigned, a racing timeout cannot prove that
-     * the subsequent EnqueueBatch did not reach the engine.
+     * Whether delivery has crossed the point where an external caller or
+     * engine may observe the request. A claim is acquired before either an
+     * EnqueueBatch invocation or a route decision becomes visible.
      */
-    synchronized boolean hasDispatchClaim() {
-        return batchId > 0;
+    synchronized boolean hasDeliveryClaim() {
+        return deliveryClaimKind.isClaimed();
     }
 
     synchronized RequestLifecycleSnapshot snapshot() {
-        return new RequestLifecycleSnapshot(requestId, state, batchId,
+        return new RequestLifecycleSnapshot(requestId, state, deliveryClaimKind, batchId,
                 createdAtMs, updatedAtMs, detail);
+    }
+
+    private void requireCompatibleDelivery(DeliveryClaimKind requestedKind, long requestedBatchId) {
+        if (deliveryClaimKind == DeliveryClaimKind.NONE) {
+            return;
+        }
+        if (deliveryClaimKind != requestedKind) {
+            throw new IllegalStateException(
+                    "request already has a " + deliveryClaimKind + " delivery claim");
+        }
+        if (deliveryClaimKind == DeliveryClaimKind.BATCH_ENQUEUE && batchId != requestedBatchId) {
+            throw new IllegalStateException("request already belongs to batch " + batchId);
+        }
+    }
+
+    private void ensureTransitionAllowed(RequestLifecycleState next) {
+        if (state != next && !ALLOWED.get(state).contains(next)) {
+            throw new IllegalStateException("invalid request lifecycle transition " + state + " -> " + next);
+        }
     }
 
     private RequestLifecycleSnapshot transition(RequestLifecycleState next, String message) {
         if (state == next) {
             return snapshot();
         }
-        if (!ALLOWED.get(state).contains(next)) {
-            throw new IllegalStateException("invalid request lifecycle transition " + state + " -> " + next);
-        }
+        ensureTransitionAllowed(next);
         state = next;
         detail = message == null ? "" : message;
         updatedAtMs = System.currentTimeMillis();
