@@ -770,12 +770,30 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     EXPECT_EQ(expect_lm_output_indexes, toVec<int>(lm_output_indexes));
 
     model_input.sequence_lengths_plus_1 = torch::tensor({2, 3}, torch::kInt32).to(torch::kCUDA);
+    model_input.sequence_lengths_host_for_log = torch::tensor({1, 2}, torch::kInt32).pin_memory();
+    auto original_sequence_lengths_host       = model_input.sequence_lengths_host_for_log;
     GptModelOutputs model_output;
     model_output.all_hidden_states = torch::zeros({2, 4}, torch::kFloat32).to(torch::kCUDA);
     processor.updateDecodeDraftModelInput(
         model_input, model_output, torch::tensor({1, 2}, torch::kInt32).to(torch::kCUDA), holder);
     EXPECT_FALSE(model_input.sequence_lengths_plus_1.defined());
     EXPECT_EQ(std::vector<int>({2, 3}), toVec<int>(model_input.sequence_lengths));
+    EXPECT_EQ(std::vector<int>({2, 3}), toVec<int>(model_input.sequence_lengths_host_for_log));
+    EXPECT_EQ(std::vector<int>({1, 2}), toVec<int>(original_sequence_lengths_host));
+    EXPECT_TRUE(model_input.sequence_lengths_host_for_log.is_pinned());
+
+    // Exercise the legacy CPU fallback as well. It must publish the new pinned
+    // host mirror without mutating a snapshot retained by the previous step.
+    model_input.sequence_lengths              = torch::tensor({3, 4}, torch::kInt32);
+    model_input.sequence_lengths_plus_1       = torch::tensor({4, 5}, torch::kInt32).to(torch::kCUDA);
+    model_input.sequence_lengths_host_for_log = torch::tensor({3, 4}, torch::kInt32).pin_memory();
+    auto fallback_original_sequence_lengths_host  = model_input.sequence_lengths_host_for_log;
+    processor.updateDecodeDraftModelInput(
+        model_input, model_output, torch::tensor({1, 2}, torch::kInt32).to(torch::kCUDA), holder);
+    EXPECT_EQ(std::vector<int>({4, 5}), toVec<int>(model_input.sequence_lengths));
+    EXPECT_EQ(std::vector<int>({4, 5}), toVec<int>(model_input.sequence_lengths_host_for_log));
+    EXPECT_EQ(std::vector<int>({3, 4}), toVec<int>(fallback_original_sequence_lengths_host));
+    EXPECT_TRUE(model_input.sequence_lengths_host_for_log.is_pinned());
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {

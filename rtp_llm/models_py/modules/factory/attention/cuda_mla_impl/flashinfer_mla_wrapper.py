@@ -620,4 +620,44 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
         )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
+        is_target_verify = bool(getattr(attn_inputs, "is_target_verify", False))
+        sequence_lengths_d = getattr(
+            attn_inputs, "sequence_lengths_plus_1_d", None
+        )
+        sequence_lengths_host = getattr(
+            attn_inputs, "sequence_lengths_host", None
+        )
+        block_table_d = getattr(
+            attn_inputs, "kv_cache_kernel_block_id_device", None
+        )
+
+        # Normal and MTP draft decode are q=1. Build their bulk metadata with
+        # the existing CUDA replay kernel, while retaining only the tiny CPU
+        # arrays that FlashInfer's length-dependent scheduler still requires.
+        if (
+            not is_target_verify
+            and sequence_lengths_d is not None
+            and sequence_lengths_d.numel() > 0
+            and sequence_lengths_host is not None
+            and sequence_lengths_host.numel() > 0
+            and block_table_d is not None
+            and block_table_d.numel() > 0
+        ):
+            assert self.fmha_params is not None
+            self.attn_inputs = attn_inputs
+            check_attention_inputs(attn_inputs)
+            self.fmha_params.fill_decode_cuda_graph_params(
+                sequence_lengths_d,
+                block_table_d,
+                self.seq_size_per_block,
+            )
+            self.fmha_params.fill_decode_cuda_graph_plan_host_params(
+                sequence_lengths_host,
+                block_table_d,
+                self.seq_size_per_block,
+            )
+            self.fmha_impl.plan(self.fmha_params)
+            return
+
+        # Target verification has q>1 and still needs the generic planner.
         self.prepare(attn_inputs, forbid_realloc=True)

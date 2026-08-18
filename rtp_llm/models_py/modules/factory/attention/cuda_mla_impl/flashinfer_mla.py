@@ -1,6 +1,7 @@
 import fcntl
 import logging
 import os
+import threading
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -535,6 +536,36 @@ class MlaFlashInferDecodeOp(object):
             kv_indices=self.kv_indices_d,
             kv_len_arr=self.kv_len_arr_h,
         )
+        # FlashInfer's planner writes a pinned CPU workspace and then enqueues
+        # an H2D from it. Reusing that workspace before the copy completes is a
+        # host-write race once replay-time D2H synchronization is removed.
+        self._plan_workspace_lock = threading.Lock()
+        self._plan_workspace_pool = [
+            {
+                "workspace": self.mla_wrapper._pin_memory_int_workspace_buffer,
+                "ready": None,
+            }
+        ]
+        self._cuda_graph_plan_signature = None
+
+    def _acquire_plan_workspace(self):
+        for entry in self._plan_workspace_pool:
+            ready = entry["ready"]
+            if ready is None or ready.query():
+                return entry
+
+        template = self.mla_wrapper._pin_memory_int_workspace_buffer
+        entry = {
+            "workspace": torch.empty(
+                template.shape,
+                dtype=template.dtype,
+                device="cpu",
+                pin_memory=True,
+            ),
+            "ready": None,
+        }
+        self._plan_workspace_pool.append(entry)
+        return entry
 
     def plan(self, fmha_params: Any):
         if self.use_cuda_graph and self.kv_indices_d.size(
@@ -547,20 +578,46 @@ class MlaFlashInferDecodeOp(object):
                 f"kv_indices_d.size(0) < fmha_params.page_indice_d.size(0)"
             )
 
-        self.mla_wrapper.plan(
-            fmha_params.qo_indptr_h,
-            fmha_params.decode_page_indptr_h,
-            fmha_params.page_indice_d,
-            fmha_params.kvlen_h,
-            self.num_heads,
-            self.kv_lora_rank,
-            self.qk_rope_head_dim,
-            self.token_per_block,
-            True,  # causal
-            self.scale * self.softmax_extra_scale,
-            torch.bfloat16,
-            torch.bfloat16,
-        )
+        def plan_with_current_workspace():
+            self.mla_wrapper.plan(
+                fmha_params.qo_indptr_h,
+                fmha_params.decode_page_indptr_h,
+                fmha_params.page_indice_d,
+                fmha_params.kvlen_h,
+                self.num_heads,
+                self.kv_lora_rank,
+                self.qk_rope_head_dim,
+                self.token_per_block,
+                True,  # causal
+                self.scale * self.softmax_extra_scale,
+                torch.bfloat16,
+                torch.bfloat16,
+            )
+
+        if not self.use_cuda_graph:
+            plan_with_current_workspace()
+            return
+
+        # Pool the pinned scheduler source by completion event. This keeps the
+        # CPU nonblocking without allowing a later plan() to overwrite bytes
+        # still being consumed by cudaMemcpyAsync.
+        with self._plan_workspace_lock:
+            entry = self._acquire_plan_workspace()
+            self.mla_wrapper._pin_memory_int_workspace_buffer = entry["workspace"]
+            plan_with_current_workspace()
+            ready = entry["ready"]
+            if ready is None:
+                ready = torch.cuda.Event(enable_timing=False)
+                entry["ready"] = ready
+            ready.record(torch.cuda.current_stream(self.kv_indices_d.device))
+            signature = tuple(int(value) for value in self.mla_wrapper._plan_info)
+            if self._cuda_graph_plan_signature is None:
+                self._cuda_graph_plan_signature = signature
+            elif signature != self._cuda_graph_plan_signature:
+                raise RuntimeError(
+                    "FlashInfer MLA CUDA graph plan signature changed: "
+                    f"captured={self._cuda_graph_plan_signature}, replay={signature}"
+                )
 
     def forward(
         self,

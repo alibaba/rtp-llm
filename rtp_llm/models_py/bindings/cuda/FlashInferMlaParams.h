@@ -72,6 +72,12 @@ public:
                                    torch::Tensor kv_cache_block_id_device,
                                    int           seq_size_per_block);
 
+    // Fill only the small CPU arrays consumed by FlashInfer's MLA scheduler.
+    // The bulk replay metadata remains device-resident in fillDecodeCudaGraphParams.
+    void fillDecodeCudaGraphPlanHostParams(torch::Tensor sequence_lengths_host,
+                                           torch::Tensor kv_cache_block_id_device,
+                                           int           seq_size_per_block);
+
     void fillTokenSpeedMetadata(torch::Tensor block_tables,
                                 torch::Tensor sequence_lengths,
                                 int           batch_size,

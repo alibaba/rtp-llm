@@ -1,8 +1,16 @@
-from unittest import TestCase, main, skipUnless
+from types import SimpleNamespace
+from unittest import TestCase, main, mock, skipUnless
 
 import torch
 
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import (
+    MlaFlashInferDecodeOp,
+)
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
+    MlaFlashInferDecodeImpl,
+)
 from rtp_llm.ops.compute_ops import rtp_llm_ops
+from rtp_llm.utils.model_weight import W
 
 
 CUDA_AVAILABLE = torch.cuda.is_available()
@@ -105,6 +113,24 @@ class FlashInferDecodeParamsTest(TestCase):
         params.fill_decode_cuda_graph_params(
             sequence_lengths.cuda(), block_table.cuda(), page_size
         )
+        host_plan_fits = bool(
+            (
+                torch.div(
+                    sequence_lengths.clamp_min(1) + max(page_size, 1) - 1,
+                    max(page_size, 1),
+                    rounding_mode="floor",
+                )
+                <= max_blocks
+            )
+            .all()
+            .item()
+        )
+        if host_plan_fits:
+            params.fill_decode_cuda_graph_plan_host_params(
+                sequence_lengths - 1,
+                block_table.cuda(),
+                page_size,
+            )
         torch.cuda.synchronize()
 
         valid_pages = int(expected["decode_page_indptr_d"][-1])
@@ -119,6 +145,26 @@ class FlashInferDecodeParamsTest(TestCase):
         }
         for name, expected_tensor in expected.items():
             torch.testing.assert_close(actual[name], expected_tensor, rtol=0, atol=0)
+        if host_plan_fits:
+            torch.testing.assert_close(
+                params.qo_indptr_h,
+                expected["qo_indptr_d"],
+                rtol=0,
+                atol=0,
+            )
+            torch.testing.assert_close(
+                params.decode_page_indptr_h,
+                expected["decode_page_indptr_d"],
+                rtol=0,
+                atol=0,
+            )
+            torch.testing.assert_close(
+                params.kvlen_h,
+                expected["kvlen_d"],
+                rtol=0,
+                atol=0,
+            )
+            self.assertEqual(params.page_indice_d.numel(), valid_pages)
 
     def test_parallel_and_serial_fallback_shapes(self) -> None:
         cases = [
@@ -141,6 +187,23 @@ class FlashInferDecodeParamsTest(TestCase):
 
     def test_non_positive_page_size_preserves_existing_clamp(self) -> None:
         self._run_case(batch_size=8, page_size=0, max_blocks=7)
+
+    def test_host_plan_rejects_insufficient_block_table_capacity(self) -> None:
+        params = rtp_llm_ops.FlashInferMlaAttnParams()
+        self._reserve_decode_buffers(params, batch_size=1, max_blocks=2, page_size=64)
+        block_table = torch.zeros((1, 2), dtype=torch.int32, device="cuda")
+        params.fill_decode_cuda_graph_params(
+            torch.tensor([129], dtype=torch.int32, device="cuda"),
+            block_table,
+            64,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "needs 3 cache pages"):
+            params.fill_decode_cuda_graph_plan_host_params(
+                torch.tensor([128], dtype=torch.int32),
+                block_table,
+                64,
+            )
 
     def test_cuda_graph_replay_reads_live_inputs_without_reallocation(self) -> None:
         batch_size = 33
@@ -215,6 +278,72 @@ class FlashInferDecodeParamsTest(TestCase):
         self.assertEqual(
             pointers_before,
             {name: getattr(params, name).data_ptr() for name in output_names},
+        )
+
+    def test_generic_plan_snapshots_survive_back_to_back_host_updates(self) -> None:
+        batch_size = 2
+        page_size = 64
+        max_blocks = 3
+        empty_prefix = torch.empty(0, dtype=torch.int32)
+        input_lengths = torch.ones(batch_size, dtype=torch.int32)
+        first_lengths = torch.tensor([63, 127], dtype=torch.int32)
+        second_lengths = torch.tensor([0, 64], dtype=torch.int32)
+        first_blocks = torch.tensor(
+            [[10, 11, 12], [20, 21, 22]], dtype=torch.int32
+        )
+        second_blocks = torch.tensor(
+            [[30, 31, 32], [40, 41, 42]], dtype=torch.int32
+        )
+
+        params = rtp_llm_ops.FlashInferMlaAttnParams()
+        self._reserve_decode_buffers(params, batch_size, max_blocks, page_size)
+        torch.cuda.synchronize()
+
+        delayed_stream = torch.cuda.Stream()
+        with torch.cuda.stream(delayed_stream):
+            # Keep the first H2D queued while the CPU immediately prepares the
+            # second replay. Without per-call snapshots, the first transfer
+            # observes the second replay's in-place host metadata.
+            torch.cuda._sleep(100_000_000)
+            params.fill_params(
+                empty_prefix,
+                first_lengths,
+                input_lengths,
+                first_blocks,
+                page_size,
+                True,
+            )
+            first_pages = params.page_indice_d.clone()
+            first_indptr = params.decode_page_indptr_d.clone()
+            first_kvlen = params.kvlen_d.clone()
+            first_positions = params.positions_d.clone()
+            first_slots = params.slot_mapping.clone()
+
+            params.fill_params(
+                empty_prefix,
+                second_lengths,
+                input_lengths,
+                second_blocks,
+                page_size,
+                True,
+            )
+            completed = delayed_stream.record_event()
+
+        completed.synchronize()
+        torch.testing.assert_close(
+            first_pages.cpu(), torch.tensor([10, 20, 21], dtype=torch.int32)
+        )
+        torch.testing.assert_close(
+            first_indptr.cpu(), torch.tensor([0, 1, 3], dtype=torch.int32)
+        )
+        torch.testing.assert_close(
+            first_kvlen.cpu(), torch.tensor([64, 128], dtype=torch.int32)
+        )
+        torch.testing.assert_close(
+            first_positions.cpu(), first_lengths, rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            first_slots.cpu(), torch.tensor([703, 1407], dtype=torch.int64)
         )
 
     def test_tokenspeed_compact_metadata_fusion_uses_current_stream(self) -> None:
@@ -421,6 +550,210 @@ class FlashInferDecodeParamsTest(TestCase):
                     params.fill_decode_cuda_graph_params(
                         sequence_arg, block_arg, page_size
                     )
+
+    def test_mla_replay_uses_device_bulk_metadata_for_q1(self) -> None:
+        impl = object.__new__(MlaFlashInferDecodeImpl)
+        impl.fmha_params = mock.Mock()
+        impl.fmha_impl = mock.Mock()
+        impl.seq_size_per_block = 64
+        impl.prepare = mock.Mock()
+        sequence_lengths_d = torch.tensor([18, 130], dtype=torch.int32, device="cuda")
+        sequence_lengths_host = torch.tensor([17, 129], dtype=torch.int32)
+        block_table_d = torch.arange(8, dtype=torch.int32, device="cuda").reshape(
+            2, 4
+        )
+        inputs = SimpleNamespace(
+            is_target_verify=False,
+            is_prefill=False,
+            sequence_lengths_plus_1_d=sequence_lengths_d,
+            sequence_lengths_host=sequence_lengths_host,
+            kv_cache_kernel_block_id_device=block_table_d,
+        )
+
+        with mock.patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl."
+            "flashinfer_mla_wrapper.check_attention_inputs"
+        ) as check_inputs:
+            impl.prepare_cuda_graph(inputs)
+
+        check_inputs.assert_called_once_with(inputs)
+        impl.fmha_params.fill_decode_cuda_graph_params.assert_called_once_with(
+            sequence_lengths_d, block_table_d, 64
+        )
+        impl.fmha_params.fill_decode_cuda_graph_plan_host_params.assert_called_once_with(
+            sequence_lengths_host, block_table_d, 64
+        )
+        impl.fmha_impl.plan.assert_called_once_with(impl.fmha_params)
+        impl.prepare.assert_not_called()
+        self.assertIs(impl.attn_inputs, inputs)
+
+    def test_mla_target_verify_replay_keeps_generic_planner(self) -> None:
+        impl = object.__new__(MlaFlashInferDecodeImpl)
+        impl.fmha_params = mock.Mock()
+        impl.fmha_impl = mock.Mock()
+        impl.seq_size_per_block = 64
+        impl.prepare = mock.Mock()
+        inputs = SimpleNamespace(
+            is_target_verify=True,
+            sequence_lengths_plus_1_d=torch.ones(
+                1, dtype=torch.int32, device="cuda"
+            ),
+            sequence_lengths_host=torch.zeros(1, dtype=torch.int32),
+            kv_cache_kernel_block_id_device=torch.zeros(
+                (1, 4), dtype=torch.int32, device="cuda"
+            ),
+        )
+
+        impl.prepare_cuda_graph(inputs)
+
+        impl.prepare.assert_called_once_with(inputs, forbid_realloc=True)
+        impl.fmha_params.fill_decode_cuda_graph_params.assert_not_called()
+        impl.fmha_impl.plan.assert_not_called()
+
+    def test_mla_q1_cuda_graph_attention_matches_eager_across_live_metadata(
+        self,
+    ) -> None:
+        torch.manual_seed(37)
+        batch_size = 2
+        num_heads = 12
+        kv_lora_rank = 512
+        rope_dim = 64
+        nope_dim = 128
+        value_dim = 128
+        page_size = 64
+        max_blocks = 4
+        max_context_len = page_size * max_blocks
+
+        kc_weight = (
+            torch.randn(
+                num_heads,
+                nope_dim,
+                kv_lora_rank,
+                dtype=torch.float32,
+                device="cuda",
+            )
+            * 0.02
+        ).to(torch.bfloat16)
+        vc_weight = (
+            torch.randn(
+                num_heads,
+                kv_lora_rank,
+                value_dim,
+                dtype=torch.float32,
+                device="cuda",
+            )
+            * 0.02
+        ).to(torch.bfloat16)
+        q_nope = torch.randn(
+            batch_size,
+            num_heads,
+            nope_dim,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        q_pe = torch.randn(
+            batch_size,
+            num_heads,
+            rope_dim,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        cache = torch.randn(
+            batch_size * max_blocks,
+            page_size,
+            kv_lora_rank + rope_dim,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        layer_cache = SimpleNamespace(kv_cache_base=cache)
+        block_table_d = torch.arange(
+            batch_size * max_blocks, dtype=torch.int32, device="cuda"
+        ).reshape(batch_size, max_blocks)
+        block_table_h = block_table_d.cpu()
+
+        op = MlaFlashInferDecodeOp(
+            num_heads,
+            kv_lora_rank,
+            rope_dim,
+            nope_dim,
+            page_size,
+            1.0,
+            True,
+            False,
+            [{W.mla_kc: kc_weight, W.mla_vc: vc_weight}],
+            max_bs=batch_size,
+            max_context_len=max_context_len,
+            num_tokens=batch_size,
+            is_cuda_graph=True,
+        )
+        params = rtp_llm_ops.FlashInferMlaAttnParams()
+        capture_sequence_host = torch.tensor([127, 128], dtype=torch.int32)
+        params.fill_params(
+            torch.empty(0, dtype=torch.int32),
+            capture_sequence_host,
+            torch.ones(batch_size, dtype=torch.int32),
+            block_table_h,
+            page_size,
+            False,
+        )
+        op.plan(params)
+        op.forward(q_nope, q_pe, layer_cache, 0)
+        torch.cuda.synchronize()
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            graph_output = op.forward(q_nope, q_pe, layer_cache, 0)
+
+        def eager_reference(kv_lengths, physical_blocks):
+            q_ckv = torch.einsum(
+                "bhn,hnk->bhk", q_nope.float(), kc_weight.float()
+            )
+            outputs = []
+            scale = (nope_dim + rope_dim) ** -0.5
+            for batch, kv_length in enumerate(kv_lengths):
+                page_count = (kv_length + page_size - 1) // page_size
+                page_ids = physical_blocks[batch, :page_count].tolist()
+                request_cache = cache[page_ids].reshape(
+                    -1, kv_lora_rank + rope_dim
+                )[:kv_length]
+                ckv = request_cache[:, :kv_lora_rank].float()
+                kpe = request_cache[:, kv_lora_rank:].float()
+                logits = (
+                    torch.einsum("hk,tk->ht", q_ckv[batch], ckv)
+                    + torch.einsum("hr,tr->ht", q_pe[batch].float(), kpe)
+                ) * scale
+                attended = torch.softmax(logits, dim=-1) @ ckv
+                outputs.append(
+                    torch.einsum("hk,hkv->hv", attended, vc_weight.float())
+                )
+            return torch.stack(outputs)
+
+        cases = [
+            ([1, 2], [[3, 2, 1, 0], [4, 5, 6, 7]]),
+            ([63, 64], [[0, 1, 2, 3], [7, 6, 5, 4]]),
+            ([65, 127], [[2, 1, 0, 3], [4, 6, 5, 7]]),
+            ([128, 129], [[1, 3, 0, 2], [5, 7, 4, 6]]),
+        ]
+        captured_signature = op._cuda_graph_plan_signature
+        for kv_lengths, physical_blocks in cases:
+            live_blocks_h = torch.tensor(physical_blocks, dtype=torch.int32)
+            live_lengths_h = torch.tensor(kv_lengths, dtype=torch.int32)
+            block_table_d.copy_(live_blocks_h)
+            params.fill_decode_cuda_graph_params(
+                live_lengths_h.cuda(), block_table_d, page_size
+            )
+            params.fill_decode_cuda_graph_plan_host_params(
+                live_lengths_h - 1, block_table_d, page_size
+            )
+            op.plan(params)
+            graph.replay()
+            torch.cuda.synchronize()
+
+            expected = eager_reference(kv_lengths, live_blocks_h)
+            torch.testing.assert_close(
+                graph_output.float(), expected, rtol=2e-2, atol=2e-2
+            )
+            self.assertEqual(op._cuda_graph_plan_signature, captured_signature)
 
 
 if __name__ == "__main__":

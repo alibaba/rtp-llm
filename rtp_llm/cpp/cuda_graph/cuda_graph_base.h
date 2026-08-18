@@ -58,7 +58,7 @@ public:
     virtual bool           canRun(const PyModelInputs& inputs, CudaGraphState& state)   = 0;
     virtual void           prepareAttentionInputs(const PyModelInputs& inputs,
                                                   CudaGraphState&      state,
-                                                  bool                 skip_forward_event_sync = false) = 0;
+                                                  bool                 skip_forward_event_wait = false) = 0;
 
     // Refresh only captured kv_cache_kernel_block_id state and FlashInfer plan
     // buffers after page-table changes. Other captured fields stay untouched.

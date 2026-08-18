@@ -394,16 +394,14 @@ void FlashInferMlaAttnParams::fillParamsInternal(torch::Tensor t_prefix_lengths,
 
 void FlashInferMlaAttnParams::refreshBuffer(
     int batch_size, int input_token_num, int page_num, int reuse_page_num, int batch_reuse_info_size) {
-    // Keep this allocator-aware.  A normal Python-model forward replaces the
-    // previous FlashInfer params object before queued GPU work necessarily
-    // completes.  Tensor::copy_(non_blocking=true) records the pinned source
-    // with PyTorch's caching host allocator, preventing buf_h from being
-    // recycled while this H2D is still in flight.  A raw cudaMemcpyAsync does
-    // not establish that lifetime relationship.
-    buf_d.copy_(buf_h, /*non_blocking=*/true);
+    RTP_LLM_CHECK_WITH_INFO(batch_reuse_info_size == batch_size * 4,
+                            "batch_reuse_info_size mismatch: %d != %d * 4",
+                            batch_reuse_info_size,
+                            batch_size);
 
-    // Update tensor shapes (without reallocating memory)
-    // Use vector<int64_t> which can be implicitly converted to c10::IntArrayRef
+    // Restore the active logical shapes before copying. The owning buffers keep
+    // their reserved capacity, while these views may still carry a smaller
+    // shape from the previous replay.
     std::vector<int64_t> shape;
 
     // Update shapes for batch_size + 1 tensors
@@ -443,6 +441,41 @@ void FlashInferMlaAttnParams::refreshBuffer(
     shape = {batch_size, 4};
     batch_reuse_info_vec_d.unsafeGetTensorImpl()->set_sizes_contiguous(shape);
     batch_reuse_info_vec_h.unsafeGetTensorImpl()->set_sizes_contiguous(shape);
+
+    // The planner rewrites the persistent host views on the next replay. Copy
+    // only the active ranges through one compact pinned allocation so the
+    // caching host allocator protects every in-flight H2D source without
+    // transferring the reserved >= 1M-entry page buffer each token.
+    auto snapshot_ret = allocateManyBuffer({{input_token_num},
+                                            {page_num},
+                                            {reuse_page_num},
+                                            {batch_size + 1},
+                                            {batch_size + 1},
+                                            {batch_size},
+                                            {batch_size + 1},
+                                            {batch_size},
+                                            {input_token_num},
+                                            {batch_size, 4}},
+                                           false);
+    auto& snapshots = std::get<1>(snapshot_ret);
+    auto  copy_active = [](const torch::Tensor& src, torch::Tensor& snapshot, torch::Tensor& dst) {
+        if (src.numel() == 0) {
+            return;
+        }
+        snapshot.copy_(src);
+        dst.copy_(snapshot, /*non_blocking=*/true);
+    };
+
+    copy_active(batch_indice_h, snapshots[0], batch_indice_d);
+    copy_active(page_indice_h, snapshots[1], page_indice_d);
+    copy_active(reuse_cache_page_indice_h, snapshots[2], reuse_cache_page_indice_d);
+    copy_active(decode_page_indptr_h, snapshots[3], decode_page_indptr_d);
+    copy_active(prefill_ragged_kv_len_indptr_h, snapshots[4], prefill_ragged_kv_len_indptr_d);
+    copy_active(paged_kv_last_page_len_h, snapshots[5], paged_kv_last_page_len_d);
+    copy_active(qo_indptr_h, snapshots[6], qo_indptr_d);
+    copy_active(kvlen_h, snapshots[7], kvlen_d);
+    copy_active(positions_h, snapshots[8], positions_d);
+    copy_active(batch_reuse_info_vec_h, snapshots[9], batch_reuse_info_vec_d);
 }
 
 void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
@@ -534,11 +567,14 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
             slot_mapping_ptr[i]        = static_cast<int64_t>(block_number) * seq_size_per_block + block_offset;
         }
 
-        // Copy through the owning full-size buffers so this remains valid when
-        // slot_mapping_d_ still carries the previous invocation's narrowed
-        // logical shape.  The allocator-aware nonblocking copy also keeps the
-        // pinned source alive after held_attn_pyobj_ is replaced.
-        buf_d_i64_.slice(0, 0, input_token_num).copy_(buf_h_i64_.slice(0, 0, input_token_num), /*non_blocking=*/true);
+        // Isolate this H2D source from the next replay's host-side slot update.
+        auto slot_snapshot = torch::empty({input_token_num},
+                                          torch::TensorOptions()
+                                              .dtype(torch::kInt64)
+                                              .device(torch::kCPU)
+                                              .pinned_memory(true));
+        slot_snapshot.copy_(buf_h_i64_.slice(0, 0, input_token_num));
+        buf_d_i64_.slice(0, 0, input_token_num).copy_(slot_snapshot, /*non_blocking=*/true);
 
         slot_mapping_d_.unsafeGetTensorImpl()->set_sizes_contiguous({input_token_num});
         slot_mapping = slot_mapping_d_;
@@ -626,6 +662,67 @@ void FlashInferMlaAttnParams::fillDecodeCudaGraphParams(torch::Tensor sequence_l
     positions                    = positions_d;
     batch_reuse_info_vec         = batch_reuse_info_vec_d;
     slot_mapping                 = torch::Tensor();
+}
+
+void FlashInferMlaAttnParams::fillDecodeCudaGraphPlanHostParams(torch::Tensor sequence_lengths_host,
+                                                                torch::Tensor kv_cache_block_id_device,
+                                                                int           seq_size_per_block) {
+    RTP_LLM_CHECK_WITH_INFO(sequence_lengths_host.defined() && !sequence_lengths_host.is_cuda(),
+                            "fillDecodeCudaGraphPlanHostParams expects CPU sequence_lengths_host");
+    RTP_LLM_CHECK_WITH_INFO(sequence_lengths_host.scalar_type() == torch::kInt32,
+                            "fillDecodeCudaGraphPlanHostParams expects int32 sequence_lengths_host");
+    RTP_LLM_CHECK_WITH_INFO(sequence_lengths_host.is_contiguous(),
+                            "fillDecodeCudaGraphPlanHostParams expects contiguous sequence_lengths_host");
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_block_id_device.defined() && kv_cache_block_id_device.is_cuda(),
+                            "fillDecodeCudaGraphPlanHostParams expects CUDA kv_cache block table");
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_block_id_device.scalar_type() == torch::kInt32,
+                            "fillDecodeCudaGraphPlanHostParams expects int32 kv_cache block table");
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_block_id_device.dim() == 2,
+                            "fillDecodeCudaGraphPlanHostParams expects 2-D kv_cache block table");
+
+    const int batch_size           = static_cast<int>(sequence_lengths_host.size(0));
+    const int max_blocks_per_batch = static_cast<int>(kv_cache_block_id_device.size(1));
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_block_id_device.size(0) == batch_size,
+                            "fillDecodeCudaGraphPlanHostParams batch mismatch: sequence=%d block_table=%ld",
+                            batch_size,
+                            kv_cache_block_id_device.size(0));
+    RTP_LLM_CHECK_WITH_INFO(batch_size <= max_batch_size_,
+                            "fillDecodeCudaGraphPlanHostParams batch exceeds reserved capacity: %d > %d",
+                            batch_size,
+                            max_batch_size_);
+
+    const int32_t page_size = std::max(seq_size_per_block, 1);
+    const auto*   lengths   = sequence_lengths_host.data_ptr<int32_t>();
+    auto*         qo        = qo_indptr_h.data_ptr<int32_t>();
+    auto*         kv_indptr = decode_page_indptr_h.data_ptr<int32_t>();
+    auto*         kv_len    = kvlen_h.data_ptr<int32_t>();
+
+    qo[0]        = 0;
+    kv_indptr[0] = 0;
+    int64_t page_count = 0;
+    for (int i = 0; i < batch_size; ++i) {
+        const int32_t current_kv_len = std::max(lengths[i] + 1, 1);
+        const int64_t request_pages =
+            (static_cast<int64_t>(current_kv_len) + page_size - 1) / page_size;
+        RTP_LLM_CHECK_WITH_INFO(request_pages <= max_blocks_per_batch,
+                                "decode request %d needs %ld cache pages, block table provides %d",
+                                i,
+                                request_pages,
+                                max_blocks_per_batch);
+        page_count += request_pages;
+        qo[i + 1]        = i + 1;
+        kv_indptr[i + 1] = static_cast<int32_t>(page_count);
+        kv_len[i]        = current_kv_len;
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(page_count <= max_page_num_,
+                            "fillDecodeCudaGraphPlanHostParams pages exceed reserved capacity: %ld > %d",
+                            page_count,
+                            max_page_num_);
+    qo_indptr_h.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size + 1});
+    decode_page_indptr_h.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size + 1});
+    kvlen_h.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size});
+    page_indice_d.unsafeGetTensorImpl()->set_sizes_contiguous({page_count});
 }
 
 void FlashInferMlaAttnParams::fillTokenSpeedMetadata(torch::Tensor block_tables,
@@ -780,6 +877,12 @@ void registerPyFlashInferMlaParams(pybind11::module& m) {
              pybind11::arg("kv_cache_block_id_device"),
              pybind11::arg("seq_size_per_block"),
              "Update FlashInfer decode metadata on device during CUDA graph replay")
+        .def("fill_decode_cuda_graph_plan_host_params",
+             &rtp_llm::FlashInferMlaAttnParams::fillDecodeCudaGraphPlanHostParams,
+             pybind11::arg("sequence_lengths_host"),
+             pybind11::arg("kv_cache_block_id_device"),
+             pybind11::arg("seq_size_per_block"),
+             "Update the small CPU arrays required by the FlashInfer MLA replay scheduler")
         .def("fill_tokenspeed_metadata",
              &rtp_llm::FlashInferMlaAttnParams::fillTokenSpeedMetadata,
              pybind11::arg("block_tables"),

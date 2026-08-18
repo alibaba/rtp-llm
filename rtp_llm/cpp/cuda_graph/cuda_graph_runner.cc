@@ -233,7 +233,7 @@ void launchFusedD2DCopies(FusedD2DCopyParams& d2d_copies, FusedStridedCopyParams
 void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState& state) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareInputs");
     prepareInputData(inputs, state);
-    prepareAttentionInputs(inputs, state, /*skip_forward_event_sync=*/true);
+    prepareAttentionInputs(inputs, state, /*skip_forward_event_wait=*/true);
 }
 
 void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphState& state) {
@@ -264,14 +264,15 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
 
 void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                              CudaGraphState&      state,
-                                             bool                 skip_forward_event_sync) {
+                                             bool                 skip_forward_event_wait) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs");
 
-    // AsyncRunner calls need this cross-stream sync; inline forward() calls are
-    // already ordered on the same stream and can skip the CPU-blocking wait.
-    if (!skip_forward_event_sync) {
+    // AsyncRunner prepares on a separate stream. Order its device destinations
+    // after the preceding replay without blocking the CPU planner. Persistent
+    // host inputs are copied through allocator-tracked per-call snapshots.
+    if (!skip_forward_event_wait) {
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(wait_forward_event)");
-        forward_event_.synchronize();
+        forward_event_.block(cuda_graph::graphGetCurrentStream());
     }
     prepared_attention_inputs_.store(true, std::memory_order_release);
 
@@ -332,6 +333,20 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                           state.current_batch_size + 1,
                                           max_bs_ + 1,
                                           last_valid);
+        } else if (!is_target_verify_ && state.current_batch_size < state.current_real_graph_bs) {
+            // Decode may replay the next larger captured graph key. Keep its
+            // padding rows aligned with the host planner: sequence_lengths is
+            // pre-append (0 for a dummy row), while plus_1 is post-append (1).
+            addCudaGraphPrepareFillRegion(fill_params,
+                                          py_model_inputs_.attention_inputs.sequence_lengths,
+                                          state.current_batch_size,
+                                          state.current_real_graph_bs,
+                                          0);
+            addCudaGraphPrepareFillRegion(fill_params,
+                                          py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d,
+                                          state.current_batch_size,
+                                          state.current_real_graph_bs,
+                                          1);
         }
         invokeCudaGraphPrepareFill(fill_params, cuda_graph::graphGetCurrentStream().stream());
     }
@@ -465,22 +480,21 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                py_model_inputs_.attention_inputs.prefix_lengths_host,
                                state.current_batch_size * sizeof(int));
         }
+        if (inputs.attention_inputs.sequence_lengths_host.defined()
+            && py_model_inputs_.attention_inputs.sequence_lengths_host.defined()) {
+            optimizedCopyAsync(inputs.attention_inputs.sequence_lengths_host,
+                               py_model_inputs_.attention_inputs.sequence_lengths_host,
+                               state.current_batch_size * sizeof(int));
+            if (!is_prefill_cuda_graph_mode_ && !is_target_verify_
+                && state.current_batch_size < state.current_real_graph_bs) {
+                fillHostInt32(py_model_inputs_.attention_inputs.sequence_lengths_host,
+                              state.current_batch_size,
+                              state.current_real_graph_bs,
+                              0);
+            }
+        }
 
         if (!is_prefill_cuda_graph_mode_) {
-            // FlashInfer's replay-time planner consumes the CPU mirrors.  Keep
-            // them aligned with the live request instead of retaining the
-            // maximum-prefix values used while the graph was captured.
-            if (is_target_verify_) {
-                optimizedCopyAsync(inputs.attention_inputs.input_lengths_host,
-                                   py_model_inputs_.attention_inputs.input_lengths_host,
-                                   state.current_batch_size * sizeof(int32_t));
-                optimizedCopyAsync(inputs.attention_inputs.prefix_lengths_host,
-                                   py_model_inputs_.attention_inputs.prefix_lengths_host,
-                                   state.current_batch_size * sizeof(int32_t));
-                optimizedCopyAsync(inputs.attention_inputs.sequence_lengths_host,
-                                   py_model_inputs_.attention_inputs.sequence_lengths_host,
-                                   state.current_batch_size * sizeof(int32_t));
-            }
             optimizedCopyAsync(inputs.attention_inputs.sequence_lengths,
                                py_model_inputs_.attention_inputs.sequence_lengths,
                                state.current_batch_size * sizeof(int));
@@ -742,6 +756,11 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     // sequence_lengths [batch_size, int32] (decode only) — CUDA buffer; kernels read it on-device.
     inputs.attention_inputs.sequence_lengths =
         torch::full({int(max_bs_)}, max_seq_len_ - num_tokens_per_bs - 1, options_cuda_int32_);
+    // FlashInfer MLA plans on the host at replay time. Keep a pinned mirror so
+    // its generic fillParams path never materializes this 4-byte-per-request
+    // tensor from CUDA and synchronizes the current stream.
+    inputs.attention_inputs.sequence_lengths_host =
+        torch::full({int(max_bs_)}, max_seq_len_ - num_tokens_per_bs - 1, options_cpu_int32_).pin_memory();
 
     const int64_t max_kv_blocks =
         static_cast<int64_t>(((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_) + sp_steps_);
@@ -1105,6 +1124,8 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     }
     inputs.attention_inputs.sequence_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, batch_size);
+    inputs.attention_inputs.sequence_lengths_host =
+        capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths_host.slice(0, 0, batch_size);
     if (capture_mem_hold_.py_model_inputs_.combo_position_ids.defined()) {
         // Buffer was allocated as max_bs_ * num_tokens_per_bs_ * position_id_len_factor_;
         // slice proportionally with current batch_size using the same factor.

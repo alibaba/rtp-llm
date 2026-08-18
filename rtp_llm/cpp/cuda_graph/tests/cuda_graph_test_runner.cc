@@ -75,6 +75,10 @@ public:
         return runner_->forward(inputs, state_);
     }
 
+    void prepareAttentionInputs(torch_ext::PyModelInputs& inputs) {
+        runner_->prepareAttentionInputs(inputs, state_);
+    }
+
     int getCurrentRealGraphSize() {
         return runner_ != nullptr ? runner_->getCurrentRealGraphBs(state_) : 0;
     }
@@ -123,5 +127,6 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("max_context_batch_size") = 128)
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)
+        .def("prepareAttentionInputs", &CudaGraphTestRunner::prepareAttentionInputs)
         .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);
 }

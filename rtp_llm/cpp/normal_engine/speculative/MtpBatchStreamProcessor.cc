@@ -720,6 +720,31 @@ void MtpBatchStreamProcessor::updateDecodeDraftModelInput(GptModelInputs&       
         auto seq_lengths_d           = model_input.sequence_lengths.is_cuda() ? model_input.sequence_lengths :
                                                                                 model_input.sequence_lengths.to(torch::kCUDA);
         model_input.sequence_lengths = (seq_lengths_d + 1).to(torch::kInt32);
+
+        // FlashInfer MLA's replay planner consumes CPU lengths. Publish the
+        // exact next value from the already-known +1 transition instead of
+        // making the planner read the CUDA tensor back and synchronize. Use
+        // fresh storage so snapshots retained for target verification remain
+        // unchanged while the draft loop advances.
+        if (model_input.sequence_lengths_host_for_log.defined()) {
+            const auto& current_host = model_input.sequence_lengths_host_for_log;
+            RTP_LLM_CHECK_WITH_INFO(!current_host.is_cuda() && current_host.scalar_type() == torch::kInt32
+                                        && current_host.numel() >= batch_size,
+                                    "invalid draft sequence-length host mirror: device=%s dtype=%s numel=%ld batch=%d",
+                                    current_host.device().str().c_str(),
+                                    current_host.dtype().name(),
+                                    current_host.numel(),
+                                    batch_size);
+            auto next_host = torch::empty({batch_size},
+                                          torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+            auto        current_host_contiguous = current_host.contiguous();
+            const auto* src                     = current_host_contiguous.data_ptr<int32_t>();
+            auto*       dst                     = next_host.data_ptr<int32_t>();
+            for (int i = 0; i < batch_size; ++i) {
+                dst[i] = src[i] + 1;
+            }
+            model_input.sequence_lengths_host_for_log = std::move(next_host);
+        }
     } else {
         // Legacy CPU fallback when device input is disabled and the caller has
         // not already published sequence_lengths on CUDA.
@@ -728,6 +753,9 @@ void MtpBatchStreamProcessor::updateDecodeDraftModelInput(GptModelInputs&       
             sequence_lengths_cpu.data_ptr<int>()[i]++;
         }
         model_input.sequence_lengths = toCudaInt32(sequence_lengths_cpu, host_holder);
+        // Publish the fresh CPU snapshot used for the H2D. Older host mirrors
+        // may still be retained by target verification or async preparation.
+        model_input.sequence_lengths_host_for_log = sequence_lengths_cpu;
     }
     // sequence_lengths_plus_1 is a snapshot created by the normal decode
     // gatherer. Recompute it from the updated draft length on the next forward.
