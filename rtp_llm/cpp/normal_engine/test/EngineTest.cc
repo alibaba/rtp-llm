@@ -2,10 +2,13 @@
 #include "torch/all.h"
 #include <cstdlib>
 
+#define private public
+#include "rtp_llm/cpp/normal_engine/NormalEngine.h"
+#undef private
+
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
-#include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
 #include "gmock/gmock-actions.h"
@@ -110,6 +113,38 @@ TEST_F(NormalEngineTest, testSimple) {
         auto output2 = stream->nextOutput();
         ASSERT_TRUE(!output2.ok());
     }
+}
+
+TEST_F(NormalEngineTest, testParallelDispatchMultipleRequests) {
+    CustomConfig config;
+    config.engine_async_worker_count                     = 2;
+    auto                                     engine      = createMockEngine(config);
+    std::weak_ptr<autil::LockFreeThreadPool> thread_pool = engine->thread_pool_;
+    ASSERT_FALSE(thread_pool.expired());
+
+    auto make_query = [](int input_token) {
+        auto query                             = make_shared<GenerateInput>();
+        query->input_ids                       = torch::tensor({input_token}, torch::kInt32);
+        query->generate_config                 = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 2;
+        query->generate_config->is_streaming   = false;
+        return query;
+    };
+
+    auto streams = engine->batchEnqueue({make_query(1), make_query(2)});
+    ASSERT_EQ(streams.size(), 2u);
+    for (auto& stream : streams) {
+        ASSERT_NE(stream, nullptr);
+        auto output = stream->nextOutput();
+        ASSERT_TRUE(output.ok());
+        ASSERT_EQ(output.value().generate_outputs.size(), 1u);
+        EXPECT_EQ(output.value().generate_outputs[0].aux_info.input_len, 1);
+        EXPECT_EQ(output.value().generate_outputs[0].aux_info.output_len, 2);
+        EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+    }
+
+    engine.reset();
+    EXPECT_TRUE(thread_pool.expired());
 }
 
 TEST_F(NormalEngineTest, testSystemPrompt) {

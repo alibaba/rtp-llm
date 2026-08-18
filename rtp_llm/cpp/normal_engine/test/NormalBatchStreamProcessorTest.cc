@@ -6,6 +6,7 @@
 
 #define private public
 #define protected public
+#include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
@@ -54,6 +55,20 @@ protected:
             padded_size > 0 ? padded_size : static_cast<int64_t>(model_config.output_vocab_ids.size());
         return model_config;
     }
+};
+
+class ThreadPoolStopGuard {
+public:
+    explicit ThreadPoolStopGuard(std::shared_ptr<autil::LockFreeThreadPool> thread_pool):
+        thread_pool_(std::move(thread_pool)) {}
+
+    ~ThreadPoolStopGuard() {
+        thread_pool_->stop();
+        thread_pool_->waitFinish();
+    }
+
+private:
+    std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;
 };
 
 TEST_F(NormalBatchStreamProcessorTest, testWarmUpWithoutCacheManager) {
@@ -423,6 +438,60 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
     EXPECT_TRUE(softmax_probs.defined());
     EXPECT_EQ(2048, softmax_probs.numel());
     EXPECT_NEAR(0.731058, softmax_probs.data_ptr<float>()[1], 0.0001);
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testParallelDispatchMultipleStreams) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 8;
+    model_config.vocab_size  = 2;
+    model_config.num_layers  = 1;
+    RuntimeConfig runtime_config;
+
+    auto make_stream = [&](int input_token) {
+        auto query                                   = make_shared<GenerateInput>();
+        query->input_ids                             = hostIntBuffer({input_token});
+        query->generate_config                       = make_shared<GenerateConfig>();
+        query->generate_config->return_softmax_probs = true;
+        auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        return stream;
+    };
+    auto stream1 = make_stream(0);
+    auto stream2 = make_stream(1);
+
+    auto thread_pool = std::make_shared<autil::LockFreeThreadPool>(2, 4, nullptr, "ParallelDispatchTest");
+    ASSERT_TRUE(thread_pool->start());
+    ThreadPoolStopGuard thread_pool_guard(thread_pool);
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    NormalBatchStreamProcessor  processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false, thread_pool);
+    ASSERT_EQ(processor.thread_pool_, thread_pool);
+    ASSERT_EQ(processor.output_dispatcher_->thread_pool_, thread_pool);
+
+    StreamGroups stream_groups({stream1, stream2});
+    MergedOutput merge_outputs;
+    merge_outputs.model_output.logits =
+        torch::tensor({1.0f, 2.0f, 3.0f, 1.0f}, torch::kFloat32).reshape({2, 2}).to(torch::kCUDA);
+    merge_outputs.sampler_output.token_ids     = torch::tensor({0, 1, 1, 0}, torch::kInt32).reshape({2, 2});
+    merge_outputs.sampler_output.success       = torch::tensor({true, true}, torch::kBool);
+    merge_outputs.sampler_output.cum_log_probs = torch::tensor({1.0f, 2.0f}, torch::kFloat32).to(torch::kCUDA);
+
+    ASSERT_TRUE(processor.dispatch(stream_groups, merge_outputs).ok());
+    ASSERT_FALSE(stream1->hasError());
+    ASSERT_FALSE(stream2->hasError());
+    EXPECT_EQ(stream1->completeTokenIdsVec(0), (std::vector<int>{0, 1}));
+    EXPECT_EQ(stream2->completeTokenIdsVec(0), (std::vector<int>{1, 0}));
+
+    auto stream1_probs = stream1->getSoftmaxProbs();
+    auto stream2_probs = stream2->getSoftmaxProbs();
+    ASSERT_TRUE(stream1_probs.defined());
+    ASSERT_TRUE(stream2_probs.defined());
+    EXPECT_NEAR(stream1_probs.data_ptr<float>()[1], 0.731058f, 0.0001f);
+    EXPECT_NEAR(stream2_probs.data_ptr<float>()[1], 0.880797f, 0.0001f);
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabMapsGreedyTokenBeforeStreamUpdate) {

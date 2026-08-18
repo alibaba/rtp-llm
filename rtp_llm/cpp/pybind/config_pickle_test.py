@@ -1,7 +1,7 @@
 import pickle
 import unittest
 
-from rtp_llm.ops import GrammarConfig
+from rtp_llm.ops import DeviceResourceConfig, GrammarConfig
 
 
 def _new_grammar_config():
@@ -82,6 +82,16 @@ class GrammarConfigPickleTest(unittest.TestCase):
             ):
                 config = _new_grammar_config()
                 config.__setstate__(state)
+
+
+class DeviceResourceConfigPickleTest(unittest.TestCase):
+    def test_engine_async_worker_count_round_trip(self):
+        config = DeviceResourceConfig()
+        config.engine_async_worker_count = 3
+
+        restored = pickle.loads(pickle.dumps(config))
+
+        self.assertEqual(restored.engine_async_worker_count, 3)
 
 
 if __name__ == "__main__":

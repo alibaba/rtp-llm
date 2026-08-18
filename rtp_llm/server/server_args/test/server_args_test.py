@@ -100,6 +100,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["MM_VIDEO_MAX_FILE_SIZE_KB"] = "4096"
         os.environ["THINK_MODE"] = "adaptive"
         os.environ["DISABLE_FLASHINFER_HYBRID_PREFILL"] = "1"
+        os.environ["ENGINE_ASYNC_WORKER_COUNT"] = "3"
 
         sys.argv = ["prog"]
 
@@ -188,6 +189,9 @@ class ServerArgsSetTest(TestCase):
 
         # Verify disable_flashinfer_hybrid_prefill
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)
+        self.assertEqual(
+            py_env_configs.device_resource_config.engine_async_worker_count, 3
+        )
 
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""
@@ -233,6 +237,8 @@ class ServerArgsSetTest(TestCase):
             "true",
             "--disable_flashinfer_hybrid_prefill",
             "true",
+            "--engine_async_worker_count",
+            "4",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
         ]
@@ -302,6 +308,9 @@ class ServerArgsSetTest(TestCase):
         self.assertFalse(py_env_configs.fmha_config.enable_paged_flashinfer_trt_fmha_v2)
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_native)
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)
+        self.assertEqual(
+            py_env_configs.device_resource_config.engine_async_worker_count, 4
+        )
 
     def test_model_warm_up_env_and_global_master(self):
         os.environ["WARM_UP"] = "0"

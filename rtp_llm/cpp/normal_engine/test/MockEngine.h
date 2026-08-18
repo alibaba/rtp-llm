@@ -4,7 +4,6 @@
 #include <c10/util/Half.h>
 #include <cstring>
 #include <memory>
-#include <cuda_fp16.h>
 #include "c10/util/intrusive_ptr.h"
 #include "torch/all.h"
 
@@ -46,9 +45,10 @@ struct CustomConfig {
     DataType                                kv_cache_data_type = DataType::TYPE_FP16;
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
     std::vector<int64_t>                    output_vocab_ids;  // non-empty enables output-vocab pruning
-    bool                                    prefill_cp_enabled  = false;
-    bool                                    speculative_enabled = false;
-    bool                                    warm_up_with_loss   = false;
+    bool                                    prefill_cp_enabled        = false;
+    bool                                    speculative_enabled       = false;
+    bool                                    warm_up_with_loss         = false;
+    int                                     engine_async_worker_count = 0;
 };
 
 inline void setDefaultMhaKVCacheSpecDescs(rtp_llm::ModelConfig& model_config) {
@@ -155,6 +155,7 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     rtp_llm::GrpcConfig            grpc_config;
     rtp_llm::FfnDisAggregateConfig ffn_disaggregate_config;
     rtp_llm::VitConfig             vit_config;
+    device_resource_config.engine_async_worker_count = config.engine_async_worker_count;
 
     rtp_llm::EngineInitParams rtp_llm_params(0,
                                              model_config,
