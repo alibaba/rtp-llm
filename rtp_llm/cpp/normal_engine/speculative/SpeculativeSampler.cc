@@ -1,29 +1,104 @@
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 #include <algorithm>
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
-#include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
 namespace speculative {
 
-FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int top_k) {
-    FastTopKSamplerOutput output;
-    output.all_probs = torch::softmax(logits, -1);
-
-    std::tuple<torch::Tensor, torch::Tensor> sample_res;
-    if (top_k == 1) {
-        sample_res = torch::max(output.all_probs, -1, true);
-    } else {
-        sample_res = torch::topk(output.all_probs, top_k, -1);
+FastTopKSampler::FastTopKSampler(torch::Tensor d2t_map, size_t target_vocab_size):
+    d2t_map_(std::move(d2t_map)), target_vocab_size_(target_vocab_size) {
+    if (!d2t_map_.defined() || d2t_map_.numel() == 0) {
+        return;
     }
 
-    output.token_ids = std::get<1>(sample_res);
+    RTP_LLM_CHECK_WITH_INFO(d2t_map_.dim() == 1, "d2t_map must be 1-D");
+    RTP_LLM_CHECK_WITH_INFO(d2t_map_.dtype() == torch::kInt64, "d2t_map must be int64");
+    RTP_LLM_CHECK_WITH_INFO(target_vocab_size_ > 0, "target vocab size must be positive when d2t_map is provided");
+    RTP_LLM_CHECK_WITH_INFO(d2t_map_.min().item<int64_t>() >= 0, "d2t_map contains a negative target token id");
+    RTP_LLM_CHECK_WITH_INFO(d2t_map_.max().item<int64_t>() < static_cast<int64_t>(target_vocab_size_),
+                            "d2t_map target token id exceeds target vocab size");
+}
 
-    int batch_size = output.token_ids.size(0);
+FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int top_k) {
+    RTP_LLM_CHECK_WITH_INFO(top_k == 1, "FastTopKSampler only supports top_k=1 proposals");
+    RTP_LLM_CHECK_WITH_INFO(logits.dim() == 2, "FastTopKSampler logits must be 2-D");
+
+    FastTopKSamplerOutput output;
+    auto                  draft_token_ids = torch::argmax(logits, -1, true);
+
+    const int     batch_size        = draft_token_ids.size(0);
+    const int64_t draft_vocab_size  = logits.size(1);
+    const int64_t target_vocab_size = target_vocab_size_ == 0 ? draft_vocab_size : target_vocab_size_;
+
+    if (d2t_map_.defined() && d2t_map_.numel() > 0) {
+        RTP_LLM_CHECK_WITH_INFO(d2t_map_.numel() == draft_vocab_size,
+                                "d2t_map size mismatch: %ld != %ld",
+                                d2t_map_.numel(),
+                                draft_vocab_size);
+    } else {
+        RTP_LLM_CHECK_WITH_INFO(draft_vocab_size == target_vocab_size,
+                                "draft/target vocab mismatch requires d2t_map: %ld != %ld",
+                                draft_vocab_size,
+                                target_vocab_size);
+    }
+
+    // The probability tensor always describes the distribution that produced
+    // token_ids. Top-1 is a point mass; a future top-p sampler can return its
+    // filtered and normalized distribution through the same contract.
+    output.all_probs = torch::zeros({batch_size, draft_vocab_size}, logits.options().dtype(torch::kFloat32));
+    output.all_probs.scatter_(1, draft_token_ids.to(torch::kLong), 1.0f);
+
+    output.token_ids = draft_token_ids;
     execMappingDraft2Target({output.token_ids, d2t_map_, batch_size, 0, 1});
 
     return output;
+}
+
+torch::Tensor SpeculativeSampler::mapDraftProbsToTarget(const torch::Tensor& draft_probs,
+                                                        const torch::Tensor& d2t_map,
+                                                        int64_t              target_vocab_size,
+                                                        torch::Tensor*       target_probs_buffer) {
+    RTP_LLM_CHECK_WITH_INFO(draft_probs.defined(), "draft proposal probabilities must be defined");
+    RTP_LLM_CHECK_WITH_INFO(draft_probs.dim() == 3, "draft proposal probabilities must be 3-D");
+    RTP_LLM_CHECK_WITH_INFO(draft_probs.scalar_type() == torch::kFloat32,
+                            "draft proposal probabilities must be float32");
+    RTP_LLM_CHECK_WITH_INFO(target_vocab_size > 0, "target vocabulary size must be positive");
+
+    const int64_t draft_vocab_size = draft_probs.size(2);
+    if (!d2t_map.defined() || d2t_map.numel() == 0) {
+        RTP_LLM_CHECK_WITH_INFO(draft_vocab_size == target_vocab_size,
+                                "draft/target vocab mismatch requires d2t_map: %ld != %ld",
+                                draft_vocab_size,
+                                target_vocab_size);
+        return draft_probs;
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(d2t_map.dim() == 1, "d2t_map must be 1-D");
+    RTP_LLM_CHECK_WITH_INFO(d2t_map.scalar_type() == torch::kInt64, "d2t_map must be int64");
+    RTP_LLM_CHECK_WITH_INFO(d2t_map.device() == draft_probs.device(),
+                            "d2t_map and draft proposal probabilities must be on the same device");
+    RTP_LLM_CHECK_WITH_INFO(
+        d2t_map.numel() == draft_vocab_size, "d2t_map size mismatch: %ld != %ld", d2t_map.numel(), draft_vocab_size);
+
+    const int64_t batch_size = draft_probs.size(0);
+    const int64_t num_steps  = draft_probs.size(1);
+    torch::Tensor local_buffer;
+    auto&         buffer       = target_probs_buffer == nullptr ? local_buffer : *target_probs_buffer;
+    const bool    reuse_buffer = buffer.defined() && buffer.size(0) >= batch_size && buffer.size(1) == num_steps
+                              && buffer.size(2) == target_vocab_size
+                              && buffer.scalar_type() == draft_probs.scalar_type()
+                              && buffer.device() == draft_probs.device();
+    if (!reuse_buffer) {
+        const int64_t buffer_batch_size = std::max(batch_size, buffer.defined() ? buffer.size(0) : int64_t{0});
+        buffer = torch::empty({buffer_batch_size, num_steps, target_vocab_size}, draft_probs.options());
+    }
+    auto target_probs = buffer.narrow(0, 0, batch_size).narrow(1, 0, num_steps);
+    target_probs.zero_();
+    auto target_indices = d2t_map.view({1, 1, draft_vocab_size}).expand_as(draft_probs);
+    target_probs.scatter_add_(-1, target_indices, draft_probs);
+    return target_probs;
 }
 
 SpeculativeSamplerOutput SpeculativeSampler::forward(const std::list<GenerateStreamPtr>& streams,
@@ -47,14 +122,15 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
     int batch_size = streams.size();
 
-    auto draft_token_ids  = draft_sampler_output.token_ids;
-    auto target_token_ids = target_sampler_output.token_ids;
+    auto draft_token_ids   = draft_sampler_output.token_ids;
+    auto draft_token_probs = draft_sampler_output.all_probs;
 
-    auto draft_token_probs  = draft_sampler_output.all_probs;
     auto target_token_probs = target_sampler_output.all_probs;
 
-    buffer_holder_.hold_host(draft_token_ids);
-    auto draft_token_ids_d_t = draft_token_ids.to(target_device, true);
+    if (!draft_token_ids.is_cuda()) {
+        buffer_holder_.hold_host(draft_token_ids);
+    }
+    auto draft_token_ids_d_t = draft_token_ids.to(target_device, torch::kInt32, true);
 
     auto target_token_ids_d_t = target_sampler_output.token_ids;
     if (!target_token_ids_d_t.is_cuda()) {
@@ -66,6 +142,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         torch::zeros({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
     int stream_idx = 0;
     for (const GenerateStreamPtr& stream : streams) {
+        // If the stream's top1() config is true, we do not sample from the target distribution
         do_sample[stream_idx] = !stream->generateConfig()->top1();
         stream_idx++;
     }
@@ -88,42 +165,14 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         }
     }
 
-    auto          draft_token_probs_d_t  = draft_token_probs;
-    auto          target_token_probs_d_t = target_token_probs;
+    auto target_token_probs_d_t = target_token_probs;
+    auto draft_token_probs_d_t =
+        mapDraftProbsToTarget(draft_token_probs, d2t_map_, target_token_probs_d_t.size(2), &draft_probs_target_buffer_);
     torch::Tensor output_token_ids_d =
         torch::zeros({(long)batch_size, (long)propose_step_ + 1},
                      torch::TensorOptions().device(target_device).dtype(torch::kInt32).requires_grad(false));
     torch::Tensor output_accepted_token_num_d = torch::zeros(
         {(long)batch_size}, torch::TensorOptions().device(target_device).dtype(torch::kInt32).requires_grad(false));
-
-    if (draft_token_probs_d_t.size(2) != target_token_probs_d_t.size(2)) {
-        const int64_t target_vocab_size = target_token_probs_d_t.size(2);
-        const int64_t num_spec          = draft_token_probs_d_t.size(1);
-
-        // Reuse pre-allocated padding buffer to avoid per-forward GPU allocation.
-        // Grow-only along batch / num_spec dims; vocab dim must match exactly.
-        const bool need_realloc = !draft_probs_padding_buffer_.defined()
-                                  || draft_probs_padding_buffer_.size(0) < (int64_t)batch_size
-                                  || draft_probs_padding_buffer_.size(1) < num_spec
-                                  || draft_probs_padding_buffer_.size(2) != target_vocab_size
-                                  || draft_probs_padding_buffer_.dtype() != draft_token_probs_d_t.dtype()
-                                  || draft_probs_padding_buffer_.device() != draft_token_probs_d_t.device();
-        if (need_realloc) {
-            const int64_t cap_b =
-                std::max((int64_t)batch_size,
-                         draft_probs_padding_buffer_.defined() ? draft_probs_padding_buffer_.size(0) : (int64_t)0);
-            const int64_t cap_s = std::max(
-                num_spec, draft_probs_padding_buffer_.defined() ? draft_probs_padding_buffer_.size(1) : (int64_t)0);
-            draft_probs_padding_buffer_ =
-                torch::zeros({cap_b, cap_s, target_vocab_size}, draft_token_probs_d_t.options());
-        }
-
-        auto draft_probs_padding = draft_probs_padding_buffer_.narrow(0, 0, (int64_t)batch_size).narrow(1, 0, num_spec);
-        draft_probs_padding.zero_();
-        draft_probs_padding.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), d2t_map_},
-                                       draft_token_probs_d_t);
-        draft_token_probs_d_t = draft_probs_padding;
-    }
 
     {
         RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.execRejectionSampling");

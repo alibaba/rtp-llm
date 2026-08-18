@@ -90,6 +90,8 @@ public:
     // avoid a D2H + CPU loop + H2D round trip.
     torch::Tensor propose_tokens_gpu;
     torch::Tensor hidden_states;
+    // Exact normalized distribution used to produce the proposal token, in
+    // draft-vocabulary space. PD/KV-cache peers must use the same build.
     torch::Tensor all_probs;
 
     // hold tensors from grpc
@@ -576,6 +578,8 @@ public:
         // Main-thread mirrors used when DROP_BROAD_SYNC lets the next step run
         // before worker-side specUpdate has written sp_output_buffer fields.
         torch::Tensor last_hidden_states_gpu;
+        // Same draft-space proposal distribution contract as
+        // SpeculativeExecutorStreamOutput::all_probs.
         torch::Tensor draft_all_probs_gpu;
         // True host seqLength observed when this state is published. MTP async
         // uses it as the base for the next KV allocation upper bound.

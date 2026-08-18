@@ -639,7 +639,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     const auto& draft_weights = propose_params->getEngineInitParams().gpt_weights;
     d2t_map_                  = draft_model_ ? draft_model_->weights_.d2t_map : draft_weights.d2t_map;
     speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_));
-    fast_topk_sampler_.reset(new speculative::FastTopKSampler(d2t_map_));
+    fast_topk_sampler_.reset(new speculative::FastTopKSampler(d2t_map_, vocab_size_));
 
     RTP_LLM_LOG_INFO("[speculative decoding] d2t_map size: %ld", d2t_map_.defined() ? d2t_map_.numel() : 0);
 

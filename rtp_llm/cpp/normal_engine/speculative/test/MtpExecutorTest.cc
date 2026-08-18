@@ -193,7 +193,7 @@ private:
 
 class FakeFastTopKSampler: public spec::FastTopKSampler {
 public:
-    FakeFastTopKSampler(): spec::FastTopKSampler(torch::Tensor()) {}
+    FakeFastTopKSampler(): spec::FastTopKSampler(torch::Tensor(), 0) {}
 
     spec::FastTopKSamplerOutput forward(const torch::Tensor& logits, int top_k = 1) override {
         checkInputs(logits);
@@ -226,6 +226,9 @@ public:
     spec::SpeculativeSamplerOutput forward(const std::list<GenerateStreamPtr>& streams,
                                            SamplerOutput&                      draft_sampler_output,
                                            SamplerOutput&                      target_sampler_output) override {
+        if (!input_holder.test_data.empty()) {
+            checkInputs(streams, draft_sampler_output, target_sampler_output);
+        }
         return output_holder.get();
     }
 
@@ -800,9 +803,9 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     draft_sampler_output_1.token_ids    = torch::tensor({2}, torch::kInt32).reshape({(int64_t)batch_size, 1});
     draft_sampler_output_1.all_probs    = torch::tensor({0.0f, 0.0f, 1.0f, 0.0f}).reshape({(int64_t)batch_size, 4});
     draft_sampler_output_2.token_ids    = torch::tensor({1}, torch::kInt32).reshape({(int64_t)batch_size, 1});
-    draft_sampler_output_2.all_probs    = torch::tensor({0.0f, 0.0f, 0.0f, 1.0f}).reshape({(int64_t)batch_size, 4});
+    draft_sampler_output_2.all_probs    = torch::tensor({0.0f, 1.0f, 0.0f, 0.0f}).reshape({(int64_t)batch_size, 4});
     draft_sampler_output_3.token_ids    = torch::tensor({3}, torch::kInt32).reshape({(int64_t)batch_size, 1});
-    draft_sampler_output_3.all_probs    = torch::tensor({1.0f, 0.0f, 0.0f, 0.0f}).reshape({(int64_t)batch_size, 4});
+    draft_sampler_output_3.all_probs    = torch::tensor({0.0f, 0.0f, 0.0f, 1.0f}).reshape({(int64_t)batch_size, 4});
     next_draft_sampler_output.token_ids = torch::tensor({1}, torch::kInt32).reshape({(int64_t)batch_size, 1});
     next_draft_sampler_output.all_probs = torch::tensor({0.0f, 1.0f, 0.0f, 0.0f}).reshape({(int64_t)batch_size, 4});
 
@@ -821,14 +824,13 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     auto draft_spec_sample_input                 = SamplerOutput{};
     auto target_spec_sample_input                = SamplerOutput{};
 
-    vector<vector<float>> draft_all_probs_list;
-    draft_all_probs_list.push_back(toVec<float>(stream1_draft_token_probs));
-    draft_all_probs_list.push_back(toVec<float>(draft_output_1.logits));
-    draft_all_probs_list.push_back(toVec<float>(draft_output_2.logits));
-    draft_all_probs_list.push_back(toVec<float>(draft_output_3.logits));
     draft_spec_sample_input.token_ids  = torch::tensor({3, 2, 1, 3}, torch::kInt32).reshape({1, 4});
-    draft_spec_sample_input.all_probs  = torch::tensor(catVectors(draft_all_probs_list)).reshape({4, 4});
-    target_spec_sample_input.all_probs = draft_spec_sample_input.all_probs;
+    draft_spec_sample_input.all_probs  = torch::cat({stream1_draft_token_probs.reshape({1, 1, 4}),
+                                                    draft_sampler_output_1.all_probs.reshape({1, 1, 4}),
+                                                    draft_sampler_output_2.all_probs.reshape({1, 1, 4}),
+                                                    draft_sampler_output_3.all_probs.reshape({1, 1, 4})},
+                                                   1);
+    target_spec_sample_input.all_probs = sampler_output.all_probs;
 
     components.fake_speculative_sampler->setInputs({draft_spec_sample_input, target_spec_sample_input});
     components.fake_speculative_sampler->setOutputs({speculative_sampler_output});
@@ -1148,13 +1150,13 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
 
     draft_sampler_output_1.token_ids = torch::tensor({1, 0}, torch::kInt32).reshape({(int64_t)batch_size, 1});
     draft_sampler_output_1.all_probs =
-        torch::tensor({0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f}).reshape({(int64_t)batch_size, 4});
+        torch::tensor({0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f}).reshape({(int64_t)batch_size, 4});
     draft_sampler_output_2.token_ids = torch::tensor({2, 2}, torch::kInt32).reshape({(int64_t)batch_size, 1});
     draft_sampler_output_2.all_probs =
-        torch::tensor({0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f}).reshape({(int64_t)batch_size, 4});
+        torch::tensor({0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f}).reshape({(int64_t)batch_size, 4});
     draft_sampler_output_3.token_ids = torch::tensor({3, 2}, torch::kInt32).reshape({(int64_t)batch_size, 1});
     draft_sampler_output_3.all_probs =
-        torch::tensor({1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f}).reshape({(int64_t)batch_size, 4});
+        torch::tensor({0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f}).reshape({(int64_t)batch_size, 4});
     next_draft_sampler_output.token_ids = torch::tensor({1, 2}, torch::kInt32).reshape({(int64_t)batch_size, 1});
     next_draft_sampler_output.all_probs =
         torch::tensor({0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f}).reshape({(int64_t)batch_size, 4});
@@ -1184,13 +1186,13 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     auto draft_spec_sample_input                 = SamplerOutput{};
     auto target_spec_sample_input                = SamplerOutput{};
 
-    vector<vector<float>> draft_all_probs_list;
-    draft_all_probs_list.push_back({0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0});
-    draft_all_probs_list.push_back(toVec<float>(draft_output_1.logits));
-    draft_all_probs_list.push_back(toVec<float>(draft_output_2.logits));
-    draft_all_probs_list.push_back(toVec<float>(draft_output_3.logits));
     draft_spec_sample_input.token_ids = torch::tensor({2, 1, 2, 3, 3, 0, 2, 2}, torch::kInt32).reshape({2, 4});
-    draft_spec_sample_input.all_probs = torch::tensor(catVectors(draft_all_probs_list)).reshape({4, 8});
+    draft_spec_sample_input.all_probs =
+        torch::cat({torch::cat({stream1_draft_token_probs, stream2_draft_token_probs}, 0).reshape({2, 1, 4}),
+                    draft_sampler_output_1.all_probs.reshape({2, 1, 4}),
+                    draft_sampler_output_2.all_probs.reshape({2, 1, 4}),
+                    draft_sampler_output_3.all_probs.reshape({2, 1, 4})},
+                   1);
     target_spec_sample_input.all_probs =
         torch::tensor(target_sample_all_probs_data)
             .reshape({(int64_t)batch_size, (int64_t)(propose_step + 1), (int64_t)vocab_size});

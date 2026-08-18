@@ -20,3 +20,17 @@ cc_test(
     tags = ["rocm"],
     exec_properties = {'gpu':'MI308X-ROCM7'},
 )
+
+cc_test(
+    name = "rejection_sampling_op_test",
+    srcs = [
+        "RocmRejectionSamplingOpTest.cc",
+    ],
+    data = [],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/testing:rejection_sampling_test_utils",
+    ] + torch_deps(),
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X-ROCM7'},
+)

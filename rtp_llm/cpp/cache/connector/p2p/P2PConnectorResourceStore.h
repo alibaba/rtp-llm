@@ -35,6 +35,7 @@ struct P2PConnectorResourceEntry {
         int32_t              remote_reuse_len = 0;
         int32_t              memory_reuse_len = 0;
         std::vector<int>     propose_tokens;
+        // Exact normalized proposal distribution in draft-vocabulary space.
         TensorPB             propose_probs;
         TensorPB             propose_hidden;
         std::vector<int32_t> position_ids;
