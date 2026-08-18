@@ -282,9 +282,10 @@ protected:
 };
 
 TEST_F(RuntimeOpsTest, testInitRuntimeIdempotent) {
-    // Second call should be a no-op (already initialized).
-    auto mla = initRuntime(0, false, false, MlaOpsType::AUTO);
-    (void)mla;
+    // Second call is a no-op and keeps the legacy contract of returning the
+    // current caller's request rather than the first call's resolved value.
+    auto mla = initRuntime(0, false, false, MlaOpsType::MHA);
+    EXPECT_EQ(mla, MlaOpsType::MHA);
     ASSERT_TRUE(isRuntimeInitialized());
 }
 

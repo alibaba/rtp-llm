@@ -63,7 +63,12 @@ MlaOpsType initRuntime(std::size_t device_id, bool trace_memory, bool enable_com
                             g_device_id.load(std::memory_order_relaxed),
                             g_enable_comm_overlap.load(std::memory_order_relaxed),
                             static_cast<int>(resolved_mla_ops_type));
-        return resolved_mla_ops_type;
+        // Preserve the legacy ExecOps contract: a repeated initialization is a
+        // no-op and returns the value supplied by that caller.  In particular,
+        // Python initializes the process before EngineBase is constructed; the
+        // engine must still observe its own AUTO request instead of inheriting
+        // the value resolved for the earlier Python call.
+        return mla_ops_type;
     }
 
     setlinebuf(stdout);
