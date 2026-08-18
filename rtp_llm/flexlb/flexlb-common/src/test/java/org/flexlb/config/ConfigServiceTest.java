@@ -190,6 +190,10 @@ class ConfigServiceTest {
                 "dumpEffectiveConfig should log autoTpmCancelAckTimeoutMs");
         assertTrue(lines.stream().anyMatch(line -> line.contains("autoTpmCancelCompletionTimeoutMs=")),
                 "dumpEffectiveConfig should log autoTpmCancelCompletionTimeoutMs");
+        assertTrue(lines.stream().anyMatch(line -> line.contains("batchInflightMaxAgeMs=")),
+                "dumpEffectiveConfig should log batchInflightMaxAgeMs");
+        assertTrue(lines.stream().anyMatch(line -> line.contains("batchInflightStaleMs=")),
+                "dumpEffectiveConfig should log batchInflightStaleMs");
     }
 
     // ---- F3 (P0-3): unmatched env var scan ----

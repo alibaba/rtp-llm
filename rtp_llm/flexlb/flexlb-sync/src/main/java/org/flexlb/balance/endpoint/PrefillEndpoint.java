@@ -27,6 +27,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongPredicate;
 import java.util.stream.Collectors;
@@ -62,9 +63,23 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private final AtomicInteger inflightRequestCount = new AtomicInteger(0);
     private final WorkerBatcher batcher;
     private final BatchSchedulerReporter reporter;
+    /**
+     * The batch decision handler (the FlexlbBatchScheduler in production).
+     * Retained so the F-F batch-level age cap can route each member of a
+     * force-settled batch through the existing handler terminal chain
+     * ({@link BatchDecisionHandler#onExpired}) instead of leaving the
+     * scheduler-side inflight entries dangling after the endpoint ledger
+     * entry is removed.
+     */
+    private final BatchDecisionHandler handler;
 
-    /** Active Engine tasks not already represented in the local batch ledger. */
-    private volatile long engineUntrackedRequestCount = 0;
+    /**
+     * Active Engine tasks not already represented in the local batch ledger.
+     * Atomic so the F-F age-cap release (R5 compensation) can add the
+     * force-settled members back concurrently with the status-sync
+     * recomputation.
+     */
+    private final AtomicLong engineUntrackedRequestCount = new AtomicLong(0);
 
     /**
      * Raw engine-reported waiting (queued) query count from the last worker
@@ -91,6 +106,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                            BatchSchedulerReporter reporter) {
         super(status);
         this.reporter = reporter;
+        this.handler = handler;
         this.predictor = createPredictor(config);
         this.batcher = createBatcher(config, handler, reporter);
         this.batcher.start();
@@ -470,7 +486,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         // while older/newer Engine variants may still populate only the scalar
         // counts. Keep the request-id union when details exist and conservatively
         // retain the scalar lower bound when the detail list is empty or partial.
-        engineUntrackedRequestCount = Math.max(untracked.size(), scalarLowerBound);
+        engineUntrackedRequestCount.set(Math.max(untracked.size(), scalarLowerBound));
     }
 
     private static boolean isPriorityCancelOverlayOnly(TaskInfo task) {
@@ -488,7 +504,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * not already represented in the local ledger.
      */
     public long realPendingCount() {
-        return inflightRequestCount.get() + batcher.queueSize() + engineUntrackedRequestCount;
+        return inflightRequestCount.get() + batcher.queueSize() + engineUntrackedRequestCount.get();
     }
 
     // ==================== Wait Time ====================
@@ -530,7 +546,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * @return number of batches evicted
      */
     public int evictExpiredBatches(long ttlMs) {
-        return evictExpiredBatches(ttlMs, 0, requestId -> false);
+        return evictExpiredBatches(ttlMs, 0, 0, 0, requestId -> false);
     }
 
     /**
@@ -556,13 +572,70 @@ public class PrefillEndpoint extends WorkerEndpoint {
      */
     public int evictExpiredBatches(long ttlMs, long hardMaxAgeMs,
                                    LongPredicate schedulerOwnsRequest) {
+        return evictExpiredBatches(ttlMs, hardMaxAgeMs, 0, 0, schedulerOwnsRequest);
+    }
+
+    /**
+     * Full eviction pass with the progress-aware batch-level inflight age
+     * cap (F-F, {@code flexlbBatchInflightMaxAgeMs} +
+     * {@code flexlbBatchInflightStaleMs}) layered on top: a committed
+     * inflight batch whose creation age exceeds {@code batchInflightMaxAgeMs}
+     * <b>and</b> whose last observation is older than
+     * {@code batchInflightStaleMs} is force-settled — even while a
+     * dispatch-reconciliation fence holds it and even when the scheduler
+     * still tracks its members. That is the bounded-freeze guarantee: a
+     * zombie reconciliation that never receives its authoritative
+     * settlement must not pin the endpoint ledger (and the fixed-window
+     * inflight gate) forever. The staleness leg is the progress-aware
+     * guard: batches the ~20ms worker status sync keeps observing (running
+     * members, saturated queued batches, long-generation pdFusion batches)
+     * refresh {@code lastObservedAtMs} on every calibrate round and are
+     * never capped — only batches that went silent for
+     * {@code batchInflightStaleMs} are treated as frozen.
+     * {@code batchInflightStaleMs <= 0} drops the progress guard (pure age
+     * cap). On release the batch entry, its reconciliation fence and the
+     * request counter are dropped, the members are re-reserved as
+     * engine-untracked (R5 compensation — the engine may still be executing
+     * them, and the next status sync recomputes the exact count), each
+     * member is routed through the existing handler terminal chain
+     * ({@link BatchDecisionHandler#onExpired} — idempotent against entries
+     * the scheduler already settled), and one WARN + age-cap metric is
+     * emitted per batch tagged with the endpoint's own role. The cap is
+     * checked first, so it also covers the scheduler-owned entries the
+     * guarded {@code hardMaxAgeMs} branch skips; those get their
+     * scheduler-side release from the same handler chain. Auto-TPM only —
+     * the registry gates the pass with {@code isAutoTpmEnabled()}.
+     *
+     * @param ttlMs                 max unobserved age before normal eviction
+     * @param hardMaxAgeMs          guarded hard creation-age cap;
+     *                              {@code <= 0} disables
+     * @param batchInflightMaxAgeMs batch-level age cap (F-F);
+     *                              {@code <= 0} disables
+     * @param batchInflightStaleMs  no-progress staleness threshold for the
+     *                              age cap; {@code <= 0} drops the
+     *                              progress guard (pure age cap)
+     * @param schedulerOwnsRequest  whether the scheduler still tracks a
+     *                              request (race guard for the guarded
+     *                              hard-cap branch only)
+     * @return number of batches removed (age-capped + guarded hard-cap +
+     *         normal TTL)
+     */
+    public int evictExpiredBatches(long ttlMs, long hardMaxAgeMs, long batchInflightMaxAgeMs,
+                                   long batchInflightStaleMs, LongPredicate schedulerOwnsRequest) {
         long nowMs = System.currentTimeMillis();
         AtomicInteger evictedCount = new AtomicInteger();
         for (Long batchId : inflightBatches.keySet()) {
             AtomicReference<BatchInflight> evicted = new AtomicReference<>();
             AtomicReference<BatchInflight> forced = new AtomicReference<>();
+            AtomicReference<BatchInflight> ageCapped = new AtomicReference<>();
             inflightBatches.computeIfPresent(batchId, (id, batch) -> {
                 long ageMs = nowMs - batch.createdAtMs();
+                if (batchInflightMaxAgeMs > 0 && ageMs > batchInflightMaxAgeMs
+                        && (batchInflightStaleMs <= 0
+                            || nowMs - batch.lastObservedAtMs() > batchInflightStaleMs)) {
+                    ageCapped.set(batch);
+                    return null;
+                }
                 if (hardMaxAgeMs > 0 && ageMs > hardMaxAgeMs
                         && batch.requests().stream().noneMatch(
                                 item -> schedulerOwnsRequest.test(item.requestId()))) {
@@ -576,6 +649,14 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 evicted.set(batch);
                 return null;
             });
+            BatchInflight cappedBatch = ageCapped.get();
+            if (cappedBatch != null) {
+                forceSettleAgeCappedBatch(batchId, cappedBatch,
+                        nowMs - cappedBatch.createdAtMs(),
+                        nowMs - cappedBatch.lastObservedAtMs(), batchInflightMaxAgeMs);
+                evictedCount.incrementAndGet();
+                continue;
+            }
             BatchInflight forcedBatch = forced.get();
             if (forcedBatch != null) {
                 // The engine never settled these members, so the fence's
@@ -600,6 +681,53 @@ public class PrefillEndpoint extends WorkerEndpoint {
             }
         }
         return evictedCount.get();
+    }
+
+    /**
+     * F-F bounded-freeze release for one age-capped inflight batch, called
+     * after the per-key compute already removed it from {@code inflightBatches}
+     * (so the visible {@code inflight.batch.count} drops immediately).
+     * Drops the reconciliation fence (the authoritative settlement this
+     * fence is waiting for will never arrive — that is why the batch
+     * reached the cap), decrements the request counter, compensates the
+     * engine-untracked counter (R5: the engine may still be executing the
+     * members — re-reserve them so the fixed-window inflight gate does not
+     * oversell in the short window before the next status sync recomputes
+     * the exact count), emits one WARN line + the age-cap metric tagged
+     * with the endpoint's own role, and routes every member through the
+     * existing handler terminal chain ({@code onExpired} — the scheduler
+     * completes/times out its own inflight entry and any later engine
+     * terminal for these requests lands on already-removed keys, i.e.
+     * idempotent no-ops). Member callbacks run outside any ledger critical
+     * section.
+     */
+    private void forceSettleAgeCappedBatch(long batchId, BatchInflight batch,
+                                           long ageMs, long lastObservedAgoMs, long maxAgeMs) {
+        boolean hadFence = reconciliationRequests.remove(batchId) != null;
+        int members = batch.requests().size();
+        inflightRequestCount.addAndGet(-members);
+        // R5 compensation: re-reserve the members as engine-untracked so the
+        // released inflight gate does not oversell before the next worker
+        // status sync recomputes the count.
+        engineUntrackedRequestCount.addAndGet(members);
+        cachedWaitTimeExpireAtMs = 0;
+        // W2: tag with the endpoint's own role, not a hard-coded PREFILL.
+        RoleType role = status.getRole();
+        String roleName = role != null ? role.name() : RoleType.PREFILL.name();
+        org.flexlb.util.Logger.warn(
+                "event=inflight_batch_age_capped role={} endpoint={} batch_id={} "
+                        + "age_ms={} last_observed_ago_ms={} max_age_ms={} fenced={} "
+                        + "n_requests={} request_ids={}",
+                roleName, getIp(), batchId, ageMs, lastObservedAgoMs, maxAgeMs, hadFence,
+                members, batch.originalRequestIds());
+        if (reporter != null) {
+            reporter.reportBatchInflightAgeCapped(roleName, getIp(), 1);
+        }
+        if (handler != null) {
+            for (BatchItem request : batch.requests()) {
+                handler.onExpired(request);
+            }
+        }
     }
 
     /** Protect an ACK-ambiguous batch from age-only eviction. */

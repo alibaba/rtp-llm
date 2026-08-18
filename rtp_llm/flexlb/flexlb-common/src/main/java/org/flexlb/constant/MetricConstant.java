@@ -113,6 +113,18 @@ public class MetricConstant {
     public static final String INFLIGHT_TTL_EXPIRED_QPS = "app.flexlb.inflight.ttl.expired.qps";
 
     /**
+     * FlexLB batch inflight age-cap force-settle count — inflight batches
+     * released by the batch-level age cap (F-F,
+     * {@code flexlbBatchInflightMaxAgeMs}), including batches held by a
+     * dispatch-reconciliation fence at release time. Reported as QPS,
+     * tagged by {role, engineIp} of the owning endpoint ledger. A
+     * persistently non-zero rate means inflight batches are freezing past
+     * any legitimate lifecycle — the bounded-freeze signal.
+     */
+    public static final String BATCH_INFLIGHT_AGE_CAPPED_QPS =
+            "app.flexlb.batch.inflight.age.capped.qps";
+
+    /**
      * FlexLB scheduler inflight cleanup fence skips — number of inflight entries
      * past the TTL that were retained because a stronger fence still owns them
      * (preemption claim / dispatch reconciliation / cleanup ownership).

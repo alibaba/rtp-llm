@@ -759,6 +759,171 @@ class PrefillEndpointTest {
         assertEquals(1, endpoint.getInflightBatchCount());
     }
 
+    // ---- batch-level inflight age cap (F-F, bounded freeze) ----
+
+    /** Records every onExpired member routed through the handler chain. */
+    private static final class RecordingHandler implements BatchDecisionHandler {
+        final List<Long> expiredRequestIds = new java.util.ArrayList<>();
+
+        @Override
+        public void onExpired(BatchItem head) {
+            expiredRequestIds.add(head.requestId());
+        }
+
+        @Override
+        public void onBatchReady(List<BatchItem> items, DispatchMeta meta) {}
+
+        @Override
+        public void onOfferFailure(BatchItem item, Throwable error) {}
+    }
+
+    private static PrefillEndpoint newRecordingEndpoint(String ip,
+                                                        RecordingHandler handler,
+                                                        BatchSchedulerReporter reporter) {
+        return newRecordingEndpoint(ip, RoleType.PREFILL, handler, reporter);
+    }
+
+    private static PrefillEndpoint newRecordingEndpoint(String ip, RoleType role,
+                                                        RecordingHandler handler,
+                                                        BatchSchedulerReporter reporter) {
+        WorkerStatus status = new WorkerStatus();
+        status.setIp(ip);
+        status.setPort(8080);
+        status.setGrpcPort(8090);
+        status.setRole(role);
+
+        FlexlbConfig cfg = new FlexlbConfig();
+        cfg.setFlexlbBatchQueueMaxSize(100);
+        cfg.setCostFormula("10 + 0.1*sum(computeTokens) + 5*batchSize");
+        return new PrefillEndpoint(status, cfg, handler, reporter);
+    }
+
+    @Test
+    void batchAgeCapForceSettlesOverdueBatchAndClearsLedger() throws InterruptedException {
+        RecordingHandler handler = new RecordingHandler();
+        BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
+        PrefillEndpoint capped = newRecordingEndpoint("127.0.0.9", handler, reporter);
+        try {
+            capped.commitBatch(7L, 2_000, List.of(
+                    createBatchItem(capped, 101L, 500, 200),
+                    createBatchItem(capped, 102L, 300, 100)));
+            Thread.sleep(10);
+            // age ≈ 10ms > maxAge 5ms AND last observation ≈ 10ms > stale 5ms
+            int evicted = capped.evictExpiredBatches(60_000, 0, 5, 5, requestId -> false);
+
+            assertEquals(1, evicted);
+            assertEquals(0, capped.getInflightBatchCount(),
+                    "inflight.batch.count must drop immediately on the age cap");
+            assertEquals(2, capped.realPendingCount(),
+                    "R5 compensation: members are re-reserved as engine-untracked until "
+                            + "the next status sync recomputes the count");
+            assertEquals(List.of(101L, 102L), handler.expiredRequestIds,
+                    "every member must be routed through the handler terminal chain");
+            verify(reporter).reportBatchInflightAgeCapped("PREFILL", "127.0.0.9", 1);
+        } finally {
+            capped.close();
+        }
+    }
+
+    @Test
+    void batchAgeCapForceSettlesFencedBatchDespiteSchedulerOwnership() throws InterruptedException {
+        // The core F-F assertion: a reconciliation fence (and even scheduler
+        // ownership, which the guarded hard-cap branch respects) must not
+        // extend the freeze past the batch-level age cap.
+        RecordingHandler handler = new RecordingHandler();
+        BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
+        PrefillEndpoint capped = newRecordingEndpoint("127.0.0.10", handler, reporter);
+        try {
+            capped.commitBatch(7L, 100, List.of(createBatchItem(capped, 101L, 500, 200)));
+            capped.beginDispatchReconciliation(7L, 101L);
+            Thread.sleep(10);
+            // age ≈ 10ms > maxAge 5ms AND the fence's touch is also ≈ 10ms
+            // old > stale 5ms — frozen despite the fence and scheduler ownership.
+            int evicted = capped.evictExpiredBatches(1, 5, 5, 5, requestId -> true);
+
+            assertEquals(1, evicted,
+                    "the cap must fire even when fenced and scheduler-owned");
+            assertEquals(0, capped.getInflightBatchCount());
+            assertEquals(1, capped.realPendingCount(),
+                    "R5 compensation re-reserves the single member as engine-untracked");
+            assertEquals(List.of(101L), handler.expiredRequestIds);
+            verify(reporter).reportBatchInflightAgeCapped("PREFILL", "127.0.0.10", 1);
+
+            // The fence is gone too: a late authoritative settlement must be
+            // an idempotent no-op instead of resurrecting anything.
+            capped.endDispatchReconciliation(7L, 101L);
+            assertEquals(0, capped.getInflightBatchCount());
+            assertEquals(1, capped.realPendingCount());
+        } finally {
+            capped.close();
+        }
+    }
+
+    @Test
+    void batchAgeCapLeavesYoungBatchesAlone() {
+        endpoint.commitBatch(7L, 100, List.of(createBatchItem(101L, 500, 200)));
+
+        assertEquals(0, endpoint.evictExpiredBatches(60_000, 0, 60_000, 60_000, requestId -> false));
+        assertEquals(1, endpoint.getInflightBatchCount());
+        assertEquals(1, endpoint.realPendingCount());
+    }
+
+    @Test
+    void batchAgeCapDisabledByZeroKeepsBatchForOrdinaryPaths() throws InterruptedException {
+        endpoint.commitBatch(7L, 100, List.of(createBatchItem(101L, 500, 200)));
+        Thread.sleep(10);
+
+        assertEquals(0, endpoint.evictExpiredBatches(60_000, 0, 0, 0, requestId -> false));
+        assertEquals(1, endpoint.getInflightBatchCount());
+        assertEquals(1, endpoint.realPendingCount());
+    }
+
+    @Test
+    void batchAgeCapSparesOverdueBatchStillObservedByStatusSync() throws Exception {
+        // Misfire guard (R1 core): an over-age batch whose member the worker
+        // status sync still reports (RUNNING or queued — either path refreshes
+        // lastObservedAtMs in calibrate Phase 3) must NOT be force-settled;
+        // only batches that went silent past the staleness threshold are frozen.
+        endpoint.commitBatch(7L, 100, List.of(createBatchItem(101L, 500, 200)));
+        Thread.sleep(10);
+        // Status sync observes the member as RUNNING — Phase 3 touches the batch.
+        calibrate(Map.of(), Map.of("101", taskInfo(101L, 7L, TaskPhase.RUNNING, 0, 0)));
+
+        assertEquals(0, endpoint.evictExpiredBatches(60_000, 0, 5, 15_000, requestId -> false),
+                "an over-age batch still observed by the status sync must be spared");
+        assertEquals(1, endpoint.getInflightBatchCount());
+
+        // Control on the same batch: once the staleness window has also
+        // elapsed, the cap fires — the exemption above comes from observation
+        // freshness, not from any fence.
+        Thread.sleep(20);
+        assertEquals(1, endpoint.evictExpiredBatches(60_000, 0, 5, 15, requestId -> false));
+        assertEquals(0, endpoint.getInflightBatchCount());
+        assertEquals(1, endpoint.realPendingCount(),
+                "R5 compensation re-reserves the member as engine-untracked");
+    }
+
+    @Test
+    void batchAgeCapReportsEndpointRoleTag() throws InterruptedException {
+        // W2: the WARN and the metric must carry the endpoint's own role —
+        // a pdFusion endpoint must not be reported under the PREFILL tag.
+        RecordingHandler handler = new RecordingHandler();
+        BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
+        PrefillEndpoint pdFusion = newRecordingEndpoint("127.0.0.11", RoleType.PDFUSION,
+                handler, reporter);
+        try {
+            pdFusion.commitBatch(7L, 100, List.of(createBatchItem(pdFusion, 101L, 500, 200)));
+            Thread.sleep(10);
+
+            int evicted = pdFusion.evictExpiredBatches(60_000, 0, 5, 5, requestId -> false);
+
+            assertEquals(1, evicted);
+            verify(reporter).reportBatchInflightAgeCapped("PDFUSION", "127.0.0.11", 1);
+        } finally {
+            pdFusion.close();
+        }
+    }
+
     @Test
     void calibrateRecordsCancelOverlayObservationForForensics() throws Exception {
         endpoint.commitBatch(1L, 100, List.of(createBatchItem(1L, 500, 0)));

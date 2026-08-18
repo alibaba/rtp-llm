@@ -380,6 +380,44 @@ public class FlexlbConfig {
     private long flexlbInflightHardMaxAgeMs = 1_800_000L;
 
     /**
+     * Batch-level inflight age cap (F-F, na130_4 bounded-freeze fix), in
+     * milliseconds, enforced by the endpoint 60s eviction sweep
+     * ({@code PrefillEndpoint.evictExpiredBatches}): a committed inflight
+     * batch whose creation age ({@code now - createdAtMs}) exceeds this cap
+     * <b>and</b> has gone unobserved for longer than
+     * {@link #flexlbBatchInflightStaleMs} is force-settled — even while a
+     * dispatch-reconciliation fence holds it (that is the point: a zombie
+     * reconciliation that never receives its authoritative settlement must
+     * not freeze the fixed-window inflight gate and pin
+     * {@code inflight.batch.count} forever). Batches that the ~20ms worker
+     * status sync still observes (running members, saturated queued
+     * batches, long-generation pdFusion batches) keep refreshing
+     * {@code lastObservedAtMs} and are never capped. Effective window per
+     * unobserved batch: {@code [maxAge, maxAge + stale + 60s sweep)}. On
+     * release the batch entry, its reconciliation fence and the request
+     * counter are dropped, and each member is routed through the existing
+     * handler terminal chain ({@code BatchDecisionHandler.onExpired}).
+     * Auto-TPM only (the registry gates the pass with
+     * {@link #autoTpmEnabled}). {@code <= 0} disables the cap.
+     * Environment variable: FLEXLB_BATCH_INFLIGHT_MAX_AGE_MS.
+     */
+    private long flexlbBatchInflightMaxAgeMs = 120_000L;
+
+    /**
+     * No-progress staleness threshold for the batch-level inflight age cap
+     * (F-F), in milliseconds, paired with
+     * {@link #flexlbBatchInflightMaxAgeMs}: an over-age batch is only
+     * force-settled when its last observation
+     * ({@code now - lastObservedAtMs}) is also older than this threshold —
+     * the progress-aware guard that keeps legitimately long batches alive
+     * while they are still being observed by the worker status sync.
+     * {@code <= 0} disables the staleness exemption (pure age cap, the
+     * pre-review behavior).
+     * Environment variable: FLEXLB_BATCH_INFLIGHT_STALE_MS.
+     */
+    private long flexlbBatchInflightStaleMs = 60_000L;
+
+    /**
      * Post-ACK inflight audit threshold in milliseconds. The scheduler audit
      * tick force-settles an inflight ledger entry older than this when its
      * public future is already completed, no fence (preemption claim /

@@ -248,20 +248,31 @@ public class EndpointRegistry {
      * @param ttlMs        max age before eviction
      * @param hardMaxAgeMs hard age cap overriding TTL exemptions and
      *                     observation keep-alives; {@code <= 0} disables it
+     * @param batchInflightMaxAgeMs progress-aware batch-level inflight age
+     *                     cap (F-F) applied to prefill/pdFusion batch
+     *                     ledgers — force-settles over-age batches that also
+     *                     went unobserved; {@code <= 0} disables it
+     * @param batchInflightStaleMs  no-progress staleness threshold for the
+     *                     age cap; {@code <= 0} drops the progress guard
      */
-    private void evictExpiredAll(long ttlMs, long hardMaxAgeMs) {
+    private void evictExpiredAll(long ttlMs, long hardMaxAgeMs,
+                                 long batchInflightMaxAgeMs, long batchInflightStaleMs) {
         // Race guard for hard-cap eviction: entries the scheduler still owns
-        // are left to the scheduler's own cleanup cascade.
+        // are left to the scheduler's own cleanup cascade. The F-F batch age
+        // cap is intentionally unconditional (bounded freeze) and takes the
+        // scheduler-owned members through the handler terminal chain instead.
         LongPredicate schedulerOwns = batchScheduler()::hasInflightRequest;
         prefillEndpoints.forEach((endpoint, ep) ->
                 reportEndpointEviction(RoleType.PREFILL, endpoint, ep.getIp(),
-                        ep.evictExpiredBatches(ttlMs, hardMaxAgeMs, schedulerOwns), ttlMs));
+                        ep.evictExpiredBatches(ttlMs, hardMaxAgeMs, batchInflightMaxAgeMs,
+                                batchInflightStaleMs, schedulerOwns), ttlMs));
         decodeEndpoints.forEach((endpoint, ep) ->
                 reportEndpointEviction(RoleType.DECODE, endpoint, ep.getIp(),
                         ep.evictExpiredRequests(ttlMs, hardMaxAgeMs, schedulerOwns), ttlMs));
         pdFusionEndpoints.forEach((endpoint, ep) ->
                 reportEndpointEviction(RoleType.PDFUSION, endpoint, ep.getIp(),
-                        ep.evictExpiredBatches(ttlMs, hardMaxAgeMs, schedulerOwns), ttlMs));
+                        ep.evictExpiredBatches(ttlMs, hardMaxAgeMs, batchInflightMaxAgeMs,
+                                batchInflightStaleMs, schedulerOwns), ttlMs));
     }
 
     private void reportEndpointEviction(RoleType role,
@@ -290,7 +301,13 @@ public class EndpointRegistry {
     @Scheduled(fixedRate = 60000L)
     public void scheduledEviction() {
         FlexlbConfig config = configService.loadBalanceConfig();
+        // F-F batch-level age cap is an Auto-TPM-only guard (aligned with the
+        // other na130_4 gates); non-Auto-TPM deployments keep the legacy
+        // TTL/hard-cap sweep unchanged.
+        boolean ageCapEnabled = config.isAutoTpmEnabled();
         evictExpiredAll(config.getFlexlbInflightTtlMs(),
-                config.getFlexlbInflightHardMaxAgeMs());
+                config.getFlexlbInflightHardMaxAgeMs(),
+                ageCapEnabled ? config.getFlexlbBatchInflightMaxAgeMs() : 0,
+                ageCapEnabled ? config.getFlexlbBatchInflightStaleMs() : 0);
     }
 }

@@ -15,6 +15,7 @@ import static org.flexlb.constant.MetricConstant.BATCHER_PARK_QPS;
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_ENTER_QPS;
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_LEAVE_QPS;
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_SIZE;
+import static org.flexlb.constant.MetricConstant.BATCH_INFLIGHT_AGE_CAPPED_QPS;
 import static org.flexlb.constant.MetricConstant.ENGINE_WAIT_FILTERED_QPS;
 import static org.flexlb.constant.MetricConstant.SELECTION_FALLBACK_QPS;
 import static org.flexlb.constant.MetricConstant.BATCH_ACTUAL_TIME_MS;
@@ -126,6 +127,9 @@ public class BatchSchedulerReporter {
 
         // Inflight TTL expired — count of inflight requests cleaned up by the TTL task, QPS tagged by role
         monitor.register(INFLIGHT_TTL_EXPIRED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        // Batch inflight age-cap force-settles — bounded-freeze releases from the
+        // batch-level age cap (F-F), QPS tagged by role + engineIp
+        monitor.register(BATCH_INFLIGHT_AGE_CAPPED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         // Inflight cleanup fence skips — TTL-due entries retained by a stronger fence, QPS tagged by role
         monitor.register(INFLIGHT_CLEANUP_SKIPPED_FENCED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
@@ -151,7 +155,7 @@ public class BatchSchedulerReporter {
         // ACK-to-response time — from engine ACK to schedule response sent to client (timer for distribution)
         monitor.register(ACK_TO_RESPONSE_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
-        log.info("BatchSchedulerReporter initialized (32 metrics)");
+        log.info("BatchSchedulerReporter initialized (33 metrics)");
     }
 
     // ==================== Queue metrics ====================
@@ -464,6 +468,22 @@ public class BatchSchedulerReporter {
                 "role", role,
                 "reason", reason);
         monitor.report(INFLIGHT_TTL_EXPIRED_QPS, tags, count);
+    }
+
+    /**
+     * Report inflight batches force-settled by the batch-level age cap
+     * (F-F, {@code flexlbBatchInflightMaxAgeMs}) via
+     * {@code app.flexlb.batch.inflight.age.capped.qps}, tagged by
+     * {role, engineIp} of the owning endpoint ledger. Includes batches that
+     * were held by a dispatch-reconciliation fence at release time — the
+     * bounded-freeze releases the TTL sweep cannot make.
+     *
+     * @param count batches force-settled by the age cap in this cycle
+     */
+    public void reportBatchInflightAgeCapped(String role, String engineIp, int count) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
+                "role", role);
+        monitor.report(BATCH_INFLIGHT_AGE_CAPPED_QPS, tags, count);
     }
 
     /**

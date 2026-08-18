@@ -10,6 +10,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import static org.flexlb.constant.MetricConstant.BATCH_INFLIGHT_AGE_CAPPED_QPS;
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_ENTER_QPS;
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_LEAVE_QPS;
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_SIZE;
@@ -128,6 +129,23 @@ class BatchSchedulerReporterTest {
         verify(monitor).register(INFLIGHT_MAX_AGE_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register(INFLIGHT_TTL_EXPIRED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         verify(monitor).register(DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+    }
+
+    @Test
+    void should_register_batch_inflight_age_capped_metric_on_init() {
+        reporter.init();
+
+        verify(monitor).register(BATCH_INFLIGHT_AGE_CAPPED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+    }
+
+    @Test
+    void should_report_batch_inflight_age_capped_with_engine_and_role_tags() {
+        reporter.reportBatchInflightAgeCapped("PREFILL", "10.0.0.1", 2);
+
+        FlexMetricTags tags = FlexMetricTags.of(
+                "engineIp", "10.0.0.1",
+                "role", "PREFILL");
+        verify(monitor).report(BATCH_INFLIGHT_AGE_CAPPED_QPS, tags, 2.0);
     }
 
     @Test
