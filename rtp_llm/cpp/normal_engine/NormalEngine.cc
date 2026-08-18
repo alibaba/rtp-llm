@@ -55,6 +55,14 @@ bool cacheStatusSnapshotEnabled() {
     return env != nullptr && std::strcmp(env, "1") == 0;
 }
 
+// Must keep the same parsing semantics as NormalExecutor::useDeviceInput()
+// (RTP_LLM_DEVICE_INPUT == "1"); the guard below rejects combinations that
+// the executor's device-input path cannot handle.
+bool deviceInputEnabled() {
+    const char* env = std::getenv("RTP_LLM_DEVICE_INPUT");
+    return env != nullptr && std::strcmp(env, "1") == 0;
+}
+
 bool shouldRefreshCacheStatusSnapshot(RoleType role_type, const std::list<GenerateStreamPtr>& streams) {
     if (!cacheStatusSnapshotEnabled() || (role_type != RoleType::PREFILL && role_type != RoleType::PDFUSION)) {
         return false;
@@ -84,6 +92,31 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                    params.parallelism_config.dp_rank * params.parallelism_config.tp_size
                        + params.parallelism_config.tp_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
+    if (!model_config_.output_vocab_ids.empty()) {
+        RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE && !propose_params_,
+                                "output vocabulary pruning does not support speculative, MTP, or EAGLE engines");
+        RTP_LLM_CHECK_WITH_INFO(!runtime_config.warm_up_with_loss,
+                                "output vocabulary pruning does not support warm_up_with_loss");
+        // forwardPostLayersLastHidden (prefill CP) is a second lm_head exit that does not
+        // narrow P-wide logits down to the output vocabulary width, so padded zero columns
+        // would reach sampling. Reject the combination until that path narrows as well.
+        RTP_LLM_CHECK_WITH_INFO(!parallelism_config.prefill_cp_config.is_enabled(),
+                                "output vocabulary pruning does not support prefill context parallelism");
+        // publishNormalDeviceState stores sampler token ids as the next step's device
+        // input without restoration; under pruning those are compact ids, which would
+        // be fed to the embedding lookup as-is. Reject until that path restores them.
+        RTP_LLM_CHECK_WITH_INFO(!deviceInputEnabled(),
+                                "output vocabulary pruning does not support device-input mode (RTP_LLM_DEVICE_INPUT)");
+        const auto& output_vocab_ids = model_config_.output_vocab_ids;
+        RTP_LLM_CHECK_WITH_INFO(std::is_sorted(output_vocab_ids.begin(), output_vocab_ids.end())
+                                    && std::adjacent_find(output_vocab_ids.begin(), output_vocab_ids.end())
+                                           == output_vocab_ids.end(),
+                                "output_vocab_ids must be strictly ascending and deduplicated");
+        RTP_LLM_CHECK_WITH_INFO(output_vocab_ids.front() >= 0 && output_vocab_ids.back() < model_config_.vocab_size,
+                                "output_vocab_ids must be within [0, vocab_size)");
+        RTP_LLM_CHECK_WITH_INFO(model_config_.output_vocab_padded_size >= static_cast<int64_t>(output_vocab_ids.size()),
+                                "output_vocab_padded_size must be >= output_vocab_ids.size()");
+    }
     if (propose_params_) {
         reserve_step_ = propose_params_->gen_num_per_circle + 1;
     } else {

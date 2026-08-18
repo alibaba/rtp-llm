@@ -38,6 +38,9 @@ class ServerArgsSetTest(TestCase):
         os.environ["DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"] = "9"
         os.environ["LOADER_RECYCLE_HANDLES"] = "false"
         os.environ["MOE_PURE_TP_PRESHARD"] = "true"
+        os.environ["MM_IMAGE_MAX_FILE_SIZE_KB"] = "2048"
+        os.environ["MM_VIDEO_MAX_FILE_SIZE_KB"] = "4096"
+        os.environ["THINK_MODE"] = "adaptive"
         os.environ["DISABLE_FLASHINFER_HYBRID_PREFILL"] = "1"
 
         sys.argv = ["prog"]
@@ -88,6 +91,9 @@ class ServerArgsSetTest(TestCase):
         self.assertTrue(py_env_configs.load_config.moe_pure_tp_preshard)
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
+        self.assertEqual(py_env_configs.vit_config.mm_image_max_file_size_kb, 2048)
+        self.assertEqual(py_env_configs.vit_config.mm_video_max_file_size_kb, 4096)
+        self.assertEqual(py_env_configs.generate_env_config.think_mode, "adaptive")
 
         # Verify disable_flashinfer_hybrid_prefill
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)

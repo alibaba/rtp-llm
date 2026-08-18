@@ -7,7 +7,11 @@ from typing import Any, AsyncGenerator, List, Optional
 from fastapi import Request
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import GenerateConfig, ReturnAllProbsMode
+from rtp_llm.config.generate_config import (
+    GenerateConfig,
+    ReturnAllProbsMode,
+    ThinkingMode,
+)
 from rtp_llm.config.grammar_constraint import GrammarConstraint
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig
@@ -18,6 +22,7 @@ from rtp_llm.config.py_config_modules import (
     VitConfig,
 )
 from rtp_llm.config.response_format import ResponseFormat, normalize_think_tag
+from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.frontend.recommendation_parser import parse_and_fill_banned_combo
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
@@ -177,22 +182,48 @@ class OpenaiEndpoint(object):
     ) -> List[List[int]]:
         return [i for i, _ in itertools.groupby(sorted(stop_words_list))]
 
-    def _ensure_think_end_token_ids(self, config: GenerateConfig) -> None:
-        if config.end_think_token_ids:
-            return
-        end_token_id = self.generate_env_config.think_end_token_id
-        if end_token_id != -1:
-            config.end_think_token_ids = [end_token_id]
-            return
-        think_end_tag = normalize_think_tag(self.generate_env_config.think_end_tag)
-        config.end_think_token_ids = self.tokenizer.encode(
-            think_end_tag, add_special_tokens=False
+    def _reasoning_format_for_prompt(
+        self,
+        config: GenerateConfig,
+        renderer: CustomChatRenderer,
+        input_ids: Optional[List[int]],
+    ) -> Optional[ReasoningFormat]:
+        if config.thinking_mode not in (
+            ThinkingMode.ENABLED,
+            ThinkingMode.ADAPTIVE,
+        ):
+            return None
+
+        base_format = renderer.get_reasoning_format()
+        if config.thinking_mode == ThinkingMode.ENABLED:
+            return base_format
+        think_start_tag = normalize_think_tag(self.generate_env_config.think_start_tag)
+        begin_ids = config.begin_think_token_ids or self.tokenizer.encode(
+            think_start_tag, add_special_tokens=False
+        )
+        prompt_has_begin = bool(
+            begin_ids
+            and input_ids is not None
+            and input_ids[-len(begin_ids) :] == begin_ids
+        )
+        if config.thinking_mode == ThinkingMode.ADAPTIVE and prompt_has_begin:
+            config.thinking_mode = ThinkingMode.ENABLED
+            config.in_think_mode = True
+        return ReasoningFormat(
+            tag_begin="" if prompt_has_begin else think_start_tag,
+            tag_end=base_format.tag_end,
+            suffix=base_format.suffix,
+            no_think_excludes=base_format.no_think_excludes,
         )
 
     def _extract_generation_config(
-        self, request: ChatCompletionRequest
+        self,
+        request: ChatCompletionRequest,
+        input_ids: Optional[List[int]] = None,
+        renderer: Optional[CustomChatRenderer] = None,
     ) -> GenerateConfig:
         # TODO(wangyin): implement this
+        renderer = renderer or self.chat_renderer
         config = request.extra_configs or GenerateConfig()
         if request.extra_configs is not None and (
             config.response_format is not None
@@ -275,11 +306,9 @@ class OpenaiEndpoint(object):
         if request.thinking_budget is not None:
             budget = int(request.thinking_budget)
             config.max_thinking_tokens = _INT32_MAX if budget < 0 else budget
-        enable_thinking = bool(self.generate_env_config.think_mode)
-        if request.enable_thinking_requested() and config.max_thinking_tokens != 0:
-            enable_thinking = True
-        if request.disable_thinking():
-            enable_thinking = False
+        config.thinking_mode = renderer.resolve_thinking_mode(request)
+        config.in_think_mode = config.thinking_mode == ThinkingMode.ENABLED
+        if config.thinking_mode == ThinkingMode.DISABLED:
             config.max_thinking_tokens = 0
         max_completion_tokens = _positive_int_or_none(request.max_completion_tokens)
         max_tokens_cap = _positive_int_or_none(request.max_tokens)
@@ -293,8 +322,14 @@ class OpenaiEndpoint(object):
         config.add_thinking_params(
             self.tokenizer,
             self.generate_env_config,
-            enable_thinking=enable_thinking,
-            reasoning_format=self.chat_renderer.get_reasoning_format(),
+            enable_thinking=(
+                None
+                if config.thinking_mode == ThinkingMode.ADAPTIVE
+                else config.thinking_mode == ThinkingMode.ENABLED
+            ),
+            reasoning_format=self._reasoning_format_for_prompt(
+                config, renderer, input_ids
+            ),
         )
         if request.debug_info:
             config.return_output_ids = True
@@ -583,7 +618,9 @@ class OpenaiEndpoint(object):
             self.template_renderer if chat_request.user_template else self.chat_renderer
         )
         rendered_input = self.render_chat(chat_request)
-        generate_config = self._extract_generation_config(chat_request)
+        generate_config = self._extract_generation_config(
+            chat_request, rendered_input.input_ids, renderer
+        )
 
         # 生成式推荐：chat 链路同样需要从 rendered_prompt 解析已曝光商品并填充
         # banned_combo_token_ids。函数内部做了开关与空值短路，对非推荐场景零侵入。
@@ -630,8 +667,13 @@ class OpenaiEndpoint(object):
 
         from rtp_llm.utils.base_model_datatypes import GenerateInput
 
+        renderer = (
+            self.template_renderer if chat_request.user_template else self.chat_renderer
+        )
         rendered_input = self.render_chat(chat_request)
-        generate_config = self._extract_generation_config(chat_request)
+        generate_config = self._extract_generation_config(
+            chat_request, rendered_input.input_ids, renderer
+        )
 
         if generate_config.return_prompt_logits and rendered_input.multimodal_inputs:
             raise FtRuntimeException(
@@ -715,8 +757,10 @@ class OpenaiEndpoint(object):
         renderer = (
             self.template_renderer if chat_request.user_template else self.chat_renderer
         )
-        rendered_input = renderer.render_chat(chat_request)
-        generate_config = self._extract_generation_config(chat_request)
+        rendered_input = self.render_chat(chat_request)
+        generate_config = self._extract_generation_config(
+            chat_request, rendered_input.input_ids, renderer
+        )
         self._apply_renderer_chat_constraints(renderer, chat_request, generate_config)
         debug_info = self._get_debug_info(renderer, rendered_input, generate_config)
         return debug_info

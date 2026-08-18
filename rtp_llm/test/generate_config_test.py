@@ -6,6 +6,7 @@ from unittest import TestCase, main
 from transformers import AutoTokenizer
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.generate_config import ThinkingMode, thinking_mode_from_value
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     GenerateEnvConfig,
@@ -19,6 +20,7 @@ from rtp_llm.config.response_format_compiler import (
     restore_final_constraint,
     validate_engine_ready,
 )
+from rtp_llm.config.thinking_mode import normalize_think_mode
 from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTokenizer
 from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
     QWenTokenizer,
@@ -85,6 +87,24 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(generate_config.top_k, 1)
         self.assertEqual(generate_config.top_p, 0.95)
         self.assertEqual(generate_config.max_new_tokens, 100)
+
+    def test_think_mode_accepts_strings_and_legacy_aliases(self):
+        cases = {
+            "disabled": ("disabled", ThinkingMode.DISABLED),
+            "adaptive": ("adaptive", ThinkingMode.ADAPTIVE),
+            "enabled": ("enabled", ThinkingMode.ENABLED),
+            "0": ("disabled", ThinkingMode.DISABLED),
+            0: ("disabled", ThinkingMode.DISABLED),
+            "1": ("enabled", ThinkingMode.ENABLED),
+            1: ("enabled", ThinkingMode.ENABLED),
+        }
+        for value, (normalized, mode) in cases.items():
+            with self.subTest(value=value):
+                self.assertEqual(normalize_think_mode(value), normalized)
+                self.assertEqual(thinking_mode_from_value(value), mode)
+
+        with self.assertRaises(ValueError):
+            normalize_think_mode("auto")
 
     def test_kwargs_overwrite(self):
         special_tokens = SpecialTokens()
@@ -271,6 +291,11 @@ class OpenaiGenerateConfigTest(TestCase):
         req_config_stop_word_list: Optional[List[List[int]]] = None,
         response_format: Optional[Union[str, Dict[str, Any]]] = None,
         json_format: Optional[bool] = None,
+        enable_thinking: Optional[bool] = False,
+        thinking_budget: Optional[int] = None,
+        input_ids: Optional[List[int]] = None,
+        thinking_mode: Optional[ThinkingMode] = None,
+        env_think_mode: Optional[Union[str, int]] = None,
     ):
         special_tokens = SpecialTokens()
         if model_stop_word_str is not None:
@@ -279,6 +304,8 @@ class OpenaiGenerateConfigTest(TestCase):
             special_tokens.stop_words_id_list = model_stop_word_list
 
         generate_env_config = GenerateEnvConfig()
+        if env_think_mode is not None:
+            generate_env_config.think_mode = env_think_mode
         if env_stop_word_str is not None:
             generate_env_config.stop_words_str = env_stop_word_str
         if env_stop_word_list is not None:
@@ -306,7 +333,14 @@ class OpenaiGenerateConfigTest(TestCase):
             messages=[],
             response_format=response_format,
             json_format=json_format,
+            enable_thinking=enable_thinking,
+            thinking_budget=thinking_budget,
         )
+        if thinking_mode is not None:
+            if request.extra_configs is None:
+                request.extra_configs = GenerateConfig()
+            request.extra_configs.thinking_mode = thinking_mode
+
         if req_stop is not None:
             request.stop = req_stop
         if req_config_stop_word_str is not None:
@@ -318,7 +352,7 @@ class OpenaiGenerateConfigTest(TestCase):
                 request.extra_configs = GenerateConfig()
             request.extra_configs.stop_words_list = req_config_stop_word_list
 
-        return openai_endpoint._extract_generation_config(request)
+        return openai_endpoint._extract_generation_config(request, input_ids=input_ids)
 
     def test_response_format_is_finalized_before_generation(self):
         config = self._generate_config_with_stop_word(
@@ -338,6 +372,189 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertIsNone(config.json_schema)
         self.assertIsNone(config.regex)
         self.assertIsNone(config.ebnf)
+        self.assertIsNone(config.structural_tag)
+
+    def test_unresolved_openai_thinking_uses_disabled_fallback_even_with_budget(self):
+        request = ChatCompletionRequest(messages=[], thinking_budget=32000)
+        self.assertEqual(request.resolve_thinking_mode(), ThinkingMode.DISABLED)
+        self.assertIsNone(request.get_enable_thinking())
+
+    def test_unspecified_openai_thinking_uses_disabled_final_constraint(self):
+        config = self._generate_config_with_stop_word(
+            response_format={"type": "json_object"},
+            enable_thinking=None,
+        )
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.DISABLED)
+        self.assertFalse(config.in_think_mode)
+        self.assertEqual(config.max_thinking_tokens, 0)
+        self.assertIsNone(config.structural_tag)
+        self.assertEqual(config.begin_think_token_ids, [])
+        self.assertEqual(config.end_think_token_ids, [])
+        self.assertEqual(config.json_schema, {"type": "object"})
+
+    def test_unspecified_openai_thinking_inherits_env_mode(self):
+        cases = {
+            "disabled": (ThinkingMode.DISABLED, None),
+            "adaptive": (ThinkingMode.ADAPTIVE, "or"),
+            "enabled": (ThinkingMode.ENABLED, "sequence"),
+            "0": (ThinkingMode.DISABLED, None),
+            "1": (ThinkingMode.ENABLED, "sequence"),
+        }
+        for env_mode, (expected, expected_format_type) in cases.items():
+            with self.subTest(env_mode=env_mode):
+                config = self._generate_config_with_stop_word(
+                    enable_thinking=None,
+                    env_think_mode=env_mode,
+                )
+                self.assertEqual(config.thinking_mode, expected)
+                self.assertEqual(config.in_think_mode, expected == ThinkingMode.ENABLED)
+                if expected_format_type is None:
+                    self.assertIsNone(config.structural_tag)
+                    self.assertEqual(config.max_thinking_tokens, 0)
+                else:
+                    self.assertEqual(
+                        config.structural_tag["format"]["type"],
+                        expected_format_type,
+                    )
+                    self.assertEqual(config.max_thinking_tokens, 32000)
+
+    def test_openai_positive_budget_inherits_env_mode(self):
+        cases = {
+            "disabled": ThinkingMode.DISABLED,
+            "adaptive": ThinkingMode.ADAPTIVE,
+            "enabled": ThinkingMode.ENABLED,
+        }
+        for env_mode, expected in cases.items():
+            with self.subTest(env_mode=env_mode):
+                config = self._generate_config_with_stop_word(
+                    enable_thinking=None,
+                    thinking_budget=32000,
+                    env_think_mode=env_mode,
+                )
+
+                self.assertEqual(config.thinking_mode, expected)
+                self.assertEqual(
+                    config.max_thinking_tokens,
+                    0 if expected == ThinkingMode.DISABLED else 32000,
+                )
+
+    def test_explicit_openai_thinking_overrides_env_mode(self):
+        disabled = self._generate_config_with_stop_word(
+            enable_thinking=False,
+            env_think_mode="enabled",
+        )
+        enabled = self._generate_config_with_stop_word(
+            enable_thinking=True,
+            env_think_mode="disabled",
+        )
+
+        self.assertEqual(disabled.thinking_mode, ThinkingMode.DISABLED)
+        self.assertEqual(enabled.thinking_mode, ThinkingMode.ENABLED)
+
+    def test_adaptive_prompt_with_think_start_continues_as_enabled(self):
+        begin_ids = self.tokenizer.encode("<think>\n", add_special_tokens=False)
+        config = self._generate_config_with_stop_word(
+            enable_thinking=None,
+            input_ids=[1, 2, *begin_ids],
+            thinking_mode=ThinkingMode.ADAPTIVE,
+        )
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
+        self.assertTrue(config.in_think_mode)
+        reasoning_tag = config.structural_tag["format"]["elements"][0]
+        self.assertEqual(reasoning_tag["begin"], "")
+
+    def test_explicit_openai_thinking_boolean_selects_fixed_mode(self):
+        self.assertEqual(
+            ChatCompletionRequest(
+                messages=[], enable_thinking=True
+            ).resolve_thinking_mode(),
+            ThinkingMode.ENABLED,
+        )
+        self.assertEqual(
+            ChatCompletionRequest(
+                messages=[], enable_thinking=False
+            ).resolve_thinking_mode(),
+            ThinkingMode.DISABLED,
+        )
+        request = ChatCompletionRequest(
+            messages=[],
+            enable_thinking=True,
+            chat_template_kwargs={"enable_thinking": False},
+        )
+        self.assertFalse(request.get_enable_thinking())
+        self.assertEqual(request.resolve_thinking_mode(), ThinkingMode.DISABLED)
+        adaptive_request = ChatCompletionRequest(
+            messages=[],
+            extra_configs=GenerateConfig(
+                thinking_mode=ThinkingMode.ADAPTIVE,
+                chat_template_kwargs={"enable_thinking": True},
+            ),
+        )
+        self.assertEqual(
+            adaptive_request.resolve_thinking_mode(), ThinkingMode.ADAPTIVE
+        )
+        self.assertTrue(adaptive_request.get_enable_thinking())
+
+    def test_enabled_openai_thinking_keeps_legacy_empty_grammar_begin(self):
+        config = self._generate_config_with_stop_word(enable_thinking=True)
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
+        self.assertTrue(config.in_think_mode)
+        reasoning_tag = config.structural_tag["format"]["elements"][0]
+        self.assertEqual(reasoning_tag["begin"], "")
+        self.assertEqual(config.begin_think_token_ids, [])
+
+    def test_invalid_chat_template_thinking_mode_is_rejected(self):
+        for value in ("auto", "Adaptive", True, 1, None):
+            with self.subTest(value=value):
+                request = ChatCompletionRequest(
+                    messages=[],
+                    chat_template_kwargs={"thinking_mode": value},
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "chat_template_kwargs.thinking_mode must be one of",
+                ):
+                    request.resolve_thinking_mode()
+
+    def test_adaptive_thinking_initializes_boundaries_without_forcing_think(self):
+        env = GenerateEnvConfig()
+        env.think_start_tag = "<think>"
+        env.think_end_token_id = 102
+        config = GenerateConfig(
+            thinking_mode=ThinkingMode.ADAPTIVE,
+            max_thinking_tokens=32000,
+        )
+
+        config.add_thinking_params(self.tokenizer, env)
+
+        self.assertFalse(config.in_think_mode)
+        self.assertEqual(
+            config.begin_think_token_ids,
+            self.tokenizer.encode("<think>", add_special_tokens=False),
+        )
+        self.assertEqual(config.end_think_token_ids, [102])
+        branches = config.structural_tag["format"]["elements"]
+        self.assertEqual(config.structural_tag["format"]["type"], "or")
+        self.assertEqual(branches[0]["elements"][0]["begin"], "<think>")
+        self.assertEqual(branches[0]["elements"][0]["content"]["max_tokens"], 32000)
+        self.assertEqual(branches[1]["type"], "any_text")
+        self.assertEqual(branches[1]["excludes"], ["<think>", "</think>\n\n"])
+
+    def test_disabled_thinking_keeps_configured_end_token_metadata(self):
+        env = GenerateEnvConfig()
+        env.think_mode = "disabled"
+        env.think_end_token_id = 102
+        config = GenerateConfig()
+
+        config.add_thinking_params(self.tokenizer, env)
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.DISABLED)
+        self.assertFalse(config.in_think_mode)
+        self.assertEqual(config.end_think_token_ids, [102])
         self.assertIsNone(config.structural_tag)
 
     def assert_config_stop_word(
@@ -864,6 +1081,69 @@ class ResponseFormatProjectionTest(TestCase):
         elements = structural_tag["format"]["elements"]
         self.assertEqual(elements[0]["type"], "tag")
         self.assertEqual(elements[1], {"type": "any_text"})
+
+    def test_adaptive_reasoning_uses_think_or_final_branches(self):
+        cfg = GenerateConfig(
+            response_format={"type": "json_object"},
+            thinking_mode=ThinkingMode.ADAPTIVE,
+            max_thinking_tokens=17,
+            begin_think_token_ids=[10],
+            end_think_token_ids=[11],
+        )
+        reasoning_format = ReasoningFormat(
+            tag_begin="<think>",
+            tag_end="</think>",
+        )
+
+        self._validate(cfg, reasoning_format=reasoning_format)
+
+        adaptive = cfg.structural_tag["format"]
+        self.assertEqual(adaptive["type"], "or")
+        think_branch, no_think_branch = adaptive["elements"]
+        reasoning_tag = think_branch["elements"][0]
+        self.assertEqual(reasoning_tag["begin"], "<think>")
+        self.assertEqual(reasoning_tag["end"], "</think>")
+        self.assertEqual(reasoning_tag["content"]["max_tokens"], 17)
+        self.assertEqual(think_branch["elements"][1]["type"], "json_schema")
+        self.assertEqual(no_think_branch["type"], "json_schema")
+
+    def test_adaptive_text_branch_excludes_think_boundaries(self):
+        cfg = GenerateConfig(
+            thinking_mode=ThinkingMode.ADAPTIVE,
+            max_thinking_tokens=9,
+            begin_think_token_ids=[10],
+            end_think_token_ids=[11],
+        )
+        self._validate(
+            cfg,
+            reasoning_format=ReasoningFormat(
+                tag_begin="<think>",
+                tag_end="</think>",
+            ),
+        )
+
+        no_think_branch = cfg.structural_tag["format"]["elements"][1]
+        self.assertEqual(no_think_branch["type"], "any_text")
+        self.assertEqual(no_think_branch["excludes"], ["<think>", "</think>"])
+
+    def test_adaptive_reasoning_requires_begin_tag(self):
+        cfg = GenerateConfig(
+            thinking_mode=ThinkingMode.ADAPTIVE,
+            max_thinking_tokens=9,
+            begin_think_token_ids=[10],
+            end_think_token_ids=[11],
+        )
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._validate(
+                cfg,
+                reasoning_format=ReasoningFormat(
+                    tag_begin="",
+                    tag_end="</think>",
+                ),
+            )
+        self.assertEqual(
+            ctx.exception.exception_type, ExceptionType.ERROR_INPUT_FORMAT_ERROR
+        )
 
     def test_reasoning_final_structural_tag_with_existing_budget_rejected(self):
         cfg = GenerateConfig(

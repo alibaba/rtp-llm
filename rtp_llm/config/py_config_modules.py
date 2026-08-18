@@ -263,12 +263,22 @@ class DistributeConfig:
 
 
 class VitConfig:
+    DEFAULT_MM_TIMEOUT_MS: int = 120000
+    DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB: int = 100 * 1024
+    DEFAULT_MM_VIDEO_MAX_FILE_SIZE_KB: int = 2 * 1024 * 1024
+
     def __init__(self):
         self.vit_separation: VitSeparation = VitSeparation.VIT_SEPARATION_LOCAL
         self.vit_trt: int = 0
         self.trt_cache_enabled: int = 0
         self.trt_cache_path: Optional[str] = None
         self.download_headers: str = ""
+        self.mm_image_max_file_size_kb: int = (
+            VitConfig.DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB
+        )
+        self.mm_video_max_file_size_kb: int = (
+            VitConfig.DEFAULT_MM_VIDEO_MAX_FILE_SIZE_KB
+        )
         self.mm_cache_item_num: int = 10
         self.url_cache_item_num: int = 100
         self.use_igraph_cache: bool = True
@@ -279,7 +289,7 @@ class VitConfig:
         self.mm_preprocess_max_workers: int = 4
         self.biencoder_preprocess: bool = False
         self.extra_input_in_mm_embedding = ""
-        self.mm_timeout_ms: Optional[int] = None
+        self.mm_timeout_ms: int = VitConfig.DEFAULT_MM_TIMEOUT_MS
         self.extra_data_path: str = ""
         self.local_extra_data_path: str = ""
         self.disable_access_log: bool = False
@@ -339,6 +349,8 @@ class VitConfig:
             f"trt_cache_enabled: {self.trt_cache_enabled}\n"
             f"trt_cache_path: {self.trt_cache_path}\n"
             f"download_headers: {self.download_headers}\n"
+            f"mm_image_max_file_size_kb: {self.mm_image_max_file_size_kb}\n"
+            f"mm_video_max_file_size_kb: {self.mm_video_max_file_size_kb}\n"
             f"mm_cache_item_num: {self.mm_cache_item_num}\n"
             f"url_cache_item_num: {self.url_cache_item_num}\n"
             f"use_igraph_cache: {self.use_igraph_cache}\n"
@@ -366,7 +378,7 @@ class GenerateEnvConfig:
     def __init__(self):
         self.think_end_tag: str = "</think>\n\n"
         self.think_end_token_id: int = -1
-        self.think_mode: int = 0
+        self.think_mode: str = "disabled"
         self.force_stop_words: bool = False
         self.stop_words_list: Optional[str] = None
         self.stop_words_str: Optional[str] = None
@@ -502,9 +514,15 @@ class MasterConfig:
 class JITConfig:
     def __init__(self):
         self.remote_jit_dir: str = ""
+        self.jit_cache_setup_timeout_s: int = 180
+        self.manage_jit_cache: bool = True
 
     def to_string(self):
-        return f"remote_jit_dir: {self.remote_jit_dir}"
+        return (
+            f"remote_jit_dir: {self.remote_jit_dir}\n"
+            f"jit_cache_setup_timeout_s: {self.jit_cache_setup_timeout_s}\n"
+            f"manage_jit_cache: {self.manage_jit_cache}"
+        )
 
 
 class DeepEPConfig:

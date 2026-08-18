@@ -14,7 +14,9 @@ import os
 import shutil
 import subprocess
 import sys
+from contextlib import suppress
 from pathlib import Path
+from urllib.parse import urlparse
 
 from filelock import FileLock
 
@@ -209,14 +211,34 @@ def modify_bazel_wrapper_pythonpath(wrapper_path):
         return False
 
 
-def setup_jit_cache(cache_dir=None, packages=None):
-    # Use defaults if not provided
-    if cache_dir is None:
-        cache_dir = Path.home().as_posix() + "/.cache"
-    if packages is None:
-        packages = ["flashinfer", "torch", "deep_gemm", "tvm_ffi"]
+def bootstrap_remote_jit_dir():
+    remote = os.environ.get("REMOTE_JIT_DIR", "").strip()
+    if not remote or urlparse(remote).scheme:
+        return
+    try:
+        root = Path(remote).expanduser()
+        if not root.is_absolute():
+            raise OSError(f"not an absolute path: {remote}")
+        if root.is_symlink() or root.parent.is_symlink():
+            raise OSError(f"symlinked path: {remote}")
+        try:
+            root.mkdir(parents=True)
+        except FileExistsError:
+            if not root.is_dir() or not os.access(root, os.R_OK | os.W_OK | os.X_OK):
+                raise OSError(f"unusable directory: {remote}")
+        else:
+            root.chmod(0o1777)  # protect direct children of a shared root
+        os.environ["REMOTE_JIT_DIR"] = str(root)
+    except (OSError, RuntimeError) as e:
+        os.environ.pop("REMOTE_JIT_DIR", None)  # child servers inherit the env
+        logging.warning(f"[JIT] REMOTE_JIT_DIR refused ({e}); cold start later")
 
-    runfiles_dir = os.environ.get("RUNFILES_DIR") or os.environ.get("TEST_SRCDIR")
+
+def setup_jit_cache():
+    bootstrap_remote_jit_dir()
+
+    cache_dir = Path.home().as_posix() + "/.cache"
+    packages = ["flashinfer", "torch", "deep_gemm", "tvm_ffi"]
 
     # Copy packages to cache with file locking
     copied_paths = []
@@ -234,16 +256,27 @@ def setup_jit_cache(cache_dir=None, packages=None):
     logging.info(
         f"[Package Setup] Set _JIT_CACHE_PATHS: {os.environ['_JIT_CACHE_PATHS']}"
     )
-    runfiles_dir = os.environ.get("RUNFILES_DIR", None)
-    test_binary = sys.argv[1]
-    bazel_wrapper_path = os.path.join(runfiles_dir, "rtp_llm/" + test_binary)
+    runfiles_dir = os.environ.get("RUNFILES_DIR")
+    test_binary = sys.argv[1] if len(sys.argv) > 1 else ""
+    if not runfiles_dir or not test_binary:
+        logging.warning(
+            "[Package Setup] Bazel wrapper unavailable; skip cache path injection"
+        )
+        return None
+    bazel_wrapper_path = Path(runfiles_dir) / "rtp_llm" / test_binary
     suffix = f"_new_{os.getpid()}"
-    bazel_wrapper_path_new = bazel_wrapper_path + suffix
+    bazel_wrapper_path_new = bazel_wrapper_path.with_name(
+        bazel_wrapper_path.name + suffix
+    )
     try:
-        os.remove(bazel_wrapper_path_new)
-    except FileNotFoundError:
-        pass
-    shutil.copy2(bazel_wrapper_path, bazel_wrapper_path_new)
+        bazel_wrapper_path_new.unlink(missing_ok=True)
+        shutil.copy2(bazel_wrapper_path, bazel_wrapper_path_new)
+        if not modify_bazel_wrapper_pythonpath(bazel_wrapper_path_new):
+            raise OSError("wrapper injection failed")
+    except Exception as error:
+        with suppress(OSError):
+            bazel_wrapper_path_new.unlink()
+        logging.warning(f"[Package Setup] wrapper setup failed ({error})")
+        return None
     logging.info(f"[Package Setup] Copied Bazel wrapper to: {bazel_wrapper_path_new}")
-    modify_bazel_wrapper_pythonpath(bazel_wrapper_path_new)
     sys.argv[1] = test_binary + suffix

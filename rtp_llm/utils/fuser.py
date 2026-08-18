@@ -295,7 +295,10 @@ class NfsManager:
         with self._lock:
             self._mounted_path_map = {}
             for mount_root in list(self._nfs_info_map.keys()):
-                self._do_unmount_nfs(mount_root)
+                try:
+                    self._do_unmount_nfs(mount_root)
+                except Exception:
+                    logging.exception(f"failed to unmount nfs {mount_root}")
 
 
 _nfs_manager = NfsManager()
@@ -320,8 +323,10 @@ def fetch_remote_file_to_local(
 
 def umount_file(path: str, force: bool = False):
     logging.info(f"umount file {path}")
-    _get_fuser().umount_fuse_dir(path, force=force)
-    _nfs_manager.unmount_nfs_path(path)
+    try:
+        _get_fuser().umount_fuse_dir(path, force=force)
+    finally:
+        _nfs_manager.unmount_nfs_path(path)
 
 
 def fuse_available() -> bool:

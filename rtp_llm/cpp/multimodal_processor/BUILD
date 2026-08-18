@@ -21,10 +21,25 @@ cc_library(
 )
 
 cc_library(
+    name = "multimodal_input_utils",
+    hdrs = [
+        "MultimodalInputUtils.h",
+    ],
+    deps = [
+        "//:rtp_compute_ops",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "multimodal_processor",
     hdrs = glob([
         "*.h",
-    ], exclude = ["MultimodalTypes.h"]),
+    ], exclude = [
+        "MultimodalInputUtils.h",
+        "MultimodalTypes.h",
+    ]),
     srcs = glob([
         "*.cc",
     ]),

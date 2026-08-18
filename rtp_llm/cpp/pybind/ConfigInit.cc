@@ -46,15 +46,15 @@ void registerMultimodal(const py::module& m) {
     pybind11::class_<MMPreprocessConfig>(m, "MMPreprocessConfig")
         .def(pybind11::
                  init<int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, std::vector<float>, int32_t>(),
-             py::arg("width"),
-             py::arg("height"),
-             py::arg("min_pixels"),
-             py::arg("max_pixels"),
-             py::arg("fps"),
-             py::arg("min_frames"),
-             py::arg("max_frames"),
-             py::arg("crop_positions"),
-             py::arg("mm_timeout_ms"))
+             py::arg("width")          = -1,
+             py::arg("height")         = -1,
+             py::arg("min_pixels")     = -1,
+             py::arg("max_pixels")     = -1,
+             py::arg("fps")            = -1,
+             py::arg("min_frames")     = -1,
+             py::arg("max_frames")     = -1,
+             py::arg("crop_positions") = std::vector<float>{},
+             py::arg("mm_timeout_ms")  = -1)
         .def_readwrite("width", &MMPreprocessConfig::width)
         .def_readwrite("height", &MMPreprocessConfig::height)
         .def_readwrite("min_pixels", &MMPreprocessConfig::min_pixels)
@@ -1869,6 +1869,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("max_seq_len", &ModelConfig::max_seq_len)
         .def_readwrite("gen_num_per_cycle", &ModelConfig::gen_num_per_cycle)
         .def_readwrite("vocab_size", &ModelConfig::vocab_size)
+        .def_readwrite("output_vocab_ids", &ModelConfig::output_vocab_ids)
+        .def_readwrite("output_vocab_padded_size", &ModelConfig::output_vocab_padded_size)
         .def_readwrite("hidden_size", &ModelConfig::hidden_size)
         .def_readwrite("attn_config", &ModelConfig::attn_config)
         .def_readwrite("linear_attention_config", &ModelConfig::linear_attention_config)

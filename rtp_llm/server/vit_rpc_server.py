@@ -7,6 +7,11 @@ import grpc
 import torch
 
 from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.config.exceptions import (
+    ExceptionCategory,
+    ExceptionType,
+    FtRuntimeException,
+)
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import setup_and_configure_server
@@ -27,6 +32,7 @@ from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.model_factory import ModelFactory
+from rtp_llm.multimodal.mm_error_messages import format_mm_rpc_error
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes, MMProcessEngine
 from rtp_llm.multimodal.mm_scheduler import (
     MMSchedulerOverloadError,
@@ -49,6 +55,28 @@ def _tensor_pb_bytes(tensor_pb) -> int:
         + len(tensor_pb.fp16_data)
         + len(tensor_pb.bf16_data)
     )
+
+
+_EXCEPTION_CATEGORY_TO_GRPC_STATUS = {
+    ExceptionCategory.BAD_REQUEST: grpc.StatusCode.INVALID_ARGUMENT,
+    ExceptionCategory.TOO_LONG: grpc.StatusCode.INVALID_ARGUMENT,
+    ExceptionCategory.UNSUPPORTED: grpc.StatusCode.INVALID_ARGUMENT,
+    ExceptionCategory.CAPACITY: grpc.StatusCode.RESOURCE_EXHAUSTED,
+    ExceptionCategory.TIMEOUT: grpc.StatusCode.DEADLINE_EXCEEDED,
+    ExceptionCategory.CANCELLED: grpc.StatusCode.CANCELLED,
+}
+
+
+def _grpc_status_for_runtime_exception(
+    error: FtRuntimeException,
+) -> grpc.StatusCode:
+    return _EXCEPTION_CATEGORY_TO_GRPC_STATUS.get(
+        error.exception_type.category, grpc.StatusCode.INTERNAL
+    )
+
+
+def _runtime_exception_reason(error: FtRuntimeException) -> str:
+    return f"runtime_{error.exception_type.category.value}"
 
 
 def _report_output_metrics(output_pb: MultimodalOutputPB, tags: Dict[str, str]) -> None:
@@ -154,7 +182,12 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 1,
                 {"source": "vit_server", "reason": "overload"},
             )
-            context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, str(e))
+            context.abort(
+                grpc.StatusCode.RESOURCE_EXHAUSTED,
+                format_mm_rpc_error(
+                    FtRuntimeException(ExceptionType.MM_PROCESS_ERROR, str(e))
+                ),
+            )
         except MMSchedulerTimeoutError as e:
             # Scheduler wait exceeded its embedding timeout.
             kmonitor.report(
@@ -162,7 +195,12 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 1,
                 {"source": "vit_server", "reason": "timeout"},
             )
-            context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, str(e))
+            context.abort(
+                grpc.StatusCode.DEADLINE_EXCEEDED,
+                format_mm_rpc_error(
+                    FtRuntimeException(ExceptionType.MM_PROCESS_ERROR, str(e))
+                ),
+            )
         except MMSchedulerRequestTooLargeError as e:
             # Client asked for more than a single request may carry -> a caller
             # error, so INVALID_ARGUMENT rather than UNKNOWN.
@@ -171,7 +209,20 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 1,
                 {"source": "vit_server", "reason": "request_too_large"},
             )
-            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                format_mm_rpc_error(
+                    FtRuntimeException(ExceptionType.MM_WRONG_FORMAT_ERROR, str(e))
+                ),
+            )
+        except FtRuntimeException as e:
+            grpc_status = _grpc_status_for_runtime_exception(e)
+            kmonitor.report(
+                AccMetrics.VIT_RPC_SERVER_ERROR_QPS_METRIC,
+                1,
+                {"source": "vit_server", "reason": _runtime_exception_reason(e)},
+            )
+            context.abort(grpc_status, format_mm_rpc_error(e))
         except Exception:
             kmonitor.report(
                 AccMetrics.VIT_RPC_SERVER_ERROR_QPS_METRIC,

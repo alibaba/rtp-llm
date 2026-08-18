@@ -7,8 +7,10 @@
 #include <vector>
 #include <torch/python.h>
 #include "absl/status/statusor.h"
+#include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
@@ -73,7 +75,7 @@ private:
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
                                                       std::string                                 ip_port = "") {
         if (ip_port == "") {
-            return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "ip:port is empty in remote multimodal processing");
+            return ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, "ip:port is empty in remote multimodal processing");
         }
         auto connection_status = pool_.getConnection(ip_port);
         if (!connection_status.ok()) {
@@ -93,7 +95,17 @@ private:
         reportRpcMetrics(ip_port, cost_us, request_bytes, output_pb.ByteSizeLong(), &status);
 
         if (!status.ok()) {
-            return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, status.error_message());
+            if (auto error_info = parseMultimodalErrorMessage(status.error_message())) {
+                return *error_info;
+            }
+            if (status.error_code() == grpc::StatusCode::UNAVAILABLE
+                || status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
+                return ErrorInfo(ErrorCode::MM_REMOTE_RPC_FAILED, status.error_message());
+            }
+            RTP_LLM_LOG_WARNING("unclassified multimodal RPC error is not retryable, grpc code [%d], message [%s]",
+                                static_cast<int>(status.error_code()),
+                                status.error_message().c_str());
+            return ErrorInfo(ErrorCode::UNKNOWN_ERROR, status.error_message());
         }
         return QueryConverter::transMMOutput(&output_pb);
     }

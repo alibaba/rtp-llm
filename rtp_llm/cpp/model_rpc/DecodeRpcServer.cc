@@ -1279,7 +1279,7 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
         EXECUTE_WITH_RETRY(
             allocateResourceFunc, decode_context, max_retry_times, max_retry_timeout_ms, retry_interval_ms);
         if (decode_context.hasError()) {
-            RTP_LLM_LOG_WARNING("request [%s] allocate resource failed after retry %d times, cost time ms [%ld], "
+            RTP_LLM_LOG_WARNING("request [%s] allocate resource failed after retry %ld times, cost time ms [%ld], "
                                 "max retry time [%ld], max retry timeout ms [%ld]",
                                 decode_context.request_key.c_str(),
                                 decode_context.retry_times,
@@ -1293,11 +1293,13 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
         decode_context.stat_info.nextStage();
     } catch (const std::exception& e) {
         auto error_msg              = "request [" + decode_context.request_key + "] catch exception [" + e.what() + "]";
-        decode_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        decode_context.error_info   = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error_msg);
+        decode_context.error_status = serializeErrorMsg(decode_context.request_key, decode_context.error_info);
         return decode_context.error_status;
     } catch (...) {
         auto error_msg              = "request [" + decode_context.request_key + "] catch unknown exception";
-        decode_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        decode_context.error_info   = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error_msg);
+        decode_context.error_status = serializeErrorMsg(decode_context.request_key, decode_context.error_info);
         return decode_context.error_status;
     }
 

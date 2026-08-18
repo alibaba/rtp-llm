@@ -27,6 +27,20 @@ enum class ReturnAllProbsMode {
     ORIGINAL = 2
 };
 
+enum class ThinkingMode {
+    UNSPECIFIED = 0,
+    DISABLED    = 1,
+    ADAPTIVE    = 2,
+    ENABLED     = 3,
+};
+
+inline ThinkingMode normalizeThinkingMode(int value) {
+    if (value < static_cast<int>(ThinkingMode::UNSPECIFIED) || value > static_cast<int>(ThinkingMode::ENABLED)) {
+        return ThinkingMode::UNSPECIFIED;
+    }
+    return static_cast<ThinkingMode>(value);
+}
+
 class GenerateConfig: public autil::legacy::Jsonizable {
 public:
     int global_request_id  = -1;
@@ -94,6 +108,7 @@ public:
     bool pd_separation         = false;
 
     bool               in_think_mode       = false;
+    ThinkingMode       thinking_mode       = ThinkingMode::UNSPECIFIED;
     int                max_thinking_tokens = 0;
     std::vector<int>   begin_think_token_ids;
     std::vector<int>   end_think_token_ids;
@@ -185,7 +200,8 @@ public:
                      << ", stop_words_list:" << vectorsToString(stop_words_list)
                      << ", grammar_terminate_without_stop_token: " << grammar_terminate_without_stop_token
                      << ", can_use_pd_separation: " << can_use_pd_separation << ", pd_separation: " << pd_separation
-                     << ", in_think_mode: " << in_think_mode << ", max_thinking_tokens: " << max_thinking_tokens
+                     << ", in_think_mode: " << in_think_mode << ", thinking_mode: " << static_cast<int>(thinking_mode)
+                     << ", max_thinking_tokens: " << max_thinking_tokens
                      << ", begin_think_token_ids: " << vectorToString(begin_think_token_ids)
                      << ", end_think_token_ids: " << vectorToString(end_think_token_ids)
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
@@ -300,6 +316,9 @@ public:
         JSONIZE(sp_advice_prompt);
         JSONIZE(sp_advice_prompt_token_ids);
         JSONIZE(in_think_mode);
+        int thinking_mode_int = static_cast<int>(thinking_mode);
+        json.Jsonize("thinking_mode", thinking_mode_int, thinking_mode_int);
+        thinking_mode = normalizeThinkingMode(thinking_mode_int);
         JSONIZE(max_thinking_tokens);
         JSONIZE(begin_think_token_ids);
         JSONIZE(end_think_token_ids);

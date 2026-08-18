@@ -40,7 +40,10 @@ py_test(
 py_test(
     name = "test_model_weight_info",
     srcs = ["test_model_weight_info.py"],
-    deps = py_test_deps,
+    deps = py_test_deps + [
+        # auto_model: the finalize coverage imports rtp_llm.models.base_model.
+        "//rtp_llm/models_py/standalone:auto_model",
+    ],
     tags = ["H20"],
     exec_properties = {
         'gpu': 'H20',

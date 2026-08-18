@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode
 from rtp_llm.config.grammar_constraint import GRAMMAR_FIELD_NAMES
 from rtp_llm.config.response_format import ResponseFormat, parse_response_format
 from rtp_llm.utils.base_model_datatypes import AuxInfo
@@ -64,7 +64,9 @@ class MMPreprocessConfigPart(BaseModel):
     min_frames: Optional[int] = None
     max_frames: Optional[int] = None
     crop_positions: Optional[str] = None
-    mm_timeout_ms: int = 30000
+    # Unset values inherit MM_TIMEOUT_MS (120s by default). Set MM_TIMEOUT_MS=30000
+    # to preserve the legacy 30s timeout for requests that omit this field.
+    mm_timeout_ms: int = -1
 
 
 class IgraphInfo(BaseModel):
@@ -287,6 +289,46 @@ class ChatCompletionRequest(BaseModel):
         ):
             return True
         return False
+
+    def get_explicit_thinking_mode(self) -> Optional[ThinkingMode]:
+        chat_template_kwargs = self.get_chat_template_kwargs() or {}
+        requested_mode: Optional[ThinkingMode] = None
+        if "thinking_mode" in chat_template_kwargs:
+            raw_mode = chat_template_kwargs["thinking_mode"]
+            request_modes = {
+                "disabled": ThinkingMode.DISABLED,
+                "adaptive": ThinkingMode.ADAPTIVE,
+                "enabled": ThinkingMode.ENABLED,
+            }
+            if not isinstance(raw_mode, str) or raw_mode not in request_modes:
+                raise ValueError(
+                    "chat_template_kwargs.thinking_mode must be one of: "
+                    "disabled, adaptive, enabled"
+                )
+            requested_mode = request_modes[raw_mode]
+
+        if self.disable_thinking():
+            return ThinkingMode.DISABLED
+        if self.enable_thinking is True:
+            return ThinkingMode.ENABLED
+
+        if (
+            self.extra_configs is not None
+            and "thinking_mode" in self.extra_configs.model_fields_set
+            and self.extra_configs.thinking_mode != ThinkingMode.UNSPECIFIED
+        ):
+            return self.extra_configs.thinking_mode
+
+        if requested_mode is not None:
+            return requested_mode
+        if chat_template_kwargs.get("enable_thinking") is True:
+            return ThinkingMode.ENABLED
+        return None
+
+    def resolve_thinking_mode(
+        self, default_mode: ThinkingMode = ThinkingMode.DISABLED
+    ) -> ThinkingMode:
+        return self.get_explicit_thinking_mode() or default_mode
 
 
 class BatchChatCompletionRequest(BaseModel):
