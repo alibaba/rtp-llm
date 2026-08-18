@@ -162,6 +162,14 @@ cc_library(
 )
 
 cc_library(
+    name = "block_ref_counter",
+    hdrs = ["BlockRefCounter.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = ["//rtp_llm/cpp/utils:core_utils"],
+)
+
+cc_library(
     name = "block_pool",
     srcs = [
         "BlockCache.cc",
@@ -174,7 +182,6 @@ cc_library(
         "BlockPool.h",
         "BlockPoolConfig.h",
         "BlockPoolConfigHelper.h",
-        "BlockRefCounter.h",
         "MemoryLayoutStrategy.h",
         "MemoryLayoutConfig.h",
         "SharedBlockCache.h",
@@ -182,11 +189,13 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":block_ref_counter",
         ":cache_types",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:lru_cache",
         "//rtp_llm/cpp/utils:profiling_scope",
+        "//rtp_llm/cpp/utils:stl_utils",
         "//rtp_llm/models_py/bindings/core:type_convert",
     ] + select({
         "@//:using_cuda": [
