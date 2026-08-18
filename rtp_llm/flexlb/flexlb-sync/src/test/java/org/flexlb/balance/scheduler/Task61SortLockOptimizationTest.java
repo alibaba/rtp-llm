@@ -121,6 +121,9 @@ class Task61SortLockOptimizationTest {
         // reference (jump-in semantics only); the na130_4 depth term has its
         // own dedicated tests in PrefillQueueManagerTest, so gate it off here.
         config.setFlexlbQueueDepthPenaltyEnabled(false);
+        // Likewise disable the 18:41 cold-start floor: this test pins the
+        // estimate against the raw 200ms batching-window fallback.
+        config.setFlexlbDispatchIntervalColdFloorMs(0);
         config.setFlexlbBatchSizeMax(2);
         config.setFlexlbBatchFixedWaitMs(200);
         WorkerBatcher batcher = new WorkerBatcher("test-worker", null, config,

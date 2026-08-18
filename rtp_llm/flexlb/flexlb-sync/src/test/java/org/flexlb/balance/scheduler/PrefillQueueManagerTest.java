@@ -13,6 +13,10 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.PriorityBlockingQueue;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -38,6 +42,10 @@ class PrefillQueueManagerTest {
         config = new FlexlbConfig();
         config.setFlexlbBatchAlgorithm("fixed_window");
         config.setAutoTpmEnabled(true);
+        // The pre-18:41 estimate tests pin the pure jump/depth semantics
+        // against the batching-window fallback; the cold-start floor has its
+        // own dedicated tests below.
+        config.setFlexlbDispatchIntervalColdFloorMs(0);
     }
 
     private WorkerBatcher newBatcher() {
@@ -202,6 +210,91 @@ class PrefillQueueManagerTest {
         // Empty queue: depth term is 0, P70 probe keeps its jump-in zero wait
         WorkerBatcher emptyBatcher = newBatcher();
         assertEquals(0, emptyBatcher.queueManager().estimateWaitMs(70, now + 60_000, 999));
+    }
+
+    // ==================== 18:41 cold-start dispatch-interval floor ====================
+
+    @Test
+    void cold_start_estimate_is_floored_until_dispatch_samples_exist() {
+        config.setFlexlbBatchSizeMax(8);
+        config.setFlexlbBatchFixedWaitMs(120);
+        config.setFlexlbDispatchIntervalColdFloorMs(500);
+        WorkerBatcher batcher = newBatcher();
+        long now = System.currentTimeMillis();
+        for (long requestId = 1; requestId <= 16; requestId++) {
+            assertTrue(batcher.tryOffer(item(requestId, 30, now, now - 100_000, 128)));
+        }
+
+        // Cold EMA right after a master restart: the 120ms batching-window
+        // fallback would dilute the depth term to (16/8)×120=240; the floor
+        // restores the counterweight to (16/8)×500=1000.
+        assertEquals(1000, batcher.queueManager().estimateWaitMs(70, now + 60_000, 999),
+                "a cold EMA must not dilute the depth term below the floor cadence");
+    }
+
+    @Test
+    void converged_ema_is_used_verbatim_and_ignores_the_cold_floor() throws InterruptedException {
+        config.setFlexlbBatchSizeMax(8);
+        config.setFlexlbBatchFixedWaitMs(120);
+        // Floor far above the injected EMA so the "not re-floored" assertion
+        // tolerates CI scheduler jitter on the 200ms sleep.
+        config.setFlexlbDispatchIntervalColdFloorMs(5000);
+        WorkerBatcher batcher = newBatcher();
+        long now = System.currentTimeMillis();
+
+        // A batcher-context pair whose EMA is driven by real dispatch samples:
+        // two dispatch(List.of(), null) calls ~200ms apart — the first seeds
+        // lastDispatchAtMs, the second produces the first positive EMA
+        // (~200ms, far below the 5000ms floor).
+        PriorityBlockingQueue<BatchItem> queue =
+                new PriorityBlockingQueue<>(11, WorkerBatcher.AUTO_TPM_QUEUE_ORDER);
+        BatcherContext warmCtx = new BatcherContext("warm-worker", null, config,
+                mock(BatchDecisionHandler.class), queue, new AtomicInteger(),
+                new AtomicLong(), new ReentrantLock(), WorkerBatcher.AUTO_TPM_QUEUE_ORDER,
+                mock(BatchSchedulerReporter.class));
+        PrefillQueueManager warm = new PrefillQueueManager(batcher, warmCtx);
+        for (long requestId = 1; requestId <= 8; requestId++) {
+            queue.offer(item(requestId, 30, now, now - 100_000, 128));
+        }
+        warmCtx.dispatch(List.of(), null);
+        Thread.sleep(200);
+        warmCtx.dispatch(List.of(), null);
+
+        // Core regression: a converged EMA (~200ms) must NOT be re-floored to
+        // 5000 — the depth horizon (8/8)×EMA stays in the measured band.
+        long warmWait = warm.estimateWaitMs(70, now + 60_000, 999);
+        assertTrue(warmWait >= 200 && warmWait < 5000,
+                "converged EMA must be used verbatim, got " + warmWait);
+
+        // Control: the same queue/config on a cold context (no dispatch
+        // samples) is floored to 5000 — proving the flag, not the queue,
+        // drives the difference.
+        PriorityBlockingQueue<BatchItem> coldQueue =
+                new PriorityBlockingQueue<>(11, WorkerBatcher.AUTO_TPM_QUEUE_ORDER);
+        BatcherContext coldCtx = new BatcherContext("cold-worker", null, config,
+                mock(BatchDecisionHandler.class), coldQueue, new AtomicInteger(),
+                new AtomicLong(), new ReentrantLock(), WorkerBatcher.AUTO_TPM_QUEUE_ORDER,
+                mock(BatchSchedulerReporter.class));
+        PrefillQueueManager cold = new PrefillQueueManager(batcher, coldCtx);
+        for (long requestId = 1; requestId <= 8; requestId++) {
+            coldQueue.offer(item(requestId, 30, now, now - 100_000, 128));
+        }
+        assertEquals(5000, cold.estimateWaitMs(70, now + 60_000, 999));
+    }
+
+    @Test
+    void cold_floor_zero_disables_the_clamp() {
+        config.setFlexlbBatchSizeMax(8);
+        config.setFlexlbBatchFixedWaitMs(120);
+        config.setFlexlbDispatchIntervalColdFloorMs(0);
+        WorkerBatcher batcher = newBatcher();
+        long now = System.currentTimeMillis();
+        for (long requestId = 1; requestId <= 16; requestId++) {
+            assertTrue(batcher.tryOffer(item(requestId, 30, now, now - 100_000, 128)));
+        }
+
+        // Bit-for-bit legacy behavior: (16/8) × 120ms fallback, no clamp.
+        assertEquals(240, batcher.queueManager().estimateWaitMs(70, now + 60_000, 999));
     }
 
     // ==================== 17.2 atomic victim replace ====================

@@ -610,4 +610,18 @@ public class BatcherContext {
                 : cfg.getFlexlbBatchWindowMs();
         return Math.max(1, windowMs);
     }
+
+    /**
+     * Whether the dispatch-interval EMA has real samples — i.e. at least two
+     * dispatches were recorded (the first only seeds {@code lastDispatchAtMs},
+     * the second produces the first positive EMA). This is the precise
+     * cold-start signal for {@link #avgDispatchIntervalMs()}: while false the
+     * returned value is the batching-window fallback, never a measured
+     * interval; once true the EMA stays strictly positive forever
+     * ({@code 0.3*interval + 0.7*ema} of positive terms), so the flag never
+     * flips back and a converged fast engine is never re-floored.
+     */
+    boolean hasDispatchIntervalSamples() {
+        return dispatchIntervalEmaMs > 0;
+    }
 }

@@ -328,6 +328,7 @@ public class ConfigService {
             config.getAutoTpmCommitStrategy(), config.getAutoTpmVictimGuardMode());
         log.info("queueDepthPenaltyEnabled={}, queueDepthPenaltyFactor={}",
             config.isFlexlbQueueDepthPenaltyEnabled(), config.getFlexlbQueueDepthPenaltyFactor());
+        log.info("dispatchIntervalColdFloorMs={}", config.getFlexlbDispatchIntervalColdFloorMs());
         log.info("congestedQueueFilterEnabled={}, congestedQueueRatio={}",
             config.isFlexlbCongestedQueueFilterEnabled(), config.getFlexlbCongestedQueueRatio());
         log.info("engineWaitPenaltyEnabled={}, engineWaitPenaltyMsPerWaitStream={}",

@@ -603,6 +603,25 @@ public class FlexlbConfig {
     private double flexlbQueueDepthPenaltyFactor = 1.0;
 
     /**
+     * Cold-start dispatch-interval floor for the Auto-TPM batcher wait
+     * estimate ({@code PrefillQueueManager.estimateWaitMs}). Before any
+     * dispatch is observed, {@code avgDispatchIntervalMs()} falls back to the
+     * algorithm's batching window (fixed_window:
+     * {@code flexlbBatchFixedWaitMs}, e.g. 120ms), diluting the depth term
+     * {@code (queueSize / flexlbBatchSizeMax) × interval} ~10× against the
+     * real 1-2s drain cadence right after a master restart — the engineWait
+     * term then dominates and routing keeps favoring the lowest-reporting
+     * engine until it drowns (18:41: engine 237 kept winning while being
+     * flooded to 820 queued). While the EMA has no dispatch samples the
+     * per-cycle interval is clamped to at least this floor; once any real
+     * dispatch sample exists the measured EMA is used verbatim — zero
+     * steady-state impact on converged fast engines. {@code <= 0} disables
+     * the floor (exact legacy behavior).
+     * Environment variable: FLEXLB_DISPATCH_INTERVAL_COLD_FLOOR_MS.
+     */
+    private long flexlbDispatchIntervalColdFloorMs = 500L;
+
+    /**
      * Congested-queue candidate filter gate for prefill selection
      * ({@code CostBasedPrefillStrategy}): when true (default), a prefill
      * endpoint whose batcher queue depth is at least

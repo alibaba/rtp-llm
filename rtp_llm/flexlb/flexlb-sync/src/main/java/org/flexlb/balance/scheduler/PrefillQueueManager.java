@@ -111,6 +111,20 @@ public final class PrefillQueueManager {
      * can never look cheaper than the queue it jumps into. With the gate off
      * the legacy jump-only value is returned unchanged.
      *
+     * <p>18:41 cold-start floor: right after a master restart the dispatch
+     * EMA has no samples yet, so {@code avgDispatchIntervalMs()} falls back
+     * to the batching window (fixed_window: {@code flexlbBatchFixedWaitMs},
+     * e.g. 120ms) and the depth term {@code (queueSize/maxBatch) × interval}
+     * is diluted ~10× against the real 1-2s drain cadence — the engineWait
+     * term then dominates the routing score and traffic keeps piling onto
+     * the lowest-reporting engine until it drowns (18:41: engine 237 kept
+     * winning while being flooded to 820 queued). While the EMA is
+     * unconverged ({@code hasDispatchIntervalSamples() == false}) the
+     * per-cycle interval is clamped to at least
+     * {@code flexlbDispatchIntervalColdFloorMs}; once any real dispatch
+     * sample exists the measured EMA is used verbatim — zero steady-state
+     * impact on converged fast engines.
+     *
      * <p>task61 L2: the previous implementation sorted the whole queue under
      * the lock only to take the ordered head and count the items ahead. The
      * count is order-independent, and the head is {@code queue.peek()} — the
@@ -142,6 +156,15 @@ public final class PrefillQueueManager {
         }
         int maxBatchSize = Math.max(1, ctx.cfg().getFlexlbBatchSizeMax());
         long intervalMs = ctx.avgDispatchIntervalMs();
+        // 18:41 cold-start floor: while the EMA has no dispatch samples the
+        // interval is the batching-window fallback (e.g. 120ms), which dilutes
+        // the depth term ~10× right after a master restart. Clamp it to the
+        // configured floor until a real dispatch sample exists; a converged
+        // EMA is used verbatim (see the class-level note above).
+        long coldFloorMs = ctx.cfg().getFlexlbDispatchIntervalColdFloorMs();
+        if (coldFloorMs > 0 && !ctx.hasDispatchIntervalSamples()) {
+            intervalMs = Math.max(intervalMs, coldFloorMs);
+        }
         long batchCyclesAhead = itemsAhead / maxBatchSize;
         long headRemainingWindowMs = 0;
         if (head != null) {
