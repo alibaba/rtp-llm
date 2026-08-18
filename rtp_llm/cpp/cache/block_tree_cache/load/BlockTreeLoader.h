@@ -47,7 +47,6 @@ public:
 
     // The caller must hold the shared BlockTreeCache mutex.
     BlockTreeMatchResult matchLocked(const CacheKeysType& cache_keys);
-    void                 releaseMatchedResourcesLocked(const std::vector<MultiNodeResource>& resources);
     BlockIndicesType     matchedBlocksForGroup(size_t                                group_id,
                                                const std::vector<MultiNodeResource>& matched_resources) const;
     bool                 cancelLoad(const std::shared_ptr<AsyncContext>& context);
@@ -61,11 +60,11 @@ private:
     BlockTreeMatchResult createMatchResult(std::vector<TreeNode*>& path, const CacheKeysType& cache_keys);
     StorageRequest       makeStorageRequest(const CacheKeysType& cache_keys, size_t local_matched_blocks_num) const;
     bool                 commitLoad(const std::shared_ptr<LoadAsyncContext>& context);
-    bool                 releaseDeviceLoadSourcesLocked(const LoadAsyncContext& context);
     void                 abortLoadLocked(const std::vector<TransferDescriptor>& load_descs,
                                          const std::vector<bool>&               joined_loads,
                                          size_t                                 prepared_desc_count,
-                                         uint64_t                               context_id);
+                                         uint64_t                               context_id,
+                                         bool                                   release_transferred_refs);
     void                 runLoadTask(const LoadTaskRunner::TaskPtr& task);
     bool                 settleLoadLocked(LoadTaskRunner::Task& task, bool copy_success);
 

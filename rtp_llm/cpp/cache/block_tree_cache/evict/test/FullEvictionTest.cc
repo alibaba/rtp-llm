@@ -312,6 +312,7 @@ TEST_F(FullEvictionTest, LRUReclaimsOldestLeafFirst) {
 
     auto result = cache_->match({200});
     EXPECT_EQ(result.matched_device_blocks, 1u);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache_, result.matched_device_resources);
 }
 
 // A real match is the only event that advances LRU heat. Matching the oldest
@@ -322,13 +323,17 @@ TEST_F(FullEvictionTest, MatchRefreshesLruOrder) {
 
     auto match = cache_->match({100});
     ASSERT_EQ(match.matched_device_blocks, 1u);
-    cache_->releaseMatchedResources(match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache_, match.matched_device_resources);
 
     EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
 
-    EXPECT_EQ(cache_->match({100}).matched_device_blocks, 1u);
-    EXPECT_EQ(cache_->match({200}).matched_device_blocks, 0u);
+    auto hot_match  = cache_->match({100});
+    auto cold_match = cache_->match({200});
+    EXPECT_EQ(hot_match.matched_device_blocks, 1u);
+    EXPECT_EQ(cold_match.matched_device_blocks, 0u);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache_, hot_match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache_, cold_match.matched_device_resources);
 }
 
 // Releasing match-protection references only restores candidate eligibility;
@@ -344,7 +349,7 @@ TEST_F(FullEvictionTest, MatchReleaseDoesNotMutateHeat) {
     const CandidateMeta meta_after_match = found.back()->group_set_resources[0].candidate_meta;
     ASSERT_EQ(meta_after_match.hit_count, 1u);
 
-    cache_->releaseMatchedResources(match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache_, match.matched_device_resources);
 
     const CandidateMeta meta_after_release = found.back()->group_set_resources[0].candidate_meta;
     EXPECT_EQ(meta_after_release.last_access_seq, meta_after_match.last_access_seq);
@@ -359,8 +364,8 @@ TEST_F(FullEvictionTest, MatchReleaseDoesNotMutateHeat) {
     auto cold_match = cache_->match({200});
     EXPECT_EQ(hot_match.matched_device_blocks, 1u);
     EXPECT_EQ(cold_match.matched_device_blocks, 0u);
-    cache_->releaseMatchedResources(hot_match.matched_device_resources);
-    cache_->releaseMatchedResources(cold_match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache_, hot_match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache_, cold_match.matched_device_resources);
 }
 
 // An insert that completely overlaps an existing path creates no inserted_nodes.
@@ -377,8 +382,12 @@ TEST_F(FullEvictionTest, OverlappingInsertDoesNotOverwriteOrRefreshLru) {
     EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
 
-    EXPECT_EQ(cache_->match({100}).matched_device_blocks, 0u);
-    EXPECT_EQ(cache_->match({200}).matched_device_blocks, 1u);
+    auto old_match = cache_->match({100});
+    auto new_match = cache_->match({200});
+    EXPECT_EQ(old_match.matched_device_blocks, 0u);
+    EXPECT_EQ(new_match.matched_device_blocks, 1u);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache_, old_match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache_, new_match.matched_device_resources);
 }
 
 TEST(FullPruneTest, PrunesDependentFullSubtreeAcrossTiers) {
