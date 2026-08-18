@@ -1054,6 +1054,8 @@ class ModelConfig:
     swiglu_limit: float
     num_hash_layers: int
     num_layers: int
+    output_vocab_ids: list[int]
+    output_vocab_padded_size: int
     partial_rotary_factor: float
     position_ids_style: int
     pre_seq_len: int

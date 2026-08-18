@@ -76,6 +76,41 @@ std::optional<ErrorInfo> collectStreamSamplerError(const SamplerOutput& sampler_
     return error_info;
 }
 
+bool NormalOutputDispatcher::restoreCurrentTokenIds(const GenerateStreamPtr& stream,
+                                                    torch::Tensor&           batch_token_ids,
+                                                    torch::Tensor&           current_token_ids,
+                                                    size_t                   token_position) const {
+    if (output_vocab_ids_.empty()) {
+        return true;
+    }
+
+    RTP_LLM_CHECK(batch_token_ids.device().is_cpu() && current_token_ids.device().is_cpu());
+    RTP_LLM_CHECK(batch_token_ids.scalar_type() == torch::kInt32 && current_token_ids.scalar_type() == torch::kInt32);
+    RTP_LLM_CHECK(batch_token_ids.dim() == 2 && current_token_ids.dim() == 2);
+    RTP_LLM_CHECK(batch_token_ids.is_contiguous() && current_token_ids.is_contiguous());
+    RTP_LLM_CHECK(batch_token_ids.size(0) == current_token_ids.size(0));
+    RTP_LLM_CHECK(current_token_ids.size(1) == 1);
+    RTP_LLM_CHECK(token_position < static_cast<size_t>(batch_token_ids.size(1)));
+
+    const auto token_stride = static_cast<size_t>(batch_token_ids.size(1));
+    auto*      batch_data   = batch_token_ids.data_ptr<int32_t>();
+    auto*      current_data = current_token_ids.data_ptr<int32_t>();
+    for (int64_t row = 0; row < current_token_ids.size(0); ++row) {
+        const auto compact_id = current_data[row];
+        if (compact_id < 0 || static_cast<size_t>(compact_id) >= output_vocab_ids_.size()) {
+            stream->reportError(ErrorCode::OUT_OF_VOCAB_RANGE,
+                                "compact output token id " + std::to_string(compact_id)
+                                    + " is outside configured output vocabulary size "
+                                    + std::to_string(output_vocab_ids_.size()));
+            return false;
+        }
+        const auto canonical_id                         = static_cast<int32_t>(output_vocab_ids_[compact_id]);
+        current_data[row]                               = canonical_id;
+        batch_data[row * token_stride + token_position] = canonical_id;
+    }
+    return true;
+}
+
 absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
                                               const MergedOutput& merge_outputs) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -159,17 +194,38 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
 
     auto batch_new_all_token_ids = new_all_token_ids.narrow(0, batch_idx_out, next_batch_size);
 
-    bool has_beam_search = stream->currentNumBeams() > 1 || stream->nextNumBeams() > 1;
+    bool has_beam_search = stream->usesBeamSearchTokenLayoutForCurrentStep();
     bool has_var_batch   = stream->currentBatchSize() != stream->nextBatchSize();
 
     // construct mapping from output batches to input batches
     torch::Tensor src_batch_indices;
     if (has_beam_search) {
         // beam search
+        if (!sampler_output.beam_index.defined() || sampler_output.beam_index.dim() != 1
+            || batch_idx_out + next_batch_size > sampler_output.beam_index.numel()) {
+            stream->reportError(ErrorCode::UNKNOWN_ERROR, "sampler returned an invalid parent index tensor");
+            return;
+        }
         src_batch_indices = sampler_output.beam_index.narrow(0, batch_idx_out, next_batch_size);
     } else if (has_var_batch) {
         // from context stream to decode straem, there might be other cases in future
         src_batch_indices = torch::zeros({(int64_t)next_batch_size}, torch::kInt32);
+    }
+    if (src_batch_indices.defined()) {
+        src_batch_indices = src_batch_indices.to(torch::kCPU, torch::kInt32).contiguous();
+        if (src_batch_indices.dim() != 1 || src_batch_indices.numel() != next_batch_size) {
+            stream->reportError(ErrorCode::UNKNOWN_ERROR, "sampler returned an invalid parent index tensor");
+            return;
+        }
+        const auto* parent_data = src_batch_indices.data_ptr<int32_t>();
+        for (int32_t row = 0; row < next_batch_size; ++row) {
+            if (parent_data[row] < 0 || parent_data[row] >= cur_batch_size) {
+                stream->reportError(ErrorCode::UNKNOWN_ERROR,
+                                    "sampler parent index " + std::to_string(parent_data[row])
+                                        + " is outside the previous batch size " + std::to_string(cur_batch_size));
+                return;
+            }
+        }
     }
     const auto get_src_idx = [&](int32_t dst_idx) {
         return src_batch_indices.defined() ? src_batch_indices.data_ptr<int32_t>()[dst_idx] : dst_idx;
@@ -178,12 +234,27 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     // construct update info
     torch::Tensor batch_hidden_states;
     if (stream->generateConfig()->return_hidden_states) {
-        batch_hidden_states = model_output.hidden_states.narrow(0, batch_idx_in, cur_batch_size);
+        auto raw_hidden_states = model_output.hidden_states.narrow(0, batch_idx_in, cur_batch_size);
+        if (has_beam_search && src_batch_indices.defined()) {
+            auto src_indices_device = src_batch_indices.to(raw_hidden_states.device(), torch::kLong);
+            batch_hidden_states     = raw_hidden_states.index_select(0, src_indices_device);
+        } else {
+            batch_hidden_states = raw_hidden_states;
+        }
     }
 
+    torch::Tensor raw_logits;
     torch::Tensor batch_logits;
-    if (stream->returnLogits() || stream->calculateSoftmaxProbs() || has_beam_search) {
-        batch_logits = model_output.logits.narrow(0, batch_idx_in, cur_batch_size);
+    if (stream->returnLogits() || stream->calculateSoftmaxProbs()) {
+        raw_logits = model_output.logits.narrow(0, batch_idx_in, cur_batch_size);
+        if (stream->returnLogits()) {
+            if (has_beam_search && src_batch_indices.defined()) {
+                auto src_indices_device = src_batch_indices.to(raw_logits.device(), torch::kLong);
+                batch_logits            = raw_logits.index_select(0, src_indices_device);
+            } else {
+                batch_logits = raw_logits;
+            }
+        }
     }
 
     torch::Tensor all_probs;
@@ -266,15 +337,36 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         all_hidden_states = model_output.all_hidden_states.narrow(0, token_offset, token_size);
     }
 
-    auto new_tokens = new_tokens_all.narrow(0, batch_idx_out, next_batch_size);
+    auto         new_tokens     = new_tokens_all.narrow(0, batch_idx_out, next_batch_size);
+    const size_t token_position = has_beam_search ? stream->seqLength() : token_stride - 1;
+    RTP_LLM_CHECK(token_position < token_stride);
     for (size_t i = 0; i < next_batch_size; ++i) {
         new_tokens.data_ptr<int32_t>()[i] =
-            new_all_token_ids.data_ptr<int32_t>()[(batch_idx_out + i) * token_stride + token_stride - 1];
+            new_all_token_ids.data_ptr<int32_t>()[(batch_idx_out + i) * token_stride + token_position];
+    }
+
+    if (!output_vocab_ids_.empty()) {
+        for (int i = 0; i < cur_batch_size; ++i) {
+            if (success_cpu.defined() && !success_cpu.data_ptr<bool>()[batch_idx_in + i]) {
+                stream->reportError(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");
+                return;
+            }
+        }
+        for (int i = 0; i < next_batch_size; ++i) {
+            const auto compact_id = new_tokens.data_ptr<int32_t>()[i];
+            if (compact_id < 0 || static_cast<size_t>(compact_id) >= output_vocab_ids_.size()) {
+                stream->reportError(ErrorCode::OUT_OF_VOCAB_RANGE,
+                                    "compact output token id " + std::to_string(compact_id)
+                                        + " is outside configured output vocabulary size "
+                                        + std::to_string(output_vocab_ids_.size()));
+                return;
+            }
+        }
     }
 
     torch::Tensor current_softmax_result;
     if (stream->calculateSoftmaxProbs()) {
-        auto batch_softmax_input = batch_logits.to(torch::kFloat32).contiguous();
+        auto batch_softmax_input = raw_logits.to(torch::kFloat32).contiguous();
 #if USING_CUDA
         cudaSoftmaxInplace(batch_softmax_input, at::cuda::getCurrentCUDAStream().stream());
 #else
@@ -304,6 +396,10 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                   token_stride);
             }
         }
+    }
+
+    if (!restoreCurrentTokenIds(stream, batch_new_all_token_ids, new_tokens, token_position)) {
+        return;
     }
 
     RTP_LLM_LOG_DEBUG("stream [%ld], new_tokens size = [%ld]", stream->streamId(), new_tokens.numel());
