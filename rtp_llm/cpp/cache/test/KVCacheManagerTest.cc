@@ -1303,7 +1303,7 @@ TEST_F(KVCacheManagerTest, StorePublishesFullBlocksOnlyAndLookupLeavesOneToken) 
               (CacheKeysType{seed_keys[0], seed_keys[1]}));
     auto partial_match = manager->blockTreeCache()->match(seed_keys);
     EXPECT_EQ(partial_match.matched_device_blocks, 2u);
-    manager->blockTreeCache()->releaseMatchedResources(partial_match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*manager->blockTreeCache(), partial_match.matched_device_resources);
 
     auto       aligned_resource = makeDSV4BatchResource(cache_config);
     auto       aligned_tokens   = makeDSV4CompleteTokenIds(/*initial_seq_len=*/8, /*max_seq_len=*/10, 4);

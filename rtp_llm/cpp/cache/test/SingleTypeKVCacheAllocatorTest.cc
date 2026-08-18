@@ -740,13 +740,13 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCachePublishesOnlyBatchZero) {
     ASSERT_EQ(batch_zero_match.matched_device_blocks, 1u);
     ASSERT_EQ(allocator_->blockTreeCacheOwner()->matchedBlocksForGroup(0, batch_zero_match.matched_device_resources),
               (BlockIndicesType{blocks[0]}));
-    allocator_->blockTreeCacheOwner()->releaseMatchedResources(batch_zero_match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*allocator_->blockTreeCacheOwner(), batch_zero_match.matched_device_resources);
 
     auto batch_one_match = allocator_->blockTreeCacheOwner()->match(CacheKeysType{200});
     EXPECT_EQ(batch_one_match.matched_device_blocks, 0u);
     EXPECT_TRUE(
         allocator_->blockTreeCacheOwner()->matchedBlocksForGroup(0, batch_one_match.matched_device_resources).empty());
-    allocator_->blockTreeCacheOwner()->releaseMatchedResources(batch_one_match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*allocator_->blockTreeCacheOwner(), batch_one_match.matched_device_resources);
 
     block_pool->decRef(blocks, BlockRefType::REQUEST);
 }
@@ -794,13 +794,13 @@ TEST_F(SingleTypeKVCacheAllocatorTest, CPInsertAndAllocatorMatchShareLastRankCan
 
     auto noncanonical_match = allocator_->blockTreeCacheOwner()->match(CacheKeysType{100, 102});
     EXPECT_EQ(noncanonical_match.matched_device_blocks, 0u);
-    allocator_->blockTreeCacheOwner()->releaseMatchedResources(noncanonical_match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*allocator_->blockTreeCacheOwner(), noncanonical_match.matched_device_resources);
 
     auto canonical_match = allocator_->blockTreeCacheOwner()->match(CacheKeysType{101, 103});
     ASSERT_EQ(canonical_match.matched_device_blocks, 2u);
     EXPECT_EQ(allocator_->blockTreeCacheOwner()->matchedBlocksForGroup(0, canonical_match.matched_device_resources),
               seed_blocks);
-    allocator_->blockTreeCacheOwner()->releaseMatchedResources(canonical_match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*allocator_->blockTreeCacheOwner(), canonical_match.matched_device_resources);
 
     auto hit = createBatchKVCacheResource(/*batch_size=*/1, config);
     hit->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103, 200, 201});
