@@ -621,19 +621,29 @@ class GenericMoeDecoderLayer(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache],
         prev_topk_indices: Optional[torch.Tensor],
+        force_reuse_topk_indices: bool = False,
     ) -> DecodeLayerOutput:
         """Run the GLM5 CMP attention and MoE preparation path."""
         cmp = self.cmp
         if cmp is None:
             raise RuntimeError("GLM5 CMP execution was not initialized")
         # Prepare MLA inputs with internal streams and PDL.
-        output_residual, mla_query, topk_indices = cmp.mla_prologue(
-            hidden_states,
-            residual,
-            fmha_impl,
-            kv_cache,
-            prev_topk_indices,
-        )
+        if force_reuse_topk_indices:
+            output_residual, mla_query, topk_indices = cmp.mla_prologue_reusing_topk(
+                hidden_states,
+                residual,
+                fmha_impl,
+                kv_cache,
+                prev_topk_indices,
+            )
+        else:
+            output_residual, mla_query, topk_indices = cmp.mla_prologue(
+                hidden_states,
+                residual,
+                fmha_impl,
+                kv_cache,
+                prev_topk_indices,
+            )
 
         # Run RTP's existing FlashMLA interface explicitly.
         mla_output = cmp.sparse_mla(
@@ -694,6 +704,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 fmha_impl,
                 kv_cache,
                 prev_topk_indices,
+                force_reuse_topk_indices=force_reuse_topk_indices,
             )
 
         topk_indices = None
