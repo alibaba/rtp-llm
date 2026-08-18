@@ -250,6 +250,7 @@ class PyAttentionInputs:
     cache_store_inputs: PyCacheStoreInputs | None
     combo_position_ids: torch.Tensor
     context_parallel_info: PyContextParallelParams | None
+    cuda_graph_fmha_workspace: torch.Tensor
     context_total_kv_length: int
     cu_kv_seqlens: torch.Tensor
     cu_seqlens: torch.Tensor
@@ -330,6 +331,8 @@ class PyModelInitResources:
     def is_decode_role(self) -> bool: ...
     @property
     def max_context_batch_size(self) -> int: ...
+    @property
+    def max_decode_graph_batch_size(self) -> int: ...
 
 class PyModelInputs:
     @typing.overload

@@ -267,6 +267,7 @@ struct PyModelInitResources {
     bool                   is_speculative         = false;
     bool                   is_decode_role         = false;
     int64_t                max_context_batch_size = 1;
+    int64_t                max_decode_graph_batch_size = 1;
 };
 
 struct PyCacheStoreInputs {
@@ -321,6 +322,9 @@ struct PyContextParallelParams {
 struct PyAttentionInputs {
     bool is_prefill{false};
     bool is_target_verify{false};
+    // Model-scoped fixed-address backing storage used while constructing
+    // TokenSpeed MLA implementations for CUDA graph capture/replay.
+    torch::Tensor cuda_graph_fmha_workspace;
     // True for the synthetic stream used to keep DP/EP collectives aligned.
     // Python models must not read or write request KV state for this stream.
     bool          is_fake_stream{false};

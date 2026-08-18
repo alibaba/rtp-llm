@@ -25,6 +25,7 @@ __all__ = [
     "transpose_packed_fp4",
     "tf32_hc_prenorm_gemm",
     "has_deep_gemm",
+    "has_bf16_gemm_nt_skip_head_mid",
     "is_deep_gemm_e8m0_used",
     "configure_deep_gemm_num_sms",
     "maybe_pack_ue8m0_scale",
@@ -88,6 +89,11 @@ _tf32_hc_prenorm_gemm_impl: Callable[..., Any] | None = None
 def has_deep_gemm() -> bool:
     """Whether the optional `deep_gemm` package is available."""
     return has_module("deep_gemm")
+
+
+def has_bf16_gemm_nt_skip_head_mid() -> bool:
+    """Whether the installed DeepGEMM exposes the packed-KV BF16 kernel."""
+    return _bf16_gemm_nt_skip_head_mid_impl is not None
 
 
 @functools.cache

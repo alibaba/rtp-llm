@@ -23,7 +23,6 @@ from .rope_emb_new import NewMlaRotaryEmbeddingOp
 MLA_DECODE_KERNEL_ENV = "RTP_MLA_DECODE_KERNEL"
 _MLA_DECODE_KERNELS = ("auto", "flashinfer", "tokenspeed_mla")
 
-
 def _get_mla_decode_kernel() -> str:
     kernel = os.environ.get(MLA_DECODE_KERNEL_ENV, "auto")
     if kernel not in _MLA_DECODE_KERNELS:
@@ -279,23 +278,69 @@ def tokenspeed_mla_kernel_supported(
     return True
 
 
+def _tokenspeed_workspace_bytes(
+    device: torch.device,
+    num_heads: int,
+    kv_lora_rank: int,
+    max_q_len: int,
+) -> int:
+    assert _TOKENSPEED_GET_NUM_SM is not None
+    num_sms = int(_TOKENSPEED_GET_NUM_SM(device))
+    # B * split_kv never exceeds the active SM count. Each partial stores one
+    # fp32 latent vector plus its normalization scalar per query head.
+    return num_sms * num_heads * max_q_len * (kv_lora_rank + 1) * 4
+
+
 def _get_tokenspeed_workspace(
     device: torch.device,
     num_heads: int,
     kv_lora_rank: int,
     max_q_len: int,
 ) -> torch.Tensor:
-    """Allocate an op-owned split-KV upper bound.
-
-    TokenSpeed writes intermediate reductions into this buffer.  It therefore
-    cannot be shared by graph instances or concurrently executing streams.
-    """
-    assert _TOKENSPEED_GET_NUM_SM is not None
-    num_sms = int(_TOKENSPEED_GET_NUM_SM(device))
-    # B * split_kv never exceeds the active SM count. Each partial stores one
-    # fp32 latent vector plus its normalization scalar per query head.
-    required_bytes = num_sms * num_heads * max_q_len * (kv_lora_rank + 1) * 4
+    """Allocate a split-KV upper bound for one eager operator."""
+    required_bytes = _tokenspeed_workspace_bytes(
+        device, num_heads, kv_lora_rank, max_q_len
+    )
     return torch.empty(required_bytes, dtype=torch.int8, device=device)
+
+
+def _tokenspeed_graph_workspace_q_len(requested_q_len: int) -> int:
+    """Return the process-wide fixed CUDA Graph query-length capacity."""
+    override = os.environ.get("RTP_TOKENSPEED_MLA_GRAPH_MAX_Q_LEN")
+    if override is not None:
+        try:
+            configured = int(override)
+        except ValueError as error:
+            raise ValueError(
+                "RTP_TOKENSPEED_MLA_GRAPH_MAX_Q_LEN must be an integer, got "
+                f"{override!r}"
+            ) from error
+        if configured <= 0:
+            raise ValueError(
+                "RTP_TOKENSPEED_MLA_GRAPH_MAX_Q_LEN must be positive, got "
+                f"{configured}"
+            )
+        return max(requested_q_len, configured)
+
+    # Target verify scores GEN_NUM_PER_CIRCLE draft tokens plus the current
+    # target token.  Reserve that upper bound before the first ordinary-decode
+    # graph is captured so the shared pointer never needs to grow afterwards.
+    try:
+        speculative_q_len = int(os.environ.get("GEN_NUM_PER_CIRCLE", "0")) + 1
+    except ValueError as error:
+        raise ValueError("GEN_NUM_PER_CIRCLE must be an integer") from error
+    return max(requested_q_len, speculative_q_len)
+
+
+def _get_tokenspeed_cuda_graph_workspace(
+    device: torch.device,
+    num_heads: int,
+    kv_lora_rank: int,
+    max_q_len: int,
+) -> torch.Tensor:
+    """Allocate the maximum-sized workspace later shared by one model instance."""
+    capacity_q_len = _tokenspeed_graph_workspace_q_len(max_q_len)
+    return _get_tokenspeed_workspace(device, num_heads, kv_lora_rank, capacity_q_len)
 
 
 class TokenSpeedMlaDecodeOp:
@@ -314,6 +359,7 @@ class TokenSpeedMlaDecodeOp:
         max_q_len: int = 1,
         max_context_len: int = 0,
         is_cuda_graph: bool = False,
+        cuda_graph_workspace: Optional[torch.Tensor] = None,
     ) -> None:
         if not _load_tokenspeed_mla() or _TOKENSPEED_MLA_API is None:
             raise RuntimeError(
@@ -388,9 +434,41 @@ class TokenSpeedMlaDecodeOp:
             is_cuda_graph,
             device,
         )
-        self._workspace = _get_tokenspeed_workspace(
-            device, num_heads, kv_lora_rank, max_q_len
-        )
+        if is_cuda_graph:
+            requested_bytes = _tokenspeed_workspace_bytes(
+                device, num_heads, kv_lora_rank, max_q_len
+            )
+            capacity_bytes = _tokenspeed_workspace_bytes(
+                device,
+                num_heads,
+                kv_lora_rank,
+                _tokenspeed_graph_workspace_q_len(max_q_len),
+            )
+            if cuda_graph_workspace is None:
+                self._workspace_storage = torch.empty(
+                    capacity_bytes, dtype=torch.int8, device=device
+                )
+            else:
+                if cuda_graph_workspace.device != device:
+                    raise RuntimeError(
+                        "TokenSpeed MLA CUDA Graph workspace device mismatch: "
+                        f"{cuda_graph_workspace.device} vs {device}"
+                    )
+                if cuda_graph_workspace.numel() < capacity_bytes:
+                    raise RuntimeError(
+                        "TokenSpeed MLA CUDA Graph workspace is too small: "
+                        f"need {capacity_bytes} bytes, have "
+                        f"{cuda_graph_workspace.numel()}"
+                    )
+                self._workspace_storage = cuda_graph_workspace
+            # TokenSpeed uses the workspace tensor length when selecting its
+            # split-KV geometry.  Keep one maximum-sized backing allocation,
+            # but pass each graph an exact-length view at the same base address.
+            self._workspace = self._workspace_storage[:requested_bytes]
+        else:
+            self._workspace = _get_tokenspeed_workspace(
+                device, num_heads, kv_lora_rank, max_q_len
+            )
         self._validated_runtime_shapes = {(max_q_len, self._dtype)}
         self._attn_output: Optional[torch.Tensor] = None
         if is_cuda_graph and max_bs > 0:
@@ -401,6 +479,26 @@ class TokenSpeedMlaDecodeOp:
             )
             self._warmup(max_bs, max_q_len, max(max_context_len, token_per_block))
         self._sync_metadata_views()
+
+    def cuda_graph_workspace_key(self) -> tuple:
+        return (_device_index(self._device), self.num_heads, self.kv_lora_rank)
+
+    def bind_cuda_graph_workspace(self, workspace: torch.Tensor) -> None:
+        if not self.use_cuda_graph:
+            raise RuntimeError("cannot bind a CUDA Graph workspace to an eager op")
+        if workspace.device != self._workspace.device:
+            raise RuntimeError(
+                "TokenSpeed MLA CUDA Graph workspace device mismatch: "
+                f"{workspace.device} vs {self._workspace.device}"
+            )
+        if workspace.numel() < self._workspace.numel():
+            raise RuntimeError(
+                "TokenSpeed MLA CUDA Graph workspace cannot grow after capture: "
+                f"need {self._workspace.numel()} bytes, have {workspace.numel()}"
+            )
+        requested_bytes = self._workspace.numel()
+        self._workspace_storage = workspace
+        self._workspace = workspace[:requested_bytes]
 
     def _absorb_query(
         self, q_nope: torch.Tensor, q_pe: torch.Tensor, layer_id: int
@@ -664,6 +762,9 @@ class TokenSpeedMlaDecodeImpl(MlaFlashInferImplBase):
                 max_q_len=max_q_len,
                 max_context_len=max_seq_len,
                 is_cuda_graph=is_cuda_graph,
+                cuda_graph_workspace=getattr(
+                    attn_inputs, "cuda_graph_fmha_workspace", None
+                ),
             ),
             NewMlaRotaryEmbeddingOp(
                 cos_sin_cache=cos_sin_cache,
@@ -689,6 +790,12 @@ class TokenSpeedMlaDecodeImpl(MlaFlashInferImplBase):
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
         self.prepare(attn_inputs, forbid_realloc=True)
+
+    def cuda_graph_workspace_key(self) -> tuple:
+        return self.fmha_impl.cuda_graph_workspace_key()
+
+    def bind_cuda_graph_workspace(self, workspace: torch.Tensor) -> None:
+        self.fmha_impl.bind_cuda_graph_workspace(workspace)
 
     @classmethod
     def support(

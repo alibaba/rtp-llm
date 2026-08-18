@@ -889,12 +889,21 @@ void CudaGraphRunner::initCapture() {
         if (is_prefill_cuda_graph_mode_) {
             RTP_LLM_LOG_INFO("CUDA graph capture for prefill, num_tokens_per_bs_: %d", num_tokens_per_bs_);
         }
-        max_num_token_ = max_bs_ * num_tokens_per_bs_;
         if (is_prefill_cuda_graph_mode_) {
             capture_range_ = getPrefillSequenceLengthsToCapture();
         } else {
             capture_range_ = getDecodeBatchSizesToCapture();
+            if (!capture_range_.empty()) {
+                const int capture_max_bs = *std::max_element(capture_range_.begin(), capture_range_.end());
+                if (capture_max_bs > max_bs_) {
+                    RTP_LLM_LOG_INFO("Expand CUDA graph input capacity from max_bs=%d to capture_max_bs=%d",
+                                     max_bs_,
+                                     capture_max_bs);
+                    max_bs_ = capture_max_bs;
+                }
+            }
         }
+        max_num_token_ = max_bs_ * num_tokens_per_bs_;
 
         PyModelInputs inputs;
         // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
@@ -1018,7 +1027,14 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             CudaGraphCaptureGuard capture_guard;
             try {
                 auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
-                outputs             = py_outputs_obj.cast<PyModelOutputs>();
+                if (py::isinstance<py::tuple>(py_outputs_obj)) {
+                    auto tuple = py_outputs_obj.cast<py::tuple>();
+                    RTP_LLM_CHECK_WITH_INFO(tuple.size() == 1,
+                                            "target-verify hidden tuple must contain one tensor");
+                    outputs.hidden_states = tuple[0].cast<torch::Tensor>();
+                } else {
+                    outputs = py_outputs_obj.cast<PyModelOutputs>();
+                }
             } catch (const py::error_already_set& e) {
                 RTP_LLM_LOG_ERROR("Capture forward failed for %s %d: %s", key_type, key, e.what());
                 throw;

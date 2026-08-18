@@ -2,6 +2,7 @@
 #pragma once
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
+#include <algorithm>
 #include <optional>
 #include <string>
 #include <atomic>
@@ -301,6 +302,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         graph_params.max_context_batch_size       = params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
+        if (!graph_params.decode_capture_batch_sizes.empty()) {
+            init_resources.max_decode_graph_batch_size =
+                *std::max_element(graph_params.decode_capture_batch_sizes.begin(),
+                                  graph_params.decode_capture_batch_sizes.end());
+        }
         graph_params.kv_cache_group_num           = params.kv_cache_group_num;
         // Derive combo_position_ids capture-buffer factor from the C++ rope_config:
         // 0 = model has no combo_position_ids (no buffer allocated, capture skips it);

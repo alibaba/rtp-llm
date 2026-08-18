@@ -415,19 +415,27 @@ class KimiK3Model(GptModelBase):
         self._is_decode_role = bool(init_resource.is_decode_role)
         if (
             self._is_decode_role
-            and self._mtp_hidden_buffer is None
             and os.environ.get("SP_TYPE", "").lower() == "eagle3"
         ):
             tokens_per_batch = max(int(self.config.gen_num_per_cycle) + 1, 1)
-            token_capacity = self._max_generate_batch_size * tokens_per_batch
-            self._mtp_hidden_buffer = self.embedding_weight.new_empty(
-                token_capacity,
-                3 * int(self.config.hidden_size),
+            graph_batch_capacity = int(
+                getattr(init_resource, "max_decode_graph_batch_size", 1)
             )
-            logging.info(
-                "[K3_EAGLE3] allocated Decode hidden buffer shape=%s",
-                tuple(self._mtp_hidden_buffer.shape),
-            )
+            token_capacity = max(
+                self._max_generate_batch_size, graph_batch_capacity
+            ) * tokens_per_batch
+            if (
+                self._mtp_hidden_buffer is None
+                or int(self._mtp_hidden_buffer.size(0)) < token_capacity
+            ):
+                self._mtp_hidden_buffer = self.embedding_weight.new_empty(
+                    token_capacity,
+                    3 * int(self.config.hidden_size),
+                )
+                logging.info(
+                    "[K3_EAGLE3] allocated Decode hidden buffer shape=%s",
+                    tuple(self._mtp_hidden_buffer.shape),
+                )
         if self._fused_ag_gemm_workspace_ready:
             return True
 
@@ -957,11 +965,21 @@ class KimiK3Model(GptModelBase):
                 group=Group.TP,
             )
         fmha_params = getattr(fmha_impl, "fmha_params", None)
-        return (
+        # The C++ caller only consumes hidden_states from PyModelOutputs.  In
+        # target-verify, retaining the Python FMHA parameter object across the
+        # pybind return boundary is unnecessary and is the only remaining
+        # object with non-tensor lifetime/destructor behavior at that boundary.
+        if bool(getattr(attention_inputs, "is_target_verify", False)):
+            # Avoid transporting the custom PyModelOutputs holder through
+            # pybind for target verification.  C++ only needs hidden_states
+            # here, and accepts this one-element tuple as an isolated path.
+            return (hidden_states,)
+        outputs = (
             PyModelOutputs(hidden_states, fmha_params)
             if fmha_params is not None
             else PyModelOutputs(hidden_states)
         )
+        return outputs
 
 
 __all__ = [

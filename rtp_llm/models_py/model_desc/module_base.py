@@ -50,6 +50,7 @@ class GptModelBase(nn.Module):
 
         ## (batch_size -> fmha_params)
         self.params_dict: dict[int, Any] = {}
+        self.cuda_graph_fmha_workspaces: dict[tuple, Tensor] = {}
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
@@ -94,6 +95,14 @@ class GptModelBase(nn.Module):
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> Any:
+        if is_cuda_graph and self.cuda_graph_fmha_workspaces:
+            if len(self.cuda_graph_fmha_workspaces) != 1:
+                raise RuntimeError(
+                    "expected exactly one model-scoped CUDA Graph FMHA workspace"
+                )
+            inputs.attention_inputs.cuda_graph_fmha_workspace = next(
+                iter(self.cuda_graph_fmha_workspaces.values())
+            )
         fmha_impl = AttnImplFactory.get_fmha_impl(
             self.config,
             self.parallelism_config,
@@ -102,6 +111,33 @@ class GptModelBase(nn.Module):
             self.fmha_config,
             is_cuda_graph,
         )
+        if is_cuda_graph and hasattr(fmha_impl, "cuda_graph_workspace_key"):
+            key = fmha_impl.cuda_graph_workspace_key()
+            inner_impl = getattr(fmha_impl, "fmha_impl", None)
+            workspace = getattr(inner_impl, "_workspace_storage", None)
+            if workspace is None:
+                workspace = getattr(inner_impl, "_workspace", None)
+            if workspace is None:
+                raise RuntimeError(
+                    "CUDA Graph FMHA implementation exposes a workspace key "
+                    "without an allocated workspace"
+                )
+            shared_workspace = self.cuda_graph_fmha_workspaces.get(key)
+            if shared_workspace is None:
+                self.cuda_graph_fmha_workspaces[key] = workspace
+                logging.info(
+                    "registered model-scoped CUDA Graph FMHA workspace: "
+                    "key=%s bytes=%d ptr=%d",
+                    key,
+                    workspace.numel(),
+                    workspace.data_ptr(),
+                )
+            else:
+                if workspace.data_ptr() != shared_workspace.data_ptr():
+                    raise RuntimeError(
+                        "CUDA Graph FMHA implementation did not use the "
+                        "model-scoped workspace during construction"
+                    )
         return fmha_impl
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:

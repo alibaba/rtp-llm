@@ -12,6 +12,9 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+    has_bf16_gemm_nt_skip_head_mid,
+)
 from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
 from rtp_llm.ops import KvCacheDataType
 from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
@@ -215,6 +218,7 @@ class MlaFlashMLAPrefillOp:
         if (
             head_splits == _K3_PACKED_KV_HEAD_SPLITS
             and callable(packed_projection)
+            and has_bf16_gemm_nt_skip_head_mid()
             and compressed_kv.is_cuda
             and compressed_kv.dtype == torch.bfloat16
             and getattr(kv_b_proj, "bias", None) is None

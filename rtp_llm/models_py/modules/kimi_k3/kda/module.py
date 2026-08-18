@@ -256,16 +256,20 @@ class KimiK3KDA(nn.Module):
         mode: KDAExecutionMode,
     ) -> torch.Tensor:
         token_count = output_gate.shape[1]
-        if is_target_verify:
+        # Decode and target-verify must use the same numerics. Mixing the fused
+        # projection path with this explicit path can change near-tied logits.
+        use_explicit_output = mode == "decode"
+        if use_explicit_output:
+            output_dtype = output.dtype
+            norm_weight = self.weights[W.linear_attn_norm_w]
             output_float = output.float()
-            output = (
-                output_float
-                * torch.rsqrt(
-                    output_float.square().mean(dim=-1, keepdim=True) + self.eps
-                )
-                * self.weights[W.linear_attn_norm_w].float()
-                * torch.sigmoid(output_gate.float())
-            ).to(dtype=output.dtype)
+            rms = torch.rsqrt(
+                output_float.square().mean(dim=-1, keepdim=True) + self.eps
+            )
+            output = output_float * rms
+            output = output * norm_weight.float()
+            output = output * torch.sigmoid(output_gate.float())
+            output = output.to(dtype=output_dtype)
         else:
             output = kimi_kda_rms_norm_sigmoid_gate(
                 output,
@@ -275,7 +279,7 @@ class KimiK3KDA(nn.Module):
             )
 
         projection_input = output.reshape(token_count, self.projection_size)
-        if is_target_verify:
+        if use_explicit_output:
             output = torch.matmul(
                 projection_input,
                 self.weights[W.linear_attn_out_w],
@@ -405,7 +409,6 @@ class KimiK3KDA(nn.Module):
                 attention_inputs=attention_inputs,
                 is_target_verify=is_target_verify,
             )
-
         output = self._project_output(
             output,
             output_gate,

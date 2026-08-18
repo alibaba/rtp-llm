@@ -89,7 +89,10 @@ void registerPyOpDefs(pybind11::module& m) {
                       "True when this model instance runs in decode role")
         .def_readonly("max_context_batch_size",
                       &PyModelInitResources::max_context_batch_size,
-                      "Max concurrent context (prefill) batches from FIFO scheduler");
+                      "Max concurrent context (prefill) batches from FIFO scheduler")
+        .def_readonly("max_decode_graph_batch_size",
+                      &PyModelInitResources::max_decode_graph_batch_size,
+                      "Maximum Decode batch size reserved by CUDA Graph capture");
 
     pybind11::class_<caffe2::TypeMeta>(m, "TypeMeta").def(pybind11::init<>());
 
@@ -148,6 +151,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("is_prefill", &PyAttentionInputs::is_prefill)
         .def_readwrite("is_cuda_graph", &PyAttentionInputs::is_cuda_graph)
         .def_readwrite("is_target_verify", &PyAttentionInputs::is_target_verify)
+        .def_readwrite("cuda_graph_fmha_workspace", &PyAttentionInputs::cuda_graph_fmha_workspace)
         .def_readwrite("is_fake_stream", &PyAttentionInputs::is_fake_stream)
         .def_readwrite("prefix_lengths", &PyAttentionInputs::prefix_lengths)
         .def_readwrite("sequence_lengths", &PyAttentionInputs::sequence_lengths)

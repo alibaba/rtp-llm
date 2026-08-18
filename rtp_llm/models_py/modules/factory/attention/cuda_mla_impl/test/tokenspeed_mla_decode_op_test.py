@@ -326,7 +326,7 @@ class TokenSpeedMlaDecodeOpTest(TestCase):
     def test_k3_tp8_single_request(self):
         run_case(self, self.geo, [384], num_pages=8)
 
-    def test_workspace_is_owned_by_each_graph_instance(self):
+    def test_workspace_can_be_shared_by_serial_graph_instances(self):
         first, _, _ = make_op(
             self.geo,
             max_bs=1,
@@ -342,6 +342,37 @@ class TokenSpeedMlaDecodeOpTest(TestCase):
             is_cuda_graph=True,
         )
         self.assertNotEqual(first._workspace.data_ptr(), second._workspace.data_ptr())
+        second.bind_cuda_graph_workspace(first._workspace)
+        self.assertEqual(first._workspace.data_ptr(), second._workspace.data_ptr())
+
+    def test_graph_workspace_reserves_speculative_query_upper_bound(self):
+        with mock.patch.dict(os.environ, {"GEN_NUM_PER_CIRCLE": "3"}):
+            decode, _, _ = make_op(
+                self.geo,
+                max_bs=1,
+                max_q_len=1,
+                max_context_len=128,
+                is_cuda_graph=True,
+            )
+            verify, _, _ = make_op(
+                self.geo,
+                max_bs=1,
+                max_q_len=4,
+                max_context_len=128,
+                is_cuda_graph=True,
+            )
+        self.assertEqual(
+            decode._workspace_storage.numel(), verify._workspace_storage.numel()
+        )
+        verify.bind_cuda_graph_workspace(decode._workspace_storage)
+        self.assertEqual(
+            decode._workspace_storage.data_ptr(),
+            verify._workspace_storage.data_ptr(),
+        )
+        # Kernel-facing views retain the exact size required by each q_len,
+        # while sharing the fixed backing allocation and base address.
+        self.assertNotEqual(decode._workspace.numel(), verify._workspace.numel())
+        self.assertEqual(decode._workspace.data_ptr(), verify._workspace.data_ptr())
 
     def test_hybrid_model_mla_weights_need_not_be_on_layer_zero(self):
         base_op, kc_weight, _ = make_op(self.geo)

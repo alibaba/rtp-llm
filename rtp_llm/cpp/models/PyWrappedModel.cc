@@ -918,8 +918,14 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             held_attn_pyobj_      = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
             auto py_model_forward = py_model_.attr("forward");
             auto outputs          = py_model_forward(py_model_inputs, held_attn_pyobj_);
-            py_model_outputs      = outputs.cast<PyModelOutputs>();
-            hidden_states         = py_model_outputs.hidden_states.clone();
+            if (py::isinstance<py::tuple>(outputs)) {
+                auto tuple = outputs.cast<py::tuple>();
+                RTP_LLM_CHECK_WITH_INFO(tuple.size() == 1, "target-verify hidden tuple must contain one tensor");
+                hidden_states = tuple[0].cast<torch::Tensor>().clone();
+            } else {
+                py_model_outputs = outputs.cast<PyModelOutputs>();
+                hidden_states = py_model_outputs.hidden_states.clone();
+            }
         }
 
         if (!inputs.warmup && inputs.pd_separation) {
