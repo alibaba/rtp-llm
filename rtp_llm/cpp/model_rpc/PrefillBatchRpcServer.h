@@ -65,13 +65,7 @@ public:
         std::shared_ptr<DeferredPrefillContext> ignored;
         return cancelByPriorityPreemption(request_id, ignored);
     }
-    void publishPriorityPreemptionCanceled(int64_t request_id, const DeferredPrefillContext* expected);
-    // W-2 ledger-sweep linkage: unconditional (any-owner) mirror of
-    // publishPriorityPreemptionCanceled's active-entry removal, invoked by the
-    // runtime-meta stale-overlay sweep hook after it published the aged typed
-    // CANCELED record. Keeps the tombstone downgrade so duplicate Cancels stay
-    // idempotent. Must be called WITHOUT the runtime-meta lock held.
-    void   dropActiveEntryAfterLedgerSweep(int64_t request_id);
+    void   publishPriorityPreemptionCanceled(int64_t request_id, const DeferredPrefillContext* expected);
     void   finish(int64_t request_id, const DeferredPrefillContext* expected);
     void   stopAccepting();
     void   cancelAll(const grpc::Status& status);
@@ -154,13 +148,6 @@ private:
         std::shared_ptr<DeferredPrefillContext> deferred;
         grpc::Status                            registration_status = grpc::Status::OK;
         int64_t                                 fetch_attach_timeout_ms{0};
-        // True when admitGroup installed RTP_LLM_BATCH_STREAM_DEFAULT_TIMEOUT_MS
-        // on this slot's input copy. R1: an injected default must bound only
-        // the prefill-side chain (stream checkTimeout / nextOutput wait); it
-        // must NOT flow into the downstream GenerateInputPB nor into the
-        // context's request_timeout_ms (which would tighten the P->D streaming
-        // RPC deadline below max_rpc_timeout_ms and truncate decode).
-        bool default_timeout_injected{false};
     };
 
     struct PrepareResult {

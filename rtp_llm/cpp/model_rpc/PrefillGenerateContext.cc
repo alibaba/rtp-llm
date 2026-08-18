@@ -251,9 +251,6 @@ bool PrefillGenerateContext::finalizePriorityPreemption(bool force_advance_strea
     (void)closeGrpcStream();
 
     if (stream_) {
-        // R2: keep a handle past stream_.reset() below — the sweep-meets-
-        // finalizer fallback needs it for the runtime-meta dequeue backstop.
-        GenerateStreamPtr stream_for_meta_cleanup = stream_;
         stream_->reportError(ErrorCode::PRIORITY_PREEMPTED, "preempted by a higher-priority request");
         // A Prefill stream is scheduler-owned once published. Retry on the
         // managed finalizer executor until the scheduler has completed its
@@ -292,22 +289,6 @@ bool PrefillGenerateContext::finalizePriorityPreemption(bool force_advance_strea
         }
         markRequestEnd();
         stream_.reset();
-
-        if (meta
-            && !meta->markPriorityPreemptionCanceled(request_id,
-                                                     static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED),
-                                                     "preempted by a higher-priority request")) {
-            // R2 double-insurance backstop (equivalent to
-            // dequeueStreamFromRuntimeMeta, which cannot be reused here
-            // because the member stream_ is already reset): when the aging
-            // sweep consumed the overlay AND this request's running entry was
-            // already fully closed, an ordinary dequeue is a no-op; in any
-            // leftover corner it removes the entry one last time.
-            meta->dequeue(request_id, stream_for_meta_cleanup);
-        }
-        stream_for_meta_cleanup.reset();
-        priority_finalized_ = true;
-        return true;
     }
 
     if (meta) {

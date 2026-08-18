@@ -312,15 +312,6 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     new_request->clear_group_size();
     new_request->clear_group_id();
     new_request->mutable_generate_config()->clear_group_timeout();
-    // R1b: strip the per-request timeout before it reaches decode. The decode
-    // side copies this field into its own stream config (DecodeRpcServer reads
-    // getTimeoutMs() from it), where a prefill-injected default would fire
-    // GENERATE_TIMEOUT and truncate long decode generations. proto3 has no
-    // presence for this scalar: clear == set 0 == "no timeout". Explicit
-    // per-request timeouts set by real clients are equally stripped here —
-    // decode's generation horizon must stay governed by its own knobs
-    // (max_rpc_timeout_ms / client-side cancellation), not by prefill's copy.
-    new_request->mutable_generate_config()->clear_timeout_ms();
     alloc_request.set_allocated_input(new_request);
     for (auto& addrs : prefill_context.prefill_worker_cache_store_addrs) {
         alloc_request.add_peer_addrs(addrs);
