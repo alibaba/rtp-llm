@@ -329,7 +329,19 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         send_token_ids = torch.cat(send_token_parts, dim=0)
 
         if padded_all_to_all:
-            recv_counts = [x.size(0)] * world
+            # DP ranks may own different active-token counts at batch boundaries.
+            # Each source sends local N rows to every destination, so receive
+            # splits must use source-rank counts rather than repeating local N.
+            local_count = torch.full(
+                (1,), x.size(0), dtype=torch.int64, device=x.device
+            )
+            gathered_counts = torch.empty(
+                world, dtype=torch.int64, device=x.device
+            )
+            dist.all_gather_into_tensor(
+                gathered_counts, local_count, group=group
+            )
+            recv_counts = [int(v) for v in gathered_counts.cpu().tolist()]
         else:
             send_counts_t = torch.tensor(
                 send_counts, dtype=torch.int64, device=x.device
@@ -380,8 +392,11 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         fp8_combine = padded_all_to_all and (
             os.environ.get("DSV4_SM120_NCCL_EP_FP8_COMBINE", "1") != "0"
         )
-        pipeline_combine = fp8_combine and (
-            os.environ.get("DSV4_SM120_NCCL_EP_PIPELINE", "0") != "0"
+        equal_peer_counts = all(count == x.size(0) for count in recv_counts)
+        pipeline_combine = (
+            fp8_combine
+            and equal_peer_counts
+            and os.environ.get("DSV4_SM120_NCCL_EP_PIPELINE", "0") != "0"
         )
         if pipeline_combine:
             if self._sm120_grouped is None:
@@ -481,8 +496,10 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         else:
             raise RuntimeError("SM120 MXFP8 dispatch requires grouped FP4 MoE")
 
-        reduce_scatter_combine = padded_all_to_all and (
-            os.environ.get("DSV4_SM120_NCCL_EP_REDUCE_SCATTER", "0") != "0"
+        reduce_scatter_combine = (
+            padded_all_to_all
+            and equal_peer_counts
+            and os.environ.get("DSV4_SM120_NCCL_EP_REDUCE_SCATTER", "0") != "0"
         )
         if reduce_scatter_combine:
             reduced = torch.empty(
