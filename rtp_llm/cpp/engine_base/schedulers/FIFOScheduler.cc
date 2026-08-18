@@ -29,6 +29,19 @@ bool asyncCachePrepareEnabled() {
     return env != nullptr && std::strcmp(env, "1") == 0;
 }
 
+bool fifoBatchTraceEnabled() {
+    const char* env = std::getenv("RTP_LLM_FIFO_BATCH_TRACE");
+    return env != nullptr && std::strcmp(env, "1") == 0;
+}
+
+int64_t prefillKvTokenSize(const GenerateStreamPtr& stream) {
+    // FIFO admission happens before prepareCache() on the synchronous path, so
+    // reuseLength()/contextLength() do not reliably describe the eventual
+    // reuse-cache split here.  The complete KV visible to a prefill request is
+    // its current sequence, replicated for every active sequence in the stream.
+    return static_cast<int64_t>(stream->seqLength()) * stream->currentBatchSize();
+}
+
 }  // namespace
 
 FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_config,
@@ -44,6 +57,7 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
     cache_manager_(cache_manager),
     max_seq_len_(model_config.max_seq_len),
     max_batch_tokens_size_(runtime_config.fifo_scheduler_config.max_batch_tokens_size),
+    max_batch_kv_len_(std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_kv_len, 0)),
     max_generate_batch_size_(runtime_config.max_generate_batch_size),
     max_inited_kv_cache_streams_(
         std::max<int64_t>(runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams, 0)),
@@ -52,11 +66,12 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                              && runtime_config.fifo_scheduler_config.cp_force_single_prefill),
     worker_status_snapshot_enabled_(workerStatusSnapshotEnabled()),
     metrics_reporter_(metrics_reporter) {
-    RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu], "
+    RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu], max_batch_kv_len is [%zu], "
                      "cp_force_single_prefill is [%d], max_inited_kv_cache_streams is [%zu], "
                      "worker_status_snapshot_enabled is [%d]",
                      max_generate_batch_size_,
                      max_batch_tokens_size_,
+                     max_batch_kv_len_,
                      cp_force_single_prefill_,
                      max_inited_kv_cache_streams_,
                      worker_status_snapshot_enabled_);
@@ -130,7 +145,7 @@ int64_t FIFOScheduler::lastScheduleTime() {
 // validation, but source branch removed enqueue-time input_length * batch_size
 // rejection because max_batch_tokens_size is enforced during scheduling.
 // 仅检查输入长度不超过 KV Cache 最大可用 token 数；max_batch_tokens_size 的约束在调度时由
-// evaluateRunningMemory 基于 contextLength 判断，不应在 enqueue 阶段乘以 batch_size 拒绝请求。
+// evaluateRunningBatch 在调度时统一执行 batch token/KV 限制，不应在 enqueue 阶段拒绝单个请求。
 bool FIFOScheduler::checkInputLength(const GenerateStreamPtr& stream) {
     const auto input_length = static_cast<size_t>(stream->inputLength());
     const auto reserve_step = stream->reserveStep();
@@ -211,15 +226,37 @@ bool FIFOScheduler::evaluateRunningBatch(const list<GenerateStreamPtr>& streams,
         return false;
     }
 
-    int max_token_size = new_stream->contextLength();
-    if (streams.empty() && max_token_size + running_streams_.size() < int(max_seq_len_)) {
+    if (streams.empty() && new_stream->contextLength() + running_streams_.size() < int(max_seq_len_)) {
         return true;
     }
-    for (auto& stream : streams) {
+
+    if (max_batch_kv_len_ > 0) {
+        int64_t total_kv_tokens = prefillKvTokenSize(new_stream);
+        for (const auto& stream : streams) {
+            total_kv_tokens += prefillKvTokenSize(stream);
+        }
+        // Indexer materializes scores against every request's complete visible
+        // KV. When explicitly enabled, this replaces (rather than combines
+        // with) the legacy max(q_len) * batch admission rule.
+        const bool fits =
+            total_kv_tokens + static_cast<int64_t>(running_streams_.size()) < static_cast<int64_t>(max_batch_kv_len_);
+        if (fifoBatchTraceEnabled()) {
+            RTP_LLM_LOG_INFO("[FIFO_BATCH_TRACE] mode=sum_kv candidate_batch=%zu sum_kv_tokens=%ld limit=%zu "
+                             "admitted=%d",
+                             streams.size() + 1,
+                             total_kv_tokens,
+                             max_batch_kv_len_,
+                             fits);
+        }
+        return fits;
+    }
+
+    int max_token_size = new_stream->contextLength();
+    for (const auto& stream : streams) {
         max_token_size = std::max(max_token_size, stream->contextLength());
     }
-    // 这里的判断是要求当前调度轮所有请求参与计算的 token 数之和小于 max_batch_tokens_size_，loading_cache_streams
-    // 这一轮实际不参与计算，不需要计入。
+    // Backward-compatible default: preserve MAX_BATCH_TOKENS_SIZE's original
+    // max(q_len) * batch semantics when MAX_BATCH_KV_LEN is disabled.
     return max_token_size * (streams.size() + 1) + running_streams_.size() < int(max_batch_tokens_size_);
 }
 
