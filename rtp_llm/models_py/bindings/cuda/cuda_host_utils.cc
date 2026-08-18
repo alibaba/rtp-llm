@@ -74,6 +74,15 @@ static const char* _cudaGetErrorEnum(cublasStatus_t error) {
 }
 
 static const char* _cudaGetErrorEnum(CUresult error) {
+#if defined(USE_PPU) && USE_PPU
+    // PPU builds intentionally do not link the CUDA driver stub because that
+    // stub also requires nvToolsExt, which is absent from the PPU image. Keep
+    // CUresult diagnostics useful without leaving a driver symbol unresolved
+    // in librtp_compute_ops.so.
+    static thread_local std::string error_name;
+    error_name = "CUDA driver error code " + std::to_string(static_cast<int>(error));
+    return error_name.c_str();
+#else
     const char* error_name  = nullptr;
     CUresult    name_result = cuGetErrorName(error, &error_name);
     if (name_result != CUDA_SUCCESS) {
@@ -81,6 +90,7 @@ static const char* _cudaGetErrorEnum(CUresult error) {
         return "Unknown CUDA error (failed to get error name)";
     }
     return error_name;
+#endif
 }
 #endif
 
