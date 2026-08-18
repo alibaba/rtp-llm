@@ -2663,7 +2663,7 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
                   config.typeForGroup(gid) == CacheGroupType::FULL ? 3u : 1u)
             << tag;
     }
-    allocator->blockTreeCacheOwner()->releaseMatchedResources(match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(), match.matched_device_resources);
 
     // Free all blocks
     for (int gid = 0; gid < 7; gid++) {
@@ -2722,7 +2722,7 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
                   config.typeForGroup(gid) == CacheGroupType::FULL ? 3u : 1u)
             << tag;
     }
-    allocator->blockTreeCacheOwner()->releaseMatchedResources(match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(), match.matched_device_resources);
 
     for (int gid = 0; gid < 7; gid++) {
         block_pool->decRef(batch_res->blocks(0, gid), BlockRefType::REQUEST);

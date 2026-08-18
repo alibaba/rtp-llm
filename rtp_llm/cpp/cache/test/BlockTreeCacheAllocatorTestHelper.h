@@ -9,6 +9,7 @@
 
 #include "rtp_llm/cpp/cache/BlockReleaseBatch.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 
 namespace rtp_llm::test {
 
@@ -142,7 +143,7 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
 
     auto match     = cache->match(keys);
     result.success = match.matched_device_blocks == keys.size();
-    cache->releaseMatchedResources(match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache, match.matched_device_resources);
     return result;
 }
 

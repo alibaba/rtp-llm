@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 
+#include "rtp_llm/cpp/cache/BlockReleaseBatch.h"
+
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
@@ -260,6 +262,28 @@ size_t treeCachedBlocksNum(const IBlockPool& pool) {
         }
     }
     return count;
+}
+
+void releaseRequestRefsForTest(BlockTreeCache& cache, const std::vector<MultiNodeResource>& resources) {
+    BlockReleaseBatch releases;
+    const auto&       group_sets = cache.groupSets();
+    for (const MultiNodeResource& resource : resources) {
+        RTP_LLM_CHECK(resource.tier == Tier::DEVICE);
+        RTP_LLM_CHECK(resource.group_set_id < group_sets.size());
+        const GroupSetPtr& group_set = group_sets[resource.group_set_id];
+        const auto&        group_ids = group_set->groupIds();
+        const auto&        pools     = group_set->devicePools();
+        RTP_LLM_CHECK(group_ids.size() == pools.size());
+        for (const auto& [_, blocks] : resource.node_blocks) {
+            RTP_LLM_CHECK(blocks.size() == pools.size());
+            for (size_t member_group_id = 0; member_group_id < blocks.size(); ++member_group_id) {
+                releases.append(group_ids[member_group_id],
+                                pools[member_group_id]->decRefWithResult(
+                                    {blocks[member_group_id]}, BlockRefType::REQUEST));
+            }
+        }
+    }
+    cache.onBlocksReleased(releases.finish());
 }
 
 void releaseDeviceBlocksAndNotify(BlockTreeCache&           cache,
@@ -822,12 +846,12 @@ void FullSWAEnvironment::releaseRequestRefsForGroup(int group_id) {
     ASSERT_EQ(path.size(), options_.path_length);
     MultiNodeResource released_blocks = makeMultiNodeResourceForTest(
         static_cast<size_t>(group_id), Tier::DEVICE, path, request_blocks[static_cast<size_t>(group_id)]);
-    cache->releaseMatchedResources({released_blocks});
+    block_tree_cache_test::releaseRequestRefsForTest(*cache, {released_blocks});
     request_refs_released_[static_cast<size_t>(group_id)] = true;
 }
 
 void FullSWAEnvironment::releaseMatch(BlockTreeMatchResult& result) {
-    cache->releaseMatchedResources(result.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache, result.matched_device_resources);
     result.matched_device_resources.clear();
 }
 

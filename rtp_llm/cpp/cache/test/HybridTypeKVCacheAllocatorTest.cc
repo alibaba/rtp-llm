@@ -1067,6 +1067,94 @@ TEST_F(HybridTypeKVCacheAllocatorTest, TieredJoinedLoadMapsTargetsAcrossFullAndL
     }
 }
 
+TEST_F(HybridTypeKVCacheAllocatorTest, DeviceLoadSourceMatchRefBecomesRequestRef) {
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+
+    KVCacheConfig tiered_config;
+    tiered_config.enable_host_cache  = true;
+    tiered_config.host_cache_size_mb = 1;
+    allocator->setBlockTreeCacheConfigForTest(std::move(tiered_config));
+    ASSERT_TRUE(allocator->init());
+
+    const auto& cache = allocator->blockTreeCacheOwner();
+    ASSERT_NE(cache, nullptr);
+    auto transfer_engine = std::make_shared<PausableHybridPerRankBlockTransferEngine>(cache->groupSets());
+    cache->transfer_dispatcher_->per_rank_engine_ = transfer_engine;
+    ScopedHybridTransferRelease transfer_release(transfer_engine);
+
+    const CacheKeysType                        cached_keys{100, 101};
+    std::vector<std::vector<GroupSetResource>> slots(cached_keys.size(),
+                                                     std::vector<GroupSetResource>(cache->groupSets().size()));
+    std::vector<std::pair<GroupSetPtr, block_tree_cache_test::MultiNodeBlocks>> device_resources;
+    for (const GroupSetPtr& group_set : cache->groupSets()) {
+        const size_t group_set_id = group_set->groupSetId();
+        if (group_set->groupType() == CacheGroupType::FULL) {
+            auto blocks = block_tree_cache_test::allocateDeviceBlocksForTest(
+                *group_set, cached_keys.size(), BlockRefType::REQUEST);
+            ASSERT_EQ(blocks.size(), cached_keys.size());
+            for (size_t path_index = 0; path_index < cached_keys.size(); ++path_index) {
+                slots[path_index][group_set_id].device_blocks = blocks[path_index];
+            }
+            device_resources.emplace_back(group_set, std::move(blocks));
+        } else {
+            ASSERT_NE(group_set->hostPool(), nullptr);
+            for (size_t path_index = 0; path_index < cached_keys.size(); ++path_index) {
+                const BlockIdxType source_block =
+                    group_set->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+                ASSERT_FALSE(isNullBlockIdx(source_block));
+                slots[path_index][group_set_id].host_block = source_block;
+            }
+        }
+    }
+    ASSERT_EQ(device_resources.size(), 1u);
+    ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(*cache, cached_keys, slots));
+    for (const auto& [group_set, blocks] : device_resources) {
+        block_tree_cache_test::unreferenceDeviceBlocksForTest(*group_set, blocks, BlockRefType::REQUEST);
+    }
+
+    const CacheKeysType request_keys{100, 101, 102};
+    auto                request_resource = makeBatchResource(/*batch_size=*/1, config, request_keys);
+    auto request_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/9, /*seq_size_per_block=*/4);
+    MallocInfo malloc_info{request_resource, request_tokens};
+    malloc_info.enable_cache_lookup = true;
+    malloc_info.reuse_cache         = true;
+
+    MallocResult malloc_result = allocator->malloc(malloc_info);
+    ASSERT_TRUE(malloc_result.success);
+    const auto load_context = std::dynamic_pointer_cast<LoadAsyncContext>(malloc_result.async_context);
+    ASSERT_NE(load_context, nullptr);
+    ASSERT_TRUE(transfer_engine->waitUntilEnteredFor(std::chrono::seconds(5)));
+
+    size_t device_source_descs = 0;
+    for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {
+        const TransferDescriptor& desc = load_context->loadDescs()[desc_index];
+        if (desc.source_tier != Tier::DEVICE || load_context->joinedLoads()[desc_index]) {
+            continue;
+        }
+        ++device_source_descs;
+        const GroupSetPtr& group_set = cache->groupSets()[desc.group_set_id];
+        ASSERT_EQ(desc.source_blocks.size(), group_set->devicePools().size());
+        for (size_t member_group_id = 0; member_group_id < desc.source_blocks.size(); ++member_group_id) {
+            EXPECT_EQ(group_set->devicePools()[member_group_id]->refCount(desc.source_blocks[member_group_id]), 2u);
+        }
+    }
+    EXPECT_EQ(device_source_descs, cached_keys.size());
+
+    transfer_engine->release();
+    load_context->waitDone();
+    ASSERT_TRUE(load_context->success());
+    allocator->free(FreeInfo{request_resource, request_tokens});
+
+    for (const auto& [group_set, blocks] : device_resources) {
+        for (size_t path_index = 0; path_index < blocks.size(); ++path_index) {
+            for (size_t member_group_id = 0; member_group_id < blocks[path_index].size(); ++member_group_id) {
+                EXPECT_EQ(group_set->devicePools()[member_group_id]->refCount(blocks[path_index][member_group_id]), 1u);
+            }
+        }
+    }
+}
+
 TEST_F(HybridTypeKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly) {
     auto config    = makeTinyHybridConfig();
     auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
@@ -1128,7 +1216,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly
     }
     auto seeded_match = allocator->blockTreeCacheOwner()->match(seed_keys);
     ASSERT_EQ(seeded_match.matched_device_blocks, seed_keys.size());
-    allocator->blockTreeCacheOwner()->releaseMatchedResources(seeded_match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(), seeded_match.matched_device_resources);
 
     const auto& full_blocks   = seeded_blocks[static_cast<size_t>(full_group_id)];
     const auto& linear_blocks = seeded_blocks[static_cast<size_t>(linear_group_id)];
@@ -1517,7 +1605,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheInsertsOnlyFullBlocks) {
     EXPECT_EQ(
         allocator->blockTreeCacheOwner()->matchedBlocksForGroup(linear_group_id, match.matched_device_resources).size(),
         1u);
-    allocator->blockTreeCacheOwner()->releaseMatchedResources(match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(), match.matched_device_resources);
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCachePreservesLinearHoleAndPublishesLaterState) {
@@ -1550,7 +1638,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCachePreservesLinearHoleAndPubl
     EXPECT_EQ(match.matched_device_blocks, 3u);
     EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(/*group_id=*/0, match.matched_device_resources),
               (BlockIndicesType{blocks[1]}));
-    allocator->blockTreeCacheOwner()->releaseMatchedResources(match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(), match.matched_device_resources);
 
     block_pool->decRef(blocks, BlockRefType::REQUEST);
 }
@@ -1603,7 +1691,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DefaultHybridLinearPrefixReuseSupportsIns
                   ->matchedBlocksForGroup(/*group_id=*/0, seed_match.matched_device_resources)
                   .size(),
               1u);
-    allocator->blockTreeCacheOwner()->releaseMatchedResources(seed_match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(), seed_match.matched_device_resources);
 
     auto hit_res    = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102, 103});
     auto hit_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/16, /*seq_size_per_block=*/4);
