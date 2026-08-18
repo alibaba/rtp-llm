@@ -28,6 +28,18 @@ class AccMetrics(Enum):
     RECENT_CACHE_KEY_EMPTY_REQUEST_COUNT_METRIC = (
         "py_rtp_recent_cache_key_empty_request_count"
     )
+    FRONTEND_RECENT_CACHE_KEY_HIT_COUNT_METRIC = (
+        "py_rtp_frontend_recent_cache_key_hit_count"
+    )
+    FRONTEND_RECENT_CACHE_KEY_TOTAL_COUNT_METRIC = (
+        "py_rtp_frontend_recent_cache_key_total_count"
+    )
+    FRONTEND_RECENT_CACHE_KEY_REQUEST_COUNT_METRIC = (
+        "py_rtp_frontend_recent_cache_key_request_count"
+    )
+    FRONTEND_RECENT_CACHE_KEY_EMPTY_REQUEST_COUNT_METRIC = (
+        "py_rtp_frontend_recent_cache_key_empty_request_count"
+    )
 
     # igraph
     IGRAPH_QPS_METRIC = "py_rtp_igraph_qps"
@@ -82,6 +94,9 @@ class GaugeMetrics(Enum):
     MASTER_QUEUE_LENGTH_METRIC = "py_rtp_master_queue_length"
     MASTER_HOST_METRIC = "py_rtp_master_host"
     RECENT_CACHE_KEY_HIT_RATIO_METRIC = "py_rtp_recent_cache_key_hit_ratio"
+    FRONTEND_RECENT_CACHE_KEY_HIT_RATIO_METRIC = (
+        "py_rtp_frontend_recent_cache_key_hit_ratio"
+    )
 
     # igraph
     IGRAPH_RT_METRIC = "py_rtp_igraph_rt"
@@ -127,6 +142,33 @@ class GaugeMetrics(Enum):
         "py_rtp_tool_call_loop_current_span_tokens"
     )
     TOOL_CALL_LOOP_CHECK_RT_METRIC = "py_rtp_tool_call_loop_check_rt"
+
+    # Request-lifecycle metrics emitted by the Python frontend after rendering.
+    FRONTEND_INPUT_LENGTH_METRIC = "py_rtp_frontend_input_length"
+    FRONTEND_OUTPUT_LENGTH_METRIC = "py_rtp_frontend_output_length"
+    FRONTEND_CACHED_TOKEN_LENGTH_METRIC = "py_rtp_frontend_cached_token_length"
+    FRONTEND_CACHE_HIT_RATIO_METRIC = "py_rtp_frontend_cache_hit_ratio"
+    FRONTEND_CONCURRENCY_METRIC = "py_rtp_frontend_concurrency"
+    FRONTEND_TTFT_MS_METRIC = "py_rtp_frontend_ttft_ms"
+    FRONTEND_TPOT_MS_METRIC = "py_rtp_frontend_tpot_ms"
+    FRONTEND_REQUEST_RT_MS_METRIC = "py_rtp_frontend_request_rt_ms"
+    FRONTEND_SPECULATIVE_ACCEPT_RATE_METRIC = "py_rtp_frontend_speculative_accept_rate"
+    FRONTEND_SPECULATIVE_AVG_ACCEPT_LENGTH_METRIC = (
+        "py_rtp_frontend_speculative_avg_accept_length"
+    )
+    FRONTEND_STREAM_FIRST_OUTPUT_TOKEN_LENGTH_METRIC = (
+        "py_rtp_frontend_stream_first_output_token_length"
+    )
+    # Frontend token throughput. Input TPS is normalized by backend execution
+    # time; output TPS is normalized by the elapsed reporting-window time.
+    FRONTEND_INPUT_TOKEN_TPS_METRIC = "py_rtp_frontend_input_token_tps"
+    FRONTEND_OUTPUT_TOKEN_TPS_METRIC = "py_rtp_frontend_output_token_tps"
+    FRONTEND_NONCACHE_INPUT_TOKEN_TPS_METRIC = (
+        "py_rtp_frontend_noncache_input_token_tps"
+    )
+    FRONTEND_NONCACHE_OUTPUT_TOKEN_TPS_METRIC = (
+        "py_rtp_frontend_noncache_output_token_tps"
+    )
 
 
 class MetricReporter(object):

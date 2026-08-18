@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
 import torch
 
@@ -68,8 +68,14 @@ class GenerateInput:
     prefix_length: int = 0
     token_type_ids: List[int] = field(default_factory=list)
     batch_group_size: int = 1
-    batch_group_id: int = -1  # Batch group ID for force batch grouping, -1 means not set
+    batch_group_id: int = (
+        -1
+    )  # Batch group ID for force batch grouping, -1 means not set
     headers: Dict[str, str] = field(default_factory=dict, repr=False)
+    frontend_metric_tags: Dict[str, str] = field(default_factory=dict, repr=False)
+    frontend_metric_observer: Optional[Callable[[Any, int], None]] = field(
+        default=None, repr=False, compare=False
+    )
     request_info: RequestInfo = field(default_factory=RequestInfo, repr=False)
 
     class Config:
@@ -119,7 +125,6 @@ class AuxInfo:
     decode_memory_reuse_len: int = 0
 
     multimodal_lengths: Dict[int, int] = field(default_factory=dict)
-
     role_addrs: List[RoleAddr] = field(default_factory=list)
     aux_string: str = ""
 
@@ -144,6 +149,89 @@ class GenerateOutput:
 @dataclass
 class GenerateOutputs:
     generate_outputs: List[GenerateOutput] = field(default_factory=list)
+    # Internal transport marker. Unlike AuxInfo fields, this wrapper-level
+    # value is consumed by BackendRPCServerVisitor and is never serialized in
+    # an outward inference response.
+    frontend_metric_only: bool = field(default=False, repr=False, compare=False)
+    frontend_input_len: Optional[int] = field(default=None, repr=False, compare=False)
+    frontend_output_len: Optional[int] = field(default=None, repr=False, compare=False)
+    frontend_context_token_num: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
+    frontend_context_token_num_with_cache: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
+    frontend_context_execute_time_us: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
+    frontend_context_execute_time_with_cache_us: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
+    frontend_generate_token_num: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
+    frontend_generate_execute_time_us: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
+    frontend_speculative_verify_rounds: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
+    frontend_speculative_accepted_token_num: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
+    frontend_speculative_proposed_draft_tokens: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
+
+
+@dataclass(frozen=True)
+class FrontendMetricFrame:
+    """Typed private projection shared by frontend metric producers."""
+
+    aux_info: List[Optional[AuxInfo]]
+    _frontend_metric_attempt: int
+    _frontend_context_batch_size: int
+    _frontend_output_batch_size: int
+    _frontend_metric_unit_id: Optional[int]
+    frontend_input_len: Optional[int]
+    frontend_output_len: Optional[int]
+    context_token_num: Optional[int]
+    context_token_num_with_cache: Optional[int]
+    context_execute_time_us: Optional[int]
+    context_execute_time_with_cache_us: Optional[int]
+    generate_token_num: Optional[int]
+    generate_execute_time_us: Optional[int]
+    speculative_verify_rounds: Optional[int]
+    speculative_accepted_token_num: Optional[int]
+    speculative_proposed_draft_tokens: Optional[int]
+
+    @classmethod
+    def from_output(
+        cls,
+        output: GenerateOutputs,
+        *,
+        attempt: int,
+        context_batch_size: int = 1,
+        unit_id: Optional[int] = None,
+    ) -> "FrontendMetricFrame":
+        return cls(
+            aux_info=[item.aux_info for item in output.generate_outputs],
+            _frontend_metric_attempt=attempt,
+            _frontend_context_batch_size=context_batch_size,
+            _frontend_output_batch_size=len(output.generate_outputs),
+            _frontend_metric_unit_id=unit_id,
+            frontend_input_len=output.frontend_input_len,
+            frontend_output_len=output.frontend_output_len,
+            context_token_num=output.frontend_context_token_num,
+            context_token_num_with_cache=output.frontend_context_token_num_with_cache,
+            context_execute_time_us=output.frontend_context_execute_time_us,
+            context_execute_time_with_cache_us=output.frontend_context_execute_time_with_cache_us,
+            generate_token_num=output.frontend_generate_token_num,
+            generate_execute_time_us=output.frontend_generate_execute_time_us,
+            speculative_verify_rounds=output.frontend_speculative_verify_rounds,
+            speculative_accepted_token_num=output.frontend_speculative_accepted_token_num,
+            speculative_proposed_draft_tokens=output.frontend_speculative_proposed_draft_tokens,
+        )
 
 
 @dataclass

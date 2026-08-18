@@ -618,6 +618,10 @@ class DashScApp:
                     think_runtime=think_runtime,
                     rank_id=self.server_config.rank_id,
                     repetition_monitor_config=repetition_monitor_config,
+                    monitor_interval_s=max(
+                        float(self.server_config.monitor_interval or 1),
+                        0.1,
+                    ),
                 )
 
             loop = self._start_enqueue_loop()
@@ -663,6 +667,8 @@ class DashScApp:
                 backup_count=self.py_env_configs.profiling_debug_logging_config.log_file_backup_count,
                 rank_id=self.server_config.rank_id,
             )
+            if isinstance(servicer, DashScInferenceServicer):
+                servicer.start_metrics()
             logging.info("[DashScApp] gRPC server bound on port %s", port)
         except BaseException as e:
             _abort_bind_barrier(bind_barrier)

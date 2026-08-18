@@ -334,9 +334,14 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         // Metrics and KV release stay on the main thread; dispatch_output_us
         // now measures launch cost, while worker time is in async_runner.thread.
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
+        }
+        if (stream_groups.needFrontendMetricStreaming()) {
+            stream_groups.addFrontendContextExecuteMetrics(tps_execute_time_us);
+            stream_groups.addFrontendGenerateExecuteMetrics(tps_execute_time_us,
+                                                            static_cast<int64_t>(stream_groups.totalDecodeBatchSize()));
         }
         reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us);
 
@@ -354,9 +359,21 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         if (useDeviceInput()) {
             publishNormalDeviceState(stream_groups, merge_outputs.sampler_output);
         }
+        // The synchronous dispatcher constructs and enqueues the outward
+        // snapshot. Accumulate frontend counters first so the terminal frame
+        // includes this execution step; there is no later frame to repair it.
+        if (stream_groups.needFrontendMetricStreaming()) {
+            int64_t frontend_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+            if (frontend_execute_time_us <= 0) {
+                frontend_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
+            }
+            stream_groups.addFrontendContextExecuteMetrics(frontend_execute_time_us);
+            stream_groups.addFrontendGenerateExecuteMetrics(frontend_execute_time_us,
+                                                            static_cast<int64_t>(stream_groups.totalDecodeBatchSize()));
+        }
         auto result                           = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }

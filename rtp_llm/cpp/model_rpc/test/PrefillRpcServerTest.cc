@@ -225,6 +225,40 @@ TEST_F(PrefillRpcServerTest, mergeMultimodalLengthsUsesPrefillMetadata) {
     EXPECT_EQ(second_aux_info->multimodal_lengths().at(1), 64);
 }
 
+TEST_F(PrefillRpcServerTest, mergeFrontendContextMetricsAddsPrefillAndDecodeCounters) {
+    GenerateOutputsPB response;
+    response.mutable_frontend_context_token_num()->set_value(3);
+    response.mutable_frontend_context_token_num_with_cache()->set_value(5);
+    response.mutable_frontend_context_execute_time_us()->set_value(7);
+    response.mutable_frontend_context_execute_time_with_cache_us()->set_value(11);
+
+    PrefillRpcServer::mergeFrontendContextMetrics(response,
+                                                  /*token_num=*/13,
+                                                  /*token_num_with_cache=*/17,
+                                                  /*execute_time_us=*/19,
+                                                  /*execute_time_with_cache_us=*/23);
+
+    EXPECT_EQ(response.frontend_context_token_num().value(), 16);
+    EXPECT_EQ(response.frontend_context_token_num_with_cache().value(), 22);
+    EXPECT_EQ(response.frontend_context_execute_time_us().value(), 26);
+    EXPECT_EQ(response.frontend_context_execute_time_with_cache_us().value(), 34);
+}
+
+TEST_F(PrefillRpcServerTest, mergeFrontendContextMetricsPopulatesEmptyDecodeResponse) {
+    GenerateOutputsPB response;
+
+    PrefillRpcServer::mergeFrontendContextMetrics(response, 13, 17, 19, 23);
+
+    ASSERT_TRUE(response.has_frontend_context_token_num());
+    EXPECT_EQ(response.frontend_context_token_num().value(), 13);
+    ASSERT_TRUE(response.has_frontend_context_token_num_with_cache());
+    EXPECT_EQ(response.frontend_context_token_num_with_cache().value(), 17);
+    ASSERT_TRUE(response.has_frontend_context_execute_time_us());
+    EXPECT_EQ(response.frontend_context_execute_time_us().value(), 19);
+    ASSERT_TRUE(response.has_frontend_context_execute_time_with_cache_us());
+    EXPECT_EQ(response.frontend_context_execute_time_with_cache_us().value(), 23);
+}
+
 TEST_F(PrefillRpcServerTest, multimodalProcessMarksDeterministicErrorNonRetryable) {
     GenerateInputPB request;
     request.set_request_id(1);

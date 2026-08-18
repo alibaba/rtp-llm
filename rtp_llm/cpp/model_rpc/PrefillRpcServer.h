@@ -42,6 +42,11 @@ private:
     void              remoteGenerate(PrefillGenerateContext& prefill_context);
     void              pollRemoteOutput(PrefillGenerateContext& prefill_context);
     static void       mergeMultimodalLengths(GenerateOutputsPB& response, const std::map<int, int>& multimodal_lengths);
+    static void       mergeFrontendContextMetrics(GenerateOutputsPB& response,
+                                                  int64_t            token_num,
+                                                  int64_t            token_num_with_cache,
+                                                  int64_t            execute_time_us,
+                                                  int64_t            execute_time_with_cache_us);
 
 private:
     std::string decode_cluster_name_;

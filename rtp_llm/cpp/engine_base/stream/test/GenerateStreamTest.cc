@@ -30,11 +30,14 @@ public:
             /*layer_num=*/3, /*block_num=*/9, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
     }
 
-    GenerateStreamPtr createContextStream(std::vector<int> input_ids) {
-        std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
-        std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
-        ResourceContext                 resource_context;
+    GenerateStreamPtr
+    createContextStream(std::vector<int>                input_ids,
+                        std::shared_ptr<GenerateConfig> generate_config = std::make_shared<GenerateConfig>(),
+                        int                             prefix_length   = 0) {
+        std::shared_ptr<GenerateInput> generate_input(new GenerateInput());
+        ResourceContext                resource_context;
         generate_input->generate_config = generate_config;
+        generate_input->prefix_length   = prefix_length;
         generate_input->begin_time_us   = autil::TimeUtility::currentTimeInMicroSeconds();
         generate_input->input_ids =
             torch::tensor(std::vector<int32_t>(input_ids.begin(), input_ids.end()), torch::kInt32);
@@ -111,6 +114,117 @@ TEST_F(GenerateStreamTest, testConstruct) {
     auto builder = GenerateStreamBuilder();
     auto stream1 = builder.createContextStream({{1, 2, 3, 4, 5}, {}});
     auto stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
+}
+
+TEST_F(GenerateStreamTest, testFrontendMetricKeepsIndependentReturnSequenceLengthsWithoutChangingAuxInfo) {
+    auto config                       = std::make_shared<GenerateConfig>();
+    config->aux_info                  = true;
+    config->ignore_eos                = true;
+    config->is_streaming              = false;
+    config->frontend_metric_streaming = true;
+    config->num_return_sequences      = 2;
+    config->stop_words_list           = {{7}};
+    auto stream                       = GenerateStreamBuilder().createContextStream({1, 2}, config);
+
+    stream->update({torch::tensor({{7}, {8}}, torch::kInt32), 1});
+    auto metric_output = stream->nextOutput();
+    ASSERT_TRUE(metric_output.ok());
+    EXPECT_TRUE(metric_output.value().frontend_metric_only);
+    stream->update({torch::tensor({{0}, {7}}, torch::kInt32), 1});
+
+    auto output = stream->nextOutput();
+    ASSERT_TRUE(output.ok());
+    ASSERT_EQ(output.value().generate_outputs.size(), 2);
+    const auto& first  = output.value().generate_outputs[0];
+    const auto& second = output.value().generate_outputs[1];
+    EXPECT_TRUE(first.finished);
+    EXPECT_TRUE(second.finished);
+    EXPECT_EQ(first.aux_info.output_len, 2);
+    EXPECT_EQ(second.aux_info.output_len, 2);
+    ASSERT_TRUE(output.value().frontend_output_len.has_value());
+    EXPECT_EQ(output.value().frontend_output_len.value(), 3);
+}
+
+TEST_F(GenerateStreamTest, testFrontendFullInputLengthDoesNotChangePublicAuxInfo) {
+    auto config                       = std::make_shared<GenerateConfig>();
+    config->aux_info                  = true;
+    config->ignore_eos                = true;
+    config->frontend_metric_streaming = true;
+    config->max_new_tokens            = 1;
+    auto stream = GenerateStreamBuilder().createContextStream({10, 11, 12, 13}, config, /*prefix_length=*/2);
+
+    stream->update({torch::tensor({{20}}, torch::kInt32), 1});
+    auto output = stream->nextOutput();
+
+    ASSERT_TRUE(output.ok());
+    ASSERT_EQ(output.value().generate_outputs.size(), 1);
+    EXPECT_EQ(output.value().generate_outputs[0].aux_info.input_len, 2);
+    ASSERT_TRUE(output.value().frontend_input_len.has_value());
+    EXPECT_EQ(output.value().frontend_input_len.value(), 4);
+    ASSERT_TRUE(output.value().frontend_output_len.has_value());
+    EXPECT_EQ(output.value().frontend_output_len.value(), 1);
+}
+
+TEST_F(GenerateStreamTest, testFrontendContextCountersAccumulateOnStream) {
+    auto stream = GenerateStreamBuilder().createContextStream({1, 2, 3});
+
+    stream->addFrontendContextExecuteMetrics(
+        /*execute_time_us=*/25, /*context_token_num=*/2, /*context_token_num_with_cache=*/3);
+
+    EXPECT_EQ(stream->frontendContextTokenNum(), 2);
+    EXPECT_EQ(stream->frontendContextTokenNumWithCache(), 3);
+    EXPECT_EQ(stream->frontendContextExecuteTimeUs(), 25);
+    EXPECT_EQ(stream->frontendContextExecuteTimeWithCacheUs(), 25);
+}
+
+TEST_F(GenerateStreamTest, testSlowNonStreamingMetricConsumerDoesNotFillBusinessOutputQueue) {
+    constexpr int kOutputLength       = 1100;
+    auto          config              = std::make_shared<GenerateConfig>();
+    config->aux_info                  = true;
+    config->ignore_eos                = true;
+    config->is_streaming              = false;
+    config->frontend_metric_streaming = true;
+    config->max_new_tokens            = kOutputLength;
+    auto stream                       = GenerateStreamBuilder().createContextStream({1}, config);
+
+    for (int i = 0; i < kOutputLength; ++i) {
+        stream->addFrontendGenerateExecuteMetrics(/*execute_time_us=*/10, /*generate_token_num=*/1);
+        stream->update({torch::tensor({{2}}, torch::kInt32), 1});
+    }
+
+    ASSERT_FALSE(stream->hasError());
+    auto metric_output = stream->nextOutput();
+    ASSERT_TRUE(metric_output.ok());
+    EXPECT_TRUE(metric_output.value().frontend_metric_only);
+    EXPECT_EQ(metric_output.value().frontend_generate_token_num.value(), kOutputLength - 1);
+
+    auto final_output = stream->nextOutput();
+    ASSERT_TRUE(final_output.ok());
+    EXPECT_FALSE(final_output.value().frontend_metric_only);
+    EXPECT_EQ(final_output.value().generate_outputs[0].aux_info.output_len, kOutputLength);
+    EXPECT_EQ(final_output.value().frontend_generate_token_num.value(), kOutputLength);
+    EXPECT_FALSE(stream->hasError());
+}
+
+TEST_F(GenerateStreamTest, testCancelledNonStreamingRequestPreservesTerminalErrorPrecedence) {
+    constexpr int kExecutedSteps      = 5;
+    auto          config              = std::make_shared<GenerateConfig>();
+    config->aux_info                  = true;
+    config->ignore_eos                = true;
+    config->is_streaming              = false;
+    config->frontend_metric_streaming = true;
+    config->max_new_tokens            = 100;
+    auto stream                       = GenerateStreamBuilder().createContextStream({1}, config);
+
+    for (int i = 0; i < kExecutedSteps; ++i) {
+        stream->addFrontendGenerateExecuteMetrics(/*execute_time_us=*/10, /*generate_token_num=*/1);
+        stream->update({torch::tensor({{2}}, torch::kInt32), 1});
+    }
+    stream->reportError(ErrorCode::CANCELLED, "cancelled by test");
+
+    auto output = stream->nextOutput();
+    ASSERT_FALSE(output.ok());
+    EXPECT_EQ(output.status().code(), ErrorCode::CANCELLED);
 }
 
 TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {

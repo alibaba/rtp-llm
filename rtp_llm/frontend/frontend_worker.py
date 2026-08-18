@@ -232,6 +232,8 @@ class FrontendWorker:
             for i, (text, urls, generate_config) in enumerate(
                 zip(request.input_texts, request.input_urls, request.generate_configs)
             ):
+                unit_kwargs = dict(kwargs)
+                unit_kwargs["frontend_metric_unit_id"] = i
                 generators.append(
                     self._yield_generate(
                         request.request_id + i * 10000,
@@ -240,7 +242,7 @@ class FrontendWorker:
                         generate_config=generate_config,
                         batch_group_size=batch_group_size,
                         batch_group_id=batch_group_id,
-                        **kwargs,
+                        **unit_kwargs,
                     )
                 )
             return self._parallel_batch_async_generators(
@@ -249,12 +251,14 @@ class FrontendWorker:
                 request.batch_infer,
             )
         else:
+            unit_kwargs = dict(kwargs)
+            unit_kwargs["frontend_metric_unit_id"] = 0
             return self._yield_generate(
                 request.request_id,
                 request.input_texts[0],
                 request.input_urls[0],
                 generate_config=request.generate_configs[0],
-                **kwargs,
+                **unit_kwargs,
             )
 
     def _format_response(

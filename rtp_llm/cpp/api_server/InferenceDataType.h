@@ -113,8 +113,7 @@ public:
         cum_log_probs    = base.cum_log_probs;
         local_reuse_len  = base.local_reuse_len;
         remote_reuse_len = base.remote_reuse_len;
-
-        cost_time_ms = cost_time_us / 1000.0;
+        cost_time_ms     = cost_time_us / 1000.0;
     }
     float                    cost_time_ms;
     std::vector<std::string> beam_responses;

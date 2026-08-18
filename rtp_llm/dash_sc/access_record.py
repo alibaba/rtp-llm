@@ -32,7 +32,7 @@ import dataclasses
 import json
 import re
 import time
-from typing import Any, Optional, Sequence
+from typing import Any, NamedTuple, Optional, Sequence
 
 import grpc
 
@@ -58,6 +58,19 @@ from rtp_llm.dash_sc.status import (
 )
 
 DASH_SC_GRPC_PROTOCOL = "grpc"
+
+
+class FrontendBackendMetricCounters(NamedTuple):
+    speculative_verify_rounds: int = 0
+    speculative_accepted_token_num: int = 0
+    speculative_proposed_draft_tokens: int = 0
+    context_execute_time_us: int = 0
+    context_execute_time_with_cache_us: int = 0
+    generate_execute_time_us: int = 0
+    input_len: int = 0
+    reuse_len: int = 0
+    generate_token_num: int = 0
+
 
 _MAX_CONTROL_STRING_LEN = 4096
 _MAX_CONTROL_DEPTH = 8
@@ -374,6 +387,13 @@ class GrpcAccessRecord:
     finished: Optional[bool] = None
     terminal_seen: bool = False
     prompt_cached_token_num: Optional[int] = None
+    # Latest cumulative speculative sampler counters per internal phase.
+    # DashSC phase-2 starts new backend counters, while the Frontend metric is
+    # request-scoped, so phase totals are summed before reporting.
+    frontend_backend_metric_counters: dict[str, FrontendBackendMetricCounters] = (
+        dataclasses.field(default_factory=dict, repr=False)
+    )
+    frontend_metric_state: Any = dataclasses.field(default=None, repr=False)
     # Protocol-level backend error channel (predict_v2.proto: empty means
     # success). Kept here so a successful gRPC status can still be classified as
     # a backend failure when the payload says so.
@@ -467,6 +487,69 @@ class GrpcAccessRecord:
         """
         if token_ids:
             self.generated_ids.extend(token_ids)
+
+    def record_frontend_backend_output(
+        self, backend_output: Any, *, phase: str = "phase1"
+    ) -> None:
+        """Retain private backend counters without extending public AuxInfo."""
+        if backend_output is None:
+            return
+        try:
+            generate_outputs = getattr(backend_output, "generate_outputs", None) or ()
+            aux_info = (
+                getattr(generate_outputs[0], "aux_info", None)
+                if generate_outputs
+                else getattr(backend_output, "aux_info", None)
+            )
+
+            def private_counter(name: str) -> int:
+                value = getattr(backend_output, name, None)
+                return max(int(value or 0), 0)
+
+            speculative_verify_rounds = max(
+                private_counter("frontend_speculative_verify_rounds"),
+                0,
+            )
+            speculative_accepted_token_num = private_counter(
+                "frontend_speculative_accepted_token_num"
+            )
+            # Match the numerator used by rtp_llm_generate_tps. MTP reports
+            # accepted tokens per verify step directly; output_len - 1 is only
+            # the compatibility fallback for ordinary one-token decode.
+            generate_token_num = private_counter("frontend_generate_token_num")
+            if generate_token_num == 0:
+                generate_token_num = (
+                    speculative_accepted_token_num
+                    if speculative_verify_rounds > 0
+                    else max(int(getattr(aux_info, "output_len", 0)) - 1, 0)
+                )
+            counters = FrontendBackendMetricCounters(
+                speculative_verify_rounds,
+                speculative_accepted_token_num,
+                private_counter("frontend_speculative_proposed_draft_tokens"),
+                private_counter("frontend_context_execute_time_us"),
+                private_counter("frontend_context_execute_time_with_cache_us"),
+                private_counter("frontend_generate_execute_time_us"),
+                private_counter("frontend_input_len")
+                or max(int(getattr(aux_info, "input_len", 0)), 0),
+                max(int(getattr(aux_info, "reuse_len", 0)), 0),
+                generate_token_num,
+            )
+        except (TypeError, ValueError):
+            return
+        self.frontend_backend_metric_counters[str(phase)] = counters
+
+    @property
+    def frontend_combined_metric_counters(
+        self,
+    ) -> FrontendBackendMetricCounters:
+        """Return request totals across DashSC's internal backend phases."""
+        counters = self.frontend_backend_metric_counters.values()
+        return (
+            FrontendBackendMetricCounters(*(sum(values) for values in zip(*counters)))
+            if counters
+            else FrontendBackendMetricCounters()
+        )
 
     def check_repetition(self) -> None:
         self._repetition_monitor.check_generated_ids(self.generated_ids or ())

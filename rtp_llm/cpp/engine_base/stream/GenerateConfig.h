@@ -74,29 +74,30 @@ public:
 
     std::vector<int>              select_tokens_id;
     std::vector<std::string>      select_tokens_str;
-    int                           calculate_loss           = 0;
-    int                           hidden_states_cut_dim    = 0;
-    bool                          return_logits            = false;
-    bool                          return_prompt_logits     = false;
-    int                           prompt_logits_top_k      = 64;
-    int                           prompt_logits_start      = -1;
-    int                           prompt_logits_end        = -1;
-    bool                          return_target_logprob    = true;
-    bool                          return_cum_log_probs     = false;
-    bool                          return_incremental       = false;
-    bool                          return_hidden_states     = false;
-    bool                          return_all_hidden_states = false;
-    bool                          normalized_hidden_states = false;
-    bool                          return_output_ids        = false;
-    bool                          return_input_ids         = false;
-    bool                          is_streaming             = false;
-    int                           timeout_ms               = -1;
-    bool                          sp_edit                  = false;
-    bool                          force_disable_sp_run     = false;
-    bool                          force_sp_accept          = false;
-    ReturnAllProbsMode            return_all_probs         = ReturnAllProbsMode::NONE;
-    bool                          return_softmax_probs     = false;
-    bool                          aux_info                 = true;
+    int                           calculate_loss            = 0;
+    int                           hidden_states_cut_dim     = 0;
+    bool                          return_logits             = false;
+    bool                          return_prompt_logits      = false;
+    int                           prompt_logits_top_k       = 64;
+    int                           prompt_logits_start       = -1;
+    int                           prompt_logits_end         = -1;
+    bool                          return_target_logprob     = true;
+    bool                          return_cum_log_probs      = false;
+    bool                          return_incremental        = false;
+    bool                          return_hidden_states      = false;
+    bool                          return_all_hidden_states  = false;
+    bool                          normalized_hidden_states  = false;
+    bool                          return_output_ids         = false;
+    bool                          return_input_ids          = false;
+    bool                          is_streaming              = false;
+    bool                          frontend_metric_streaming = false;
+    int                           timeout_ms                = -1;
+    bool                          sp_edit                   = false;
+    bool                          force_disable_sp_run      = false;
+    bool                          force_sp_accept           = false;
+    ReturnAllProbsMode            return_all_probs          = ReturnAllProbsMode::NONE;
+    bool                          return_softmax_probs      = false;
+    bool                          aux_info                  = true;
     std::vector<std::vector<int>> stop_words_list;
     std::vector<std::string>      stop_words_str;
     bool                          print_stop_words = false;
@@ -190,9 +191,9 @@ public:
                      << ", hidden_states_cut_dim:" << hidden_states_cut_dim
                      << ", normalized_hidden_states:" << normalized_hidden_states
                      << ", return_output_ids:" << return_output_ids << ", return_input_ids:" << return_input_ids
-                     << ", is_streaming:" << is_streaming << ", timeout_ms:" << timeout_ms << ", top_k:" << top_k
-                     << ", top_p:" << top_p << ", force_disable_sp_run: " << force_disable_sp_run
-                     << ", force_sp_accept: " << force_sp_accept
+                     << ", is_streaming:" << is_streaming << ", frontend_metric_streaming:" << frontend_metric_streaming
+                     << ", timeout_ms:" << timeout_ms << ", top_k:" << top_k << ", top_p:" << top_p
+                     << ", force_disable_sp_run: " << force_disable_sp_run << ", force_sp_accept: " << force_sp_accept
                      << ", return_all_probs: " << static_cast<int>(return_all_probs)
                      << ", json_schema: " << summarize_optional_string(json_schema)
                      << ", regex: " << summarize_optional_string(regex) << ", ebnf: " << summarize_optional_string(ebnf)
@@ -281,6 +282,9 @@ public:
         JSONIZE(return_output_ids);
         JSONIZE(return_input_ids);
         JSONIZE(is_streaming);
+        // Internal transport control: it is populated by QueryConverter from
+        // the private model-RPC field and must never be accepted from public
+        // JSON requests.
         JSONIZE(timeout_ms);
         JSONIZE(stop_words_list);
         JSONIZE(stop_words_str);

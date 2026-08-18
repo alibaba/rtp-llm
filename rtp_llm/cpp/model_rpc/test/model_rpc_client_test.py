@@ -21,6 +21,7 @@ sys.modules["rtp_llm.ops.comm.nccl_op"] = mock_nccl_op
 import logging
 import os
 import unittest
+from dataclasses import asdict
 from typing import AsyncGenerator
 from unittest import TestCase, main
 
@@ -145,6 +146,17 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(request_info_pb.request_id, "request-id")
         self.assertEqual(request_info_pb.source_role, "frontend")
 
+    def test_trans_input_writes_internal_frontend_metric_flag(self):
+        config = GenerateConfig().model_copy(update={"frontend_metric_streaming": True})
+        input_py = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([1, 2]),
+            mm_inputs=[],
+            generate_config=config,
+        )
+
+        self.assertTrue(trans_input(input_py).generate_config.frontend_metric_streaming)
+
     def test_trans_input_fills_request_info_from_typed_headers(self):
         input_py = GenerateInput(
             request_id=123,
@@ -265,6 +277,97 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(elements[0]["type"], "tag")
         self.assertEqual(elements[1]["type"], "json_schema")
 
+    def test_frontend_metric_envelope_stays_out_of_public_aux_info(self):
+        input_py = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+            mm_inputs=[],
+            generate_config=GenerateConfig(aux_info=True),
+        )
+        outputs_pb = GenerateOutputsPB()
+        outputs_pb.frontend_metric_only = True
+        outputs_pb.frontend_input_len.value = 19
+        outputs_pb.frontend_output_len.value = 23
+        outputs_pb.frontend_context_token_num.value = 11
+        outputs_pb.frontend_context_token_num_with_cache.value = 13
+        outputs_pb.frontend_context_execute_time_us.value = 101
+        outputs_pb.frontend_context_execute_time_with_cache_us.value = 81
+        outputs_pb.frontend_generate_token_num.value = 17
+        outputs_pb.frontend_generate_execute_time_us.value = 201
+        outputs_pb.frontend_speculative_verify_rounds.value = 3
+        outputs_pb.frontend_speculative_accepted_token_num.value = 9
+        outputs_pb.frontend_speculative_proposed_draft_tokens.value = 12
+        outputs_pb.flatten_output.finished.append(False)
+        outputs_pb.flatten_output.aux_info.add().output_len = 4
+
+        output = trans_output(input_py, outputs_pb, StreamState())
+
+        self.assertTrue(output.frontend_metric_only)
+        self.assertEqual(output.frontend_input_len, 19)
+        self.assertEqual(output.frontend_output_len, 23)
+        self.assertEqual(output.frontend_context_token_num, 11)
+        self.assertEqual(output.frontend_context_token_num_with_cache, 13)
+        self.assertEqual(output.frontend_context_execute_time_us, 101)
+        self.assertEqual(output.frontend_context_execute_time_with_cache_us, 81)
+        self.assertEqual(output.frontend_generate_token_num, 17)
+        self.assertEqual(output.frontend_generate_execute_time_us, 201)
+        self.assertEqual(output.frontend_speculative_verify_rounds, 3)
+        self.assertEqual(output.frontend_speculative_accepted_token_num, 9)
+        self.assertEqual(output.frontend_speculative_proposed_draft_tokens, 12)
+        self.assertNotIn(
+            "frontend_metric_only",
+            asdict(output.generate_outputs[0].aux_info),
+        )
+        self.assertNotIn(
+            "frontend_generate_token_num",
+            asdict(output.generate_outputs[0].aux_info),
+        )
+        self.assertNotIn(
+            "frontend_context_token_num",
+            asdict(output.generate_outputs[0].aux_info),
+        )
+        self.assertNotIn(
+            "frontend_generate_execute_time_us",
+            asdict(output.generate_outputs[0].aux_info),
+        )
+        self.assertNotIn(
+            "speculative_verify_rounds",
+            asdict(output.generate_outputs[0].aux_info),
+        )
+
+    def test_empty_payload_preserves_frontend_metric_envelope(self):
+        input_py = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+            mm_inputs=[],
+            generate_config=GenerateConfig(aux_info=True),
+        )
+        outputs_pb = GenerateOutputsPB()
+        outputs_pb.frontend_metric_only = True
+        outputs_pb.frontend_generate_token_num.value = 7
+
+        output = trans_output(input_py, outputs_pb, StreamState())
+
+        self.assertTrue(output.frontend_metric_only)
+        self.assertEqual(output.frontend_generate_token_num, 7)
+        self.assertEqual(output.generate_outputs, [])
+
+    def test_absent_frontend_metric_envelope_defaults_to_none(self):
+        input_py = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+            mm_inputs=[],
+            generate_config=GenerateConfig(aux_info=True),
+        )
+
+        output = trans_output(input_py, GenerateOutputsPB(), StreamState())
+
+        self.assertFalse(output.frontend_metric_only)
+        self.assertIsNone(output.frontend_input_len)
+        self.assertIsNone(output.frontend_generate_token_num)
+        self.assertIsNone(output.frontend_generate_execute_time_us)
+        self.assertEqual(output.generate_outputs, [])
+
     @unittest.skip("need fix")
     def test_generate_stream(self):
         client = FakeModelRpcClient()
@@ -286,7 +389,6 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(res[1].finished, False)
         self.assertEqual(res[1].aux_info.iter_count, 3)
         self.assertEqual(res[1].aux_info.output_len, 2)
-
         self.assertEqual(res[2].finished, True)
 
     def test_generate_stream_with_logits_index(self):

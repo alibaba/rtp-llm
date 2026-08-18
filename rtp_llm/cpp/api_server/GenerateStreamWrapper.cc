@@ -23,17 +23,23 @@ void GenerateStreamWrapper::init(GenerateStreamPtr stream, const std::shared_ptr
 }
 
 std::pair<MultiSeqsResponse, bool> GenerateStreamWrapper::generateResponse() {
-    const auto result = stream_->nextOutput();
-    if (!result.ok()) {
-        const auto& status = result.status();
-        if (status.code() == ErrorCode::FINISHED) {
-            return std::make_pair(MultiSeqsResponse(), true);
-        }
+    GenerateOutputs outputs;
+    while (true) {
+        auto result = stream_->nextOutput();
+        if (!result.ok()) {
+            const auto& status = result.status();
+            if (status.code() == ErrorCode::FINISHED) {
+                return std::make_pair(MultiSeqsResponse(), true);
+            }
 
-        RTP_LLM_LOG_WARNING("stream nextOutput failed: %s", status.ToString().c_str());
-        throw streamErrorToHttpException(status);
+            RTP_LLM_LOG_WARNING("stream nextOutput failed: %s", status.ToString().c_str());
+            throw streamErrorToHttpException(status);
+        }
+        outputs = std::move(result.value());
+        if (!outputs.frontend_metric_only) {
+            break;
+        }
     }
-    auto outputs = result.value();
 
     if (outputs_cache_.generate_outputs.size() == 0) {
         outputs_cache_.generate_outputs = outputs.generate_outputs;

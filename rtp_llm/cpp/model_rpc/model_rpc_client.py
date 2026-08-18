@@ -43,6 +43,7 @@ from rtp_llm.utils.grpc_util import (
 MAX_GRPC_TIMEOUT_SECONDS = 3600
 JsonableOption = Optional[Union[str, Dict[str, Any], bool]]
 
+
 class StreamState:
     def __init__(self):
         self.cached_logits_dict = {}
@@ -201,6 +202,9 @@ def trans_input(input_py: GenerateInput):
         input_py.generate_config.normalized_hidden_states
     )
     generate_config_pb.is_streaming = input_py.generate_config.is_streaming
+    generate_config_pb.frontend_metric_streaming = (
+        input_py.generate_config.frontend_metric_streaming
+    )
     generate_config_pb.timeout_ms = input_py.generate_config.timeout_ms
     if input_py.generate_config.sp_advice_prompt_token_ids:
         generate_config_pb.sp_advice_prompt_token_ids.extend(
@@ -323,8 +327,66 @@ def trans_multimodal_input(
         input_pb.multimodal_inputs.append(mm_input_pb)
 
 
-# 假设 trans_tensor 函数将 Protobuf 的 TensorPB 转换为 numpy array
-# from .utils import trans_tensor
+def _trans_frontend_metric_envelope(outputs_pb: GenerateOutputsPB) -> GenerateOutputs:
+    """Decode wrapper-level private metrics even when the payload is empty."""
+    return GenerateOutputs(
+        frontend_metric_only=bool(outputs_pb.frontend_metric_only),
+        frontend_input_len=(
+            int(outputs_pb.frontend_input_len.value)
+            if outputs_pb.HasField("frontend_input_len")
+            else None
+        ),
+        frontend_output_len=(
+            int(outputs_pb.frontend_output_len.value)
+            if outputs_pb.HasField("frontend_output_len")
+            else None
+        ),
+        frontend_context_token_num=(
+            int(outputs_pb.frontend_context_token_num.value)
+            if outputs_pb.HasField("frontend_context_token_num")
+            else None
+        ),
+        frontend_context_token_num_with_cache=(
+            int(outputs_pb.frontend_context_token_num_with_cache.value)
+            if outputs_pb.HasField("frontend_context_token_num_with_cache")
+            else None
+        ),
+        frontend_context_execute_time_us=(
+            int(outputs_pb.frontend_context_execute_time_us.value)
+            if outputs_pb.HasField("frontend_context_execute_time_us")
+            else None
+        ),
+        frontend_context_execute_time_with_cache_us=(
+            int(outputs_pb.frontend_context_execute_time_with_cache_us.value)
+            if outputs_pb.HasField("frontend_context_execute_time_with_cache_us")
+            else None
+        ),
+        frontend_generate_token_num=(
+            int(outputs_pb.frontend_generate_token_num.value)
+            if outputs_pb.HasField("frontend_generate_token_num")
+            else None
+        ),
+        frontend_generate_execute_time_us=(
+            int(outputs_pb.frontend_generate_execute_time_us.value)
+            if outputs_pb.HasField("frontend_generate_execute_time_us")
+            else None
+        ),
+        frontend_speculative_verify_rounds=(
+            int(outputs_pb.frontend_speculative_verify_rounds.value)
+            if outputs_pb.HasField("frontend_speculative_verify_rounds")
+            else None
+        ),
+        frontend_speculative_accepted_token_num=(
+            int(outputs_pb.frontend_speculative_accepted_token_num.value)
+            if outputs_pb.HasField("frontend_speculative_accepted_token_num")
+            else None
+        ),
+        frontend_speculative_proposed_draft_tokens=(
+            int(outputs_pb.frontend_speculative_proposed_draft_tokens.value)
+            if outputs_pb.HasField("frontend_speculative_proposed_draft_tokens")
+            else None
+        ),
+    )
 
 
 def trans_output(
@@ -333,9 +395,10 @@ def trans_output(
     logging.debug("outputs_pb = %s", outputs_pb)
     output_pb = outputs_pb.flatten_output
     num_outputs = len(output_pb.finished)
+    outputs_py = _trans_frontend_metric_envelope(outputs_pb)
 
     if num_outputs == 0:
-        return GenerateOutputs()
+        return outputs_py
 
     logits_index = input_py.generate_config.logits_index
     aux_info_flag = input_py.generate_config.aux_info
@@ -399,7 +462,6 @@ def trans_output(
             "end_pos": pl_pb.end_pos,
         }
 
-    outputs_py = GenerateOutputs()
     input_token_ids = input_py.token_ids.reshape(1, -1)
 
     # 遍历每个 beam/output
@@ -641,7 +703,9 @@ class ModelRpcClient(object):
         except grpc.RpcError as e:
             if response_iterator:
                 response_iterator.cancel()
-            self._handle_grpc_error(e, f"request: [{input_pb.request_id}]", target_address)
+            self._handle_grpc_error(
+                e, f"request: [{input_pb.request_id}]", target_address
+            )
         except Exception as e:
             logging.error(
                 f"request: [{input_pb.request_id}] rpc to [{target_address}] unknown error: {str(e)}"
