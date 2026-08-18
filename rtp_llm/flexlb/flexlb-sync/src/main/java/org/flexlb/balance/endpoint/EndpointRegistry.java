@@ -254,24 +254,29 @@ public class EndpointRegistry {
         // are left to the scheduler's own cleanup cascade.
         LongPredicate schedulerOwns = batchScheduler()::hasInflightRequest;
         prefillEndpoints.forEach((endpoint, ep) ->
-                logEndpointEviction(RoleType.PREFILL, endpoint,
+                reportEndpointEviction(RoleType.PREFILL, endpoint, ep.getIp(),
                         ep.evictExpiredBatches(ttlMs, hardMaxAgeMs, schedulerOwns), ttlMs));
         decodeEndpoints.forEach((endpoint, ep) ->
-                logEndpointEviction(RoleType.DECODE, endpoint,
+                reportEndpointEviction(RoleType.DECODE, endpoint, ep.getIp(),
                         ep.evictExpiredRequests(ttlMs, hardMaxAgeMs, schedulerOwns), ttlMs));
         pdFusionEndpoints.forEach((endpoint, ep) ->
-                logEndpointEviction(RoleType.PDFUSION, endpoint,
+                reportEndpointEviction(RoleType.PDFUSION, endpoint, ep.getIp(),
                         ep.evictExpiredBatches(ttlMs, hardMaxAgeMs, schedulerOwns), ttlMs));
     }
 
-    private static void logEndpointEviction(RoleType role,
-                                            String endpoint,
-                                            int evicted,
-                                            long ttlMs) {
+    private void reportEndpointEviction(RoleType role,
+                                        String endpoint,
+                                        String engineIp,
+                                        int evicted,
+                                        long ttlMs) {
         if (evicted > 0) {
             Logger.info("event=endpoint_inflight_ttl_eviction role={} endpoint={} "
                             + "evicted={} ttl_ms={}",
                     role, endpoint, evicted, ttlMs);
+            // Endpoint-ledger evictions were previously log-only. The endpoint
+            // eviction APIs do not split TTL vs hard-cap counts, so reason=ttl
+            // covers both here.
+            reporter.reportEndpointInflightTtlExpired(role.name(), engineIp, "ttl", evicted);
         }
     }
 

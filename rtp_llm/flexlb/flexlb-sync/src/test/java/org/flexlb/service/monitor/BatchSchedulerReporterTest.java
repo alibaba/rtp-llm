@@ -15,11 +15,14 @@ import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_HARD_KV_RESERVE
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_DISPATCH_REASON;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL;
 import static org.flexlb.constant.MetricConstant.DISPATCH_ACK_TIME_MS;
+import static org.flexlb.constant.MetricConstant.DISPATCH_RECONCILIATION_EVENT_QPS;
+import static org.flexlb.constant.MetricConstant.DISPATCH_RECONCILIATION_FENCE_SIZE;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_MAX_AGE_MS;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_TTL_EXPIRED_QPS;
 import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
+import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_MAX_AGE_MS;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.eq;
@@ -136,11 +139,68 @@ class BatchSchedulerReporterTest {
     }
 
     @Test
-    void should_report_inflight_ttl_expired_with_role_tag_only() {
-        reporter.reportInflightTtlExpired(3);
+    void should_register_dispatch_reconciliation_metrics_on_init() {
+        reporter.init();
 
-        FlexMetricTags tags = FlexMetricTags.of("role", "PREFILL");
+        verify(monitor).register(DISPATCH_RECONCILIATION_EVENT_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        verify(monitor).register(DISPATCH_RECONCILIATION_FENCE_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+    }
+
+    @Test
+    void should_report_scheduler_inflight_ttl_expired_with_scheduler_role_and_reason() {
+        reporter.reportSchedulerInflightTtlExpired("hard_age_cap", 3);
+
+        FlexMetricTags tags = FlexMetricTags.of(
+                "engineIp", "scheduler",
+                "role", "SCHEDULER",
+                "reason", "hard_age_cap");
         verify(monitor).report(INFLIGHT_TTL_EXPIRED_QPS, tags, 3.0);
+    }
+
+    @Test
+    void should_report_endpoint_inflight_ttl_expired_with_engine_tags() {
+        reporter.reportEndpointInflightTtlExpired("DECODE", "10.0.0.2", "ttl", 2);
+
+        FlexMetricTags tags = FlexMetricTags.of(
+                "engineIp", "10.0.0.2",
+                "role", "DECODE",
+                "reason", "ttl");
+        verify(monitor).report(INFLIGHT_TTL_EXPIRED_QPS, tags, 2.0);
+    }
+
+    @Test
+    void should_report_scheduler_max_age_on_both_legacy_and_unified_series() {
+        reporter.reportSchedulerInflightMaxAgeMs(12_000L);
+
+        FlexMetricTags legacyTags = FlexMetricTags.of(
+                "role", "PREFILL",
+                "engineIp", "scheduler");
+        verify(monitor).report(SCHEDULER_INFLIGHT_MAX_AGE_MS, legacyTags, 12_000.0);
+        FlexMetricTags unifiedTags = FlexMetricTags.of(
+                "engineIp", "scheduler",
+                "role", "SCHEDULER");
+        verify(monitor).report(INFLIGHT_MAX_AGE_MS, unifiedTags, 12_000.0);
+    }
+
+    @Test
+    void should_report_dispatch_reconciliation_event_with_event_and_reason_tags() {
+        reporter.reportDispatchReconciliationEvent("forced_terminal", "failure_cap");
+
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", "SCHEDULER",
+                "event", "forced_terminal",
+                "reason", "failure_cap");
+        verify(monitor).report(DISPATCH_RECONCILIATION_EVENT_QPS, tags, 1.0);
+    }
+
+    @Test
+    void should_report_dispatch_reconciliation_fence_size_gauge() {
+        reporter.reportDispatchReconciliationFenceSize(4);
+
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", "SCHEDULER",
+                "engineIp", "scheduler");
+        verify(monitor).report(DISPATCH_RECONCILIATION_FENCE_SIZE, tags, 4.0);
     }
 
     @Test

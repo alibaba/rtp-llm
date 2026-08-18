@@ -17,6 +17,8 @@ import static org.flexlb.constant.MetricConstant.BATCH_ACTUAL_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICTED_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICT_GAP_MS;
 import static org.flexlb.constant.MetricConstant.DISPATCH_ACK_TIME_MS;
+import static org.flexlb.constant.MetricConstant.DISPATCH_RECONCILIATION_EVENT_QPS;
+import static org.flexlb.constant.MetricConstant.DISPATCH_RECONCILIATION_FENCE_SIZE;
 import static org.flexlb.constant.MetricConstant.ACK_TO_RESPONSE_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
@@ -55,6 +57,12 @@ public class BatchSchedulerReporter {
     private static final String[] FIXED_WINDOW_DISPATCH_REASONS = {
             "batch_full", "fixed_window_timeout", "predict_threshold"
     };
+
+    /** role tag value for scheduler-ledger series (vs PREFILL/DECODE endpoint ledgers). */
+    public static final String SCHEDULER_ROLE = "SCHEDULER";
+
+    /** engineIp tag value for scheduler-ledger series (no real engine behind them). */
+    public static final String SCHEDULER_ENGINE_IP = "scheduler";
 
     private final FlexMonitor monitor;
 
@@ -105,6 +113,10 @@ public class BatchSchedulerReporter {
         // Inflight cleanup fence skips — TTL-due entries retained by a stronger fence, QPS tagged by role
         monitor.register(INFLIGHT_CLEANUP_SKIPPED_FENCED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
+        // Dispatch reconciliation — fence lifecycle events (QPS) and live fence population (gauge)
+        monitor.register(DISPATCH_RECONCILIATION_EVENT_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(DISPATCH_RECONCILIATION_FENCE_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+
         // Prediction accuracy — predicted vs actual engine execution time (timer for distribution)
         monitor.register(BATCH_PREDICTED_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
         monitor.register(BATCH_ACTUAL_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
@@ -119,7 +131,7 @@ public class BatchSchedulerReporter {
         // ACK-to-response time — from engine ACK to schedule response sent to client (timer for distribution)
         monitor.register(ACK_TO_RESPONSE_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
-        log.info("BatchSchedulerReporter initialized (24 metrics)");
+        log.info("BatchSchedulerReporter initialized (26 metrics)");
     }
 
     // ==================== Queue metrics ====================
@@ -286,14 +298,20 @@ public class BatchSchedulerReporter {
                 "role", RoleType.PREFILL.name(),
                 "engineIp", "scheduler");
         monitor.report(SCHEDULER_INFLIGHT_MAX_AGE_MS, tags, ageMs);
+        // Unified series: same metric name and tag schema ({engineIp, role})
+        // as the per-worker reportInflightMaxAgeMs, so a single role='*'
+        // grouping on inflight.max.age.ms compares the scheduler ledger
+        // against the PREFILL/DECODE endpoint ledgers — the exact contrast
+        // the post-ACK ghost incident lacked (endpoints ~10s, scheduler 300s+).
+        monitor.report(INFLIGHT_MAX_AGE_MS,
+                FlexMetricTags.ofEngine(SCHEDULER_ENGINE_IP, "role", SCHEDULER_ROLE), ageMs);
     }
 
     /**
      * Report one restore-pending-dispatch event — a flush-time item returned
      * to the batcher queue because the Decode concurrency gate reported
      * CAPACITY_FULL — via {@code app.flexlb.scheduler.restore.pending.dispatch.qps}.
-     * <p>Scheduler-level metric tagged by role only, mirroring
-     * {@link #reportInflightTtlExpired}.
+     * <p>Scheduler-level metric tagged by role only.
      */
     public void reportSchedulerRestorePendingDispatch() {
         FlexMetricTags tags = FlexMetricTags.of("role", RoleType.PREFILL.name());
@@ -334,15 +352,36 @@ public class BatchSchedulerReporter {
     }
 
     /**
-     * Report the count of inflight requests expired and cleaned up by the TTL task
-     * via {@code app.flexlb.inflight.ttl.expired.qps}.
-     * <p>Scheduler-level metric tagged by role only (no engineIp), because the TTL
-     * cleanup is a scheduler-wide operation not tied to a specific engine.
+     * Report inflight entries evicted from the scheduler ledger by the TTL
+     * cleanup task via {@code app.flexlb.inflight.ttl.expired.qps}.
+     * <p>Tagged role=SCHEDULER + engineIp="scheduler" (the ledger that
+     * evicted — the former hardcoded role=PREFILL tag mislabelled these
+     * scheduler-level evictions as an endpoint series) + reason
+     * (ttl / hard_age_cap), keeping one tag schema with the endpoint series.
      *
-     * @param count number of inflight entries expired in this cleanup cycle
+     * @param reason eviction reason bucket
+     * @param count  number of entries evicted in this cleanup cycle
      */
-    public void reportInflightTtlExpired(int count) {
-        FlexMetricTags tags = FlexMetricTags.of("role", RoleType.PREFILL.name());
+    public void reportSchedulerInflightTtlExpired(String reason, int count) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(SCHEDULER_ENGINE_IP,
+                "role", SCHEDULER_ROLE,
+                "reason", reason);
+        monitor.report(INFLIGHT_TTL_EXPIRED_QPS, tags, count);
+    }
+
+    /**
+     * Report inflight entries evicted from an endpoint ledger
+     * (PrefillEndpoint.evictExpiredBatches / DecodeEndpoint.evictExpiredRequests
+     * / orphan decode reservation reclaims) via the same
+     * {@code app.flexlb.inflight.ttl.expired.qps} series family.
+     * <p>Endpoint-side evictions were previously log-only
+     * (event=endpoint_inflight_ttl_eviction); this closes the gap with the
+     * shared {role, engineIp, reason} tag schema.
+     */
+    public void reportEndpointInflightTtlExpired(String role, String engineIp, String reason, int count) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
+                "role", role,
+                "reason", reason);
         monitor.report(INFLIGHT_TTL_EXPIRED_QPS, tags, count);
     }
 
@@ -351,8 +390,8 @@ public class BatchSchedulerReporter {
      * a stronger fence (preemption claim / dispatch reconciliation / cleanup
      * ownership) still owns them, via
      * {@code app.flexlb.inflight.cleanup.skipped.fenced.qps}.
-     * <p>Scheduler-level metric tagged by role only, mirroring
-     * {@link #reportInflightTtlExpired}. A persistently non-zero value means
+     * <p>Scheduler-level metric tagged by role only. A persistently
+     * non-zero value means
      * fence-held entries are accumulating past their TTL — the population the
      * hard age cap and the post-ACK audit eventually reclaim.
      *
@@ -361,6 +400,44 @@ public class BatchSchedulerReporter {
     public void reportInflightCleanupSkippedFenced(int count) {
         FlexMetricTags tags = FlexMetricTags.of("role", RoleType.PREFILL.name());
         monitor.report(INFLIGHT_CLEANUP_SKIPPED_FENCED_QPS, tags, count);
+    }
+
+    // ==================== Dispatch reconciliation metrics ====================
+
+    /**
+     * Report one dispatch-reconciliation fence lifecycle event via
+     * {@code app.flexlb.dispatch.reconciliation.event.qps}.
+     * <p>Events: start (uncertain ACK entered reconciliation), settled
+     * (engine TOMBSTONED confirmed the fence), forced_terminal (fence
+     * released without engine confirmation — natural alert point).
+     * Metricizes the previously log-only event=dispatch_reconciliation_*
+     * lines.
+     *
+     * @param event  start / settled / forced_terminal
+     * @param reason event qualifier (uncertain_ack / engine_tombstoned /
+     *               target_deregistered / failure_cap)
+     */
+    public void reportDispatchReconciliationEvent(String event, String reason) {
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", SCHEDULER_ROLE,
+                "event", event,
+                "reason", reason);
+        monitor.report(DISPATCH_RECONCILIATION_EVENT_QPS, tags, 1.0);
+    }
+
+    /**
+     * Report the number of scheduler inflight entries currently holding the
+     * dispatch-reconciliation fence via
+     * {@code app.flexlb.dispatch.reconciliation.fence.size}.
+     * <p>A fence population stuck above zero while dispatch QPS is zero is
+     * the post-ACK ghost signature the TTL sweep cannot see (fenced entries
+     * are skipped until the hard age cap).
+     */
+    public void reportDispatchReconciliationFenceSize(int size) {
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", SCHEDULER_ROLE,
+                "engineIp", SCHEDULER_ENGINE_IP);
+        monitor.report(DISPATCH_RECONCILIATION_FENCE_SIZE, tags, size);
     }
 
     // ==================== Decode inflight metrics ====================

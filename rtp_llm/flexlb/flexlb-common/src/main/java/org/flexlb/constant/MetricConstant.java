@@ -94,13 +94,21 @@ public class MetricConstant {
 
     /**
      * FlexLB scheduler inflight max age (ms) — age of the oldest inflight entry, tagged by role and engineIp.
+     * <p>Series: role=PREFILL/DECODE with the real engine IP (per-worker
+     * endpoint ledgers) and role=SCHEDULER with engineIp="scheduler"
+     * (scheduler ledger), so a single role='*' grouping compares all three
+     * ledgers in one panel.
      */
     public static final String INFLIGHT_MAX_AGE_MS =
             "app.flexlb.inflight.max.age.ms";
 
     /**
-     * FlexLB scheduler inflight TTL expired count — number of inflight requests
-     * cleaned up by the TTL cleanup task. Reported as QPS, tagged by role.
+     * FlexLB inflight TTL eviction count — inflight entries force-released
+     * by a cleanup pass. Reported as QPS, tagged by {role, engineIp, reason}:
+     * role=SCHEDULER + engineIp="scheduler" for scheduler-ledger evictions
+     * (reason=ttl / hard_age_cap), role=PREFILL/DECODE/PDFUSION + real
+     * engine IP for endpoint-ledger evictions (reason=ttl) and orphan decode
+     * reservation reclaims (reason=orphan_reservation).
      */
     public static final String INFLIGHT_TTL_EXPIRED_QPS = "app.flexlb.inflight.ttl.expired.qps";
 
@@ -113,6 +121,27 @@ public class MetricConstant {
      */
     public static final String INFLIGHT_CLEANUP_SKIPPED_FENCED_QPS =
             "app.flexlb.inflight.cleanup.skipped.fenced.qps";
+
+    /**
+     * FlexLB dispatch-reconciliation fence lifecycle events — QPS tagged by
+     * {role, event, reason}. Events: start (uncertain ACK entered
+     * reconciliation, reason=uncertain_ack), settled (engine confirmed the
+     * fence, reason=engine_tombstoned), forced_terminal (fence released
+     * without engine confirmation, reason=target_deregistered / failure_cap
+     * — natural alert point). Metricizes the previously log-only
+     * event=dispatch_reconciliation_* lines.
+     */
+    public static final String DISPATCH_RECONCILIATION_EVENT_QPS =
+            "app.flexlb.dispatch.reconciliation.event.qps";
+
+    /**
+     * FlexLB dispatch-reconciliation fence population — number of scheduler
+     * inflight entries currently holding the reconciliation fence, computed
+     * by a stateless rescan of the ledger. Gauge tagged by {role, engineIp}
+     * (role=SCHEDULER, engineIp="scheduler").
+     */
+    public static final String DISPATCH_RECONCILIATION_FENCE_SIZE =
+            "app.flexlb.dispatch.reconciliation.fence.size";
 
     /**
      * Batch predicted execution time (formula estimate) in milliseconds

@@ -1126,6 +1126,8 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         long hardMaxAgeMs = configService.loadBalanceConfig().getFlexlbInflightHardMaxAgeMs();
         long now = System.currentTimeMillis();
         int expiredCount = 0;
+        // Hard-age-cap subset of expiredCount, split out for the reason tag.
+        int hardCapCount = 0;
         // F3 observability: entries past the TTL retained only by a fence
         // (preemption / dispatch reconciliation / cleanup ownership). A
         // persistently non-zero rate is the inflight-leak signature.
@@ -1167,6 +1169,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                         expiredRequestSamples.add(candidate.getKey());
                     }
                     expiredCount++;
+                    hardCapCount++;
                     continue;
                 }
                 oldestExpiredAgeMs = Math.max(oldestExpiredAgeMs, ageMs);
@@ -1177,8 +1180,11 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 expiredCount++;
             }
         }
-        if (expiredCount > 0) {
-            reporter.reportInflightTtlExpired(expiredCount);
+        if (expiredCount - hardCapCount > 0) {
+            reporter.reportSchedulerInflightTtlExpired("ttl", expiredCount - hardCapCount);
+        }
+        if (hardCapCount > 0) {
+            reporter.reportSchedulerInflightTtlExpired("hard_age_cap", hardCapCount);
         }
         if (skippedFenced > 0) {
             reporter.reportInflightCleanupSkippedFenced(skippedFenced);
@@ -1199,15 +1205,21 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         for (Map.Entry<String, DecodeEndpoint> decodeEntry
                 : endpointRegistry.getDecodeEndpoints().entrySet()) {
             DecodeEndpoint decodeEp = decodeEntry.getValue();
+            int orphanReclaimed = 0;
             for (Map.Entry<Long, RequestInflight> reserved : decodeEp.reservedView().entrySet()) {
                 long requestId = reserved.getKey();
                 if (now - reserved.getValue().createdAtMs() > ttlMs
                         && !inflight.containsKey(requestId)) {
                     decodeEp.release(requestId);
+                    orphanReclaimed++;
                     Logger.warn("orphan decode reservation reclaimed: request_id={} worker={} age_ms={}",
                             requestId, decodeEntry.getKey(),
                             now - reserved.getValue().createdAtMs());
                 }
+            }
+            if (orphanReclaimed > 0) {
+                reporter.reportEndpointInflightTtlExpired(RoleType.DECODE.name(),
+                        decodeEp.getIp(), "orphan_reservation", orphanReclaimed);
             }
         }
     }
@@ -1751,6 +1763,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         Logger.info("event=dispatch_reconciliation_start request_id={} batch_id={} target={}",
                 entry.item.requestId(), batchId,
                 prefill != null ? prefill.ipPort() : "unknown");
+        reporter.reportDispatchReconciliationEvent("start", "uncertain_ack");
         return true;
     }
 
@@ -1826,6 +1839,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                                         + "request_id={} batch_id={} attempt={}",
                                 entry.item.requestId(),
                                 entry.lifecycle.snapshot().batchId(), attempt);
+                        reporter.reportDispatchReconciliationEvent("settled", "engine_tombstoned");
                         reduceOrdinaryTerminalLocked(entry, DeferredTerminal.timeout(
                                 "EnqueueBatch deadline exceeded; engine fenced late enqueue"));
                     }
@@ -1897,6 +1911,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                         + "target={} attempt={} missing_ms={}",
                 entry.item.requestId(), entry.lifecycle.snapshot().batchId(),
                 ipPort, attempt, now - entry.reconcileTargetMissingSinceMs);
+        reporter.reportDispatchReconciliationEvent("forced_terminal", "target_deregistered");
         reduceOrdinaryTerminalLocked(entry, DeferredTerminal.timeout(
                 "dispatch reconciliation target deregistered: " + ipPort));
         return true;
@@ -1936,6 +1951,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 prefill == null ? "unknown"
                         : prefill.getServerIp() + ":" + prefill.getGrpcPort(),
                 attempt, entry.reconcileConsecutiveFailures, outcome.ack());
+        reporter.reportDispatchReconciliationEvent("forced_terminal", "failure_cap");
         reduceOrdinaryTerminalLocked(entry, DeferredTerminal.timeout(
                 "dispatch reconciliation exhausted after "
                         + entry.reconcileConsecutiveFailures + " failed cancels"));
@@ -2197,6 +2213,16 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         // a max age creeping toward the TTL window is the leak signature.
         reporter.reportSchedulerInflightMaxAgeMs(
                 InflightEvictor.maxAgeMs(inflight, System.currentTimeMillis()));
+        // Live dispatch-reconciliation fence population. Stateless rescan of
+        // the ledger (racy unlocked read of the fence flag is fine for a
+        // gauge); an incremental counter would drift on a missed decrement.
+        int reconciliationFenced = 0;
+        for (InflightEntry fenceProbe : inflight.values()) {
+            if (fenceProbe.dispatchReconciliation) {
+                reconciliationFenced++;
+            }
+        }
+        reporter.reportDispatchReconciliationFenceSize(reconciliationFenced);
 
         // Per-worker metrics: prefill endpoints
         for (Map.Entry<String, PrefillEndpoint> entry : endpointRegistry.getPrefillEndpoints().entrySet()) {
