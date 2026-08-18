@@ -369,8 +369,8 @@ class WorkerStatusTest {
     }
 
     @Test
-    @DisplayName("In-transit and waiting stats use only local task count and tokens")
-    void inTransitAndWaitingStats_useOnlyLocalTaskCountAndTokens() {
+    @DisplayName("In-transit and waiting stats include tasks first observed in worker status")
+    void inTransitAndWaitingStats_includeWorkerObservedTasks() {
         TaskInfo engineTaskOne = pendingTask("engine-one", 4_000, 0);
         engineTaskOne.setPrefixLengthValid(true);
         TaskInfo engineTaskTwo = pendingTask("engine-two", 64_000, 0);
@@ -386,8 +386,29 @@ class WorkerStatusTest {
                 "engine-two", engineTaskTwo,
                 "engine-three", engineTaskThree), Map.of(), Map.of());
 
-        assertEquals(2, workerStatus.getInTransitAndWaitingTaskCount());
-        assertEquals(52_000, workerStatus.getInTransitAndWaitingUncachedTokens());
+        assertEquals(4, workerStatus.getInTransitAndWaitingTaskCount());
+        assertEquals(180_000, workerStatus.getInTransitAndWaitingUncachedTokens());
+        assertEquals(TaskStateEnum.CONFIRMED,
+                workerStatus.getLocalTaskMap().get("engine-two").getTaskState());
+    }
+
+    @Test
+    @DisplayName("Running task first observed in worker status is added once to local load")
+    void runningStats_includeWorkerObservedTaskOnce() {
+        workerStatus.setRole(RoleType.PREFILL.name());
+        TaskInfo engineRunningTask = pendingTask("engine-running", 64_000, 16_000);
+        engineRunningTask.setRemainingPrefillTokens(32_000);
+
+        workerStatus.updateTaskStates(
+                Map.of(), Map.of("engine-running", engineRunningTask), Map.of());
+        workerStatus.updateTaskStates(
+                Map.of(), Map.of("engine-running", engineRunningTask), Map.of());
+
+        assertEquals(1, workerStatus.getLocalTaskMap().size());
+        assertEquals(TaskStateEnum.RUNNING,
+                workerStatus.getLocalTaskMap().get("engine-running").getTaskState());
+        assertEquals(48_000, workerStatus.getRunningQueueTime().get());
+        assertEquals(32_000, workerStatus.getRunningRemainingPrefillTokens());
     }
 
     @Test

@@ -20,7 +20,7 @@ import static org.mockito.Mockito.when;
 class ResourceWaterLevelTest {
 
     @Test
-    void prefillWaterLevelUsesOnlyLocalInTransitAndWaitingTasks() {
+    void prefillWaterLevelIncludesWorkerObservedWaitingTasks() {
         FlexlbConfig config = new FlexlbConfig();
         config.setPrefillQueueSizeThreshold(20);
         PrefillResourceMeasure measure = new PrefillResourceMeasure(configService(config));
@@ -32,11 +32,11 @@ class ResourceWaterLevelTest {
                 "request-4", new TaskInfo(),
                 "request-5", new TaskInfo()), Map.of(), Map.of());
 
-        assertEquals(0.0, measure.calculateWorkerWaterLevel(workerStatus));
+        assertEquals(25.0, measure.calculateWorkerWaterLevel(workerStatus));
 
         addLocalTasks(workerStatus, 5);
 
-        assertEquals(25.0, measure.calculateWorkerWaterLevel(workerStatus));
+        assertEquals(50.0, measure.calculateWorkerWaterLevel(workerStatus));
     }
 
     @Test

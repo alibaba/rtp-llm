@@ -138,6 +138,9 @@ public class WorkerStatus {
                                                   Map<String, TaskInfo> runningTaskInfo,
                                                   Map<String, TaskInfo> finishedTaskInfo) {
 
+        addObservedTasks(runningTaskInfo, TaskStateEnum.RUNNING);
+        addObservedTasks(waitingTaskInfo, TaskStateEnum.CONFIRMED);
+
         List<CacheHitFeedback> cacheHitFeedbacks = new ArrayList<>();
         List<Long> decisionToWaitingObservedLatenciesMs = new ArrayList<>();
         List<Long> waitingToRunningObservedLatenciesMs = new ArrayList<>();
@@ -279,6 +282,24 @@ public class WorkerStatus {
                 engineWaitingToRunningLatenciesMs,
                 engineReceivedToWaitingLatenciesMs
         );
+    }
+
+    private void addObservedTasks(Map<String, TaskInfo> tasks, TaskStateEnum taskState) {
+        if (tasks == null) {
+            return;
+        }
+        tasks.forEach((requestId, taskInfo) -> {
+            if (requestId == null || taskInfo == null) {
+                return;
+            }
+            // Atomically add tasks first observed in worker status. A null return value means
+            // this request was absent and prevents repeated status updates from counting it twice.
+            if (localTaskMap.putIfAbsent(requestId, taskInfo) == null) {
+                taskInfo.updateTaskState(taskState);
+                addRunningQueueTime(taskInfo.estimatePrefillTime());
+                logger.info("Task {} added from worker status with state: {}", requestId, taskState);
+            }
+        });
     }
 
     private void updateTaskInputLength(TaskInfo localTask, TaskInfo engineTask) {
