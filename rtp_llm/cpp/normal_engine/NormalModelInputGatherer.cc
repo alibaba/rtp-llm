@@ -21,6 +21,11 @@ bool asyncDebugEnabled() {
     return env != nullptr && std::string(env) == "1";
 }
 
+std::string modelTraceId(const GenerateStream& stream) {
+    auto trace_id = stream.traceId();
+    return trace_id.empty() ? "rtp-request-" + std::to_string(stream.streamId()) : trace_id;
+}
+
 struct GatherModelInputContext {
     int          input_vocab_size;
     bool         need_cal_position_id;
@@ -341,7 +346,7 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
         RTP_LLM_LOG_DEBUG("decode stream: %s", stream->debugString().c_str());
 
         for (auto i = 0; i < current_batch_size; ++i) {
-            model_input.trace_ids.push_back(stream->traceId());
+            model_input.trace_ids.push_back(modelTraceId(*stream));
             if (use_normal_device_state) {
                 const auto&             state = stream->getNormalAsyncDeviceState();
                 static std::atomic<int> debug_log_budget{200};
@@ -419,7 +424,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
 
         for (auto i = 0; i < current_batch_size; ++i) {
             const auto prefill_batch_idx = ctx.batch_idx - ctx.total_decode_batch_size;
-            model_input.trace_ids.push_back(stream->traceId());
+            model_input.trace_ids.push_back(modelTraceId(*stream));
             auto input_tokens = stream->currentExecuteTokens(i);
             auto input_masks  = stream->textTokensMask();
             memcpy(ctx.merged_tokens + ctx.token_idx, input_tokens.data(), input_tokens.size() * sizeof(int));

@@ -61,6 +61,8 @@ public:
 public:
     py::object               attn_pyobj_{py::none()};
     at::Tensor               decoder_layer_hidden_states_;
+    at::Tensor               nan_diag_event_counters_;
+    at::Tensor               nan_diag_events_;
     torch_ext::PyModelInputs py_model_inputs_;
 };
 

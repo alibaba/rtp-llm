@@ -1,5 +1,11 @@
 load("//:def.bzl", "copts")
 
+cc_library(
+    name = "nan_diagnostic",
+    hdrs = ["NanDiagnostic.h"],
+    visibility = ["//visibility:public"],
+)
+
 # Sample infos - model sampling data structures
 cc_library(
     name = "sample_infos",

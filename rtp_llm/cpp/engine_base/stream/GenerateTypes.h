@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
+#include "rtp_llm/cpp/models/NanDiagnostic.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
 
 namespace rtp_llm {
@@ -117,6 +118,7 @@ struct AuxInfo {
     std::optional<torch::Tensor> cum_log_probs;
     std::optional<torch::Tensor> all_probs;
     std::optional<torch::Tensor> softmax_probs;
+    NanDiagnostics               nan_diagnostics;
 };
 
 class GenerateOutput {

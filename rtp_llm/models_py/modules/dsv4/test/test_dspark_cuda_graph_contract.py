@@ -6,6 +6,8 @@ import torch
 
 import rtp_llm.models_py.model_desc.deepseek_v4_dspark_model as dspark_model_module
 from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import DeepSeekV4DSparkModel
+from rtp_llm.models_py.modules.dsv4 import _nan_diag_triton as nan_diag
+from rtp_llm.models_py.modules.dsv4.block import Block
 from rtp_llm.models_py.speculative.dspark_proposer_mixin import map_context_rows
 from rtp_llm.ops.compute_ops import PyModelInputs
 
@@ -38,14 +40,50 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             model.forward(propose_inputs)
 
-        propose_outputs = model.forward_propose(propose_inputs)
-        self.assertEqual(tuple(propose_outputs.hidden_states.shape), (3, 8))
-        self.assertEqual(propose_outputs.hidden_states.dtype, torch.bfloat16)
-
         commit_inputs = PyModelInputs()
         commit_inputs.input_ids = torch.zeros(4, dtype=torch.int32)
-        commit_outputs = model.forward_commit(commit_inputs)
+        with (
+            patch.object(nan_diag, "ENABLED", True),
+            patch.object(nan_diag, "reset") as reset,
+            patch.object(
+                nan_diag, "attach_event_buffers", side_effect=lambda output: output
+            ),
+        ):
+            propose_outputs = model.forward_propose(propose_inputs)
+            commit_outputs = model.forward_commit(commit_inputs)
+
+        self.assertEqual(tuple(propose_outputs.hidden_states.shape), (3, 8))
+        self.assertEqual(propose_outputs.hidden_states.dtype, torch.bfloat16)
         self.assertEqual(tuple(commit_outputs.hidden_states.shape), (0, 8))
+        self.assertEqual(reset.call_count, 2)
+        reset.assert_called_with(torch.device("cpu"))
+
+    def test_nan_diagnostics_cover_block_boundaries(self) -> None:
+        layer = Block.__new__(Block)
+        torch.nn.Module.__init__(layer)
+        layer.layer_id = 0
+        hc = SimpleNamespace(
+            pre=lambda hidden, **_kwargs: (hidden.squeeze(2), None, None),
+            post=lambda output, *_args: output.unsqueeze(2),
+        )
+        layer.attn_hc = hc
+        layer.attn_norm = torch.nn.Identity()
+        layer.ffn_hc = hc
+        layer.ffn_norm = torch.nn.Identity()
+        layer.ffn = lambda hidden, _input_ids: hidden
+
+        with (
+            patch.object(nan_diag, "ENABLED", True),
+            patch.object(nan_diag, "report") as report,
+        ):
+            layer.forward_decode(
+                torch.zeros((1, 2, 1, 8)),
+                None,
+                torch.zeros((1, 2), dtype=torch.long),
+                attn_fn=lambda hidden: hidden,
+            )
+
+        report.assert_called_once()
 
     def test_padded_bucket_rows_have_no_attention_work(self) -> None:
         model = _dspark_harness()

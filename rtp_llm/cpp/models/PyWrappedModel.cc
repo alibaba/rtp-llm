@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include <cstdint>
@@ -10,10 +11,7 @@
 #include <algorithm>
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-#include <algorithm>
 #include <cstdlib>
-#include <cstring>
-#include <iostream>
 #include <numeric>
 #include <sstream>
 #include "rtp_llm/cpp/models/ModelInputsLogger.h"
@@ -28,6 +26,178 @@
 using namespace std;
 
 namespace rtp_llm {
+
+namespace {
+
+constexpr const char* kNanStages[] = {"unknown", "attention_input", "attention_output", "moe_input", "moe_output"};
+constexpr const char* kNanDtypes[] = {"unknown", "float16", "bfloat16", "float32", "float64"};
+
+std::string nanPhase(const GptModelInputs& inputs, int32_t request) {
+    if (inputs.is_target_verify || inputs.is_speculative_draft_decode) {
+        return "decode";
+    }
+    return request < inputs.sequence_lengths.numel() ? "decode" : "prefill";
+}
+
+std::vector<int32_t>
+nanRequests(const GptModelInputs& inputs, int64_t row, int64_t rows, const torch::Tensor& lengths_cpu = {}) {
+    const auto count = static_cast<int32_t>(std::max<size_t>(inputs.trace_ids.size(), 1));
+    if (row >= 0 && row < rows) {
+        if (rows == count) {
+            return {static_cast<int32_t>(row)};
+        }
+        if (rows > count && rows % count == 0) {
+            return {static_cast<int32_t>(row / (rows / count))};
+        }
+        if (lengths_cpu.defined() && lengths_cpu.numel() == count) {
+            int64_t begin = 0;
+            for (int32_t i = 0; i < count; ++i) {
+                const auto end = begin + lengths_cpu.data_ptr<int64_t>()[i];
+                if (row >= begin && row < end) {
+                    return {i};
+                }
+                begin = end;
+            }
+        }
+    }
+    std::vector<int32_t> result(count);
+    std::iota(result.begin(), result.end(), 0);
+    return result;
+}
+
+NanDiagnosticEvent nanEvent(const GptModelInputs& inputs, const std::string& role, int32_t request, bool cuda_graph) {
+    NanDiagnosticEvent event;
+    event.request_index = request;
+    event.trace_id      = request < inputs.trace_ids.size() && !inputs.trace_ids[request].empty() ?
+                              inputs.trace_ids[request] :
+                          inputs.trace_ids.empty() ? "startup-unmapped" :
+                                                     "missing-trace-index-" + std::to_string(request);
+    event.phase         = nanPhase(inputs, request);
+    event.model_role    = role;
+    event.cuda_graph    = cuda_graph;
+    return event;
+}
+
+void logNanEvent(const NanDiagnosticEvent& event) {
+    std::ostringstream shape;
+    for (const auto dim : event.shape) {
+        shape << (shape.tellp() ? "," : "") << dim;
+    }
+    RTP_LLM_ACCESS_LOG_ERROR("[DSV4_NAN] trace_id=\"%s\" request_index=%d role=%s phase=%s stage=%s layer=%d "
+                             "cuda_graph=%d dtype=%s shape=[%s] first_bad=%ld n_nan=%ld n_inf=%ld",
+                             event.trace_id.c_str(),
+                             event.request_index,
+                             event.model_role.c_str(),
+                             event.phase.c_str(),
+                             event.stage.c_str(),
+                             event.layer_id,
+                             event.cuda_graph,
+                             event.dtype.c_str(),
+                             shape.str().c_str(),
+                             event.first_bad_index,
+                             event.n_nan,
+                             event.n_inf);
+}
+
+torch::Tensor stageNanTensor(const torch::Tensor& source) {
+    auto staged = torch::empty(source.sizes(), source.options().device(torch::kCPU).pinned_memory(true));
+    staged.copy_(source, /*non_blocking=*/true);
+    return staged;
+}
+
+void appendLayerNanEvents(NanDiagnostics&       result,
+                          const torch::Tensor&  counters,
+                          const torch::Tensor&  records,
+                          const GptModelInputs& inputs,
+                          const std::string&    role,
+                          bool                  cuda_graph) {
+    if (!counters.defined() || counters.data_ptr<int32_t>()[0] <= 0) {
+        return;
+    }
+    auto       lengths = inputs.input_lengths.defined() ?
+                             inputs.input_lengths.to(torch::kCPU).to(torch::kInt64).contiguous() :
+                             torch::Tensor();
+    const auto count   = std::min<int64_t>(counters.data_ptr<int32_t>()[0], records.size(0));
+    for (int64_t i = 0; i < count; ++i) {
+        const auto* row = records.data_ptr<int64_t>() + i * records.size(1);
+        for (const auto request : nanRequests(inputs, row[7] > 0 ? row[2] / row[7] : -1, row[6], lengths)) {
+            auto event            = nanEvent(inputs, role, request, cuda_graph);
+            event.stage           = row[0] > 0 && row[0] <= 4 ? kNanStages[row[0]] : kNanStages[0];
+            event.layer_id        = static_cast<int32_t>(row[1]);
+            event.first_bad_index = row[2];
+            event.n_nan           = row[3];
+            event.n_inf           = row[4];
+            event.dtype           = row[5] > 0 && row[5] <= 4 ? kNanDtypes[row[5]] : kNanDtypes[0];
+            event.shape           = {row[6], row[7]};
+            logNanEvent(event);
+            result.emplace_back(std::move(event));
+        }
+    }
+}
+
+void appendLogitsNanEvents(NanDiagnostics&       result,
+                           const torch::Tensor&  logits,
+                           const GptModelInputs& inputs,
+                           const std::string&    role,
+                           bool                  cuda_graph) {
+    auto                 flat       = logits.reshape({logits.size(0), -1});
+    auto                 bad        = torch::logical_not(torch::isfinite(flat));
+    auto                 nan        = torch::isnan(flat);
+    auto                 nan_counts = nan.sum(1).cpu().contiguous();
+    auto                 inf_counts = torch::logical_and(bad, torch::logical_not(nan)).sum(1).cpu().contiguous();
+    auto                 first_bad  = bad.to(torch::kInt64).argmax(1).cpu().contiguous();
+    std::vector<int64_t> shape(logits.sizes().begin(), logits.sizes().end());
+    for (int64_t row = 0; row < flat.size(0); ++row) {
+        if (nan_counts.data_ptr<int64_t>()[row] == 0 && inf_counts.data_ptr<int64_t>()[row] == 0) {
+            continue;
+        }
+        for (const auto request : nanRequests(inputs, row, flat.size(0))) {
+            auto event            = nanEvent(inputs, role, request, cuda_graph);
+            event.stage           = "logits";
+            event.first_bad_index = row * flat.size(1) + first_bad.data_ptr<int64_t>()[row];
+            event.n_nan           = nan_counts.data_ptr<int64_t>()[row];
+            event.n_inf           = inf_counts.data_ptr<int64_t>()[row];
+            event.dtype           = c10::toString(logits.scalar_type());
+            event.shape           = shape;
+            logNanEvent(event);
+            result.emplace_back(std::move(event));
+        }
+    }
+}
+
+NanDiagnosticLoader stageNanDiagnostics(const torch_ext::PyModelOutputs* layer_output,
+                                        torch::Tensor                    logits,
+                                        GptModelInputs                   inputs,
+                                        std::string                      role,
+                                        bool                             cuda_graph) {
+    torch::Tensor counters;
+    torch::Tensor records;
+    if (layer_output) {
+        counters = stageNanTensor(layer_output->nan_diag_event_counters);
+        records  = stageNanTensor(layer_output->nan_diag_events);
+    }
+    torch::Tensor bad;
+    if (logits.defined() && logits.is_floating_point() && logits.numel() > 0) {
+        logits = logits.clone();  // sampling overwrites the raw logits
+        bad    = stageNanTensor(torch::logical_not(torch::isfinite(logits)).any());
+    }
+    return [counters = std::move(counters),
+            records  = std::move(records),
+            logits   = std::move(logits),
+            bad      = std::move(bad),
+            inputs   = std::move(inputs),
+            role     = std::move(role),
+            cuda_graph]() mutable {
+        NanDiagnostics result;
+        appendLayerNanEvents(result, counters, records, inputs, role, cuda_graph);
+        if (bad.defined() && bad.data_ptr<bool>()[0]) {
+            appendLogitsNanEvents(result, logits, inputs, role, cuda_graph);
+        }
+        return result;
+    };
+}
+
+}  // namespace
 
 static torch::Tensor layerRegionToGroupTensor(const std::optional<CacheLayerLayout>& layout_opt) {
     if (!layout_opt.has_value() || layout_opt->layer_region_to_group_id.empty()) {
@@ -544,6 +714,17 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                             py_model_outputs.size(),
                             input_list.size());
 
+    const auto           nan_model_role = model_id_ == 0                              ? "target" :
+                                          dspark_model_role_ != DSparkModelRole::NONE ? "dspark_draft" :
+                                                                                        "mtp_draft";
+    NanDiagnosticLoaders nan_diagnostic_loaders;
+    if (collect_nan_diagnostics_ && !inputs.warmup) {
+        for (size_t i = 0; i < py_model_outputs.size(); ++i) {
+            nan_diagnostic_loaders.emplace_back(
+                stageNanDiagnostics(&py_model_outputs[i], {}, split_inputs[i], nan_model_role, false));
+        }
+    }
+
     if (!inputs.warmup && inputs.pd_separation) {
         cache_store_async_writer_->waitAllDone();
     }
@@ -581,7 +762,13 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 
     RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
 
-    return callForwardPostLayers(hidden_states, inputs, false);
+    auto outputs = callForwardPostLayers(hidden_states, inputs, false);
+    if (collect_nan_diagnostics_ && !inputs.warmup) {
+        nan_diagnostic_loaders.emplace_back(
+            stageNanDiagnostics(nullptr, outputs.logits, inputs, nan_model_role, false));
+        outputs.nan_diagnostic_loaders = std::move(nan_diagnostic_loaders);
+    }
+    return outputs;
 }
 
 void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs) {
@@ -739,6 +926,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         auto py_model_inputs = PyModelInputs(token_ids, input_hiddens, attention_inputs_, bert_embedding_inputs);
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
+        bool           used_cuda_graph = false;
 
         // Cast the Python object to PyModelOutputs and extract hidden states
         if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
@@ -751,6 +939,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 graph_state_.current_real_graph_bs);
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state_);
+            used_cuda_graph                              = true;
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
             hidden_states = py_model_outputs.hidden_states.clone();
         } else {
@@ -778,13 +967,24 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // downstream Sampler::forward fail with a narrow OOB.  Detect
         // this by reusing the standard "has any context stream" test
         // already used by callForwardPostLayers.
-        const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
+        const bool has_context_request  = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
+        const bool collect_nan          = collect_nan_diagnostics_ && !inputs.warmup;
+        const auto nan_model_role       = model_id_ == 0                              ? "target" :
+                                          dspark_model_role_ != DSparkModelRole::NONE ? "dspark_draft" :
+                                                                                        "mtp_draft";
+        auto       with_nan_diagnostics = [&](GptModelOutputs outputs) {
+            if (collect_nan) {
+                outputs.nan_diagnostic_loaders.emplace_back(
+                    stageNanDiagnostics(&py_model_outputs, outputs.logits, inputs, nan_model_role, used_cuda_graph));
+            }
+            return outputs;
+        };
         if (dspark_model_role_ != DSparkModelRole::NONE) {
             if (dspark_model_role_ == DSparkModelRole::PROPOSE) {
                 // Python returns normalized [B*gamma, hidden_dim]. Reuse the
                 // regular C++ lm_head and TP logits gather for every proposal
                 // row; the speculative executor owns only Markov sampling.
-                return callForwardPostLayers(hidden_states, inputs, true);
+                return with_nan_diagnostics(callForwardPostLayers(hidden_states, inputs, true));
             }
             // Commit only updates the draft KV cache and has no logits
             // consumer. Preserve its row-aligned hidden output for the common
@@ -792,13 +992,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             GptModelOutputs outputs;
             outputs.hidden_states     = hidden_states;
             outputs.all_hidden_states = hidden_states;
-            return outputs;
+            return with_nan_diagnostics(std::move(outputs));
         }
         if (enable_prefill_cp_ && has_context_request) {
             context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
-            return forwardPostLayersLastHidden(hidden_states, inputs);
+            return with_nan_diagnostics(forwardPostLayersLastHidden(hidden_states, inputs));
         }
-        return callForwardPostLayers(hidden_states, inputs, true);
+        return with_nan_diagnostics(callForwardPostLayers(hidden_states, inputs, true));
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());

@@ -111,6 +111,9 @@ TEST(InferenceDataTypeTest, AuxInfoAdapter) {
     aux_info.cost_time_us                        = 1000;
     aux_info.speculative_draft_rounds            = 4;
     aux_info.speculative_accepted_tokens_per_pos = {3, 2, 1};
+    NanDiagnosticEvent event;
+    event.trace_id = "trace-99";
+    aux_info.nan_diagnostics.push_back(std::move(event));
     AuxInfoAdapter aux_info_adapter(aux_info);
     std::string    jsonStr = ToJsonString(aux_info_adapter, true);
     ASSERT_TRUE(jsonStr.find(R"("cost_time":1)") != std::string::npos);
@@ -124,6 +127,7 @@ TEST(InferenceDataTypeTest, AuxInfoAdapter) {
     ASSERT_TRUE(jsonStr.find(R"("speculative_draft_rounds":4)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("speculative_accepted_tokens_per_pos":[3,2,1])") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("cum_log_probs":)") == std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("trace_id":"trace-99")") != std::string::npos);
 }
 
 TEST(InferenceDataTypeTest, MultiSeqsResponse) {

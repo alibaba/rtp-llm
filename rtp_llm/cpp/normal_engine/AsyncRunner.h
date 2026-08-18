@@ -1,10 +1,10 @@
 #pragma once
 
 #include <condition_variable>
+#include <deque>
 #include <exception>
 #include <functional>
 #include <mutex>
-#include <optional>
 #include <thread>
 #include <ATen/ThreadLocalState.h>
 #include <torch/torch.h>
@@ -20,6 +20,7 @@ public:
     AsyncRunner& operator=(const AsyncRunner&) = delete;
 
     void launch(std::function<void()> fn);
+    void enqueue(std::function<void()> fn);
     void sync(const torch::Stream& wait_stream);
 
 private:
@@ -38,10 +39,10 @@ private:
         std::function<void()> fn;
         at::ThreadLocalState  tls_state;
     };
-    std::optional<Task> pending_task_;
-    std::exception_ptr  pending_exception_;
-    bool                task_done_ = true;
-    bool                shutdown_  = false;
+    std::deque<Task>   pending_tasks_;
+    std::exception_ptr pending_exception_;
+    bool               task_done_ = true;
+    bool               shutdown_  = false;
 };
 
 }  // namespace rtp_llm

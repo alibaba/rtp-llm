@@ -101,6 +101,7 @@ class AuxInfo:
 
     role_addrs: List[RoleAddr] = field(default_factory=list)
     aux_string: str = ""
+    nan_diagnostics: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

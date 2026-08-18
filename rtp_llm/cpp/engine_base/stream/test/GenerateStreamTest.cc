@@ -134,6 +134,27 @@ TEST_F(GenerateStreamTest, testSyncSpeculativeMaxLengthDoesNotCountAnchorAsNewTo
     EXPECT_EQ(stream->maxTokenNum(), 2045);
 }
 
+TEST_F(GenerateStreamTest, testNanDiagnosticsForceAuxStreamOutput) {
+    auto builder                                       = GenerateStreamBuilder();
+    auto stream                                        = builder.createContextStream({1, 2, 3});
+    stream->generate_input_->generate_config->aux_info = false;
+
+    NanDiagnosticEvent event;
+    event.trace_id = "trace-99";
+    event.stage    = "logits";
+
+    stream->update({torch::tensor({{4}}, torch::kInt32), 1, {}, {}, {}, {}, {}, {}, {}, {}, true, true, {event}});
+
+    auto output = stream->nextOutput();
+    ASSERT_TRUE(output.ok());
+    EXPECT_TRUE(output.value().generate_outputs[0].finished);
+    EXPECT_EQ(output.value().generate_outputs[0].output_ids.numel(), 0);
+    const auto& diagnostics = output.value().generate_outputs[0].aux_info.nan_diagnostics;
+    ASSERT_EQ(diagnostics.size(), 1);
+    EXPECT_EQ(diagnostics[0].trace_id, "trace-99");
+    EXPECT_EQ(diagnostics[0].stage, "logits");
+}
+
 // clearMtpAsyncDeviceState rejects stale epochs. A worker that
 // captured epoch N must not clear state that step N+1 already published
 // under epoch N+1.

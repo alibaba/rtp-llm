@@ -855,6 +855,30 @@ void GenerateStream::matchStopWordsList(int batch_id) {
     }
 }
 
+bool GenerateStream::emitNanDiagnostics(const NanDiagnostics& diagnostics, bool update_remote_generate) {
+    if (diagnostics.empty()) {
+        return false;
+    }
+    if (metrics_reporter_ && !nan_metric_reported_) {
+        nan_metric_reported_        = true;
+        const auto&           event = diagnostics.front();
+        kmonitor::MetricsTags tags;
+        tags.AddTag("error_code", "NAN_ERROR");
+        tags.AddTag("phase", event.phase);
+        tags.AddTag("model_role", event.model_role);
+        tags.AddTag("stage", event.stage);
+        tags.AddTag("non_finite_type",
+                    event.n_nan > 0 && event.n_inf > 0 ? "nan_inf" :
+                    event.n_nan > 0                    ? "nan" :
+                                                         "inf");
+        tags.AddTag("cuda_graph", event.cuda_graph ? "true" : "false");
+        metrics_reporter_->report(1, "rtp_llm_framework_error_qps", kmonitor::MetricType::QPS, &tags);
+    }
+    // A terminal zero-token chunk carries aux_info without exposing an invalid sampler token.
+    updateOutput({{}, 0, {}, {}, {}, {}, {}, {}, {}, {}, update_remote_generate, true, diagnostics});
+    return true;
+}
+
 void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     // Worker-thread MTP bookkeeping updates tokens/output and finish checks
     // before the next async dispatch. The speculative propose_step+1 window
@@ -869,6 +893,10 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     // Ignore stale worker updates after finish; committing them would duplicate
     // tokens and touch KV blocks only deferred until this worker exits.
     if (isFinished() && !update_info.force_update_info) {
+        return;
+    }
+
+    if (emitNanDiagnostics(update_info.nan_diagnostics, update_info.update_remote_generate)) {
         return;
     }
 
@@ -996,6 +1024,10 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     // Ignore stale worker updates after finish; committing them would duplicate
     // tokens and touch KV blocks only deferred until this worker exits.
     if (isFinished() && !update_info.force_update_info) {
+        return;
+    }
+
+    if (emitNanDiagnostics(update_info.nan_diagnostics, update_info.update_remote_generate)) {
         return;
     }
 

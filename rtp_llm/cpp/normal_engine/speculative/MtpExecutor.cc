@@ -515,6 +515,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     draft_prefill_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),
     spec_logits_verify_runner_(std::make_unique<SpecLogitsVerifyRunner>()),
     spec_logits_verify_async_runner_(cuda_graph::graphGetStreamFromPool(true)),
+    nan_diagnostic_runner_(cuda_graph::graphGetStreamFromPool(true)),
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)) {
     data_type_        = params.model_config_.data_type;
     hidden_size_      = params.model_config_.hidden_size * params.model_config_.hc_mult;
@@ -924,13 +925,13 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             batch_stream_processor_->validatePrefillDSparkCommitInput(model_input);
             // Seeding = commit only: prompt-suffix feature rows into the
             // draft feature KV (the call keeps the target's own
-            // incremental-prefill geometry; output intentionally unused).
+            // incremental-prefill geometry; only diagnostics are retained).
             // Proposals are produced exclusively at the decode round head and
             // are not persisted in stream or PD state.
             RTP_LLM_CHECK_WITH_INFO(sp_prefill_draft_model_ != nullptr,
                                     "DSpARK prefill requires a draft prefill model");
-            (void)sp_prefill_draft_model_->forward(model_input);
-            draft_model_output = GptModelOutputs();
+            auto commit_output                        = sp_prefill_draft_model_->forward(model_input);
+            draft_model_output.nan_diagnostic_loaders = std::move(commit_output.nan_diagnostic_loaders);
         } else {
             draft_model_output = std::move(draft_model_->forward(model_input));
         }
@@ -1179,6 +1180,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     torch::Tensor              draft_token_ids_t;
     torch::Tensor              spec_token_ids_t;
     std::vector<torch::Tensor> draft_probs_list;
+    NanDiagnosticLoaders       draft_decode_nan_diagnostic_loaders;
     torch::Event               accept_len_ready_event = cuda_graph::makeGraphEvent();
     int64_t                    model_forward_us       = 0;
     auto                       spec_logits_result     = std::make_shared<SpecLogitsVerifyRunner::LaunchResult>();
@@ -1257,11 +1259,21 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     launchTargetVerifyPrepareAsync(model_input, batch_size);
 
     if (is_dspark_) {
-        dsparkModelDecode(
-            model_input, stream_groups, dspark_round_head, draft_sampler_output, draft_token_ids_t, model_forward_us);
+        dsparkModelDecode(model_input,
+                          stream_groups,
+                          dspark_round_head,
+                          draft_sampler_output,
+                          draft_token_ids_t,
+                          model_forward_us,
+                          draft_decode_nan_diagnostic_loaders);
     } else if (propose_step_ > 1) {
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
-        draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
+        draftModelDecode(model_input,
+                         stream_groups,
+                         draft_probs_list,
+                         draft_token_ids_t,
+                         model_forward_us,
+                         draft_decode_nan_diagnostic_loaders);
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
     }
 
@@ -1447,6 +1459,12 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             model_input.lm_output_indexes  = torch::empty({(int64_t)batch_size}, cuda_i32);
             model_input.last_hidden_states = model_output.all_hidden_states;
         }
+    }
+
+    if (isTpRank0()) {
+        speculative_sampler_output.nan_diagnostic_loaders = model_output.nan_diagnostic_loaders;
+        appendNanDiagnosticLoaders(speculative_sampler_output.nan_diagnostic_loaders,
+                                   draft_decode_nan_diagnostic_loaders);
     }
 
     // Record before broadcast/draft work so the worker waits only for
@@ -1862,7 +1880,8 @@ void MtpExecutor::dsparkModelDecode(GptModelInputs&                             
                                     const MtpBatchStreamProcessor::DSparkRoundHead& round_head,
                                     SamplerOutput&                                  draft_sampler_output,
                                     torch::Tensor&                                  draft_token_ids_t,
-                                    int64_t&                                        model_forward_us) {
+                                    int64_t&                                        model_forward_us,
+                                    NanDiagnosticLoaders&                           nan_diagnostic_loaders) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.dspark_model_decode(batch_size=%zu)",
                                   model_input.input_lengths.size(0));
 
@@ -1872,6 +1891,7 @@ void MtpExecutor::dsparkModelDecode(GptModelInputs&                             
     model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
     int64_t start_time_us               = autil::TimeUtility::currentTimeInMicroSeconds();
     auto    propose_output              = runDSparkProposeForward(model_input);
+    appendNanDiagnosticLoaders(nan_diagnostic_loaders, propose_output.nan_diagnostic_loaders);
     model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
 
     if (isTpRank0()) {
@@ -1894,10 +1914,16 @@ GptModelOutputs MtpExecutor::runDraftCommitForward(GptModelInputs& model_input) 
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_forward)");
     maybePrintModelInput(model_input, "decode post draft model");
     ensureModelInputsOnCuda(model_input, "decode.draft_prefill_forward");
-    auto* draft_prefill_model        = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
-    auto  draft_prefill_model_output = draft_prefill_model->forward(model_input);
-    // Ordinary MTP chains this output into the next autoregressive draft step.
-    maybeOverrideAllHiddenStatesWithMtpBuffer(draft_prefill_model_output, *draft_prefill_model);
+    model_input.is_speculative_draft_decode = true;
+    // Use sp_prefill_draft_model_ if CUDA graph is enabled, otherwise use draft_model_.
+    auto* commit_model               = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
+    auto  draft_prefill_model_output = commit_model->forward(model_input);
+    if (!is_dspark_) {
+        // Ordinary MTP chains this output into the next autoregressive draft
+        // step. DSpARK uses this forward only for its KV-cache side effect.
+        maybeOverrideAllHiddenStatesWithMtpBuffer(draft_prefill_model_output, *commit_model);
+    }
+    model_input.is_speculative_draft_decode = false;
     return draft_prefill_model_output;
 }
 
@@ -1957,6 +1983,10 @@ absl::Status MtpExecutor::dispatchDecodeOutput(const StreamGroups&              
     } else {
         MergedOutput draft_prefill_output{std::move(draft_prefill_model_output),
                                           std::move(draft_prefill_sampler_output)};
+        if (!speculative_sampler_output.nan_diagnostic_loaders.empty()
+            || !draft_prefill_output.model_output.nan_diagnostic_loaders.empty()) {
+            cuda_graph::graphGetCurrentStream().synchronize();
+        }
         result =
             batch_stream_processor_->dispatchDecode(stream_groups, speculative_sampler_output, draft_prefill_output);
         if (result.ok()) {
@@ -2107,7 +2137,8 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                                    const StreamGroups&         stream_groups,
                                    std::vector<torch::Tensor>& draft_probs_list,
                                    torch::Tensor&              draft_token_ids_t,
-                                   int64_t&                    model_forward_us) {
+                                   int64_t&                    model_forward_us,
+                                   NanDiagnosticLoaders&       nan_diagnostic_loaders) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(batch_size=%zu)", model_input.combo_tokens.size(0));
 
     const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
@@ -2209,6 +2240,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         ensureModelInputsOnCuda(model_input, "draft_decode.loop_forward");
         draft_decode_model_output = std::move(draft_model_->forward(model_input));
+        appendNanDiagnosticLoaders(nan_diagnostic_loaders, draft_decode_model_output.nan_diagnostic_loaders);
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         maybeOverrideAllHiddenStatesWithMtpBuffer(draft_decode_model_output, *draft_model_);
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %d forward done", i);
@@ -2516,6 +2548,29 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     auto  spec_decode_copy   = spec_decode_output;
     auto  draft_prefill_copy = std::move(draft_prefill_output);
     auto  stream_groups_copy = stream_groups;
+
+    auto nan_loaders = std::move(spec_decode_copy.nan_diagnostic_loaders);
+    appendNanDiagnosticLoaders(nan_loaders, draft_prefill_copy.model_output.nan_diagnostic_loaders);
+
+    if (!nan_loaders.empty()) {
+        nan_diagnostic_runner_.enqueue([streams     = stream_groups_copy.allStreams(),
+                                        loaders     = std::move(nan_loaders),
+                                        ready_event = draft_event]() mutable {
+            if (ready_event && !ready_event->query()) {
+                ready_event->synchronize();
+            }
+            auto    events = loadNanDiagnostics(loaders);
+            int32_t begin  = 0;
+            for (const auto& stream : streams) {
+                const auto size    = static_cast<int32_t>(stream->currentBatchSize());
+                auto       matched = nanDiagnosticsForRequest(events, begin, size);
+                if (!matched.empty()) {
+                    stream->specUpdate({{}, 0, -1, {}, {}, {}, true, true, 0, 0, std::move(matched)});
+                }
+                begin += size;
+            }
+        });
+    }
 
     auto streams_for_inc = stream_groups_copy.allStreams();
     for (auto& s : streams_for_inc) {

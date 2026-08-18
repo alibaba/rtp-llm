@@ -43,6 +43,14 @@ def _is_finished_response(outputs_pb: GenerateOutputsPB) -> bool:
     return bool(finished) and all(finished)
 
 
+def _nan_diagnostic_to_dict(event):
+    return {
+        field.name: list(value) if field.label == field.LABEL_REPEATED else value
+        for field in event.DESCRIPTOR.fields
+        for value in (getattr(event, field.name),)
+    }
+
+
 def trans_role_type(role_type: RoleType) -> RoleAddrPB.RoleType:
     """Map the frontend role to the original RoleAddrPB field-1 enum.
 
@@ -332,7 +340,9 @@ def trans_output(
         output_py = GenerateOutput()
         output_py.finished = output_pb.finished[i]
         current_aux_info = None
-        if aux_info_flag and len(output_pb.aux_info) > i:
+        if len(output_pb.aux_info) > i and (
+            aux_info_flag or len(output_pb.aux_info[i].nan_diagnostics) > 0
+        ):
             aux_info_pb = output_pb.aux_info[i]
             current_aux_info = AuxInfo(
                 cost_time=aux_info_pb.cost_time_us / 1000.0,
@@ -362,6 +372,10 @@ def trans_output(
                 ),
                 aux_string=aux_info_pb.aux_string,
                 role_addrs=input_py.generate_config.role_addrs,
+                nan_diagnostics=[
+                    _nan_diagnostic_to_dict(event)
+                    for event in aux_info_pb.nan_diagnostics
+                ],
             )
             if aux_info_pb.HasField("cum_log_probs"):
                 current_aux_info.cum_log_probs = trans_tensor(

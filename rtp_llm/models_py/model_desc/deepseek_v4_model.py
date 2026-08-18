@@ -38,6 +38,7 @@ import torch
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.modules.dsv4 import _nan_diag_triton as _nan_diag
 from rtp_llm.models_py.modules.dsv4.chunk_env import (
     DSV4_CHUNK_TOKENS_ENV,
     dsv4_global_chunk_tokens_configured,
@@ -696,6 +697,8 @@ class DeepSeekV4Model(GptModelBase):
         # subsequent calls inside CUDA graph capture hit the cache and skip
         # JIT — which would otherwise abort via __unexpected (noexcept violation).
         model_warm_up = model_warm_up_enabled()
+        if device_str.startswith("cuda"):
+            _nan_diag.prewarm(device_str)
         if device_str.startswith("cuda") and model_warm_up:
             from rtp_llm.models_py.modules.dsv4 import tilelang_kernels as _tl_kernels
 
@@ -1226,6 +1229,8 @@ class DeepSeekV4Model(GptModelBase):
         the PyWrappedModel with cache_manager==nullptr); only the prefill
         path needs to tolerate this — warmup never enters decode.
         """
+        _nan_diag.reset(inputs.input_ids.device)
+
         if self.kv_cache is None:
             # Warmup-only PyWrappedModel: NormalExecutor builds it with
             # cache_manager==nullptr, so init_resources carries no kv_cache.
@@ -1237,7 +1242,7 @@ class DeepSeekV4Model(GptModelBase):
             hidden = torch.zeros(
                 T, self._v4_args.dim, dtype=torch.bfloat16, device=device
             )
-            return PyModelOutputs(hidden)
+            return _nan_diag.attach_event_buffers(PyModelOutputs(hidden))
         attn = inputs.attention_inputs
 
         # Subclass-overridable hidden-state preparation hooks.  When a
@@ -1264,7 +1269,7 @@ class DeepSeekV4Model(GptModelBase):
                 assert bool(
                     getattr(self.v4, "fp8_kv_cache", False)
                 ), "target verify requires fp8 kv cache"
-            return forward_decode(
+            outputs = forward_decode(
                 self.v4,
                 self.kv_cache,
                 self._v4_args,
@@ -1273,7 +1278,7 @@ class DeepSeekV4Model(GptModelBase):
                 prepare_hidden_fn=prep_decode,
             )
         elif attn.is_prefill:
-            return forward_prefill(
+            outputs = forward_prefill(
                 self.v4,
                 self.kv_cache,
                 self.parallelism_config,
@@ -1281,7 +1286,7 @@ class DeepSeekV4Model(GptModelBase):
                 prepare_hidden_fn=prep_prefill,
             )
         else:
-            return forward_decode(
+            outputs = forward_decode(
                 self.v4,
                 self.kv_cache,
                 self._v4_args,
@@ -1289,3 +1294,4 @@ class DeepSeekV4Model(GptModelBase):
                 fmha_impl,
                 prepare_hidden_fn=prep_decode,
             )
+        return _nan_diag.attach_event_buffers(outputs)

@@ -32,8 +32,21 @@ void AsyncRunner::launch(std::function<void()> fn) {
         std::unique_lock<std::mutex> lk(mutex_);
         cv_done_.wait(lk, [this] { return task_done_; });
         rethrowPendingExceptionIfAny(lk);
-        pending_task_ = Task{std::move(fn), std::move(tls_state)};
-        task_done_    = false;
+        pending_tasks_.push_back(Task{std::move(fn), std::move(tls_state)});
+        task_done_ = false;
+    }
+    cv_task_.notify_one();
+}
+
+void AsyncRunner::enqueue(std::function<void()> fn) {
+    at::ThreadLocalState tls_state;
+    {
+        std::unique_lock<std::mutex> lk(mutex_);
+        if (task_done_) {
+            rethrowPendingExceptionIfAny(lk);
+        }
+        pending_tasks_.push_back(Task{std::move(fn), std::move(tls_state)});
+        task_done_ = false;
     }
     cv_task_.notify_one();
 }
@@ -61,12 +74,12 @@ void AsyncRunner::workerLoop() {
         Task task;
         {
             std::unique_lock<std::mutex> lk(mutex_);
-            cv_task_.wait(lk, [this] { return pending_task_.has_value() || shutdown_; });
-            if (shutdown_ && !pending_task_.has_value()) {
+            cv_task_.wait(lk, [this] { return !pending_tasks_.empty() || shutdown_; });
+            if (shutdown_ && pending_tasks_.empty()) {
                 return;
             }
-            task = std::move(*pending_task_);
-            pending_task_.reset();
+            task = std::move(pending_tasks_.front());
+            pending_tasks_.pop_front();
         }
 
         std::exception_ptr exception;
@@ -76,7 +89,7 @@ void AsyncRunner::workerLoop() {
             // callbacks are thread-affine and can crash when the main engine thread
             // starts/stops profiling while async bookkeeping still runs ATen ops.
             at::DisableRecordFunctionGuard record_function_guard;
-            cuda_graph::GraphStreamGuard stream_guard(cuda_graph::toGraphStream(stream_));
+            cuda_graph::GraphStreamGuard   stream_guard(cuda_graph::toGraphStream(stream_));
             try {
                 task.fn();
                 event_.record(stream_);
@@ -85,12 +98,17 @@ void AsyncRunner::workerLoop() {
             }
         }
 
+        bool done;
         {
             std::lock_guard<std::mutex> lk(mutex_);
-            pending_exception_ = exception;
-            task_done_         = true;
+            if (exception && !pending_exception_) {
+                pending_exception_ = exception;
+            }
+            done = task_done_ = pending_tasks_.empty();
         }
-        cv_done_.notify_one();
+        if (done) {
+            cv_done_.notify_all();
+        }
     }
 }
 

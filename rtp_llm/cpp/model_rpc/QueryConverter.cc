@@ -26,7 +26,7 @@ RoleType checkedRoleType(int value, const char* field_name) {
 }
 
 RoleType checkedRoleString(const std::string& value) {
-    std::string role = value;
+    std::string       role   = value;
     const std::string prefix = "RoleType.";
     if (role.rfind(prefix, 0) == 0) {
         role = role.substr(prefix.size());
@@ -51,7 +51,7 @@ RoleType checkedRoleString(const std::string& value) {
 
 RoleType transRoleAddrType(const RoleAddrPB& role_addr) {
     std::optional<RoleType> resolved;
-    auto merge = [&resolved](RoleType candidate, const char* source) {
+    auto                    merge = [&resolved](RoleType candidate, const char* source) {
         RTP_LLM_CHECK_WITH_INFO(!resolved.has_value() || *resolved == candidate,
                                 "conflicting RoleAddrPB role from %s: resolved=%d candidate=%d",
                                 source,
@@ -363,7 +363,7 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
     FlattenOutputPB* flatten_output = outputs->mutable_flatten_output();
     for (const auto& response : source_outputs) {
         flatten_output->add_finished(response.finished);
-        if (dump_aux_info) {
+        if (dump_aux_info || !response.aux_info.nan_diagnostics.empty()) {
             auto* aux_info = flatten_output->add_aux_info();
             aux_info->set_cost_time_us(response.aux_info.cost_time_us);
             aux_info->set_first_token_cost_time_us(response.aux_info.first_token_cost_time_us);
@@ -391,6 +391,24 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
                 aux_info->add_speculative_accepted_tokens_per_pos(accepted_tokens);
             }
             aux_info->set_aux_string(aux_string);
+            for (const auto& event : response.aux_info.nan_diagnostics) {
+                auto* event_pb = aux_info->add_nan_diagnostics();
+                event_pb->set_request_index(event.request_index);
+                event_pb->set_trace_id(event.trace_id);
+                event_pb->set_phase(event.phase);
+                event_pb->set_model_role(event.model_role);
+                event_pb->set_stage(event.stage);
+                event_pb->set_layer_id(event.layer_id);
+                event_pb->set_iteration(event.iteration);
+                event_pb->set_first_bad_index(event.first_bad_index);
+                event_pb->set_n_nan(event.n_nan);
+                event_pb->set_n_inf(event.n_inf);
+                event_pb->set_cuda_graph(event.cuda_graph);
+                event_pb->set_dtype(event.dtype);
+                for (const auto dim : event.shape) {
+                    event_pb->add_shape(dim);
+                }
+            }
             if (response.aux_info.cum_log_probs.has_value()) {
                 transTensorPB(aux_info->mutable_cum_log_probs(), response.aux_info.cum_log_probs.value());
             }

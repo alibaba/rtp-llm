@@ -38,6 +38,7 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 from rtp_llm.models_py.modules import RMSNorm
+from rtp_llm.models_py.modules.dsv4 import _nan_diag_triton as _nan_diag
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
 from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
 from rtp_llm.models_py.modules.dsv4.cp import build_cp_context_for_forward
@@ -781,6 +782,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         self, inputs: PyModelInputs, fmha_impl: Any = None
     ) -> PyModelOutputs:
         device = self._forward_device()
+        _nan_diag.reset(device)
         # PyWrappedModel warmup intentionally has no KVCache.  Produce stable
         # shapes without invoking any paged-cache or FlashMLA kernels.
         if self.kv_cache is None:
@@ -792,23 +794,28 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 "returning warmup placeholders for batch=%d",
                 batch_size,
             )
-            return self.dspark_empty_outputs(batch_size, device)
-        return self.run_propose_step(inputs, fmha_impl, device)
+            outputs = self.dspark_empty_outputs(batch_size, device)
+        else:
+            outputs = self.run_propose_step(inputs, fmha_impl, device)
+        return _nan_diag.attach_event_buffers(outputs)
 
     @torch.inference_mode()
     def forward_commit(
         self, inputs: PyModelInputs, fmha_impl: Any = None
     ) -> PyModelOutputs:
         device = self._forward_device()
+        _nan_diag.reset(device)
         if self.kv_cache is None:
-            return PyModelOutputs(
+            outputs = PyModelOutputs(
                 torch.zeros(
                     (0, int(self._v4_args.dim)),
                     dtype=torch.bfloat16,
                     device=device,
                 )
             )
-        return self.run_commit_step(inputs, device)
+        else:
+            outputs = self.run_commit_step(inputs, device)
+        return _nan_diag.attach_event_buffers(outputs)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         raise RuntimeError(

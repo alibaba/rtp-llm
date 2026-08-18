@@ -361,6 +361,8 @@ struct PyModelInputs {
 
 struct PyModelOutputs {
     torch::Tensor          hidden_states;
+    torch::Tensor          nan_diag_event_counters;
+    torch::Tensor          nan_diag_events;
     rtp_llm::ParamsBasePtr params_ptr{nullptr};
     py::object             py_attn_params{py::none()};
 

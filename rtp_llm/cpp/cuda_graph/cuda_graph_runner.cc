@@ -598,6 +598,9 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_seq_len].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state.current_seq_len);
+        outputs.nan_diag_event_counters =
+            graph_instances_[state.current_real_graph_seq_len].mem_hold_.nan_diag_event_counters_;
+        outputs.nan_diag_events = graph_instances_[state.current_real_graph_seq_len].mem_hold_.nan_diag_events_;
     } else {
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayDecode)");
@@ -606,6 +609,9 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state.seq_len_sum);
+        const auto& hold                = graph_instances_[state.current_real_graph_bs].mem_hold_;
+        outputs.nan_diag_event_counters = hold.nan_diag_event_counters_;
+        outputs.nan_diag_events         = hold.nan_diag_events_;
     }
     // record forward done event
     forward_event_.record(cuda_graph::graphGetCurrentStream());
@@ -1021,6 +1027,8 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
             graph.capture_end();
         }
+        graph_instances_[key].mem_hold_.nan_diag_event_counters_ = outputs.nan_diag_event_counters;
+        graph_instances_[key].mem_hold_.nan_diag_events_         = outputs.nan_diag_events;
 
         if (enable_cuda_graph_debug_mode_) {
             RTP_LLM_LOG_INFO("Calling debug_dump to generate: %s", output_dot_filename.c_str());

@@ -73,7 +73,8 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     bool                need_d2h_sync = false;
     const torch::Tensor token_ids_cpu = copyToPinnedCpuAsync(token_ids_for_copy, need_d2h_sync);
     const torch::Tensor success_cpu   = copyToPinnedCpuAsync(sampler_output.success, need_d2h_sync);
-    syncPinnedCpuCopies(need_d2h_sync);
+    syncPinnedCpuCopies(need_d2h_sync || !merge_outputs.model_output.nan_diagnostic_loaders.empty());
+    auto nan_diagnostics = loadNanDiagnostics(merge_outputs.model_output.nan_diagnostic_loaders);
     RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(token_ids_cpu).c_str());
     int  batch_idx_in     = 0;
     int  batch_idx_out    = 0;
@@ -94,7 +95,8 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
                              return_all_probs,
                              new_tokens_all,
                              token_ids_cpu,
-                             success_cpu);
+                             success_cpu,
+                             nan_diagnostics);
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
@@ -105,15 +107,16 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     return absl::OkStatus();
 }
 
-void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
-                                                  const MergedOutput&  merge_outputs,
-                                                  int                  batch_idx_in,
-                                                  int                  batch_idx_out,
-                                                  int                  token_offset,
-                                                  bool                 return_all_probs,
-                                                  const torch::Tensor& new_tokens_all,
-                                                  const torch::Tensor& token_ids_cpu,
-                                                  const torch::Tensor& success_cpu) const {
+void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr     stream,
+                                                  const MergedOutput&   merge_outputs,
+                                                  int                   batch_idx_in,
+                                                  int                   batch_idx_out,
+                                                  int                   token_offset,
+                                                  bool                  return_all_probs,
+                                                  const torch::Tensor&  new_tokens_all,
+                                                  const torch::Tensor&  token_ids_cpu,
+                                                  const torch::Tensor&  success_cpu,
+                                                  const NanDiagnostics& all_nan_diagnostics) const {
 
     const auto&  model_output      = merge_outputs.model_output;
     const auto&  sampler_output    = merge_outputs.sampler_output;
@@ -123,6 +126,8 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     auto cur_batch_size  = stream->currentBatchSize();
     auto next_batch_size = stream->nextBatchSize();
     auto token_size      = stream->currentExecuteTokenSize();
+
+    auto nan_diagnostics = nanDiagnosticsForRequest(all_nan_diagnostics, batch_idx_in, cur_batch_size);
 
     auto batch_new_all_token_ids = new_all_token_ids.narrow(0, batch_idx_out, next_batch_size);
 
@@ -202,7 +207,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     }
 
     for (int i = 0; i < cur_batch_size; ++i) {
-        if (success_cpu.defined() && !(success_cpu.data_ptr<bool>()[batch_idx_in + i])) {
+        if (success_cpu.defined() && !(success_cpu.data_ptr<bool>()[batch_idx_in + i]) && nan_diagnostics.empty()) {
             if (asyncDebugEnabled()) {
                 const auto& state = stream->getNormalAsyncDeviceState();
                 RTP_LLM_LOG_ERROR("[async-debug] sampler success=false: stream=%ld pd_sep=%d status=%s "
@@ -231,7 +236,10 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                     all_probs,
                     loss,
                     src_batch_indices,
-                    all_hidden_states});
+                    all_hidden_states,
+                    true,
+                    !nan_diagnostics.empty(),
+                    std::move(nan_diagnostics)});
 }
 
 }  // namespace rtp_llm

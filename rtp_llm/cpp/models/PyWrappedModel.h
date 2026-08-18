@@ -2,6 +2,7 @@
 #pragma once
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
+#include <cstdlib>
 #include <optional>
 #include <string>
 #include <atomic>
@@ -118,6 +119,7 @@ private:
     const rtp_llm::ExecProperties            device_props_;
     const bool                               enable_prefill_cp_;
     const DSparkModelRole                    dspark_model_role_;
+    const bool                               collect_nan_diagnostics_;
     const rtp_llm::MlaOpsType                mla_ops_type_;
     const size_t                             layer_num_;
     const GptModelDescription                description_;
@@ -173,6 +175,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
     // rejected at executor construction).
     enable_prefill_cp_(device_props_.enable_prefill_cp),
     dspark_model_role_(dspark_model_role),
+    collect_nan_diagnostics_(
+        (params.model_id == 0 || params.sp_config.type == SP_TYPE_MTP || params.sp_config.type == SP_TYPE_DSPARK) &&
+        []() {
+            const char* value = std::getenv("DSV4_NAN_DIAG");
+            return value != nullptr && value[0] == '1' && value[1] == '\0';
+        }()),
     mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
     description_(params.description),

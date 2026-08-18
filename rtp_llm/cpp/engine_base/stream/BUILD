@@ -21,6 +21,7 @@ cc_library(
     ],
     deps = [
         "//rtp_llm/cpp/models:position_ids_generator",
+        "//rtp_llm/cpp/models:nan_diagnostic",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
         "//:rtp_compute_ops",
     ],

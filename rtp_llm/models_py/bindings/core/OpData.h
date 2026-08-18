@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/model_utils/activation_types.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
+#include "rtp_llm/cpp/models/NanDiagnostic.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <cstddef>
@@ -95,7 +96,8 @@ struct GptModelInputs {
     // to extra kv_cache blocks when normal inference only write last token mamba state.
     // So, the model has different inference logic for target verify and normal inference.
     // To select correct inference mode, we need to set this flag manually.
-    bool is_target_verify = false;
+    bool is_target_verify            = false;
+    bool is_speculative_draft_decode = false;
 
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
@@ -112,6 +114,7 @@ struct GptModelOutputs {
     torch::Tensor softmax_result;
 
     std::vector<torch::Tensor> moe_gating;
+    NanDiagnosticLoaders       nan_diagnostic_loaders;
 };
 
 struct CopyParams {

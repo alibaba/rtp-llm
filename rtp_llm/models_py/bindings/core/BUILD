@@ -78,6 +78,7 @@ cc_library(
         "//rtp_llm/cpp/models/models_weight:weights_define",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/models:stats",
+        "//rtp_llm/cpp/models:nan_diagnostic",
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/utils:stack_trace",

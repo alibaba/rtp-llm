@@ -39,6 +39,7 @@ struct StreamUpdateInfo {
     const torch::Tensor all_hidden_states;
     bool                update_remote_generate = true;
     bool                force_update_info      = false;
+    NanDiagnostics      nan_diagnostics;
 };
 
 struct StreamSpecUpdateInfo {
@@ -55,11 +56,11 @@ struct StreamSpecUpdateInfo {
 
     bool update_remote_generate = true;
     bool force_update_info      = false;
-
     // Rejection-sampling result for this speculative decode round. Prefill
     // updates leave speculative_propose_step at zero and are not counted.
-    int speculative_propose_step = 0;
-    int accepted_draft_tokens    = 0;
+    int            speculative_propose_step = 0;
+    int            accepted_draft_tokens    = 0;
+    NanDiagnostics nan_diagnostics;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -696,6 +697,7 @@ public:
     bool     queryPdSep() const;
 
 protected:
+    bool emitNanDiagnostics(const NanDiagnostics& diagnostics, bool update_remote_generate);
     void updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
     void updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
     void updateLogitProcessorStatus(const torch::Tensor& new_tokens,
@@ -721,6 +723,7 @@ protected:
     int64_t                               begin_time_us_;
     int64_t                               wait_time_us_                = 0;
     bool                                  metrics_reported_            = false;
+    bool                                  nan_metric_reported_         = false;
     int64_t                               scheduler_enqueue_time_us_   = 0;
     int64_t                               can_run_time_us_             = 0;
     int64_t                               loading_cache_start_time_us_ = 0;

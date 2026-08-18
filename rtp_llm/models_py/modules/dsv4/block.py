@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.modules import RMSNorm
+from rtp_llm.models_py.modules.dsv4 import _nan_diag_triton as _nan_diag
 from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
 from rtp_llm.models_py.modules.dsv4.moe import MoE
@@ -311,6 +312,7 @@ class Block(nn.Module):
         x_pre = self.attn_norm(x_pre.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_in", x_pre)
+        attn_in = x_pre
         if attn_fn is not None:
             attn_out = attn_fn(x_pre)
         else:
@@ -331,7 +333,14 @@ class Block(nn.Module):
         x_pre = self.ffn_norm(x_pre.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_in", x_pre)
+        moe_in = x_pre
         ffn_out = self.ffn(x_pre, input_ids)
+        if _nan_diag.ENABLED:
+            _nan_diag.report(
+                (attn_in, attn_out, moe_in, ffn_out),
+                _nan_diag.SOURCE_ATTENTION_INPUT,
+                self.layer_id,
+            )
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_out", ffn_out)
         x = self.ffn_hc.post(ffn_out, residual, post, comb)
@@ -424,6 +433,10 @@ class Block(nn.Module):
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
             )
+        if _nan_diag.ENABLED:
+            _nan_diag.report(
+                (x_pre, attn_out), _nan_diag.SOURCE_ATTENTION_INPUT, self.layer_id
+            )
         x = attn_hc_post(attn_out, residual, post, comb)
         self._sync_after_first_cp_prefill_attention()
 
@@ -431,6 +444,10 @@ class Block(nn.Module):
         x_pre, post, comb = ffn_hc_pre(x)
         x_pre = _prefill_fast_norm(self.ffn_norm, x_pre)
         ffn_out = self.ffn(x_pre, input_ids)
+        if _nan_diag.ENABLED:
+            _nan_diag.report(
+                (x_pre, ffn_out), _nan_diag.SOURCE_MOE_INPUT, self.layer_id
+            )
         return ffn_hc_post(ffn_out, residual, post, comb)
 
     def forward(
@@ -553,6 +570,10 @@ class Block(nn.Module):
                 attn_out = attn_out_padded.reshape(T, D)
             else:
                 attn_out = attn_out_padded[b_idx, s_idx]  # [T, dim]
+        if _nan_diag.ENABLED:
+            _nan_diag.report(
+                (x_pre, attn_out), _nan_diag.SOURCE_ATTENTION_INPUT, self.layer_id
+            )
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_out", attn_out)
             if dbg_pos_mask is not None:
@@ -599,6 +620,10 @@ class Block(nn.Module):
         finally:
             if _dbg_layer and hasattr(self.ffn, "_dbg_positions"):
                 setattr(self.ffn, "_dbg_positions", None)
+        if _nan_diag.ENABLED:
+            _nan_diag.report(
+                (x_pre, ffn_out), _nan_diag.SOURCE_MOE_INPUT, self.layer_id
+            )
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_ffn_out", ffn_out)
             if dbg_pos_mask is not None:

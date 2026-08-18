@@ -125,7 +125,8 @@ protected:
                                       const MtpBatchStreamProcessor::DSparkRoundHead& round_head,
                                       SamplerOutput&                                  draft_sampler_output,
                                       torch::Tensor&                                  draft_token_ids_t,
-                                      int64_t&                                        model_forward_us);
+                                      int64_t&                                        model_forward_us,
+                                      NanDiagnosticLoaders&                           nan_diagnostic_loaders);
     GptModelOutputs runDraftCommitForward(GptModelInputs& model_input);
     SpecLogitsVerifyRunner::LaunchResult
                  buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
@@ -147,7 +148,8 @@ protected:
                           const StreamGroups&         stream_groups,
                           std::vector<torch::Tensor>& draft_probs_list,
                           torch::Tensor&              draft_token_ids_t,
-                          int64_t&                    model_forward_us);
+                          int64_t&                    model_forward_us,
+                          NanDiagnosticLoaders&       nan_diagnostic_loaders);
 
     bool useDeviceInput() const;
     bool checkDeviceInput() const;
@@ -269,6 +271,7 @@ private:
     std::unique_ptr<SpecLogitsVerifyRunner> spec_logits_verify_runner_;
     AsyncRunner                             spec_logits_verify_async_runner_;
 
+    AsyncRunner nan_diagnostic_runner_;
     // Bookkeeping worker for stream-async decode dispatch. It owns a CUDA
     // stream + thread and runs D2H/specUpdate/KV release off the main thread.
     AsyncRunner spec_bookkeeping_runner_;

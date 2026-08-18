@@ -32,8 +32,12 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
 
     for (int i = 0; i < nextBatchSize(); i++) {
         GenerateOutput generate_output;
-        generate_output.aux_info.iter_count = iter_count_;
-        generate_output.output_ids          = torch::empty({1, (int64_t)output_len}, torch::kInt32);
+        generate_output.aux_info.iter_count      = iter_count_;
+        generate_output.aux_info.nan_diagnostics = update_info.nan_diagnostics;
+        for (auto& event : generate_output.aux_info.nan_diagnostics) {
+            event.iteration = iter_count_;
+        }
+        generate_output.output_ids = torch::empty({1, (int64_t)output_len}, torch::kInt32);
 
         // TODO(xinfei.sxf) optimize this copy : only copy last token
         complete_token_ids_->copyTokensTo(
@@ -175,7 +179,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         setSoftmaxProbs(update_info.softmax_probs, seqLength() - update_info.num_new_tokens);
     }
 
-    finished_ = needFinish();
+    finished_ = !update_info.nan_diagnostics.empty() || needFinish();
     if (finished_) {
         reportEventWithoutLock(StreamEvents::GenerateDone);
         fillSubGenerateStatus(StreamState::FINISHED);
@@ -211,7 +215,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         return;
     }
 
-    if (seqLength() - last_output_pos_ == 0) {
+    if (seqLength() - last_output_pos_ == 0 && update_info.nan_diagnostics.empty()) {
         return;
     }
 

@@ -101,6 +101,26 @@ public:
         json.Jsonize("speculative_accepted_tokens_per_pos",
                      speculative_accepted_tokens_per_pos,
                      speculative_accepted_tokens_per_pos);
+        if (json.GetMode() == FastJsonizableBase::Mode::TO_JSON && !nan_diagnostics.empty()) {
+            JsonArray events;
+            events.reserve(nan_diagnostics.size());
+            for (const auto& event : nan_diagnostics) {
+                events.push_back(JsonMap{{"request_index", event.request_index},
+                                         {"trace_id", event.trace_id},
+                                         {"phase", event.phase},
+                                         {"model_role", event.model_role},
+                                         {"stage", event.stage},
+                                         {"layer_id", event.layer_id},
+                                         {"iteration", event.iteration},
+                                         {"first_bad_index", event.first_bad_index},
+                                         {"n_nan", event.n_nan},
+                                         {"n_inf", event.n_inf},
+                                         {"cuda_graph", event.cuda_graph},
+                                         {"dtype", event.dtype},
+                                         {"shape", ToJson(event.shape)}});
+            }
+            json.Jsonize("nan_diagnostics", events);
+        }
     }
     AuxInfoAdapter() {
         AuxInfo();
@@ -119,6 +139,7 @@ public:
         remote_reuse_len                    = base.remote_reuse_len;
         speculative_draft_rounds            = base.speculative_draft_rounds;
         speculative_accepted_tokens_per_pos = base.speculative_accepted_tokens_per_pos;
+        nan_diagnostics                     = base.nan_diagnostics;
 
         cost_time_ms = cost_time_us / 1000.0;
     }

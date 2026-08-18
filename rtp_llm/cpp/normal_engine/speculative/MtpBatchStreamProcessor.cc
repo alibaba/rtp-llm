@@ -1007,7 +1007,6 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
 
     const auto& new_all_token_ids         = sampler_output.token_ids;
     const auto& propose_new_all_token_ids = draft_sampler_output.token_ids;
-
     RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(new_all_token_ids).c_str());
     RTP_LLM_LOG_DEBUG("propose_new_all_token_ids = [%s]",
                       tensorDebugStringWithData<int64_t>(propose_new_all_token_ids).c_str());
@@ -1022,6 +1021,8 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
     const torch::Tensor new_all_token_ids_cpu =
         new_all_token_ids.is_cuda() ? new_all_token_ids.cpu() : new_all_token_ids;
     const torch::Tensor success_cpu = sampler_output.success.defined() ? sampler_output.success.cpu() : torch::Tensor();
+    auto prefill_nan_diagnostics    = loadNanDiagnostics(prefill_output.model_output.nan_diagnostic_loaders);
+    auto propose_nan_diagnostics    = loadNanDiagnostics(propose_output.model_output.nan_diagnostic_loaders);
 
     int batch_idx_in  = 0;
     int batch_idx_out = 0;
@@ -1062,7 +1063,13 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
             }
         }
 
-        spec_update_infos.push_back({new_tokens, 1, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
+        StreamSpecUpdateInfo update_info{
+            new_tokens, 1, -1, std::move(last_hidden_states), std::move(propose_all_probs)};
+        update_info.nan_diagnostics = nanDiagnosticsForRequest(prefill_nan_diagnostics, batch_idx_in, cur_batch_size);
+        auto proposed               = nanDiagnosticsForRequest(propose_nan_diagnostics, batch_idx_in, cur_batch_size);
+        update_info.nan_diagnostics.insert(update_info.nan_diagnostics.end(), proposed.begin(), proposed.end());
+        update_info.force_update_info = !update_info.nan_diagnostics.empty();
+        spec_update_infos.push_back(std::move(update_info));
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
@@ -1080,13 +1087,17 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
     const auto& accept_len    = spec_decode_output.accept_len_cpu;
     const auto& accept_tokens = spec_decode_output.accept_tokens_cpu;
 
-    const auto& draft_model_output   = draft_prefill_output.model_output;
-    const auto& draft_sampler_output = draft_prefill_output.sampler_output;
+    const auto& draft_model_output            = draft_prefill_output.model_output;
+    const auto& draft_sampler_output          = draft_prefill_output.sampler_output;
+    auto        spec_nan_diagnostics          = loadNanDiagnostics(spec_decode_output.nan_diagnostic_loaders);
+    auto        draft_prefill_nan_diagnostics = loadNanDiagnostics(draft_model_output.nan_diagnostic_loaders);
 
+    int batch_idx_in  = 0;
     int batch_idx_out = 0;
     int token_offset  = 0;
 
     for (auto& stream : stream_groups.allStreams()) {
+        auto cur_batch_size  = stream->currentBatchSize();
         auto next_batch_size = stream->nextBatchSize();
 
         // speculative decoding info
@@ -1114,8 +1125,13 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         auto& update_info                    = spec_update_infos.back();
         update_info.speculative_propose_step = propose_step_;
         update_info.accepted_draft_tokens    = std::max(0, cur_accept_len - 1);
+        update_info.nan_diagnostics = nanDiagnosticsForRequest(spec_nan_diagnostics, batch_idx_in, cur_batch_size);
+        auto draft = nanDiagnosticsForRequest(draft_prefill_nan_diagnostics, batch_idx_in, cur_batch_size);
+        update_info.nan_diagnostics.insert(update_info.nan_diagnostics.end(), draft.begin(), draft.end());
+        update_info.force_update_info = !update_info.nan_diagnostics.empty();
 
         token_offset += propose_step_ + 1;
+        batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
     }
 }

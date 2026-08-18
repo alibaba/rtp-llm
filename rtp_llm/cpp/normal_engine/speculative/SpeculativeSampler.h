@@ -21,6 +21,7 @@ public:
     torch::Tensor accept_len_cpu;
 
     std::shared_ptr<torch::Event> transfer_done_event;
+    NanDiagnosticLoaders          nan_diagnostic_loaders;
 
     SpeculativeSamplerOutput(): transfer_done_event(std::make_shared<torch::Event>(cuda_graph::makeGraphEvent())) {}
 };

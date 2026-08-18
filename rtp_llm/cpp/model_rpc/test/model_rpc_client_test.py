@@ -531,6 +531,28 @@ class ModelRpcClientTest(TestCase):
 
         self.assertFalse(stub.fetch_iterator.cancelled)
 
+    def test_trans_output_nan_diagnostics_without_aux_flag(self):
+        input_py = MagicMock(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(aux_info=False),
+        )
+        response_pb = _make_response(False)
+        flattened = response_pb.flatten_output
+        flattened.aux_info.add().nan_diagnostics.add(
+            trace_id="trace-99",
+            model_role="dspark_draft",
+            stage="logits",
+            first_bad_index=42,
+            shape=[1, 129280],
+        )
+
+        output = trans_output(input_py, response_pb, StreamState())
+        diagnostic = output.generate_outputs[0].aux_info.nan_diagnostics[0]
+
+        self.assertEqual(diagnostic["trace_id"], "trace-99")
+        self.assertEqual(diagnostic["stage"], "logits")
+        self.assertEqual(diagnostic["shape"], [1, 129280])
+
 
 if __name__ == "__main__":
     setup_logging()

@@ -170,6 +170,24 @@ message GenerateInputPB {
     int32 priority = 10;
 }
 
+message NanDiagnosticPB {
+    reserved 1, 6, 8, 15;
+    reserved "batch_id", "forward_kind", "source_id", "tp_rank";
+    int32 request_index = 2;
+    string trace_id = 3;
+    string phase = 4;
+    string model_role = 5;
+    string stage = 7;
+    int32 layer_id = 9;
+    int64 iteration = 10;
+    int64 first_bad_index = 11;
+    int64 n_nan = 12;
+    int64 n_inf = 13;
+    bool cuda_graph = 14;
+    string dtype = 16;
+    repeated int64 shape = 17;
+}
+
 message AuxInfoPB {
     int32 cost_time_us = 1;
     int32 iter_count = 2;
@@ -198,6 +216,7 @@ message AuxInfoPB {
     int32 decode_memory_reuse_len = 26;
     int32 speculative_draft_rounds = 27;
     repeated int32 speculative_accepted_tokens_per_pos = 28;
+    repeated NanDiagnosticPB nan_diagnostics = 29;
 }
 
 message FlattenOutputPB {
