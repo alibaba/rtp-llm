@@ -1,10 +1,59 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 #include <torch/torch.h>
 
 namespace rtp_llm {
+
+// Normalize a dynamic packed prefill batch to the fixed graph contract:
+// Bmax real slots followed by one sentinel slot, with exactly token_capacity
+// packed tokens. The first real_request_count entries of input_lengths must
+// already contain the live request lengths. All output buffers are caller
+// owned and therefore keep stable addresses across CUDA graph replays.
+inline bool prepareFullPrefillReplayMetadata(int32_t* input_lengths,
+                                             int32_t* cu_seqlens,
+                                             int32_t* padding_offset,
+                                             int      real_request_count,
+                                             int      max_request_count,
+                                             int      real_token_count,
+                                             int      token_capacity) {
+    if (input_lengths == nullptr || cu_seqlens == nullptr || padding_offset == nullptr || real_request_count <= 0
+        || real_request_count > max_request_count || max_request_count <= 0 || real_token_count <= 0
+        || real_token_count > token_capacity) {
+        return false;
+    }
+
+    int computed_real_tokens = 0;
+    for (int slot = 0; slot < real_request_count; ++slot) {
+        if (input_lengths[slot] <= 0 || input_lengths[slot] > token_capacity - computed_real_tokens) {
+            return false;
+        }
+        computed_real_tokens += input_lengths[slot];
+    }
+    if (computed_real_tokens != real_token_count) {
+        return false;
+    }
+
+    for (int slot = real_request_count; slot < max_request_count; ++slot) {
+        input_lengths[slot] = 0;
+    }
+    input_lengths[max_request_count] = token_capacity - real_token_count;
+
+    int packed_offset = 0;
+    cu_seqlens[0]     = 0;
+    for (int slot = 0; slot <= max_request_count; ++slot) {
+        const int length       = input_lengths[slot];
+        const int fixed_offset = slot * token_capacity - packed_offset;
+        for (int token = 0; token < length; ++token) {
+            padding_offset[packed_offset + token] = fixed_offset;
+        }
+        packed_offset += length;
+        cu_seqlens[slot + 1] = packed_offset;
+    }
+    return packed_offset == token_capacity;
+}
 
 enum class ReplayIdDimRequirement {
     kAny,

@@ -25,6 +25,7 @@ public:
         enable_cuda_graph_(graph_params.enable_cuda_graph),
         is_prefill_cuda_graph_mode_(graph_params.is_prefill_cuda_graph_mode),
         is_target_verify_(graph_params.is_target_verify),
+        role_(graph_params.role),
         capture_stream_(cuda_graph::graphGetStreamFromPool(true)),
         enable_cuda_graph_debug_mode_(graph_params.enable_cuda_graph_debug_mode),
         num_tokens_per_bs_(graph_params.num_tokens_per_bs),
@@ -38,7 +39,11 @@ public:
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         model_data_type_(graph_params.model_data_type),
         kv_cache_group_tags_(graph_params.kv_cache_group_tags),
-        position_id_len_factor_(graph_params.position_id_len_factor) {
+        position_id_len_factor_(graph_params.position_id_len_factor),
+        full_prefill_max_requests_(graph_params.full_prefill_max_requests),
+        full_prefill_max_padding_ratio_(graph_params.full_prefill_max_padding_ratio),
+        full_prefill_pad_token_id_(graph_params.full_prefill_pad_token_id),
+        prefill_scratch_kernel_block_ids_(graph_params.prefill_scratch_kernel_block_ids) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
@@ -46,7 +51,18 @@ public:
         if (kernel_seq_size_per_block_ <= 0) {
             throw std::runtime_error("CudaGraphRunner constructor: kernel_tokens_per_block must be > 0.");
         }
-        max_bs_               = graph_params.max_context_batch_size;
+        max_bs_ = graph_params.max_context_batch_size;
+        if (role_ == CudaGraphRole::AUTO) {
+            role_ = is_target_verify_ ? CudaGraphRole::TARGET_VERIFY :
+                    is_prefill_cuda_graph_mode_ ?
+                                        (num_tokens_per_bs_ == max_seq_len_ ? CudaGraphRole::EMBEDDING_PREFILL :
+                                                                              CudaGraphRole::MTP_DRAFT_PREFILL) :
+                                        CudaGraphRole::DECODE;
+        }
+        is_prefill_cuda_graph_mode_ = role_ == CudaGraphRole::EMBEDDING_PREFILL
+                                      || role_ == CudaGraphRole::MTP_DRAFT_PREFILL
+                                      || role_ == CudaGraphRole::GENERATIVE_PREFILL_NO_PREFIX;
+        is_target_verify_     = role_ == CudaGraphRole::TARGET_VERIFY;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr("forward");
         options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
@@ -54,7 +70,7 @@ public:
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, kernel_seq_size_per_block_: %d, \
-            hidden_size_: %d, num_tokens_per_bs_: %d, is_prefill_cuda_graph_mode_: %d, is_target_verify_: %d",
+            hidden_size_: %d, num_tokens_per_bs_: %d, role_: %d, is_prefill_cuda_graph_mode_: %d, is_target_verify_: %d",
                          enable_cuda_graph_,
                          max_bs_,
                          enable_cuda_graph_debug_mode_,
@@ -62,6 +78,7 @@ public:
                          kernel_seq_size_per_block_,
                          hidden_size_,
                          num_tokens_per_bs_,
+                         static_cast<int>(role_),
                          is_prefill_cuda_graph_mode_,
                          is_target_verify_);
     }
@@ -105,10 +122,13 @@ private:
     void replayAndSyncCheck(int key, const char* key_type);
 
     bool isEmbeddingStylePrefillCudaGraph() const {
-        return is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ == max_seq_len_;
+        return role_ == CudaGraphRole::EMBEDDING_PREFILL;
     }
     bool isMtpDraftPrefillCudaGraph() const {
-        return is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
+        return role_ == CudaGraphRole::MTP_DRAFT_PREFILL;
+    }
+    bool isGenerativePrefillCudaGraph() const {
+        return role_ == CudaGraphRole::GENERATIVE_PREFILL_NO_PREFIX;
     }
     bool usesFixedCapacityMtpDraftPrefillCudaGraph() const {
         return isMtpDraftPrefillCudaGraph() && hc_mult_ > 1;
@@ -118,6 +138,8 @@ private:
     // Common memory hold creation logic
     CaptureMemoryHold createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count);
     void              initKernelInternalMemory();
+    py::object        prepareFmhaImpl(const PyModelInputs& inputs, bool is_cuda_graph);
+    void              initPrefillScratchTensors();
     void              logCudaGraphPoolMemory(const char* phase);
     void              setPositionEncoding(torch::Tensor position_encoding) override;
     void              setTokenTypeEmbedding(torch::Tensor token_type_embedding) override;
@@ -143,6 +165,7 @@ private:
     bool                    enable_cuda_graph_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
+    CudaGraphRole           role_{CudaGraphRole::AUTO};
     cuda_graph::GraphStream capture_stream_;
     bool                    enable_cuda_graph_debug_mode_{false};
     size_t                  max_bs_{1};
@@ -170,13 +193,22 @@ private:
     at::TensorOptions                      options_cuda_float_;
     cuda_graph::GraphPoolHandle            shared_graph_pool_{};
 
-    std::vector<std::string> kv_cache_group_tags_;
-    int                      position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
+    std::vector<std::string>      kv_cache_group_tags_;
+    int                           position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
+    int                           full_prefill_max_requests_{0};
+    double                        full_prefill_max_padding_ratio_{0.25};
+    int                           full_prefill_pad_token_id_{0};
+    std::vector<std::vector<int>> prefill_scratch_kernel_block_ids_;
+    std::vector<torch::Tensor>    prefill_scratch_kernel_block_ids_host_;
+    std::vector<torch::Tensor>    prefill_scratch_kernel_block_ids_device_;
+    torch::Tensor                 full_prefill_padding_offset_host_;
     // Log-throttling state only. The actionable fallback signal is the
     // power-of-two warning; operational rollback uses enable_cuda_graph.
     mutable std::atomic<uint64_t> combo_position_fallback_log_count_{0};
     mutable std::atomic<uint64_t> bert_replay_id_fallback_log_count_{0};
     mutable std::atomic<uint64_t> multimodal_input_fallback_log_count_{0};
+    mutable std::atomic<uint64_t> full_prefill_fallback_log_count_{0};
+    mutable std::atomic<uint64_t> full_prefill_replay_log_count_{0};
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();

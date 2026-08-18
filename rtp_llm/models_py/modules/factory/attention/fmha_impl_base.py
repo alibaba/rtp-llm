@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -6,6 +7,13 @@ import torch
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
 from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, ParamsBase, PyAttentionInputs
+
+
+class PrefillCudaGraphCapability(str, Enum):
+    """Full-prefill CUDA Graph capability of an attention implementation."""
+
+    NEVER = "never"
+    FULL_NO_PREFIX = "full_no_prefix"
 
 
 class MlaImplBase(object):
@@ -62,6 +70,9 @@ class MlaImplBase(object):
     def support_cuda_graph(self) -> bool:
         """Check if CUDA graph is supported."""
         return callable(getattr(self, "prepare_cuda_graph", None))
+
+    def prefill_cuda_graph_capability(self) -> PrefillCudaGraphCapability:
+        return PrefillCudaGraphCapability.NEVER
 
     def prepare(self, attn_inputs: PyAttentionInputs):
         """Prepare for attention computation."""
@@ -169,6 +180,10 @@ class FMHAImplBase(ABC):
             如果想支持cuda graph需要子类支持prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):这个函数
         """
         return callable(getattr(self, "prepare_cuda_graph", None))
+
+    def prefill_cuda_graph_capability(self) -> PrefillCudaGraphCapability:
+        """Return an explicit capability; having prepare_cuda_graph is insufficient."""
+        return PrefillCudaGraphCapability.NEVER
 
     @classmethod
     def support_prefill_cp(cls) -> bool:

@@ -266,6 +266,31 @@ class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
 class TestCudaFp8PerBlockNoDPMaskedStrategy(unittest.TestCase):
     """Test CUDA FP8 PerBlock No DP Masked strategy"""
 
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_executor_v2.get_sm"
+    )
+    @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
+    def test_can_handle_cuda_graph_on_sm90(
+        self, mock_has_deep_gemm: Any, mock_get_sm: Any
+    ) -> None:
+        """The full-prefill allowlist relies on this exact graph-safe strategy."""
+        mock_has_deep_gemm.return_value = True
+        mock_get_sm.return_value = (9, 0)
+
+        config = create_moe_config_adapter(
+            model_config=create_model_config_with_fp8_block_quant(),
+            parallelism_config=create_parallelism_config(
+                ep_size=1, tp_size=1, dp_size=1
+            ),
+            moe_config=create_moe_config(
+                use_all_gather=True, moe_strategy="fp8_per_block_no_dp_masked"
+            ),
+            enable_cuda_graph=True,
+        )
+
+        strategy = CudaFp8PerBlockNoDPMaskedStrategy()
+        self.assertTrue(strategy.can_handle(config))
+
     @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
     def test_can_handle_single_gpu(self, mock_has_deep_gemm: Any) -> None:
         """Test single GPU case"""
