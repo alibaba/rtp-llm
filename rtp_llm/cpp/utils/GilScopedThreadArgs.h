@@ -38,7 +38,16 @@ inline std::atomic<GilThreadStateStorage*>& gilThreadStateStorage() noexcept {
 
 // This must run while the caller owns the GIL. It records the calling thread's state so
 // no-GIL ownership checks stay allocation-free and never enter pybind's slow paths.
+//
+// get_internals() here is load-bearing, not defensive. pybind needs internals initialized
+// under the GIL so internals.tstate exists before any later gil_scoped_acquire, and reaching
+// it implicitly (the previous `&get_internals().tstate`) was the only thing doing that. Drop
+// it and the process' first get_internals() runs inside a worker's gil_scoped_acquire with
+// the GIL released, where it does PyGILState_Ensure/Release and therefore creates *and
+// destroys* a PyThreadState while storing it into internals.tstate; gil_scoped_acquire then
+// calls PyEval_AcquireThread() on that freed state.
 inline void initializeGilThreadStateTracking() {
+    pybind11::detail::get_internals();
     static GilThreadStateStorage tracked_storage;
     tracked_storage.set(pybind11::detail::get_thread_state_unchecked());
     gilThreadStateStorage().store(&tracked_storage, std::memory_order_release);
