@@ -42,6 +42,8 @@ public:
         py_model_inputs_.attention_inputs.combo_position_ids       = inputs.attention_inputs.combo_position_ids;
         py_model_inputs_.input_ids                                 = inputs.input_ids;
         py_model_inputs_.combo_position_ids                        = inputs.combo_position_ids;
+        py_model_inputs_.cuda_graph_input_embedding_overrides      = inputs.cuda_graph_input_embedding_overrides;
+        py_model_inputs_.cuda_graph_input_embedding_mask           = inputs.cuda_graph_input_embedding_mask;
 
         // for spec
         py_model_inputs_.input_hiddens                            = inputs.input_hiddens;

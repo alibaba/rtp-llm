@@ -11,7 +11,10 @@ from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import (
     is_cuda_12_9_or_later,
 )
-from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
+from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
+    FMHAImplBase,
+    PrefillCudaGraphCapability,
+)
 from rtp_llm.models_py.utils.arch import is_sm12x, is_sm90
 from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ParallelismConfig, RopeStyle
 from rtp_llm.ops.compute_ops import (
@@ -416,3 +419,14 @@ class FlashInferTRTLLMFMHAv2PrefillImpl(FMHAImplBase):
             common.copy_kv_cache_offset(
                 self.rope_params.kv_cache_offset, new_kv_cache_offset
             )
+
+    def prefill_cuda_graph_capability(self) -> PrefillCudaGraphCapability:
+        configs = self.fmha_impl.attn_configs
+        if (
+            (is_sm90() or is_sm12x())
+            and configs.dtype == torch.bfloat16
+            and configs.kv_cache_dtype == KvCacheDataType.BASE
+            and configs.is_causal
+        ):
+            return PrefillCudaGraphCapability.FULL_NO_PREFIX
+        return PrefillCudaGraphCapability.NEVER
