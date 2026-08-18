@@ -334,8 +334,17 @@ public class ConfigService {
             config.isFlexlbEngineWaitPenaltyEnabled(), config.getFlexlbEngineWaitPenaltyMsPerWaitStream());
         log.info("engineWaitHardFilterEnabled={}, engineWaitHardFilterThreshold={}",
             config.isFlexlbEngineWaitHardFilterEnabled(), config.getFlexlbEngineWaitHardFilterThreshold());
-        log.info("batchInflightMaxAgeMs={}, batchInflightStaleMs={}",
-            config.getFlexlbBatchInflightMaxAgeMs(), config.getFlexlbBatchInflightStaleMs());
+        log.info("batchInflightMaxAgeMs={}, batchInflightStaleMs={}, batchFrozenAuditAfterMs={}",
+            config.getFlexlbBatchInflightMaxAgeMs(), config.getFlexlbBatchInflightStaleMs(),
+            config.getFlexlbBatchFrozenAuditAfterMs());
+        log.info("prefillLostAfterMs={}, prefillLostMinMisses={}",
+            config.getFlexlbPrefillLostAfterMs(), config.getFlexlbPrefillLostMinMisses());
+        log.info("pendingOfferPenaltyEnabled={}, pendingOfferPenaltyMsPerRequest={}, "
+                + "engineUntrackedPenaltyEnabled={}, engineUntrackedPenaltyMsPerRequest={}",
+            config.isFlexlbPendingOfferPenaltyEnabled(),
+            config.getFlexlbPendingOfferPenaltyMsPerRequest(),
+            config.isFlexlbEngineUntrackedPenaltyEnabled(),
+            config.getFlexlbEngineUntrackedPenaltyMsPerRequest());
         log.info("maxNewTokensCap={}", config.getMaxNewTokensCap());
         log.info("workerTimeoutMs={}",
             config.getWorkerTimeoutMs());

@@ -20,6 +20,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -1097,6 +1098,233 @@ class PrefillEndpointTest {
         BatchItem item = createBatchItem(1L, 500, 200);
         endpoint.getBatcher().offer(item);
         // Should not throw — batcher handles stopped state
+    }
+
+    // ---- ACKNOWLEDGED-lost detection (Fix A, 205 pileup incident) ----
+
+    @Test
+    void detectLostSettlesBatchMissedByConsecutiveRealReports() throws InterruptedException {
+        config.setAutoTpmEnabled(true);
+        config.setFlexlbPrefillLostAfterMs(1);
+        endpoint.commitBatch(1L, 100, List.of(
+                createBatchItem(101L, 500, 200),
+                createBatchItem(102L, 300, 100)));
+        Thread.sleep(5);
+
+        calibrate(Map.of(), Map.of());
+        calibrate(Map.of(), Map.of());
+        assertEquals(1, endpoint.getInflightBatchCount(),
+                "below the miss threshold the batch must stay inflight");
+
+        calibrate(Map.of(), Map.of());
+        assertEquals(0, endpoint.getInflightBatchCount(),
+                "three real reports that mention the batch nowhere must settle it");
+        assertEquals(0, endpoint.realPendingCount());
+        verify(endpointReporter).reportEndpointInflightTtlExpired(
+                "PREFILL", "127.0.0.1", "post_ack_lost", 1);
+    }
+
+    @Test
+    void detectLostDeliversEveryMemberToExpiredTerminal() throws InterruptedException {
+        WorkerStatus status = new WorkerStatus();
+        status.setIp("127.0.0.2");
+        status.setPort(8080);
+        status.setGrpcPort(8090);
+        status.setRole(RoleType.PREFILL);
+        FlexlbConfig lostConfig = new FlexlbConfig();
+        lostConfig.setFlexlbBatchQueueMaxSize(100);
+        lostConfig.setFlexlbBatchFixedWaitMs(300);
+        lostConfig.setCostFormula("10 + 0.1*sum(computeTokens) + 5*batchSize");
+        lostConfig.setAutoTpmEnabled(true);
+        lostConfig.setFlexlbPrefillLostAfterMs(1);
+        List<Long> expired = new ArrayList<>();
+        BatchDecisionHandler recording = new BatchDecisionHandler() {
+            @Override public void onExpired(BatchItem head) { expired.add(head.requestId()); }
+            @Override public void onBatchReady(List<BatchItem> items, DispatchMeta meta) {}
+            @Override public void onOfferFailure(BatchItem item, Throwable error) {}
+        };
+        PrefillEndpoint lostEndpoint = new PrefillEndpoint(
+                status, lostConfig, recording, mock(BatchSchedulerReporter.class));
+        try {
+            lostEndpoint.commitBatch(1L, 100, List.of(
+                    createBatchItem(lostEndpoint, 201L, 500, 0),
+                    createBatchItem(lostEndpoint, 202L, 300, 0)));
+            Thread.sleep(5);
+            WorkerStatusResponse empty = new WorkerStatusResponse();
+            empty.setFinishedTaskInfo(Map.of());
+            empty.setRunningTaskInfo(Map.of());
+            for (int i = 0; i < 3; i++) {
+                lostEndpoint.onWorkerStatusUpdate(lostEndpoint.getStatus(), empty);
+            }
+            assertEquals(0, lostEndpoint.getInflightBatchCount());
+            expired.sort(null);
+            assertEquals(List.of(201L, 202L), expired,
+                    "every member must reach the ordinary expired terminal exactly once");
+        } finally {
+            lostEndpoint.close();
+        }
+    }
+
+    @Test
+    void detectLostResetsMissCountOnAnyMemberObservation() throws InterruptedException {
+        config.setAutoTpmEnabled(true);
+        config.setFlexlbPrefillLostAfterMs(1);
+        endpoint.commitBatch(1L, 100, List.of(createBatchItem(101L, 500, 200)));
+        Thread.sleep(5);
+
+        calibrate(Map.of(), Map.of());
+        calibrate(Map.of(), Map.of());
+        // any member observation resets the consecutive-miss counter
+        calibrate(Map.of(), Map.of("101", taskInfo(101L, 1L, TaskPhase.RUNNING, 0, 0)));
+        Thread.sleep(5);
+
+        calibrate(Map.of(), Map.of());
+        calibrate(Map.of(), Map.of());
+        assertEquals(1, endpoint.getInflightBatchCount(),
+                "misses must restart from zero after an observation");
+
+        calibrate(Map.of(), Map.of());
+        assertEquals(0, endpoint.getInflightBatchCount());
+    }
+
+    @Test
+    void detectLostTimeLegKeepsFreshBatchAliveDespiteMisses() {
+        config.setAutoTpmEnabled(true);
+        // default 20s time leg: miss count alone must never settle a fresh batch
+        endpoint.commitBatch(1L, 100, List.of(createBatchItem(101L, 500, 200)));
+        for (int i = 0; i < 5; i++) {
+            calibrate(Map.of(), Map.of());
+        }
+        assertEquals(1, endpoint.getInflightBatchCount(),
+                "the time leg must keep a fresh batch alive regardless of miss count");
+    }
+
+    @Test
+    void detectLostDisabledByNonPositiveThreshold() throws InterruptedException {
+        config.setAutoTpmEnabled(true);
+        config.setFlexlbPrefillLostAfterMs(0);
+        endpoint.commitBatch(1L, 100, List.of(createBatchItem(101L, 500, 200)));
+        Thread.sleep(5);
+        for (int i = 0; i < 5; i++) {
+            calibrate(Map.of(), Map.of());
+        }
+        assertEquals(1, endpoint.getInflightBatchCount(),
+                "a non-positive threshold must disable the detection entirely");
+    }
+
+    @Test
+    void detectLostRequiresAutoTpm() throws InterruptedException {
+        config.setAutoTpmEnabled(false);
+        config.setFlexlbPrefillLostAfterMs(1);
+        endpoint.commitBatch(1L, 100, List.of(createBatchItem(101L, 500, 200)));
+        Thread.sleep(5);
+        for (int i = 0; i < 5; i++) {
+            calibrate(Map.of(), Map.of());
+        }
+        assertEquals(1, endpoint.getInflightBatchCount(),
+                "legacy (non Auto-TPM) deployments must be untouched");
+    }
+
+    @Test
+    void detectLostSkipsDispatchReconciliationFencedBatch() throws InterruptedException {
+        config.setAutoTpmEnabled(true);
+        config.setFlexlbPrefillLostAfterMs(1);
+        endpoint.commitBatch(700L, 100, List.of(
+                createBatchItem(101L, 500, 200),
+                createBatchItem(102L, 300, 100)));
+        endpoint.beginDispatchReconciliation(700L, 101L);
+        Thread.sleep(5);
+        for (int i = 0; i < 3; i++) {
+            calibrate(Map.of(), Map.of());
+        }
+        assertEquals(1, endpoint.getInflightBatchCount(),
+                "an ACK-ambiguous fenced batch awaits its own settlement, never lost-settled");
+        endpoint.endDispatchReconciliation(700L, 101L);
+    }
+
+    @Test
+    void detectLostSkipsEmptyMemberLegacyReservation() throws InterruptedException {
+        config.setAutoTpmEnabled(true);
+        config.setFlexlbPrefillLostAfterMs(1);
+        // Legacy non-batch placeholder: the engine reports it with batch_id=-1,
+        // so it would always look unobserved at batch granularity.
+        endpoint.commitBatch(555L, 100, List.of());
+        Thread.sleep(5);
+        for (int i = 0; i < 3; i++) {
+            calibrate(Map.of(), Map.of());
+        }
+        assertEquals(1, endpoint.getInflightBatchCount(),
+                "empty-member placeholder entries are outside batch-level observation");
+    }
+
+    // ---- pending offers (R1) ----
+
+    @Test
+    void pendingOfferRecordAndReleaseAreIdempotent() {
+        assertEquals(0, endpoint.getPendingOfferCount());
+        endpoint.recordPendingOffer(1L);
+        endpoint.recordPendingOffer(1L);
+        assertEquals(1, endpoint.getPendingOfferCount());
+        endpoint.recordPendingOffer(2L);
+        assertEquals(2, endpoint.getPendingOfferCount());
+        endpoint.releasePendingOffer(1L);
+        endpoint.releasePendingOffer(1L);
+        assertEquals(1, endpoint.getPendingOfferCount());
+        endpoint.releasePendingOffer(2L);
+        endpoint.releasePendingOffer(99L); // absent key is a no-op
+        assertEquals(0, endpoint.getPendingOfferCount());
+    }
+
+    // ---- frozen-batch audit ----
+
+    @Test
+    void frozenAuditReportsOverAgeBatchKeptAliveByObservation() throws Exception {
+        // The na130_4 freeze shape: over the age cap but the ~20ms status sync
+        // keeps observing it, so the stale leg exempts it from the F-F cap —
+        // the audit line must name exactly this verdict (over_age_cap=true,
+        // stale=false) and count the batch.
+        config.setAutoTpmEnabled(true);
+        config.setFlexlbBatchFrozenAuditAfterMs(1);
+        endpoint.commitBatch(9L, 100, List.of(createBatchItem(901L, 500, 200)));
+        Thread.sleep(5);
+        calibrate(Map.of(), Map.of("901", taskInfo(901L, 9L, TaskPhase.RUNNING, 0, 0)));
+
+        int evicted = endpoint.evictExpiredBatches(
+                60_000, 0, 5, 15_000, requestId -> false);
+        assertEquals(0, evicted, "an observed-fresh over-age batch must survive the sweep");
+        assertEquals(1, endpoint.getInflightBatchCount());
+        verify(endpointReporter).reportBatchInflightFrozenAudit("PREFILL", "127.0.0.1", 1);
+    }
+
+    @Test
+    void frozenAuditRateLimitsToFiveLinesPerSweep() throws Exception {
+        config.setAutoTpmEnabled(true);
+        config.setFlexlbBatchFrozenAuditAfterMs(1);
+        for (long batchId = 1; batchId <= 6; batchId++) {
+            endpoint.commitBatch(batchId, 100,
+                    List.of(createBatchItem(900 + batchId, 500, 200)));
+        }
+        Thread.sleep(5);
+
+        // maxAge=0 disables the F-F cap, ttl far in the future — all six
+        // batches are retained and over the audit threshold: only five may
+        // be audited per sweep.
+        assertEquals(0, endpoint.evictExpiredBatches(
+                60_000, 0, 0, 0, requestId -> false));
+        assertEquals(6, endpoint.getInflightBatchCount());
+        verify(endpointReporter).reportBatchInflightFrozenAudit("PREFILL", "127.0.0.1", 5);
+    }
+
+    @Test
+    void frozenAuditDisabledByNonPositiveThreshold() throws Exception {
+        config.setFlexlbBatchFrozenAuditAfterMs(0);
+        endpoint.commitBatch(9L, 100, List.of(createBatchItem(901L, 500, 200)));
+        Thread.sleep(5);
+
+        assertEquals(0, endpoint.evictExpiredBatches(
+                60_000, 0, 0, 0, requestId -> false));
+        verify(endpointReporter, never()).reportBatchInflightFrozenAudit(
+                anyString(), anyString(), anyInt());
     }
 
     // ---- helpers ----

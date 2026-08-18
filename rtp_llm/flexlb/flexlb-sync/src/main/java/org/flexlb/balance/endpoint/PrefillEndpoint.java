@@ -72,6 +72,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * entry is removed.
      */
     private final BatchDecisionHandler handler;
+    /**
+     * Runtime config, retained for the calibrate-driven ACKNOWLEDGED-lost
+     * detection (Fix A: {@code flexlbPrefillLostAfterMs} /
+     * {@code flexlbPrefillLostMinMisses}) — the constructor is the only
+     * config injection point of this class.
+     */
+    private final FlexlbConfig config;
 
     /**
      * Active Engine tasks not already represented in the local batch ledger.
@@ -107,6 +114,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         super(status);
         this.reporter = reporter;
         this.handler = handler;
+        this.config = config;
         this.predictor = createPredictor(config);
         this.batcher = createBatcher(config, handler, reporter);
         this.batcher.start();
@@ -317,6 +325,119 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 }
             }
         }
+
+        // Phase 5 (Fix A): ACKNOWLEDGED-lost detection. This calibrate round
+        // is backed by a real, version-advanced engine report (the status
+        // runner gates onWorkerStatusUpdate on versionAdvanced && isAlive),
+        // so a committed batch that the report mentions nowhere was silently
+        // dropped by the engine — count the miss and, past the configured
+        // thresholds, force-settle it through the handler terminal chain.
+        detectLostBatches(finishedByBatch.keySet(), activeByBatch.keySet(), statusMs);
+    }
+
+    /**
+     * Fix A (ACKNOWLEDGED-lost detection, 205 pileup incident): sweep the
+     * inflight ledger against the batch ids this calibrate round observed.
+     * A batch mentioned anywhere (finished or running, any member — even a
+     * stale one) resets its miss counter. A batch mentioned nowhere records
+     * one miss; once it accumulates {@code flexlbPrefillLostMinMisses}
+     * consecutive misses <b>and</b> its {@code lastObservedAtMs} is older
+     * than {@code flexlbPrefillLostAfterMs}, it is removed inside the
+     * per-key compute (atomic against concurrent settle/repack) and
+     * force-settled.
+     *
+     * <p>False-kill guards, in order:
+     * <ul>
+     * <li>misses only advance here — i.e. on rounds backed by a real
+     *     version-advanced engine report; sync stalls, pull failures or a
+     *     frozen report version never accumulate misses (detection then
+     *     degrades to the 120s age cap / 300s TTL, never fires early);</li>
+     * <li>empty-member entries (legacy non-batch placeholders keyed by
+     *     requestId — the engine reports those with {@code batch_id=-1},
+     *     so they would always look unobserved) are skipped;</li>
+     * <li>fenced batches ({@code hasDispatchReconciliation}) are skipped —
+     *     an ACK-ambiguous dispatch awaits its authoritative settlement and
+     *     has its own zombie guards (reconcile-target-missing, age cap);</li>
+     * <li>the time leg anchors on {@code lastObservedAtMs} (init =
+     *     createdAtMs), so a just-committed batch cannot be settled before
+     *     {@code lostAfterMs} even if the engine report races the commit
+     *     (miss counting may start on the same tick as commitBatch, but
+     *     the 20s time leg dominates the 3-round miss leg by two orders
+     *     of magnitude at the ~20ms-2s sync cadence).</li>
+     * </ul>
+     * Auto-TPM only; {@code flexlbPrefillLostAfterMs <= 0} disables.
+     */
+    private void detectLostBatches(Set<Long> finishedBatchIds, Set<Long> activeBatchIds,
+                                   long statusMs) {
+        if (config == null || !config.isAutoTpmEnabled()) {
+            return;
+        }
+        long lostAfterMs = config.getFlexlbPrefillLostAfterMs();
+        if (lostAfterMs <= 0) {
+            return;
+        }
+        int minMisses = Math.max(1, config.getFlexlbPrefillLostMinMisses());
+        for (Long batchId : inflightBatches.keySet()) {
+            AtomicReference<BatchInflight> lost = new AtomicReference<>();
+            inflightBatches.computeIfPresent(batchId, (id, batch) -> {
+                if (finishedBatchIds.contains(id) || activeBatchIds.contains(id)) {
+                    batch.resetObservationMisses();
+                    return batch;
+                }
+                if (batch.requests().isEmpty() || hasDispatchReconciliation(id)) {
+                    return batch;
+                }
+                int misses = batch.recordObservationMiss();
+                if (misses < minMisses
+                        || statusMs - batch.lastObservedAtMs() <= lostAfterMs) {
+                    return batch;
+                }
+                lost.set(batch);
+                return null;
+            });
+            BatchInflight lostBatch = lost.get();
+            if (lostBatch != null) {
+                forceSettleLostBatch(batchId, lostBatch, statusMs, lostAfterMs);
+            }
+        }
+    }
+
+    /**
+     * Fix A release for one lost (engine-dropped) inflight batch, called
+     * after the per-key compute already removed it from
+     * {@code inflightBatches}. Mirrors the F-F age-cap release shape but
+     * with the opposite engine-side premise: the engine just told us — via
+     * a successful report that mentions the batch nowhere — that it is NOT
+     * executing these members, so unlike {@code forceSettleAgeCappedBatch}
+     * there is no R5 engine-untracked compensation, and no fence to drop
+     * (fenced batches are never selected). Each member goes through the
+     * existing handler terminal chain ({@code onExpired} — idempotent:
+     * entries the scheduler already settled reduce to no-ops, a preempted
+     * entry defers to its preemption fence). Member callbacks run outside
+     * any ledger critical section.
+     */
+    private void forceSettleLostBatch(long batchId, BatchInflight batch,
+                                      long statusMs, long lostAfterMs) {
+        int members = batch.requests().size();
+        inflightRequestCount.addAndGet(-members);
+        cachedWaitTimeExpireAtMs = 0;
+        RoleType role = status.getRole();
+        String roleName = role != null ? role.name() : RoleType.PREFILL.name();
+        org.flexlb.util.Logger.warn(
+                "event=inflight_batch_lost_settled role={} endpoint={} batch_id={} "
+                        + "last_observed_ago_ms={} lost_after_ms={} misses={} age_ms={} "
+                        + "running={} n_requests={} request_ids={}",
+                roleName, getIp(), batchId, statusMs - batch.lastObservedAtMs(),
+                lostAfterMs, batch.observationMisses(), statusMs - batch.createdAtMs(),
+                batch.running(), members, batch.originalRequestIds());
+        if (reporter != null) {
+            reporter.reportEndpointInflightTtlExpired(roleName, getIp(), "post_ack_lost", 1);
+        }
+        if (handler != null) {
+            for (BatchItem request : batch.requests()) {
+                handler.onExpired(request);
+            }
+        }
     }
 
     private void settleFinishedMembers(long batchId,
@@ -343,6 +464,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 .collect(Collectors.toSet());
         Set<Long> finishedIds = new HashSet<>();
         int foreignCount = 0;
+        int deferredByFence = 0;
 
         for (FinishedObservation observation : observations) {
             long requestId = observation.requestId();
@@ -364,6 +486,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 batch.observeFailure();
             }
             if (deferReconciliation && deferIfReconciling(batchId, observation)) {
+                deferredByFence++;
                 continue;
             }
 
@@ -374,6 +497,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
             }
         }
 
+        if (deferredByFence > 0) {
+            warnSettleDeferredByFence(batchId, batch, deferredByFence,
+                    observations.size(), statusMs);
+        }
         if (foreignCount > 0) {
             logger.warn("Prefill calibrate: batchId={} has {} finished tasks with foreign requestIds; "
                             + "ignoring them",
@@ -395,6 +522,37 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
         long newPredMs = (long) predictor.predictBatchMs(survivors);
         return batch.repack(newPredMs, survivors);
+    }
+
+    /** Anti-flood rate limit for the settle-deferred fence WARN (per batch). */
+    private static final long SETTLE_DEFER_WARN_RATE_MS = 60_000L;
+
+    /**
+     * Fence-deferred settle audit: finished members whose settle was skipped
+     * because the dispatch-reconciliation fence still owns them. One WARN
+     * per batch per {@link #SETTLE_DEFER_WARN_RATE_MS} — an unresolved fence
+     * otherwise repeats on every ~20ms calibrate round because finished
+     * snapshots re-report the same members. Pinpoints the "fence postpones
+     * settle" path when batches outlive their members' engine terminals.
+     */
+    private void warnSettleDeferredByFence(long batchId, BatchInflight batch,
+                                           int deferredMembers, int reportedMembers,
+                                           long statusMs) {
+        if (!batch.shouldWarnSettleDeferred(statusMs, SETTLE_DEFER_WARN_RATE_MS)) {
+            return;
+        }
+        ConcurrentHashMap<Long, ReconciliationState> fence =
+                reconciliationRequests.get(batchId);
+        org.flexlb.util.Logger.warn(
+                "event=inflight_settle_deferred_by_fence endpoint={} batch_id={} "
+                        + "reason=dispatch_reconciliation_fence deferred_members={} "
+                        + "reported_finished_members={} fence_size={} age_ms={} "
+                        + "last_observed_ago_ms={} n_requests={}",
+                getIp(), batchId, deferredMembers, reportedMembers,
+                fence != null ? fence.size() : 0,
+                statusMs - batch.createdAtMs(),
+                statusMs - batch.lastObservedAtMs(),
+                batch.requests().size());
     }
 
     /**
@@ -507,6 +665,56 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return inflightRequestCount.get() + batcher.queueSize() + engineUntrackedRequestCount.get();
     }
 
+    /**
+     * Active engine tasks the local batch ledger does not track — the S3
+     * scoring input ({@code CostBasedPrefillStrategy} engine-untracked
+     * penalty). Refreshed on every worker status sync.
+     */
+    public long getEngineUntrackedRequestCount() {
+        return engineUntrackedRequestCount.get();
+    }
+
+    // ==================== Pending Offers (R1) ====================
+
+    /**
+     * Requests route() already committed to this endpoint but that the
+     * batcher has not yet accepted — the route→offer blind window the
+     * Round-1 score cannot see through any other ledger (R1, 205 pileup
+     * incident). requestId → record timestamp.
+     *
+     * <p>Correctness over completeness: recording is idempotent (re-route
+     * overwrites the timestamp), releasing is idempotent (remove of an
+     * absent key is a no-op), and any entry leaked by a path that never
+     * reaches the batcher (e.g. a decode-side rollback that skips the
+     * prefill strategy rollback) self-heals via the lazy
+     * {@link #PENDING_OFFER_TTL_MS} expiry in the read path — a stale
+     * pending entry can overstate the score for at most a few seconds.
+     */
+    private final ConcurrentHashMap<Long, Long> pendingOffers = new ConcurrentHashMap<>();
+
+    /** Lazy expiry for leaked pending-offer entries; route→offer is normally sub-ms. */
+    private static final long PENDING_OFFER_TTL_MS = 5_000L;
+
+    /** Route committed this request here; the batcher has not seen it yet. */
+    public void recordPendingOffer(long requestId) {
+        pendingOffers.put(requestId, System.currentTimeMillis());
+    }
+
+    /** The batcher took over (or the route was rolled back) — idempotent. */
+    public void releasePendingOffer(long requestId) {
+        pendingOffers.remove(requestId);
+    }
+
+    /**
+     * Live pending-offer count for Round-1 scoring; prunes entries older
+     * than {@link #PENDING_OFFER_TTL_MS} so leaked entries self-heal.
+     */
+    public int getPendingOfferCount() {
+        long cutoffMs = System.currentTimeMillis() - PENDING_OFFER_TTL_MS;
+        pendingOffers.values().removeIf(recordedAtMs -> recordedAtMs < cutoffMs);
+        return pendingOffers.size();
+    }
+
     // ==================== Wait Time ====================
 
     /**
@@ -606,6 +814,17 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * scheduler-side release from the same handler chain. Auto-TPM only —
      * the registry gates the pass with {@code isAutoTpmEnabled()}.
      *
+     * <p>Frozen-batch audit: batches that <b>survive</b> this sweep while
+     * older than {@code flexlbBatchFrozenAuditAfterMs} (default 60s, aligned
+     * with the 60s sweep cadence) emit one WARN audit line each — carrying
+     * the exact verdict fields (over_age_cap / stale, dispatch fence,
+     * scheduler ownership, member terminal distribution) so the next freeze
+     * immediately reveals which exemption leg kept the batch alive.
+     * Rate-limited to {@value #FROZEN_BATCH_AUDIT_MAX_LINES} lines per
+     * endpoint per sweep; the audited-batch count is reported through
+     * {@code reportBatchInflightFrozenAudit} ({@code <= 0} threshold
+     * disables the audit entirely).
+     *
      * @param ttlMs                 max unobserved age before normal eviction
      * @param hardMaxAgeMs          guarded hard creation-age cap;
      *                              {@code <= 0} disables
@@ -624,6 +843,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                                    long batchInflightStaleMs, LongPredicate schedulerOwnsRequest) {
         long nowMs = System.currentTimeMillis();
         AtomicInteger evictedCount = new AtomicInteger();
+        AtomicInteger frozenAuditLines = new AtomicInteger(FROZEN_BATCH_AUDIT_MAX_LINES);
         for (Long batchId : inflightBatches.keySet()) {
             AtomicReference<BatchInflight> evicted = new AtomicReference<>();
             AtomicReference<BatchInflight> forced = new AtomicReference<>();
@@ -678,9 +898,93 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 inflightRequestCount.addAndGet(-removed.requests().size());
                 cachedWaitTimeExpireAtMs = 0;
                 evictedCount.incrementAndGet();
+            } else {
+                // Retained by one of the exemption legs (fence / observed
+                // freshness / under every threshold) — frozen-batch audit.
+                auditFrozenBatch(batchId, nowMs, batchInflightMaxAgeMs,
+                        batchInflightStaleMs, schedulerOwnsRequest, frozenAuditLines);
             }
         }
+        int auditedCount = FROZEN_BATCH_AUDIT_MAX_LINES - frozenAuditLines.get();
+        if (auditedCount > 0 && reporter != null) {
+            RoleType auditRole = status.getRole();
+            reporter.reportBatchInflightFrozenAudit(
+                    auditRole != null ? auditRole.name() : RoleType.PREFILL.name(),
+                    getIp(), auditedCount);
+        }
         return evictedCount.get();
+    }
+
+    /** Max frozen-batch audit WARN lines per endpoint per sweep (anti-flood). */
+    private static final int FROZEN_BATCH_AUDIT_MAX_LINES = 5;
+
+    /**
+     * One frozen-batch audit line for a batch that survived the sweep while
+     * older than {@code flexlbBatchFrozenAuditAfterMs}. Returns whether a
+     * line was emitted (consumes one unit of the per-sweep budget; batches
+     * past the budget or under the threshold are skipped silently).
+     *
+     * <p>Field semantics — the line answers "why is this batch still alive":
+     * <ul>
+     * <li>{@code over_age_cap} / {@code stale}: the exact F-F cap verdict
+     *     legs — {@code over_age_cap=true, stale=false} is the observed-
+     *     freshness exemption (the "kept alive by observation" freeze), a
+     *     fence shows as {@code fenced=true};</li>
+     * <li>{@code scheduler_owned}: at least one member is still tracked by
+     *     the scheduler ledger;</li>
+     * <li>{@code members_terminal/pending}: how many member futures already
+     *     reached a terminal state — a fully-terminal member set on a live
+     *     batch is the smoking gun for a lost settle;</li>
+     * <li>{@code observation_misses}: consecutive engine reports that
+     *     mentioned this batch nowhere (Fix A counter).</li>
+     * </ul>
+     */
+    private boolean auditFrozenBatch(long batchId, long nowMs, long batchInflightMaxAgeMs,
+                                     long batchInflightStaleMs, LongPredicate schedulerOwnsRequest,
+                                     AtomicInteger linesLeft) {
+        if (linesLeft.get() <= 0) {
+            return false;
+        }
+        long auditAfterMs = config != null ? config.getFlexlbBatchFrozenAuditAfterMs() : 0;
+        if (auditAfterMs <= 0) {
+            return false;
+        }
+        BatchInflight batch = inflightBatches.get(batchId);
+        if (batch == null) {
+            return false;
+        }
+        long ageMs = nowMs - batch.createdAtMs();
+        if (ageMs <= auditAfterMs) {
+            return false;
+        }
+        linesLeft.decrementAndGet();
+        long lastObservedAgoMs = nowMs - batch.lastObservedAtMs();
+        boolean overAgeCap = batchInflightMaxAgeMs > 0 && ageMs > batchInflightMaxAgeMs;
+        boolean stale = batchInflightStaleMs > 0 && lastObservedAgoMs > batchInflightStaleMs;
+        boolean fenced = hasDispatchReconciliation(batchId);
+        boolean schedulerOwned = batch.requests().stream()
+                .anyMatch(item -> schedulerOwnsRequest.test(item.requestId()));
+        int terminalMembers = 0;
+        for (BatchItem request : batch.requests()) {
+            if (request.future() != null && request.future().isDone()) {
+                terminalMembers++;
+            }
+        }
+        int members = batch.requests().size();
+        RoleType role = status.getRole();
+        org.flexlb.util.Logger.warn(
+                "event=inflight_batch_frozen_audit role={} endpoint={} batch_id={} "
+                        + "age_ms={} last_observed_ago_ms={} fenced={} scheduler_owned={} "
+                        + "member_count={} members_terminal={} members_pending={} "
+                        + "inflight_request_count={} over_age_cap={} stale={} "
+                        + "age_cap_ms={} stale_ms={} observation_misses={} running={}",
+                role != null ? role.name() : RoleType.PREFILL.name(), getIp(), batchId,
+                ageMs, lastObservedAgoMs, fenced, schedulerOwned,
+                members, terminalMembers, members - terminalMembers,
+                inflightRequestCount.get(), overAgeCap, stale,
+                batchInflightMaxAgeMs, batchInflightStaleMs, batch.observationMisses(),
+                batch.running());
+        return true;
     }
 
     /**

@@ -15,9 +15,11 @@ import org.flexlb.dao.ScheduleBudget;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -26,6 +28,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -259,7 +262,140 @@ class CostBasedPrefillStrategyCongestionTest {
                 "a negative engine-reported waitingQueryLen must clamp to 0");
     }
 
+    @Test
+    void pending_offer_penalty_pushes_route_committed_engine_below_sibling() {
+        // R1 (205 pileup): 100 route-committed but not-yet-offered requests
+        // × default 50ms = 5000ms Round-1 penalty — the only score asymmetry
+        // between two otherwise identical engines. Each select below also
+        // records one pending offer on the winner (the buildServerStatus
+        // hook), adding at most 50 × 50ms = 2500ms to the idle sibling —
+        // still strictly below 5000ms, so the choice stays deterministic.
+        for (long requestId = 10_000; requestId < 10_100; requestId++) {
+            congested.recordPendingOffer(requestId);
+        }
+
+        for (int i = 0; i < 50; i++) {
+            ServerStatus selected = strategy.select(context(i), RoleType.PREFILL, null);
+            assertTrue(selected.isSuccess());
+            assertNotEquals(CONGESTED_PORT, selected.getHttpPort(),
+                    "route-committed pending offers must push the engine below its idle sibling");
+        }
+    }
+
+    @Test
+    void pending_offer_penalty_gate_off_restores_tie_and_stops_recording() {
+        // Gate off: the reservations are ignored by the score and select no
+        // longer records new ones — legacy behavior (regression protection
+        // for the switch).
+        config.setFlexlbPendingOfferPenaltyEnabled(false);
+        for (long requestId = 10_000; requestId < 10_100; requestId++) {
+            congested.recordPendingOffer(requestId);
+        }
+
+        boolean congestedSeen = false;
+        boolean idleSeen = false;
+        for (int i = 0; i < 200; i++) {
+            ServerStatus selected = strategy.select(context(i), RoleType.PREFILL, null);
+            assertTrue(selected.isSuccess());
+            congestedSeen |= selected.getHttpPort() == CONGESTED_PORT;
+            idleSeen |= selected.getHttpPort() == IDLE_PORT;
+        }
+        assertTrue(congestedSeen,
+                "with the gate off the reserved engine must stay selectable");
+        assertTrue(idleSeen, "the sibling engine must stay selectable too");
+        assertEquals(0, idle.getPendingOfferCount(),
+                "with the gate off select must not record pending offers");
+    }
+
+    @Test
+    void select_records_pending_offer_until_batcher_offer_releases_it() {
+        // One select reserves the route→offer blind window on the winner;
+        // the batcher offer of the same requestId is the hand-over that
+        // releases it.
+        ServerStatus selected = strategy.select(context(9_000L), RoleType.PREFILL, null);
+        assertTrue(selected.isSuccess());
+        PrefillEndpoint winner =
+                selected.getHttpPort() == CONGESTED_PORT ? congested : idle;
+        assertEquals(1, winner.getPendingOfferCount(),
+                "select must reserve the route→offer blind window");
+
+        long now = System.currentTimeMillis();
+        assertTrue(winner.getBatcher().tryOffer(item(9_000L, 30, now + 60_000, now, 128)));
+        assertEquals(0, winner.getPendingOfferCount(),
+                "the batcher offer must release the reservation");
+    }
+
+    @Test
+    void roll_back_releases_pending_offer_reservation() {
+        congested.recordPendingOffer(7_777L);
+        strategy.rollBack(congested, 7_777L);
+        assertEquals(0, congested.getPendingOfferCount(),
+                "a dead route decision must release its pending-offer reservation");
+    }
+
+    @Test
+    void engine_untracked_penalty_pushes_untracked_busy_engine_below_sibling() {
+        // S3 (205 pileup): 100 engine-side active tasks the local ledger does
+        // not track × default 20ms = 2000ms Round-1 penalty. The pendingCount
+        // asymmetry (100 vs 0, avg 50) stays under the hotspot bound
+        // (100 < 3 × 50). The R1 gate is off so the select-side pending-offer
+        // recording cannot erode the asymmetry across iterations.
+        config.setFlexlbPendingOfferPenaltyEnabled(false);
+        reportEngineOnlyRunningTasks(congested, 100);
+        assertEquals(100, congested.getEngineUntrackedRequestCount());
+
+        for (int i = 0; i < 50; i++) {
+            ServerStatus selected = strategy.select(context(i), RoleType.PREFILL, null);
+            assertTrue(selected.isSuccess());
+            assertNotEquals(CONGESTED_PORT, selected.getHttpPort(),
+                    "engine-untracked active tasks must push the engine below its idle sibling");
+        }
+    }
+
+    @Test
+    void engine_untracked_penalty_gate_off_restores_tie() {
+        // Both fix-C gates off: untracked engine work is ignored by the score
+        // and the two engines stay interchangeable — legacy behavior
+        // (regression protection for the switch).
+        config.setFlexlbPendingOfferPenaltyEnabled(false);
+        config.setFlexlbEngineUntrackedPenaltyEnabled(false);
+        reportEngineOnlyRunningTasks(congested, 100);
+
+        boolean congestedSeen = false;
+        boolean idleSeen = false;
+        for (int i = 0; i < 200; i++) {
+            ServerStatus selected = strategy.select(context(i), RoleType.PREFILL, null);
+            assertTrue(selected.isSuccess());
+            congestedSeen |= selected.getHttpPort() == CONGESTED_PORT;
+            idleSeen |= selected.getHttpPort() == IDLE_PORT;
+        }
+        assertTrue(congestedSeen,
+                "with the gate off the untracked-busy engine must stay selectable");
+        assertTrue(idleSeen, "the sibling engine must stay selectable too");
+    }
+
     // ==================== helpers ====================
+
+    /**
+     * Inject an engine-side sync whose running task details are all unknown
+     * to the local batch ledger, driving
+     * {@code PrefillEndpoint.engineUntrackedRequestCount} to {@code count} —
+     * the S3 scoring input (other-master re-routes / scalar lower bound).
+     */
+    private static void reportEngineOnlyRunningTasks(PrefillEndpoint endpoint, int count) {
+        Map<String, TaskInfo> running = new HashMap<>();
+        for (long requestId = 50_000; requestId < 50_000 + count; requestId++) {
+            TaskInfo task = new TaskInfo();
+            task.setRequestId(requestId);
+            task.setBatchId(requestId);
+            task.setPhase(TaskPhase.RUNNING);
+            running.put(String.valueOf(requestId), task);
+        }
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setFinishedTaskInfo(Map.of());
+        response.setRunningTaskInfo(running);
+        endpoint.onWorkerStatusUpdate(endpoint.getStatus(), response);
+    }
 
     /**
      * Inject an engine-side worker-status sync (the ~20ms path used by

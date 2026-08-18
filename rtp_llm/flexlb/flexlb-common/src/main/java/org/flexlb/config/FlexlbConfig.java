@@ -418,6 +418,23 @@ public class FlexlbConfig {
     private long flexlbBatchInflightStaleMs = 60_000L;
 
     /**
+     * Frozen-batch audit threshold in milliseconds. Each inflight TTL sweep
+     * (60s, {@code EndpointRegistry.scheduledEviction}) emits one WARN audit
+     * line per still-resident batch older than this threshold — with the
+     * exact fields that reveal which exemption leg kept it alive
+     * (over_age_cap / stale verdicts, dispatch fence, scheduler ownership,
+     * member terminal distribution) — rate-limited to 5 lines per endpoint
+     * per sweep. The frozen-audit QPS metric
+     * ({@code app.flexlb.batch.inflight.frozen.audit.qps}) counts the
+     * audited batches. Deployed to explain the na130_4 pattern
+     * "age.capped = 0 while ttl.expired > 0": over-age batches being kept
+     * alive by the observed-freshness/fence exemption legs.
+     * {@code <= 0} disables the audit entirely.
+     * Environment variable: FLEXLB_BATCH_FROZEN_AUDIT_AFTER_MS.
+     */
+    private long flexlbBatchFrozenAuditAfterMs = 60_000L;
+
+    /**
      * Post-ACK inflight audit threshold in milliseconds. The scheduler audit
      * tick force-settles an inflight ledger entry older than this when its
      * public future is already completed, no fence (preemption claim /
@@ -431,6 +448,38 @@ public class FlexlbConfig {
      * Environment variable: FLEXLB_INFLIGHT_AUDIT_AFTER_MS.
      */
     private long flexlbInflightAuditAfterMs = 30_000L;
+
+    /**
+     * ACKNOWLEDGED-lost detection threshold (Fix A, 205 pileup incident), in
+     * milliseconds. A committed inflight batch that a <b>successful</b> engine
+     * WorkerStatus report (calibrate round) fails to mention — neither in
+     * {@code finished_task_info} nor {@code running_task_info} — for
+     * {@link #flexlbPrefillLostMinMisses} consecutive rounds <b>and</b> whose
+     * {@code lastObservedAtMs} is older than this threshold is declared lost
+     * (the engine silently dropped it, e.g. a DeferredPrefillContext that
+     * evaporated after a clean EnqueueBatch ACK) and force-settled through
+     * the ordinary handler terminal chain. Detection is driven purely by the
+     * master-side observation loop — no engine-side cooperation or C++
+     * change is required. Must exceed the EnqueueBatch deadline
+     * ({@link #flexlbBatchEnqueueDeadlineMs}, 5s) plus several status-sync
+     * rounds; far below the batch age cap
+     * ({@link #flexlbBatchInflightMaxAgeMs}, 120s) and the inflight TTL
+     * ({@link #flexlbInflightTtlMs}, 300s) it front-runs. Auto-TPM only.
+     * {@code <= 0} disables the detection.
+     * Environment variable: FLEXLB_PREFILL_LOST_AFTER_MS.
+     */
+    private long flexlbPrefillLostAfterMs = 20_000L;
+
+    /**
+     * Minimum consecutive unobserved calibrate rounds before the
+     * ACKNOWLEDGED-lost detection ({@link #flexlbPrefillLostAfterMs}) may
+     * fire. Miss counting advances only on rounds backed by a real engine
+     * report (version-advanced, alive) and resets the moment any member of
+     * the batch is mentioned, so sync stalls or pull failures can never
+     * accumulate misses. Values below 1 are clamped to 1.
+     * Environment variable: FLEXLB_PREFILL_LOST_MIN_MISSES.
+     */
+    private int flexlbPrefillLostMinMisses = 3;
 
     /**
      * Ack-only release gate: when true (default), the frontend-facing fetch
@@ -633,6 +682,58 @@ public class FlexlbConfig {
      * Environment variable: FLEXLB_ENGINE_WAIT_HARD_FILTER_THRESHOLD.
      */
     private int flexlbEngineWaitHardFilterThreshold = 256;
+
+    /**
+     * Pending-offer penalty gate for prefill selection (R1, 205 pileup
+     * incident): when true (default), requests that route() already
+     * committed to an endpoint but that the batcher has not yet accepted
+     * (the route→offer blind window) add
+     * {@link #flexlbPendingOfferPenaltyMsPerRequest} each to the endpoint's
+     * Round-1 score, so a burst routed to one endpoint within a single
+     * scoring epoch stops looking free to the followers. Only effective in
+     * Auto-TPM batch-path deployments (gated on {@link #autoTpmEnabled}
+     * like the other score terms); legacy scoring is bit-for-bit unchanged.
+     * Environment variable: FLEXLB_PENDING_OFFER_PENALTY_ENABLED.
+     */
+    private boolean flexlbPendingOfferPenaltyEnabled = true;
+
+    /**
+     * Score penalty in milliseconds per pending (route-committed, not yet
+     * offered) request when {@link #flexlbPendingOfferPenaltyEnabled} is on
+     * (and Auto-TPM is enabled):
+     * {@code pendingOfferMs = min(pendingOfferCount × thisFactor, 1L << 40)}.
+     * Default 50.0; a non-finite or non-positive value falls back to 50.0
+     * at use time (treated as the default, not as 0).
+     * Environment variable: FLEXLB_PENDING_OFFER_PENALTY_MS_PER_REQUEST.
+     */
+    private double flexlbPendingOfferPenaltyMsPerRequest = 50.0;
+
+    /**
+     * Engine-untracked penalty gate for prefill selection (S3, 205 pileup
+     * incident): when true (default), active engine tasks that the local
+     * batch ledger does not track ({@code engineUntrackedRequestCount} —
+     * e.g. requests re-routed by another master generation, or the scalar
+     * lower bound when the engine omits task details) add
+     * {@link #flexlbEngineUntrackedPenaltyMsPerRequest} each to the
+     * endpoint's Round-1 score. Closes the scoring blind spot where an
+     * engine busy with untracked work looked as attractive as an idle one.
+     * Only effective in Auto-TPM deployments (gated on
+     * {@link #autoTpmEnabled}); legacy scoring is bit-for-bit unchanged.
+     * Environment variable: FLEXLB_ENGINE_UNTRACKED_PENALTY_ENABLED.
+     */
+    private boolean flexlbEngineUntrackedPenaltyEnabled = true;
+
+    /**
+     * Score penalty in milliseconds per engine-untracked active request
+     * when {@link #flexlbEngineUntrackedPenaltyEnabled} is on (and Auto-TPM
+     * is enabled):
+     * {@code engineUntrackedMs = min(engineUntrackedRequestCount ×
+     * thisFactor, 1L << 40)}. Default 20.0 (same scale as the engine-wait
+     * penalty — both count engine-side work the master ledgers cannot see);
+     * a non-finite or non-positive value falls back to 20.0 at use time.
+     * Environment variable: FLEXLB_ENGINE_UNTRACKED_PENALTY_MS_PER_REQUEST.
+     */
+    private double flexlbEngineUntrackedPenaltyMsPerRequest = 20.0;
 
     /**
      * Whether to enable score-tie randomization among near-equal prefill candidates.

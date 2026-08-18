@@ -1,9 +1,12 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.ScheduleBudget;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -333,6 +336,36 @@ class WorkerBatcherTest {
         // a remove that matches nothing leaves no count
         assertEquals(0, batcher.tryRemoveNoVersion(List.of(999L), "plan_cancel").size());
         verify(reporter, times(2)).reportBatcherQueueLeave(anyString(), anyString(), anyString(), anyInt());
+    }
+
+    @Test
+    void offer_and_try_offer_release_endpoint_pending_offer() {
+        // R1 (205 pileup): the batcher entry points are the hand-over that
+        // ends the route→offer blind window reserved by recordPendingOffer.
+        WorkerStatus status = new WorkerStatus();
+        status.setIp("127.0.0.1");
+        status.setPort(9090);
+        status.setGrpcPort(9091);
+        status.setRole(RoleType.PREFILL);
+        PrefillEndpoint ep = new PrefillEndpoint(status, config,
+                mock(BatchDecisionHandler.class), mock(BatchSchedulerReporter.class));
+        try {
+            WorkerBatcher batcher = new WorkerBatcher("test-worker", ep, config,
+                    mock(BatchDecisionHandler.class), mock(BatchSchedulerReporter.class));
+            long now = System.currentTimeMillis();
+
+            ep.recordPendingOffer(1L);
+            assertTrue(batcher.tryOffer(item(1, 50, now)));
+            assertEquals(0, ep.getPendingOfferCount(),
+                    "tryOffer must release the pending-offer reservation");
+
+            ep.recordPendingOffer(2L);
+            batcher.offer(item(2, 50, now));
+            assertEquals(0, ep.getPendingOfferCount(),
+                    "offer must release the pending-offer reservation too");
+        } finally {
+            ep.close();
+        }
     }
 
     // ==================== helpers ====================

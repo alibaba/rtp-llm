@@ -16,6 +16,7 @@ import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_ENTER_QPS;
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_LEAVE_QPS;
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_SIZE;
 import static org.flexlb.constant.MetricConstant.BATCH_INFLIGHT_AGE_CAPPED_QPS;
+import static org.flexlb.constant.MetricConstant.BATCH_INFLIGHT_FROZEN_AUDIT_QPS;
 import static org.flexlb.constant.MetricConstant.BATCH_ACTUAL_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICTED_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICT_GAP_MS;
@@ -124,6 +125,9 @@ public class BatchSchedulerReporter {
         // Batch inflight age-cap force-settles — bounded-freeze releases from the
         // batch-level age cap (F-F), QPS tagged by role + engineIp
         monitor.register(BATCH_INFLIGHT_AGE_CAPPED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        // Frozen-batch audit triggers — still-resident batches past the frozen-audit
+        // threshold, QPS tagged by role + engineIp
+        monitor.register(BATCH_INFLIGHT_FROZEN_AUDIT_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         // Inflight cleanup fence skips — TTL-due entries retained by a stronger fence, QPS tagged by role
         monitor.register(INFLIGHT_CLEANUP_SKIPPED_FENCED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
@@ -149,7 +153,7 @@ public class BatchSchedulerReporter {
         // ACK-to-response time — from engine ACK to schedule response sent to client (timer for distribution)
         monitor.register(ACK_TO_RESPONSE_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
-        log.info("BatchSchedulerReporter initialized (31 metrics)");
+        log.info("BatchSchedulerReporter initialized (32 metrics)");
     }
 
     // ==================== Queue metrics ====================
@@ -451,6 +455,26 @@ public class BatchSchedulerReporter {
         FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", role);
         monitor.report(BATCH_INFLIGHT_AGE_CAPPED_QPS, tags, count);
+    }
+
+    /**
+     * Report the frozen-batch audit trigger count via
+     * {@code app.flexlb.batch.inflight.frozen.audit.qps}, tagged by
+     * {role, engineIp} of the owning endpoint ledger. Each sweep audits
+     * inflight batches older than {@code flexlbBatchFrozenAuditAfterMs}
+     * that still survived it (rate-limited to 5 WARN lines per endpoint);
+     * the reported count is the number of audited batches, so the series
+     * observes how often a "high-age batch exists" population is present —
+     * the diagnostic complement of the age-capped counter when releases
+     * are being blocked by an exemption leg.
+     *
+     * @param count still-resident over-audit-threshold batches audited in
+     *              this sweep (bounded by the per-sweep rate limit)
+     */
+    public void reportBatchInflightFrozenAudit(String role, String engineIp, int count) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
+                "role", role);
+        monitor.report(BATCH_INFLIGHT_FROZEN_AUDIT_QPS, tags, count);
     }
 
     /**

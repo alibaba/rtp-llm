@@ -7,6 +7,7 @@ import org.flexlb.balance.strategy.PrefillBatchFeatures;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
@@ -24,6 +25,15 @@ final class BatchInflight implements InflightEvictor.TtlTracked {
     private final AtomicBoolean successfulCompletionObserved;
     private final AtomicBoolean learningEligible;
     private final AtomicBoolean cancelOverlayObserved;
+    /**
+     * Consecutive calibrate rounds (each backed by a real, version-advanced
+     * engine report) in which no member of this batch was mentioned in
+     * either finished or running task info (Fix A, ACKNOWLEDGED-lost
+     * detection). Reset to zero the moment any member is observed. A
+     * {@link #repack} starts a fresh instance at zero — the settle that
+     * triggered the repack is itself an observation.
+     */
+    private final AtomicInteger observationMisses = new AtomicInteger(0);
     private volatile boolean running;
 
     BatchInflight(long predictTimeMs, List<BatchItem> requests) {
@@ -154,6 +164,39 @@ final class BatchInflight implements InflightEvictor.TtlTracked {
 
     boolean cancelOverlayObserved() {
         return cancelOverlayObserved.get();
+    }
+
+    /** One more observed calibrate round without any member of this batch. */
+    int recordObservationMiss() {
+        return observationMisses.incrementAndGet();
+    }
+
+    /** Some member of this batch was mentioned by the engine report. */
+    void resetObservationMisses() {
+        observationMisses.set(0);
+    }
+
+    int observationMisses() {
+        return observationMisses.get();
+    }
+
+    /** Last wall-clock time a settle-deferred WARN was emitted for this batch. */
+    private volatile long lastDeferWarnAtMs;
+
+    /**
+     * Anti-spam gate for the settle-deferred audit WARN: allows at most one
+     * line per {@code rateLimitMs} window (calibrate runs every ~20ms and
+     * finished snapshots repeat members, so an unresolved fence would
+     * otherwise flood). Race-tolerant by design — a concurrent pass may
+     * emit one extra line, never fewer than one per window per instance.
+     */
+    boolean shouldWarnSettleDeferred(long nowMs, long rateLimitMs) {
+        long last = lastDeferWarnAtMs;
+        if (nowMs - last < rateLimitMs) {
+            return false;
+        }
+        lastDeferWarnAtMs = nowMs;
+        return true;
     }
 
     boolean running() {

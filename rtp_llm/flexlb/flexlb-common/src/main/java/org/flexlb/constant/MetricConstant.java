@@ -125,6 +125,22 @@ public class MetricConstant {
             "app.flexlb.batch.inflight.age.capped.qps";
 
     /**
+     * FlexLB frozen-batch audit trigger count — inflight batches older than
+     * {@code flexlbBatchFrozenAuditAfterMs} that still survived a sweep,
+     * logged once per batch per sweep (rate-limited to 5 WARN lines per
+     * endpoint) with the exact age-cap verdict fields (over_age_cap / stale /
+     * fenced / scheduler_owned / member terminal distribution). Reported as
+     * QPS, tagged by {role, engineIp} of the owning endpoint ledger; the
+     * value is the number of audited still-resident over-age batches in the
+     * sweep. Complements {@link #BATCH_INFLIGHT_AGE_CAPPED_QPS}:
+     * frozen-audit non-zero while age-capped stays zero means the over-age
+     * batches are being kept alive by an exemption leg (dispatch fence /
+     * observation freshness) — which the audit WARN line names explicitly.
+     */
+    public static final String BATCH_INFLIGHT_FROZEN_AUDIT_QPS =
+            "app.flexlb.batch.inflight.frozen.audit.qps";
+
+    /**
      * FlexLB scheduler inflight cleanup fence skips — number of inflight entries
      * past the TTL that were retained because a stronger fence still owns them
      * (preemption claim / dispatch reconciliation / cleanup ownership).

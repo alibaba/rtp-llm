@@ -62,6 +62,10 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         // Batch path inflight is managed by FlexlbBatchScheduler — no-op here.
         if (ep instanceof PrefillEndpoint pe) {
             pe.releaseBatch(requestId);
+            // R1: the route decision is dead — release the pending-offer
+            // reservation too (idempotent; a leaked entry self-heals via
+            // the endpoint-side lazy expiry).
+            pe.releasePendingOffer(requestId);
         }
     }
 
@@ -257,8 +261,31 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                     ? Math.min((long) (ep.getReportedWaitingQueryLen()
                             * engineWaitPenaltyMsPerWaitStream(config)), 1L << 40)
                     : 0L;
+            // R1 (205 pileup): requests route() already committed here but
+            // the batcher has not yet accepted — the route→offer blind
+            // window in which a burst routed within one scoring epoch looks
+            // free to the followers. Same gate/clamp shape as engineWaitMs;
+            // gate off ⇒ the term is exactly 0.
+            long pendingOfferMs = config.isFlexlbPendingOfferPenaltyEnabled()
+                    && config.isAutoTpmEnabled()
+                    ? Math.min((long) (ep.getPendingOfferCount()
+                            * pendingOfferPenaltyMsPerRequest(config)), 1L << 40)
+                    : 0L;
+            // S3 (205 pileup): active engine tasks the local batch ledger
+            // does not track (other-master re-routes, scalar lower bound).
+            // Already inside pendingCount (Round-2 imbalance input) but
+            // previously invisible to the Round-1 score itself. May double
+            // with engineWaitMs when the scalar lower bound overlaps
+            // waitingQueryLen — both penalize the same congestion signal in
+            // the conservative direction. Gate off ⇒ exactly 0.
+            long engineUntrackedMs = config.isFlexlbEngineUntrackedPenaltyEnabled()
+                    && config.isAutoTpmEnabled()
+                    ? Math.min((long) (ep.getEngineUntrackedRequestCount()
+                            * engineUntrackedPenaltyMsPerRequest(config)), 1L << 40)
+                    : 0L;
             feasible.setCandidate(feasibleCount++, ep, cacheHit,
-                    singlePrefillMs + endpointWaitMs + batcherWaitMs + engineWaitMs,
+                    singlePrefillMs + endpointWaitMs + batcherWaitMs + engineWaitMs
+                            + pendingOfferMs + engineUntrackedMs,
                     endpointWaitMs, pendingCount);
             sumWaitMs += endpointWaitMs;
             sumPendingCount += pendingCount;
@@ -459,6 +486,26 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         return weight;
     }
 
+    private static double pendingOfferPenaltyMsPerRequest(FlexlbConfig config) {
+        double weight = config.getFlexlbPendingOfferPenaltyMsPerRequest();
+        // A misconfigured weight (NaN/Infinite or <= 0) falls back to the
+        // default 50.0 ms per pending (route-committed, not yet offered) request.
+        if (!Double.isFinite(weight) || weight <= 0) {
+            return 50.0;
+        }
+        return weight;
+    }
+
+    private static double engineUntrackedPenaltyMsPerRequest(FlexlbConfig config) {
+        double weight = config.getFlexlbEngineUntrackedPenaltyMsPerRequest();
+        // A misconfigured weight (NaN/Infinite or <= 0) falls back to the
+        // default 20.0 ms per engine-untracked active request.
+        if (!Double.isFinite(weight) || weight <= 0) {
+            return 20.0;
+        }
+        return weight;
+    }
+
     private static long engineWaitHardFilterThreshold(FlexlbConfig config) {
         int threshold = config.getFlexlbEngineWaitHardFilterThreshold();
         // A non-positive threshold is a misconfiguration that would filter
@@ -503,6 +550,14 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         // Batch path uses FlexlbBatchScheduler.commitBatch() instead — skip here to avoid double-counting.
         if (isNonBatchPath(config)) {
             ep.commitBatch(requestId, score, Collections.emptyList());
+        } else if (config.isAutoTpmEnabled()
+                && config.isFlexlbPendingOfferPenaltyEnabled()) {
+            // R1: batch path — the batcher will not see this request until
+            // PlanCommitter offers it. Reserve the route→offer blind window
+            // so concurrent scoring epochs stop treating this endpoint as
+            // free. Released at the batcher offer entry and on rollBack;
+            // leaked entries self-heal via the endpoint-side lazy expiry.
+            ep.recordPendingOffer(requestId);
         }
 
         // Populate DebugInfo so BatchItem.hitCache() can read hitCacheLen for batch metrics

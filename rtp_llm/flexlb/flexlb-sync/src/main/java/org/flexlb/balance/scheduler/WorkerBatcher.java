@@ -132,6 +132,14 @@ public class WorkerBatcher {
     }
 
     public void offer(BatchItem item) {
+        // R1: the batcher now owns this request (whatever the outcome —
+        // enqueue, stopped or queue-full all leave the route→offer blind
+        // window), so release the endpoint's pending-offer reservation.
+        // Null-guarded: test harnesses build the batcher without an endpoint.
+        PrefillEndpoint pendingOfferEp = ctx.prefillEp();
+        if (pendingOfferEp != null) {
+            pendingOfferEp.releasePendingOffer(item.requestId());
+        }
         if (stopped) {
             handler.onOfferFailure(item, new IllegalStateException("FlexLB batcher stopped"));
             return;
@@ -155,6 +163,13 @@ public class WorkerBatcher {
      *         stopped or the queue is full (item not enqueued)
      */
     public boolean tryOffer(BatchItem item) {
+        // R1: same hand-over point as offer() — a false return sends the
+        // caller (PlanCommitter) into rollback, which never re-offers here.
+        // Null-guarded: test harnesses build the batcher without an endpoint.
+        PrefillEndpoint pendingOfferEp = ctx.prefillEp();
+        if (pendingOfferEp != null) {
+            pendingOfferEp.releasePendingOffer(item.requestId());
+        }
         if (stopped) {
             return false;
         }

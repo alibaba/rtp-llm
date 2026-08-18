@@ -11,6 +11,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import static org.flexlb.constant.MetricConstant.BATCH_INFLIGHT_AGE_CAPPED_QPS;
+import static org.flexlb.constant.MetricConstant.BATCH_INFLIGHT_FROZEN_AUDIT_QPS;
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_ENTER_QPS;
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_LEAVE_QPS;
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_SIZE;
@@ -146,6 +147,23 @@ class BatchSchedulerReporterTest {
                 "engineIp", "10.0.0.1",
                 "role", "PREFILL");
         verify(monitor).report(BATCH_INFLIGHT_AGE_CAPPED_QPS, tags, 2.0);
+    }
+
+    @Test
+    void should_register_batch_inflight_frozen_audit_metric_on_init() {
+        reporter.init();
+
+        verify(monitor).register(BATCH_INFLIGHT_FROZEN_AUDIT_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+    }
+
+    @Test
+    void should_report_batch_inflight_frozen_audit_with_engine_and_role_tags() {
+        reporter.reportBatchInflightFrozenAudit("PDFUSION", "10.0.0.2", 3);
+
+        FlexMetricTags tags = FlexMetricTags.of(
+                "engineIp", "10.0.0.2",
+                "role", "PDFUSION");
+        verify(monitor).report(BATCH_INFLIGHT_FROZEN_AUDIT_QPS, tags, 3.0);
     }
 
     @Test
