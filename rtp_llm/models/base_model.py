@@ -522,6 +522,11 @@ class BaseModel(object):
             raise ValueError(
                 "force_cpu_load_weights is not supported by this newloader slice"
             )
+        if self.model_config.enable_output_vocab_pruning:
+            raise ValueError(
+                "output vocabulary pruning is not supported by this newloader "
+                "slice; disable newloader and use the legacy loader"
+            )
         if self.model_config.eplb_config.enable_eplb():
             raise ValueError(
                 "EPLB is not supported by this newloader slice; disable EPLB "
