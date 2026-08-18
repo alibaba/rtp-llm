@@ -202,3 +202,24 @@ The following legacy options and environment variables were removed and must no 
 | `--force_cpu_load_weights` | Load weights on CPU to reduce device memory usage (`FORCE_CPU_LOAD_WEIGHTS`) | False |
 | `--loader_recycle_handles` | ROCm + safetensors only: close consumed main-model shard handles to release mmap memory. Requires layer-numbered tensors and copies safetensors data out before closing; no effect on fastsafetensors, ViT, EPLB, or .bin weights. (`LOADER_RECYCLE_HANDLES`) | True |
 | `--moe_pure_tp_preshard` | Disabled by default. Set true to pre-shard supported Qwen3-Next / Qwen3.5 MoE and offline FP8 weights under pure TP (`tp>1, dp=1, ep=1`) before device copy. Unsupported sources or layouts warn and use legacy full reads. (`MOE_PURE_TP_PRESHARD`) | False |
+
+### FastSafeTensors loader configuration
+
+When `LOAD_METHOD=fastsafetensors`, RTP-LLM uses the config-driven `AutoLoader`.
+Pass the standard fastsafetensors configuration as either an inline JSON string
+or a JSON file path. Inline JSON has higher priority when both are set:
+
+```bash
+# Inline JSON string
+export FASTSAFETENSORS_CONFIG_JSON='{"loader":"base","base":{"copier_type":"nogds"}}'
+
+# JSON file path; the file contains the same JSON object
+export FASTSAFETENSORS_CONFIG=/path/to/fastsafetensors.json
+```
+
+For compatibility with existing development environments,
+`FASTSAFETENSORS_NOGDS=1` remains supported. Before constructing `AutoLoader`,
+RTP-LLM directly overrides `FASTSAFETENSORS_CONFIG_JSON` with
+`{"loader":"base","base":{"copier_type":"nogds"}}`. This compatibility switch
+therefore takes priority over other fastsafetensors configuration. Prefer one
+of the standard configuration variables above for new deployments.
