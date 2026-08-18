@@ -202,6 +202,29 @@ public class MetricConstant {
             "app.flexlb.scheduler.inflight.max.age.ms";
 
     /**
+     * FlexLB scheduler post-ACK invisible release count — inflight entries
+     * force-settled because the request already reached a client-visible
+     * terminal state while both endpoints stopped tracking it (A-class
+     * scheduler ghost). QPS tagged by {role, engineIp, reason}
+     * (role=SCHEDULER, engineIp="scheduler"): reason=post_ack_audit for the
+     * periodic audit fallback, reason=decode_vanish_sync for the immediate
+     * WorkerStatus-sync settlement path.
+     */
+    public static final String SCHEDULER_INFLIGHT_AUDIT_RELEASE_QPS =
+            "app.flexlb.scheduler.inflight.audit.release.qps";
+
+    /**
+     * FlexLB scheduler fenced inflight max age (ms) — age of the oldest
+     * scheduler inflight entry currently held by a fence (preemption claim /
+     * dispatch reconciliation / cleanup ownership). Gauge tagged by
+     * {role, engineIp} (role=SCHEDULER, engineIp="scheduler"); a value
+     * creeping toward the hard age cap flags D/E-class entries stuck behind
+     * their fences, which the post-ACK audit deliberately never touches.
+     */
+    public static final String SCHEDULER_INFLIGHT_FENCED_MAX_AGE_MS =
+            "app.flexlb.scheduler.inflight.fenced.max.age.ms";
+
+    /**
      * FlexLB scheduler restore-pending-dispatch count — items returned to the
      * batcher queue at flush time because the Decode concurrency gate reported
      * CAPACITY_FULL. Reported as QPS, tagged by role.

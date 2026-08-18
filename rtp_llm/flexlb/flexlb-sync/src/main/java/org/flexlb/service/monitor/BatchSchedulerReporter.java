@@ -37,6 +37,8 @@ import static org.flexlb.constant.MetricConstant.INFLIGHT_REQUEST_COUNT;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_TTL_EXPIRED_QPS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
+import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_AUDIT_RELEASE_QPS;
+import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_FENCED_MAX_AGE_MS;
 import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_MAX_AGE_MS;
 import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_SIZE;
 import static org.flexlb.constant.MetricConstant.SCHEDULER_RESTORE_PENDING_DISPATCH_QPS;
@@ -116,6 +118,10 @@ public class BatchSchedulerReporter {
         // Dispatch reconciliation — fence lifecycle events (QPS) and live fence population (gauge)
         monitor.register(DISPATCH_RECONCILIATION_EVENT_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(DISPATCH_RECONCILIATION_FENCE_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+
+        // Post-ACK invisible releases (QPS tagged by reason) and fenced inflight max age (gauge)
+        monitor.register(SCHEDULER_INFLIGHT_AUDIT_RELEASE_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(SCHEDULER_INFLIGHT_FENCED_MAX_AGE_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         // Prediction accuracy — predicted vs actual engine execution time (timer for distribution)
         monitor.register(BATCH_PREDICTED_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
@@ -438,6 +444,38 @@ public class BatchSchedulerReporter {
                 "role", SCHEDULER_ROLE,
                 "engineIp", SCHEDULER_ENGINE_IP);
         monitor.report(DISPATCH_RECONCILIATION_FENCE_SIZE, tags, size);
+    }
+
+    /**
+     * Report post-ACK invisible inflight releases accumulated over the
+     * caller's report window via
+     * {@code app.flexlb.scheduler.inflight.audit.release.qps}, tagged by
+     * release reason (post_ack_audit / decode_vanish_sync).
+     * <p>Window-aggregated by the scheduler (LongAdder flush on the 2s
+     * metrics tick) — never called per event on the WorkerStatus sync hot
+     * path.
+     */
+    public void reportSchedulerInflightAuditRelease(String reason, long count) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(SCHEDULER_ENGINE_IP,
+                "role", SCHEDULER_ROLE,
+                "reason", reason);
+        monitor.report(SCHEDULER_INFLIGHT_AUDIT_RELEASE_QPS, tags, count);
+    }
+
+    /**
+     * Report the age of the oldest fence-held scheduler inflight entry
+     * (preemption claim / dispatch reconciliation / cleanup ownership) via
+     * {@code app.flexlb.scheduler.inflight.fenced.max.age.ms}; 0 when no
+     * entry is fenced. Complements
+     * {@link #reportDispatchReconciliationFenceSize}: the size gauge alone
+     * cannot distinguish a healthy fence rotation from D/E-class entries
+     * stuck behind their fences.
+     */
+    public void reportSchedulerInflightFencedMaxAgeMs(long ageMs) {
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", SCHEDULER_ROLE,
+                "engineIp", SCHEDULER_ENGINE_IP);
+        monitor.report(SCHEDULER_INFLIGHT_FENCED_MAX_AGE_MS, tags, ageMs);
     }
 
     // ==================== Decode inflight metrics ====================

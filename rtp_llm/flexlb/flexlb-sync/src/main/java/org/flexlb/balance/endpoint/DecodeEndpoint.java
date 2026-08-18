@@ -61,6 +61,22 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private final ConcurrentHashMap<Long, ConfirmedTask> trackedConfirmed = new ConcurrentHashMap<>();
 
     /**
+     * Requests that vanished from the engine-confirmed layer without a
+     * matching finished record in the same WorkerStatus report — the raw
+     * material of A-class scheduler ghosts (lost finished delta). Produced
+     * under {@link #admissionLock} by calibrate and drained by the scheduler
+     * right after the same sync round (lock-free poll), so the settlement
+     * probes never nest inside the admission lock (settle takes the entry
+     * monitor before the admission lock — enqueue-only here keeps the lock
+     * order acyclic). Bounded: when the scheduler is absent or slow the
+     * queue caps out and the periodic post-ACK audit remains the fallback.
+     */
+    private static final int VANISHED_QUEUE_CAP = 4096;
+    private final java.util.concurrent.ConcurrentLinkedQueue<Long> vanishedEngineConfirmed =
+            new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private final AtomicInteger vanishedQueueSize = new AtomicInteger();
+
+    /**
      * Token-fenced priority-preemption ownership.  Victim accounting remains
      * in its original layer until a typed Prefill WorkerStatus CANCELED event
      * is settled; an ACCEPTED Cancel response only advances the claim state.
@@ -758,9 +774,37 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
         // Keep claimed entries discoverable even if Decode reports them
         // finished first.  Unclaimed entries follow ordinary calibration.
-        trackedConfirmed.entrySet().removeIf(entry ->
-                !confirmedNow.contains(entry.getKey())
-                        && !preemptionClaims.containsKey(entry.getKey()));
+        // Entries dropped here WITHOUT any trace in the same report (no
+        // running task of any phase, no finished record) are exactly the
+        // A-class ghost trigger — the finished delta was lost — so collect
+        // them for immediate scheduler settlement instead of waiting for the
+        // periodic audit. A requeued-but-unconfirmed request still shows up
+        // in runningTaskInfo (RECEIVED/PENDING) and is NOT treated as
+        // vanished.
+        Set<Long> reportedIds = new HashSet<>();
+        if (runningTaskInfo != null) {
+            for (TaskInfo task : runningTaskInfo.values()) {
+                reportedIds.add(task.getRequestId());
+            }
+        }
+        if (finishedTaskInfo != null) {
+            for (TaskInfo task : finishedTaskInfo.values()) {
+                reportedIds.add(task.getRequestId());
+            }
+        }
+        java.util.Iterator<Map.Entry<Long, ConfirmedTask>> trackedIt =
+                trackedConfirmed.entrySet().iterator();
+        while (trackedIt.hasNext()) {
+            Long requestId = trackedIt.next().getKey();
+            if (confirmedNow.contains(requestId)
+                    || preemptionClaims.containsKey(requestId)) {
+                continue;
+            }
+            trackedIt.remove();
+            if (!reportedIds.contains(requestId)) {
+                offerVanished(requestId);
+            }
+        }
 
         if (finishedTaskInfo != null) {
             for (TaskInfo task : finishedTaskInfo.values()) {
@@ -790,6 +834,39 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 queuedPhaseCount.decrementAndGet();
             }
         }
+    }
+
+    /**
+     * Enqueue one vanished engine-confirmed request id for scheduler
+     * settlement; dropped when the bounded queue is full (the periodic
+     * post-ACK audit remains the fallback). Called under
+     * {@link #admissionLock} — enqueue only, never a callback.
+     */
+    private void offerVanished(long requestId) {
+        if (vanishedQueueSize.get() >= VANISHED_QUEUE_CAP) {
+            return;
+        }
+        vanishedEngineConfirmed.offer(requestId);
+        vanishedQueueSize.incrementAndGet();
+    }
+
+    /**
+     * Drain the request ids that vanished from the engine-confirmed layer
+     * since the previous drain. Called by the scheduler outside the
+     * admission lock, right after the endpoint calibrated the same
+     * WorkerStatus response.
+     */
+    public List<Long> drainVanishedEngineConfirmed() {
+        if (vanishedEngineConfirmed.isEmpty()) {
+            return java.util.Collections.emptyList();
+        }
+        List<Long> drained = new ArrayList<>();
+        Long requestId;
+        while ((requestId = vanishedEngineConfirmed.poll()) != null) {
+            vanishedQueueSize.decrementAndGet();
+            drained.add(requestId);
+        }
+        return drained;
     }
 
     /**

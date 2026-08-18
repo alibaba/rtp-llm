@@ -186,9 +186,10 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     ep.onWorkerStatusUpdate(workerStatus, newWorkerStatus);
                 }
 
-                // 3. Notify scheduler (cleanup finished requests)
+                // 3. Notify scheduler (cleanup finished requests + settle
+                // decode-vanish signals collected by the calibrate above)
                 if (batchScheduler != null) {
-                    batchScheduler.onWorkerStatusUpdate(newWorkerStatus);
+                    batchScheduler.onWorkerStatusUpdate(newWorkerStatus, ep);
                 }
 
                 Long latestFinishedVersion = newWorkerStatus.getLatestFinishedVersion();

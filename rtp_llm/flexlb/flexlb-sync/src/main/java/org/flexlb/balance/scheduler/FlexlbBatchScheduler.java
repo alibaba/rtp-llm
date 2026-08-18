@@ -4,6 +4,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.RequestInflight;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.priority.AdmissionFailure;
 import org.flexlb.balance.scheduler.priority.AdmissionFailureClassifier;
 import org.flexlb.balance.scheduler.priority.AdmissionLease;
@@ -47,6 +48,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.LongAdder;
 
 /**
  * Coordinates batch scheduling for FlexLB disaggregated inference.
@@ -79,6 +81,14 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     private final BatchIdGenerator batchIdGenerator;
     /** Linearizes the final endpoint-ledger commit/RPC handoff with fencing. */
     private final Object dispatchFence = new Object();
+    /**
+     * Post-ACK invisible releases accumulated since the last metrics flush,
+     * split by settlement path (audit fallback vs decode-vanish sync).
+     * Window-aggregated: incremented per settlement, flushed once per
+     * {@link #reportBatchMetrics()} tick — never reported per event.
+     */
+    private final LongAdder postAckAuditReleases = new LongAdder();
+    private final LongAdder postAckSyncSettles = new LongAdder();
 
     public FlexlbBatchScheduler(ConfigService configService,
                                 Router router,
@@ -707,6 +717,16 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     // ==================== Completion from worker status ====================
 
     public void onWorkerStatusUpdate(WorkerStatusResponse response) {
+        onWorkerStatusUpdate(response, null);
+    }
+
+    /**
+     * @param endpoint the endpoint whose calibrate just processed this same
+     *                 response (nullable — legacy/test call sites); a decode
+     *                 endpoint additionally supplies the vanish signals for
+     *                 immediate post-ACK ghost settlement.
+     */
+    public void onWorkerStatusUpdate(WorkerStatusResponse response, WorkerEndpoint endpoint) {
         if (response == null) {
             return;
         }
@@ -737,6 +757,16 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 // even though the Enqueue ACK never fired.
                 releaseOnPrefillObserved(task.getRequestId(), task.getBatchId());
             }
+        }
+
+        // A-class ghost convergence: settle post-ACK entries whose request
+        // vanished from this decode engine without a finished record. Placed
+        // BEFORE the finished-task early return on purpose — the ghost case
+        // by definition arrives on reports whose finished delta was lost.
+        // Runs outside the endpoint admission lock (calibrate already
+        // returned) so the entry-monitor -> admission-lock order holds.
+        if (isDecode && endpoint instanceof DecodeEndpoint decodeEndpoint) {
+            settleVanishedDecodeRequests(decodeEndpoint);
         }
 
         Map<String, TaskInfo> finishedTaskInfo = response.getFinishedTaskInfo();
@@ -1280,33 +1310,89 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             if (ageMs <= auditAfterMs) {
                 continue;
             }
-            // Visibility probes outside the entry monitor (R5) — lock-free
-            // CHM reads. Decode visible = engine-confirmed OR shadow
-            // reservation still held (R1); a null endpoint stays invisible.
-            PrefillEndpoint prefillEp = entry.item.prefillEp();
-            DecodeEndpoint decodeEp = entry.item.decodeEp();
-            boolean prefillVisible = prefillEp != null
-                    && prefillEp.tracksRequest(candidate.getKey());
-            boolean decodeVisible = decodeEp != null
-                    && (decodeEp.isEngineConfirmed(candidate.getKey())
-                            || decodeEp.isReserved(candidate.getKey()));
-            synchronized (entry) {
-                if (inflight.get(candidate.getKey()) != entry) {
-                    continue;
-                }
-                if (entry.preemption != null || entry.dispatchReconciliation || entry.cleanupOwned) {
-                    continue;
-                }
-                if (!entry.item.future().isDone()) {
-                    continue;
-                }
-                if (prefillVisible || decodeVisible) {
-                    continue;
-                }
+            if (tryReleasePostAckInvisible(candidate.getKey(), entry, false,
+                    "post-ACK inflight audit: both endpoints invisible")) {
                 Logger.warn("event=scheduler_inflight_audit_release request_id={} "
                                 + "age_ms={} threshold_ms={} reason=post_ack_both_sides_invisible",
                         candidate.getKey(), ageMs, auditAfterMs);
-                timeoutEntry(entry, "post-ACK inflight audit: both endpoints invisible");
+                postAckAuditReleases.increment();
+            }
+        }
+    }
+
+    /**
+     * Shared post-ACK invisibility verdict + settlement, used by both the
+     * periodic {@link #auditInflight()} fallback and the immediate
+     * decode-vanish sync path. Visibility probes are lock-free CHM reads
+     * taken OUTSIDE the entry monitor (R5/R1 — see the audit javadoc for the
+     * full safety argument); the monitor is then taken only for the
+     * re-verify, the fence exclusions (preemption / dispatch reconciliation
+     * / cleanup ownership — D/E-class entries are never touched), the
+     * post-ACK proof ({@code future.isDone()}) and the settlement via
+     * {@link #timeoutEntry}.
+     *
+     * @param requireDecodeOwned additionally require the linearized
+     *                           DECODE_OWNED ownership proof — the sync path
+     *                           only settles entries whose decode acceptance
+     *                           was already observed, so a request that never
+     *                           reached the decode engine keeps its ordinary
+     *                           lifecycle
+     * @param detail             terminal detail recorded by the lifecycle
+     * @return true when this call settled the entry
+     */
+    private boolean tryReleasePostAckInvisible(long requestId, InflightEntry entry,
+                                               boolean requireDecodeOwned, String detail) {
+        PrefillEndpoint prefillEp = entry.item.prefillEp();
+        DecodeEndpoint decodeEp = entry.item.decodeEp();
+        boolean prefillVisible = prefillEp != null
+                && prefillEp.tracksRequest(requestId);
+        boolean decodeVisible = decodeEp != null
+                && (decodeEp.isEngineConfirmed(requestId)
+                        || decodeEp.isReserved(requestId));
+        synchronized (entry) {
+            if (inflight.get(requestId) != entry) {
+                return false;
+            }
+            if (entry.preemption != null || entry.dispatchReconciliation || entry.cleanupOwned) {
+                return false;
+            }
+            if (requireDecodeOwned
+                    && entry.dispatchOwnership != DispatchOwnership.DECODE_OWNED) {
+                return false;
+            }
+            if (!entry.item.future().isDone()) {
+                return false;
+            }
+            if (prefillVisible || decodeVisible) {
+                return false;
+            }
+            timeoutEntry(entry, detail);
+            return true;
+        }
+    }
+
+    /**
+     * Drain the vanish signals produced by this decode endpoint's calibrate
+     * of the same WorkerStatus response and settle the matching post-ACK
+     * scheduler entries immediately — per-id probes, never a full-table
+     * scan. The audit predicate is reused verbatim plus the DECODE_OWNED
+     * guard; {@link #auditInflight()} stays as the fallback for signals
+     * dropped by the bounded endpoint queue.
+     */
+    private void settleVanishedDecodeRequests(DecodeEndpoint decodeEndpoint) {
+        for (long requestId : decodeEndpoint.drainVanishedEngineConfirmed()) {
+            InflightEntry entry = inflight.get(requestId);
+            if (entry == null) {
+                continue;
+            }
+            long ageMs = System.currentTimeMillis() - entry.createdAtMs();
+            if (tryReleasePostAckInvisible(requestId, entry, true,
+                    "post-ACK sync settle: decode vanished, both endpoints invisible")) {
+                Logger.info("event=scheduler_inflight_sync_settle request_id={} "
+                                + "age_ms={} trigger=decode_vanish "
+                                + "reason=post_ack_both_sides_invisible",
+                        requestId, ageMs);
+                postAckSyncSettles.increment();
             }
         }
     }
@@ -2216,13 +2302,38 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         // Live dispatch-reconciliation fence population. Stateless rescan of
         // the ledger (racy unlocked read of the fence flag is fine for a
         // gauge); an incremental counter would drift on a missed decrement.
+        // The same scan tracks the oldest fence-held entry of ANY kind
+        // (preemption / reconciliation / cleanup ownership): fence dwell time
+        // creeping toward the hard age cap is the D/E-class stuck signature
+        // that the size gauge alone cannot expose.
         int reconciliationFenced = 0;
+        long fencedMaxAgeMs = 0;
+        long nowMs = System.currentTimeMillis();
         for (InflightEntry fenceProbe : inflight.values()) {
             if (fenceProbe.dispatchReconciliation) {
                 reconciliationFenced++;
             }
+            if (fenceProbe.preemption != null
+                    || fenceProbe.dispatchReconciliation
+                    || fenceProbe.cleanupOwned) {
+                fencedMaxAgeMs = Math.max(fencedMaxAgeMs, nowMs - fenceProbe.createdAtMs());
+            }
         }
         reporter.reportDispatchReconciliationFenceSize(reconciliationFenced);
+        reporter.reportSchedulerInflightFencedMaxAgeMs(fencedMaxAgeMs);
+
+        // Post-ACK invisible releases — window-aggregated flush of the
+        // per-settlement counters (project rule: no per-event reporting on
+        // the sync hot path). Only non-zero windows are reported to keep the
+        // series sparse.
+        long auditReleases = postAckAuditReleases.sumThenReset();
+        if (auditReleases > 0) {
+            reporter.reportSchedulerInflightAuditRelease("post_ack_audit", auditReleases);
+        }
+        long syncSettles = postAckSyncSettles.sumThenReset();
+        if (syncSettles > 0) {
+            reporter.reportSchedulerInflightAuditRelease("decode_vanish_sync", syncSettles);
+        }
 
         // Per-worker metrics: prefill endpoints
         for (Map.Entry<String, PrefillEndpoint> entry : endpointRegistry.getPrefillEndpoints().entrySet()) {
