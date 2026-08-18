@@ -118,6 +118,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     TRANS_OPTIONAL(trace_id);
     TRANS_OPTIONAL(batch_group_timeout);
     TRANS_OPTIONAL(force_batch);
+    TRANS_OPTIONAL(wait_timeout);
 
     // 生成式推荐：组合 token 约束
     generate_config->combo_token_size              = config_proto->combo_token_size();

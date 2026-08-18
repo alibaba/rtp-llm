@@ -109,6 +109,12 @@ void GenerateStream::resetBeginTime(int64_t begin_time_us) {
     begin_time_us_ = begin_time_us;
 }
 
+void GenerateStream::recordSchedulerEnqueueTime(int64_t time_us) {
+    if (scheduler_enqueue_time_us_ == 0) {
+        scheduler_enqueue_time_us_ = time_us;
+    }
+}
+
 bool GenerateStream::hasCacheKeys() const {
     return stream_cache_resource_->hasCacheKeys();
 }

@@ -313,6 +313,7 @@ public:
     std::string debugString() const;
 
     void    resetBeginTime(int64_t begin_time_us);
+    void    recordSchedulerEnqueueTime(int64_t time_us);
     int64_t beginTimeUs() const {
         return begin_time_us_;
     }
@@ -466,6 +467,10 @@ public:
         return generate_input_->generate_config->batch_group_timeout.value_or(100);
     }
 
+    int waitTimeout() const {
+        return generate_input_->generate_config->wait_timeout.value_or(-1);
+    }
+
     bool forceBatch() const {
         return generate_input_->generate_config->force_batch;
     }
@@ -475,6 +480,10 @@ public:
 
     int64_t enqueueTime() const {
         return generate_input_->begin_time_us;
+    }
+
+    int64_t schedulerEnqueueTimeUs() const {
+        return scheduler_enqueue_time_us_ > 0 ? scheduler_enqueue_time_us_ : enqueueTime();
     }
 
     std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {
@@ -596,7 +605,8 @@ protected:
     int64_t                               vocab_size_;
     std::shared_ptr<CompleteTokenIds>     complete_token_ids_;
     int64_t                               begin_time_us_;
-    int64_t                               wait_time_us_ = 0;
+    int64_t                               wait_time_us_              = 0;
+    int64_t                               scheduler_enqueue_time_us_ = 0;
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
     std::shared_ptr<bool>                 is_context_stream_;
     size_t                                iter_count_           = 0;

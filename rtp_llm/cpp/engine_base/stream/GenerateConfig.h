@@ -100,6 +100,7 @@ public:
     std::string        trace_id;
     bool               force_batch = false;  // If true, streams with same batch_group_id must be scheduled together
     std::optional<int> batch_group_timeout;
+    std::optional<int> wait_timeout;  // scheduler queue timeout in milliseconds; unset/non-positive disables it
     std::string        unique_key;
 
     // 生成式推荐：组合 token 粒度去重与曝光过滤
@@ -171,7 +172,9 @@ public:
                      << ", reuse_cache: " << reuse_cache << ", enable_device_cache: " << enable_device_cache
                      << ", enable_memory_cache: " << enable_memory_cache
                      << ", enable_remote_cache: " << enable_remote_cache << ", force_batch: " << force_batch
-                     << ", unique_key: " << unique_key << ", combo_token_size: " << combo_token_size
+                     << ", batch_group_timeout: " << batch_group_timeout.value_or(-1)
+                     << ", wait_timeout: " << wait_timeout.value_or(-1) << ", unique_key: " << unique_key
+                     << ", combo_token_size: " << combo_token_size
                      << ", banned_combo_token_ids_size: " << banned_combo_token_ids.size()
                      << ", enable_cross_sequence_ban: " << enable_cross_sequence_ban
                      << ", cross_seq_diverge_start_combo: " << cross_seq_diverge_start_combo << "}";
@@ -286,6 +289,7 @@ public:
         JSONIZE(force_batch);
         JSONIZE(aux_info);
         JSONIZE_OPTIONAL(batch_group_timeout);
+        JSONIZE_OPTIONAL(wait_timeout);
         JSONIZE(unique_key);
         JSONIZE(combo_token_size);
         JSONIZE(banned_combo_token_ids);

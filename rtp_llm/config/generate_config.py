@@ -215,9 +215,11 @@ class GenerateConfig(BaseModel):
     enable_memory_cache: bool = True
 
     enable_remote_cache: bool = True
-    # 是否强制相同 request_id 的 stream 在一批中调度
+    # 是否强制相同 batch_group_id 的 stream 在一批中调度
     force_batch: bool = False
     batch_group_timeout: Optional[int] = None  # ms
+    # backend scheduler 排队超时；未设置或非正值表示不启用
+    wait_timeout: Optional[int] = None  # ms
 
     unique_key: str = ""
 

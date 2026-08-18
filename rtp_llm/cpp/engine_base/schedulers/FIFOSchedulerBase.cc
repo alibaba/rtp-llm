@@ -73,6 +73,7 @@ absl::Status FIFOSchedulerBase::enqueue(const GenerateStreamPtr& stream) {
     if (!checkInputLength(stream)) {
         return absl::InvalidArgumentError("Check input length failed");
     }
+    stream->recordSchedulerEnqueueTime(autil::TimeUtility::currentTimeInMicroSeconds());
     {
         std::lock_guard<std::mutex> lock(lock_);
         waiting_streams_.emplace_back(stream);
@@ -91,13 +92,17 @@ std::vector<std::shared_ptr<GenerateStream>> FIFOSchedulerBase::batchEnqueue(con
             stream_enqueued.emplace_back(stream);
         }
     }
+    const auto enqueue_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    for (auto& stream : stream_enqueued) {
+        stream->recordSchedulerEnqueueTime(enqueue_time_us);
+    }
     {
         std::lock_guard<std::mutex> lock(lock_);
         waiting_streams_.insert(waiting_streams_.end(), stream_enqueued.begin(), stream_enqueued.end());
         schedule_trigger_ = true;
     }
     cond_.notify_all();
-    return streams;
+    return stream_enqueued;
 }
 
 size_t FIFOSchedulerBase::evaluateAndUpdateStreams(list<GenerateStreamPtr>& streams) {
@@ -121,15 +126,34 @@ void FIFOSchedulerBase::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_
     RTP_LLM_PROFILE_FUNCTION();
     list<GenerateStreamPtr> new_streams;
 
+    const int64_t now_us = autil::TimeUtility::currentTimeInMicroSeconds();
+
+    // Evaluate queue timeout before force-batch completeness and memory admission.
+    // batchEnqueue() gives every member the same timestamp, so a force-batch
+    // group with the same timeout expires atomically in this scheduler pass.
+    for (const auto& stream : waiting_streams) {
+        const int wait_timeout_ms = stream->waitTimeout();
+        if (stream->hasError() || wait_timeout_ms <= 0) {
+            continue;
+        }
+        const int64_t wait_time_us = std::max<int64_t>(0, now_us - stream->schedulerEnqueueTimeUs());
+        if (wait_time_us > static_cast<int64_t>(wait_timeout_ms) * 1000) {
+            stream->reportError(
+                ErrorCode::WAIT_TO_RUN_TIMEOUT,
+                autil::StringUtil::formatString(
+                    "scheduler queue wait time %ld us exceeds wait_timeout %d ms", wait_time_us, wait_timeout_ms));
+        }
+    }
+
     struct GroupInfo {
         int64_t first_arrival_time = 0;
         int     count              = 0;
     };
     std::unordered_map<int64_t, GroupInfo> request_group_info;
 
-    int64_t now = autil::TimeUtility::currentTimeInMilliSeconds();
+    int64_t now = now_us / 1000;
     for (const auto& stream : waiting_streams) {
-        if (stream->forceBatch() && stream->batchGroupId() != -1) {
+        if (!stream->hasError() && stream->forceBatch() && stream->batchGroupId() != -1) {
             auto& info = request_group_info[stream->batchGroupId()];
             if (info.count == 0) {
                 info.first_arrival_time = stream->enqueueTime() / 1000;

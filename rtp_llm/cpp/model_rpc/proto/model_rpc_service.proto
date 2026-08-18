@@ -131,6 +131,7 @@ message GenerateConfigPB {
     int32 prompt_logits_start = 65;
     int32 prompt_logits_end = 66;
     bool return_target_logprob = 67;
+    google.protobuf.Int32Value wait_timeout = 75;
 }
 
 message MMPreprocessConfigPB {

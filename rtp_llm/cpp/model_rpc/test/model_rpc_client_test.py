@@ -236,6 +236,23 @@ class ModelRpcClientTest(TestCase):
                 output.all_hidden_states.tolist(),
             )
 
+    def test_trans_input_serializes_wait_timeout(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(wait_timeout=321),
+            request_id=123,
+            mm_inputs=[],
+        )
+
+        input_pb = trans_input(input_py)
+
+        self.assertTrue(input_pb.generate_config.HasField("wait_timeout"))
+        self.assertEqual(input_pb.generate_config.wait_timeout.value, 321)
+
+        input_py.generate_config.wait_timeout = None
+        input_pb = trans_input(input_py)
+        self.assertFalse(input_pb.generate_config.HasField("wait_timeout"))
+
     def test_trans_output_keeps_legacy_per_output_all_hidden_states(self):
         input_py = GenerateInput(
             token_ids=torch.tensor([1, 2, 3]),

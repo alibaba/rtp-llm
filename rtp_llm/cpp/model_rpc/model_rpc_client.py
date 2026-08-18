@@ -176,6 +176,7 @@ def trans_input(input_py: GenerateInput):
     )
     trans_option(generate_config_pb, input_py.generate_config, "batch_group_timeout")
     trans_option(generate_config_pb, input_py.generate_config, "force_batch")
+    trans_option(generate_config_pb, input_py.generate_config, "wait_timeout")
 
     for i in range(len(input_py.generate_config.stop_words_list)):
         stop_words = generate_config_pb.stop_words_list.rows.add()
@@ -183,8 +184,12 @@ def trans_input(input_py: GenerateInput):
 
     # 生成式推荐：组合 token 约束
     generate_config_pb.combo_token_size = input_py.generate_config.combo_token_size
-    generate_config_pb.enable_cross_sequence_ban = input_py.generate_config.enable_cross_sequence_ban
-    generate_config_pb.cross_seq_diverge_start_combo = input_py.generate_config.cross_seq_diverge_start_combo
+    generate_config_pb.enable_cross_sequence_ban = (
+        input_py.generate_config.enable_cross_sequence_ban
+    )
+    generate_config_pb.cross_seq_diverge_start_combo = (
+        input_py.generate_config.cross_seq_diverge_start_combo
+    )
     for i in range(len(input_py.generate_config.banned_combo_token_ids)):
         banned_combo = generate_config_pb.banned_combo_token_ids.rows.add()
         banned_combo.values.extend(input_py.generate_config.banned_combo_token_ids[i])
