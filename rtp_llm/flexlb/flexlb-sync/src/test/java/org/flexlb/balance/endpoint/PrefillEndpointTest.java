@@ -25,6 +25,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -701,6 +702,64 @@ class PrefillEndpointTest {
         endpoint.endDispatchReconciliation(703L, 731L);
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0, endpoint.realPendingCount());
+    }
+
+    // ---- 18:10 fix: all-terminal release despite zombie observation touches ----
+
+    @Test
+    void allTerminalBatchIsReleasedBySweepDespiteZombieTouches() {
+        BatchItem first = createBatchItemWithFuture(811L, 500, 200);
+        BatchItem second = createBatchItemWithFuture(812L, 300, 100);
+        endpoint.commitBatch(810L, 100, List.of(first, second));
+
+        // Scheduler-side terminals (admission timeout / client cancel) that
+        // never surface as engine finished reports.
+        first.future().complete(null);
+        second.future().complete(null);
+
+        // Zombie engine running entries (stuck at a non-RUNNING phase) keep
+        // the batch touched and reset its miss counter — the 18:10 audit
+        // shape: last_observed_ago_ms=43, stale=false, observation_misses=0,
+        // running=false, scheduler_owned=true.
+        calibrate(Map.of(), Map.of(
+                "811", taskInfo(811L, 810L, TaskPhase.KV_ALLOCATED, 0, 0),
+                "812", taskInfo(812L, 810L, TaskPhase.KV_ALLOCATED, 0, 0)));
+        assertEquals(1, endpoint.getInflightBatchCount());
+
+        // Huge TTL, no hard cap, no F-F cap, scheduler still "owns" every
+        // member: only the all-terminal leg can release the batch.
+        int evicted = endpoint.evictExpiredBatches(300_000, 0, 0, 0, requestId -> true);
+        assertEquals(1, evicted);
+        assertEquals(0, endpoint.getInflightBatchCount(),
+                "terminal members cannot revive; the batch must be released");
+        assertEquals(0, endpoint.realPendingCount(), "the inflight gate must be released");
+    }
+
+    @Test
+    void allTerminalButFencedBatchIsNotReleasedBySweep() {
+        BatchItem first = createBatchItemWithFuture(821L, 500, 200);
+        BatchItem second = createBatchItemWithFuture(822L, 300, 100);
+        endpoint.commitBatch(820L, 100, List.of(first, second));
+        endpoint.beginDispatchReconciliation(820L, 821L);
+        first.future().complete(null);
+        second.future().complete(null);
+
+        // Regression guard: an all-terminal batch behind a reconciliation
+        // fence stays with the fence's own settle paths (17:04 fix).
+        assertEquals(0, endpoint.evictExpiredBatches(300_000, 0, 0, 0, requestId -> true));
+        assertEquals(1, endpoint.getInflightBatchCount());
+    }
+
+    @Test
+    void partiallyTerminalBatchSurvivesSweep() {
+        BatchItem first = createBatchItemWithFuture(831L, 500, 200);
+        BatchItem second = createBatchItemWithFuture(832L, 300, 100);
+        endpoint.commitBatch(830L, 100, List.of(first, second));
+        first.future().complete(null);
+
+        assertEquals(0, endpoint.evictExpiredBatches(300_000, 0, 0, 0, requestId -> true));
+        assertEquals(1, endpoint.getInflightBatchCount(),
+                "a batch with a still-pending member must survive the sweep");
     }
 
     // ---- estimated waiting time ----
@@ -1461,6 +1520,34 @@ class PrefillEndpointTest {
         prefill.setDebugInfo(debugInfo);
 
         return new BatchItem(ctx, null, null, prefill, null, owner, null, System.currentTimeMillis());
+    }
+
+    /**
+     * Same as {@link #createBatchItem(PrefillEndpoint, long, long, long)} but
+     * carries a real {@link CompletableFuture}, so tests can simulate
+     * scheduler-side terminals (admission timeout / client cancel) via
+     * {@code future().complete(...)} — paths that never surface as engine
+     * finished reports.
+     */
+    private BatchItem createBatchItemWithFuture(long requestId, long seqLen, long hitCacheLen) {
+        Request request = new Request();
+        request.setRequestId(requestId);
+        request.setSeqLen(seqLen);
+
+        BalanceContext ctx = new BalanceContext();
+        ctx.setRequest(request);
+
+        ServerStatus prefill = new ServerStatus();
+        prefill.setRole(RoleType.PREFILL);
+        prefill.setServerIp("127.0.0.1");
+        prefill.setHttpPort(8080);
+        prefill.setGrpcPort(8090);
+        DebugInfo debugInfo = new DebugInfo();
+        debugInfo.setHitCacheLen(hitCacheLen);
+        prefill.setDebugInfo(debugInfo);
+
+        return new BatchItem(ctx, new CompletableFuture<>(), null, prefill, null,
+                endpoint, null, System.currentTimeMillis());
     }
 
     private static TaskInfo priorityCanceledTask(long requestId, long batchId) {

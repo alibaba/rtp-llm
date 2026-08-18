@@ -791,6 +791,20 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * scheduler-side release from the same handler chain. Auto-TPM only —
      * the registry gates the pass with {@code isAutoTpmEnabled()}.
      *
+     * <p>All-terminal release (18:10 fix): a batch whose members are ALL
+     * terminal — scheduler-side futures done (admission timeout, client
+     * cancel, scheduler-side expiry: terminals that never surface as
+     * engine finished reports) — is removed regardless of observation
+     * freshness. Zombie engine running entries keep touching such a batch
+     * ({@code markQueued}), defeating every staleness-based release leg
+     * (TTL / F-F cap / lost-detection) indefinitely; terminal members
+     * cannot revive, so the sweep releases the ledger entry and the
+     * inflight gate directly. Fenced batches are excluded (the fence's own
+     * settle paths own them — the 17:04 fix already settles them on
+     * finished evidence) and no member callbacks are needed (the futures
+     * are already terminal). This leg is unconditional — it is a
+     * correctness fix, not a tuning knob.
+     *
      * <p>Frozen-batch audit: batches that <b>survive</b> this sweep while
      * older than {@code flexlbBatchFrozenAuditAfterMs} (default 60s, aligned
      * with the 60s sweep cadence) emit one WARN audit line each — carrying
@@ -813,8 +827,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * @param schedulerOwnsRequest  whether the scheduler still tracks a
      *                              request (race guard for the guarded
      *                              hard-cap branch only)
-     * @return number of batches removed (age-capped + guarded hard-cap +
-     *         normal TTL)
+     * @return number of batches removed (all-terminal + age-capped +
+     *         guarded hard-cap + normal TTL)
      */
     public int evictExpiredBatches(long ttlMs, long hardMaxAgeMs, long batchInflightMaxAgeMs,
                                    long batchInflightStaleMs, LongPredicate schedulerOwnsRequest) {
@@ -825,8 +839,25 @@ public class PrefillEndpoint extends WorkerEndpoint {
             AtomicReference<BatchInflight> evicted = new AtomicReference<>();
             AtomicReference<BatchInflight> forced = new AtomicReference<>();
             AtomicReference<BatchInflight> ageCapped = new AtomicReference<>();
+            AtomicReference<BatchInflight> allTerminal = new AtomicReference<>();
             inflightBatches.computeIfPresent(batchId, (id, batch) -> {
                 long ageMs = nowMs - batch.createdAtMs();
+                // 18:10 fix: members whose scheduler-side futures are all done
+                // were terminated through paths that never surface as engine
+                // finished reports (admission timeout, client cancel,
+                // scheduler-side expiry). Zombie engine running entries keep
+                // touching the batch (markQueued), so every staleness-based
+                // release leg (TTL / F-F cap / lost-detection) is defeated
+                // indefinitely. Terminal members cannot revive — release the
+                // gate now, regardless of observation freshness. Fenced
+                // batches stay with the fence's own settle paths.
+                if (!hasDispatchReconciliation(id)
+                        && !batch.requests().isEmpty()
+                        && batch.requests().stream().allMatch(
+                                item -> item.future() != null && item.future().isDone())) {
+                    allTerminal.set(batch);
+                    return null;
+                }
                 if (batchInflightMaxAgeMs > 0 && ageMs > batchInflightMaxAgeMs
                         && (batchInflightStaleMs <= 0
                             || nowMs - batch.lastObservedAtMs() > batchInflightStaleMs)) {
@@ -846,6 +877,36 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 evicted.set(batch);
                 return null;
             });
+            BatchInflight terminalBatch = allTerminal.get();
+            if (terminalBatch != null) {
+                // No fence exists by precondition, so there is nothing to
+                // clear; the futures are already terminal, so no handler
+                // terminal chain is needed either — just release the ledger
+                // entry and the inflight gate. Zombie engine entries keep
+                // feeding updateEngineUntrackedRequestCount until the engine
+                // drops them, which only biases that penalty conservatively.
+                boolean schedulerOwned = terminalBatch.requests().stream()
+                        .anyMatch(item -> schedulerOwnsRequest.test(item.requestId()));
+                RoleType terminalRole = status.getRole();
+                org.flexlb.util.Logger.warn(
+                        "event=inflight_settle_forced_by_all_members_terminal role={} "
+                                + "endpoint={} batch_id={} age_ms={} member_count={} "
+                                + "last_observed_ago_ms={} touch_source={} "
+                                + "scheduler_owned={} observation_misses={} "
+                                + "reason=all_members_terminal_zombie_touch",
+                        terminalRole != null ? terminalRole.name() : RoleType.PREFILL.name(),
+                        getIp(), batchId,
+                        nowMs - terminalBatch.createdAtMs(),
+                        terminalBatch.requests().size(),
+                        nowMs - terminalBatch.lastObservedAtMs(),
+                        terminalBatch.running() ? "engine_running_report"
+                                : "engine_queued_report_or_init",
+                        schedulerOwned, terminalBatch.observationMisses());
+                inflightRequestCount.addAndGet(-terminalBatch.requests().size());
+                cachedWaitTimeExpireAtMs = 0;
+                evictedCount.incrementAndGet();
+                continue;
+            }
             BatchInflight cappedBatch = ageCapped.get();
             if (cappedBatch != null) {
                 forceSettleAgeCappedBatch(batchId, cappedBatch,
