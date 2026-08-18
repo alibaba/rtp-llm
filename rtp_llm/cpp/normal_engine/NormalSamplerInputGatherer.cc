@@ -61,6 +61,14 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
 
     auto vocab_size           = (size_t)model_output.logits.size(1);
     sampler_inputs.vocab_size = vocab_size;
+    if (all_streams.front()->outputVocabSize() > 0) {
+        auto* top_k_values = sampler_inputs.top_k.data_ptr<int32_t>();
+        for (size_t index = 0; index < sampler_inputs.batch_size; ++index) {
+            if (top_k_values[index] > 0) {
+                top_k_values[index] = std::min<int32_t>(top_k_values[index], static_cast<int32_t>(vocab_size));
+            }
+        }
+    }
     if (return_all_probs != ReturnAllProbsMode::NONE) {
         sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size_in, (int64_t)vocab_size},
                                                 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));

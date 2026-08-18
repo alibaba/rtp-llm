@@ -103,7 +103,22 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     TRANS_OPTIONAL(structural_tag);
     TRANS_OPTIONAL(task_id);
     TRANS_OPTIONAL(adapter_name);
-    generate_config->in_think_mode       = config_proto->in_think_mode();
+    const bool legacy_in_think_mode = config_proto->in_think_mode();
+    const int  thinking_mode        = static_cast<int>(config_proto->thinking_mode());
+    generate_config->thinking_mode  = normalizeThinkingMode(thinking_mode);
+    if (static_cast<int>(generate_config->thinking_mode) != thinking_mode) {
+        RTP_LLM_LOG_WARNING("invalid thinking_mode value %d; using UNSPECIFIED", thinking_mode);
+    }
+    if (generate_config->thinking_mode == ThinkingMode::UNSPECIFIED) {
+        generate_config->in_think_mode = legacy_in_think_mode;
+    } else {
+        generate_config->in_think_mode = generate_config->thinking_mode == ThinkingMode::ENABLED;
+        if (generate_config->in_think_mode != legacy_in_think_mode) {
+            RTP_LLM_LOG_WARNING("thinking_mode %d overrides conflicting in_think_mode %d",
+                                static_cast<int>(generate_config->thinking_mode),
+                                static_cast<int>(legacy_in_think_mode));
+        }
+    }
     generate_config->max_thinking_tokens = config_proto->max_thinking_tokens();
     for (const auto& token_id : config_proto->begin_think_token_ids()) {
         generate_config->begin_think_token_ids.push_back(token_id);

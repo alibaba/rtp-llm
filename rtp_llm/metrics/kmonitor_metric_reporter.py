@@ -98,6 +98,10 @@ class GaugeMetrics(Enum):
     VIT_RPC_SERVER_LIFECYCLE_RT_US_METRIC = "rtp_llm_vit_rpc_server_lifecycle_rt_us"
     VIT_RPC_PROXY_LIFECYCLE_RT_US_METRIC = "rtp_llm_vit_rpc_proxy_lifecycle_rt_us"
     VIT_RPC_PROXY_TO_WORKER_RT_US_METRIC = "rtp_llm_vit_rpc_proxy_to_worker_rt_us"
+    VIT_RPC_PROXY_HEALTHY_WORKER_COUNT_METRIC = (
+        "rtp_llm_vit_rpc_proxy_healthy_worker_count"
+    )
+    VIT_RPC_PROXY_TOTAL_WORKER_COUNT_METRIC = "rtp_llm_vit_rpc_proxy_total_worker_count"
     VIT_RPC_REQUEST_BYTES_METRIC = "rtp_llm_vit_rpc_request_bytes"
     VIT_RPC_RESPONSE_BYTES_METRIC = "rtp_llm_vit_rpc_response_bytes"
     VIT_RESPONSE_EMBEDDING_BYTES_METRIC = "rtp_llm_vit_response_embedding_bytes"

@@ -56,7 +56,13 @@ class Processor(AudioEmbeddingInterface):
         **kwargs,
     ):
         assert len(mm_inputs) == 1
-        data = get_bytes_io_from_url(mm_inputs[0].url, vit_config.download_headers)
+        # Keep audio aligned with the common multimodal size limit. Video alone
+        # has a separate, larger limit for backward compatibility.
+        data = get_bytes_io_from_url(
+            mm_inputs[0].url,
+            vit_config.download_headers,
+            max_file_size_kb=vit_config.mm_image_max_file_size_kb,
+        )
         audio = librosa.load(data, sr=feature_extractor.sampling_rate)[0]
         features_dict = feature_extractor(
             [audio],

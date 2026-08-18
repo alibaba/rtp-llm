@@ -196,7 +196,7 @@ class Pipeline(object):
                     url,
                     MMUrlType.DEFAULT,
                     torch.empty(0),
-                    MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000),
+                    MMPreprocessConfig(),
                 )
                 for url in urls
             ]

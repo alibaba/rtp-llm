@@ -28,7 +28,9 @@ from rtp_llm.dash_sc.server import DashScGrpcDrainAioInterceptor, DashScGrpcServ
 
 
 class _EnvCfg:
-    def __init__(self, think_mode: int = 1, think_start_tag: str = "<think>\n"):
+    def __init__(
+        self, think_mode: str | int = "enabled", think_start_tag: str = "<think>\n"
+    ):
         self.think_mode = think_mode
         self.think_start_tag = think_start_tag
 
@@ -141,11 +143,13 @@ class DeriveEchoPrefixIdsTest(TestCase):
         self.assertEqual(ids, [154841])
         self.assertEqual(tok.encode_calls, [("<think>\n", False)])
 
-    def test_disabled_when_think_mode_off(self) -> None:
-        tok = _FakeTokenizer(ids=[154841])
-        ids = _derive_echo_prefix_ids(_EnvCfg(think_mode=0), _BaseTok(tok))
-        self.assertEqual(ids, [])
-        self.assertEqual(tok.encode_calls, [])
+    def test_think_mode_does_not_gate_dash_sc_prefix_metadata(self) -> None:
+        for mode in ("disabled", "adaptive", "enabled", "0", 0, "1", 1):
+            with self.subTest(mode=mode):
+                tok = _FakeTokenizer(ids=[154841])
+                ids = _derive_echo_prefix_ids(_EnvCfg(think_mode=mode), _BaseTok(tok))
+                self.assertEqual(ids, [154841])
+                self.assertEqual(tok.encode_calls, [("<think>\n", False)])
 
     def test_disabled_when_tag_empty(self) -> None:
         tok = _FakeTokenizer(ids=[154841])

@@ -50,6 +50,7 @@ class ProcessManager:
         pre_stop_drain_headroom_seconds: float = AUTO_PRE_STOP_DRAIN_HEADROOM_SECONDS,
         pre_stop_drain_signal: bool = False,
         backend_post_frontend_drain_seconds: float = DEFAULT_BACKEND_POST_FRONTEND_DRAIN_SECONDS,
+        pre_exit_cleanup: Optional[Callable[[], None]] = None,
     ):
         if shutdown_timeout != -1 and shutdown_timeout <= 0:
             logging.warning(
@@ -61,6 +62,7 @@ class ProcessManager:
         self.processes: List[Process] = []
         self.shutdown_requested = False
         self.failure_detected = False
+        self.pre_exit_cleanup = pre_exit_cleanup
         self.shutdown_timeout = shutdown_timeout
         self.monitor_interval = monitor_interval
         self.frontend_pre_stop_drain_seconds = normalize_non_negative_seconds(
@@ -174,9 +176,7 @@ class ProcessManager:
         if shutdown_group not in self.shutdown_group_order:
             self.shutdown_group_order.append(shutdown_group)
 
-    def set_processes(
-        self, processes: List[Process], shutdown_group: str = "default"
-    ):
+    def set_processes(self, processes: List[Process], shutdown_group: str = "default"):
         """Set the processes to manage (replaces existing list)"""
         self.processes = processes if processes else []
         self.process_groups = {}
@@ -191,9 +191,7 @@ class ProcessManager:
             self._register_group(shutdown_group)
             self.process_groups[shutdown_group].append(process)
 
-    def add_processes(
-        self, processes: List[Process], shutdown_group: str = "default"
-    ):
+    def add_processes(self, processes: List[Process], shutdown_group: str = "default"):
         """Add multiple processes to manage"""
         if processes:
             self.processes.extend(processes)
@@ -505,9 +503,7 @@ class ProcessManager:
             self._terminate_process_list(
                 group_processes,
                 group_name,
-                force_immediate=(
-                    self._defer_first_sigterm and group_name == "default"
-                ),
+                force_immediate=(self._defer_first_sigterm and group_name == "default"),
             )
             if group_name in self.DRAIN_GROUPS:
                 result = self._wait_process_list_exit(
@@ -797,6 +793,11 @@ class ProcessManager:
 
         if self.failure_detected:
             logging.error("Child process failure cleanup completed, exiting parent")
+            if self.pre_exit_cleanup:
+                try:
+                    self.pre_exit_cleanup()
+                except Exception:
+                    logging.exception("Pre-exit cleanup failed")
             os._exit(1)
         logging.info("Process monitoring completed")
 

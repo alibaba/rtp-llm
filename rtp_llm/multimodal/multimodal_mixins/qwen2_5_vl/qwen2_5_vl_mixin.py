@@ -203,7 +203,11 @@ class Qwen2_5_VLImageEmbedding(Qwen2_VLImageEmbedding):
         elif mm_type == MMUrlType.IMAGE:
             tags = {"model": "qwen2_5_vl", "mm_type": "image"}
             with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC, tags):
-                data = get_bytes_io_from_url(mm_input.url, vit_config.download_headers)
+                data = get_bytes_io_from_url(
+                    mm_input.url,
+                    vit_config.download_headers,
+                    max_file_size_kb=vit_config.mm_image_max_file_size_kb,
+                )
             data = Qwen2_VLImageEmbedding.load_image(
                 data,
                 mm_input.mm_preprocess_config,
@@ -217,7 +221,11 @@ class Qwen2_5_VLImageEmbedding(Qwen2_VLImageEmbedding):
         elif mm_type == MMUrlType.VIDEO:
             tags = {"model": "qwen2_5_vl", "mm_type": "video"}
             with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC, tags):
-                data = get_bytes_io_from_url(mm_input.url, vit_config.download_headers)
+                data = get_bytes_io_from_url(
+                    mm_input.url,
+                    vit_config.download_headers,
+                    max_file_size_kb=vit_config.mm_video_max_file_size_kb,
+                )
             data = Qwen2_5_VLImageEmbedding.load_video(
                 data,
                 mm_input.mm_preprocess_config,

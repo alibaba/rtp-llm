@@ -9,6 +9,8 @@ import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.sync.config.VitStatusConfig;
+import org.flexlb.sync.util.GrpcStatusUtils;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
@@ -16,14 +18,10 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.atomic.AtomicLong;
-
-import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
 
 public class GrpcWorkerStatusRunner implements Runnable {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
-
     private final String ipPort;
     private final String modelName;
     private final String site;
@@ -37,12 +35,28 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final long createTimeUs = System.nanoTime() / 1000;
     private final String id = IdUtils.fastUuid();
     private final long syncRequestTimeoutMs;
+    private final boolean retainVitAliveOnTimeout;
 
     public GrpcWorkerStatusRunner(String modelName, String ipPort, String site, RoleType roleType, String group,
                                   WorkerStatus workerStatus,
                                   EngineHealthReporter engineHealthReporter,
                                   EngineGrpcService engineGrpcService,
                                   long syncRequestTimeoutMs) {
+        this(modelName, ipPort, site, roleType, group, workerStatus, engineHealthReporter,
+                engineGrpcService, syncRequestTimeoutMs, VitStatusConfig.SYNC_REQUEST_TIMEOUT_MS,
+                VitStatusConfig.RETAIN_ALIVE_ON_TIMEOUT);
+        if (roleType == RoleType.VIT) {
+            VitStatusConfig.warnIfRetentionWindowAtRisk(this.syncRequestTimeoutMs);
+        }
+    }
+
+    GrpcWorkerStatusRunner(String modelName, String ipPort, String site, RoleType roleType, String group,
+                           WorkerStatus workerStatus,
+                           EngineHealthReporter engineHealthReporter,
+                           EngineGrpcService engineGrpcService,
+                           long syncRequestTimeoutMs,
+                           long vitSyncRequestTimeoutMs,
+                           boolean retainVitAliveOnTimeout) {
         this.ipPort = ipPort;
         String[] split = ipPort.split(":");
         this.ip = split[0];
@@ -54,7 +68,12 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.group = group;
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
-        this.syncRequestTimeoutMs = syncRequestTimeoutMs;
+        // The VIT-specific timeout is a lower bound. A larger global sync timeout
+        // remains in force instead of being shortened for VIT workers.
+        this.syncRequestTimeoutMs = roleType == RoleType.VIT
+                ? Math.max(syncRequestTimeoutMs, vitSyncRequestTimeoutMs)
+                : syncRequestTimeoutMs;
+        this.retainVitAliveOnTimeout = retainVitAliveOnTimeout;
     }
 
     @Override
@@ -65,26 +84,28 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
             long latestFinishedTaskVersion = workerStatus.getLatestFinishedTaskVersion().get();
 
-            WorkerStatusResponse response = launchGrpcStatusCheck(ip, grpcPort, latestFinishedTaskVersion);
-            handleStatusResponse(response, startTime);
+            StatusCheckResult result = launchGrpcStatusCheck(ip, grpcPort, latestFinishedTaskVersion);
+            handleStatusResponse(result, startTime);
         } finally {
             workerStatus.getStatusCheckInProgress().set(false);
         }
     }
 
-    private WorkerStatusResponse launchGrpcStatusCheck(String ip, int grpcPort, long latestFinishedTaskVersion) {
+    private StatusCheckResult launchGrpcStatusCheck(String ip, int grpcPort, long latestFinishedTaskVersion) {
         try {
             EngineRpcService.WorkerStatusPB workerStatusPB = engineGrpcService.getWorkerStatus(ip, grpcPort, latestFinishedTaskVersion, syncRequestTimeoutMs, roleType);
-            return EngineStatusConverter.convertToWorkerStatusResponse(workerStatusPB);
+            return new StatusCheckResult(EngineStatusConverter.convertToWorkerStatusResponse(workerStatusPB), false);
         } catch (Throwable throwable) {
-            handleException(throwable);
+            boolean deadlineExceeded = GrpcStatusUtils.isDeadlineExceeded(throwable);
+            handleException(throwable, deadlineExceeded);
             WorkerStatusResponse errorResponse = new WorkerStatusResponse();
             errorResponse.setMessage("Worker status gRPC call failed: " + throwable.getMessage());
-            return errorResponse;
+            return new StatusCheckResult(errorResponse, deadlineExceeded);
         }
     }
 
-    private void handleStatusResponse(WorkerStatusResponse newWorkerStatus, long startTime) {
+    private void handleStatusResponse(StatusCheckResult result, long startTime) {
+        WorkerStatusResponse newWorkerStatus = result.response;
         try {
             if (newWorkerStatus == null) {
                 logger.info("query engine worker status via gRPC, response body is null");
@@ -93,9 +114,18 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 return;
             }
 
-            if (newWorkerStatus.getMessage() != null) {
-                workerStatus.setAlive(false);
-                logger.error("query engine worker status via gRPC, msg={}", newWorkerStatus.getMessage());
+            String errorMessage = newWorkerStatus.getMessage();
+            if (errorMessage != null) {
+                // The proxy owns immediate health for its concrete child workers. FlexLB
+                // tracks the aggregate proxy endpoint, so a transient VIT deadline keeps
+                // the last state; ExpirationCleaner removes the endpoint after the
+                // VIT-specific stale-status window if no later heartbeat succeeds.
+                boolean retainLastAliveStatus = shouldRetainVitAlive(result.deadlineExceeded);
+                if (!retainLastAliveStatus) {
+                    workerStatus.setAlive(false);
+                }
+                logger.error("query engine worker status via gRPC, msg={}, retainLastAliveStatus={}",
+                        errorMessage, retainLastAliveStatus);
                 return;
             }
 
@@ -198,10 +228,14 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 System.nanoTime() / 1000 - startTime);
     }
 
-    private void handleException(Throwable ex) {
+    private boolean shouldRetainVitAlive(boolean deadlineExceeded) {
+        return roleType == RoleType.VIT && deadlineExceeded && retainVitAliveOnTimeout;
+    }
+
+    private void handleException(Throwable ex, boolean deadlineExceeded) {
         log("gRPC worker status check failed, msg=" + ex.getMessage());
         // Report specific error based on exception type
-        if (ex.getMessage() != null && ex.getMessage().toLowerCase().contains(DEADLINE_EXCEEDED_MESSAGE.toLowerCase())) {
+        if (deadlineExceeded) {
             logger.info("gRPC worker status check timeout, msg={}, ipPort: {}, rt: {}", ex.getMessage(), ipPort, System.nanoTime() / 1000 - createTimeUs);
             engineHealthReporter.reportStatusCheckerFail(
                     modelName, BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, roleType);
@@ -219,5 +253,14 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 modelName,
                 System.nanoTime() / 1000 - createTimeUs,
                 msg);
+    }
+    private static class StatusCheckResult {
+        private final WorkerStatusResponse response;
+        private final boolean deadlineExceeded;
+
+        private StatusCheckResult(WorkerStatusResponse response, boolean deadlineExceeded) {
+            this.response = response;
+            this.deadlineExceeded = deadlineExceeded;
+        }
     }
 }

@@ -1,6 +1,7 @@
 import logging
 import os
 
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.ops import VitSeparation
 from rtp_llm.server.server_args.util import str2bool
 
@@ -88,6 +89,22 @@ def init_vit_group_args(parser, vit_config):
         help="是否需要下载headers",
     )
     vit_group.add_argument(
+        "--mm_image_max_file_size_kb",
+        env_name="MM_IMAGE_MAX_FILE_SIZE_KB",
+        bind_to=(vit_config, "mm_image_max_file_size_kb"),
+        type=int,
+        default=VitConfig.DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB,
+        help="图片及默认多模态文件大小上限，单位为KB",
+    )
+    vit_group.add_argument(
+        "--mm_video_max_file_size_kb",
+        env_name="MM_VIDEO_MAX_FILE_SIZE_KB",
+        bind_to=(vit_config, "mm_video_max_file_size_kb"),
+        type=int,
+        default=VitConfig.DEFAULT_MM_VIDEO_MAX_FILE_SIZE_KB,
+        help="视频文件大小上限，单位为KB",
+    )
+    vit_group.add_argument(
         "--mm_cache_item_num",
         env_name="MM_CACHE_ITEM_NUM",
         bind_to=(vit_config, "mm_cache_item_num"),
@@ -172,7 +189,7 @@ def init_vit_group_args(parser, vit_config):
         env_name="MM_TIMEOUT_MS",
         bind_to=(vit_config, "mm_timeout_ms"),
         type=int,
-        default=120000,
+        default=VitConfig.DEFAULT_MM_TIMEOUT_MS,
         help="多模态嵌入的超时时间，单位为毫秒",
     )
     vit_group.add_argument(

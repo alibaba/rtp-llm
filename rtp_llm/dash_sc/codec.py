@@ -14,7 +14,8 @@ import logging
 import struct
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import TYPE_CHECKING, Any, NamedTuple
+from functools import cache
+from typing import TYPE_CHECKING, Any, Iterator, NamedTuple
 
 from rtp_llm.config.response_format import parse_response_format
 from rtp_llm.dash_sc.proto import predict_v2_pb2
@@ -28,6 +29,7 @@ from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
 
 if TYPE_CHECKING:
     from rtp_llm.config.generate_config import GenerateConfig
+    from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 _INT32_MAX = 2_147_483_647
 _DEFAULT_MAX_NEW_TOKENS = 32000
@@ -893,8 +895,11 @@ def parse_request_controls(
     """Parse non-sampling request controls.
 
     ``ds_header_attributes`` carries DashScope request-scoped controls that need
-    backend effects (thinking switch, timeout, priority, scheduler headers) even
-    though they are not ordinary sampler behavior.
+    backend effects (timeout, priority, scheduler headers) even though they are
+    not ordinary sampler behavior. Thinking is controlled by the top-level
+    ``enable_thinking`` parameter, with nested ``enable_thinking`` retained as
+    a compatibility fallback. The legacy ``x-ds-llm-thinking`` attribute is
+    intentionally ignored.
     """
     return_input_ids = False
     inp, raw = _find_input_raw(request, "return_input_ids")
@@ -911,15 +916,11 @@ def parse_request_controls(
                     return_input_ids = vf != 0.0
 
     ds_attrs = ds_attrs if ds_attrs is not None else parse_ds_header_attributes(request)
-    enable_thinking = _parse_optional_bool(
-        _lookup_ds_request_control(ds_attrs, "x-ds-llm-thinking")
-    )
+    enable_thinking = _parse_optional_parameter_bool(request, "enable_thinking")
     if enable_thinking is None:
         enable_thinking = _parse_optional_bool(
             _lookup_ds_request_control(ds_attrs, "enable_thinking")
         )
-    if enable_thinking is None:
-        enable_thinking = _parse_optional_parameter_bool(request, "enable_thinking")
 
     max_new_think_tokens = _parse_optional_scalar_int(request, "max_new_think_tokens")
     if max_new_think_tokens is None:
@@ -984,6 +985,188 @@ def parse_dash_sc_grpc_request(
         parse_sampling_params(request, ds_attrs),
         parse_request_controls(request, ds_attrs),
     )
+
+
+# ----------------------------------------------------------------------------
+# Multimodal parsing: OpenAI/DashScope messages embedded in gRPC parameters.
+# ----------------------------------------------------------------------------
+
+
+@cache
+def _multimodal_type_maps() -> (
+    tuple[dict[str, tuple[str, MMUrlType]], dict[str, MMUrlType]]
+):
+    from rtp_llm.utils.base_model_datatypes import MMUrlType
+
+    return (
+        {
+            "image_url": ("image_url", MMUrlType.IMAGE),
+            "video_url": ("video_url", MMUrlType.VIDEO),
+            "audio_url": ("audio_url", MMUrlType.AUDIO),
+        },
+        {
+            "image": MMUrlType.IMAGE,
+            "video": MMUrlType.VIDEO,
+            "audio": MMUrlType.AUDIO,
+        },
+    )
+
+
+_MULTIMODAL_PARAMETER_KEYS: tuple[str, ...] = ("payload", "__messages__")
+_PER_PART_CONFIG_INT_KEYS: tuple[str, ...] = (
+    "min_pixels",
+    "max_pixels",
+    "fps",
+    "max_frames",
+    "min_frames",
+)
+
+
+@dataclass(frozen=True)
+class MultimodalPart:
+    """One parsed multimodal content part from a DashSc request."""
+
+    url: str
+    mm_type: MMUrlType
+    min_pixels: int = -1
+    max_pixels: int = -1
+    fps: int = -1
+    max_frames: int = -1
+    min_frames: int = -1
+
+
+def _extract_openai_url(part: dict[str, Any], inner_field: str) -> str | None:
+    value = part.get(inner_field)
+    if isinstance(value, dict):
+        url = value.get("url")
+        return url if isinstance(url, str) and url else None
+    return value if isinstance(value, str) and value else None
+
+
+def _extract_per_part_config(part: dict[str, Any]) -> dict[str, int]:
+    """Read nested preprocess_config first, then apply inline overrides."""
+    out: dict[str, int] = {}
+    nested = part.get("preprocess_config")
+    if isinstance(nested, dict):
+        for key in _PER_PART_CONFIG_INT_KEYS:
+            value = nested.get(key)
+            if (
+                not isinstance(value, bool)
+                and isinstance(value, (int, float))
+                and value > 0
+            ):
+                out[key] = int(value)
+    for key in _PER_PART_CONFIG_INT_KEYS:
+        value = part.get(key)
+        if (
+            not isinstance(value, bool)
+            and isinstance(value, (int, float))
+            and value > 0
+        ):
+            out[key] = int(value)
+    return out
+
+
+def _parts_from_openai_content(part: dict[str, Any]) -> Iterator[MultimodalPart]:
+    openai_part_types, _ = _multimodal_type_maps()
+    mapping = openai_part_types.get(part.get("type"))
+    if mapping is None:
+        return
+    inner_field, mm_type = mapping
+    url = _extract_openai_url(part, inner_field)
+    if url is None:
+        raise DashScParameterError(
+            f"{part.get('type')} requires a non-empty URL string"
+        )
+    yield MultimodalPart(
+        url=url,
+        mm_type=mm_type,
+        **_extract_per_part_config(part),
+    )
+
+
+def _parts_from_dashscope_native(part: dict[str, Any]) -> Iterator[MultimodalPart]:
+    config = _extract_per_part_config(part)
+    _, native_part_types = _multimodal_type_maps()
+    for key, mm_type in native_part_types.items():
+        if key not in part:
+            continue
+        value = part[key]
+        if key == "video" and isinstance(value, list):
+            raise DashScParameterError(
+                "video frame lists are not supported; provide a video URL string"
+            )
+        if not isinstance(value, str) or not value:
+            raise DashScParameterError(f"{key} requires a non-empty URL string")
+        yield MultimodalPart(url=value, mm_type=mm_type, **config)
+
+
+def _iter_messages_from_payload(obj: Any) -> Iterator[Any]:
+    """Accept bare messages and the observed DashScope/OpenAI wrappers."""
+    if isinstance(obj, list):
+        yield from obj
+        return
+    if not isinstance(obj, dict):
+        return
+    payload = obj.get("payload")
+    if isinstance(payload, dict):
+        inner = payload.get("input")
+        if isinstance(inner, dict) and isinstance(inner.get("messages"), list):
+            yield from inner["messages"]
+            return
+    inner = obj.get("input")
+    if isinstance(inner, dict) and isinstance(inner.get("messages"), list):
+        yield from inner["messages"]
+        return
+    messages = obj.get("messages")
+    if isinstance(messages, list):
+        yield from messages
+
+
+def _load_multimodal_payload(
+    request: predict_v2_pb2.ModelInferRequest,
+) -> Any:
+    for key in _MULTIMODAL_PARAMETER_KEYS:
+        if key not in request.parameters:
+            continue
+        param = request.parameters[key]
+        if not param.HasField("string_param") or not param.string_param:
+            raise DashScParameterError(
+                f"parameters[{key!r}] must be a non-empty JSON string"
+            )
+        try:
+            return json.loads(param.string_param)
+        except (TypeError, ValueError) as e:
+            raise DashScParameterError(
+                f"failed to parse multimodal payload from parameters[{key!r}]: {e}"
+            ) from e
+    return None
+
+
+def parse_multimodal_parts_from_request(
+    request: predict_v2_pb2.ModelInferRequest,
+) -> list[MultimodalPart]:
+    """Extract image, video, and audio parts without changing text-only requests."""
+    payload = _load_multimodal_payload(request)
+    if payload is None:
+        return []
+
+    openai_part_types, _ = _multimodal_type_maps()
+    result: list[MultimodalPart] = []
+    for message in _iter_messages_from_payload(payload):
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") in openai_part_types:
+                result.extend(_parts_from_openai_content(part))
+            else:
+                result.extend(_parts_from_dashscope_native(part))
+    return result
 
 
 # ----------------------------------------------------------------------------
