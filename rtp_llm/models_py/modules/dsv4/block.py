@@ -176,6 +176,7 @@ class Block(nn.Module):
         )
         self._prefill_fast_hc_impls_cached = self._resolve_prefill_fast_hc_impls()
         self._mega_csa_adapter = None
+        self._mega_hca_adapter = None
 
     def enable_mega_csa(self, runtime, layer_weights: Dict[str, torch.Tensor]) -> None:
         """Attach the TP1 CSA adapter only to compress-ratio-4 layers."""
@@ -186,6 +187,16 @@ class Block(nn.Module):
         )
 
         self._mega_csa_adapter = MegaCSAAdapter(self, layer_weights, runtime)
+
+    def enable_mega_hca(self, runtime, layer_weights: Dict[str, torch.Tensor]) -> None:
+        """Attach the TP1 HCA adapter only to compress-ratio-128 layers."""
+        if int(self.attn.compress_ratio) != 128:
+            return
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_hca_adapter import (
+            MegaHCAAdapter,
+        )
+
+        self._mega_hca_adapter = MegaHCAAdapter(self, layer_weights, runtime)
 
     def _sync_after_first_cp_prefill_attention(self) -> None:
         if self._cp_sync_after_attn_done:
@@ -325,9 +336,11 @@ class Block(nn.Module):
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
         _dbg_layer = _rt.should_record_layer(self.layer_id)
-        mega_csa = self._mega_csa_adapter
-        if mega_csa is not None and mega_csa.supports_decode_shape(x, attn_metadata):
-            x = mega_csa.forward_attention_sublayer(
+        mega_adapter = self._mega_csa_adapter or self._mega_hca_adapter
+        if mega_adapter is not None and mega_adapter.supports_decode_shape(
+            x, attn_metadata
+        ):
+            x = mega_adapter.forward_attention_sublayer(
                 self, x, attn_metadata, kv_cache=kv_cache
             )
         else:

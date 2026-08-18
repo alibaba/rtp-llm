@@ -62,6 +62,7 @@ _DSV4_FP8_CPU_TESTS = [
     "test_decode_topk_length",
     "test_indexer_forward_with_pending_nested",
     "test_mega_csa_adapter",
+    "test_mega_hca_adapter",
     "test_prefill_mixed_layer_cache_store",
 ]
 
@@ -140,6 +141,17 @@ py_test(
 py_test(
     name = "test_mega_csa_rtp_eager",
     srcs = ["test_mega_csa_rtp_eager.py"],
+    deps = _DSV4_FP8_TEST_DEPS + [
+        "//rtp_llm:deep_gemm",
+    ],
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    timeout = "long",
+)
+
+py_test(
+    name = "test_mega_hca_rtp_eager",
+    srcs = ["test_mega_hca_rtp_eager.py"],
     deps = _DSV4_FP8_TEST_DEPS + [
         "//rtp_llm:deep_gemm",
     ],

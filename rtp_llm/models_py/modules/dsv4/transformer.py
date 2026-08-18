@@ -221,23 +221,29 @@ class V4Transformer(nn.Module):
             # ``nn.Parameter``); the framework dict supplies the real tensor.
             self.embed = EmbeddingTorch(gw[W.embedding])
             self.norm = RMSNorm(gw[W.final_ln_gamma], args.norm_eps)
-            if os.environ.get("DSV4_MEGA_CSA", "0") not in (
-                "0",
-                "",
-                "false",
-                "False",
-            ):
+            mega_flags = {
+                name: os.environ.get(name, "0")
+                not in ("0", "", "false", "False")
+                for name in ("DSV4_MEGA_CSA", "DSV4_MEGA_HCA")
+            }
+            if any(mega_flags.values()):
+                enabled = "/".join(name for name, on in mega_flags.items() if on)
                 if not args.fp8_kv_cache or args.tp_size != 1:
-                    raise RuntimeError("DSV4_MEGA_CSA requires FP8 KV cache and TP1")
+                    raise RuntimeError(f"{enabled} requires FP8 KV cache and TP1")
                 from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_runtime import (
                     MegaCSARuntime,
                 )
 
                 self._mega_csa_runtime = MegaCSARuntime()
                 for layer_id, layer in enumerate(self.layers):
-                    layer.enable_mega_csa(
-                        self._mega_csa_runtime, mw.weights[layer_id]
-                    )
+                    if mega_flags["DSV4_MEGA_CSA"]:
+                        layer.enable_mega_csa(
+                            self._mega_csa_runtime, mw.weights[layer_id]
+                        )
+                    if mega_flags["DSV4_MEGA_HCA"]:
+                        layer.enable_mega_hca(
+                            self._mega_csa_runtime, mw.weights[layer_id]
+                        )
 
         # LM head — plain weight matrix [vocab_size, dim].  Accept either
         # BF16 (ckpt-native, used when ``enable_fp32_lm_head=False``) or
