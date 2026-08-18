@@ -160,6 +160,20 @@ cc_library(
 )
 
 cc_test(
+    name = "block_pool_ref_test",
+    srcs = ["BlockPoolRefTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:block_pool",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {
+        "RTP_LLM_PIN_HOST_BLOCK_POOL": "0",
+    },
+)
+
+cc_test(
     name = "block_cache_test",
     srcs = [
         "BlockCacheTest.cc",
