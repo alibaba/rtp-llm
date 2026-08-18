@@ -22,6 +22,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStu
 from rtp_llm.server.request_headers import (
     extract_correlation_request_id,
     extract_trace_id,
+    resolve_qos_priority,
 )
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
@@ -77,6 +78,9 @@ def _trans_jsonable_option(config_pb, config, field_name):
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
+    input_pb.priority = resolve_qos_priority(
+        getattr(input_py, "headers", None), input_py.generate_config
+    )
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
     input_pb.start_time = int(time.time() * 1_000_000)
     input_pb.group_size = input_py.group_size

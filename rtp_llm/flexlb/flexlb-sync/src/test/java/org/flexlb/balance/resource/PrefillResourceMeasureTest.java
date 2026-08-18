@@ -23,7 +23,7 @@ import static org.mockito.Mockito.when;
  *
  * <p>Since {@code isResourceAvailable(PrefillEndpoint)} depends on endpoint-level
  * state ({@code realPendingCount()}), it is tested in integration tests
- * ({@code FlexlbBatchSchedulerTest}). This unit test focuses on
+ * ({@code PrioritySchedulerTest}). This unit test focuses on
  * {@code calculateAverageWaterLevel} using {@code WorkerStatus.runningTaskList}
  * with {@link TaskPhase} to distinguish running vs waiting tasks.
  */

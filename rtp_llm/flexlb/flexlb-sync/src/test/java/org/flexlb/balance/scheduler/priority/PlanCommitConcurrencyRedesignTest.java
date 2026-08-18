@@ -8,7 +8,7 @@ import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.scheduler.BatchDispatcher;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.PrefillQueueManager;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.balance.scheduler.WorkerBatcher;
@@ -83,7 +83,8 @@ class PlanCommitConcurrencyRedesignTest {
     private EngineGrpcClient grpcClient;
     private BatchSchedulerReporter reporter;
     private PrioritySchedulerReporter priorityReporter;
-    private FlexlbBatchScheduler scheduler;
+    private PriorityAdmissionScheduler priorityScheduler;
+    private PriorityScheduler scheduler;
     private EndpointRegistry endpointRegistry;
     private FlexlbConfig config;
     private WorkerStatus decodeWs;
@@ -118,12 +119,12 @@ class PlanCommitConcurrencyRedesignTest {
 
         endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
         BatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
-        PriorityAdmissionScheduler priorityScheduler = new PriorityAdmissionScheduler(
+        priorityScheduler = new PriorityAdmissionScheduler(
                 configService, router, endpointRegistry, new PlanCommitter(),
                 new PrioritySloPolicy(PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
                         PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
                 priorityReporter, reporter, new UnsupportedEngineCancelChannel());
-        scheduler = new FlexlbBatchScheduler(configService, router,
+        scheduler = new PriorityScheduler(configService, router,
                 endpointRegistry, dispatcher, reporter, priorityScheduler, null);
 
         WorkerStatus prefillWs = new WorkerStatus();
@@ -143,6 +144,7 @@ class PlanCommitConcurrencyRedesignTest {
 
     @AfterEach
     void tearDown() {
+        priorityScheduler.shutdown();
         scheduler.shutdown();
     }
 
@@ -521,8 +523,8 @@ class PlanCommitConcurrencyRedesignTest {
     private BatchItem dummyItem(long requestId) {
         Response route = successRoute(requestId);
         return new BatchItem(context(requestId), new CompletableFuture<>(), route,
-                FlexlbBatchScheduler.findServer(route, RoleType.PREFILL),
-                FlexlbBatchScheduler.findServer(route, RoleType.DECODE),
+                PriorityScheduler.findServer(route, RoleType.PREFILL),
+                PriorityScheduler.findServer(route, RoleType.DECODE),
                 endpointRegistry.getPrefill(PREFILL_IP_PORT), null,
                 System.currentTimeMillis());
     }

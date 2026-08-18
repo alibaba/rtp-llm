@@ -249,7 +249,7 @@ class QueueStressTest {
         when(prefillEp.getInflightBatchCount()).thenReturn(0);
         when(predictor.estimateMs(anyLong(), anyLong())).thenReturn(0L);
 
-        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
 
         WorkerBatcher batcher = new WorkerBatcher("stress-test", prefillEp, config, handler, reporter);

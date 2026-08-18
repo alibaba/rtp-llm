@@ -5,7 +5,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.BatchDispatcher;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.config.ConfigService;
@@ -35,12 +35,19 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -57,7 +64,7 @@ import static org.mockito.Mockito.when;
 
 /**
  * Phase 1 tests for {@link PriorityAdmissionScheduler} + {@link PlanCommitter}
- * wired through {@link FlexlbBatchScheduler#submit}:
+ * wired through {@link PriorityScheduler#submit}:
  * switch-off parity, switch-on placement parity, infeasible failure,
  * offer-failure rollback and optimistic-concurrency retry semantics.
  */
@@ -72,7 +79,7 @@ class PriorityAdmissionSchedulerTest {
     private BatchSchedulerReporter reporter;
     private PrioritySchedulerReporter priorityReporter;
     private PriorityAdmissionScheduler priorityScheduler;
-    private FlexlbBatchScheduler scheduler;
+    private PriorityScheduler scheduler;
     private EndpointRegistry endpointRegistry;
     private FlexlbConfig config;
     private final List<EngineRpcService.EnqueueBatchRequestPB> sentBatches = new CopyOnWriteArrayList<>();
@@ -116,7 +123,7 @@ class PriorityAdmissionSchedulerTest {
                 new PrioritySloPolicy(PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
                         PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
                 priorityReporter, reporter, new UnsupportedEngineCancelChannel()));
-        scheduler = new FlexlbBatchScheduler(configService, router,
+        scheduler = new PriorityScheduler(configService, router,
                 endpointRegistry, dispatcher, reporter, priorityScheduler, null);
 
         // Prefill worker matching successRoute()
@@ -138,6 +145,7 @@ class PriorityAdmissionSchedulerTest {
 
     @AfterEach
     void tearDown() {
+        priorityScheduler.shutdown();
         scheduler.shutdown();
     }
 
@@ -175,8 +183,8 @@ class PriorityAdmissionSchedulerTest {
         assertEquals(1, sentBatches.size());
         assertEquals(2, batchInputs(sentBatches.getFirst()).size());
         // Route response carries the router-selected prefill/decode pair untouched
-        ServerStatus prefill = FlexlbBatchScheduler.findServer(firstResponse, RoleType.PREFILL);
-        ServerStatus decode = FlexlbBatchScheduler.findServer(firstResponse, RoleType.DECODE);
+        ServerStatus prefill = PriorityScheduler.findServer(firstResponse, RoleType.PREFILL);
+        ServerStatus decode = PriorityScheduler.findServer(firstResponse, RoleType.DECODE);
         assertEquals("10.0.0.1", prefill.getServerIp());
         assertEquals("10.0.0.2", decode.getServerIp());
         verify(priorityReporter, times(2)).reportNormalPlacement(eq(50));
@@ -187,7 +195,7 @@ class PriorityAdmissionSchedulerTest {
 
     @Test
     void request_without_priority_field_still_takes_priority_path_when_switch_on() throws Exception {
-        // hasPriority gate removed from FlexlbBatchScheduler.submit():
+        // hasPriority gate removed from PriorityScheduler.submit():
         // normalize() always assigns 1-100 in production, so the switch is
         // the sole gate — even a raw priority-0 context goes through the
         // priority scheduler and is placed normally.
@@ -243,6 +251,212 @@ class PriorityAdmissionSchedulerTest {
 
         assertTrue(response.isSuccess());
         verify(priorityScheduler, never()).schedule(any(), any(), any());
+    }
+
+    // ==================== admission permit hard limit ====================
+
+    @Test
+    void admissionPermitLimitIsAtomicAcrossConcurrentScheduling() throws Exception {
+        config.setAutoTpmPostSuccessBackpressureLimit(1);
+        config.setAutoTpmPostSuccessSoftTimeoutMs(60_000);
+        config.setFlexlbBatchSizeMax(1);
+
+        CountDownLatch firstRouteEntered = new CountDownLatch(1);
+        CountDownLatch allowFirstRoute = new CountDownLatch(1);
+        AtomicInteger routeCalls = new AtomicInteger();
+        when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
+            BalanceContext ctx = inv.getArgument(0);
+            if (routeCalls.incrementAndGet() == 1) {
+                firstRouteEntered.countDown();
+                if (!allowFirstRoute.await(2, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("timed out waiting to release first route");
+                }
+            }
+            endpointRegistry.getDecode(DECODE_IP_PORT)
+                    .reserve(ctx.getRequestId(), 128, 136,
+                            ctx.getPriority(), ctx.getDeadlineMs());
+            return successRoute(ctx.getRequestId());
+        });
+
+        ExecutorService submitter = Executors.newSingleThreadExecutor();
+        Future<CompletableFuture<Response>> firstSubmission =
+                submitter.submit(() -> scheduler.submit(contextWithBudget(73)));
+        try {
+            assertTrue(firstRouteEntered.await(2, TimeUnit.SECONDS));
+            assertEquals(1, priorityScheduler.activeAdmissionCount());
+
+            Response second = scheduler.submit(contextWithBudget(74))
+                    .get(1, TimeUnit.SECONDS);
+
+            assertFalse(second.isSuccess());
+            assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), second.getCode());
+            assertEquals(1, routeCalls.get(),
+                    "the rejected request must not start placement");
+            assertEquals(1, priorityScheduler.activeAdmissionCount());
+
+            allowFirstRoute.countDown();
+            Response first = firstSubmission.get(2, TimeUnit.SECONDS)
+                    .get(2, TimeUnit.SECONDS);
+            assertTrue(first.isSuccess());
+            assertEquals(1, priorityScheduler.activeAdmissionCount());
+
+            reportDecodePhase(73, TaskPhase.KV_ALLOCATED);
+            assertEquals(0, priorityScheduler.activeAdmissionCount());
+        } finally {
+            allowFirstRoute.countDown();
+            submitter.shutdownNow();
+        }
+    }
+
+    @Test
+    void admissionPermitIsReleasedWhenLeaseAttachmentThrows() {
+        config.setAutoTpmPostSuccessBackpressureLimit(1);
+        config.setFlexlbBatchSizeMax(100);
+
+        InflightRegistrar registrar = mock(InflightRegistrar.class);
+        when(registrar.registerInflight(any(BatchItem.class))).thenReturn(true);
+        when(registrar.attachAdmissionLease(any(BatchItem.class), any(AdmissionLease.class)))
+                .thenThrow(new IllegalStateException("attach failed"));
+
+        CompletableFuture<Response> response = new CompletableFuture<>();
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> priorityScheduler.schedule(
+                        contextWithBudget(75), response, registrar));
+
+        assertEquals("attach failed", error.getMessage());
+        assertEquals(0, priorityScheduler.activeAdmissionCount());
+        verify(registrar).unregisterInflight(any(BatchItem.class));
+    }
+
+    @Test
+    void successfulPrefillOnlyAdmissionsDoNotConsumeTheHardLimit() throws Exception {
+        config.setAutoTpmPostSuccessBackpressureLimit(1);
+        config.setAutoTpmPostSuccessSoftTimeoutMs(60_000);
+        config.setFlexlbBatchSizeMax(1);
+        when(router.route(any(BalanceContext.class))).thenAnswer(invocation -> {
+            BalanceContext ctx = invocation.getArgument(0);
+            return prefillOnlyRoute(ctx.getRequestId());
+        });
+
+        Response first = scheduler.submit(contextWithBudget(78))
+                .get(2, TimeUnit.SECONDS);
+        Response second = scheduler.submit(contextWithBudget(79))
+                .get(2, TimeUnit.SECONDS);
+
+        assertTrue(first.isSuccess(), first.getErrorMessage());
+        assertTrue(second.isSuccess(), second.getErrorMessage());
+        assertEquals(0, priorityScheduler.activeAdmissionCount());
+        assertEquals(0, priorityScheduler.pendingSoftTimeoutLeaseCount());
+    }
+
+    @Test
+    void shutdownCancelsPendingLeaseTimeoutAndRejectsNewAdmission() throws Exception {
+        config.setAutoTpmPostSuccessSoftTimeoutMs(60_000);
+        config.setFlexlbBatchSizeMax(100);
+
+        InflightRegistrar registrar = mock(InflightRegistrar.class);
+        AtomicReference<AdmissionLease> attachedLease = new AtomicReference<>();
+        when(registrar.registerInflight(any(BatchItem.class))).thenReturn(true);
+        when(registrar.attachAdmissionLease(any(BatchItem.class), any(AdmissionLease.class)))
+                .thenAnswer(invocation -> {
+                    attachedLease.set(invocation.getArgument(1));
+                    return true;
+                });
+
+        CompletableFuture<Response> admitted = new CompletableFuture<>();
+        priorityScheduler.schedule(contextWithBudget(76), admitted, registrar);
+        admitted.complete(successRoute(76));
+        awaitSoftTimeoutQueueSize(1);
+
+        assertTrue(priorityScheduler.removesCanceledSoftTimeouts());
+        assertEquals(1, priorityScheduler.activeAdmissionCount());
+        assertEquals(1, priorityScheduler.pendingSoftTimeoutLeaseCount());
+        priorityScheduler.shutdown();
+
+        assertTrue(priorityScheduler.isShutdown());
+        assertEquals(0, priorityScheduler.softTimeoutQueueSize());
+        assertEquals(0, priorityScheduler.activeAdmissionCount());
+        assertEquals(0, priorityScheduler.pendingSoftTimeoutLeaseCount());
+        assertEquals(2, attachedLease.get().leaseState());
+        verify(registrar, never())
+                .fenceAfterDeliveryTimeout(any(BatchItem.class), anyString());
+
+        CompletableFuture<Response> rejected = new CompletableFuture<>();
+        priorityScheduler.schedule(contextWithBudget(77), rejected, registrar);
+        Response rejection = rejected.get(1, TimeUnit.SECONDS);
+        assertFalse(rejection.isSuccess());
+        assertTrue(rejection.getErrorMessage().contains("shut down"));
+        verify(router, times(1)).route(any(BalanceContext.class));
+    }
+
+    @Test
+    void softTimeoutCallbackRunsOutsideLifecycleMonitorAndShutdownWaitsForIt()
+            throws Exception {
+        // Mockito creates a copy-based spy whose field-initialized timeout
+        // scheduler still captures the original instance. This lifecycle test
+        // must observe the same concrete instance that owns the timer.
+        priorityScheduler.shutdown();
+        priorityScheduler = new PriorityAdmissionScheduler(
+                configService, router, endpointRegistry, new PlanCommitter(),
+                new PrioritySloPolicy(PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
+                        PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
+                priorityReporter, reporter, new UnsupportedEngineCancelChannel());
+        config.setAutoTpmPostSuccessSoftTimeoutMs(1);
+        config.setFlexlbBatchSizeMax(100);
+
+        long firstRequestId = 176L;
+        long secondRequestId = 177L;
+        CountDownLatch firstFenceEntered = new CountDownLatch(1);
+        CountDownLatch releaseFirstFence = new CountDownLatch(1);
+        CountDownLatch shutdownStarted = new CountDownLatch(1);
+        InflightRegistrar registrar = mock(InflightRegistrar.class);
+        when(registrar.registerInflight(any(BatchItem.class))).thenReturn(true);
+        when(registrar.attachAdmissionLease(any(BatchItem.class), any(AdmissionLease.class)))
+                .thenReturn(true);
+        when(registrar.fenceAfterDeliveryTimeout(any(BatchItem.class), anyString()))
+                .thenAnswer(invocation -> {
+                    BatchItem item = invocation.getArgument(0);
+                    if (item.requestId() == firstRequestId) {
+                        firstFenceEntered.countDown();
+                        awaitLatch(releaseFirstFence);
+                    }
+                    return InflightRegistrar.PostDeliveryFenceResult.STARTED;
+                });
+
+        CompletableFuture<Response> first = new CompletableFuture<>();
+        priorityScheduler.schedule(contextWithBudget(firstRequestId), first, registrar);
+        assertTrue(first.complete(successRoute(firstRequestId)));
+        assertTrue(firstFenceEntered.await(1, TimeUnit.SECONDS));
+        assertEquals(1, priorityScheduler.activeSoftTimeoutCallbackCount());
+
+        CompletableFuture<Response> second = new CompletableFuture<>();
+        priorityScheduler.schedule(contextWithBudget(secondRequestId), second, registrar);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<Boolean> secondCompletion = executor.submit(
+                    () -> second.complete(successRoute(secondRequestId)));
+            assertTrue(secondCompletion.get(1, TimeUnit.SECONDS),
+                    "a running timeout callback must not retain the lifecycle monitor");
+            assertEquals(1, priorityScheduler.pendingSoftTimeoutLeaseCount());
+
+            Future<?> shutdown = executor.submit(() -> {
+                shutdownStarted.countDown();
+                priorityScheduler.shutdown();
+            });
+            assertTrue(shutdownStarted.await(1, TimeUnit.SECONDS));
+            assertThrows(TimeoutException.class,
+                    () -> shutdown.get(100, TimeUnit.MILLISECONDS),
+                    "shutdown must wait for a callback which already crossed the gate");
+
+            releaseFirstFence.countDown();
+            shutdown.get(1, TimeUnit.SECONDS);
+            assertEquals(0, priorityScheduler.activeSoftTimeoutCallbackCount());
+            assertEquals(0, priorityScheduler.pendingSoftTimeoutLeaseCount());
+            assertEquals(0, priorityScheduler.activeAdmissionCount());
+        } finally {
+            releaseFirstFence.countDown();
+            executor.shutdownNow();
+        }
     }
 
     // ==================== infeasible: no available worker ====================
@@ -407,8 +621,8 @@ class PriorityAdmissionSchedulerTest {
     private BatchItem dummyItem(long requestId) {
         Response route = successRoute(requestId);
         return new BatchItem(context(requestId), new CompletableFuture<>(), route,
-                FlexlbBatchScheduler.findServer(route, RoleType.PREFILL),
-                FlexlbBatchScheduler.findServer(route, RoleType.DECODE),
+                PriorityScheduler.findServer(route, RoleType.PREFILL),
+                PriorityScheduler.findServer(route, RoleType.DECODE),
                 endpointRegistry.getPrefill(PREFILL_IP_PORT), null,
                 System.currentTimeMillis());
     }
@@ -456,6 +670,55 @@ class PriorityAdmissionSchedulerTest {
         return ctx;
     }
 
+    private static BalanceContext contextWithBudget(long requestId) {
+        BalanceContext ctx = context(requestId);
+        long nowMs = System.currentTimeMillis();
+        ctx.setBudget(ScheduleBudget.forDeadline(
+                ctx.getPriority(), nowMs, nowMs + 60_000));
+        return ctx;
+    }
+
+    private void reportDecodePhase(long requestId, TaskPhase phase) {
+        TaskInfo task = new TaskInfo();
+        task.setRequestId(requestId);
+        task.setPhase(phase);
+        task.setInputLength(128);
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRole(RoleType.DECODE);
+        response.setRunningTaskInfo(Map.of(String.valueOf(requestId), task));
+        scheduler.onWorkerStatusUpdate(response);
+    }
+
+    private void awaitSoftTimeoutQueueSize(int expected) throws InterruptedException {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+        while (priorityScheduler.softTimeoutQueueSize() != expected
+                && System.nanoTime() < deadlineNanos) {
+            Thread.sleep(1);
+        }
+        assertEquals(expected, priorityScheduler.softTimeoutQueueSize());
+    }
+
+    private static void awaitLatch(CountDownLatch latch) {
+        boolean interrupted = false;
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        try {
+            while (latch.getCount() != 0) {
+                long remainingNanos = deadlineNanos - System.nanoTime();
+                assertTrue(remainingNanos > 0, "latch did not open before timeout");
+                try {
+                    assertTrue(latch.await(remainingNanos, TimeUnit.NANOSECONDS),
+                            "latch did not open before timeout");
+                } catch (InterruptedException shutdownInterrupt) {
+                    interrupted = true;
+                }
+            }
+        } finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
     private static byte[] generateInputBytes(long requestId) {
         EngineRpcService.GenerateInputPB input = EngineRpcService.GenerateInputPB.newBuilder()
                 .setRequestId(requestId)
@@ -475,6 +738,22 @@ class PriorityAdmissionSchedulerTest {
                 server(RoleType.PREFILL, "10.0.0.1", 8080, 8081, requestId),
                 server(RoleType.DECODE, "10.0.0.2", 8081, 8082, requestId)
         ));
+        return response;
+    }
+
+    private static Response prefillOnlyRoute(long requestId) {
+        Response response = new Response();
+        response.setSuccess(true);
+
+        ServerStatus prefill = new ServerStatus();
+        prefill.setSuccess(true);
+        prefill.setRole(RoleType.PREFILL);
+        prefill.setServerIp("10.0.0.1");
+        prefill.setHttpPort(8080);
+        prefill.setGrpcPort(8081);
+        prefill.setGroup("g1");
+        prefill.setRequestId(requestId);
+        response.setServerStatus(List.of(prefill));
         return response;
     }
 

@@ -5,7 +5,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.cache.core.EngineLocalView;
 import org.flexlb.cache.core.GlobalCacheIndex;
@@ -45,7 +45,7 @@ import static org.mockito.Mockito.when;
 /**
  * Base class for mock-worker integration tests.
  *
- * <p>Sets up a real {@link FlexlbBatchScheduler} backed by a real
+ * <p>Sets up a real {@link PriorityScheduler} backed by a real
  * {@link EngineGrpcClient} that creates real Netty gRPC channels to
  * mock workers.  No Spring Boot context, no model loading, no GPU.
  *
@@ -54,7 +54,7 @@ import static org.mockito.Mockito.when;
  *
  * <p>Architecture:
  * <pre>
- * Real FlexlbBatchScheduler (direct construction)
+ * Real PriorityScheduler (direct construction)
  *   ├── Real DefaultBatchDispatcher
  *   │     └── Real EngineGrpcClient (real Netty channels)
  *   │           ↕  real gRPC (Netty)
@@ -72,7 +72,7 @@ public abstract class FlexLBMockTestBase {
 
     protected MockPrefillWorker mockPrefillWorker;
     protected MockDecodeWorker mockDecodeWorker;
-    protected FlexlbBatchScheduler scheduler;
+    protected PriorityScheduler scheduler;
     protected EndpointRegistry endpointRegistry;
     protected FlexlbConfig config;
     protected ConfigService configService;
@@ -190,11 +190,11 @@ public abstract class FlexLBMockTestBase {
         router = createRouter();
 
         // 11. Create real scheduler
-        scheduler = new FlexlbBatchScheduler(
+        scheduler = new PriorityScheduler(
                 configService, router,
                 endpointRegistry, dispatcher, reporter, null, null);
 
-        // 12. Register prefill endpoint with the real scheduler as BatchDecisionHandler
+        // 12. Register prefill endpoint with the real scheduler as DecisionGroupHandler
         endpointRegistry.ensureEndpoint(RoleType.PREFILL, prefillIpPort, prefillWs);
 
         // 13. Register in EngineWorkerStatus static map for completeness
@@ -309,7 +309,6 @@ public abstract class FlexLBMockTestBase {
      */
     protected void triggerTtlCleanup() {
         scheduler.cleanupInflight();
-        endpointRegistry.scheduledEviction();
     }
 
     // ==================== Helper: endpoint accessors ====================

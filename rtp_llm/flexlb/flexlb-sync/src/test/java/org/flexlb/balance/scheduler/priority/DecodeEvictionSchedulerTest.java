@@ -5,7 +5,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.BatchDispatcher;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -34,6 +34,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -41,6 +42,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -50,7 +52,7 @@ import static org.mockito.Mockito.when;
 /**
  * Phase 4 tests for the decode reserved-only eviction path of
  * {@link PriorityAdmissionScheduler} wired through
- * {@link FlexlbBatchScheduler#submit}: higher priority evicts a strictly
+ * {@link PriorityScheduler#submit}: higher priority evicts a strictly
  * lower-priority decode reservation when the decode capacity is exhausted
  * (the reserved-only victim yields with the retryable NO_AVAILABLE_WORKER,
  * contract 5.3), equal priority never yields, the gate keeps the legacy
@@ -67,9 +69,12 @@ class DecodeEvictionSchedulerTest {
     private EngineGrpcClient grpcClient;
     private BatchSchedulerReporter reporter;
     private PrioritySchedulerReporter priorityReporter;
-    private FlexlbBatchScheduler scheduler;
+    private PriorityAdmissionScheduler priorityScheduler;
+    private PriorityScheduler scheduler;
     private EndpointRegistry endpointRegistry;
     private FlexlbConfig config;
+    private final AtomicBoolean failDecodeEvictionPlacement = new AtomicBoolean();
+    private final AtomicBoolean failNextVictimSettlement = new AtomicBoolean();
 
     @BeforeEach
     void setUp() {
@@ -105,7 +110,7 @@ class DecodeEvictionSchedulerTest {
         BatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
         // Test seam: after a decode eviction the prefill is picked manually
         // (the static strategy factory is not populated in unit tests).
-        PriorityAdmissionScheduler priorityScheduler = new PriorityAdmissionScheduler(
+        priorityScheduler = new PriorityAdmissionScheduler(
                 configService, router, endpointRegistry, new PlanCommitter(),
                 new PrioritySloPolicy(PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
                         PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
@@ -114,11 +119,22 @@ class DecodeEvictionSchedulerTest {
             protected ServerStatus selectPrefillForDecodeEviction(BalanceContext ctx,
                                                                   FlexlbConfig config,
                                                                   String group) {
+                if (failDecodeEvictionPlacement.get()) {
+                    throw new IllegalStateException("prefill selection failed");
+                }
                 return server(RoleType.PREFILL, "10.0.0.1", 8080, 8081, ctx.getRequestId());
             }
         };
-        scheduler = new FlexlbBatchScheduler(configService, router,
-                endpointRegistry, dispatcher, reporter, priorityScheduler, null);
+        scheduler = new PriorityScheduler(configService, router,
+                endpointRegistry, dispatcher, reporter, priorityScheduler, null) {
+            @Override
+            public void finishYieldedById(long requestId, String detail) {
+                if (failNextVictimSettlement.compareAndSet(true, false)) {
+                    throw new IllegalStateException("victim settlement interrupted");
+                }
+                super.finishYieldedById(requestId, detail);
+            }
+        };
 
         WorkerStatus prefillWs = new WorkerStatus();
         prefillWs.setIp("10.0.0.1");
@@ -141,6 +157,7 @@ class DecodeEvictionSchedulerTest {
 
     @AfterEach
     void tearDown() {
+        priorityScheduler.shutdown();
         scheduler.shutdown();
     }
 
@@ -153,7 +170,9 @@ class DecodeEvictionSchedulerTest {
         if (slotFull || kvFull) {
             return Response.error(StrategyErrorType.NO_DECODE_WORKER);
         }
-        decodeEp.reserve(ctx.getRequestId(), 128, 136, ctx.getPriority(), ctx.getDeadlineMs());
+        long seqLen = ctx.getRequest().getSeqLen();
+        decodeEp.reserve(ctx.getRequestId(), seqLen, seqLen + 8,
+                ctx.getPriority(), ctx.getDeadlineMs());
         return successRoute(ctx.getRequestId());
     }
 
@@ -189,6 +208,59 @@ class DecodeEvictionSchedulerTest {
         verify(priorityReporter).reportEvictionCommit(eq(70), eq("decode_kv_full"), eq("success"));
         verify(priorityReporter).reportVictim(eq(30), eq(70), eq("decode_reserved"), eq("decode_kv_full"));
         verify(priorityReporter).reportVictimKvTokens(eq(30), eq("decode_reserved"), eq(128L));
+    }
+
+    @Test
+    void reservedEvictionReleasesIncomingWhenPlacementHandoffThrows()
+            throws Exception {
+        DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
+        CompletableFuture<Response> victim = scheduler.submit(context(3, 30));
+        await(() -> decodeEp.reservedView().containsKey(3L));
+        failDecodeEvictionPlacement.set(true);
+
+        Response incoming = scheduler.submit(context(4, 70))
+                .get(2, TimeUnit.SECONDS);
+
+        assertFalse(incoming.isSuccess());
+        assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(),
+                incoming.getCode());
+        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(),
+                victim.get(1, TimeUnit.SECONDS).getCode());
+        assertFalse(decodeEp.reservedView().containsKey(3L));
+        assertFalse(decodeEp.reservedView().containsKey(4L),
+                "failed pre-register handoff must release its provisional reservation");
+        assertFalse(scheduler.ownsRequestGeneration(4L));
+    }
+
+    @Test
+    void transient_victim_settlement_failure_does_not_interrupt_decode_swap()
+            throws Exception {
+        DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
+        WorkerStatus decodeStatus = decodeEp.getStatus();
+        decodeStatus.setAvailableKvCacheTokens(new AtomicLong(256L));
+        decodeStatus.setTotalKvCacheTokens(new AtomicLong(512L));
+        decodeEp.onWorkerStatusUpdate(decodeStatus, new WorkerStatusResponse());
+
+        CompletableFuture<Response> firstVictim = scheduler.submit(context(5, 20));
+        CompletableFuture<Response> secondVictim = scheduler.submit(context(6, 30));
+        await(() -> decodeEp.reservedView().size() == 2);
+
+        // A 256-token request needs both 128-token victims. The first reducer
+        // call fails once after the endpoint has atomically swapped the
+        // reservations; the idempotent retry and remaining drain must still
+        // settle both exact generations.
+        failNextVictimSettlement.set(true);
+        CompletableFuture<Response> incoming = scheduler.submit(context(7, 70, 256));
+
+        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(),
+                firstVictim.get(2, TimeUnit.SECONDS).getCode());
+        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(),
+                secondVictim.get(2, TimeUnit.SECONDS).getCode());
+        await(() -> decodeEp.reservedView().size() == 1
+                && decodeEp.reservedView().containsKey(7L));
+        assertFalse(incoming.isDone());
+        assertFalse(scheduler.ownsRequestGeneration(5L));
+        assertFalse(scheduler.ownsRequestGeneration(6L));
     }
 
     // ==================== equal priority never yields ====================
@@ -319,7 +391,11 @@ class DecodeEvictionSchedulerTest {
         assertTrue(scheduler.registerInflight(item));
 
         scheduler.finishYieldedById(78, "yielded to higher-priority request 88");
-        scheduler.finishYieldedById(78, "second call must be ignored");
+        doThrow(new IllegalStateException("metrics unavailable"))
+                .when(priorityReporter)
+                .reportInflightSettleMiss(anyString());
+        assertDoesNotThrow(() -> scheduler.finishYieldedById(
+                78, "second call must be ignored"));
         scheduler.finishYieldedById(888, "unknown id is a no-op");
         // A racing preempt terminal must not override the yielded terminal
         scheduler.finishPreemptedById(78, "late preempt must be ignored");
@@ -350,8 +426,8 @@ class DecodeEvictionSchedulerTest {
     private BatchItem dummyItem(long requestId) {
         Response route = successRoute(requestId);
         return new BatchItem(context(requestId, 50), new CompletableFuture<>(), route,
-                FlexlbBatchScheduler.findServer(route, RoleType.PREFILL),
-                FlexlbBatchScheduler.findServer(route, RoleType.DECODE),
+                PriorityScheduler.findServer(route, RoleType.PREFILL),
+                PriorityScheduler.findServer(route, RoleType.DECODE),
                 endpointRegistry.getPrefill(PREFILL_IP_PORT),
                 endpointRegistry.getDecode(DECODE_IP_PORT),
                 System.currentTimeMillis());
@@ -372,9 +448,13 @@ class DecodeEvictionSchedulerTest {
     }
 
     private static BalanceContext context(long requestId, int priority) {
+        return context(requestId, priority, 128);
+    }
+
+    private static BalanceContext context(long requestId, int priority, int seqLen) {
         Request request = new Request();
         request.setRequestId(requestId);
-        request.setSeqLen(128);
+        request.setSeqLen(seqLen);
         request.setMaxNewTokens(8);
         request.setNumBeams(1);
         request.setModel("test-model");

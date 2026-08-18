@@ -2,7 +2,6 @@ package org.flexlb.mockengine;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.scheduler.BatchItem;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;

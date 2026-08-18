@@ -1,7 +1,8 @@
 package org.flexlb.service;
 
 import org.flexlb.balance.scheduler.DefaultRouter;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.CancelReason;
+import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.balance.scheduler.Router;
@@ -21,18 +22,18 @@ public class RouteService {
     private final ConfigService configService;
     private final Router router;
     private final QueueManager queueManager;
-    private final FlexlbBatchScheduler flexlbBatchScheduler;
+    private final PriorityScheduler priorityScheduler;
     private final RecentCacheKeyTraceReporter recentCacheKeyTraceReporter;
 
     public RouteService(ConfigService configService,
                         DefaultRouter defaultScheduler,
                         QueueManager queueManager,
-                        FlexlbBatchScheduler flexlbBatchScheduler,
+                        PriorityScheduler priorityScheduler,
                         RecentCacheKeyTraceReporter recentCacheKeyTraceReporter) {
         this.configService = configService;
         this.router = defaultScheduler;
         this.queueManager = queueManager;
-        this.flexlbBatchScheduler = flexlbBatchScheduler;
+        this.priorityScheduler = priorityScheduler;
         this.recentCacheKeyTraceReporter = recentCacheKeyTraceReporter;
     }
 
@@ -48,50 +49,68 @@ public class RouteService {
         ScheduleModeEnum mode = flexlbConfig.getDefaultScheduleModeEnum();
         balanceContext.setScheduleMode(mode);
 
-        CompletableFuture<Response> resultFuture;
-        switch (mode) {
-            case BATCH -> {
-                if (flexlbBatchScheduler == null || !hasValidGenerateInput(balanceContext)) {
-                    Logger.debug("BATCH mode cannot process this request, falling back to DIRECT");
-                    balanceContext.setScheduleMode(ScheduleModeEnum.DIRECT);
-                    try {
-                        resultFuture = CompletableFuture.completedFuture(router.route(balanceContext));
-                    } catch (Exception e) {
-                        resultFuture = CompletableFuture.failedFuture(e);
-                    }
-                } else {
-                    resultFuture = flexlbBatchScheduler.submit(balanceContext);
-                    balanceContext.setFuture(resultFuture);
-                }
-            }
-            case QUEUE -> {
-                resultFuture = queueManager.tryRouteAsync(balanceContext).toFuture();
-            }
-            case DIRECT -> {
-                try {
-                    resultFuture = CompletableFuture.completedFuture(router.route(balanceContext));
-                } catch (Exception e) {
-                    resultFuture = CompletableFuture.failedFuture(e);
-                }
-            }
-            default -> {
-                try {
-                    resultFuture = CompletableFuture.completedFuture(router.route(balanceContext));
-                } catch (Exception e) {
-                    resultFuture = CompletableFuture.failedFuture(e);
-                }
-            }
-        }
+        CompletableFuture<Response> resultFuture = switch (mode) {
+            case BATCH -> routeBatch(balanceContext);
+            case QUEUE -> flexlbConfig.usesRouteDecisionDelivery()
+                    ? submitScheduled(balanceContext)
+                    : queueManager.tryRouteAsync(balanceContext).toFuture();
+            case DIRECT -> routeDirect(balanceContext);
+        };
 
-        return resultFuture.whenComplete((result, throwable) -> {
+        // Observe the scheduler-owned future without replacing it with a
+        // dependent stage. Returning the exact source preserves external
+        // cancel propagation and keeps one publication owner end to end.
+        resultFuture.whenComplete((result, throwable) -> {
             if (throwable != null) {
                 return;
             }
-            balanceContext.setResponse(result);
-            if (result != null && result.isSuccess()) {
-                recentCacheKeyTraceReporter.report(balanceContext);
+            try {
+                balanceContext.setResponse(result);
+                if (result != null && result.isSuccess()) {
+                    recentCacheKeyTraceReporter.report(balanceContext);
+                }
+            } catch (RuntimeException completionSideEffectFailure) {
+                Logger.warn("Route completion side effect failed: request_id={}",
+                        balanceContext.getRequestId(), completionSideEffectFailure);
             }
         });
+        return resultFuture;
+    }
+
+    /**
+     * BATCH retains its established compatibility behavior: an unavailable
+     * scheduler or missing serialized generate input falls back to DIRECT.
+     */
+    private CompletableFuture<Response> routeBatch(BalanceContext balanceContext) {
+        if (priorityScheduler == null || !hasValidGenerateInput(balanceContext)) {
+            Logger.debug("BATCH mode cannot process this request, falling back to DIRECT");
+            balanceContext.setScheduleMode(ScheduleModeEnum.DIRECT);
+            return routeDirect(balanceContext);
+        }
+        return submitScheduled(balanceContext);
+    }
+
+    /**
+     * Submit to the common scheduler. Route-decision requests intentionally do
+     * not require generate_input: Master selects endpoints but the frontend
+     * remains responsible for sending the original request to the engine.
+     */
+    private CompletableFuture<Response> submitScheduled(BalanceContext balanceContext) {
+        if (priorityScheduler == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException(
+                    "PriorityScheduler is required for the configured scheduling path"));
+        }
+        CompletableFuture<Response> resultFuture = priorityScheduler.submit(balanceContext);
+        balanceContext.setFuture(resultFuture);
+        return resultFuture;
+    }
+
+    private CompletableFuture<Response> routeDirect(BalanceContext balanceContext) {
+        try {
+            return CompletableFuture.completedFuture(router.route(balanceContext));
+        } catch (Exception e) {
+            return CompletableFuture.failedFuture(e);
+        }
     }
 
     private boolean hasValidGenerateInput(BalanceContext ctx) {
@@ -101,7 +120,21 @@ public class RouteService {
 
     public RequestLifecycleSnapshot getRequestState(long requestId,
                                                     long expectedBatchId) {
-        return flexlbBatchScheduler == null ? null
-                : flexlbBatchScheduler.getRequestState(requestId, expectedBatchId);
+        return priorityScheduler == null ? null
+                : priorityScheduler.getRequestState(requestId, expectedBatchId);
+    }
+
+    /**
+     * Cancel one scheduler-owned request generation.
+     *
+     * <p>The scheduler is the only lifecycle and resource owner.  Keeping the
+     * reducer there gives BATCH enqueue and QUEUE route-decision delivery the
+     * same idempotency and generation-fencing semantics.</p>
+     */
+    public RequestLifecycleSnapshot cancelRequest(long requestId,
+                                                   long expectedBatchId,
+                                                   CancelReason reason) {
+        return priorityScheduler == null ? null
+                : priorityScheduler.cancelRequest(requestId, expectedBatchId, reason);
     }
 }

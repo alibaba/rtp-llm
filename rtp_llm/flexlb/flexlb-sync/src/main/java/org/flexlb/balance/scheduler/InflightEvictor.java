@@ -60,11 +60,11 @@ public class InflightEvictor<K, V extends InflightEvictor.TtlTracked> {
                 // concurrent release()/calibrate() map.remove(key). If another thread
                 // already removed the entry, map.remove() returns null and we skip
                 // the onEvict callback — preventing double-deduction of counters.
-                V removed = map.remove(entry.getKey());
-                if (removed != null) {
+                V candidate = entry.getValue();
+                if (map.remove(entry.getKey(), candidate)) {
                     count++;
                     if (onEvict != null) {
-                        onEvict.accept(removed);
+                        onEvict.accept(candidate);
                     }
                 }
             }

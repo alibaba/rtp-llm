@@ -143,6 +143,9 @@ class DecodeEndpointLayeredViewTest {
         endpoint.evictExpiredRequests(1);
 
         assertFalse(endpoint.isConfirmedTracked(1L));
+        assertEquals(0, endpoint.getConfirmedRunningCount(),
+                "tracked TTL removal must release the published confirmed slot");
+        assertEquals(0, endpoint.getTotalLoad());
         assertTrue(endpoint.admissionVersion() > versionBefore);
     }
 
@@ -168,6 +171,28 @@ class DecodeEndpointLayeredViewTest {
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)), null, 10_000);
         assertTrue(endpoint.isConfirmedTracked(1L),
                 "the cancel fence follows the configured terminal retention TTL");
+    }
+
+    @Test
+    void priorityTombstoneIsAuthoritativeWithoutAcceptedOrWorkerCanceled() {
+        endpoint.reserve(1L, 500, 508, 30, 1_000);
+        updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)), null, 10_000);
+        long version = endpoint.admissionVersion();
+        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+                endpoint.beginPriorityPreemption(102L, List.of(1L),
+                        9L, 128, 136, 70, 2_000, version, true));
+        assertTrue(endpoint.markPriorityCancelInFlight(102L));
+
+        assertTrue(endpoint.settlePriorityTombstoned(102L, 1L));
+        assertTrue(endpoint.commitPriorityPreemption(102L));
+
+        assertFalse(endpoint.isConfirmedTracked(1L));
+        assertTrue(endpoint.reservedView().containsKey(9L));
+        assertEquals(1, endpoint.getTotalLoad());
+        // The same late Decode sample rejected by typed-CANCELED fencing must
+        // also be rejected after the stronger absent+tombstone proof.
+        updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)), null, 10_000);
+        assertFalse(endpoint.isConfirmedTracked(1L));
     }
 
     // ==================== accounting invariants unchanged (iron rule 5) ====================
@@ -265,21 +290,23 @@ class DecodeEndpointLayeredViewTest {
     @Test
     void ttlEvictionCannotReleaseClaimedEngineVisibleShadow() throws Exception {
         endpoint.reserve(1L, 500, 508, 30, 1_000);
-        Thread.sleep(5);
+        // Keep a wide age gap so the provisional incoming reservation cannot
+        // become TTL-eligible merely because this test runs on a loaded JVM.
+        Thread.sleep(150);
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
                 endpoint.beginPriorityPreemption(101L, List.of(1L),
                         9L, 700, 708, 70, 3_000,
                         endpoint.admissionVersion(), true));
         assertTrue(endpoint.markPriorityCancelInFlight(101L));
 
-        assertEquals(0, endpoint.evictExpiredRequests(1));
+        assertEquals(0, endpoint.evictExpiredRequests(100));
         assertTrue(endpoint.reservedView().containsKey(1L),
                 "generic TTL cleanup must not deduct a claimed victim");
         assertEquals(1_200, endpoint.inflightHardKvReserved(),
                 "victim and provisional incoming remain fully charged");
 
         endpoint.abortPriorityPreemption(101L);
-        assertEquals(1, endpoint.evictExpiredRequests(1));
+        assertEquals(1, endpoint.evictExpiredRequests(100));
         assertFalse(endpoint.reservedView().containsKey(1L));
         assertEquals(0, endpoint.inflightHardKvReserved());
     }
@@ -305,6 +332,43 @@ class DecodeEndpointLayeredViewTest {
         assertEquals(10_000, endpoint.realKvAvailable(),
                 "active reconciliation must release held KV before dropping the claim");
         assertFalse(confirmedView(1L).claimedForPreemption());
+    }
+
+    @Test
+    void notFoundTransferRetainsSyntheticKvUntilExactEngineFenceSettlement() {
+        endpoint.reserve(1L, 500, 508, 30, 1_000);
+        updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 500)), null, 10_000);
+        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+                endpoint.beginPriorityPreemption(104L, List.of(1L),
+                        9L, 700, 708, 70, 3_000,
+                        endpoint.admissionVersion(), true));
+        assertTrue(endpoint.markPriorityCancelInFlight(104L));
+        assertTrue(endpoint.markPriorityCancelNotFound(104L, 1L));
+
+        // Decode disappearance moves the victim's 500-token charge into a
+        // synthetic hold. The 700-token provisional incoming reservation is
+        // still independently owned by the live preemption attempt.
+        updateStatus(Map.of(), null, 10_000);
+        assertEquals(700, endpoint.inflightHardKvReserved());
+        assertEquals(2, endpoint.getTotalLoad(),
+                "victim and provisional incoming must both remain charged before abort");
+        assertEquals(8_800, endpoint.realKvAvailable());
+        assertTrue(endpoint.transferPriorityNotFoundClaimToEngineFence(104L, 1L));
+        endpoint.abortPriorityPreemption(104L);
+
+        assertEquals(0, endpoint.inflightHardKvReserved(),
+                "aborting the attempt releases only its provisional incoming reservation");
+        assertEquals(9_500, endpoint.realKvAvailable(),
+                "control-owner transfer must not release the synthetic KV hold");
+        assertEquals(1, endpoint.getTotalLoad(),
+                "the disappeared confirmed victim remains a synthetic slot");
+
+        assertTrue(endpoint.settleEngineFenceClaim(104L, 1L));
+        assertEquals(10_000, endpoint.realKvAvailable());
+        assertEquals(0, endpoint.getTotalLoad());
+        assertFalse(endpoint.settleEngineFenceClaim(104L, 1L),
+                "the exact fence generation settles accounting at most once");
+        assertEquals(10_000, endpoint.realKvAvailable());
     }
 
     // ==================== snapshot capture: layered lists ====================

@@ -1,5 +1,10 @@
 from typing import Any, Dict, Mapping, Optional
 
+QOS_PRIORITY_HEADER = "x-dashscope-inner-qos-level"
+DEFAULT_QOS_PRIORITY = 50
+MIN_QOS_PRIORITY = 1
+MAX_QOS_PRIORITY = 100
+
 REQUEST_HEADER_NAMES = (
     "user_id",
     "x-dashscope-apikeyid",
@@ -12,7 +17,7 @@ REQUEST_HEADER_NAMES = (
     "trace_id",
     "eagleeye-traceid",
     "x-b3-traceid",
-    "x-dashscope-inner-qos-level",
+    QOS_PRIORITY_HEADER,
 )
 CORRELATION_HEADER_NAMES = (
     "x-dashscope-request-id",
@@ -80,3 +85,32 @@ def extract_trace_id(headers: Optional[Mapping[str, Any]]) -> str:
                 return parts[1]
         return value
     return ""
+
+
+def resolve_qos_priority(
+    headers: Optional[Mapping[str, Any]],
+    generate_config: Any = None,
+) -> int:
+    """Resolve the priority carried to both FlexLB and the engine.
+
+    A valid HTTP header wins. ``generate_config.qos_priority`` is the IPC-safe
+    fallback used when request headers are no longer available. Invalid or
+    missing values resolve to the normal Auto-TPM priority (50), matching the
+    FlexLB wire contract.
+    """
+
+    normalized_headers = extract_request_headers(headers)
+    candidates = (
+        normalized_headers.get(QOS_PRIORITY_HEADER),
+        getattr(generate_config, "qos_priority", None),
+    )
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            priority = int(str(candidate).strip())
+        except (TypeError, ValueError):
+            continue
+        if MIN_QOS_PRIORITY <= priority <= MAX_QOS_PRIORITY:
+            return priority
+    return DEFAULT_QOS_PRIORITY

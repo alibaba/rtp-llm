@@ -40,7 +40,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *   <li>Regardless of retry, the exception propagates to
  *       {@link org.flexlb.balance.scheduler.DefaultBatchDispatcher}, which calls
  *       {@code failItems()} → {@code callback.onFailure()} →
- *       {@link org.flexlb.balance.scheduler.FlexlbBatchScheduler#failAck}</li>
+ *       scheduler failure handling</li>
  * </ul>
  *
  * <p>Note: {@code MockWorker.stop()} already supports graceful gRPC server shutdown

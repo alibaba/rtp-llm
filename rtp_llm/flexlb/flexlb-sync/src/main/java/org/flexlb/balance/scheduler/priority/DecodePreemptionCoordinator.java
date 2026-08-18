@@ -187,6 +187,8 @@ public final class DecodePreemptionCoordinator {
         // replay a cached ordinary Decode terminal ahead of late typed 8429.
         List<Boolean> acceptedAcknowledgements = new ArrayList<>();
         boolean hasNotFound = false;
+        int tombstonedSettlements = 0;
+        boolean tombstoneSettlementFailed = false;
 
         List<PreemptionAttempt.Victim> victims = attempt.victims();
         for (int i = 0; i < victims.size(); i++) {
@@ -216,14 +218,16 @@ public final class DecodePreemptionCoordinator {
                     registrar.markPreemptionNotFound(victim.requestId(), attempt.token());
                 }
                 case TOMBSTONED -> {
-                    // The request was absent and is now fenced against a
-                    // racing late Enqueue. For preemption planning this is a
-                    // stronger form of NOT_FOUND and requires a replan.
-                    hasNotFound = true;
-                    attempt.recordNotFound(victim.requestId());
-                    request.endpoint().markPriorityCancelNotFound(
-                            attempt.token(), victim.requestId());
-                    registrar.markPreemptionNotFound(victim.requestId(), attempt.token());
+                    // Unlike NOT_FOUND, TOMBSTONED atomically proves absence
+                    // and prevents every racing late Enqueue. It is therefore
+                    // a terminal victim proof and contributes freed capacity
+                    // to this same transaction.
+                    if (settleTombstoned(
+                            request, registrar, attempt, victim)) {
+                        tombstonedSettlements++;
+                    } else {
+                        tombstoneSettlementFailed = true;
+                    }
                 }
                 case FAILED, UNSUPPORTED -> {
                     markUnknown(request, registrar, attempt, victim.requestId());
@@ -233,7 +237,7 @@ public final class DecodePreemptionCoordinator {
             }
         }
 
-        if (completionCandidates.isEmpty()) {
+        if (completionCandidates.isEmpty() && tombstonedSettlements == 0) {
             request.endpoint().abortPriorityPreemption(attempt.token());
             boolean cleanSingleNotFound = hasNotFound && victims.size() == 1;
             attempt.markAborted(!cleanSingleNotFound);
@@ -267,10 +271,13 @@ public final class DecodePreemptionCoordinator {
         }
 
         final boolean ackNotFound = hasNotFound;
+        final int alreadySettled = tombstonedSettlements;
+        final boolean tombstoneFailed = tombstoneSettlementFailed;
         return CompletableFuture.allOf(boundedSettlements.toArray(new CompletableFuture[0]))
                 .thenApply(ignored -> {
-                    boolean allCanceled = boundedSettlements.stream()
-                            .allMatch(future -> future.join());
+                    boolean allCanceled = !tombstoneFailed
+                            && alreadySettled + boundedSettlements.size() == victims.size()
+                            && boundedSettlements.stream().allMatch(CompletableFuture::join);
                     if (allCanceled && !ackNotFound && request.admissionOpen().getAsBoolean()
                             && request.endpoint().commitPriorityPreemption(attempt.token())
                             && attempt.markCommitted()) {
@@ -320,6 +327,24 @@ public final class DecodePreemptionCoordinator {
                 && registrar.finishPreemptedById(
                         victim.requestId(), attempt.token(), request.detail());
         return endpointSettled && attemptSettled && inflightSettled;
+    }
+
+    private static boolean settleTombstoned(
+            Request request,
+            InflightRegistrar registrar,
+            PreemptionAttempt attempt,
+            PreemptionAttempt.Victim victim) {
+        // Endpoint accounting remains the resource-owning CAS. The remaining
+        // two transitions are exact-token followers, just like typed CANCELED,
+        // but no WorkerStatus future is required for this stronger proof.
+        boolean endpointSettled = request.endpoint().settlePriorityTombstoned(
+                attempt.token(), victim.requestId());
+        boolean inflightSettled = endpointSettled
+                && registrar.finishTombstonedById(
+                        victim.requestId(), attempt.token(), request.detail());
+        boolean attemptSettled = inflightSettled
+                && attempt.recordTombstoned(victim.requestId());
+        return endpointSettled && inflightSettled && attemptSettled;
     }
 
     private static void markUnknown(Request request,

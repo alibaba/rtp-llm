@@ -40,6 +40,18 @@ class PriorityPreemptionSmoke(FlexLBSmokeBase):
                 response.raise_for_status()
                 return await response.json()
 
+    async def _wait_master_inflight(
+        self, predicate, description: str, timeout_s: float = 5.0
+    ) -> dict:
+        deadline = time.monotonic() + timeout_s
+        last = None
+        while time.monotonic() < deadline:
+            last = await self._master_inflight()
+            if predicate(last):
+                return last
+            await asyncio.sleep(self.POLL_INTERVAL_S)
+        raise AssertionError(f"timeout waiting for {description}; last_inflight={last}")
+
     @staticmethod
     def _engine(snapshot: dict, grpc_target: str) -> dict | None:
         return next(
@@ -125,6 +137,66 @@ class PriorityPreemptionSmoke(FlexLBSmokeBase):
             for engine in snapshot.get("engines", [])
         }
 
+    @staticmethod
+    def _rpc_total(snapshot: dict, method: str) -> int:
+        return sum(
+            int(engine.get("rpc_counts", {}).get(method, 0))
+            for engine in snapshot.get("engines", [])
+        )
+
+    def _assert_queue_request_accounting(
+        self, inflight: dict, *, require_active: bool
+    ) -> None:
+        prefill_endpoints = inflight.get("prefill_endpoints", [])
+        request_counts = [
+            int(endpoint.get("inflight_requests", 0)) for endpoint in prefill_endpoints
+        ]
+        route_counts = [
+            int(endpoint.get("inflight_route_requests", 0))
+            for endpoint in prefill_endpoints
+        ]
+        assert all(
+            int(endpoint.get("inflight_batches", 0)) == 0
+            for endpoint in prefill_endpoints
+        ), f"QUEUE delivery created a Prefill batch ledger: {inflight}"
+        if require_active:
+            assert (
+                sum(request_counts) >= 1
+            ), f"Master did not account the active Prefill request: {inflight}"
+            assert (
+                sum(route_counts) >= 1
+            ), f"Master did not account the active route request: {inflight}"
+        if self.args.prefill_request_cap > 0:
+            assert all(
+                count <= self.args.prefill_request_cap for count in route_counts
+            ), (
+                "Prefill route-request cap exceeded: "
+                f"cap={self.args.prefill_request_cap}, inflight={inflight}"
+            )
+
+    @staticmethod
+    def _all_master_accounting_clean(inflight: dict) -> bool:
+        prefill_endpoints = inflight.get("prefill_endpoints", [])
+        decode_endpoints = inflight.get("decode_endpoints", [])
+        return (
+            bool(prefill_endpoints)
+            and bool(decode_endpoints)
+            and int(inflight.get("scheduler_inflight", 0)) == 0
+            and all(
+                int(endpoint.get(field, 0)) == 0
+                for endpoint in prefill_endpoints
+                for field in (
+                    "inflight_batches",
+                    "inflight_requests",
+                    "inflight_route_requests",
+                )
+            )
+            and all(
+                int(endpoint.get("inflight_requests", 0)) == 0
+                for endpoint in decode_endpoints
+            )
+        )
+
     async def run(self) -> tuple[bool, str]:
         import grpc
 
@@ -135,23 +207,42 @@ class PriorityPreemptionSmoke(FlexLBSmokeBase):
         high_schedule_task: asyncio.Task | None = None
         selected_decode_name = ""
         try:
+            delivery_baseline = await self._get_snapshot()
+            low_block_keys = [low_rid * 100 + 1]
             low_response = await self._schedule(
                 low_rid,
                 input_len=512,
                 output_len=200,
                 priority=30,
-                block_keys=[low_rid * 100 + 1],
+                block_keys=low_block_keys,
             )
             assert low_response.success and low_response.code == 200, (
                 f"low schedule failed: code={low_response.code} "
                 f"message={low_response.error_message}"
             )
+            if self.args.schedule_mode == "queue":
+                assert (
+                    not low_response.enqueued_by_master
+                ), "QUEUE low request was enqueued by Master"
+                low_route_inflight = await self._master_inflight()
+                self._assert_queue_request_accounting(
+                    low_route_inflight, require_active=True
+                )
             prefill_target = self._role_addr(low_response, "PREFILL")
             decode_target = self._role_addr(low_response, "DECODE")
             assert prefill_target, "low response has no original Prefill route"
             assert decode_target, "low response has no Decode route"
 
-            low_stream = await self._start_stream(low_response, low_rid)
+            low_stream = await self._start_stream(
+                low_response,
+                low_rid,
+                input_pb=self._build_generate_input(
+                    low_rid,
+                    input_len=512,
+                    output_len=200,
+                    block_keys=low_block_keys,
+                ),
+            )
             victim_terminal = VictimTerminal()
             low_stream_task = asyncio.create_task(
                 self._consume_victim(low_stream, victim_terminal)
@@ -199,14 +290,19 @@ class PriorityPreemptionSmoke(FlexLBSmokeBase):
             assert (
                 scheduler_inflight_before >= 1
             ), f"Master did not account the low victim: {inflight_before}"
+            if self.args.schedule_mode == "queue":
+                self._assert_queue_request_accounting(
+                    inflight_before, require_active=False
+                )
 
+            high_block_keys = [high_rid * 100 + 1]
             high_schedule_task = asyncio.create_task(
                 self._schedule(
                     high_rid,
                     input_len=512,
                     output_len=2,
                     priority=70,
-                    block_keys=[high_rid * 100 + 1],
+                    block_keys=high_block_keys,
                 )
             )
 
@@ -265,6 +361,10 @@ class PriorityPreemptionSmoke(FlexLBSmokeBase):
                 f"decode_shadow_before={decode_inflight_before}, "
                 f"decode_shadow_during={decode_inflight_during}"
             )
+            if self.args.schedule_mode == "queue":
+                self._assert_queue_request_accounting(
+                    inflight_during, require_active=False
+                )
 
             _, canceled_matches = await self._wait_prefill_progress(
                 prefill_target,
@@ -284,6 +384,28 @@ class PriorityPreemptionSmoke(FlexLBSmokeBase):
                 f"high schedule failed: code={high_response.code} "
                 f"message={high_response.error_message}"
             )
+            if self.args.schedule_mode == "queue":
+                assert (
+                    not high_response.enqueued_by_master
+                ), "QUEUE high request was enqueued by Master"
+                high_route_inflight = await self._master_inflight()
+                self._assert_queue_request_accounting(
+                    high_route_inflight, require_active=True
+                )
+                high_stream = await self._start_stream(
+                    high_response,
+                    high_rid,
+                    input_pb=self._build_generate_input(
+                        high_rid,
+                        input_len=512,
+                        output_len=2,
+                        block_keys=high_block_keys,
+                    ),
+                )
+                high_snap = StreamSnapshot()
+                high_stream_task = asyncio.create_task(
+                    self._consume_stream(high_stream, high_snap)
+                )
             dispatched_snapshot = await self._wait_snapshot(
                 lambda snap: any(
                     engine.get("role") == "decode"
@@ -345,20 +467,51 @@ class PriorityPreemptionSmoke(FlexLBSmokeBase):
                     f"engine={name} delta={delta} expected={expected}"
                 )
 
-            high_stream = await self._start_stream(high_response, high_rid)
-            high_snap = StreamSnapshot()
-            high_stream_task = asyncio.create_task(
-                self._consume_stream(high_stream, high_snap)
-            )
+            if high_stream_task is None:
+                high_stream = await self._start_stream(high_response, high_rid)
+                high_snap = StreamSnapshot()
+                high_stream_task = asyncio.create_task(
+                    self._consume_stream(high_stream, high_snap)
+                )
             await asyncio.wait_for(high_stream_task, timeout=5.0)
             assert (
                 high_snap.completed and high_snap.error is None
             ), f"high request did not complete normally: {high_snap}"
+            delivery_detail = ""
+            if self.args.schedule_mode == "queue":
+                final_inflight = await self._wait_master_inflight(
+                    self._all_master_accounting_clean,
+                    "QUEUE request ledgers and scheduler accounting to drain",
+                    timeout_s=8.0,
+                )
+                final_snapshot = await self._get_snapshot()
+                enqueue_delta = self._rpc_total(
+                    final_snapshot, "enqueue_batch"
+                ) - self._rpc_total(delivery_baseline, "enqueue_batch")
+                generate_delta = self._rpc_total(
+                    final_snapshot, "generate_stream"
+                ) - self._rpc_total(delivery_baseline, "generate_stream")
+                assert enqueue_delta == 0, (
+                    "QUEUE delivery called EnqueueBatch: "
+                    f"delta={enqueue_delta}, snapshot={final_snapshot}"
+                )
+                assert generate_delta >= 2, (
+                    "QUEUE frontend delivery did not call GenerateStream for both requests: "
+                    f"delta={generate_delta}, snapshot={final_snapshot}"
+                )
+                self._assert_queue_request_accounting(
+                    final_inflight, require_active=False
+                )
+                delivery_detail = (
+                    f"; route_delivery=2; enqueue_batch_delta={enqueue_delta}; "
+                    f"generate_stream_delta={generate_delta}; ledgers=clean"
+                )
 
             return True, (
                 f"victim={low_rid} P30 RUNNING -> CANCELED+8429; "
                 f"incoming={high_rid} P70 dispatched after fence; "
                 f"cancel_route={original_prefill_name}; repeated_ack=ACCEPTED"
+                f"{delivery_detail}"
             )
         except Exception as exc:
             return False, f"{type(exc).__name__}: {exc}"
@@ -384,7 +537,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--schedule-mode", choices=["auto", "batch", "direct", "queue"], default="batch"
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--prefill-request-cap",
+        type=int,
+        default=0,
+        help="Configured per-Prefill route-request cap (0 disables the cap)",
+    )
+    args = parser.parse_args()
+    if args.prefill_request_cap < 0:
+        parser.error("--prefill-request-cap must be non-negative")
+    return args
 
 
 async def main() -> None:

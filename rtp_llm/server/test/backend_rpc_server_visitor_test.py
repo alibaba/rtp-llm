@@ -3,7 +3,7 @@ import os
 import unittest
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import torch
 
@@ -14,12 +14,13 @@ from rtp_llm.config.exceptions import (
 )
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, RoleType
 from rtp_llm.metrics import GaugeMetrics
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
 from rtp_llm.server.backend_rpc_server_visitor import (
     BackendRPCServerVisitor,
     get_role_names,
 )
 from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
-from rtp_llm.server.master_client import FlexlbResponse
+from rtp_llm.server.master_client import FlexlbResponse, MasterClient
 from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
 
 
@@ -38,6 +39,8 @@ class _FakeGenerateConfig:
         self.role_addrs = []
         self.is_streaming = is_streaming
         self.max_new_tokens = 16
+        self.num_beams = 1
+        self.force_disable_sp_run = False
         self.calculate_loss = calculate_loss
         self.return_hidden_states = return_hidden_states
         self.return_all_hidden_states = return_all_hidden_states
@@ -115,6 +118,10 @@ class _FakeHostService:
 
     def get_master_addr(self):
         return "master:1234"
+
+
+class _FakeMasterConfig:
+    master_default_timeout_ms = 3000
 
 
 class _FakeInputPB:
@@ -223,14 +230,19 @@ class BackendRPCServerVisitorFrontendCacheMetricTest(unittest.TestCase):
 
 
 class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
-    async def test_get_master_route_addrs_passes_pb_and_marks_master_enqueue(self):
+    @staticmethod
+    def _master_route_visitor(master_client):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor.seq_size_per_block = 16
-        visitor.master_client = _FakeMasterClient()
+        visitor.master_client = master_client
         visitor._route_cache_keys = lambda keys: keys
         visitor._report_recent_cache_key_metrics = lambda keys: None
         visitor._page_rr_route_cache_keys = False
         visitor._page_rr_cp_size = 1
+        return visitor
+
+    async def test_get_master_route_addrs_passes_pb_and_marks_master_enqueue(self):
+        visitor = self._master_route_visitor(_FakeMasterClient())
 
         input = _FakeRouteInput()
 
@@ -242,7 +254,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
             return_value=_FakeInputPB(),
         ), patch(
             "rtp_llm.server.backend_rpc_server_visitor.kmonitor"
-        ):
+        ) as mock_kmonitor:
             result = await visitor.get_master_route_addrs(input)
 
         self.assertIsNone(result)
@@ -254,6 +266,108 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
             visitor.master_client.calls[0]["input_pb"].SerializeToString(),
             b"serialized-input",
         )
+        mock_kmonitor.report.assert_called_once_with(
+            AccMetrics.MASTER_ROUTE_QPS_METRIC, 1
+        )
+
+    async def test_non_200_master_response_reports_route_error_once(self):
+        master_client = MasterClient(
+            host_service=_FakeHostService(), master_config=_FakeMasterConfig()
+        )
+        master_client._send_schedule_request = AsyncMock(
+            return_value=SimpleNamespace(
+                code=int(ExceptionType.PRIORITY_ADMISSION_REJECTED),
+                error_message="same-priority request ahead",
+                admission_reject_reason=int(AdmissionRejectReason.SAME_PRIORITY_AHEAD),
+                queue_length=7,
+            )
+        )
+        visitor = self._master_route_visitor(master_client)
+        input = _FakeRouteInput()
+
+        with patch(
+            "rtp_llm.server.backend_rpc_server_visitor.get_block_cache_keys",
+            return_value=[11, 22],
+        ), patch(
+            "rtp_llm.server.backend_rpc_server_visitor.trans_input",
+            return_value=_FakeInputPB(),
+        ), patch(
+            "rtp_llm.metrics.kmonitor.report"
+        ) as report:
+            with self.assertRaises(FtRuntimeException) as ctx:
+                await visitor.get_master_route_addrs(input)
+
+        self.assertEqual(
+            ctx.exception.exception_type,
+            ExceptionType.PRIORITY_ADMISSION_REJECTED,
+        )
+        report.assert_called_once_with(
+            AccMetrics.MASTER_ROUTE_ERROR_QPS_METRIC,
+            1,
+            {"error_code": "8430_PRIORITY_ADMISSION_REJECTED"},
+        )
+
+    async def test_master_connection_failure_reports_route_error_once(self):
+        master_client = MasterClient(
+            host_service=_FakeHostService(), master_config=_FakeMasterConfig()
+        )
+        master_client._send_schedule_request = AsyncMock(return_value=None)
+        visitor = self._master_route_visitor(master_client)
+
+        with patch(
+            "rtp_llm.server.backend_rpc_server_visitor.get_block_cache_keys",
+            return_value=[11, 22],
+        ), patch(
+            "rtp_llm.server.backend_rpc_server_visitor.trans_input",
+            return_value=_FakeInputPB(),
+        ), patch(
+            "rtp_llm.metrics.kmonitor.report"
+        ) as report:
+            result = await visitor.get_master_route_addrs(_FakeRouteInput())
+
+        self.assertTrue(result.connection_failed)
+        report.assert_called_once_with(
+            AccMetrics.MASTER_ROUTE_ERROR_QPS_METRIC,
+            1,
+            {"error_code": "8201_GET_CONNECTION_FAILED"},
+        )
+
+    async def test_master_exceptions_report_once_and_propagate_unchanged(self):
+        cases = (
+            (
+                FtRuntimeException(
+                    ExceptionType.DEADLINE_EXCEEDED, "schedule deadline exceeded"
+                ),
+                "8204_DEADLINE_EXCEEDED",
+            ),
+            (RuntimeError("unexpected master client failure"), "514_UNKNOWN_ERROR"),
+        )
+        for error, expected_error_code in cases:
+            with self.subTest(error=type(error).__name__):
+                master_client = MasterClient(
+                    host_service=_FakeHostService(), master_config=_FakeMasterConfig()
+                )
+                master_client._send_schedule_request = AsyncMock(side_effect=error)
+                visitor = self._master_route_visitor(master_client)
+
+                with patch(
+                    "rtp_llm.server.backend_rpc_server_visitor.get_block_cache_keys",
+                    return_value=[11, 22],
+                ), patch(
+                    "rtp_llm.server.backend_rpc_server_visitor.trans_input",
+                    return_value=_FakeInputPB(),
+                ), patch(
+                    "rtp_llm.metrics.kmonitor.report"
+                ) as report:
+                    with self.assertRaises(type(error)) as ctx:
+                        await visitor.get_master_route_addrs(_FakeRouteInput())
+
+                self.assertIs(ctx.exception, error)
+                report.assert_called_once_with(
+                    AccMetrics.MASTER_ROUTE_ERROR_QPS_METRIC,
+                    1,
+                    {"error_code": expected_error_code},
+                )
 
     async def test_route_ips_preserves_master_route_error_code_on_route_error(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)

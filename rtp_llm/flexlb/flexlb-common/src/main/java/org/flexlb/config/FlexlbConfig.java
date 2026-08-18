@@ -525,7 +525,7 @@ public class FlexlbConfig {
 
     /**
      * Maximum total in-flight requests across all batchers. Acts as a global
-     * admission control gate at the FlexlbBatchScheduler entry.
+     * admission control gate at the PriorityScheduler entry.
      */
     private int flexlbBatchMaxInflight = 100000;
 
@@ -588,6 +588,19 @@ public class FlexlbConfig {
 
     private boolean autoTpmEnabled = false;
 
+    /**
+     * Maximum in-flight Auto-TPM requests per prefill worker.
+     *
+     * <p>This limit applies only to the {@code QUEUE + Auto-TPM} path, where
+     * Master returns routing decisions to the frontend instead of sending an
+     * EnqueueBatch RPC itself. Zero disables the per-worker limit; positive
+     * values are enforced as a hard request-count cap.
+     *
+     * <p>Environment variable:
+     * {@code AUTO_TPM_PREFILL_MAX_INFLIGHT_REQUESTS_PER_WORKER}.
+     */
+    private int autoTpmPrefillMaxInflightRequestsPerWorker = 0;
+
     /** 默认 50，一般无需修改（unset 请求的归一目标档）。 */
     private int autoTpmDefaultPriority = 50;
 
@@ -609,18 +622,20 @@ public class FlexlbConfig {
     private long autoTpmPlanCacheHitBenefitCap = 0;
 
     /**
-     * Post-success soft timeout for AdmissionLease (ms). When prefill succeeds
-     * but decode hasn't accepted within this window, the lease is force-closed
-     * and a cancel signal is sent to the engine, releasing the pinned KV cache
-     * block. 0 disables the soft timeout (legacy behavior — leaks on OOM).
+     * Post-delivery soft timeout for AdmissionLease (ms). Delivery means an
+     * EnqueueBatch acknowledgement in batch mode or route publication in
+     * route-decision mode. If Decode has not accepted within this window, the
+     * scheduler starts request-scoped Engine Cancel reconciliation. Accounting
+     * remains charged until a tombstone or typed worker terminal proves that
+     * ownership is settled. 0 disables this recovery timeout.
      * Environment variable: AUTO_TPM_POST_SUCCESS_SOFT_TIMEOUT_MS.
      */
     private long autoTpmPostSuccessSoftTimeoutMs = 30000;
 
     /**
-     * Backpressure limit for handed-over-but-not-accepted requests. When the
-     * active lease count (handed over but not yet accepted by decode) exceeds
-     * this, new prefill requests are rejected with 8502 (QUEUE_FULL). 0 disables
+     * Backpressure limit for delivered-but-not-accepted requests. When the
+     * active lease count (delivery confirmed but not yet accepted by Decode)
+     * exceeds this, new prefill requests are rejected with 8502 (QUEUE_FULL). 0 disables
      * the backpressure check.
      * Environment variable: AUTO_TPM_POST_SUCCESS_BACKPRESSURE_LIMIT.
      */
@@ -761,13 +776,28 @@ public class FlexlbConfig {
         return result;
     }
 
-    /**
-     * Returns {@code true} when the effective schedule mode is BATCH.
-     * Convenience method for strategy classes that need to decide whether
-     * to reserve prefill inflight locally or defer to FlexlbBatchScheduler.
-     */
-    public boolean isBatchPath() {
+    /** Returns {@code true} when Master sends requests through EnqueueBatch. */
+    boolean usesBatchEnqueueDelivery() {
         return getDefaultScheduleModeEnum() == ScheduleModeEnum.BATCH;
+    }
+
+    /**
+     * Returns {@code true} when routing is performed by the common priority
+     * scheduler. BATCH always uses it; QUEUE opts in only when Auto-TPM is
+     * enabled. DIRECT and the legacy QUEUE path bypass it.
+     */
+    public boolean usesPriorityScheduler() {
+        ScheduleModeEnum mode = getDefaultScheduleModeEnum();
+        return mode == ScheduleModeEnum.BATCH
+                || (mode == ScheduleModeEnum.QUEUE && autoTpmEnabled);
+    }
+
+    /**
+     * Returns {@code true} for the Auto-TPM path that returns one routing
+     * decision per request and leaves engine dispatch to the frontend.
+     */
+    public boolean usesRouteDecisionDelivery() {
+        return getDefaultScheduleModeEnum() == ScheduleModeEnum.QUEUE && autoTpmEnabled;
     }
 
     /**

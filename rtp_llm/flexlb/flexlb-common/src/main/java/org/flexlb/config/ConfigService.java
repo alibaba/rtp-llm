@@ -31,11 +31,12 @@ public class ConfigService {
      * Critical config fields whose parse failures must abort startup (fail-fast)
      * instead of silently falling back to defaults.
      *
-     * <p>F4 (P0-4): includes {@code autoTpmEnabled} / {@code flexlbBatchQueueMaxSize}
-     * (env parse failure aborts via the critical mechanism) and the two SLO spec
-     * strings {@code autoTpmSloLengthBuckets} / {@code autoTpmPrioritySloMultipliers}
-     * whose assignment never fails — those get a strict format pre-validation at
-     * startup instead (see {@link #validateSloPolicySpecs}).
+     * <p>F4 (P0-4): includes {@code autoTpmEnabled}, the route-decision inflight
+     * limit, and {@code flexlbBatchQueueMaxSize} (env parse failure aborts via
+     * the critical mechanism). The two SLO spec strings
+     * {@code autoTpmSloLengthBuckets} / {@code autoTpmPrioritySloMultipliers}
+     * never fail assignment, so they get strict startup format validation
+     * instead (see {@link #validateSloPolicySpecs}).
      */
     private static final Set<String> CRITICAL_CONFIG_FIELDS = Set.of(
             "defaultScheduleMode",
@@ -47,6 +48,7 @@ public class ConfigService {
             "costFormula",
             "prefillPredictorType",
             "autoTpmEnabled",
+            "autoTpmPrefillMaxInflightRequestsPerWorker",
             "flexlbBatchQueueMaxSize",
             "autoTpmSloLengthBuckets",
             "autoTpmPrioritySloMultipliers",
@@ -102,6 +104,8 @@ public class ConfigService {
         config.getDefaultScheduleModeEnum();
         validateSloPolicySpecs(config);
         validateCacheAffinityConfig(config);
+        validateSchedulingLimits(config);
+        warnIneffectiveSchedulingConfig(config);
 
         dumpEffectiveConfig(config);
         this.flexlbConfig = config;
@@ -318,6 +322,9 @@ public class ConfigService {
             config.isCacheAffinityEnabled(),
             config.getCacheAffinityMaxExtraTtftMs(),
             config.getCacheAffinityMinHitRate());
+        log.info("prioritySchedulerEnabled={}, deliveryMode={}, workerInflightUnit={}",
+            config.usesPriorityScheduler(), deliveryMode(config),
+            workerInflightUnit(config));
         log.info("batchMaxCapacity={}, batchMaxInflight={}",
             config.getFlexlbBatchMaxCapacity(), config.getFlexlbBatchMaxInflight());
         log.info("fixedMaxInflightBatches={}, sloMaxInflightBatches={}",
@@ -326,6 +333,8 @@ public class ConfigService {
         log.info("prefillPredictorType={}", config.getPrefillPredictorType());
         log.info("autoTpmEnabled={}, autoTpmDefaultPriority={}",
             config.isAutoTpmEnabled(), config.getAutoTpmDefaultPriority());
+        log.info("autoTpmPrefillMaxInflightRequestsPerWorker={}",
+            config.getAutoTpmPrefillMaxInflightRequestsPerWorker());
         log.info("autoTpmSloLengthBuckets={}, autoTpmPrioritySloMultipliers={}",
             config.getAutoTpmSloLengthBuckets(), config.getAutoTpmPrioritySloMultipliers());
         log.info("autoTpmPrefillQueueEvictEnabled={}, autoTpmDecodeReservedEvictEnabled={}",
@@ -388,6 +397,50 @@ public class ConfigService {
             throw new ConfigValidationException(
                     "cacheAffinityMinHitRate", "must be a finite percentage in [0, 100]");
         }
+    }
+
+    /** Validate hard scheduling limits after JSON and environment overrides. */
+    private static void validateSchedulingLimits(FlexlbConfig config) {
+        if (config.getAutoTpmPrefillMaxInflightRequestsPerWorker() < 0) {
+            throw new ConfigValidationException(
+                    "autoTpmPrefillMaxInflightRequestsPerWorker",
+                    "must be greater than or equal to zero (zero disables the limit)");
+        }
+    }
+
+    private static void warnIneffectiveSchedulingConfig(FlexlbConfig config) {
+        if (config.usesRouteDecisionDelivery()
+                && config.getAutoTpmPrefillMaxInflightRequestsPerWorker() == 0) {
+            log.warn("QUEUE + Auto-TPM route delivery has no per-Prefill inflight request limit. "
+                    + "Set AUTO_TPM_PREFILL_MAX_INFLIGHT_REQUESTS_PER_WORKER to a positive value "
+                    + "for a hard worker capacity bound");
+        }
+        if (config.getAutoTpmPrefillMaxInflightRequestsPerWorker() > 0
+                && !config.usesRouteDecisionDelivery()) {
+            log.warn("AUTO_TPM_PREFILL_MAX_INFLIGHT_REQUESTS_PER_WORKER is set to {}, "
+                            + "but it is active only when scheduleMode=QUEUE and Auto-TPM is enabled",
+                    config.getAutoTpmPrefillMaxInflightRequestsPerWorker());
+        }
+    }
+
+    private static String deliveryMode(FlexlbConfig config) {
+        if (config.usesBatchEnqueueDelivery()) {
+            return "BATCH_ENQUEUE";
+        }
+        if (config.usesRouteDecisionDelivery()) {
+            return "ROUTE_DECISION";
+        }
+        return "BYPASS";
+    }
+
+    private static String workerInflightUnit(FlexlbConfig config) {
+        if (config.usesBatchEnqueueDelivery()) {
+            return "BATCH";
+        }
+        if (config.usesRouteDecisionDelivery()) {
+            return "REQUEST";
+        }
+        return "N/A";
     }
 
     /**

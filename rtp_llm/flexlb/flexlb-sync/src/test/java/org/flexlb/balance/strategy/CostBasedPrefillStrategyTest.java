@@ -5,7 +5,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.BatchItem;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -47,7 +47,7 @@ class CostBasedPrefillStrategyTest {
     private ResourceMeasureFactory resourceMeasureFactory;
     private EngineHealthReporter engineHealthReporter;
     private PrefillResourceMeasure prefillResourceMeasure;
-    private FlexlbBatchScheduler batchScheduler;
+    private PriorityScheduler batchScheduler;
     private EndpointRegistry endpointRegistry;
     private CostBasedPrefillStrategy strategy;
     private FlexlbConfig endpointConfig;
@@ -62,7 +62,7 @@ class CostBasedPrefillStrategyTest {
         cacheAwareService = Mockito.mock(CacheAwareService.class);
         resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
-        batchScheduler = Mockito.mock(FlexlbBatchScheduler.class);
+        batchScheduler = Mockito.mock(PriorityScheduler.class);
 
         // Create registry first to break circular dependency
         endpointRegistry = new EndpointRegistry(configService, () -> batchScheduler,
@@ -105,6 +105,37 @@ class CostBasedPrefillStrategyTest {
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
+    }
+
+    @Test
+    void unavailableWaitEstimateCannotWinBySignedOverflow() {
+        Map<String, WorkerStatus> prefillMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+        prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
+
+        PrefillEndpoint first = Mockito.spy(
+                endpointRegistry.getPrefill("10.0.0.1:8080"));
+        Mockito.doReturn(Long.MAX_VALUE).when(first).realWaitTimeMs();
+        endpointRegistry.getPrefillEndpoints().put("10.0.0.1:8080", first);
+
+        ServerStatus mixed = strategy.select(
+                buildContext(1_000, 7_001L), RoleType.PREFILL, null);
+
+        assertTrue(mixed.isSuccess());
+        assertEquals("10.0.0.2", mixed.getServerIp(),
+                "an unavailable wait sentinel must not wrap into the minimum score");
+
+        PrefillEndpoint second = Mockito.spy(
+                endpointRegistry.getPrefill("10.0.0.2:8080"));
+        Mockito.doReturn(Long.MAX_VALUE).when(second).realWaitTimeMs();
+        endpointRegistry.getPrefillEndpoints().put("10.0.0.2:8080", second);
+
+        ServerStatus allUnavailable = strategy.select(
+                buildContext(1_000, 7_002L), RoleType.PREFILL, null);
+
+        assertFalse(allUnavailable.isSuccess(),
+                "selection must retry elsewhere when no coherent wait snapshot exists");
     }
 
     @Test

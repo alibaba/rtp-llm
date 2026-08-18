@@ -87,7 +87,7 @@ import static org.mockito.Mockito.withSettings;
  *
  * <p>The exercised path is:
  * client stub -> Netty Master gRPC server -> FlexlbServiceImpl -> RouteService
- * -> FlexlbBatchScheduler -> WorkerBatcher -> EngineGrpcClient -> Netty mock engine.
+ * -> PriorityScheduler -> WorkerBatcher -> EngineGrpcClient -> Netty mock engine.
  * The worker capacities are fixed by the fixture, while worker selection uses the
  * production DefaultRouter and cost-based prefill/decode strategies. The 750-engine
  * selection topology has its own focused performance regression test.

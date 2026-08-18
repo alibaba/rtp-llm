@@ -11,6 +11,8 @@ import java.util.Comparator;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.PriorityQueue;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -33,7 +35,7 @@ public class BatcherContext {
     private final String key;
     private final PrefillEndpoint prefillEp;
     private final FlexlbConfig cfg;
-    private final BatchDecisionHandler handler;
+    private final DecisionGroupHandler decisionHandler;
     private final PriorityBlockingQueue<BatchItem> queue;
     private final AtomicInteger queueDepth;
     private final AtomicLong queueVersion;
@@ -42,44 +44,87 @@ public class BatcherContext {
     private final BatchSchedulerReporter reporter;
 
     /**
-     * Items removed from the priority queue for a dispatch callback but not
-     * yet classified as dispatched, restored, or terminal. Guarded by
+     * Route decisions whose logical Fixed/SLO group is already ready, but
+     * whose delivery is waiting for a request-mode inflight slot.
+     *
+     * <p>The backlog is guarded by the existing per-worker {@link #queueLock}
+     * and shares {@link #queueDepth} with the active decision queue. It cannot
+     * grow beyond requests already admitted into that bounded queue and does
+     * not allocate a second per-request wrapper.
+     */
+    private final PriorityQueue<BatchItem> readyDeliveryQueue;
+    private volatile int readyDeliveryCount;
+
+    /**
+     * Items removed from the priority queue for a delivery callback but not
+     * yet classified as delivered, restored, or terminal. Guarded by
      * {@link #queueLock}. Their queue slots remain charged in
      * {@link #queueDepth} until the callback resolves ownership.
      */
-    private final Map<BatchItem, PendingDispatch> dispatchPending = new IdentityHashMap<>();
+    private final Map<BatchItem, PendingDelivery> pendingDeliveries = new IdentityHashMap<>();
     private boolean stopped;
 
-    private enum PendingDispatchState { STAGED, CLAIMED }
+    /**
+     * Compact ownership state stored directly as the identity-map value.
+     * Enum singletons avoid allocating a wrapper every time an item is staged.
+     */
+    private enum PendingDelivery {
+        STAGED_ACTIVE(false, false),
+        CLAIMED_ACTIVE(true, false),
+        STAGED_READY(false, true),
+        CLAIMED_READY(true, true);
 
-    private record PendingDispatch(BatchItem item, PendingDispatchState state) {
+        private final boolean claimed;
+        private final boolean restoreToReadyQueue;
+
+        PendingDelivery(boolean claimed, boolean restoreToReadyQueue) {
+            this.claimed = claimed;
+            this.restoreToReadyQueue = restoreToReadyQueue;
+        }
+
+        boolean isStaged() {
+            return !claimed;
+        }
+
+        boolean isClaimed() {
+            return claimed;
+        }
+
+        boolean restoresToReadyQueue() {
+            return restoreToReadyQueue;
+        }
+
+        PendingDelivery claimedState() {
+            return restoreToReadyQueue ? CLAIMED_READY : CLAIMED_ACTIVE;
+        }
     }
 
     enum PendingRestoreResult { RESTORED, STOPPED, NOT_PENDING }
     enum PendingClaimResult { CLAIMED, STOPPED, NOT_PENDING }
+    enum ReadyDeliveryResult { EMPTY, CAPACITY_BLOCKED, DELIVERED }
 
-    /** Dispatch-interval sliding average for the 8.4 queue wait estimate. */
-    private volatile long lastDispatchAtMs;
-    private volatile double dispatchIntervalEmaMs;
+    /** Decision-interval sliding average for the queue wait estimate. */
+    private volatile long lastDecisionAtMs;
+    private volatile double decisionIntervalEmaMs;
 
     BatcherContext(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
-                   BatchDecisionHandler handler,
+                   DecisionGroupHandler decisionHandler,
                    PriorityBlockingQueue<BatchItem> queue,
                    BatchSchedulerReporter reporter) {
-        this(key, prefillEp, cfg, handler, queue, new AtomicInteger(queue.size()), reporter);
+        this(key, prefillEp, cfg, decisionHandler, queue, new AtomicInteger(queue.size()), reporter);
     }
 
     BatcherContext(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
-                   BatchDecisionHandler handler,
+                   DecisionGroupHandler decisionHandler,
                    PriorityBlockingQueue<BatchItem> queue,
                    AtomicInteger queueDepth,
                    BatchSchedulerReporter reporter) {
-        this(key, prefillEp, cfg, handler, queue, queueDepth, new AtomicLong(),
+        this(key, prefillEp, cfg, decisionHandler, queue, queueDepth, new AtomicLong(),
                 new ReentrantLock(), Comparator.comparingLong(BatchItem::sortKey), reporter);
     }
 
     BatcherContext(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
-                   BatchDecisionHandler handler,
+                   DecisionGroupHandler decisionHandler,
                    PriorityBlockingQueue<BatchItem> queue,
                    AtomicInteger queueDepth,
                    AtomicLong queueVersion,
@@ -89,13 +134,14 @@ public class BatcherContext {
         this.key = key;
         this.prefillEp = prefillEp;
         this.cfg = cfg;
-        this.handler = handler;
+        this.decisionHandler = decisionHandler;
         this.queue = queue;
         this.queueDepth = queueDepth;
         this.queueVersion = queueVersion;
         this.queueLock = queueLock;
         this.queueOrder = queueOrder;
         this.reporter = reporter;
+        this.readyDeliveryQueue = new PriorityQueue<>(11, queueOrder);
     }
 
     // ---- accessors ----
@@ -138,12 +184,34 @@ public class BatcherContext {
         return queue.peek();
     }
 
+    /** Whether the active queue still has work requiring a logical decision. */
+    boolean isActiveEmpty() {
+        return queue.isEmpty();
+    }
+
     boolean isEmpty() {
         return queueDepth.get() == 0;
     }
 
+    /**
+     * Active decision-queue depth. The common no-backlog path preserves the
+     * existing charged-depth read exactly; only a live ready backlog needs the
+     * physical queue size to exclude already-decided requests.
+     */
+    int activeSize() {
+        return readyDeliveryCount == 0 ? queueDepth.get() : queue.size();
+    }
+
     int size() {
         return queueDepth.get();
+    }
+
+    int readyDeliveryCount() {
+        return readyDeliveryCount;
+    }
+
+    boolean hasProcessableWork() {
+        return !queue.isEmpty() || readyDeliveryCount > 0;
     }
 
     // ---- queue mutation ----
@@ -152,7 +220,13 @@ public class BatcherContext {
         queueLock.lock();
         try {
             boolean removed = queue.remove(item);
+            if (!removed && readyDeliveryQueue.remove(item)) {
+                readyDeliveryCount--;
+                item.clearRouteDecisionReady();
+                removed = true;
+            }
             if (removed) {
+                item.clearParkTrace();
                 queueDepth.decrementAndGet();
                 queueVersion.incrementAndGet();
             }
@@ -166,6 +240,17 @@ public class BatcherContext {
         queueLock.lock();
         try {
             int drained = queue.drainTo(dst);
+            for (int i = dst.size() - drained; i < dst.size(); i++) {
+                dst.get(i).clearParkTrace();
+            }
+            while (!readyDeliveryQueue.isEmpty()) {
+                BatchItem ready = readyDeliveryQueue.poll();
+                ready.clearRouteDecisionReady();
+                ready.clearParkTrace();
+                dst.add(ready);
+                drained++;
+            }
+            readyDeliveryCount = 0;
             if (drained > 0) {
                 queueDepth.addAndGet(-drained);
                 queueVersion.incrementAndGet();
@@ -179,12 +264,57 @@ public class BatcherContext {
      * Items in active queue order (legacy: {@link BatchItem#sortKey()};
      * Auto-TPM: {@link WorkerBatcher#AUTO_TPM_QUEUE_ORDER}, which delegates
      * to {@link PriorityOrdering#STRICT}), suitable for greedy-fill iteration
-     * in dispatch algorithms.
+     * in grouping algorithms.
      */
     List<BatchItem> sortedItems() {
         List<BatchItem> candidates = new ArrayList<>(queue);
         candidates.sort(queueOrder);
         return candidates;
+    }
+
+    /**
+     * All removable, not-yet-delivered requests in priority order. Used by
+     * admission snapshots so a ready route decision remains preemptible and
+     * capacity-charged until its delivery actually claims ownership.
+     * Caller holds {@link #queueLock}.
+     */
+    List<BatchItem> sortedQueuedItems() {
+        if (readyDeliveryCount == 0) {
+            return sortedItems();
+        }
+        List<BatchItem> candidates = new ArrayList<>(queue.size() + readyDeliveryCount);
+        candidates.addAll(queue);
+        candidates.addAll(readyDeliveryQueue);
+        candidates.sort(queueOrder);
+        return candidates;
+    }
+
+    BatchItem findQueued(long requestId) {
+        for (BatchItem item : queue) {
+            if (item.requestId() == requestId) {
+                return item;
+            }
+        }
+        for (BatchItem item : readyDeliveryQueue) {
+            if (item.requestId() == requestId) {
+                return item;
+            }
+        }
+        return null;
+    }
+
+    void addReadyQueueSizeByPriority(Map<Integer, Integer> sizeByPriority) {
+        if (readyDeliveryCount == 0) {
+            return;
+        }
+        queueLock.lock();
+        try {
+            for (BatchItem item : readyDeliveryQueue) {
+                sizeByPriority.merge(item.priority(), 1, Integer::sum);
+            }
+        } finally {
+            queueLock.unlock();
+        }
     }
 
     /**
@@ -225,9 +355,33 @@ public class BatcherContext {
         return Math.min(total, available);
     }
 
+    /**
+     * Request-mode capacity visible to the current decision.
+     *
+     * <p>This value must not be used as the logical batch target: Auto-TPM
+     * still decides <em>when</em> work is ready with the existing batch policy.
+     * The request cap only limits the subset delivered to the caller after that
+     * decision has been made. {@link PrefillEndpoint#tryCommitRequest} remains
+     * the authoritative concurrent hard gate.
+     */
+    int availableDeliverySlots() {
+        if (prefillEp == null) {
+            return Integer.MAX_VALUE;
+        }
+        return prefillEp.availableRequestSlots(
+                cfg.getAutoTpmPrefillMaxInflightRequestsPerWorker());
+    }
+
+    /** Delivery-unit inflight count used only for decision diagnostics. */
+    int deliveryInflightCount(BatchItem head) {
+        return head != null && head.deliveryMode() == DeliveryMode.ROUTE_DECISION
+                ? prefillEp.getInflightRouteRequestCount()
+                : prefillEp.getInflightBatchCount();
+    }
+
     void rejectForBatchTokenCapacity(BatchItem item, long capacity) {
         if (remove(item)) {
-            handler.onOfferFailure(item, new BatchTokenCapacityExceededException(
+            decisionHandler.onOfferFailure(item, new BatchTokenCapacityExceededException(
                     "request seq_len=" + item.seqLen()
                             + " cannot fit strict padded batch token capacity=" + capacity));
         }
@@ -237,64 +391,132 @@ public class BatcherContext {
         return value > 0 ? value : Long.MAX_VALUE;
     }
 
-    // ---- dispatch helpers (shared infrastructure) ----
+    // ---- delivery staging (shared infrastructure) ----
 
     /**
-     * Remove items from queue and notify handler.
+     * Remove items from the queue and notify the decision handler.
      * Caller is responsible for algorithm-specific logging and state cleanup
-     * (e.g. {@code lastParkByRequest.remove()}) before calling this.
+     * before calling this.
      */
-    void dispatch(List<BatchItem> items, DispatchMeta meta) {
-        // The dispatch-interval EMA only feeds the Auto-TPM queue-wait
+    void stageForDelivery(List<BatchItem> items, DecisionGroupMetadata metadata) {
+        // The decision-interval EMA only feeds the Auto-TPM queue-wait
         // estimate (PrefillQueueManager.estimateWaitMs); skip the synchronized
         // bookkeeping entirely on the legacy path (task10 P2-9).
         if (cfg.isAutoTpmEnabled()) {
-            recordDispatchInterval(now());
+            recordDecisionInterval(now());
         }
-        List<BatchItem> staged = stageForDispatch(items);
+        deliverStaged(stageRequests(items), metadata);
+    }
+
+    /**
+     * Publish one logical Fixed/SLO decision group.
+     *
+     * <p>The batch-only fast path is the established delivery protocol. If a
+     * route-decision member is present, every such member becomes delivery
+     * ready atomically: the available prefix is staged for the callback and
+     * the remainder moves to {@link #readyDeliveryQueue}. Request capacity never
+     * feeds back into the logical batching decision.
+     */
+    void stageDecisionGroup(List<BatchItem> logicalGroup, DecisionGroupMetadata metadata) {
+        if (logicalGroup == null || logicalGroup.isEmpty()) {
+            return;
+        }
+        boolean containsRouteDecision = false;
+        for (BatchItem item : logicalGroup) {
+            if (item.deliveryMode() == DeliveryMode.ROUTE_DECISION) {
+                containsRouteDecision = true;
+                break;
+            }
+        }
+        if (!containsRouteDecision) {
+            stageForDelivery(logicalGroup, metadata);
+            return;
+        }
+
+        if (cfg.isAutoTpmEnabled()) {
+            recordDecisionInterval(now());
+        }
+        List<BatchItem> staged = stageDecisionGroup(
+                logicalGroup, availableDeliverySlots(), metadata.reason());
+        deliverStaged(staged,
+                new DecisionGroupMetadata(metadata.reason(), liveQueuedDepth()));
+    }
+
+    /** Drain a previously-decided route backlog before making a new decision. */
+    ReadyDeliveryResult deliverReadyRequests() {
+        if (readyDeliveryCount == 0) {
+            return ReadyDeliveryResult.EMPTY;
+        }
+        int availableSlots = availableDeliverySlots();
+        if (availableSlots == 0) {
+            return ReadyDeliveryResult.CAPACITY_BLOCKED;
+        }
+        int maxDelivery = Math.max(1, cfg.getFlexlbBatchSizeMax());
+        int deliveryLimit = availableSlots == Integer.MAX_VALUE
+                ? maxDelivery : Math.min(maxDelivery, availableSlots);
+        ReadyStage readyStage = stageReadyRequests(deliveryLimit);
+        if (readyStage.items().isEmpty()) {
+            return readyDeliveryCount == 0
+                    ? ReadyDeliveryResult.EMPTY : ReadyDeliveryResult.CAPACITY_BLOCKED;
+        }
+        deliverStaged(readyStage.items(),
+                new DecisionGroupMetadata(readyStage.reason(), readyStage.queueDepth()));
+        return ReadyDeliveryResult.DELIVERED;
+    }
+
+    private void deliverStaged(List<BatchItem> staged, DecisionGroupMetadata metadata) {
         if (staged.isEmpty()) {
             return;
         }
         Throwable callbackFailure = null;
         try {
-            handler.onBatchReady(staged, meta);
+            decisionHandler.onDecisionGroupReady(staged, metadata);
         } catch (Throwable t) {
             callbackFailure = t;
         } finally {
-            // Preserve the original BatchDecisionHandler contract: a normal
+            // Preserve the original DecisionGroupHandler contract: a normal
             // return consumes every member the handler did not explicitly
             // resolve. Only a failed callback restores still-STAGED members.
             // CLAIMED ownership is never safe to restore, even on failure.
-            Map<BatchItem, Throwable> failedItems = new java.util.LinkedHashMap<>();
+            Map<BatchItem, Throwable> failedItems = null;
             for (BatchItem item : staged) {
                 boolean stagedResolved;
                 if (callbackFailure == null) {
-                    stagedResolved = completeStagedPendingDispatch(item);
+                    stagedResolved = completeStagedPendingDelivery(item);
                 } else {
-                    PendingRestoreResult restore = restoreStagedPendingDispatch(item);
+                    PendingRestoreResult restore = restoreStagedPendingDelivery(item);
                     stagedResolved = restore != PendingRestoreResult.NOT_PENDING;
                     if (restore == PendingRestoreResult.STOPPED) {
+                        if (failedItems == null) {
+                            failedItems = new java.util.LinkedHashMap<>();
+                        }
                         failedItems.put(item,
-                                new CancellationException("FlexLB batcher stopped: " + key));
+                                new CancellationException(
+                                        "FlexLB worker scheduling queue stopped: " + key));
                     }
                 }
-                if (!stagedResolved && completeClaimedPendingDispatch(item)) {
+                if (!stagedResolved && completeClaimedPendingDelivery(item)) {
                     // A callback which claimed ownership but escaped without
                     // resolving the item must not leave a charged orphan. It
                     // is no longer safe to requeue (Decode may be visible), so
                     // hand it to the terminal failure callback exactly once.
+                    if (failedItems == null) {
+                        failedItems = new java.util.LinkedHashMap<>();
+                    }
                     failedItems.put(item, callbackFailure != null
                             ? callbackFailure
                             : new IllegalStateException(
-                                    "batch callback left claimed item unresolved"));
+                                    "delivery callback left claimed item unresolved"));
                 }
             }
-            for (Map.Entry<BatchItem, Throwable> failure : failedItems.entrySet()) {
-                try {
-                    handler.onOfferFailure(failure.getKey(), failure.getValue());
-                } catch (Throwable ignored) {
-                    // The queue slot and pending ownership are already
-                    // resolved. Preserve the original callback failure.
+            if (failedItems != null) {
+                for (Map.Entry<BatchItem, Throwable> failure : failedItems.entrySet()) {
+                    try {
+                        decisionHandler.onDeliveryFailure(failure.getKey(), failure.getValue());
+                    } catch (Throwable ignored) {
+                        // The queue slot and pending ownership are already
+                        // resolved. Preserve the original callback failure.
+                    }
                 }
             }
         }
@@ -305,11 +527,11 @@ public class BatcherContext {
             throw error;
         }
         if (callbackFailure != null) {
-            throw new IllegalStateException("batch dispatch callback failed", callbackFailure);
+            throw new IllegalStateException("decision-group callback failed", callbackFailure);
         }
     }
 
-    private List<BatchItem> stageForDispatch(List<BatchItem> items) {
+    private List<BatchItem> stageRequests(List<BatchItem> items) {
         queueLock.lock();
         try {
             List<BatchItem> staged = new ArrayList<>(items.size());
@@ -317,13 +539,13 @@ public class BatcherContext {
                 if (!queue.remove(item)) {
                     continue;
                 }
-                PendingDispatch previous = dispatchPending.putIfAbsent(item,
-                        new PendingDispatch(item, PendingDispatchState.STAGED));
+                PendingDelivery previous = pendingDeliveries.putIfAbsent(
+                        item, PendingDelivery.STAGED_ACTIVE);
                 if (previous != null) {
                     // Defensive only: request IDs are unique in one batcher.
                     queue.add(item);
                     throw new IllegalStateException(
-                            "duplicate dispatch-pending item request_id=" + item.requestId());
+                            "duplicate pending-delivery item request_id=" + item.requestId());
                 }
                 // Removing the item invalidates queue snapshots even though
                 // its capacity slot remains charged until resolution.
@@ -336,21 +558,134 @@ public class BatcherContext {
         }
     }
 
+    private List<BatchItem> stageDecisionGroup(List<BatchItem> logicalGroup,
+                                               int availableRouteSlots,
+                                               String reason) {
+        int routeSlots = Math.max(0, availableRouteSlots);
+        queueLock.lock();
+        try {
+            int initialCapacity = routeSlots == Integer.MAX_VALUE
+                    ? logicalGroup.size()
+                    : Math.min(logicalGroup.size(), routeSlots + 1);
+            List<BatchItem> staged = new ArrayList<>(initialCapacity);
+            for (BatchItem item : logicalGroup) {
+                if (!queue.remove(item)) {
+                    continue;
+                }
+
+                boolean restoreToReadyQueue = false;
+                boolean stageNow = true;
+                if (item.deliveryMode() == DeliveryMode.ROUTE_DECISION) {
+                    item.markRouteDecisionReady(reason);
+                    restoreToReadyQueue = true;
+                    stageNow = routeSlots > 0;
+                    if (stageNow && routeSlots != Integer.MAX_VALUE) {
+                        routeSlots--;
+                    }
+                }
+
+                if (stageNow) {
+                    PendingDelivery previous = pendingDeliveries.putIfAbsent(
+                            item, restoreToReadyQueue
+                                    ? PendingDelivery.STAGED_READY
+                                    : PendingDelivery.STAGED_ACTIVE);
+                    if (previous != null) {
+                        restoreAfterDuplicatePending(item, restoreToReadyQueue);
+                        throw new IllegalStateException(
+                                "duplicate pending-delivery item request_id=" + item.requestId());
+                    }
+                    staged.add(item);
+                } else {
+                    readyDeliveryQueue.add(item);
+                    readyDeliveryCount++;
+                }
+                // Active -> ready/pending changes the actionable queue state,
+                // but the original capacity charge remains held.
+                queueVersion.incrementAndGet();
+            }
+            return staged;
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
+    private ReadyStage stageReadyRequests(int deliveryLimit) {
+        queueLock.lock();
+        try {
+            if (stopped || readyDeliveryCount == 0 || deliveryLimit <= 0) {
+                return ReadyStage.EMPTY;
+            }
+            int count = Math.min(deliveryLimit, readyDeliveryCount);
+            List<BatchItem> staged = new ArrayList<>(count);
+            String reason = null;
+            while (staged.size() < count) {
+                BatchItem item = readyDeliveryQueue.peek();
+                if (item == null) {
+                    readyDeliveryCount = 0;
+                    break;
+                }
+                String itemReason = item.readyDeliveryReason();
+                if (reason != null && !Objects.equals(reason, itemReason)) {
+                    break;
+                }
+                if (reason == null) {
+                    reason = itemReason;
+                }
+                readyDeliveryQueue.poll();
+                readyDeliveryCount--;
+                PendingDelivery previous = pendingDeliveries.putIfAbsent(
+                        item, PendingDelivery.STAGED_READY);
+                if (previous != null) {
+                    readyDeliveryQueue.add(item);
+                    readyDeliveryCount++;
+                    throw new IllegalStateException(
+                            "duplicate ready pending-delivery item request_id=" + item.requestId());
+                }
+                queueVersion.incrementAndGet();
+                staged.add(item);
+            }
+            return staged.isEmpty()
+                    ? ReadyStage.EMPTY
+                    : new ReadyStage(staged,
+                            reason == null ? "route_decision_ready" : reason,
+                            liveQueuedDepth());
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
+    private void restoreAfterDuplicatePending(BatchItem item,
+                                              boolean restoreToReadyQueue) {
+        if (restoreToReadyQueue) {
+            readyDeliveryQueue.add(item);
+            readyDeliveryCount++;
+        } else {
+            queue.add(item);
+        }
+    }
+
+    private int liveQueuedDepth() {
+        return queue.size() + readyDeliveryCount;
+    }
+
+    private record ReadyStage(List<BatchItem> items, String reason, int queueDepth) {
+        private static final ReadyStage EMPTY =
+                new ReadyStage(List.of(), "route_decision_ready", 0);
+    }
+
     /** Claim a staged item for the scheduler callback, fenced against shutdown. */
-    PendingClaimResult claimPendingDispatch(BatchItem item) {
+    PendingClaimResult claimPendingDelivery(BatchItem item) {
         queueLock.lock();
         try {
             if (stopped) {
                 return PendingClaimResult.STOPPED;
             }
-            PendingDispatch pending = dispatchPending.get(item);
-            if (pending == null || pending.item() != item
-                    || pending.state() != PendingDispatchState.STAGED) {
+            PendingDelivery pending = pendingDeliveries.get(item);
+            if (pending == null || !pending.isStaged()) {
                 return PendingClaimResult.NOT_PENDING;
             }
-            dispatchPending.put(item,
-                    new PendingDispatch(item, PendingDispatchState.CLAIMED));
-            // Fence the queue-to-dispatch ownership transition so a versioned
+            pendingDeliveries.put(item, pending.claimedState());
+            // Fence the queue-to-delivery ownership transition so a versioned
             // queue-side plan cannot commit across it.
             queueVersion.incrementAndGet();
             return PendingClaimResult.CLAIMED;
@@ -359,15 +694,18 @@ public class BatcherContext {
         }
     }
 
-    /** Resolve a staged/claimed item as dispatched or terminal, releasing its queue slot. */
-    boolean completePendingDispatch(BatchItem item) {
+    /** Resolve a staged/claimed item as delivered or terminal, releasing its queue slot. */
+    boolean completePendingDelivery(BatchItem item) {
         queueLock.lock();
         try {
-            PendingDispatch pending = dispatchPending.get(item);
-            if (pending == null || pending.item() != item) {
+            PendingDelivery pending = pendingDeliveries.get(item);
+            if (pending == null) {
                 return false;
             }
-            dispatchPending.remove(item);
+            pendingDeliveries.remove(item);
+            if (pending.restoresToReadyQueue()) {
+                item.clearRouteDecisionReady();
+            }
             queueDepth.decrementAndGet();
             queueVersion.incrementAndGet();
             return true;
@@ -377,15 +715,17 @@ public class BatcherContext {
     }
 
     /** Consume an unclaimed member after a successful legacy callback. */
-    private boolean completeStagedPendingDispatch(BatchItem item) {
+    private boolean completeStagedPendingDelivery(BatchItem item) {
         queueLock.lock();
         try {
-            PendingDispatch pending = dispatchPending.get(item);
-            if (pending == null || pending.item() != item
-                    || pending.state() != PendingDispatchState.STAGED) {
+            PendingDelivery pending = pendingDeliveries.get(item);
+            if (pending == null || !pending.isStaged()) {
                 return false;
             }
-            dispatchPending.remove(item);
+            pendingDeliveries.remove(item);
+            if (pending.restoresToReadyQueue()) {
+                item.clearRouteDecisionReady();
+            }
             queueDepth.decrementAndGet();
             queueVersion.incrementAndGet();
             return true;
@@ -395,15 +735,17 @@ public class BatcherContext {
     }
 
     /** Terminal fallback for a callback that escaped while owning CLAIMED. */
-    private boolean completeClaimedPendingDispatch(BatchItem item) {
+    private boolean completeClaimedPendingDelivery(BatchItem item) {
         queueLock.lock();
         try {
-            PendingDispatch pending = dispatchPending.get(item);
-            if (pending == null || pending.item() != item
-                    || pending.state() != PendingDispatchState.CLAIMED) {
+            PendingDelivery pending = pendingDeliveries.get(item);
+            if (pending == null || !pending.isClaimed()) {
                 return false;
             }
-            dispatchPending.remove(item);
+            pendingDeliveries.remove(item);
+            if (pending.restoresToReadyQueue()) {
+                item.clearRouteDecisionReady();
+            }
             queueDepth.decrementAndGet();
             queueVersion.incrementAndGet();
             return true;
@@ -417,31 +759,38 @@ public class BatcherContext {
      * The original sort key, enqueue timestamp, priority, and charged queue
      * slot are retained; no offer statistics are recorded a second time.
      */
-    PendingRestoreResult restorePendingDispatch(BatchItem item) {
-        return restorePendingDispatch(item, null);
+    PendingRestoreResult restorePendingDelivery(BatchItem item) {
+        return restorePendingDelivery(item, false);
     }
 
     /** Callback-finally fallback: never restore a request already claimed by the scheduler. */
-    private PendingRestoreResult restoreStagedPendingDispatch(BatchItem item) {
-        return restorePendingDispatch(item, PendingDispatchState.STAGED);
+    private PendingRestoreResult restoreStagedPendingDelivery(BatchItem item) {
+        return restorePendingDelivery(item, true);
     }
 
-    private PendingRestoreResult restorePendingDispatch(BatchItem item,
-                                                         PendingDispatchState requiredState) {
+    private PendingRestoreResult restorePendingDelivery(BatchItem item,
+                                                         boolean stagedOnly) {
         queueLock.lock();
         try {
-            PendingDispatch pending = dispatchPending.get(item);
-            if (pending == null || pending.item() != item
-                    || (requiredState != null && pending.state() != requiredState)) {
+            PendingDelivery pending = pendingDeliveries.get(item);
+            if (pending == null || (stagedOnly && !pending.isStaged())) {
                 return PendingRestoreResult.NOT_PENDING;
             }
-            dispatchPending.remove(item);
+            pendingDeliveries.remove(item);
             if (stopped) {
+                if (pending.restoresToReadyQueue()) {
+                    item.clearRouteDecisionReady();
+                }
                 queueDepth.decrementAndGet();
                 queueVersion.incrementAndGet();
                 return PendingRestoreResult.STOPPED;
             }
-            queue.add(item);
+            if (pending.restoresToReadyQueue()) {
+                readyDeliveryQueue.add(item);
+                readyDeliveryCount++;
+            } else {
+                queue.add(item);
+            }
             queueVersion.incrementAndGet();
             return PendingRestoreResult.RESTORED;
         } finally {
@@ -450,7 +799,7 @@ public class BatcherContext {
     }
 
     /**
-     * Linearize shutdown with queue and dispatch-pending ownership. Staged
+     * Linearize shutdown with queue and pending-delivery ownership. Staged
      * items remain engine-unseen and are drained; a callback that already
      * claimed an item owns finishing or restoring it.
      */
@@ -459,16 +808,33 @@ public class BatcherContext {
         try {
             stopped = true;
             int drained = queue.drainTo(dst);
+            for (int i = dst.size() - drained; i < dst.size(); i++) {
+                dst.get(i).clearParkTrace();
+            }
+            while (!readyDeliveryQueue.isEmpty()) {
+                BatchItem ready = readyDeliveryQueue.poll();
+                ready.clearRouteDecisionReady();
+                ready.clearParkTrace();
+                dst.add(ready);
+                drained++;
+            }
+            readyDeliveryCount = 0;
             if (drained > 0) {
                 queueDepth.addAndGet(-drained);
             }
             boolean stagedDrained = false;
-            java.util.Iterator<Map.Entry<BatchItem, PendingDispatch>> iterator =
-                    dispatchPending.entrySet().iterator();
+            java.util.Iterator<Map.Entry<BatchItem, PendingDelivery>> iterator =
+                    pendingDeliveries.entrySet().iterator();
             while (iterator.hasNext()) {
-                PendingDispatch pending = iterator.next().getValue();
-                if (pending.state() == PendingDispatchState.STAGED) {
-                    dst.add(pending.item());
+                Map.Entry<BatchItem, PendingDelivery> entry = iterator.next();
+                BatchItem item = entry.getKey();
+                PendingDelivery pending = entry.getValue();
+                if (pending.isStaged()) {
+                    if (pending.restoresToReadyQueue()) {
+                        item.clearRouteDecisionReady();
+                    }
+                    item.clearParkTrace();
+                    dst.add(item);
                     iterator.remove();
                     queueDepth.decrementAndGet();
                     stagedDrained = true;
@@ -482,43 +848,43 @@ public class BatcherContext {
         }
     }
 
-    int dispatchPendingSize() {
+    int pendingDeliveryCount() {
         queueLock.lock();
         try {
-            return dispatchPending.size();
+            return pendingDeliveries.size();
         } finally {
             queueLock.unlock();
         }
     }
 
     /**
-     * Remove head from queue and notify handler of expiry.
+     * Remove head from queue and notify decisionHandler of expiry.
      * Only called by algorithms that support deadline-based expiry.
      * Caller is responsible for algorithm-specific logging and state cleanup.
      */
     void dropHead(BatchItem head) {
         remove(head);
-        handler.onExpired(head);
+        decisionHandler.onExpired(head);
     }
 
-    // ---- dispatch interval estimation (design doc 8.4) ----
+    // ---- decision interval estimation (design doc 8.4) ----
 
-    private synchronized void recordDispatchInterval(long nowMs) {
-        if (lastDispatchAtMs > 0 && nowMs > lastDispatchAtMs) {
-            long intervalMs = nowMs - lastDispatchAtMs;
-            dispatchIntervalEmaMs = dispatchIntervalEmaMs <= 0
+    private synchronized void recordDecisionInterval(long nowMs) {
+        if (lastDecisionAtMs > 0 && nowMs > lastDecisionAtMs) {
+            long intervalMs = nowMs - lastDecisionAtMs;
+            decisionIntervalEmaMs = decisionIntervalEmaMs <= 0
                     ? intervalMs
-                    : 0.3 * intervalMs + 0.7 * dispatchIntervalEmaMs;
+                    : 0.3 * intervalMs + 0.7 * decisionIntervalEmaMs;
         }
-        lastDispatchAtMs = nowMs;
+        lastDecisionAtMs = nowMs;
     }
 
     /**
-     * Sliding-average interval between batch dispatches; before any dispatch
-     * is observed, falls back to the algorithm's batching window.
+     * Sliding-average interval between logical decision releases; before any
+     * release is observed, falls back to the algorithm's grouping window.
      */
-    long avgDispatchIntervalMs() {
-        double ema = dispatchIntervalEmaMs;
+    long avgDecisionIntervalMs() {
+        double ema = decisionIntervalEmaMs;
         if (ema > 0) {
             return Math.max(1, Math.round(ema));
         }

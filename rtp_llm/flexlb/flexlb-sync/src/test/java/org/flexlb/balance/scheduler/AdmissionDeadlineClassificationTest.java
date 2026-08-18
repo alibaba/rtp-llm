@@ -34,7 +34,7 @@ class AdmissionDeadlineClassificationTest {
 
     private static final String PREFILL_IP_PORT = "10.0.0.1:8080";
 
-    private FlexlbBatchScheduler scheduler;
+    private PriorityScheduler scheduler;
     private EndpointRegistry endpointRegistry;
     private PrefillEndpoint prefillEndpoint;
     private FlexlbConfig config;
@@ -57,7 +57,7 @@ class AdmissionDeadlineClassificationTest {
                 route(invocation.<BalanceContext>getArgument(0).getRequestId()));
 
         endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
-        scheduler = new FlexlbBatchScheduler(configService, router, endpointRegistry,
+        scheduler = new PriorityScheduler(configService, router, endpointRegistry,
                 dispatcher, reporter, null, null);
 
         WorkerStatus status = new WorkerStatus();
@@ -154,7 +154,7 @@ class AdmissionDeadlineClassificationTest {
 
         scheduler.cleanupInflight();
 
-        Response response = future.getNow(null);
+        Response response = future.join();
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode());
         assertEquals(AdmissionRejectReason.UNSPECIFIED, response.getAdmissionRejectReason());
@@ -174,7 +174,7 @@ class AdmissionDeadlineClassificationTest {
     private static void assertAdmissionFailure(BatchItem item,
                                                StrategyErrorType errorType,
                                                AdmissionRejectReason reason) {
-        Response response = item.future().getNow(null);
+        Response response = item.future().join();
         assertFalse(response.isSuccess());
         assertEquals(errorType.getErrorCode(), response.getCode());
         assertEquals(reason, response.getAdmissionRejectReason());
@@ -190,7 +190,7 @@ class AdmissionDeadlineClassificationTest {
     private BatchItem item(BalanceContext context, long enqueuedAtMs) {
         Response route = route(context.getRequestId());
         return new BatchItem(context, new CompletableFuture<>(), route,
-                FlexlbBatchScheduler.findServer(route, RoleType.PREFILL), null,
+                PriorityScheduler.findServer(route, RoleType.PREFILL), null,
                 prefillEndpoint, null, enqueuedAtMs);
     }
 

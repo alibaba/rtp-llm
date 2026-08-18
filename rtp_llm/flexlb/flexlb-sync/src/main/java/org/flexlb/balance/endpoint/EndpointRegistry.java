@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
@@ -8,12 +8,12 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.ObjectFactory;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
+import java.util.function.LongPredicate;
 
 @Component
 public class EndpointRegistry {
@@ -23,14 +23,14 @@ public class EndpointRegistry {
     private final ConcurrentHashMap<String, PrefillEndpoint> pdFusionEndpoints = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, SimpleWorkerEndpoint> vitEndpoints = new ConcurrentHashMap<>();
     private final ConfigService configService;
-    private final ObjectFactory<FlexlbBatchScheduler> batchSchedulerFactory;
+    private final ObjectFactory<PriorityScheduler> prioritySchedulerFactory;
     private final BatchSchedulerReporter reporter;
 
     public EndpointRegistry(ConfigService configService,
-                            ObjectFactory<FlexlbBatchScheduler> batchSchedulerFactory,
+                            ObjectFactory<PriorityScheduler> prioritySchedulerFactory,
                             BatchSchedulerReporter reporter) {
         this.configService = configService;
-        this.batchSchedulerFactory = batchSchedulerFactory;
+        this.prioritySchedulerFactory = prioritySchedulerFactory;
         this.reporter = reporter;
     }
 
@@ -192,14 +192,14 @@ public class EndpointRegistry {
         return true;
     }
 
-    private FlexlbBatchScheduler batchScheduler() {
-        return batchSchedulerFactory.getObject();
+    private PriorityScheduler priorityScheduler() {
+        return prioritySchedulerFactory.getObject();
     }
 
     private PrefillEndpoint createPrefillEndpoint(WorkerStatus status, RoleType roleType) {
         FlexlbConfig config = configService.loadBalanceConfig();
         prepareEndpointMetrics(roleType, status);
-        return new PrefillEndpoint(status, config, batchScheduler(), reporter);
+        return new PrefillEndpoint(status, config, priorityScheduler(), reporter);
     }
 
     private DecodeEndpoint createDecodeEndpoint(WorkerStatus status) {
@@ -246,13 +246,14 @@ public class EndpointRegistry {
      *
      * @param ttlMs max age before eviction
      */
-    private void evictExpiredAll(long ttlMs) {
+    public void evictExpiredOrphans(long ttlMs,
+                                    LongPredicate schedulerOwnsRequest) {
         prefillEndpoints.forEach((endpoint, ep) ->
                 logEndpointEviction(RoleType.PREFILL, endpoint,
-                        ep.evictExpiredBatches(ttlMs), ttlMs));
+                        ep.evictExpiredInflight(ttlMs, schedulerOwnsRequest), ttlMs));
         decodeEndpoints.forEach((endpoint, ep) ->
                 logEndpointEviction(RoleType.DECODE, endpoint,
-                        ep.evictExpiredRequests(ttlMs), ttlMs));
+                        ep.evictExpiredRequests(ttlMs, schedulerOwnsRequest), ttlMs));
         pdFusionEndpoints.forEach((endpoint, ep) ->
                 logEndpointEviction(RoleType.PDFUSION, endpoint,
                         ep.evictExpiredBatches(ttlMs), ttlMs));
@@ -269,16 +270,4 @@ public class EndpointRegistry {
         }
     }
 
-    /**
-     * Periodic TTL eviction for all endpoints.
-     * <p>Each endpoint is responsible for its own inflight lifecycle.
-     * This scheduled method provides a safety-net fallback for entries
-     * that were not cleaned up by {@code calibrate()} (e.g., engine crash,
-     * network partition, status report delay).
-     */
-    @Scheduled(fixedRate = 60000L)
-    public void scheduledEviction() {
-        long ttlMs = configService.loadBalanceConfig().getFlexlbInflightTtlMs();
-        evictExpiredAll(ttlMs);
-    }
 }

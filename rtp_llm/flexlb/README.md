@@ -182,6 +182,43 @@ environment variables are `CACHE_AFFINITY_ENABLED`, `CACHE_AFFINITY_MAX_EXTRA_TT
 
 Set `decodeConcurrencyLimit` to a positive number to cap each decode worker's in-flight requests. FlexLB counts reported waiting/running tasks plus local in-transit selections, deduplicated by request id. When a decode worker reaches the limit, it is not considered serviceable; values <= 0 disable this FlexLB-side limit.
 
+### Priority scheduler delivery modes
+
+The priority scheduler separates the Auto-TPM scheduling decision from the
+transport used to deliver that decision:
+
+| `DEFAULT_SCHEDULE_MODE` | `AUTO_TPM_ENABLED` | Scheduler | Delivery |
+| --- | --- | --- | --- |
+| `batch` | either value | `PriorityScheduler` | Master sends `EnqueueBatch`; responses set `enqueued_by_master=true` |
+| `queue` | `true` | `PriorityScheduler` | Master returns one route decision per request; responses set `enqueued_by_master=false` and the frontend sends the request |
+| `queue` | `false` | legacy queue | Existing queue routing behavior |
+| `direct` | either value | direct router | Existing direct routing behavior |
+
+Enable Auto-TPM route-decision delivery with:
+
+```bash
+export DEFAULT_SCHEDULE_MODE=queue
+export AUTO_TPM_ENABLED=true
+export AUTO_TPM_PREFILL_MAX_INFLIGHT_REQUESTS_PER_WORKER=32
+```
+
+Fixed-window or SLO-budget policy still determines when a logical decision
+group is ready. The route-request limit only bounds how many members can be
+delivered to the frontend concurrently. Excess members enter a bounded per-worker
+ready backlog, retain their original priority and enqueue time, and are delivered
+before another logical group is formed when request slots become available.
+They remain visible to timeout, shutdown, and priority-preemption cleanup while
+waiting. Set the request limit at least as large as `FLEXLB_BATCH_SIZE_MAX` when
+every ready group should be handed off in one pass. The limit is counted per
+Prefill worker and per request, is independent of the existing per-worker
+inflight-*batch* limits, and uses `0` to mean unlimited.
+`FLEXLB_BATCH_MAX_INFLIGHT` remains the global scheduler admission limit and is
+also counted in requests.
+
+See [Priority scheduler delivery modes](docs/priority-scheduler-delivery-modes.md)
+for the class model, request lifecycle, accounting invariants, and key
+control-parameter reference.
+
 ### Run
 
 ```bash

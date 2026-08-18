@@ -70,7 +70,7 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         int batchMaxCount = Math.max(1, ctx.cfg().getFlexlbBatchSizeMax());
 
         // 空队列 — 新请求启动新的 batch 周期
-        if (ctx.isEmpty()) {
+        if (ctx.isActiveEmpty()) {
             if (batchMaxCount <= 1) {
                 return 0;
             }
@@ -89,7 +89,7 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         }
 
         long elapsedMs = now - head.enqueuedAtMs();
-        int queueSize = ctx.size();
+        int queueSize = ctx.activeSize();
 
         // 新请求恰好填满一个 batch（当前 batch 或前置 dispatch 后的最后一个 batch）
         // 前面的满 batch 通过 step 2 (batch_full) 连续 dispatch，之间无 sleep 延迟
@@ -116,7 +116,7 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
 
     @Override
     public void processQueue(BatcherContext ctx) throws InterruptedException {
-        if (ctx.isEmpty()) {
+        if (ctx.isActiveEmpty()) {
             return;
         }
 
@@ -159,39 +159,50 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
 
         // 1. Engine backpressure: park if the prefill worker already has too
         //    many batches inflight, to prevent overloading the engine.
-        int maxInflightBatches = ctx.cfg().getFlexlbBatchFixedMaxInflightBatches();
-        if (maxInflightBatches > 0 && ctx.prefillEp().getInflightBatchCount() >= maxInflightBatches) {
-            TimeUnit.MILLISECONDS.sleep(1);
-            return;
+        if (head.deliveryMode() == DeliveryMode.BATCH_ENQUEUE) {
+            int maxInflightBatches = ctx.cfg().getFlexlbBatchFixedMaxInflightBatches();
+            if (maxInflightBatches > 0
+                    && ctx.prefillEp().getInflightBatchCount() >= maxInflightBatches) {
+                TimeUnit.MILLISECONDS.sleep(1);
+                return;
+            }
         }
 
-        // 2. Queue size >= batchMaxCount → dispatch immediately (batch full)
-        if (ctx.size() >= batchMaxCount) {
-            List<BatchItem> picked = pickWithinCapacity(
-                    ctx, batchMaxCount, batchMaxTokens, ctx.batchKvCapacity());
-            if (!picked.isEmpty()) {
-                dispatch(ctx, picked, "batch_full");
+        FixedPick pick = null;
+
+        // 2. A homogeneous head-mode prefix reaches batchMaxCount → dispatch
+        //    immediately. A live configuration transition may leave the other
+        //    delivery mode behind the head; it must neither join this group nor
+        //    make the head's logical group appear full.
+        if (ctx.activeSize() >= batchMaxCount) {
+            pick = pickWithinCapacity(
+                    ctx, head, batchMaxCount, batchMaxTokens, ctx.batchKvCapacity());
+            if (pick.modePrefixSize() >= batchMaxCount) {
+                releaseDecisionGroup(ctx, pick.items(), "batch_full");
+                return;
             }
-            return;
         }
 
         // 3. Queue size < batchMaxCount → check window timeout
         if (elapsedMs >= fixedWaitMs) {
-            List<BatchItem> picked = pickWithinCapacity(
-                    ctx, batchMaxCount, batchMaxTokens, ctx.batchKvCapacity());
-            if (!picked.isEmpty()) {
-                dispatch(ctx, picked, "fixed_window_timeout");
+            if (pick == null) {
+                pick = pickWithinCapacity(
+                        ctx, head, batchMaxCount, batchMaxTokens, ctx.batchKvCapacity());
             }
+            releaseDecisionGroup(ctx, pick.items(), "fixed_window_timeout");
             return;
         }
 
         // 4. Predictor-based early dispatch
         if (predictThresholdMs > 0) {
             PrefillTimePredictor predictor = ctx.prefillEp().getPredictor();
-            List<BatchItem> candidates = pickWithinCapacity(
-                    ctx, batchMaxCount, batchMaxTokens, ctx.batchKvCapacity());
+            if (pick == null) {
+                pick = pickWithinCapacity(
+                        ctx, head, batchMaxCount, batchMaxTokens, ctx.batchKvCapacity());
+            }
+            List<BatchItem> candidates = pick.items();
             if (!candidates.isEmpty() && predictor.predictBatchMs(candidates) >= predictThresholdMs) {
-                dispatch(ctx, candidates, "predict_threshold");
+                releaseDecisionGroup(ctx, candidates, "predict_threshold");
                 return;
             }
         }
@@ -210,33 +221,69 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
      * KV pressure only prevents adding more members to this batch. The Engine
      * remains the final admission authority for the singleton request.
      */
-    private static List<BatchItem> pickWithinCapacity(BatcherContext ctx,
-                                                       int maxCount,
-                                                       long batchMaxTokens,
-                                                       long batchKvTokens) {
+    private static FixedPick pickWithinCapacity(BatcherContext ctx,
+                                                BatchItem head,
+                                                int maxCount,
+                                                long batchMaxTokens,
+                                                long batchKvTokens) {
         List<BatchItem> picked = new ArrayList<>();
-        BatchShape shape = BatchShape.empty();
+        picked.add(head);
+        BatchShape shape = BatchShape.empty().add(head);
+        int modePrefixSize = 1;
+        boolean capacityOpen = true;
         for (BatchItem item : ctx.sortedItems()) {
-            if (picked.size() >= maxCount) {
+            if (item == head) {
+                continue;
+            }
+            if (item.deliveryMode() != head.deliveryMode()) {
                 break;
+            }
+            if (modePrefixSize >= maxCount) {
+                break;
+            }
+            modePrefixSize++;
+            if (!capacityOpen) {
+                continue;
             }
             BatchShape candidate = shape.add(item);
             if (!candidate.fitsCompute(batchMaxTokens)) {
-                break;
+                capacityOpen = false;
+                continue;
             }
             if (!picked.isEmpty() && !candidate.fitsKv(batchKvTokens)) {
-                break;
+                capacityOpen = false;
+                continue;
             }
             picked.add(item);
             shape = candidate;
         }
-        return picked;
+        return new FixedPick(picked, modePrefixSize);
     }
 
-    private static void dispatch(BatcherContext ctx, List<BatchItem> picked, String reason) {
+    private record FixedPick(List<BatchItem> items, int modePrefixSize) {
+    }
+
+    private static void releaseDecisionGroup(BatcherContext ctx, List<BatchItem> picked, String reason) {
         BatchItem head = picked.get(0);
         long waitMs = ctx.now() - head.enqueuedAtMs();
 
+        if (head.deliveryMode() == DeliveryMode.BATCH_ENQUEUE) {
+            reportBatchDecision(ctx, picked, reason, waitMs);
+        } else {
+            Logger.debug("flexlb_route_decision reason={} picked_size={} "
+                            + "wait_ms={} queue_before={} worker={} head_req_id={}",
+                    reason, picked.size(), waitMs, ctx.size(), ctx.key(), head.requestId());
+        }
+
+        ctx.stageDecisionGroup(picked,
+                new DecisionGroupMetadata(reason, ctx.size() - picked.size()));
+    }
+
+    private static void reportBatchDecision(BatcherContext ctx,
+                                            List<BatchItem> picked,
+                                            String reason,
+                                            long waitMs) {
+        BatchItem head = picked.get(0);
         ctx.reporter().reportDispatchReason(RoleType.PREFILL.name(), ctx.prefillEp().getIp(), reason);
         ctx.reporter().reportBatchSize(RoleType.PREFILL.name(), ctx.prefillEp().getIp(), reason, picked.size());
 
@@ -253,8 +300,5 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         Logger.debug("flexlb_batch_decision reason={} picked_size={} "
                         + "wait_ms={} queue_before={} worker={} head_req_id={}",
                 reason, picked.size(), waitMs, ctx.size(), ctx.key(), head.requestId());
-
-        ctx.dispatch(picked,
-                new DispatchMeta(reason, ctx.size() - picked.size()));
     }
 }

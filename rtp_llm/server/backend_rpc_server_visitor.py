@@ -357,6 +357,32 @@ class BackendRPCServerVisitor:
             route_result.error_code,
             route_result.error_message or "",
         )
+        if route_result.connection_failed:
+            route_error = FtRuntimeException(
+                ExceptionType.GET_CONNECTION_FAILED,
+                "FlexLB master and slave connections failed",
+            )
+            error_code = format_exception(route_error)["error_code_str"]
+        elif route_result.error_code is not None:
+            try:
+                route_error = FtRuntimeException(
+                    ExceptionType(route_result.error_code),
+                    route_result.error_message or "master route failed",
+                )
+                error_code = format_exception(route_error)["error_code_str"]
+            except ValueError:
+                error_code = str(route_result.error_code)
+        else:
+            route_error = FtRuntimeException(
+                ExceptionType.ROUTE_ERROR,
+                route_result.error_message or "master route failed",
+            )
+            error_code = format_exception(route_error)["error_code_str"]
+        kmonitor.report(
+            AccMetrics.MASTER_ROUTE_ERROR_QPS_METRIC,
+            1,
+            {"error_code": error_code},
+        )
         return route_result
 
     def _report_recent_cache_key_metrics(

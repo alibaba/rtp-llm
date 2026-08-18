@@ -1,9 +1,11 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.ScheduleBudget;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -18,12 +20,14 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Tests for {@link WorkerBatcher#queueSizeByPriority()}: per-priority
@@ -48,7 +52,7 @@ class WorkerBatcherTest {
 
     private WorkerBatcher newBatcher() {
         return new WorkerBatcher("test-worker", null, config,
-                mock(BatchDecisionHandler.class), mock(BatchSchedulerReporter.class));
+                mock(DecisionGroupHandler.class), mock(BatchSchedulerReporter.class));
     }
 
     @Test
@@ -105,7 +109,7 @@ class WorkerBatcherTest {
     }
 
     @Test
-    void dispatchCallbackFailure_restoresOnlyStagedItemsWithoutDepthLeak() {
+    void decisionCallbackFailure_restoresOnlyStagedItemsWithoutDepthLeak() {
         PriorityBlockingQueue<BatchItem> queue = new PriorityBlockingQueue<>(
                 11, WorkerBatcher.AUTO_TPM_QUEUE_ORDER);
         BatchItem first = item(1, 50, 100);
@@ -113,30 +117,260 @@ class WorkerBatcherTest {
         queue.add(first);
         queue.add(second);
         AtomicInteger depth = new AtomicInteger(2);
-        BatcherContext ctx = context(queue, depth, new BatchDecisionHandler() {
+        BatcherContext ctx = context(queue, depth, new DecisionGroupHandler() {
             @Override
             public void onExpired(BatchItem head) {
             }
 
             @Override
-            public void onBatchReady(List<BatchItem> items, DispatchMeta meta) {
+            public void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata meta) {
                 throw new IllegalStateException("test callback failure");
             }
 
             @Override
             public void onOfferFailure(BatchItem item, Throwable error) {
             }
+
+            @Override
+            public void onDeliveryFailure(BatchItem item, Throwable error) {
+            }
         });
 
         assertThrows(IllegalStateException.class,
-                () -> ctx.dispatch(List.of(first, second), new DispatchMeta("test", 0)));
+                () -> ctx.stageForDelivery(List.of(first, second), new DecisionGroupMetadata("test", 0)));
 
         assertEquals(2, depth.get());
-        assertEquals(0, ctx.dispatchPendingSize());
+        assertEquals(0, ctx.pendingDeliveryCount());
         List<BatchItem> restored = ctx.sortedItems();
         assertEquals(List.of(1L, 2L), restored.stream().map(BatchItem::requestId).toList());
         assertSame(first, restored.get(0));
         assertSame(second, restored.get(1));
+    }
+
+    @Test
+    void routeCallbackFailureRestoresToReadyBacklog_andRemovalAndShutdownDoNotLeak() {
+        config.setAutoTpmPrefillMaxInflightRequestsPerWorker(1);
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.availableRequestSlots(1)).thenReturn(1);
+        PriorityBlockingQueue<BatchItem> queue = new PriorityBlockingQueue<>(
+                11, WorkerBatcher.AUTO_TPM_QUEUE_ORDER);
+        BatchItem first = routeItem(1, 50, 100);
+        BatchItem second = routeItem(2, 50, 200);
+        queue.add(first);
+        queue.add(second);
+        AtomicInteger depth = new AtomicInteger(2);
+        BatcherContext ctx = context(endpoint, queue, depth, new DecisionGroupHandler() {
+            @Override
+            public void onExpired(BatchItem head) {
+            }
+
+            @Override
+            public void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata meta) {
+                throw new IllegalStateException("route callback failure");
+            }
+
+            @Override
+            public void onOfferFailure(BatchItem item, Throwable error) {
+            }
+
+            @Override
+            public void onDeliveryFailure(BatchItem item, Throwable error) {
+            }
+        });
+
+        assertThrows(IllegalStateException.class, () -> ctx.stageDecisionGroup(
+                List.of(first, second), new DecisionGroupMetadata("batch_full", 0)));
+
+        assertTrue(ctx.isActiveEmpty());
+        assertEquals(2, ctx.readyDeliveryCount());
+        assertEquals(2, depth.get());
+        assertEquals(0, ctx.pendingDeliveryCount());
+        assertEquals(List.of(1L, 2L), ctx.sortedQueuedItems().stream()
+                .map(BatchItem::requestId).toList());
+
+        // Lease timeout / preemption can still revoke an already-ready item.
+        assertTrue(ctx.remove(first));
+        assertEquals(1, depth.get());
+        assertEquals(1, ctx.readyDeliveryCount());
+
+        // Shutdown owns and drains the final ready member exactly once.
+        List<BatchItem> drained = new java.util.ArrayList<>();
+        ctx.stopAndDrainTo(drained);
+        assertEquals(List.of(second), drained);
+        assertEquals(0, depth.get());
+        assertEquals(0, ctx.readyDeliveryCount());
+        assertEquals(0, ctx.pendingDeliveryCount());
+        assertTrue(ctx.sortedQueuedItems().isEmpty());
+    }
+
+    @Test
+    void readyBacklogRemainsVisibleAndRemovableThroughQueueManager() throws Exception {
+        config.setFlexlbBatchSizeMax(2);
+        config.setFlexlbBatchFixedWaitMs(200);
+        config.setFlexlbBatchPredictThresholdMs(0);
+        config.setAutoTpmPrefillMaxInflightRequestsPerWorker(1);
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.availableRequestSlots(1)).thenReturn(0);
+        AtomicInteger deliveryCalls = new AtomicInteger();
+        AtomicReference<BatchItem> shutdownFailure = new AtomicReference<>();
+        WorkerBatcher batcher = new WorkerBatcher(
+                "ready-worker", endpoint, config, new DecisionGroupHandler() {
+                    @Override
+                    public void onExpired(BatchItem head) {
+                    }
+
+                    @Override
+                    public void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata meta) {
+                        deliveryCalls.incrementAndGet();
+                    }
+
+                    @Override
+                    public void onOfferFailure(BatchItem item, Throwable error) {
+                        shutdownFailure.set(item);
+                    }
+
+                    @Override
+                    public void onDeliveryFailure(BatchItem item, Throwable error) {
+                    }
+                }, mock(BatchSchedulerReporter.class));
+
+        assertTrue(batcher.tryOffer(routeItem(1, 70, 100)));
+        assertTrue(batcher.tryOffer(routeItem(2, 50, 200)));
+        long offeredVersion = batcher.queueVersion();
+        batcher.start();
+        try {
+            awaitTrue(() -> batcher.queueVersion() > offeredVersion);
+
+            // Both requests have left the active decision queue and are held
+            // behind the request cap, yet remain actionable eviction victims.
+            assertEquals(List.of(1L, 2L), batcher.queueManager().snapshot().items().stream()
+                    .map(item -> item.requestId()).toList());
+            assertEquals(Map.of(70, 1, 50, 1), batcher.queueSizeByPriority());
+            assertEquals(400, batcher.queueManager().estimateWaitMs(
+                    100, System.currentTimeMillis() + 5_000, 99),
+                    "ready requests are request-accounted, not divided by batchSizeMax");
+            assertEquals(0, deliveryCalls.get());
+
+            batcher.queueManager().tryRemove(1L, "ready-lease-timeout");
+            assertEquals(1, batcher.queueSize());
+            assertEquals(List.of(2L), batcher.queueManager().snapshot().items().stream()
+                    .map(item -> item.requestId()).toList());
+        } finally {
+            batcher.shutdown();
+        }
+
+        assertEquals(2L, shutdownFailure.get().requestId());
+        assertEquals(0, batcher.queueSize());
+        assertTrue(batcher.queueManager().snapshot().items().isEmpty());
+    }
+
+    @Test
+    void autoTpmEmptyWorkerWaitsOnConditionAndEnqueueWakesIt() throws Exception {
+        config.setFlexlbBatchSizeMax(1);
+        config.setFlexlbBatchFixedMaxInflightBatches(0);
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        CountDownLatch delivered = new CountDownLatch(1);
+        WorkerBatcher batcher = new WorkerBatcher(
+                "condition-worker", endpoint, config, new DecisionGroupHandler() {
+                    @Override public void onExpired(BatchItem head) { }
+                    @Override public void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata meta) {
+                        delivered.countDown();
+                    }
+                    @Override public void onOfferFailure(BatchItem item, Throwable error) { }
+                    @Override public void onDeliveryFailure(BatchItem item, Throwable error) { }
+                }, mock(BatchSchedulerReporter.class));
+
+        batcher.start();
+        try {
+            awaitTrue(batcher::isWaitingForSignal);
+            TimeUnit.MILLISECONDS.sleep(30);
+            assertTrue(batcher.isWaitingForSignal(),
+                    "an empty AutoTPM worker must block, not wake on a 1ms poll");
+
+            assertTrue(batcher.tryOffer(item(1, 50, System.currentTimeMillis())));
+            assertTrue(delivered.await(2, TimeUnit.SECONDS));
+        } finally {
+            batcher.shutdown();
+        }
+    }
+
+    @Test
+    void routeSlotSignalWakesReadyOnlyWorkerWithoutPolling() throws Exception {
+        config.setFlexlbBatchSizeMax(1);
+        config.setFlexlbBatchFixedWaitMs(60_000);
+        config.setAutoTpmPrefillMaxInflightRequestsPerWorker(1);
+        AtomicInteger slots = new AtomicInteger();
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.availableRequestSlots(1)).thenAnswer(ignored -> slots.get());
+        CountDownLatch delivered = new CountDownLatch(1);
+        WorkerBatcher batcher = new WorkerBatcher(
+                "slot-worker", endpoint, config, new DecisionGroupHandler() {
+                    @Override public void onExpired(BatchItem head) { }
+                    @Override public void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata meta) {
+                        delivered.countDown();
+                    }
+                    @Override public void onOfferFailure(BatchItem item, Throwable error) { }
+                    @Override public void onDeliveryFailure(BatchItem item, Throwable error) { }
+                }, mock(BatchSchedulerReporter.class));
+
+        assertTrue(batcher.tryOffer(routeItem(1, 50, System.currentTimeMillis())));
+        long offeredVersion = batcher.queueVersion();
+        batcher.start();
+        try {
+            awaitTrue(() -> batcher.queueVersion() > offeredVersion
+                    && batcher.isWaitingForSignal());
+            assertEquals(1, batcher.queueSize());
+            assertEquals(1, delivered.getCount());
+
+            slots.set(1);
+            batcher.signalDeliveryCapacityAvailable();
+            assertTrue(delivered.await(2, TimeUnit.SECONDS));
+            awaitTrue(() -> batcher.queueSize() == 0);
+        } finally {
+            batcher.shutdown();
+        }
+    }
+
+    @Test
+    void fullRouteCapDoesNotHeadOfLineBlockLegacyBatchWork() throws Exception {
+        config.setFlexlbBatchSizeMax(1);
+        config.setFlexlbBatchFixedWaitMs(60_000);
+        config.setFlexlbBatchFixedMaxInflightBatches(0);
+        config.setAutoTpmPrefillMaxInflightRequestsPerWorker(1);
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.availableRequestSlots(1)).thenReturn(0);
+        AtomicInteger routeDeliveries = new AtomicInteger();
+        CountDownLatch batchDelivered = new CountDownLatch(1);
+        WorkerBatcher batcher = new WorkerBatcher(
+                "mixed-worker", endpoint, config, new DecisionGroupHandler() {
+                    @Override public void onExpired(BatchItem head) { }
+                    @Override public void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata meta) {
+                        if (items.get(0).deliveryMode() == DeliveryMode.BATCH_ENQUEUE) {
+                            batchDelivered.countDown();
+                        } else {
+                            routeDeliveries.incrementAndGet();
+                        }
+                    }
+                    @Override public void onOfferFailure(BatchItem item, Throwable error) { }
+                    @Override public void onDeliveryFailure(BatchItem item, Throwable error) { }
+                }, mock(BatchSchedulerReporter.class));
+
+        assertTrue(batcher.tryOffer(routeItem(1, 70, System.currentTimeMillis())));
+        long routeOfferVersion = batcher.queueVersion();
+        batcher.start();
+        try {
+            awaitTrue(() -> batcher.queueVersion() > routeOfferVersion
+                    && batcher.isWaitingForSignal());
+
+            assertTrue(batcher.tryOffer(item(2, 50, System.currentTimeMillis())));
+            assertTrue(batchDelivered.await(2, TimeUnit.SECONDS),
+                    "BATCH_ENQUEUE work must pass a capacity-blocked route backlog");
+            assertEquals(0, routeDeliveries.get());
+            assertEquals(1, batcher.queueSize(),
+                    "only the capacity-blocked route request remains charged");
+        } finally {
+            batcher.shutdown();
+        }
     }
 
     @Test
@@ -149,32 +383,36 @@ class WorkerBatcherTest {
         queue.add(second);
         AtomicInteger depth = new AtomicInteger(2);
         AtomicInteger callbackMembers = new AtomicInteger();
-        BatcherContext ctx = context(queue, depth, new BatchDecisionHandler() {
+        BatcherContext ctx = context(queue, depth, new DecisionGroupHandler() {
             @Override
             public void onExpired(BatchItem head) {
             }
 
             @Override
-            public void onBatchReady(List<BatchItem> items, DispatchMeta meta) {
+            public void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata meta) {
                 callbackMembers.set(items.size());
             }
 
             @Override
             public void onOfferFailure(BatchItem item, Throwable error) {
             }
+
+            @Override
+            public void onDeliveryFailure(BatchItem item, Throwable error) {
+            }
         });
 
-        ctx.dispatch(List.of(first, second), new DispatchMeta("test", 0));
+        ctx.stageForDelivery(List.of(first, second), new DecisionGroupMetadata("test", 0));
 
         assertEquals(2, callbackMembers.get());
         assertEquals(0, depth.get(),
                 "a successful legacy callback consumes unclaimed staged members");
-        assertEquals(0, ctx.dispatchPendingSize());
+        assertEquals(0, ctx.pendingDeliveryCount());
         assertTrue(ctx.sortedItems().isEmpty());
     }
 
     @Test
-    void claimedDispatchCompletesOnce_andFinallyCannotRequeueIt() {
+    void claimedDeliveryCompletesOnce_andFinallyCannotRequeueIt() {
         PriorityBlockingQueue<BatchItem> queue = new PriorityBlockingQueue<>(
                 11, WorkerBatcher.AUTO_TPM_QUEUE_ORDER);
         BatchItem item = item(7, 50, 100);
@@ -182,21 +420,21 @@ class WorkerBatcherTest {
         AtomicInteger depth = new AtomicInteger(1);
         AtomicInteger dispatchCalls = new AtomicInteger();
         AtomicReference<BatcherContext> owner = new AtomicReference<>();
-        BatcherContext ctx = context(queue, depth, new BatchDecisionHandler() {
+        BatcherContext ctx = context(queue, depth, new DecisionGroupHandler() {
             @Override
             public void onExpired(BatchItem head) {
             }
 
             @Override
-            public void onBatchReady(List<BatchItem> items, DispatchMeta meta) {
+            public void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata meta) {
                 dispatchCalls.incrementAndGet();
                 long stagedVersion = owner.get().queueVersionValue();
                 assertEquals(BatcherContext.PendingClaimResult.CLAIMED,
-                        owner.get().claimPendingDispatch(item));
+                        owner.get().claimPendingDelivery(item));
                 assertEquals(stagedVersion + 1, owner.get().queueVersionValue(),
-                        "queue-to-dispatch ownership must invalidate versioned plans");
+                        "queue-to-delivery ownership must invalidate versioned plans");
                 long claimedVersion = owner.get().queueVersionValue();
-                assertTrue(owner.get().completePendingDispatch(item));
+                assertTrue(owner.get().completePendingDelivery(item));
                 assertEquals(claimedVersion + 1, owner.get().queueVersionValue(),
                         "releasing charged capacity must invalidate versioned offers");
             }
@@ -204,53 +442,64 @@ class WorkerBatcherTest {
             @Override
             public void onOfferFailure(BatchItem item, Throwable error) {
             }
+
+            @Override
+            public void onDeliveryFailure(BatchItem item, Throwable error) {
+            }
         });
         owner.set(ctx);
 
-        ctx.dispatch(List.of(item), new DispatchMeta("test", 0));
-        ctx.dispatch(List.of(item), new DispatchMeta("test", 0));
+        ctx.stageForDelivery(List.of(item), new DecisionGroupMetadata("test", 0));
+        ctx.stageForDelivery(List.of(item), new DecisionGroupMetadata("test", 0));
 
         assertEquals(1, dispatchCalls.get(), "a claimed member must not be dispatched twice");
         assertEquals(0, depth.get());
-        assertEquals(0, ctx.dispatchPendingSize());
+        assertEquals(0, ctx.pendingDeliveryCount());
         assertTrue(ctx.sortedItems().isEmpty());
     }
 
     @Test
-    void claimedCallbackFailure_isTerminatedWithoutPendingLeakOrRequeue() {
+    void claimedCallbackFailure_usesDeliveryFailureWithoutPendingLeakOrRequeue() {
         PriorityBlockingQueue<BatchItem> queue = new PriorityBlockingQueue<>(
                 11, WorkerBatcher.AUTO_TPM_QUEUE_ORDER);
         BatchItem item = item(8, 50, 100);
         queue.add(item);
         AtomicInteger depth = new AtomicInteger(1);
         AtomicInteger offerFailures = new AtomicInteger();
+        AtomicInteger deliveryFailures = new AtomicInteger();
         AtomicReference<BatcherContext> owner = new AtomicReference<>();
-        BatcherContext ctx = context(queue, depth, new BatchDecisionHandler() {
+        BatcherContext ctx = context(queue, depth, new DecisionGroupHandler() {
             @Override
             public void onExpired(BatchItem head) {
             }
 
             @Override
-            public void onBatchReady(List<BatchItem> items, DispatchMeta meta) {
+            public void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata meta) {
                 assertEquals(BatcherContext.PendingClaimResult.CLAIMED,
-                        owner.get().claimPendingDispatch(item));
+                        owner.get().claimPendingDelivery(item));
                 throw new IllegalStateException("failed after claim");
             }
 
             @Override
             public void onOfferFailure(BatchItem failed, Throwable error) {
+                offerFailures.incrementAndGet();
+            }
+
+            @Override
+            public void onDeliveryFailure(BatchItem failed, Throwable error) {
                 assertSame(item, failed);
                 assertEquals("failed after claim", error.getMessage());
-                offerFailures.incrementAndGet();
+                deliveryFailures.incrementAndGet();
             }
         });
         owner.set(ctx);
 
         assertThrows(IllegalStateException.class,
-                () -> ctx.dispatch(List.of(item), new DispatchMeta("test", 0)));
-        assertEquals(1, offerFailures.get());
+                () -> ctx.stageForDelivery(List.of(item), new DecisionGroupMetadata("test", 0)));
+        assertEquals(0, offerFailures.get());
+        assertEquals(1, deliveryFailures.get());
         assertEquals(0, depth.get());
-        assertEquals(0, ctx.dispatchPendingSize());
+        assertEquals(0, ctx.pendingDeliveryCount());
         assertTrue(ctx.sortedItems().isEmpty());
     }
 
@@ -264,13 +513,13 @@ class WorkerBatcherTest {
         AtomicInteger offerFailures = new AtomicInteger();
         CountDownLatch callbackEntered = new CountDownLatch(1);
         CountDownLatch callbackMayReturn = new CountDownLatch(1);
-        BatcherContext ctx = context(queue, depth, new BatchDecisionHandler() {
+        BatcherContext ctx = context(queue, depth, new DecisionGroupHandler() {
             @Override
             public void onExpired(BatchItem head) {
             }
 
             @Override
-            public void onBatchReady(List<BatchItem> items, DispatchMeta meta) {
+            public void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata meta) {
                 callbackEntered.countDown();
                 try {
                     assertTrue(callbackMayReturn.await(2, TimeUnit.SECONDS));
@@ -284,10 +533,15 @@ class WorkerBatcherTest {
                 assertSame(item, failed);
                 offerFailures.incrementAndGet();
             }
+
+            @Override
+            public void onDeliveryFailure(BatchItem failed, Throwable error) {
+                throw new AssertionError("shutdown-drained item must not reach delivery failure");
+            }
         });
 
         CompletableFuture<Void> dispatch = CompletableFuture.runAsync(() ->
-                ctx.dispatch(List.of(item), new DispatchMeta("test", 0)));
+                ctx.stageForDelivery(List.of(item), new DecisionGroupMetadata("test", 0)));
         assertTrue(callbackEntered.await(2, TimeUnit.SECONDS));
         long stagedVersion = ctx.queueVersionValue();
         List<BatchItem> drained = new java.util.ArrayList<>();
@@ -299,7 +553,7 @@ class WorkerBatcherTest {
         dispatch.get(2, TimeUnit.SECONDS);
 
         assertEquals(0, depth.get());
-        assertEquals(0, ctx.dispatchPendingSize());
+        assertEquals(0, ctx.pendingDeliveryCount());
         assertTrue(ctx.sortedItems().isEmpty());
         assertEquals(0, offerFailures.get(),
                 "shutdown owns the drained item; callback finally must not deliver it twice");
@@ -320,6 +574,15 @@ class WorkerBatcherTest {
                 null, null, null, null, enqueuedAtMs);
     }
 
+    private static BatchItem routeItem(long requestId, int priority, long enqueuedAtMs) {
+        BalanceContext ctx = newContext(requestId, priority);
+        ctx.setBudget(ScheduleBudget.forDeadline(
+                priority, enqueuedAtMs, enqueuedAtMs + 5_000));
+        ctx.setScheduleMode(ScheduleModeEnum.QUEUE);
+        return new BatchItem(ctx, new CompletableFuture<>(), null,
+                null, null, null, null, enqueuedAtMs);
+    }
+
     private static BalanceContext newContext(long requestId, int priority) {
         Request request = new Request();
         request.setRequestId(requestId);
@@ -332,9 +595,24 @@ class WorkerBatcherTest {
 
     private BatcherContext context(PriorityBlockingQueue<BatchItem> queue,
                                    AtomicInteger depth,
-                                   BatchDecisionHandler handler) {
-        return new BatcherContext("test-worker", null, config, handler, queue, depth,
+                                   DecisionGroupHandler handler) {
+        return context(null, queue, depth, handler);
+    }
+
+    private BatcherContext context(PrefillEndpoint endpoint,
+                                   PriorityBlockingQueue<BatchItem> queue,
+                                   AtomicInteger depth,
+                                   DecisionGroupHandler handler) {
+        return new BatcherContext("test-worker", endpoint, config, handler, queue, depth,
                 new AtomicLong(), new ReentrantLock(), WorkerBatcher.AUTO_TPM_QUEUE_ORDER,
                 mock(BatchSchedulerReporter.class));
+    }
+
+    private static void awaitTrue(BooleanSupplier condition) throws InterruptedException {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (!condition.getAsBoolean() && System.nanoTime() < deadlineNanos) {
+            TimeUnit.MILLISECONDS.sleep(5);
+        }
+        assertTrue(condition.getAsBoolean(), "condition did not become true within 2 seconds");
     }
 }

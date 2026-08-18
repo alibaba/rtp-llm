@@ -7,7 +7,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.BatchDispatcher;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.balance.scheduler.priority.DecodePreemptionCoordinator;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
@@ -62,7 +62,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * Shared E2E harness (task35): a REAL FlexLB scheduler stack (FlexlbBatchScheduler
+ * Shared E2E harness (task35): a REAL FlexLB scheduler stack (PriorityScheduler
  * + PriorityAdmissionScheduler + EndpointRegistry + DefaultBatchDispatcher +
  * AdmissionLease) wired to an in-process Java mock engine cluster.
  *
@@ -95,7 +95,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     final ScheduledExecutorService engineScheduler = Executors.newScheduledThreadPool(8);
 
     final EndpointRegistry endpointRegistry;
-    final FlexlbBatchScheduler scheduler;
+    final PriorityScheduler scheduler;
     final PriorityAdmissionScheduler priorityScheduler;
 
     /** requestIds in the order the mock engines actually received them via enqueueBatch. */
@@ -217,7 +217,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                     return future;
                 });
 
-        AtomicReference<FlexlbBatchScheduler> schedulerRef = new AtomicReference<>();
+        AtomicReference<PriorityScheduler> schedulerRef = new AtomicReference<>();
         endpointRegistry = new EndpointRegistry(configService, schedulerRef::get, reporter);
         BatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
         EngineCancelChannel cancelChannel = realCancelChannel
@@ -236,7 +236,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                 return prefillServer(prefillSelector.apply(ctx), ctx.getRequestId());
             }
         };
-        scheduler = new FlexlbBatchScheduler(configService, router,
+        scheduler = new PriorityScheduler(configService, router,
                 endpointRegistry, dispatcher, reporter, priorityScheduler, null);
         schedulerRef.set(scheduler);
 
