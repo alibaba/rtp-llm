@@ -79,7 +79,8 @@ arch_with_version_dep = select({
 # Not every platform pip repository exposes Bazel packages for these optional
 # dependencies. Missing platforms use the manager's polling fallback when
 # watchdog is unavailable and gzip snapshots when zstandard is unavailable.
-# PPU and pre-12.9 CUDA reuse the CUDA 12 zstandard package.
+# PPU uses the gzip fallback so its runfiles remain isolated from CUDA pip
+# repositories. Pre-12.9 CUDA reuses the CUDA 12 zstandard package.
 py_library(
     name = "watchdog",
     deps = select({
@@ -98,7 +99,7 @@ py_library(
 py_library(
     name = "zstandard",
     deps = select({
-        "@//:using_ppu": ["@pip_gpu_cuda12_torch//zstandard"],
+        "@//:using_ppu": [],
         "@//:cuda_pre_12_9": ["@pip_gpu_cuda12_torch//zstandard"],
         "@//:using_cuda13_x86": [],
         "@//:using_cuda12_9_x86": ["@pip_gpu_cuda12_9_torch//zstandard"],
