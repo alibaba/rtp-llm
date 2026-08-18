@@ -1,14 +1,21 @@
-# DSV4 Mega CSA TP1 接入状态与后续方案
+# DSV4 Mega CSA/HCA TP1 接入状态与后续方案
 
-更新日期：2026-08-15
+更新日期：2026-08-18
 
 ## 1. 当前结论
 
 DSV4 Mega CSA 的开源框架适配已经进入生产 decode 层循环。使用本地
-`cuda_extension@e1d1c985` 本地构建，TP1 单层真实 RTP attention sublayer 的数值对照、eager、
+`cuda_extension@b93e0761` 本地构建，TP1 单层真实 RTP attention sublayer 的数值对照、eager、
 CUDA Graph 和 slot reuse 已通过；但还不能称为 RTP-LLM 整模型端到端已跑通。框架当前锁定的
 CUDA13 `rtp-kernel` wheel 仍不含 Mega 扩展，必须先发布对应制品并完成真实 allocator、
 prefill/decode 切换和整模型验证。
+
+2026-08-18 起，HCA（`compress_ratio == 128`）层的同型接入也已完成并通过单层对照，由独立
+开关 `DSV4_MEGA_HCA` 控制。HCA 没有 indexer/TopK/MQA 阶段：opA/opB 两个融合 GEMM 覆盖
+front 投影、state 环 FRONT-EMIT、mHC post/comb tail、q_b 投影、128-token 边界压缩写
+HCA_KV 和 window 写 SWA_KV；query RMSNorm+RoPE 保持框架 `fused_rmsnorm_rope`，稠密
+compressed index 直接复用每 step 已构建的 `topk_total_by_ratio[128]`。CSA+HCA 同开时
+Mega 覆盖 DSV4-Pro 全部 61 个 attention 层（30 CSA + 31 HCA）。
 
 当前实现遵循“完整 attention sublayer 单独选路”，没有逐个替换普通算子：
 
@@ -21,6 +28,16 @@ Block.forward_decode
   │    -> FP8 MQA + main compressor + query RMS/RoPE
   │    -> RTP persistent TopK
   │    -> RTP 原生 FlashMLA 路径
+  │    -> CUDA inverse-RoPE + FP8 quant
+  │    -> 现有 wo_a / wo_b output projection
+  │    -> mHC post
+  ├─ HCA Mega: adapter 已挂载 && q_len == 1
+  │    mHC pre + attention RMSNorm
+  │    -> front mixed GEMM（FRONT-EMIT 写 kv|gate state 环 + mHC post/comb tail）
+  │    -> WQ-B + 边界 compressor 写 HCA_KV + window 写 SWA_KV
+  │    -> 框架 fused_rmsnorm_rope（q RMSNorm + 部分 RoPE，原地）
+  │    -> metadata 稠密 compressed index（topk_total_by_ratio[128]）
+  │    -> RTP 原生 FlashMLA 路径（SWA_KV + HCA_KV）
   │    -> CUDA inverse-RoPE + FP8 quant
   │    -> 现有 wo_a / wo_b output projection
   │    -> mHC post
@@ -38,16 +55,16 @@ FFN sublayer、FFN mHC、model head mHC 不在 Mega 替换范围内。
 | 硬件 | Blackwell `sm_100a/sm_103a` | 首次执行前强校验 |
 | 并行 | TP1、单卡 | `tp_size != 1` 初始化失败 |
 | KV cache | FP8 | 非 FP8 初始化失败 |
-| 层类型 | `compress_ratio == 4` 的 CSA 层 | 只给这些层挂 adapter |
+| 层类型 | `compress_ratio == 4` 的 CSA 层（`DSV4_MEGA_CSA`）；`compress_ratio == 128` 的 HCA 层（`DSV4_MEGA_HCA`） | 按 ratio 分别挂 adapter |
 | 请求形态 | decode、`q_len == 1`、batch 1..128 | 其余形态走现有路径 |
 | 进程角色 | `DECODE` 和单卡 `PDFUSION` | 由 `forward_decode` 限制实际执行 |
-| 开关 | `DSV4_MEGA_CSA=1` | 默认关闭，模型构造期固定 |
+| 开关 | `DSV4_MEGA_CSA=1` / `DSV4_MEGA_HCA=1` | 各自默认关闭，模型构造期固定，共享一个模型级 runtime |
 
-下列场景保持现有实现：prefill、SWA-only、HCA、target verify (`q_len > 1`)、MTP、TP2/DP2。
+下列场景保持现有实现：prefill、SWA-only、target verify (`q_len > 1`)、MTP、TP2/DP2。
 MTP 是独立模型且当前 `compress_ratio == 0`，不会挂载 CSA adapter。
 
 `is_decode_role=False` 同时覆盖 `PDFUSION` 和专用 PREFILL，框架目前没有更细的构造参数。
-因此 `DSV4_MEGA_CSA=1` 只应配置在 `DECODE/PDFUSION` 进程；误配到专用 PREFILL
+因此两个 Mega 开关都只应配置在 `DECODE/PDFUSION` 进程；误配到专用 PREFILL
 不会执行 Mega decode，但会产生不必要的 fused-weight 重排和显存占用。
 
 ## 3. 已完成的框架适配
@@ -64,6 +81,12 @@ MTP 是独立模型且当前 `compress_ratio == 0`，不会挂载 CSA adapter。
 | `fp8/decode/mega_csa_adapter.py` | 绑定现有 cache/metadata，编排 Mega 算子、TopK、原生 FlashMLA 和 o-proj |
 | `fp8/test/test_mega_csa_adapter.py` | 覆盖选路、PDFUSION、权重布局、ABI 和 runtime 生命周期 |
 | `fp8/test/test_mega_csa_rtp_eager.py` | 用真实 `AttentionFP8`/`KVCache` 对照原 attention 子层，并覆盖 eager、graph、cache/state 和性能 |
+| `fp8/decode/mega_hca_weights.py` | HCA 层 fused 布局：`front_fp8=[wq_a;wkv]`、`front_bf16=[comp_wkv;comp_wgate]`、`wq_b`，约 130 MiB/层 × 31 层 ≈ 4 GiB |
+| `fp8/decode/mega_hca_adapter.py` | HCA 编排：front/WQ-B 两个融合 GEMM、框架 `fused_rmsnorm_rope`、稠密 idx、原生 FlashMLA、共享 o-proj producer |
+| `fp8/decode/mega_csa_runtime.py`（扩展） | 新增 HCA workspace 缓存与 HCA 三组 slot（HCA_STATE/HCA_KV/SWA_KV）int64 直传校验，`begin_decode`/rope 表与 CSA 共享 |
+| `dsv4/block.py`（扩展） | `enable_mega_hca`（仅 ratio==128），`forward_decode` 统一 `_mega_csa_adapter or _mega_hca_adapter` 选路 |
+| `fp8/test/test_mega_hca_adapter.py` | HCA 选路、双开关、权重布局、geometry/ABI、runtime slot 生命周期 |
+| `fp8/test/test_mega_hca_rtp_eager.py` | 真实 `AttentionFP8(ratio=128)` 对照原 `_forward_decode_hca`：输出、边界压缩 HCA_KV、SWA、state 环、长上下文、graph、性能 |
 
 ### 3.2 权重
 
@@ -95,7 +118,9 @@ runtime 还负责：
 - 保留 capture 期间生成的 schedule tensor，避免 graph 中悬空指针；
 - 缓存从 `freqs_cis` 拆出的连续 cos/sin table。
 
-`cuda_extension@e1d1c985` 已把 FP8 CSA 的五组 slot ABI 改为 int64，与 RTP metadata 对齐。
+`cuda_extension@e1d1c985` 已把 FP8 CSA 的五组 slot ABI 改为 int64，与 RTP metadata 对齐；
+`cuda_extension@b93e0761` 把 HCA 的三组 slot（state/window/compressed destinations）同样升级
+为 int64，并新增 `geometry_hca()` 供 fail-fast ABI 探针（HCA front 的 PDL 按算子契约保持关闭）。
 runtime 不再分配 int32 mirror，不执行 `copy_`，也不按 eager/graph metadata 缓存 slot 副本；
 CUDA Graph 捕获期间直接使用框架 tensor 的稳定地址。position、block table、context length 和
 schedule metadata 等其他 ABI 均未扩大为 int64。
@@ -140,18 +165,19 @@ CUDA Extension 已完成 Wuda 最新 TP1（不含 TPDP）迁移并推送：
 
 ```text
 repo:   /root/work/cuda_extension
-branch: origin/dsv4_megakernel
+branch: dsv4_megakernel
 base:   origin/main@3bc0ca4
 source: Wuda origin/main@6818258
-commit: e1d1c985 feat(dsv4): fuse MLA output inverse RoPE quant
+commit: b93e0761 feat(dsv4): consume int64 slots in HCA decode ops
+        （其上一提交 e1d1c985 为 fused MLA output inverse RoPE quant）
 ```
 
 当前已生成但尚未发布的本地 CUDA13.2 wheel：
 
 ```text
 /root/work/cuda_extension/dist/
-  rtp_kernel-0.1.0+e1d1c985.cu132-cp310-cp310-linux_x86_64.whl
-sha256: 175b34b2e08bb6234dd50b35d83c48abd1f54fd363863203b24ec7088add5bd1
+  rtp_kernel-0.1.0+b93e0761-cp310-cp310-linux_x86_64.whl
+sha256: 1a18bfc492a1ba91f7a66cd87d7710ec8f8a880ce742f50262eb953922145e5c
 ```
 
 wheel 已确认包含：
@@ -171,13 +197,15 @@ rtp-kernel 0.1.0+cu13.4a1a7e3
 本地 CUDA13 lock 让 Bazel 正常解析，没有替换 Bazel external cache。必须发布 wheel 后再更新
 公共 requirements 和 lock，不能把本地绝对路径或临时 URL 写进提交。
 
-adapter 另外依赖当前 DeepGEMM 的：
+CSA adapter 另外依赖当前 DeepGEMM 的：
 
 ```text
 tf32_hc_prenorm_gemm
 get_paged_mqa_logits_metadata
 get_num_sms
 ```
+
+HCA adapter 只依赖其中的 `tf32_hc_prenorm_gemm`（无 MQA schedule）。
 
 首次真实执行会同时检查 GPU capability、`rtp_kernel.dsv4_mega` 函数签名和固定 geometry，
 避免“有同名旧符号但 ABI 不兼容”时进入 cache write。
@@ -291,6 +319,56 @@ B128/64K 同步校验本步写入内容，而不只校验最终输出：CSA KV�
 typed pool/block table 仍由测试按生产 geometry 构造，不是 `KVCacheManager` 分配；也未使用
 真实 checkpoint，不能替代整模型端到端验证。
 
+### 2026-08-18：Mega HCA TP1 接入与验证
+
+HCA 接入提交：开源 `c558d9b27`（本仓）+ `cuda_extension@b93e0761`。关键几何均取自
+`DSV4CacheConfigHelper.cc`：HCA_KV 为 `tokens_per_block/128 = 2` entries/block；HCA_STATE
+ring 为 `computeStateRing(128, kHcaOverlap=0, gen)`，非 MTP 时恰为 128（注意 `kHcaOverlap`
+是 0，不是 CSA 的 1）；state 行为 `kv(512)|gate(512)` 交错 fp32，算子以两个 stride-1024
+view 直接写框架池。
+
+新增测试：
+
+```text
+//rtp_llm/models_py/modules/dsv4/fp8/test:test_mega_hca_adapter
+//rtp_llm/models_py/modules/dsv4/fp8/test:test_mega_hca_rtp_eager
+```
+
+单层对照结果（真实 `AttentionFP8(compress_ratio=128, indexer=None)`，对照原
+`_forward_decode_hca` 分支，B300/sm_103a）：
+
+| 对照项 | `calc_diff` / 结果 | 门限 |
+| --- | ---: | ---: |
+| 最终 attention sublayer 输出（pos 0..3） | `2.140570e-05` | `< 1e-3` |
+| 边界压缩步输出（pos 127，随机 state 环） | `7.721056e-07` | `< 1e-3` |
+| 边界压缩写入 HCA_KV（解量化） | `1.533674e-05` | `< 1e-3` |
+| SWA KV（解量化） | `0.0`（bitwise） | `< 1e-3` |
+| HCA state 环 | `1.1e-06` | `< 1e-4` |
+| 长上下文（pos 4095，随机 cache+state） | `4.038074e-06` | `< 1e-3` |
+| CUDA Graph replay | bitwise 一致 | 精确一致 |
+
+CSA 回归在新 wheel 与共享 runtime/block/transformer 改动下重跑，数值与 2026-08-15 基线
+逐位一致。
+
+性能（生产 CUDA Graph 口径；测量时 GPU 带约 15% 外部负载，绝对值有噪声）：
+
+| Batch | Context | 步型 | 原路径 | Mega | 变化 |
+| ---: | ---: | --- | ---: | ---: | ---: |
+| 8 | 2000 | 非边界 | `176.0 us` | `140.8 us` | `-20.0%` |
+| 8 | 2048 | 压缩边界 | `316.5 us` | `141.6 us` | `-55.3%` |
+| 16 | 2048 | 压缩边界 | `315.3 us` | `145.2 us` | `-53.9%` |
+| 128 | 4096 | 压缩边界 | `445.6 us` | `253.2 us` | `-43.2%` |
+
+原路径的边界压缩是独立 Triton kernel，Mega 把它并进 WQ-B GEMM，因此边界步收益远大于
+非边界步；按每 128 步一次边界加权约 `-20%`/层。两点已知说明：
+
+1. 边界步会立即稠密读回本步刚压缩的 HCA_KV entry；两条实现在该 entry 上的 bf16/FP8
+   舍入差（约 `1.5e-05`）在稠密短候选下的 softmax 占比大，把输出差放大到最坏
+   `2.1e-04`（仍远低于 `1e-3` 主门限）。因此 HCA 性能用例的 cosine 门限为 `0.995`
+   （非边界步实测 ~`0.99998`），并额外强制 per-request `calc_diff < 1e-3`。
+2. HCA state 环对照为 `1e-06` 量级（CSA 为 `1e-11`）：extension FRONT-EMIT 的 bf16
+   round 语义与框架 Triton compressor 存在实现差，后续可对齐；不阻塞当前结论。
+
 ## 6. 端到端剩余缺口
 
 按阻塞顺序还需要：
@@ -315,15 +393,18 @@ typed pool/block table 仍由测试按生产 geometry 构造，不是 `KVCacheMa
 
 ## 7. 内源合入方案
 
-目标内源分支为 `develop/wangyin_ds_v4_20260424`。在开源提交稳定后：
+目标内源分支为 `develop/wangyin_ds_v4_20260424`。在开源提交稳定后（迁移清单现含 CSA 与
+HCA 两组 adapter/runtime/weights/测试文件）：
 
 1. 将目标内源 worktree 对齐远端分支，保留现有用户修改和 gitlink；
 2. 迁移本分支的 adapter、runtime、weights、选路及测试文档改动，不迁移 Wuda TPDP 或改造版
    FlashMLA 逻辑；
 3. 新 wheel 发布后，同时更新内源 CUDA13 requirements lock 和实际 Bazel 依赖选择；
 4. 先跑与开源相同的 CPU tests 和 `//rtp_llm:rtp_llm` 完整编译；
-5. 再在内源服务配置中只对 TP1 FP8 `DECODE/PDFUSION` 打开 `DSV4_MEGA_CSA=1`；
+5. 再在内源服务配置中只对 TP1 FP8 `DECODE/PDFUSION` 打开开关，按 `DSV4_MEGA_CSA` →
+   `DSV4_MEGA_HCA` → 双开的顺序分阶段验证；双开后 Mega 覆盖全部 61 个 attention 层；
 6. 完成第 6 节 GPU 矩阵后，才能把开关从实验配置提升为默认配置。
 
-不需要修改 HCA、SWA、prefill、TP2/DP2 或 FlashMLA 通用接口。若后续接入这些场景，应分别
-新增受支持的完整 sublayer adapter，不能放宽当前 CSA TP1 adapter 的 geometry 检查。
+HCA 已按同样的“完整 sublayer adapter”模式接入（`MegaHCAAdapter`，独立 geometry 检查）。
+SWA-only、prefill、TP2/DP2 与 FlashMLA 通用接口仍不修改；若后续接入这些场景，应分别
+新增受支持的完整 sublayer adapter，不能放宽现有 CSA/HCA TP1 adapter 的 geometry 检查。
