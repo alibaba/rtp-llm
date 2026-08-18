@@ -142,7 +142,8 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         torch::zeros({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
     int stream_idx = 0;
     for (const GenerateStreamPtr& stream : streams) {
-        do_sample[stream_idx] = stream->generateConfig()->do_sample;
+        // If the stream's top1() config is true, we do not sample from the target distribution
+        do_sample[stream_idx] = !stream->generateConfig()->top1();
         stream_idx++;
     }
     buffer_holder_.hold_host(do_sample);
