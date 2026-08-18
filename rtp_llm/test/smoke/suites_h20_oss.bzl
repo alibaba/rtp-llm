@@ -199,6 +199,32 @@ def h20_oss_suites():
                 },
                 gpu_type=["H20"],
             ),
+            smoke_test(
+                name="moe_forward_warmup_pd_ep2",
+                # Shares moe_cp_pd's golden on purpose: same model, query, and
+                # expected response, and this case's real assertions are the
+                # warmup/KV-sizing log gates below, not the response text. If
+                # this case ever needs its own query or expectation, split the
+                # file then.
+                task_info="data/model/qwen3_moe/q_r_30b_fp8_py_cp2.json",
+                envs={
+                    "prefill": [
+                        "RUNTIME_MEM_SAFETY_RATIO=0.05",
+                        "SMOKE_ASSERT_WARMUP_SIZING=1",
+                    ],
+                    "decode": [
+                        "RUNTIME_MEM_SAFETY_RATIO=0.05",
+                        "SMOKE_ASSERT_WARMUP_SIZING=1",
+                    ],
+                },
+                smoke_args={
+                    "prefill": "--act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --reuse_cache 1 --seq_size_per_block 64 --tp_size 1 --dp_size 2 --ep_size 2 --world_size 2 --warm_up 1 --max_seq_len 32768 --max_context_batch_size 2 --max_batch_tokens_size 65536 --reserver_runtime_mem_mb 1024 --use_deepep_moe 1 --use_deepep_low_latency 0 --use_all_gather 0 --eplb_mode NONE --redundant_expert 0",
+                    # DeepEP normal FP8 per-block selects DeepGemmHybridExecutor, which does not
+                    # support CUDA graph. Keep it disabled so this case reaches the warmup sizing gates.
+                    "decode": "--act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --reuse_cache 1 --seq_size_per_block 64 --tp_size 1 --dp_size 2 --ep_size 2 --world_size 2 --warm_up 1 --max_seq_len 32768 --concurrency_limit 256 --reserver_runtime_mem_mb 1024 --use_deepep_moe 1 --use_deepep_low_latency 0 --use_all_gather 0 --eplb_mode NONE --redundant_expert 0",
+                },
+                gpu_type=["H20"],
+            ),
         ],
     )
 

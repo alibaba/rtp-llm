@@ -43,6 +43,23 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# No exec_properties on purpose: this depends only on the header-only warmup_role_gate target, so
+# it needs neither a GPU nor torch. That is why the role classification was split out of
+# NormalEngine.cc -- every other test in this directory requires an H20 host.
+# Known gap: this target pins role classification only. WarmupTraceScope's sample/reset ordering
+# and makeWarmUpResult's non-torch warning threshold still live in NormalEngine.cc and have no
+# host-only orchestration test because executor reset and CUDA synchronization are not injectable.
+cc_test(
+    name = "warmup_role_gate_test",
+    srcs = ["WarmupRoleGateTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/normal_engine:warmup_role_gate",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 cc_test(
     name = "normal_output_dispatcher_test",
     srcs = ["NormalOutputDispatcherTest.cc"],

@@ -7,13 +7,15 @@
 import argparse
 import datetime
 import os
-from ast import arg
 from typing import Any, List, Tuple
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.server.server_args.server_args import EnvArgumentParser
-from rtp_llm.server.server_args.util import str2bool
-from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.server.server_args.util import (
+    empty_bounded_env_value_means_unset,
+    str2bool,
+    uses_bounded_env_converter,
+)
 
 
 def get_all_arguments_from_parser(
@@ -61,7 +63,6 @@ def read_env_value(env_name: str, default_value: Any, arg_type: type) -> Any:
         return default_value
 
     try:
-        # 根据类型转换环境变量值
         if arg_type == bool:
             return env_value.lower() in ("true", "1", "yes", "on")
         elif arg_type == int:
@@ -71,7 +72,6 @@ def read_env_value(env_name: str, default_value: Any, arg_type: type) -> Any:
         else:
             return str(env_value)
     except (ValueError, TypeError):
-        # 如果转换失败，返回默认值
         return default_value
 
 
@@ -132,13 +132,24 @@ def generate_args_list(only_env_vars: bool = False) -> List[str]:
 
         # 检查环境变量是否存在
         env_var_exists = os.getenv(env_name) is not None
+        # Bounded converters receive their original text so argparse remains the single
+        # owner of strict/lenient error handling. Dispatch by converter, not env name, so
+        # another bounded runtime-memory option cannot silently disappear from this script.
+        if env_var_exists and uses_bounded_env_converter(arg_type):
+            env_value_str = os.getenv(env_name)
+            if env_value_str is None:
+                continue
+            if empty_bounded_env_value_means_unset(arg_type, env_value_str):
+                continue
+            args_list.extend([long_option, env_value_str])
+            continue
+
         # 如果default_value为None，只要环境变量存在就读取
         if default_value is None:
             if env_var_exists:
                 env_value_str = os.getenv(env_name)
                 if env_value_str is not None:
                     try:
-                        # 根据类型转换环境变量值
                         if arg_type == bool:
                             env_value = env_value_str.lower() in (
                                 "true",
@@ -161,7 +172,6 @@ def generate_args_list(only_env_vars: bool = False) -> List[str]:
 
                         args_list.extend(format_argument_pair(long_option, env_value))
                     except (ValueError, TypeError):
-                        # 如果转换失败，跳过这个参数
                         continue
         else:
             # 从环境变量读取值

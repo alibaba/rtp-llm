@@ -25,7 +25,7 @@ class DeviceBase:
         from rtp_llm.config.server_config_setup import auto_configure_deepep
         from rtp_llm.server.server_args.server_args import setup_args
 
-        self.py_env_configs = setup_args()
+        self.py_env_configs = setup_args(log_source="device_init")
         auto_configure_deepep(
             moe_config=self.py_env_configs.moe_config,
             deep_ep_config=self.py_env_configs.deep_ep_config,

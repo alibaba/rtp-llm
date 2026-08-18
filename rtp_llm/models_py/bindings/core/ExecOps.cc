@@ -51,6 +51,7 @@ void             multiMergeCopy(const MultiMergeCopyParams& params);
 #include <cuda_runtime.h>
 #include <cuda_profiler_api.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDACachingAllocator.h>
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #elif USING_ROCM
 #include <hip/hip_runtime.h>
@@ -530,17 +531,61 @@ void cudaProfilerEnd() {
 // Status queries
 // ============================================================
 
+namespace {
+static bool g_trace_memory = false;
+#if USING_CUDA
+// Baselines snapshotted right after emptyCache()+resetPeakStats() in setTraceMemory(true).
+// Used to turn absolute readings into the forward's transient deltas (see getGpuExecStatus).
+static size_t g_reserved_baseline_bytes  = 0;  // torch reserved at baseline
+static size_t g_cuda_used_baseline_bytes = 0;  // device used (total-free) at baseline
+#endif
+}  // namespace
+
 ExecStatus getGpuExecStatus() {
     MemoryStatus mem;
-    size_t       total_bytes = 0;
 #if USING_CUDA
-    auto error = cudaMemGetInfo(&mem.free_bytes, &total_bytes);
+    auto error = cudaMemGetInfo(&mem.free_bytes, &mem.total_bytes);
     RTP_LLM_CHECK(error == cudaSuccess);
 #elif USING_ROCM
-    hipMemGetInfo(&mem.free_bytes, &total_bytes);
+    ROCM_CHECK(hipMemGetInfo(&mem.free_bytes, &mem.total_bytes));
 #endif
-    mem.used_bytes      = total_bytes - mem.free_bytes;
+    mem.used_bytes      = mem.total_bytes - mem.free_bytes;
     mem.available_bytes = mem.free_bytes;
+#if USING_CUDA
+    // The torch/non-torch transient breakdown is intentionally CUDA-only. ROCm still reports
+    // checked device totals above, while the breakdown fields retain their zero defaults.
+    if (isTraceMemory()) {
+        // max_consumed_bytes = the torch allocator's peak growth over the traced window.
+        // available_bytes downstream already excludes the steady state (weights/context), so only
+        // the growth on top of the baseline is reported -- counting the baseline here too would
+        // double-subtract it from the KV cache budget.
+        const auto&  stats      = c10::cuda::CUDACachingAllocator::getDeviceStats(at::cuda::current_device());
+        const size_t torch_peak = static_cast<size_t>(stats.reserved_bytes[0].peak);  // [0] = AGGREGATE
+        const size_t torch_cur  = static_cast<size_t>(stats.reserved_bytes[0].current);
+        mem.allocated_bytes     = static_cast<size_t>(stats.allocated_bytes[0].current);
+
+        // non_torch_increase_bytes is a *resident* sample of driver-side growth (lazily loaded
+        // kernel modules, cuBLAS/cuDNN handle state, comm buffers, per-captured-graph driver
+        // state) and is deliberately kept out of max_consumed_bytes: how much of it the KV budget
+        // must reserve depends on how much survives the warmup teardown, which only the caller can
+        // tell by sampling this field again after releasing the traced executor (see
+        // makeWarmUpResult in NormalEngine.cc). CUDA graphs are only partly visible here -- their
+        // captured tensors go into a CUDACachingAllocator private pool and thus land in
+        // max_consumed_bytes, while their driver-side bookkeeping shows up in this field.
+        //
+        // This is a resident sample, not a time-window high-water mark: non-torch memory allocated
+        // and released inside the forward is invisible to it and is left to
+        // runtime_mem_safety_ratio rather than tracked with polling or allocator hooks.
+        //
+        // cudaMemGetInfo is device-global, so this assumes the warmup rank has exclusive use of
+        // its GPU during the measurement window; external allocations show up as non-torch growth.
+        const auto growth = calculateMemoryGrowth(
+            g_reserved_baseline_bytes, torch_peak, torch_cur, g_cuda_used_baseline_bytes, mem.used_bytes);
+        mem.max_consumed_bytes           = growth.torch_peak_increase_bytes;
+        mem.torch_current_increase_bytes = growth.torch_current_increase_bytes;
+        mem.non_torch_increase_bytes     = growth.non_torch_increase_bytes;
+    }
+#endif
     ExecStatus status;
     status.device_memory_status = mem;
     return status;
@@ -550,12 +595,37 @@ torch::Device getTorchCudaDevice() {
     return torch::Device(torch::kCUDA);
 }
 
-namespace {
-static bool g_trace_memory = false;
+bool isTraceMemory() {
+    return g_trace_memory;
 }
 
 void setTraceMemory(bool trace_memory) {
-    g_trace_memory = trace_memory;
+    if (!trace_memory) {
+        // Close the phase and deliberately leave the baselines alone. They are only read while the
+        // phase is Active (getGpuExecStatus guards on isTraceMemory()), so stale values are inert --
+        // whereas zeroing them here would open a window in which a reader still seeing Active would
+        // compute growth against 0, i.e. report an absolute figure as if it were a delta. The next
+        // open re-snapshots them before publishing Active.
+        g_trace_memory = false;
+        return;
+    }
+
+#if USING_CUDA
+    // Release loader-cached free blocks so the baseline is pure steady-state (weights), then
+    // zero the peak high-water mark and snapshot the baselines. Without emptyCache, the forward
+    // could reuse cached free blocks without growing reserved, making the measured delta too
+    // small -> KV cache over-allocated -> runtime OOM.
+    c10::cuda::CUDACachingAllocator::emptyCache();
+    const auto device = at::cuda::current_device();
+    c10::cuda::CUDACachingAllocator::resetPeakStats(device);
+    g_reserved_baseline_bytes =
+        static_cast<size_t>(c10::cuda::CUDACachingAllocator::getDeviceStats(device).reserved_bytes[0].current);
+    size_t free_bytes = 0, total_bytes = 0;
+    check_cuda_value(cudaMemGetInfo(&free_bytes, &total_bytes));
+    g_cuda_used_baseline_bytes = total_bytes - free_bytes;  // for non_torch_increase
+#endif
+    // Publish active only after all baselines are initialized.
+    g_trace_memory = true;
 }
 
 // === Copy ops ===
@@ -611,12 +681,14 @@ void execMappingDraft2Target(const MappingDraft2TargetParams& params) {
 // === Communication ops (Python callbacks via pybind11) ===
 
 namespace {
+// Lock ordering is always Python GIL -> g_comm_mutex. Registration/clear enter from Python with
+// the GIL already held; callback invocation acquires it explicitly before copying py::function.
 std::mutex g_comm_mutex;
 
-// Avoid destroying static Python objects after interpreter finalization.
-py::function* g_broadcast_fn = nullptr;
-py::function* g_allreduce_fn = nullptr;
-py::function* g_allgather_fn = nullptr;
+// Raw pointers to avoid destroying static Python objects after interpreter finalization.
+py::function* g_broadcast_fn = nullptr;  // (tensors: list[Tensor], root: int, mode: int) -> None
+py::function* g_allreduce_fn = nullptr;  // (tensor, op: int, mode: int, dest: Optional[Tensor]) -> Tensor
+py::function* g_allgather_fn = nullptr;  // (recv_buffers, mode: int, send_buffers, inplace: bool) -> None
 
 void clearCommOpsUnlocked() {
     py::function broadcast_fn;
@@ -641,8 +713,10 @@ void clearCommOpsUnlocked() {
 }  // anonymous namespace
 
 void execBroadcast(const BroadcastParams& params) {
-    py::function           fn;
+    // GIL guard first: locals are destroyed in reverse declaration order, so declaring fn after it
+    // is what releases fn's Python reference while the GIL is still held.
     py::gil_scoped_acquire gil;
+    py::function           fn;
     {
         std::lock_guard<std::mutex> lock(g_comm_mutex);
         if (g_broadcast_fn != nullptr) {
@@ -687,8 +761,8 @@ bool isCpuTpBroadcasterInitialized() {
 }
 
 AllReduceOutput execAllReduce(const AllReduceParams& params) {
-    py::function           fn;
     py::gil_scoped_acquire gil;
+    py::function           fn;
     {
         std::lock_guard<std::mutex> lock(g_comm_mutex);
         if (g_allreduce_fn != nullptr) {
@@ -701,12 +775,13 @@ AllReduceOutput execAllReduce(const AllReduceParams& params) {
                      static_cast<int>(params.op),
                      static_cast<int>(params.mode),
                      params.dest.defined() ? py::cast(params.dest) : py::none());
-    return AllReduceOutput{result.cast<torch::Tensor>()};
+    auto tensor = result.cast<torch::Tensor>();
+    return AllReduceOutput{std::move(tensor)};
 }
 
 void execAllGather(const AllGatherParams& params) {
-    py::function           fn;
     py::gil_scoped_acquire gil;
+    py::function           fn;
     {
         std::lock_guard<std::mutex> lock(g_comm_mutex);
         if (g_allgather_fn != nullptr) {

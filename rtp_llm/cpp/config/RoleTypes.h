@@ -8,7 +8,9 @@ enum RoleType {
     PREFILL  = 1,
     DECODE   = 2,
     VIT      = 3,
-    FRONTEND = 4
+    FRONTEND = 4,
+    // Sentinel: keep last, do not register as a real role in language bindings.
+    ROLE_TYPE_COUNT
 };
 
 enum VitSeparation {
@@ -29,4 +31,3 @@ public:
 };
 
 }  // namespace rtp_llm
-

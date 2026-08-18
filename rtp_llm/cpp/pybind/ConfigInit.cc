@@ -96,6 +96,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     registerMultimodal(m);
 
     // Register enums
+    static_assert(static_cast<int>(RoleType::ROLE_TYPE_COUNT) == 5,
+                  "add the new role to the pybind enum and generated Python stubs");
     py::enum_<RoleType>(m, "RoleType")
         .value("PDFUSION", RoleType::PDFUSION)
         .value("PREFILL", RoleType::PREFILL)
@@ -479,6 +481,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("ssm_state_dtype", &KVCacheConfig::ssm_state_dtype)
         .def_readwrite("kv_cache_mem_mb", &KVCacheConfig::kv_cache_mem_mb)
+        .def_readwrite("runtime_mem_safety_ratio", &KVCacheConfig::runtime_mem_safety_ratio)
+        .def_readwrite("runtime_mem_no_warmup_floor_mb", &KVCacheConfig::runtime_mem_no_warmup_floor_mb)
         .def_readwrite("seq_size_per_block", &KVCacheConfig::seq_size_per_block)
         .def_readwrite("kernel_seq_size_per_block", &KVCacheConfig::kernel_seq_size_per_block)
         .def_readwrite("test_block_num", &KVCacheConfig::test_block_num)
@@ -574,10 +578,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_legacy_memory_connector_fallback,
                                       self.prefix_tree_memory_state_swa_pool_ratio,
                                       self.enable_independent_group_eviction,
-                                      self.load_cache_retry_times);
+                                      self.load_cache_retry_times,
+                                      self.runtime_mem_safety_ratio,
+                                      self.runtime_mem_no_warmup_floor_mb);
             },
             [](py::tuple t) {
-                if (t.size() != 43 && t.size() != 54)
+                // 43 and 54 are persisted states from before runtime memory
+                // tuning. Keep their config defaults for the appended fields.
+                if (t.size() != 43 && t.size() != 54 && t.size() != 56)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -636,6 +644,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.prefix_tree_memory_state_swa_pool_ratio = t[51].cast<int64_t>();
                         c.enable_independent_group_eviction       = t[52].cast<bool>();
                         c.load_cache_retry_times                  = t[53].cast<int>();
+                    }
+                    if (t.size() >= 56) {
+                        c.runtime_mem_safety_ratio       = t[54].cast<double>();
+                        c.runtime_mem_no_warmup_floor_mb = t[55].cast<int64_t>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
