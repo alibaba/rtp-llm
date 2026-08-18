@@ -71,6 +71,7 @@ void               releaseDeviceBlocksAndNotify(BlockTreeCache&           cache,
                                                 const DeviceBlockPoolPtr& pool,
                                                 const BlockIdList&        blocks,
                                                 BlockRefType              ref_type);
+void releaseRequestRefsForTest(BlockTreeCache& cache, const std::vector<MultiNodeResource>& resources);
 
 void prepareGroupSetsForTest(std::vector<GroupSetPtr>& group_sets);
 

@@ -93,10 +93,6 @@ std::shared_ptr<LoadAsyncContext> HybridKVCacheAllocator::prepareKVCache(const C
     prepared.matched_device_blocks                 = match_result.matched_device_blocks;
     prepared.total_logical_blocks =
         load_context ? load_context->localMatchedBlocks() : match_result.matched_device_blocks;
-    if (prepared.total_logical_blocks == 0 && !load_context) {
-        block_tree_cache_->releaseMatchedResources(match_result.matched_device_resources);
-        return nullptr;
-    }
     const auto& group_sets = block_tree_cache_->groupSets();
     if (prepared.total_logical_blocks > 0) {
         for (const auto& group_set : group_sets) {
@@ -115,6 +111,7 @@ std::shared_ptr<LoadAsyncContext> HybridKVCacheAllocator::prepareKVCache(const C
             const size_t group_id        = group_ids[member_group_id];
             const size_t target_position = loadTargetPosition(path_index, group_id, cp_mapper, cp_scale);
             kv_resource.mutableBlockIds(0, static_cast<int>(group_id)).setAt(target_position, blocks[member_group_id]);
+            prepared.referenced_blocks[group_id].push_back(blocks[member_group_id]);
         }
     };
 
@@ -137,19 +134,8 @@ std::shared_ptr<LoadAsyncContext> HybridKVCacheAllocator::prepareKVCache(const C
     }
 
     for (int group_id = 0; group_id < kv_resource.groupNums(); ++group_id) {
-        BlockIndicesType valid;
-        for (const auto block : kv_resource.blocks(0, group_id)) {
-            if (!isNullBlockIdx(block)) {
-                valid.push_back(block);
-            }
-        }
-        if (!valid.empty()) {
-            kv_cache_groups_[static_cast<size_t>(group_id)]->reference(valid, BlockRefType::REQUEST);
-            prepared.referenced_blocks[static_cast<size_t>(group_id)] = std::move(valid);
-        }
         prepared.original_sizes.push_back(kv_resource.blocksNum(0, group_id));
     }
-    block_tree_cache_->releaseMatchedResources(match_result.matched_device_resources);
     return load_context;
 }
 

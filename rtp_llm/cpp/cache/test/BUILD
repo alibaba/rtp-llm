@@ -188,7 +188,10 @@ cc_library(
         "BlockTreeCacheAllocatorTestHelper.h",
     ],
     copts = test_copts,
-    deps = ["//rtp_llm/cpp/cache/block_tree_cache"],
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
+    ],
 )
 
 cc_test(

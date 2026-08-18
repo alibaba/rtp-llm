@@ -23,18 +23,14 @@ namespace rtp_llm::benchmark {
 //
 // load_target_blocks:  targets for non-joined lower-tier load descriptors.
 // suffix_blocks:       device blocks for the unmatched tail of the request path.
-// joined_holder_blocks: joined descriptor target_blocks carrying one deduplicated
-//                       REQUEST ref owned by this request.
 struct PreparedRequestResources {
-    std::vector<std::vector<BlockIdxType>> load_target_blocks;    // per group set
-    std::vector<std::vector<BlockIdxType>> suffix_blocks;         // per group set
-    std::vector<std::vector<BlockIdxType>> joined_holder_blocks;  // per group set
+    std::vector<std::vector<BlockIdxType>> load_target_blocks;  // per group set
+    std::vector<std::vector<BlockIdxType>> suffix_blocks;       // per group set
     bool                                   load_targets_allocated{false};
     bool                                   suffix_allocated{false};
-    bool                                   joined_holder_allocated{false};
 
     bool holdsBlocks() const {
-        return load_targets_allocated || suffix_allocated || joined_holder_allocated;
+        return load_targets_allocated || suffix_allocated;
     }
 };
 
@@ -52,11 +48,18 @@ public:
         // positions). The load covers everything beyond matched_device_blocks,
         // so this is the actual reuse depth used for suffix preparation.
         size_t                            actual_matched_depth{0};
-        std::vector<MultiNodeResource>    matched_device_resources;  // REQUEST refs held
-        std::shared_ptr<LoadAsyncContext> load_ticket;               // nullable
+        std::vector<MultiNodeResource>    matched_device_resources;
+        std::vector<BlockIndicesType>     request_blocks;
+        size_t                            joined_target_block_count{0};
+        std::shared_ptr<LoadAsyncContext> load_ticket;  // nullable
     };
 
     virtual MatchOutcome match(const PathKeys& path) = 0;
+
+    // Convert refs acquired by match into the request's block-only release
+    // ledger. Kept separate so benchmark match timing covers cache matching,
+    // not per-block ledger materialization.
+    virtual void materializeRequestBlocks(MatchOutcome& outcome) = 0;
 
     // Allocate device targets for every lower-tier load desc. On failure
     // releases everything already allocated and returns false with nothing
@@ -68,32 +71,23 @@ public:
     // blocks and returns false.
     virtual bool allocateSuffixBlocks(size_t suffix_block_count, PreparedRequestResources& out) = 0;
 
-    // Take REQUEST refs on the joined descriptor's real target_blocks so the
-    // joined request holds the descriptor blocks independently of the loader's
-    // transfer holder. Called only when the outcome carries a joined-load
-    // ticket. Returns false if referencing fails.
-    virtual bool holdJoinedBlocks(const MatchOutcome& outcome, PreparedRequestResources& out) = 0;
-
     // Set targets and commit the load ticket. On failure releases every held
     // block and returns false.
     virtual bool commitLoad(const std::shared_ptr<LoadAsyncContext>& ticket, PreparedRequestResources& out) = 0;
 
-    // Full-path insert using the prepared blocks, then release every request
-    // ref (matched prefix, load targets, suffix, joined holder) through
-    // onBlocksReleased. `actual_matched_depth` determines where suffix blocks
-    // are placed; no KV allocation happens here.
-    virtual void publishInsert(const PathKeys&                 path,
-                               size_t                          actual_matched_depth,
-                               PreparedRequestResources&       out,
-                               std::vector<MultiNodeResource>& matched_resources) = 0;
+    // Full-path insert using the prepared blocks, then release matched and
+    // prepared request refs. `actual_matched_depth` determines where suffix
+    // blocks are placed; no KV allocation happens here.
+    virtual void publishInsert(const PathKeys&                path,
+                               size_t                         actual_matched_depth,
+                               PreparedRequestResources&      out,
+                               std::vector<BlockIndicesType>& request_blocks) = 0;
 
-    // Release match-held REQUEST refs without any prepared blocks (used when
-    // admission fails before allocation).
-    virtual void releaseMatched(std::vector<MultiNodeResource>& resources) = 0;
+    virtual void releaseRequestBlocks(std::vector<BlockIndicesType>& blocks) = 0;
 
-    // Release every held block (load targets, suffix, joined holder, matched
-    // prefix). Used by rollback and cleanup; must be idempotent.
-    virtual void rollback(PreparedRequestResources& out, std::vector<MultiNodeResource>& matched_resources) = 0;
+    // Release prepared and request blocks. Used by rollback and cleanup;
+    // must be idempotent.
+    virtual void rollback(PreparedRequestResources& out, std::vector<BlockIndicesType>& request_blocks) = 0;
 };
 
 // Benchmark-local bounded polling helper used by the real adapter.
@@ -119,7 +113,8 @@ struct OnlineRequestContext {
     size_t                                matched_depth{0};
     size_t                                matched_device_blocks{0};
     size_t                                host_matched_blocks{0};
-    std::vector<MultiNodeResource>        matched_device_resources;
+    std::vector<BlockIndicesType>         request_blocks;
+    size_t                                joined_target_block_count{0};
     std::shared_ptr<LoadAsyncContext>     load_ticket;
     PreparedRequestResources              prepared;
     bool                                  tokens_counted{false};
@@ -157,8 +152,7 @@ struct OnlineSchedulerMetrics {
     size_t suffix_allocation_failed{0};
     size_t load_commit_failed{0};
     size_t admission_allocation_retries{0};
-    size_t joined_holder_failed{0};
-    size_t joined_holder_blocks_total{0};
+    size_t joined_target_blocks_total{0};
 
     // Reuse accounting
     size_t               planned_reuse_blocks_total{0};
@@ -248,11 +242,10 @@ private:
     enum class AdmitResult { OK, BLOCKED, SKIP };
 
     OnlineRequestContext makeContext(const OnlineRequestDescriptor& descriptor);
-    // Admission transaction: match -> allocate load targets -> hold joined blocks
-    // -> allocate suffix -> commit load. Returns BLOCKED when the head request
-    // cannot fit the token budget or SKIP when a continuation's parent has not
-    // been published. Terminal and handled failures return OK so admission can
-    // continue with other requests.
+    // Admission transaction: match -> allocate load targets -> allocate suffix
+    // -> commit load. Returns BLOCKED when the head request cannot fit the token
+    // budget or SKIP when a continuation's parent has not been published.
+    // Terminal and handled failures return OK so admission can continue.
     AdmitResult admit(OnlineRequestContext& ctx);
     // Idempotent cleanup: release prepared blocks and matched refs, decrement
     // the token budget and mark the context FINISHED.
