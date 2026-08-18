@@ -19,6 +19,8 @@ class EnvironmentConfigSourceTest {
                 "FLEXLB_LOG_LEVEL", "DEBUG",
                 "FLEXLB_SYNC_CONSISTENCY_CONFIG",
                 "{\"needConsistency\":true,\"zookeeperConfig\":{\"zkHost\":\"zk:2181\",\"zkTimeoutMs\":10000}}",
+                "MODEL_SERVICE_CONFIG",
+                "{\"service_id\":\"test-service\",\"role_endpoints\":[]}",
                 "MAX_RETRY_COUNT", "4",
                 "ENABLE_QUEUEING", "true");
         EnvironmentConfigSource source = new EnvironmentVariables(environment).execute(() -> {
@@ -40,6 +42,7 @@ class EnvironmentConfigSourceTest {
         assertThat(config.getFlexlbSyncConsistencyConfig().isNeedConsistency()).isTrue();
         assertThat(config.getFlexlbSyncConsistencyConfig().getZookeeperConfig().getZkHost()).isEqualTo("zk:2181");
         assertThat(config.getFlexlbSyncConsistencyConfig().getZookeeperConfig().getZkTimeoutMs()).isEqualTo(10000);
+        assertThat(config.getModelServiceConfig().getServiceId()).isEqualTo("test-service");
         configService.close();
     }
 }

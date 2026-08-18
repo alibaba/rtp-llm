@@ -52,6 +52,7 @@ Nacos DataId 必须存在，内容必须是非空 JSON object。可识别的 `Fl
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
+| `modelServiceConfig` | 无（缺失则启动失败） | 模型路由、服务发现、KVCM 与 Optimizer 配置；可由 `MODEL_SERVICE_CONFIG` 覆盖，更新后重启生效 |
 | `blockHashStrategy` | `VLLM` | cache block hash 策略：`VLLM` / `SGLANG`；可由 `BLOCK_HASH_STRATEGY` 覆盖 |
 | `loadBalanceStrategy` | `SHORTEST_TTFT` | PDFUSION/PREFILL 策略 |
 | `decodeLoadBalanceStrategy` | `WEIGHTED_CACHE` | DECODE 策略 |
@@ -76,7 +77,9 @@ Nacos DataId 必须存在，内容必须是非空 JSON object。可识别的 `Fl
 
 ### MODEL_SERVICE_CONFIG
 
-Spring 属性/env，缺省**启动失败**。反序列化为 `ServiceRoute`：
+统一配置字段为 `FlexlbConfig.modelServiceConfig`，环境变量 `MODEL_SERVICE_CONFIG` 仍然兼容，
+Nacos 中使用对象字段 `modelServiceConfig`。缺省**启动失败**。配置更新后由 ConfigService 保存
+最新快照，模型路由相关组件在启动时初始化，因此需要重启生效。反序列化为 `ServiceRoute`：
 
 - `service_id`（必填）、`role_endpoints: List<GroupRoleEndPoint>`（必填非空）、`kvcm`。
 - `GroupRoleEndPoint`：`group` + `prefill_endpoint` / `decode_endpoint` / `vit_endpoint` /

@@ -1,23 +1,42 @@
 package org.flexlb.config;
 
 import org.flexlb.dao.route.OptimizerConfig;
+import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.ServiceDiscoveryType;
+import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class ModelServiceConfigurationTest {
 
     private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
             .withUserConfiguration(
                     ServiceDiscoveryConfiguration.class,
-                    ModelServiceConfiguration.class);
+                    ModelServiceConfiguration.class)
+            .withBean("environmentConfigSource", Object.class, Object::new)
+            .withBean("nacosConfigSource", Object.class, Object::new);
+
+    @Test
+    void failsWhenModelServiceConfigIsMissing() {
+        ConfigService configService = mock(ConfigService.class);
+        when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+
+        contextRunner
+                .withBean(ConfigService.class, () -> configService)
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .hasRootCauseMessage("MODEL_SERVICE_CONFIG must not be blank");
+                });
+    }
 
     @Test
     void loadsAndValidatesEndpointDiscoveryConfiguration() {
-        contextRunner
-                .withPropertyValues("MODEL_SERVICE_CONFIG=" + staticModelConfig())
+        withModelConfig(staticModelConfig())
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     ModelMetaConfig config = context.getBean(ModelMetaConfig.class);
@@ -35,8 +54,7 @@ class ModelServiceConfigurationTest {
                 "pd_fusion_endpoint":{"address":"service-a","protocol":"http","path":"/"}}]}
                 """;
 
-        contextRunner
-                .withPropertyValues("MODEL_SERVICE_CONFIG=" + config)
+        withModelConfig(config)
                 .run(context -> {
                     assertThat(context).hasFailed();
                     assertThat(context.getStartupFailure())
@@ -52,8 +70,7 @@ class ModelServiceConfigurationTest {
                 "discovery":{"type":"dashscope","base_url":"http://127.0.0.1:8880"}}}]}
                 """;
 
-        contextRunner
-                .withPropertyValues("MODEL_SERVICE_CONFIG=" + config)
+        withModelConfig(config)
                 .run(context -> {
                     assertThat(context).hasFailed();
                     assertThat(context.getStartupFailure())
@@ -73,8 +90,7 @@ class ModelServiceConfigurationTest {
                 "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]}}}]}
                 """;
 
-        contextRunner
-                .withPropertyValues("MODEL_SERVICE_CONFIG=" + config)
+        withModelConfig(config)
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     var route = context.getBean(ModelMetaConfig.class).getServiceRoute("test-service");
@@ -86,8 +102,7 @@ class ModelServiceConfigurationTest {
 
     @Test
     void loadsEnabledOptimizerTraceConfiguration() {
-        contextRunner
-                .withPropertyValues("MODEL_SERVICE_CONFIG=" + modelConfig(validOptimizerConfig()))
+        withModelConfig(modelConfig(validOptimizerConfig()))
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     OptimizerConfig optimizer = context.getBean(ModelMetaConfig.class)
@@ -104,9 +119,8 @@ class ModelServiceConfigurationTest {
 
     @Test
     void appliesOptimizerTraceDefaults() {
-        contextRunner
-                .withPropertyValues("MODEL_SERVICE_CONFIG=" + modelConfig(
-                        validOptimizerConfig().replace(",\"path\":\"/custom/optimizer\"", "")))
+        withModelConfig(modelConfig(
+                validOptimizerConfig().replace(",\"path\":\"/custom/optimizer\"", "")))
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     assertThat(context.getBean(ModelMetaConfig.class)
@@ -119,15 +133,13 @@ class ModelServiceConfigurationTest {
 
     @Test
     void ignoresOptimizerFieldsWhenDisabled() {
-        contextRunner
-                .withPropertyValues("MODEL_SERVICE_CONFIG=" + modelConfig("{\"enabled\":false}"))
+        withModelConfig(modelConfig("{\"enabled\":false}"))
                 .run(context -> assertThat(context).hasNotFailed());
     }
 
     @Test
     void allowsEnabledOptimizerWithoutInstanceId() {
-        contextRunner
-                .withPropertyValues("MODEL_SERVICE_CONFIG=" + modelConfig(validOptimizerConfig()))
+        withModelConfig(modelConfig(validOptimizerConfig()))
                 .run(context -> assertThat(context).hasNotFailed());
     }
 
@@ -161,8 +173,7 @@ class ModelServiceConfigurationTest {
                 "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]}}}]}
                 """;
 
-        contextRunner
-                .withPropertyValues("MODEL_SERVICE_CONFIG=" + config)
+        withModelConfig(config)
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     var kvcm = context.getBean(ModelMetaConfig.class)
@@ -194,8 +205,7 @@ class ModelServiceConfigurationTest {
                 "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]}}}]}
                 """;
 
-        contextRunner
-                .withPropertyValues("MODEL_SERVICE_CONFIG=" + config)
+        withModelConfig(config)
                 .run(context -> {
                     assertThat(context).hasFailed();
                     assertThat(context.getStartupFailure())
@@ -214,12 +224,19 @@ class ModelServiceConfigurationTest {
     }
 
     private void assertOptimizerRejected(String optimizerConfig, String message) {
-        contextRunner
-                .withPropertyValues("MODEL_SERVICE_CONFIG=" + modelConfig(optimizerConfig))
+        withModelConfig(modelConfig(optimizerConfig))
                 .run(context -> {
                     assertThat(context).hasFailed();
                     assertThat(context.getStartupFailure()).hasRootCauseMessage(message);
                 });
+    }
+
+    private ApplicationContextRunner withModelConfig(String configJson) {
+        FlexlbConfig flexlbConfig = new FlexlbConfig();
+        flexlbConfig.setModelServiceConfig(JsonUtils.toObject(configJson, ServiceRoute.class));
+        ConfigService configService = mock(ConfigService.class);
+        when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
+        return contextRunner.withBean(ConfigService.class, () -> configService);
     }
 
     private String modelConfig(String optimizerConfig) {

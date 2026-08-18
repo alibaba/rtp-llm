@@ -9,10 +9,8 @@ import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.OptimizerConfig;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.RoutingServiceDiscovery;
-import org.flexlb.util.JsonUtils;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.core.env.Environment;
 
 /**
  * Loads and validates the model routing configuration once during startup.
@@ -24,13 +22,12 @@ public class ModelServiceConfiguration {
     private static final String MODEL_SERVICE_CONFIG = "MODEL_SERVICE_CONFIG";
 
     @Bean
-    public ModelMetaConfig modelMetaConfig(Environment environment, RoutingServiceDiscovery serviceDiscovery) {
-        String modelConfigJson = environment.getProperty(MODEL_SERVICE_CONFIG);
-        if (StringUtils.isBlank(modelConfigJson)) {
+    public ModelMetaConfig modelMetaConfig(ConfigService configService, RoutingServiceDiscovery serviceDiscovery) {
+        ServiceRoute serviceRoute = configService.loadBalanceConfig().getModelServiceConfig();
+        if (serviceRoute == null) {
             throw new IllegalStateException(MODEL_SERVICE_CONFIG + " must not be blank");
         }
 
-        ServiceRoute serviceRoute = JsonUtils.toObject(modelConfigJson, ServiceRoute.class);
         validateServiceRoute(serviceRoute, serviceDiscovery);
 
         ModelMetaConfig modelMetaConfig = new ModelMetaConfig();

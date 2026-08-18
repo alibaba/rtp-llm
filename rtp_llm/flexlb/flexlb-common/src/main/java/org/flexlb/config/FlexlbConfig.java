@@ -3,6 +3,7 @@ package org.flexlb.config;
 import lombok.Getter;
 import lombok.Setter;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.enums.BlockHashStrategyType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.LogLevel;
@@ -22,6 +23,11 @@ import static org.flexlb.enums.ResourceMeasureIndicatorEnum.WAIT_TIME;
 @Getter
 @Setter
 public class FlexlbConfig {
+
+    /**
+     * Model routing, service discovery, KVCM, and optimizer configuration.
+     */
+    private ServiceRoute modelServiceConfig;
 
     /**
      * Log level for the FlexLB logging group.

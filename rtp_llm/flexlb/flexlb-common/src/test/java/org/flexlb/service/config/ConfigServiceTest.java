@@ -129,6 +129,22 @@ class ConfigServiceTest {
     }
 
     @Test
+    void letsNacosOverrideEnvironmentModelServiceConfig() {
+        EnvironmentConfigSource environmentSource = environmentSource(Map.of(
+                "MODEL_SERVICE_CONFIG",
+                "{\"service_id\":\"environment-service\",\"role_endpoints\":[]}"));
+        FakeConfigSource nacosSource = new FakeConfigSource(
+                "Nacos",
+                200,
+                "{\"modelServiceConfig\":{\"service_id\":\"nacos-service\",\"role_endpoints\":[]}}");
+
+        ConfigService service = createService(List.of(environmentSource, nacosSource));
+
+        assertThat(service.loadBalanceConfig().getModelServiceConfig().getServiceId())
+                .isEqualTo("nacos-service");
+    }
+
+    @Test
     void runtimeUpdatesKeepCurrentValuesForMissingFieldsAndReplaceSnapshot() {
         FakeConfigSource source = new FakeConfigSource(
                 "Nacos",
