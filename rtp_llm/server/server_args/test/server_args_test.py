@@ -207,6 +207,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["ENABLE_CUDA_GRAPH"] = "1"
         os.environ["GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS"] = "4"
         os.environ["GENERATION_PREFILL_CAPTURE_CONFIG"] = "64,128,256"
+        os.environ["ENGINE_ASYNC_WORKER_COUNT"] = "3"
 
         sys.argv = ["prog"]
 
@@ -318,6 +319,9 @@ class ServerArgsSetTest(TestCase):
             py_env_configs.py_hw_kernel_config.generation_prefill_cuda_graph_max_requests,
             4,
         )
+        self.assertEqual(
+            py_env_configs.device_resource_config.engine_async_worker_count, 3
+        )
 
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""
@@ -363,6 +367,8 @@ class ServerArgsSetTest(TestCase):
             "true",
             "--disable_flashinfer_hybrid_prefill",
             "true",
+            "--engine_async_worker_count",
+            "4",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
         ]
@@ -439,6 +445,10 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(
             py_env_configs.py_hw_kernel_config.generation_prefill_capture_token_buckets,
             HWKernelConfig().generation_prefill_capture_token_buckets,
+        )
+
+        self.assertEqual(
+            py_env_configs.device_resource_config.engine_async_worker_count, 4
         )
 
     def test_generation_prefill_cuda_graph_cli_binding_and_validation(self):

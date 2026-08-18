@@ -1,7 +1,7 @@
 import pickle
 import unittest
 
-from rtp_llm.ops import GrammarConfig, HWKernelConfig
+from rtp_llm.ops import DeviceResourceConfig, GrammarConfig, HWKernelConfig
 
 
 def _new_grammar_config():
@@ -207,6 +207,16 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "HWKernelConfig unpickle error"):
             config = _new_hw_kernel_config()
             config.__setstate__(malformed_state)
+
+
+class DeviceResourceConfigPickleTest(unittest.TestCase):
+    def test_engine_async_worker_count_round_trip(self):
+        config = DeviceResourceConfig()
+        config.engine_async_worker_count = 3
+
+        restored = pickle.loads(pickle.dumps(config))
+
+        self.assertEqual(restored.engine_async_worker_count, 3)
 
 
 if __name__ == "__main__":
