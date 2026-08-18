@@ -66,22 +66,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /** Active Engine tasks not already represented in the local batch ledger. */
     private volatile long engineUntrackedRequestCount = 0;
 
-    /**
-     * Raw engine-reported waiting (queued) query count from the last worker
-     * status sync — {@code WorkerStatusResponse.waiting_query_len}, clamped
-     * to {@code >= 0}. The Engine reports every ~20ms, so the value is a
-     * near-real-time view of the engine-side admission queue depth that the
-     * master cannot see through its own ledgers (e.g. slow engines whose
-     * local batcher queue was drained by dispatch but whose engine-side
-     * queue keeps growing).
-     *
-     * <p>Last-known semantics: the value is kept as-is between syncs and is
-     * NOT decayed — a stale high value keeps signaling a slow engine, and a
-     * lost engine is handled by the registry removing the endpoint entirely,
-     * so no extra staleness handling is needed here.
-     */
-    private volatile long reportedWaitingQueryLen = 0;
-
     private static final long WAIT_TIME_CACHE_TTL_MS = 2;
     private volatile long cachedWaitTimeMs = 0;
     private volatile long cachedWaitTimeExpireAtMs = 0;
@@ -196,16 +180,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
         super.onWorkerStatusUpdate(ws, resp);
         calibrate(resp.getFinishedTaskInfo(), resp.getRunningTaskInfo());
         updateEngineUntrackedRequestCount(resp);
-        reportedWaitingQueryLen = Math.max(0, resp.getWaitingQueryLen());
-    }
-
-    /**
-     * Engine-reported waiting (queued) query count from the last ~20ms status
-     * sync, clamped to {@code >= 0}. Last-known value between syncs (no
-     * decay); a lost engine is removed by the registry instead.
-     */
-    public long getReportedWaitingQueryLen() {
-        return reportedWaitingQueryLen;
     }
 
     /**

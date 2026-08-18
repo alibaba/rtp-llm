@@ -2,7 +2,6 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityOrdering;
@@ -38,14 +37,6 @@ public class WorkerBatcher {
 
     private static final long DISPATCH_CAPACITY_RETRY_NANOS =
             TimeUnit.MILLISECONDS.toNanos(1);
-
-    /**
-     * Removal reason literal for admission-timeout evictions, shared by
-     * WorkerBatcher (leave-reason bucketing in the version-agnostic remove)
-     * and FlexlbBatchScheduler (timeoutEntry queue removal) so the string
-     * exists exactly once and the two call sites cannot drift apart.
-     */
-    public static final String REASON_ADMISSION_TIMEOUT = "ADMISSION_TIMEOUT";
 
     /**
      * Auto-TPM queue order (PR-B unification): delegates to
@@ -181,49 +172,6 @@ public class WorkerBatcher {
             queueDepth.decrementAndGet();
             throw e;
         }
-        // R4 review fix: report after the compensation scope — a throw from
-        // the report itself must not double-decrement queueDepth (the catch
-        // above only compensates admission failures), and a rethrown
-        // admission failure skips the report entirely.
-        reportQueueEnter();
-    }
-
-    /**
-     * na130_4 observability: one enter count per item that successfully
-     * joined the queue — this is the single success point shared by offer /
-     * tryOffer / versioned re-offer / victim-replace incoming, so no
-     * admission path double-counts. Reported via
-     * {@code whale-lb.app.flexlb.batcher.queue.enter.qps}.
-     */
-    private void reportQueueEnter() {
-        BatchSchedulerReporter reporter = ctx.reporter();
-        if (reporter != null) {
-            reporter.reportBatcherQueueEnter(RoleType.PREFILL.name(), engineIpTag());
-        }
-    }
-
-    /**
-     * na130_4 observability: queue departure counts by bucket reason
-     * ("removed" / "admission_timeout") via
-     * {@code whale-lb.app.flexlb.batcher.queue.leave.qps}. The
-     * version-checked and version-agnostic removes and the victim-replace
-     * paths all funnel through {@code ctx.remove()}, so each counts its
-     * removed items exactly once at its own call site.
-     */
-    private void reportQueueLeave(String bucketReason, int count) {
-        if (count <= 0) {
-            return;
-        }
-        BatchSchedulerReporter reporter = ctx.reporter();
-        if (reporter != null) {
-            reporter.reportBatcherQueueLeave(RoleType.PREFILL.name(), engineIpTag(), bucketReason, count);
-        }
-    }
-
-    /** engineIp tag for per-engine batcher queue series; key fallback for tests. */
-    private String engineIpTag() {
-        PrefillEndpoint ep = ctx.prefillEp();
-        return ep != null ? ep.getIp() : key;
     }
 
     public int queueSize() {
@@ -379,7 +327,6 @@ public class WorkerBatcher {
             if (!removed.isEmpty()) {
                 Logger.debug("[auto-tpm] queue remove: worker={} reason={} removed={}",
                         key, reason, removed.size());
-                reportQueueLeave("removed", removed.size());
             }
             return removed;
         } finally {
@@ -411,7 +358,6 @@ public class WorkerBatcher {
                 }
                 removed.add(victim);
             }
-            reportQueueLeave("removed", removed.size());
             if (!tryOffer(incoming)) {
                 return PrefillQueueManager.ReplaceOutcome.partialFailure(removed);
             }
@@ -442,9 +388,6 @@ public class WorkerBatcher {
             if (!removed.isEmpty()) {
                 Logger.debug("[auto-tpm] queue remove (version-agnostic): worker={} reason={} removed={}",
                         key, reason, removed.size());
-                reportQueueLeave(
-                        REASON_ADMISSION_TIMEOUT.equals(reason) ? "admission_timeout" : "removed",
-                        removed.size());
             }
             return removed;
         } finally {
@@ -505,7 +448,6 @@ public class WorkerBatcher {
                 }
                 removed.add(victim);
             }
-            reportQueueLeave("removed", removed.size());
             if (!tryOffer(incoming)) {
                 return PrefillQueueManager.ReplaceOutcome.partialFailure(removed);
             }

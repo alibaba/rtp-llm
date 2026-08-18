@@ -7,7 +7,6 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.ScheduleBudget;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -405,30 +404,6 @@ class FixedWindowBatcherAlgorithmTest {
 
         verify(handler).onExpired(head);
         assertEquals(0, context.size());
-    }
-
-    @Test
-    void queueLeaveCountsDeadlineEvictedOnEnqueueDeadlineDrop() throws InterruptedException {
-        // na130_4 observability: the enqueue-deadline dropHead path reports
-        // exactly one leave with reason=deadline_evicted on the reporter
-        // (legacy Auto-TPM-off parity path; the engineIp tag comes from the
-        // context endpoint).
-        FlexlbConfig config = sloCaseConfig();
-        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
-        when(endpoint.getIp()).thenReturn("127.0.0.1");
-        when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
-        BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
-        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
-        BatchItem head = enqueuedItem(1, System.currentTimeMillis() - 11_000, 100);
-        BatcherContext context = context(
-                "test", endpoint, config, handler, queueWith(head), reporter);
-
-        new FixedWindowBatcherAlgorithm().processQueue(context);
-
-        verify(handler).onExpired(head);
-        assertEquals(0, context.size());
-        verify(reporter).reportBatcherQueueLeave(
-                RoleType.PREFILL.name(), "127.0.0.1", "deadline_evicted", 1);
     }
 
     // ---- helpers ----

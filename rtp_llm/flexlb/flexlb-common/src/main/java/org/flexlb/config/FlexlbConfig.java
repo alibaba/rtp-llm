@@ -542,61 +542,6 @@ public class FlexlbConfig {
     private double flexlbCongestedQueueRatio = 0.8;
 
     /**
-     * Engine-wait penalty gate for prefill selection
-     * ({@code CostBasedPrefillStrategy}): when true (default), each
-     * engine-side queued request reported by the engine
-     * ({@code waitingQueryLen}, synced every ~20ms via worker status) adds
-     * {@link #flexlbEngineWaitPenaltyMsPerWaitStream} ms to that endpoint's
-     * Round-1 score, so engines whose engine-side admission queue keeps
-     * growing lose routing attractiveness even when the master-side view
-     * (inflight + batcher queue) looks clean (na130_4). Only effective in
-     * Auto-TPM deployments (gated on {@link #autoTpmEnabled} like the
-     * congested-queue filter); when the gate is off the term is exactly 0
-     * (legacy score).
-     * Environment variable: FLEXLB_ENGINE_WAIT_PENALTY_ENABLED.
-     */
-    private boolean flexlbEngineWaitPenaltyEnabled = true;
-
-    /**
-     * Score penalty in milliseconds per engine-side waiting request when
-     * {@link #flexlbEngineWaitPenaltyEnabled} is on (and Auto-TPM is
-     * enabled):
-     * {@code engineWaitMs = min(reportedWaitingQueryLen × thisFactor,
-     * 1L << 40)}. Default 20.0; a non-finite or non-positive value falls
-     * back to 20.0 at use time (treated as the default, not as 0).
-     * Environment variable: FLEXLB_ENGINE_WAIT_PENALTY_MS_PER_WAIT_STREAM.
-     */
-    private double flexlbEngineWaitPenaltyMsPerWaitStream = 20.0;
-
-    /**
-     * Engine-wait hard filter gate for prefill selection
-     * ({@code CostBasedPrefillStrategy}): when true (default), a prefill
-     * endpoint whose reported {@code waitingQueryLen} has reached
-     * {@link #flexlbEngineWaitHardFilterThreshold} is excluded from routing
-     * candidates outright ("ENGINE_WAIT_FILTERED"). Only effective in
-     * Auto-TPM deployments (gated on {@link #autoTpmEnabled} like the
-     * congested-queue filter). Same fallback semantics: when every feasible
-     * endpoint exceeds the threshold, the existing least-loaded fallback
-     * still returns one endpoint, so routing never fails closed. Set to
-     * false to restore the legacy candidate set without the engine-wait
-     * condition.
-     * Environment variable: FLEXLB_ENGINE_WAIT_HARD_FILTER_ENABLED.
-     */
-    private boolean flexlbEngineWaitHardFilterEnabled = true;
-
-    /**
-     * Engine-reported {@code waitingQueryLen} at which the engine-wait hard
-     * filter excludes an endpoint, when
-     * {@link #flexlbEngineWaitHardFilterEnabled} is on (and Auto-TPM is
-     * enabled). An endpoint is filtered when
-     * {@code waitingQueryLen >= threshold}. Default 256; a non-positive
-     * value is a misconfiguration that would filter every engine and is
-     * treated at use time as disabled (filter never fires).
-     * Environment variable: FLEXLB_ENGINE_WAIT_HARD_FILTER_THRESHOLD.
-     */
-    private int flexlbEngineWaitHardFilterThreshold = 256;
-
-    /**
      * Whether to enable score-tie randomization among near-equal prefill candidates.
      * When enabled (default), endpoints within a threshold of the minimum score are
      * randomly selected to avoid deterministic routing bias.

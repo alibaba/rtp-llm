@@ -16,7 +16,6 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -42,12 +41,6 @@ import static org.mockito.Mockito.withSettings;
  * flexlbBatchQueueMaxSize} must not be a routing candidate, and when every
  * feasible endpoint is congested the existing least-loaded fallback must
  * still select one — routing never fails closed.
- *
- * <p>Also covers the na130_4 engine-wait signal: the engine-reported
- * {@code waitingQueryLen} (~20ms sync) both penalizes the Round-1 score
- * ({@code flexlbEngineWaitPenaltyEnabled}) and hard-filters candidates
- * ({@code flexlbEngineWaitHardFilterEnabled}), with the same
- * least-loaded fallback semantics.
  *
  * <p>Real {@link PrefillEndpoint}s are used so the filter reads the live
  * {@code WorkerBatcher.queueSize()}. Queue drain is pinned by the
@@ -192,88 +185,7 @@ class CostBasedPrefillStrategyCongestionTest {
                 "with the filter disabled the congested engine must be selectable again");
     }
 
-    @Test
-    void engine_wait_penalty_pushes_high_wait_engine_below_sibling() {
-        // 100 engine-side waiting streams × default 20ms = 2000ms score
-        // penalty — the only score asymmetry between two otherwise identical
-        // engines (batcher queues empty, symmetric waits/predictions). The
-        // pendingCount asymmetry (100 vs 0, avg 50) stays under the hotspot
-        // bound (100 < 3 × 50) so the penalty term alone must decide.
-        reportWaitingQueryLen(congested, 100);
-
-        for (int i = 0; i < 50; i++) {
-            ServerStatus selected = strategy.select(context(i), RoleType.PREFILL, null);
-            assertTrue(selected.isSuccess());
-            assertNotEquals(CONGESTED_PORT, selected.getHttpPort(),
-                    "a high engine-side wait must push the engine below its low-wait sibling");
-        }
-    }
-
-    @Test
-    void engine_at_wait_threshold_is_excluded_from_candidates() {
-        // waitingQueryLen == 128 (explicit flexlbEngineWaitHardFilterThreshold
-        // — the default moved to 256, so the boundary is pinned explicitly
-        // instead of riding the default): the ">=" boundary fires the hard
-        // filter ("ENGINE_WAIT_FILTERED"). Both batcher queues stay empty so
-        // the congested-queue filter does not interfere; pendingCount 128 vs
-        // avg 64 stays under hotspot (128 < 3 × 64) so the hard filter is
-        // the only deciding factor.
-        config.setFlexlbEngineWaitHardFilterThreshold(128);
-        reportWaitingQueryLen(congested, 128);
-
-        for (int i = 0; i < 50; i++) {
-            ServerStatus selected = strategy.select(context(i), RoleType.PREFILL, null);
-            assertTrue(selected.isSuccess());
-            assertNotEquals(CONGESTED_PORT, selected.getHttpPort(),
-                    "engine at the engine-wait threshold must never be selected while an idle one exists");
-        }
-    }
-
-    @Test
-    void engine_wait_switches_off_restore_legacy_candidate_behavior() {
-        // Both engine-wait gates off: the reported wait is ignored entirely
-        // and the two engines (queues symmetric-empty) stay interchangeable —
-        // both must be selected across iterations (score-tie randomization on
-        // by default). Regression protection for the two switches.
-        config.setFlexlbEngineWaitPenaltyEnabled(false);
-        config.setFlexlbEngineWaitHardFilterEnabled(false);
-        reportWaitingQueryLen(congested, 100);
-
-        boolean congestedSeen = false;
-        boolean idleSeen = false;
-        for (int i = 0; i < 200; i++) {
-            ServerStatus selected = strategy.select(context(i), RoleType.PREFILL, null);
-            assertTrue(selected.isSuccess());
-            congestedSeen |= selected.getHttpPort() == CONGESTED_PORT;
-            idleSeen |= selected.getHttpPort() == IDLE_PORT;
-        }
-        assertTrue(congestedSeen,
-                "with both engine-wait switches off the high-wait engine must stay selectable");
-        assertTrue(idleSeen, "the sibling engine must stay selectable too");
-    }
-
-    @Test
-    void reported_waiting_query_len_is_clamped_non_negative() {
-        reportWaitingQueryLen(congested, -5);
-        assertEquals(0L, congested.getReportedWaitingQueryLen(),
-                "a negative engine-reported waitingQueryLen must clamp to 0");
-    }
-
     // ==================== helpers ====================
-
-    /**
-     * Inject an engine-side worker-status sync (the ~20ms path used by
-     * {@code PrefillEndpoint.onWorkerStatusUpdate}) carrying the given
-     * {@code waitingQueryLen}, mirroring the injection style of
-     * {@code PrefillEndpointTest#realPendingCountFallsBackToEngineQueryLengthScalars}.
-     */
-    private static void reportWaitingQueryLen(PrefillEndpoint endpoint, long waitingQueryLen) {
-        WorkerStatusResponse response = new WorkerStatusResponse();
-        response.setFinishedTaskInfo(Map.of());
-        response.setRunningTaskInfo(Map.of());
-        response.setWaitingQueryLen(waitingQueryLen);
-        endpoint.onWorkerStatusUpdate(endpoint.getStatus(), response);
-    }
 
     private static void fillQueue(PrefillEndpoint endpoint, int count) {
         long now = System.currentTimeMillis();

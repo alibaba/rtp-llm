@@ -23,11 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
 
 /**
  * Tests for {@link WorkerBatcher#queueSizeByPriority()}: per-priority
@@ -307,32 +303,6 @@ class WorkerBatcherTest {
         assertTrue(ctx.sortedItems().isEmpty());
         assertEquals(0, offerFailures.get(),
                 "shutdown owns the drained item; callback finally must not deliver it twice");
-    }
-
-    @Test
-    void queue_enter_and_leave_counts_reported_once_per_path() {
-        BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
-        WorkerBatcher batcher = new WorkerBatcher("test-worker", null, config,
-                mock(BatchDecisionHandler.class), reporter);
-        long now = System.currentTimeMillis();
-
-        // enter: each successful admission counts exactly once at the shared
-        // enqueue success point (offer/tryOffer/versioned paths all funnel here)
-        assertTrue(batcher.tryOffer(item(1, 50, now)));
-        assertTrue(batcher.tryOffer(item(2, 50, now)));
-        assertTrue(batcher.tryOffer(item(3, 50, now)));
-        verify(reporter, times(3)).reportBatcherQueueEnter("PREFILL", "test-worker");
-
-        // leave: ADMISSION_TIMEOUT removals bucket as admission_timeout,
-        // other removal reasons bucket as removed
-        assertEquals(1, batcher.tryRemoveNoVersion(List.of(1L), "ADMISSION_TIMEOUT").size());
-        verify(reporter).reportBatcherQueueLeave("PREFILL", "test-worker", "admission_timeout", 1);
-        assertEquals(1, batcher.tryRemoveNoVersion(List.of(2L), "plan_cancel").size());
-        verify(reporter).reportBatcherQueueLeave("PREFILL", "test-worker", "removed", 1);
-
-        // a remove that matches nothing leaves no count
-        assertEquals(0, batcher.tryRemoveNoVersion(List.of(999L), "plan_cancel").size());
-        verify(reporter, times(2)).reportBatcherQueueLeave(anyString(), anyString(), anyString(), anyInt());
     }
 
     // ==================== helpers ====================

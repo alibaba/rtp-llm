@@ -1532,7 +1532,6 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 // Prediction may yield to an admission deadline/cancel fence.
                 // Revalidate dispatch ownership immediately before the first
                 // externally visible commit/send step.
-                int beforeRevalidate = dispatchable.size();
                 dispatchable = dispatchable.stream().filter(item -> {
                     InflightEntry entry = entryFor(item);
                     if (entry == null) {
@@ -1545,26 +1544,11 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                                 && entry.lifecycle.snapshot().batchId() == batchId;
                     }
                 }).toList();
-                int revalidatedOut = beforeRevalidate - dispatchable.size();
-                if (revalidatedOut > 0) {
-                    // na130_4 observability: staged items dropped by the
-                    // pre-send revalidation leave with reason=dispatch_aborted;
-                    // they are absent from dispatchable, so the dispatched
-                    // count below can never double-count them.
-                    reporter.reportBatcherQueueLeave(RoleType.PREFILL.name(),
-                            prefillEp != null ? prefillEp.getIp() : "",
-                            "dispatch_aborted", revalidatedOut);
-                }
                 if (dispatchable.isEmpty()) {
                     return;
                 }
                 if (prefillEp != null) {
                     prefillEp.commitBatch(batchId, predMs, dispatchable);
-                    // na130_4 observability: items actually dispatched to the
-                    // engine leave the batcher queue here (leave/dispatched);
-                    // enter is counted once at WorkerBatcher enqueue success.
-                    reporter.reportBatcherQueueLeave(RoleType.PREFILL.name(),
-                            prefillEp.getIp(), "dispatched", dispatchable.size());
                 }
 
                 // [ASYNC] Delegate gRPC dispatch — dispatcher owns its own thread pool
@@ -1629,13 +1613,6 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         if (entry == null) {
             return;
         }
-        // na130_4 observability: a claimed item that fails before the engine
-        // send leaves with reason=dispatch_aborted (count=1 per item; the
-        // per-item claim catch and the pre-send failure loop both funnel
-        // here, and the revalidation drop above is disjoint from dispatchable).
-        PrefillEndpoint failEp = item.prefillEp();
-        reporter.reportBatcherQueueLeave(RoleType.PREFILL.name(),
-                failEp != null ? failEp.getIp() : "", "dispatch_aborted", 1);
         synchronized (entry) {
             reduceOrdinaryTerminalLocked(entry, DeferredTerminal.failure(
                     StrategyErrorType.BATCH_DISPATCH_FAILED,
@@ -2160,7 +2137,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             admissionFailure = classifyAdmissionTimeout(entry.item, prefill);
             if (prefill != null) {
                 prefill.getBatcher().queueManager().tryRemove(
-                        entry.item.requestId(), WorkerBatcher.REASON_ADMISSION_TIMEOUT);
+                        entry.item.requestId(), "ADMISSION_TIMEOUT");
             }
         }
         RequestLifecycleSnapshot terminal = entry.lifecycle.timeout(detail);
