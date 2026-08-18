@@ -1,5 +1,7 @@
 
 #pragma once
+#include <algorithm>
+#include <cstring>
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
@@ -22,6 +24,10 @@
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
+#include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 
 namespace py = pybind11;
 
@@ -78,8 +84,13 @@ private:
     GptModelOutputs forwardPostLayersLastHidden(torch::Tensor hidden, const GptModelInputs& inputs);
     MicroBatchPlan  planMicroBatches(const GptModelInputs& inputs);
     std::pair<std::vector<GptModelInputs>, std::vector<TokenSliceInfo>>
-         splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroBatchPlan& micro_batch_plan);
-    void holdInputsHostBuffers(const GptModelInputs& inputs);
+                    splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroBatchPlan& micro_batch_plan);
+    void            holdInputsHostBuffers(const GptModelInputs& inputs);
+    GraphBase*      selectGraphRunner(const torch_ext::PyAttentionInputs& attention_inputs) const;
+    CudaGraphState& selectGraphState(const torch_ext::PyAttentionInputs& attention_inputs);
+    bool            allocateFullPrefillScratch(const GptModelInitParams&      params,
+                                               std::vector<std::vector<int>>& scratch_kernel_block_ids);
+    void            releaseFullPrefillScratch();
 
     // Member variables (formerly inherited from GptModel)
     const rtp_llm::ExecProperties                   device_props_;
@@ -90,13 +101,15 @@ private:
     std::shared_ptr<KVCacheManager>                 cache_manager_;  // For cache_store access
     torch::Tensor                                   residual_scale_fp32_;
     torch::Tensor                                   residual_scale_;
-    TensorHolder                               buffer_holder_;
+    TensorHolder                                    buffer_holder_;
 
     GraphBase* graph_runner_{nullptr};
+    GraphBase* prefill_graph_runner_{nullptr};
     py::object py_model_;
     py::object held_attn_pyobj_;
     bool       enable_cuda_graph_{false};
     bool       is_prefill_cuda_graph_mode_{false};
+    bool       enable_full_prefill_cuda_graph_{false};
     bool       use_spec_decoding_{false};
     bool       enable_device_perf_{false};
     bool       check_nan_{false};
@@ -111,10 +124,14 @@ private:
     static constexpr int kPinnedCheckForwardCount = 3;
     int                  pinned_check_remaining_{kPinnedCheckForwardCount};
 
-    std::atomic<bool>                prepared_attention_inputs_{false};
-    torch_ext::PyAttentionInputs     attention_inputs_;
-    torch_ext::AttentionInputsByTag  attention_inputs_by_tag_;
-    CudaGraphState                   graph_state_;
+    std::atomic<bool>               prepared_attention_inputs_{false};
+    torch_ext::PyAttentionInputs    attention_inputs_;
+    torch_ext::AttentionInputsByTag attention_inputs_by_tag_;
+    CudaGraphState                  graph_state_;
+    CudaGraphState                  prefill_graph_state_;
+    BatchKVCacheResourcePtr         full_prefill_scratch_resource_;
+    CompleteTokenIdsPtr             full_prefill_scratch_token_ids_;
+    int64_t                         full_prefill_scratch_request_id_{-9223372036854775000LL};
 };
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.
@@ -129,6 +146,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     cache_manager_(params.cache_manager),
     enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph),
     is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
+    enable_full_prefill_cuda_graph_(params.hw_kernel_config.enable_full_prefill_cuda_graph),
     use_spec_decoding_(use_spec_decoding),
     enable_device_perf_(params.profile_debug_logging_config.enable_device_perf),
     check_nan_(params.profile_debug_logging_config.check_nan) {
@@ -173,10 +191,15 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     py_model_                 = py_instance;
     auto py_initialize_method = py_model_.attr("initialize");
     py_init_result            = py_initialize_method(init_resources);
+    if (enable_full_prefill_cuda_graph_ && !enable_cuda_graph_) {
+        RTP_LLM_LOG_WARNING("full prefill CUDA graph disabled reason=feature_disabled ENABLE_CUDA_GRAPH=0");
+        enable_full_prefill_cuda_graph_ = false;
+    }
     if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value() && !is_prefill_cuda_graph_mode) {
         RTP_LLM_LOG_WARNING(
             "CUDA graph enabled but kv_cache_layer_layout not available (warmup?), skipping graph capture");
-        enable_cuda_graph_ = false;
+        enable_cuda_graph_              = false;
+        enable_full_prefill_cuda_graph_ = false;
     } else if (enable_cuda_graph_) {
 #if USING_CUDA || USING_ROCM
         c10::ScalarType dtype = dataTypeToTorchType(description_.data_type);
@@ -238,6 +261,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                              && params.sp_config.gen_num_per_cycle > 0 && !params.model_id
                                              && !is_prefill_cuda_graph_mode;
         graph_params.is_target_verify = use_spec_decoding || is_target_verify_decode;
+        graph_params.role =
+            graph_params.is_target_verify ? CudaGraphRole::TARGET_VERIFY :
+            is_prefill_cuda_graph_mode    ? (params.sp_config.type == SP_TYPE_NONE ? CudaGraphRole::EMBEDDING_PREFILL :
+                                                                                     CudaGraphRole::MTP_DRAFT_PREFILL) :
+                                            CudaGraphRole::DECODE;
         if (params.sp_config.type != SP_TYPE_NONE) {
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
         }
@@ -264,6 +292,71 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         auto py_initialize_method = py_instance.attr("initialize");
         py_init_result            = py_initialize_method(init_resources);
         graph_runner_->initCapture();
+
+        if (enable_full_prefill_cuda_graph_ && !is_prefill_cuda_graph_mode_) {
+            const bool valid_static_config =
+                params.sp_config.type == SP_TYPE_NONE && description_.data_type == DataType::TYPE_BF16
+                && !description_.attention_conf.use_mla && !description_.ffn_conf.moe_configs.has_value()
+                && params.parallelism_config.tp_size == 1 && !params.parallelism_config.prefill_cp_config.is_enabled()
+                && !params.parallelism_config.prefill_cp_config.is_prefill_enabled()
+                && !params.parallelism_config.ffn_disaggregate_config.enable_ffn_disaggregate
+                && params.device_resource_config.enable_layer_micro_batch == 0
+                && graph_params.position_id_len_factor == 0 && params.cache_manager != nullptr
+                && params.kv_cache_layer_layout.has_value() && !params.hw_kernel_config.prefill_capture_seq_lens.empty()
+                && params.hw_kernel_config.full_prefill_cuda_graph_max_requests > 0
+                && params.hw_kernel_config.full_prefill_cuda_graph_max_padding_ratio >= 0.0
+                && params.hw_kernel_config.full_prefill_cuda_graph_max_padding_ratio <= 1.0;
+            if (!valid_static_config) {
+                const char* reason = params.device_resource_config.enable_layer_micro_batch != 0 ?
+                                         "layer_micro_batch_enabled" :
+                                         "unsupported_model";
+                RTP_LLM_LOG_WARNING("full prefill CUDA graph disabled reason=%s", reason);
+                enable_full_prefill_cuda_graph_ = false;
+            } else {
+                std::vector<std::vector<int>> scratch_kernel_block_ids;
+                if (!allocateFullPrefillScratch(params, scratch_kernel_block_ids)) {
+                    enable_full_prefill_cuda_graph_ = false;
+                } else {
+                    GraphParams prefill_graph_params                = graph_params;
+                    prefill_graph_params.role                       = CudaGraphRole::GENERATIVE_PREFILL_NO_PREFIX;
+                    prefill_graph_params.is_prefill_cuda_graph_mode = true;
+                    prefill_graph_params.is_target_verify           = false;
+                    prefill_graph_params.num_tokens_per_bs          = 1;
+                    prefill_graph_params.max_context_batch_size =
+                        static_cast<size_t>(params.hw_kernel_config.full_prefill_cuda_graph_max_requests + 1);
+                    prefill_graph_params.full_prefill_max_requests =
+                        params.hw_kernel_config.full_prefill_cuda_graph_max_requests;
+                    prefill_graph_params.full_prefill_max_padding_ratio =
+                        params.hw_kernel_config.full_prefill_cuda_graph_max_padding_ratio;
+                    prefill_graph_params.full_prefill_pad_token_id        = 0;
+                    prefill_graph_params.prefill_scratch_kernel_block_ids = std::move(scratch_kernel_block_ids);
+                    try {
+                        prefill_graph_runner_ = new CudaGraphRunner(prefill_graph_params, py_instance);
+                        RTP_LLM_CHECK_WITH_INFO(prefill_graph_runner_ != nullptr,
+                                                "prefill_graph_runner_ can't be null");
+                        prefill_graph_runner_->setInputEmbeddingScalar(description_.input_embedding_scalar);
+                        prefill_graph_runner_->initCapture();
+                        RTP_LLM_LOG_INFO("full prefill CUDA graph enabled: max_requests=%d padding_ratio=%.4f",
+                                         params.hw_kernel_config.full_prefill_cuda_graph_max_requests,
+                                         params.hw_kernel_config.full_prefill_cuda_graph_max_padding_ratio);
+                    } catch (const std::exception& e) {
+                        const char* reason = std::strstr(e.what(), "unsupported_backend") != nullptr ?
+                                                 "unsupported_backend" :
+                                                 "profile_not_ready";
+                        RTP_LLM_LOG_WARNING("full prefill CUDA graph disabled reason=%s error=%s", reason, e.what());
+                        if (prefill_graph_runner_ != nullptr) {
+                            delete prefill_graph_runner_;
+                            prefill_graph_runner_ = nullptr;
+                        }
+                        releaseFullPrefillScratch();
+                        enable_full_prefill_cuda_graph_ = false;
+                    }
+                }
+            }
+        } else if (enable_full_prefill_cuda_graph_) {
+            RTP_LLM_LOG_WARNING("full prefill CUDA graph disabled reason=unsupported_model wrapper_is_prefill=1");
+            enable_full_prefill_cuda_graph_ = false;
+        }
     }
 
     auto py_init_success = py_init_result.cast<bool>();

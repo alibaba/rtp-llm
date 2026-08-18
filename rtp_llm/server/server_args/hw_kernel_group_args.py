@@ -29,6 +29,33 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     )
 
     hw_kernel_group.add_argument(
+        "--enable_full_prefill_cuda_graph",
+        env_name="ENABLE_FULL_PREFILL_CUDA_GRAPH",
+        bind_to=(hw_kernel_config, "enable_full_prefill_cuda_graph"),
+        type=str2bool,
+        default=False,
+        help="为明确 graph-safe 的 no-prefix attention backend 开启完整 prefill CUDA Graph",
+    )
+
+    hw_kernel_group.add_argument(
+        "--full_prefill_cuda_graph_max_requests",
+        env_name="FULL_PREFILL_CUDA_GRAPH_MAX_REQUESTS",
+        bind_to=(hw_kernel_config, "full_prefill_cuda_graph_max_requests"),
+        type=int,
+        default=8,
+        help="Full Prefill CUDA Graph 中真实 context sequence row 的最大数量",
+    )
+
+    hw_kernel_group.add_argument(
+        "--full_prefill_cuda_graph_max_padding_ratio",
+        env_name="FULL_PREFILL_CUDA_GRAPH_MAX_PADDING_RATIO",
+        bind_to=(hw_kernel_config, "full_prefill_cuda_graph_max_padding_ratio"),
+        type=float,
+        default=0.25,
+        help="Full Prefill CUDA Graph token bucket 允许的最大 padding 比例",
+    )
+
+    hw_kernel_group.add_argument(
         "--enable_native_cuda_graph",
         env_name="ENABLE_NATIVE_CUDA_GRAPH",
         bind_to=(hw_kernel_config, "enable_native_cuda_graph"),

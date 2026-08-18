@@ -8,6 +8,15 @@ namespace rtp_llm {
 
 using namespace torch_ext;
 
+enum class CudaGraphRole : uint8_t {
+    AUTO = 0,
+    DECODE,
+    TARGET_VERIFY,
+    EMBEDDING_PREFILL,
+    MTP_DRAFT_PREFILL,
+    GENERATIVE_PREFILL_NO_PREFIX,
+};
+
 // Current state of CUDA graph execution (used when calling canRun/forward with graph runner)
 struct CudaGraphState {
     int current_batch_size{1};
@@ -15,6 +24,11 @@ struct CudaGraphState {
     int current_real_graph_bs{1};       // for decode
     int current_real_graph_seq_len{1};  // for prefill
     int seq_len_sum{0};
+    int real_request_count{0};
+    int real_token_count{0};
+    int graph_token_capacity{0};
+    int graph_request_capacity{0};
+    int captured_backend_batch_size{0};
 };
 
 struct GraphParams {
@@ -22,6 +36,7 @@ struct GraphParams {
     bool             enable_cuda_graph_debug_mode = false;
     bool             is_prefill_cuda_graph_mode   = false;
     bool             is_target_verify             = false;
+    CudaGraphRole    role                         = CudaGraphRole::AUTO;
     int              max_seq_len                  = 0;
     int              tokens_per_block             = 0;  // physical kv block size
     int              kernel_tokens_per_block      = 0;  // must be explicitly configured
@@ -32,7 +47,14 @@ struct GraphParams {
     c10::ScalarType  model_data_type        = c10::ScalarType::Float;
     std::vector<int> prefill_capture_seq_lens;
     std::vector<int> decode_capture_batch_sizes;
-    int64_t          hc_mult = 1;
+    int64_t          hc_mult                        = 1;
+    int              full_prefill_max_requests      = 0;
+    double           full_prefill_max_padding_ratio = 0.25;
+    int              full_prefill_pad_token_id      = 0;
+    // One vector per kv_cache_group_tags entry (or one vector for the legacy
+    // single-group path), containing kernel block IDs owned by the runner's
+    // sentinel scratch resource.
+    std::vector<std::vector<int>> prefill_scratch_kernel_block_ids;
     // Golden cache-group identity for CUDA graph capture/replay. A one-group
     // topology keeps the direct AttentionInputs fast path; multiple groups
     // require an exact tag -> AttentionInputs mapping at replay time.
