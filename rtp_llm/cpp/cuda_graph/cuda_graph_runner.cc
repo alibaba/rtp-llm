@@ -997,6 +997,40 @@ void CudaGraphRunner::initCapture() {
             capture_range_ = getPrefillSequenceLengthsToCapture();
         } else {
             capture_range_ = getDecodeBatchSizesToCapture();
+            // Decode buckets are batch sizes, and canRun() accepts any batch up to the largest
+            // captured bucket, while max_bs_ comes from this role's CONCURRENCY_LIMIT.
+            // CONCURRENCY_LIMIT bounds the requests this role admits, not the decode streams its
+            // PD peer hands over, and DECODE_CAPTURE_CONFIG is only derived from the limit when the
+            // operator leaves it unset (maga_start.sh) -- an explicit override above the limit makes
+            // a batch in (max_bs_, largest_bucket] reachable. Replaying into buffers that hold only
+            // max_bs_ rows makes the output slice() clamp silently, and MtpExecutor then reshapes
+            // that short tensor by the real batch size and throws, terminating every rank.
+            //
+            // Size the buffers for the largest bucket instead. Widen max_bs_ in place rather than
+            // adding a second capacity field: every buffer in initCaptureAttentionInputs /
+            // initCaptureBertEmbeddingInputs and the token slice in prepareCaptureInputs is sized
+            // from it, so one source keeps them consistent by construction.
+            //
+            // Compare as int before widening: capture_range_ holds ints from operator config, and
+            // implicitly converting a negative bucket to size_t would look like an enormous limit.
+            const int largest_bucket = capture_range_.empty() ? 0 : capture_range_.back();
+            RTP_LLM_CHECK_WITH_INFO(largest_bucket <= kMaxDecodeCaptureBatchSize,
+                                    "decode_capture_batch_sizes largest bucket %d exceeds the supported "
+                                    "maximum %d; check decode_capture_batch_sizes against concurrency_limit "
+                                    "(currently %zu)",
+                                    largest_bucket,
+                                    kMaxDecodeCaptureBatchSize,
+                                    max_bs_);
+            if (largest_bucket > 0 && static_cast<size_t>(largest_bucket) > max_bs_) {
+                RTP_LLM_LOG_WARNING("decode capture buckets reach %d beyond concurrency_limit %zu; sizing graph "
+                                    "buffers for %d. The extra rows are captured graph memory -- check "
+                                    "decode_capture_batch_sizes against concurrency_limit if unexpected.",
+                                    largest_bucket,
+                                    max_bs_,
+                                    largest_bucket);
+                max_bs_        = static_cast<size_t>(largest_bucket);
+                max_num_token_ = static_cast<int>(max_bs_) * num_tokens_per_bs_;
+            }
         }
 
         PyModelInputs inputs;

@@ -140,6 +140,10 @@ private:
     bool                    is_target_verify_{false};
     cuda_graph::GraphStream capture_stream_;
     bool                    enable_cuda_graph_debug_mode_{false};
+    // Sanity bound on decode_capture_batch_sizes: the largest bucket sizes every decode graph
+    // buffer, so a typo an order of magnitude too large should fail at startup rather than
+    // silently reserve the memory for it.
+    static constexpr int    kMaxDecodeCaptureBatchSize = 4096;
     size_t                  max_bs_{1};
     int                     num_tokens_per_bs_{1};
     int                     max_num_token_{1};
