@@ -102,6 +102,12 @@ class KimiK3LatentMoE(nn.Module):
         )
         self.latent_size = int(self.weights[K3W.MOE_ROUTED_DOWN].shape[1])
         self.layer_idx = int(layer_idx)
+        router_weight = self.weights[K3W.MOE_GATE]
+        self._bf16_fp32_router_enabled = (
+            router_weight.is_cuda
+            and router_weight.dtype == torch.bfloat16
+            and torch.cuda.get_device_capability(router_weight.device)[0] >= 8
+        )
         self._group_topk = GroupTopK()
         self._setup_deep_gemm_mega()
 
@@ -425,12 +431,21 @@ class KimiK3LatentMoE(nn.Module):
         return output
 
     def _route(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        # Keep all router tensors resident in checkpoint BF16. The FP32
-        # conversion is scoped to this layer invocation so 93 layers do not
-        # retain about 1.10 GiB of extra allocator segments.
-        router_weight = self.weights[K3W.MOE_GATE].float()
-        router_logits = torch.matmul(hidden_states.float(), router_weight)
         correction_bias = self.weights[K3W.MOE_CORRECTION_BIAS].float()
+        router_weight = self.weights[K3W.MOE_GATE]
+        if (
+            self._bf16_fp32_router_enabled
+            and hidden_states.is_cuda
+            and hidden_states.dtype == torch.bfloat16
+            and hidden_states.ndim == 2
+        ):
+            router_logits = torch.mm(
+                hidden_states, router_weight, out_dtype=torch.float32
+            )
+        else:
+            router_logits = torch.matmul(
+                hidden_states.float(), router_weight.float()
+            )
         if self._group_topk.fused_sigmoid_supported(
             router_logits,
             correction_bias,

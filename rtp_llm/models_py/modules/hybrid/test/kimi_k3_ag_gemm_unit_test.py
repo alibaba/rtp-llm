@@ -22,6 +22,43 @@ from rtp_llm.utils.model_weight import W
 
 class KimiK3AllGatherMatmulUnitTest(unittest.TestCase):
     @staticmethod
+    def _router_stub() -> KimiK3LatentMoE:
+        module = KimiK3LatentMoE.__new__(KimiK3LatentMoE)
+        nn.Module.__init__(module)
+        module._bf16_fp32_router_enabled = True
+        module._group_topk = SimpleNamespace(
+            fused_sigmoid_supported=lambda *args: False
+        )
+        module.num_expert_group = 1
+        module.topk_group = 1
+        module.top_k = 2
+        module.renormalize = True
+        module.routed_scaling_factor = 0.75
+        return module
+
+    @staticmethod
+    def _expected_route(
+        module: KimiK3LatentMoE,
+        logits: torch.Tensor,
+        correction_bias: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        scores = logits.sigmoid()
+        expert_ids = (scores + correction_bias.unsqueeze(0)).topk(
+            module.top_k,
+            dim=-1,
+            sorted=False,
+        ).indices
+        expert_weights = scores.gather(1, expert_ids)
+        if module.renormalize:
+            expert_weights = expert_weights / (
+                expert_weights.sum(dim=-1, keepdim=True) + 1e-20
+            )
+        return (
+            expert_ids,
+            expert_weights * module.routed_scaling_factor,
+        )
+
+    @staticmethod
     def _packed_kda_stub(tp_size: int) -> KimiK3KDA:
         total_heads = 8
         head_dim = 4
@@ -93,6 +130,72 @@ class KimiK3AllGatherMatmulUnitTest(unittest.TestCase):
                         rtol=0,
                         atol=0,
                     )
+
+    def test_router_uses_bf16_fp32_torch_mm(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is required")
+        torch.manual_seed(20260813)
+        module = self._router_stub()
+        hidden = (0.1 * torch.randn(7, 13, device="cuda")).to(torch.bfloat16)
+        router_weight = (0.1 * torch.randn(13, 5, device="cuda")).to(
+            torch.bfloat16
+        )
+        correction_bias = 0.1 * torch.randn(
+            5, dtype=torch.float32, device="cuda"
+        )
+        module.weights = {
+            K3W.MOE_GATE: router_weight,
+            K3W.MOE_CORRECTION_BIAS: correction_bias,
+        }
+
+        logits = torch.mm(hidden, router_weight, out_dtype=torch.float32)
+        reference_logits = torch.mm(hidden.float(), router_weight.float())
+        torch.testing.assert_close(
+            logits, reference_logits, rtol=1e-3, atol=1e-3
+        )
+
+        with patch.object(torch, "mm", return_value=logits) as mm:
+            actual_ids, actual_weights = module._route(hidden)
+
+        mm.assert_called_once_with(
+            hidden, router_weight, out_dtype=torch.float32
+        )
+        expected_ids, expected_weights = self._expected_route(
+            module, logits, correction_bias
+        )
+        reference_ids, _ = self._expected_route(
+            module, reference_logits, correction_bias
+        )
+        torch.testing.assert_close(actual_ids, expected_ids, rtol=0, atol=0)
+        torch.testing.assert_close(expected_ids, reference_ids, rtol=0, atol=0)
+        torch.testing.assert_close(
+            actual_weights, expected_weights, rtol=0, atol=0
+        )
+
+    def test_router_falls_back_outside_cuda_bf16_path(self) -> None:
+        torch.manual_seed(20260814)
+        module = self._router_stub()
+        hidden = torch.randn(7, 13, dtype=torch.bfloat16)
+        router_weight = torch.randn(13, 5, dtype=torch.bfloat16)
+        correction_bias = torch.randn(5, dtype=torch.float32)
+        module.weights = {
+            K3W.MOE_GATE: router_weight,
+            K3W.MOE_CORRECTION_BIAS: correction_bias,
+        }
+
+        with patch.object(
+            torch, "mm", side_effect=AssertionError("unexpected mm")
+        ):
+            actual_ids, actual_weights = module._route(hidden)
+
+        logits = torch.matmul(hidden.float(), router_weight.float())
+        expected_ids, expected_weights = self._expected_route(
+            module, logits, correction_bias
+        )
+        torch.testing.assert_close(actual_ids, expected_ids, rtol=0, atol=0)
+        torch.testing.assert_close(
+            actual_weights, expected_weights, rtol=0, atol=0
+        )
 
     def test_nondivisible_kda_projection_restores_logical_token_domain(
         self,
