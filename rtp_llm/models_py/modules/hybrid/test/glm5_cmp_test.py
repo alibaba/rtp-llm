@@ -72,10 +72,68 @@ def test_dense_cmp_requires_ue8m0_fp8_input() -> None:
     )
 
 
+def test_parallelism_ignores_prefill_cp_metadata_on_decode() -> None:
+    prefill_cp_config = SimpleNamespace(
+        is_enabled=lambda: True,
+        is_prefill_enabled=lambda: True,
+        kv_cache_sharded=True,
+        prefill_cp_size=8,
+    )
+    decode_parallelism = SimpleNamespace(
+        tp_size=1,
+        get_attn_tp_size=lambda: 1,
+        prefill_cp_config=prefill_cp_config,
+    )
+    prefill_parallelism = SimpleNamespace(
+        tp_size=8,
+        get_attn_tp_size=lambda: 1,
+        prefill_cp_config=prefill_cp_config,
+    )
+
+    assert bridge._unsupported_parallelism_reason(decode_parallelism) is None
+    assert (
+        bridge._unsupported_parallelism_reason(prefill_parallelism)
+        == "GLM5 CMP requires TP=1"
+    )
+
+
+def test_cmp_constructor_does_not_load_runtime_or_set_pdl() -> None:
+    config = SimpleNamespace(
+        model_type="glm_5",
+        moe_layer_index=(0,),
+        attn_config=SimpleNamespace(use_mla=True, kernel_tokens_per_block=64),
+    )
+    parallelism = SimpleNamespace(tp_size=1, get_attn_tp_size=lambda: 1)
+    self_attn = SimpleNamespace(has_indexer=False)
+    mlp = SimpleNamespace()
+
+    with patch.object(bridge, "_load_ops") as load_ops, patch.object(
+        bridge, "_configure_deep_gemm_pdl"
+    ) as configure_pdl, patch.object(
+        bridge.Glm5Cmp, "_prepare_router_weight"
+    ) as prepare_router_weight:
+        cmp = bridge.Glm5Cmp(
+            layer_idx=0,
+            config=config,
+            parallelism_config=parallelism,
+            self_attn=self_attn,
+            input_layernorm=object(),
+            mlp=mlp,
+            post_attention_layernorm=object(),
+        )
+
+    assert cmp._disabled_reason is None
+    assert cmp.ops is None
+    load_ops.assert_not_called()
+    configure_pdl.assert_not_called()
+    prepare_router_weight.assert_not_called()
+
+
 def _selection_cmp(*, has_indexer: bool, reuses_indexer: bool, is_moe_layer: bool):
     cmp = object.__new__(bridge.Glm5Cmp)
     cmp._disabled_reason = None
     cmp._is_moe_layer = is_moe_layer
+    cmp.ops = object()
     cmp.self_attn = SimpleNamespace(
         has_indexer=has_indexer,
         reuse_topk_indices=reuses_indexer,
@@ -101,10 +159,79 @@ def test_model_execution_is_selected_once_for_all_layers() -> None:
         layers, 2, torch.empty((16, 6144)), object(), kv_cache
     )
 
-    full._disabled_reason = "unsupported"
+    main._disabled_reason = "unsupported"
     assert not bridge.should_enable_glm5_cmp(
         layers, 2, torch.empty((16, 6144)), object(), kv_cache
     )
+
+
+def test_dynamic_fallback_does_not_load_runtime_or_set_pdl() -> None:
+    cmp = _selection_cmp(
+        has_indexer=True,
+        reuses_indexer=False,
+        is_moe_layer=False,
+    )
+    cmp.ops = None
+    cmp._unsupported_call_reason = Mock(return_value="ordinary prefill is unsupported")
+    cmp._initialize_for_cmp = Mock()
+    layers = [SimpleNamespace(cmp=cmp)]
+    kv_cache = SimpleNamespace(get_layer_cache=lambda _: object())
+
+    with patch.object(bridge, "_load_ops") as load_ops, patch.object(
+        bridge, "_configure_deep_gemm_pdl"
+    ) as configure_pdl:
+        enabled = bridge.should_enable_glm5_cmp(
+            layers, 1, torch.empty((16, 6144)), object(), kv_cache
+        )
+
+    assert not enabled
+    load_ops.assert_not_called()
+    configure_pdl.assert_not_called()
+    cmp._initialize_for_cmp.assert_not_called()
+
+
+def test_selected_call_initializes_all_layers_before_setting_pdl() -> None:
+    full = _selection_cmp(
+        has_indexer=True,
+        reuses_indexer=False,
+        is_moe_layer=False,
+    )
+    main = _selection_cmp(
+        has_indexer=False,
+        reuses_indexer=True,
+        is_moe_layer=True,
+    )
+    full.ops = None
+    main.ops = None
+    full._unsupported_call_reason = Mock(return_value=None)
+    ops = object()
+
+    def initialize(cmp):
+        def apply(loaded_ops):
+            cmp.ops = loaded_ops
+
+        cmp._initialize_for_cmp = Mock(side_effect=apply)
+
+    initialize(full)
+    initialize(main)
+    layers = [SimpleNamespace(cmp=full), SimpleNamespace(cmp=main)]
+    kv_cache = SimpleNamespace(get_layer_cache=lambda _: object())
+
+    with patch.object(bridge, "_load_ops", return_value=ops) as load_ops, patch.object(
+        bridge, "_configure_deep_gemm_pdl"
+    ) as configure_pdl, patch.object(bridge.logger, "info") as log_info:
+        assert bridge.should_enable_glm5_cmp(
+            layers, 2, torch.empty((16, 6144)), object(), kv_cache
+        )
+        assert bridge.should_enable_glm5_cmp(
+            layers, 2, torch.empty((16, 6144)), object(), kv_cache
+        )
+
+    load_ops.assert_called_once_with()
+    full._initialize_for_cmp.assert_called_once_with(ops)
+    main._initialize_for_cmp.assert_called_once_with(ops)
+    configure_pdl.assert_called_once_with(ops)
+    log_info.assert_called_once_with("GLM5 CMP activated for %d layers", 2)
 
 
 def test_moe_prepacked_input_abi() -> None:
@@ -338,3 +465,7 @@ def test_prepacked_mega_moe_skips_input_packer(
     assert result.shape == (6, 8)
     op._input_packer.pack.assert_not_called()
     getattr(deep_gemm, expected_call).assert_called_once()
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__]))

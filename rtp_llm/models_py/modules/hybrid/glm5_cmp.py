@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any
@@ -13,13 +14,16 @@ from rtp_llm.utils.model_weight import W
 
 _ENABLE_ENV = "RTP_LLM_GLM5_CMP"
 _SUPPORTED_MODEL_TYPES = frozenset(("glm_5", "glm_5_mtp"))
+logger = logging.getLogger(__name__)
 
 
 def _load_ops() -> Any:
-    ops = importlib.import_module("rtp_kernel.glm5")
+    return importlib.import_module("rtp_kernel.glm5")
+
+
+def _configure_deep_gemm_pdl(ops: Any) -> None:
     deep_gemm = importlib.import_module("deep_gemm")
     deep_gemm.set_pdl(ops.get_pdl())
-    return ops
 
 
 def resolve_glm5_cmp_enabled() -> bool:
@@ -77,17 +81,9 @@ def _tokens_per_request(
 def _unsupported_parallelism_reason(parallelism: Any) -> str | None:
     raw_tp = int(getattr(parallelism, "tp_size", 1) or 1)
     attn_tp = int(parallelism.get_attn_tp_size())
-    cp = getattr(parallelism, "prefill_cp_config", None)
-    if cp is not None:
-        is_enabled = getattr(cp, "is_enabled", None)
-        is_prefill_enabled = getattr(cp, "is_prefill_enabled", None)
-        if (
-            (callable(is_enabled) and is_enabled())
-            or (callable(is_prefill_enabled) and is_prefill_enabled())
-            or bool(getattr(cp, "kv_cache_sharded", False))
-            or int(getattr(cp, "prefill_cp_size", 0) or 0) > 1
-        ):
-            return "GLM5 CMP requires CP=1 and an unsharded KV cache"
+    # Decode carries the prefill CP width and sharded-cache metadata so that it
+    # can read P->D KV cache correctly, but it does not run context parallelism.
+    # Active prefill CP repurposes the raw TP group and therefore has raw_tp > 1.
     if raw_tp != 1 or attn_tp != 1:
         return "GLM5 CMP requires TP=1"
     return None
@@ -132,36 +128,22 @@ class Glm5Cmp:
         self.mlp = mlp
         self.post_attention_layernorm = post_attention_layernorm
         self._is_moe_layer = self.layer_idx in config.moe_layer_index
-        self._router_weight = self._prepare_router_weight(mlp)
+        self._router_weight = None
         self._events: _StreamEvents | None = None
         self._packed_head_gate_weight: torch.Tensor | None = None
         self._draft_prefill_clone = False
         self._disabled_reason = self._static_disabled_reason()
-        self._moe_prepack_disabled_reason = (
-            self._static_moe_prepack_disabled_reason()
-            if self._disabled_reason is None and self.is_moe_layer
-            else None
-        )
+        self._moe_prepack_disabled_reason = None
         self._moe_prepack_abi_validated = False
-        self.ops = _load_ops()
-        if self._disabled_reason is None:
-            self._qkv_projection = get_weight_and_scale_from_linear(
-                self.self_attn.fused_qkv_a_proj
-            )
-            self._q_b_proj = get_weight_and_scale_from_linear(self.self_attn.q_b_proj)
-            self._output_projection = get_weight_and_scale_from_linear(
-                self.self_attn.o_proj
-            )
-            if self.has_indexer:
-                self._indexer_k_projection = get_weight_and_scale_from_linear(
-                    self.self_attn.indexer.wk
-                )
-                self._indexer_q_projection = get_weight_and_scale_from_linear(
-                    self.self_attn.indexer.wq_b
-                )
-            else:
-                self._indexer_k_projection = None
-                self._indexer_q_projection = None
+        # Merely setting RTP_LLM_GLM5_CMP must not import RTP-kernel or change
+        # DeepGEMM's process-wide PDL setting. These fields are initialized only
+        # after the current model call has passed the CMP capability checks.
+        self.ops = None
+        self._qkv_projection = None
+        self._q_b_proj = None
+        self._output_projection = None
+        self._indexer_k_projection = None
+        self._indexer_q_projection = None
 
     @property
     def has_indexer(self) -> bool:
@@ -238,6 +220,40 @@ class Glm5Cmp:
         ):
             return "unsupported MegaMoE contract"
         return None
+
+    def _initialize_for_cmp(self, ops: Any) -> None:
+        """Cache operator inputs after an actual model call selects CMP."""
+        if self.ops is not None:
+            return
+
+        if self.is_moe_layer:
+            self._router_weight = self._prepare_router_weight(self.mlp)
+            self._moe_prepack_disabled_reason = (
+                self._static_moe_prepack_disabled_reason()
+            )
+
+        qkv_projection = get_weight_and_scale_from_linear(
+            self.self_attn.fused_qkv_a_proj
+        )
+        q_b_projection = get_weight_and_scale_from_linear(self.self_attn.q_b_proj)
+        output_projection = get_weight_and_scale_from_linear(self.self_attn.o_proj)
+        if self.has_indexer:
+            indexer_k_projection = get_weight_and_scale_from_linear(
+                self.self_attn.indexer.wk
+            )
+            indexer_q_projection = get_weight_and_scale_from_linear(
+                self.self_attn.indexer.wq_b
+            )
+        else:
+            indexer_k_projection = None
+            indexer_q_projection = None
+
+        self._qkv_projection = qkv_projection
+        self._q_b_proj = q_b_projection
+        self._output_projection = output_projection
+        self._indexer_k_projection = indexer_k_projection
+        self._indexer_q_projection = indexer_q_projection
+        self.ops = ops
 
     @staticmethod
     def _moe_prepack_views_disabled_reason(views: Any, rows: int) -> str | None:
@@ -321,12 +337,11 @@ class Glm5Cmp:
         clone._moe_prepack_disabled_reason = self._moe_prepack_disabled_reason
         clone._moe_prepack_abi_validated = False
         clone.ops = self.ops
-        if self._disabled_reason is None:
-            clone._qkv_projection = self._qkv_projection
-            clone._q_b_proj = self._q_b_proj
-            clone._output_projection = self._output_projection
-            clone._indexer_k_projection = self._indexer_k_projection
-            clone._indexer_q_projection = self._indexer_q_projection
+        clone._qkv_projection = self._qkv_projection
+        clone._q_b_proj = self._q_b_proj
+        clone._output_projection = self._output_projection
+        clone._indexer_k_projection = self._indexer_k_projection
+        clone._indexer_q_projection = self._indexer_q_projection
         return clone
 
     @staticmethod
@@ -710,13 +725,18 @@ def should_enable_glm5_cmp(
     if layer_num <= 0:
         return False
 
-    # Layer 0 validates the shared attention contract. Each MoE layer checks its
-    # optional prepacked-input ABI independently without disabling attention.
-    cmp = layers[0].cmp
-    if cmp is None or cmp._disabled_reason is not None:
+    cmps = []
+    for layer in layers[:layer_num]:
+        layer_cmp = layer.cmp
+        if layer_cmp is None or layer_cmp._disabled_reason is not None:
+            return False
+        cmps.append(layer_cmp)
+    if len(cmps) != layer_num:
         return False
 
     # Layer 0 must seed the request-local TopK indices reused by main-only layers.
+    # It validates the dynamic attention contract shared by the complete model.
+    cmp = cmps[0]
     first_cache = kv_cache.get_layer_cache(0) if kv_cache is not None else None
     if (
         not cmp.has_indexer
@@ -724,4 +744,20 @@ def should_enable_glm5_cmp(
         is not None
     ):
         return False
+
+    # Initialize RTP-kernel and its DeepGEMM PDL contract only after this
+    # concrete call has been selected for CMP. CUDA Graph performs eager warmup
+    # forwards before capture, so graph clones are initialized outside capture.
+    uninitialized = [layer_cmp for layer_cmp in cmps if layer_cmp.ops is None]
+    if uninitialized:
+        ops = next(
+            (layer_cmp.ops for layer_cmp in cmps if layer_cmp.ops is not None),
+            None,
+        )
+        if ops is None:
+            ops = _load_ops()
+        for layer_cmp in uninitialized:
+            layer_cmp._initialize_for_cmp(ops)
+        _configure_deep_gemm_pdl(ops)
+        logger.info("GLM5 CMP activated for %d layers", layer_num)
     return True
