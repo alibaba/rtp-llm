@@ -192,14 +192,6 @@ def init_vit_group_args(parser, vit_config):
         help="本地额外数据路径",
     )
     vit_group.add_argument(
-        "--disable_access_log",
-        env_name="DISABLE_ACCESS_LOG",
-        bind_to=(vit_config, "disable_access_log"),
-        type=str2bool,
-        default=False,
-        help="是否禁用访问日志",
-    )
-    vit_group.add_argument(
         "--use_local_preprocess",
         env_name="USE_LOCAL_PREPROCESS",
         bind_to=(vit_config, "use_local_preprocess"),

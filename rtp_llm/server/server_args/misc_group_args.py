@@ -19,7 +19,10 @@ def init_misc_group_args(parser, misc_config):
     misc_group.add_argument(
         "--disable_access_log",
         env_name="DISABLE_ACCESS_LOG",
-        bind_to=(misc_config.misc_config, "disable_access_log"),
+        bind_to=[
+            (misc_config.misc_config, "disable_access_log"),
+            "vit_config.disable_access_log",
+        ],
         type=str2bool,
         default=False,
         help="是否默认禁用请求的 access log",
