@@ -18,6 +18,9 @@ struct BlockTreePoolMetricsSnapshot;
 
 namespace benchmark {
 
+// Test seam for exercising the same adapter used by the online benchmark.
+std::unique_ptr<OnlineCacheApi> makeBlockTreeCacheAdapterForTest(BlockTreeCache& cache);
+
 // Online workload runner: fixed ~20k-node initial cache, 32,768-block
 // device/host pools, one foreground scheduler thread driving 32 logical
 // request contexts, load-before-forward admission, one 100ms sleep per READY

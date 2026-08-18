@@ -175,11 +175,6 @@ int BlockTreeCache::evictForGroup(size_t group_id, size_t num_blocks) {
     return static_cast<int>(reclaimed);
 }
 
-void BlockTreeCache::releaseMatchedResources(const std::vector<MultiNodeResource>& resources) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    loader_.releaseMatchedResourcesLocked(resources);
-}
-
 BlockIndicesType BlockTreeCache::matchedBlocksForGroup(size_t                                group_id,
                                                        const std::vector<MultiNodeResource>& matched_resources) const {
     return loader_.matchedBlocksForGroup(group_id, matched_resources);
