@@ -104,19 +104,15 @@ std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
         // Do NOT let prefill_capture_seq_lens_ override this. It is the embedding-prefill
         // capture list and hw_kernel_group_args._parse_prefill_capture_config() populates it
         // unconditionally (160 lengths at step=1 in the EAGLE cudagraph smoke), so treating it
-        // as an opt-in rollback knob here silently replaced the bucket set with keys that are
+        // as an opt-in rollback knob here silently replaced the capture set with keys that are
         // not multiples of num_tokens_per_bs_ and aborted during capture (SIGABRT on rank 1 in
-        // rocm_eagle_qwen2_14b_cudagraph). A rollback switch for the bucketing needs its own
-        // config, not this field.
+        // rocm_eagle_qwen2_14b_cudagraph). A rollback switch would need its own config field.
         //
-        // Buckets are powers of two plus max_bs -- deliberately NOT the decode set, which is
-        // {1,8,16,24,32} then +16 (cuda_graph_decode.cc): decode replays every step so it trades
-        // capture memory for at most 15 padded rows, while draft prefill replays one graph whose
-        // token slice length equals the graph key, so a bucket costs padded compute proportional
-        // to the gap (batch 17 replays the 32 bucket). Bucketing is still the right trade here:
-        // one graph per batch size makes the capture count -- and its device memory -- grow
-        // linearly with CONCURRENCY_LIMIT, which is what ran the decode role out of memory.
-        // Rationale and degenerate-config handling live with the helper, unit tested in
+        // The set covers every batch size 1..max_bs, one key per batch. It must not be thinned
+        // to a sparse set: the prefill graph bakes in the captured batch's attention layout, so a
+        // draft batch with no exact key replays a larger key's graph over mismatched cu_seqlens
+        // and reads out of bounds (decode-side CUDA illegal memory access at concurrency > 1).
+        // Rationale and the degenerate-config guard live with the helper, unit tested in
         // tests/mtp_draft_prefill_buckets_test.cc.
         std::vector<int> result = mtpDraftPrefillCaptureSeqLens(max_bs_, num_tokens_per_bs_);
         RTP_LLM_LOG_INFO(
