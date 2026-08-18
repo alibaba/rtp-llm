@@ -2,6 +2,7 @@ package org.flexlb.service.config;
 
 import com.alibaba.nacos.api.config.listener.Listener;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DeploymentIdentity;
 import org.flexlb.dao.nacos.NacosConfig;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -10,7 +11,10 @@ import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.flexlb.constant.NacosConfigConstants.HIPPO_ROLE;
+import static org.flexlb.constant.DeploymentIdentityConstants.HIPPO_ROLE;
+import static org.flexlb.constant.DeploymentIdentityConstants.SPECTRUM_APPLICATION_NAME;
+import static org.flexlb.constant.DeploymentIdentityConstants.SPECTRUM_DEPLOYMENT_NAME;
+import static org.flexlb.constant.DeploymentIdentityConstants.SPECTRUM_WORKSPACE_ID;
 import static org.flexlb.constant.NacosConfigConstants.NACOS_DATA_ID;
 import static org.flexlb.constant.NacosConfigConstants.NACOS_GROUP;
 import static org.flexlb.constant.NacosConfigConstants.NACOS_NAMESPACE;
@@ -24,9 +28,9 @@ class NacosConfigSourceTest {
 
     @Test
     void isDisabledWhenNacosAddressIsNotConfigured() throws Exception {
-        NacosConfigSource source = new EnvironmentVariables()
+        NacosConfigSource source = new EnvironmentVariables(HIPPO_ROLE, "flexlb-test")
                 .remove(NACOS_SERVER_ADDR)
-                .execute(NacosConfigSource::new);
+                .execute(() -> new NacosConfigSource(new DeploymentIdentity()));
 
         source.initialize();
         ConfigService configService = new ConfigService();
@@ -40,9 +44,12 @@ class NacosConfigSourceTest {
     void failsFastWhenDataIdCannotBeResolved() {
         EnvironmentVariables environment = new EnvironmentVariables(NACOS_SERVER_ADDR, "127.0.0.1:8848")
                 .remove(NACOS_DATA_ID)
-                .remove(HIPPO_ROLE);
+                .remove(HIPPO_ROLE)
+                .remove(SPECTRUM_WORKSPACE_ID)
+                .remove(SPECTRUM_APPLICATION_NAME)
+                .remove(SPECTRUM_DEPLOYMENT_NAME);
 
-        assertThatThrownBy(() -> environment.execute(NacosConfigSource::new))
+        assertThatThrownBy(() -> environment.execute(() -> new NacosConfigSource(new DeploymentIdentity())))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining(HIPPO_ROLE);
     }
@@ -53,13 +60,36 @@ class NacosConfigSourceTest {
                 NACOS_SERVER_ADDR, "127.0.0.1:8848",
                 HIPPO_ROLE, "flexlb-hongyi-test-v1-flexlb-standalone")
                 .remove(NACOS_DATA_ID)
-                .execute(NacosConfigSource::new);
+                .remove(SPECTRUM_WORKSPACE_ID)
+                .remove(SPECTRUM_APPLICATION_NAME)
+                .remove(SPECTRUM_DEPLOYMENT_NAME)
+                .execute(() -> new NacosConfigSource(new DeploymentIdentity()));
 
         assertThat(source)
                 .extracting("config")
                 .isEqualTo(new NacosConfig(
                         "127.0.0.1:8848",
                         "flexlb-hongyi-test-v1-flexlb-standalone",
+                        null,
+                        null));
+    }
+
+    @Test
+    void usesSpectrumIdentityWhenDataIdIsNotConfigured() throws Exception {
+        NacosConfigSource source = new EnvironmentVariables(
+                NACOS_SERVER_ADDR, "127.0.0.1:8848",
+                SPECTRUM_WORKSPACE_ID, "df4a7748",
+                SPECTRUM_APPLICATION_NAME, "flexlb-test",
+                SPECTRUM_DEPLOYMENT_NAME, "flexlb-test-wlcb",
+                HIPPO_ROLE, "legacy-role")
+                .remove(NACOS_DATA_ID)
+                .execute(() -> new NacosConfigSource(new DeploymentIdentity()));
+
+        assertThat(source)
+                .extracting("config")
+                .isEqualTo(new NacosConfig(
+                        "127.0.0.1:8848",
+                        "spectrum:df4a7748:flexlb-test:flexlb-test-wlcb",
                         null,
                         null));
     }
@@ -127,8 +157,9 @@ class NacosConfigSourceTest {
                 NACOS_SERVER_ADDR, "127.0.0.1:8848",
                 NACOS_DATA_ID, "flexlb-test",
                 NACOS_GROUP, "FLEXLB_GROUP",
-                NACOS_NAMESPACE, namespace)
-                .execute(NacosConfigSource::new);
+                NACOS_NAMESPACE, namespace,
+                HIPPO_ROLE, "flexlb-test")
+                .execute(() -> new NacosConfigSource(new DeploymentIdentity()));
         ReflectionTestUtils.setField(source, "client", client);
         return source;
     }

@@ -28,11 +28,14 @@ Nacos 来源在 Bean 初始化阶段创建 client、注册 Nacos listener 并缓
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
 | `FLEXLB_NACOS_SERVER_ADDR` | 无 | Nacos server address；不配置时完全禁用 Nacos |
-| `FLEXLB_NACOS_DATA_ID` | `HIPPO_ROLE` | 显式 DataId；为空时使用当前部署的 `HIPPO_ROLE` |
+| `FLEXLB_NACOS_DATA_ID` | 部署标识 | 显式 DataId；为空时优先使用 Spectrum 三元组，旧环境回退 `HIPPO_ROLE` |
 | `FLEXLB_NACOS_GROUP` | `DEFAULT_GROUP` | Nacos group |
 | `FLEXLB_NACOS_NAMESPACE` | 空 | Nacos namespace |
 
-配置了 Nacos 地址后，`FLEXLB_NACOS_DATA_ID` 和 `HIPPO_ROLE` 至少一个必须非空。
+部署标识优先由 `SPECTRUM_WORKSPACE_ID`、`SPECTRUM_APPLICATION_NAME`、
+`SPECTRUM_DEPLOYMENT_NAME` 三个环境变量组成，格式为
+`spectrum:<workspace>:<application>:<deployment>`。三个变量必须同时配置；均未配置时回退
+`HIPPO_ROLE`。配置了 Nacos 地址后，显式 DataId 和部署标识至少一个必须存在。
 Nacos DataId 必须存在，内容必须是非空 JSON object。可识别的 `FlexlbConfig` 字段会覆盖
 当前配置，未知字段会被忽略。例如：
 
@@ -111,8 +114,8 @@ Nacos 中使用对象字段 `modelServiceConfig`。缺省**启动失败**。配�
 `LBConsistencyConfig{needConsistency=false, masterElectType=ZOOKEEPER,
 zookeeperConfig{zkHost, zkTimeoutMs}}`。环境变量
 `FLEXLB_SYNC_CONSISTENCY_CONFIG` 仍然兼容；Nacos 中使用对象字段
-`flexlbSyncConsistencyConfig`。该配置在启动时初始化，更新后需要重启生效；另需 env
-`HIPPO_ROLE`。见
+`flexlbSyncConsistencyConfig`。该配置在启动时初始化，更新后需要重启生效；选举隔离使用
+上述部署标识。见
 [05-lifecycle-and-consistency](05-lifecycle-and-consistency.md)。
 
 ## HTTP 端点（主端口 7001，全部 WebFlux RouterFunction）

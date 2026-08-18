@@ -65,13 +65,14 @@ warmup 未完成 → 404 "warm not finish"；否则 200 "success"。
 `FlexlbConfig.flexlbSyncConsistencyConfig`（环境变量兼容
 `FLEXLB_SYNC_CONSISTENCY_CONFIG`）：`needConsistency`
 （默认 false，缺省时一切成为 no-op、`isMaster()` 恒 false）、`masterElectType`（仅
-`ZOOKEEPER`）、`zookeeperConfig{zkHost, zkTimeoutMs}`。另需 env `HIPPO_ROLE`（做选举路径），
-端口取 `-Dserver.port`（默认 7001，假定所有副本同端口）。
+`ZOOKEEPER`）、`zookeeperConfig{zkHost, zkTimeoutMs}`。选举路径优先使用 Spectrum workspace、
+application、deployment 三元组组成的部署标识，旧环境回退 `HIPPO_ROLE`；端口取
+`-Dserver.port`（默认 7001，假定所有副本同端口）。
 
 ### ZookeeperMasterElectService
 
 - Curator recipe：**LeaderSelector**（非 LeaderLatch），namespace `whale-master`，路径
-  `/master_lb_leader/<HIPPO_ROLE>`，`setId(本机IP)`，`autoRequeue()`，重试
+  `/master_lb_leader/<deploymentId>`，`setId(本机IP)`，`autoRequeue()`，重试
   `ExponentialBackoffRetry(1000, 3)`。
 - `takeLeadership()`：置 `isMaster=true`，**主动 HTTP 通知所有非 leader 参与者**
   `POST http://<ip>:<port>/rtp_llm/notify_master`（1s 超时）；然后阻塞在 CountDownLatch 上

@@ -4,7 +4,9 @@ import com.alibaba.nacos.api.NacosFactory;
 import com.alibaba.nacos.api.PropertyKeyConst;
 import com.alibaba.nacos.api.config.listener.Listener;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DeploymentIdentity;
 import org.flexlb.dao.nacos.NacosConfig;
 import org.springframework.stereotype.Component;
 
@@ -13,7 +15,6 @@ import java.util.Properties;
 import java.util.concurrent.Executor;
 import java.util.function.Consumer;
 
-import static org.flexlb.constant.NacosConfigConstants.HIPPO_ROLE;
 import static org.flexlb.constant.NacosConfigConstants.NACOS_DATA_ID;
 import static org.flexlb.constant.NacosConfigConstants.NACOS_GROUP;
 import static org.flexlb.constant.NacosConfigConstants.NACOS_NAMESPACE;
@@ -32,31 +33,22 @@ final class NacosConfigSource implements ConfigSource {
     private volatile Consumer<String> updateListener;
     private volatile String configContent;
 
-    NacosConfigSource() {
-        String serverAddr = trimToNull(System.getenv(NACOS_SERVER_ADDR));
+    NacosConfigSource(DeploymentIdentity deploymentIdentity) {
+        String serverAddr = StringUtils.trimToNull(System.getenv(NACOS_SERVER_ADDR));
         if (serverAddr == null) {
             this.config = null;
             return;
         }
 
-        String dataId = trimToNull(System.getenv(NACOS_DATA_ID));
+        String dataId = StringUtils.trimToNull(System.getenv(NACOS_DATA_ID));
         if (dataId == null) {
-            dataId = trimToNull(System.getenv(HIPPO_ROLE));
-        }
-        if (dataId == null) {
-            throw new IllegalStateException(
-                    NACOS_DATA_ID
-                            + " or "
-                            + HIPPO_ROLE
-                            + " must be configured when "
-                            + NACOS_SERVER_ADDR
-                            + " is set");
+            dataId = deploymentIdentity.getDeploymentId();
         }
         this.config = new NacosConfig(
                 serverAddr,
                 dataId,
-                trimToNull(System.getenv(NACOS_GROUP)),
-                trimToNull(System.getenv(NACOS_NAMESPACE)));
+                StringUtils.trimToNull(System.getenv(NACOS_GROUP)),
+                StringUtils.trimToNull(System.getenv(NACOS_NAMESPACE)));
     }
 
     @Override
@@ -115,13 +107,6 @@ final class NacosConfigSource implements ConfigSource {
         } finally {
             client.shutDown();
         }
-    }
-
-    private String trimToNull(String value) {
-        if (value == null || value.trim().isEmpty()) {
-            return null;
-        }
-        return value.trim();
     }
 
     private com.alibaba.nacos.api.config.ConfigService createClient(NacosConfig config) throws Exception {

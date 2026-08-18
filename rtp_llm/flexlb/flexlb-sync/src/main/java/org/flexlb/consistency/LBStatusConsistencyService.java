@@ -2,8 +2,8 @@ package org.flexlb.consistency;
 
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.lang3.StringUtils;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DeploymentIdentity;
 import org.flexlb.config.LBConsistencyConfig;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
@@ -30,13 +30,16 @@ public class LBStatusConsistencyService implements MasterElectService {
     );
 
     private final ZookeeperMasterElectService zookeeperMasterElectService;
+    private final DeploymentIdentity deploymentIdentity;
     private LBConsistencyConfig lbConsistencyConfig;
     private String serverPort;
     private String roleId;
 
     public LBStatusConsistencyService(ZookeeperMasterElectService zookeeperMasterElectService,
-                                      ConfigService configService) {
+                                      ConfigService configService,
+                                      DeploymentIdentity deploymentIdentity) {
         this.zookeeperMasterElectService = zookeeperMasterElectService;
+        this.deploymentIdentity = deploymentIdentity;
         this.lbConsistencyConfig = configService.loadBalanceConfig().getFlexlbSyncConsistencyConfig();
         this.init();
     }
@@ -51,10 +54,7 @@ public class LBStatusConsistencyService implements MasterElectService {
         }
         serverPort = System.getProperty("server.port", "7001");
         log.info("hostIp:{}, serverPort:{}.", hostIp, serverPort);
-        roleId = System.getenv("HIPPO_ROLE");
-        if (StringUtils.isBlank(roleId)) {
-            throw new RuntimeException("HIPPO_ROLE env is blank");
-        }
+        roleId = deploymentIdentity.getDeploymentId();
         if (!isNeedConsistency()) {
             log.warn("LBStatusConsistencyService is not need.");
             return;
