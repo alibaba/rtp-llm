@@ -9,7 +9,10 @@ from torch import nn
 
 from rtp_llm.model_loader.linear_attn_weight import split_kda_qkvg_fa_beta_sections
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-from rtp_llm.models_py.distributed.sequence_parallel import TokenShardLayout
+from rtp_llm.models_py.distributed.sequence_parallel import (
+    TokenShardLayout,
+    shard_tokens_with_padding,
+)
 from rtp_llm.models_py.modules.factory.linear.parallel import (
     all_gather_matmul,
     row_parallel_linear,
@@ -286,6 +289,18 @@ class KimiK3KDA(nn.Module):
             )
             if self.attn_tp_size > 1:
                 output = all_reduce(output, group=Group.TP)
+                decode_sp = (
+                    sequence_parallel
+                    and not is_target_verify
+                    and hidden_states.is_cuda
+                )
+                if decode_sp:
+                    output, _ = shard_tokens_with_padding(
+                        output,
+                        token_count,
+                        self.attn_tp_size,
+                        self.attn_tp_rank,
+                    )
             return output
         return row_parallel_linear(
             projection_input,
