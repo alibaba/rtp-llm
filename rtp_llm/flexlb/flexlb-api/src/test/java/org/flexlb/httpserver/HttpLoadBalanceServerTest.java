@@ -166,6 +166,29 @@ class HttpLoadBalanceServerTest {
     }
 
     @Test
+    void returnsFallbackWithoutRoutingWhenFallbackIsEnabled() {
+        when(routeService.isFallbackEnabled()).thenReturn(true);
+
+        webTestClient.post()
+                .uri("/rtp_llm/schedule")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(Map.of(
+                        "request_id", "request-fallback",
+                        "seq_len", 4,
+                        "input_ids", new int[]{1, 2, 3, 4}))
+                .exchange()
+                .expectStatus().is5xxServerError()
+                .expectBody()
+                .jsonPath("$.success").isEqualTo(false)
+                .jsonPath("$.code").isEqualTo(8600)
+                .jsonPath("$.error_message").isEqualTo("FALLBACK");
+
+        verify(requestBlockHashService, never()).prepareBlockCacheKeys(any());
+        verify(routeService, never()).route(any());
+        verify(generalHttpNettyService, never()).request(any(), any(URI.class), any(), any());
+    }
+
+    @Test
     void reportsStringRequestIdAndPreparedBlockKeysToOptimizer() {
         List<Long> blockCacheKeys = List.of(10L, 20L, 30L);
         when(requestBlockHashService.prepareBlockCacheKeys(any()))

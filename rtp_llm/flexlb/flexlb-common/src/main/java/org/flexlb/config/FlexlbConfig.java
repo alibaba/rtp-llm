@@ -73,6 +73,11 @@ public class FlexlbConfig {
     private boolean enableQueueing = false;
 
     /**
+     * Whether FlexLB should skip routing and instruct the caller to fall back.
+     */
+    private boolean enableFallback = false;
+
+    /**
      * Maximum queue length per model
      */
     private int maxQueueSize = 1000000;

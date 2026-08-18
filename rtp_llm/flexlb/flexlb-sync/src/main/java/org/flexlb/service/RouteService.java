@@ -28,6 +28,10 @@ public class RouteService {
         this.queueManager = queueManager;
     }
 
+    public boolean isFallbackEnabled() {
+        return configService.loadBalanceConfig().isEnableFallback();
+    }
+
     /**
      * Route request to appropriate workers
      * @param balanceContext Load balancing context

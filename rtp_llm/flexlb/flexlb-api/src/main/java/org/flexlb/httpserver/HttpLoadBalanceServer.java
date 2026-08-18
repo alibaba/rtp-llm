@@ -135,6 +135,10 @@ public class HttpLoadBalanceServer {
     private Mono<ServerResponse> processScheduledRequest(BalanceContext ctx, Request req) {
         engineHealthReporter.reportArriveDelayTime(ctx);
 
+        if (routeService.isFallbackEnabled()) {
+            return handleRoutingResult(ctx, Response.error(StrategyErrorType.FALLBACK));
+        }
+
         if (lbStatusConsistencyService.isNeedConsistency() && !lbStatusConsistencyService.isMaster()) {
             return forwardRequestToMaster(ctx, req);
         }
