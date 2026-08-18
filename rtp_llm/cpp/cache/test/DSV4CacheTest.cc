@@ -16,7 +16,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
 #include "rtp_llm/cpp/cache/KVCacheGroup.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
-#include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/Dsv4KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
@@ -54,7 +54,7 @@ std::shared_ptr<CompressedKVCacheSpec> buildCompressedSpec(const std::string& ta
                                                            size_t             block_size_bytes_alignment = 0) {
     KVCacheSpecDesc desc;
     desc.tag                          = tag;
-    desc.cache_type                   = KVCacheSpecType::OpaqueKV;
+    desc.cache_type                   = KVCacheSpecType::CompressedKVCache;
     desc.dtype                        = dtype;
     desc.entry_elems                  = entry_elems;
     desc.entry_dtype                  = dtype;
@@ -69,35 +69,38 @@ std::shared_ptr<CompressedKVCacheSpec> buildCompressedSpec(const std::string& ta
     return std::dynamic_pointer_cast<CompressedKVCacheSpec>(SpecBuilder::build(desc, ctx));
 }
 
-std::shared_ptr<FixedStateCacheSpec> buildFixedStateSpec(const std::string& tag,
-                                                         uint32_t           entry_elems,
-                                                         uint32_t           entries_per_block,
-                                                         DataType           dtype,
-                                                         size_t             block_size_bytes_override        = 0,
-                                                         size_t             block_size_bytes_alignment       = 0,
-                                                         uint32_t           block_size_alignment_min_entries = 0) {
+std::shared_ptr<SWAStateCacheSpec> buildFixedStateSpec(const std::string& tag,
+                                                       uint32_t           entry_elems,
+                                                       uint32_t           entries_per_block,
+                                                       DataType           dtype,
+                                                       size_t             block_size_bytes_alignment = 0,
+                                                       bool               cp_slice                   = false) {
     KVCacheSpecDesc desc;
-    desc.tag                                = tag;
-    desc.cache_type                         = KVCacheSpecType::OpaqueState;
-    desc.dtype                              = dtype;
-    desc.entry_elems                        = entry_elems;
-    desc.explicit_entry_count               = entries_per_block;
-    desc.entry_dtype                        = dtype;
-    desc.block_stride_bytes_override        = block_size_bytes_override;
-    desc.block_stride_bytes_alignment       = block_size_bytes_alignment;
-    desc.block_stride_alignment_min_entries = block_size_alignment_min_entries;
-    desc.is_state_cache                     = true;
+    desc.tag                          = tag;
+    desc.cache_type                   = KVCacheSpecType::SWAState;
+    desc.dtype                        = dtype;
+    desc.entry_elems                  = entry_elems;
+    desc.explicit_entry_count         = entries_per_block;
+    desc.entry_dtype                  = dtype;
+    desc.block_stride_bytes_alignment = block_size_bytes_alignment;
+    desc.is_state_cache               = true;
     SpecBuildContext ctx;
     ctx.dtype              = dtype;
     ctx.seq_size_per_block = kDsv4TokensPerBlock;
-    return std::dynamic_pointer_cast<FixedStateCacheSpec>(SpecBuilder::build(desc, ctx));
+    ParallelismConfig parallelism_config;
+    if (cp_slice) {
+        desc.cp                = CacheCpPolicyDesc{};
+        desc.cp->slice         = true;
+        ctx.parallelism_config = &parallelism_config;
+    }
+    return std::dynamic_pointer_cast<SWAStateCacheSpec>(SpecBuilder::build(desc, ctx));
 }
 
 static size_t gidForTag(const CacheConfig& config, const std::string& tag) {
     return static_cast<size_t>(config.groupIdForTag(tag));
 }
 
-static size_t opaqueEntriesPerBlock(const OpaqueKVCacheSpec& spec, size_t entry_bytes) {
+static size_t opaqueEntriesPerBlock(const Dsv4KVCacheSpec& spec, size_t entry_bytes) {
     RTP_LLM_CHECK_WITH_INFO(entry_bytes > 0, "entry_bytes must be > 0");
     RTP_LLM_CHECK_WITH_INFO(spec.block_payload_bytes() % entry_bytes == 0,
                             "opaque payload bytes %zu must be divisible by entry bytes %zu",
@@ -130,8 +133,6 @@ static CacheConfig makeSingleStateCpConfig(const KVCacheSpec& spec, int cp_size)
     group.spec                       = spec.clone();
     group.policy                     = defaultCacheGroupPolicy(CacheGroupType::SWA);
     group.policy.enable_prefix_reuse = true;
-    group.policy.cp_slice = spec.block_size_bytes() == spec.block_payload_bytes() ? CpBlockSliceMode::PAYLOAD_BYTES :
-                                                                                    CpBlockSliceMode::EQUAL_BYTES;
     group.layer_ids.push_back(0);
     LayerBase layer;
     layer.layer_id   = 0;
@@ -147,7 +148,7 @@ sliceStateBlockForPeer(const KVCacheSpec& spec, std::vector<BlockInfo> parts, in
     return mapper.sliceBlockForPeer(config, /*gid=*/0, std::move(parts), peer_idx);
 }
 
-static std::vector<CacheStoreBlockPair>
+static std::vector<CacheStoreBlockMapping>
 buildSwaStorePlan(size_t total_logical_blocks, size_t reuse_block_size, bool use_hybrid, int cp_size) {
     auto         spec   = makeResolvedOpaqueSpec(/*state_cache=*/true, "swa", DataType::TYPE_UINT8, 2, 1);
     auto         config = makeSingleStateCpConfig(*spec, cp_size);
@@ -367,7 +368,7 @@ TEST(CacheConfigTest, SetTopologyInstallsTagAndGroupTopology) {
     config.layer_all_num = 3;
 
     auto swa_spec =
-        std::dynamic_pointer_cast<FixedStateCacheSpec>(makeResolvedOpaqueSpec(true, "swa", DataType::TYPE_UINT8, 2, 1));
+        std::dynamic_pointer_cast<SWAStateCacheSpec>(makeResolvedOpaqueSpec(true, "swa", DataType::TYPE_UINT8, 2, 1));
     auto csa_spec = std::dynamic_pointer_cast<CompressedKVCacheSpec>(
         makeResolvedOpaqueSpec(false, "csa", DataType::TYPE_UINT8, 2, 1));
 
@@ -420,7 +421,7 @@ TEST(CacheConfigTest, TopologyRemainsTheSingleSourceAcrossSupportedUpdates) {
     EXPECT_EQ(config.group("linear").kv_block_stride_bytes, 256u);
     EXPECT_EQ(policy_topology->group("linear").block_num, 0u);
 
-    config.finalizeBlockNums(/*global_block_num=*/23, RuntimeConfig{});
+    config.finalizeBlockNums(/*global_block_num=*/23);
     const auto finalized_topology = config.topologyPtr();
 
     EXPECT_NE(finalized_topology.get(), layout_topology.get());
@@ -495,8 +496,7 @@ TEST(HybridPoolConfigCreatorTest, Dsv4ModelProvidedAlignmentPropagatesToCacheSpe
             if (desc.tag == "csa_kv") {
                 desc.block_stride_bytes_alignment = 1024;
             } else if (desc.tag == "swa_kv") {
-                desc.block_stride_bytes_alignment       = 2048;
-                desc.block_stride_alignment_min_entries = 256;
+                desc.block_stride_bytes_alignment = 2048;
             }
         }
     }
@@ -506,8 +506,7 @@ TEST(HybridPoolConfigCreatorTest, Dsv4ModelProvidedAlignmentPropagatesToCacheSpe
 
     const auto* csa_kv =
         dynamic_cast<const CompressedKVCacheSpec*>(config.specForGroup(gidForTag(config, "csa_kv")).get());
-    const auto* swa_kv =
-        dynamic_cast<const FixedStateCacheSpec*>(config.specForGroup(gidForTag(config, "swa_kv")).get());
+    const auto* swa_kv = dynamic_cast<const SWAStateCacheSpec*>(config.specForGroup(gidForTag(config, "swa_kv")).get());
     ASSERT_NE(csa_kv, nullptr);
     ASSERT_NE(swa_kv, nullptr);
     EXPECT_EQ(csa_kv->block_size_bytes() % 1024u, 0u);
@@ -670,8 +669,7 @@ TEST(HybridPoolConfigCreatorTest, BasicConfigUsesModelDefaultPhysicalAndKernelBl
         dynamic_cast<const CompressedKVCacheSpec*>(config.specForGroup(gidForTag(config, "hca_kv")).get());
     const auto* idx_kv =
         dynamic_cast<const CompressedKVCacheSpec*>(config.specForGroup(gidForTag(config, "indexer_kv")).get());
-    const auto* swa_kv =
-        dynamic_cast<const FixedStateCacheSpec*>(config.specForGroup(gidForTag(config, "swa_kv")).get());
+    const auto* swa_kv = dynamic_cast<const SWAStateCacheSpec*>(config.specForGroup(gidForTag(config, "swa_kv")).get());
     ASSERT_NE(csa_kv, nullptr);
     ASSERT_NE(hca_kv, nullptr);
     ASSERT_NE(idx_kv, nullptr);
@@ -742,10 +740,10 @@ TEST(CPSlotMapperTest, CpCompactSwaUsesCanonicalTailRows) {
                                   /*use_hybrid=*/true,
                                   /*cp_size=*/4);
     ASSERT_EQ(plan.size(), 2u);
-    EXPECT_EQ(plan[0].key_index, 3);
-    EXPECT_EQ(plan[0].offset_index, 0);
-    EXPECT_EQ(plan[1].key_index, 7);
-    EXPECT_EQ(plan[1].offset_index, 1);
+    EXPECT_EQ(plan[0].cache_key_index, 3);
+    EXPECT_EQ(plan[0].block_table_index, 0);
+    EXPECT_EQ(plan[1].cache_key_index, 7);
+    EXPECT_EQ(plan[1].block_table_index, 1);
 }
 
 TEST(CPSlotMapperTest, CpCompactSwaKeepsPartialTailRows) {
@@ -755,8 +753,8 @@ TEST(CPSlotMapperTest, CpCompactSwaKeepsPartialTailRows) {
                                       /*use_hybrid=*/true,
                                       /*cp_size=*/2);
         ASSERT_EQ(plan.size(), 1u);
-        EXPECT_EQ(plan[0].key_index, 0);
-        EXPECT_EQ(plan[0].offset_index, 0);
+        EXPECT_EQ(plan[0].cache_key_index, 0);
+        EXPECT_EQ(plan[0].block_table_index, 0);
     }
     {
         auto plan = buildSwaStorePlan(/*total_logical_blocks=*/11,
@@ -764,10 +762,10 @@ TEST(CPSlotMapperTest, CpCompactSwaKeepsPartialTailRows) {
                                       /*use_hybrid=*/true,
                                       /*cp_size=*/2);
         ASSERT_EQ(plan.size(), 2u);
-        EXPECT_EQ(plan[0].key_index, 9);
-        EXPECT_EQ(plan[0].offset_index, 4);
-        EXPECT_EQ(plan[1].key_index, 10);
-        EXPECT_EQ(plan[1].offset_index, 5);
+        EXPECT_EQ(plan[0].cache_key_index, 9);
+        EXPECT_EQ(plan[0].block_table_index, 4);
+        EXPECT_EQ(plan[1].cache_key_index, 10);
+        EXPECT_EQ(plan[1].block_table_index, 5);
     }
 }
 
@@ -823,9 +821,8 @@ TEST(HybridPoolConfigCreatorTest, HybridAttentionIndependentPoolUsesHybridPoolCo
     EXPECT_EQ(config.block_size_bytes,
               config.blockSizeBytesForGroup(linear_gid) + config.blockSizeBytesForGroup(full_gid));
 
-    RuntimeConfig runtime_config;
     config.linear_step = 4;
-    config.finalizeBlockNums(/*global_block_num=*/37, runtime_config);
+    config.finalizeBlockNums(/*global_block_num=*/37);
     EXPECT_EQ(config.blockNumForGroup(linear_gid), 37u);
     EXPECT_EQ(config.blockNumForGroup(full_gid), 37u);
 }
@@ -862,9 +859,8 @@ TEST(HybridPoolConfigCreatorTest, HybridAttentionIndependentPoolSplitsFullAndSwa
     EXPECT_EQ(config.block_size_bytes,
               config.blockSizeBytesForGroup(full_gid) + config.blockSizeBytesForGroup(linear_gid));
 
-    RuntimeConfig runtime_config;
     config.linear_step = 3;
-    config.finalizeBlockNums(/*global_block_num=*/10, runtime_config);
+    config.finalizeBlockNums(/*global_block_num=*/10);
     EXPECT_EQ(config.blockNumForGroup(full_gid), 10u);
     EXPECT_EQ(config.blockNumForGroup(linear_gid), 10u);
     EXPECT_EQ(config.blockNumForGroup(swa_gid), 4u);
@@ -964,7 +960,7 @@ TEST(GenericOpaqueCacheSpecTest, CompressedKVSpecReportsGenericKindsAndLayout) {
         "compressed", kDsv4Fp8KvEntryBytes, 64, DataType::TYPE_UINT8, 4, DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES);
     ASSERT_NE(spec, nullptr);
 
-    EXPECT_EQ(spec->type, KVCacheSpecType::OpaqueKV);
+    EXPECT_EQ(spec->type, KVCacheSpecType::CompressedKVCache);
     EXPECT_EQ(spec->block_size(), 64u * kDsv4Fp8KvEntryBytes);
     EXPECT_EQ(spec->block_size_bytes(), 37440u);
     EXPECT_EQ(spec->block_size() / kDsv4Fp8KvEntryBytes, 64u);
@@ -980,16 +976,16 @@ TEST(GenericOpaqueCacheSpecTest, OpaqueKVSpecUsesSingleRegionWithoutKVSplit) {
     EXPECT_EQ(spec->v_block_size_bytes(), 0u);
 }
 
-TEST(GenericOpaqueCacheSpecTest, OpaqueKVSpecAllowsStrideLargerThanPayload) {
+TEST(GenericOpaqueCacheSpecTest, OpaqueKVSpecAlignsStrideLargerThanPayload) {
     KVCacheSpecDesc desc;
-    desc.tag                         = "odd_bytes";
-    desc.cache_type                  = KVCacheSpecType::OpaqueKV;
-    desc.dtype                       = DataType::TYPE_UINT8;
-    desc.entry_elems                 = 2;
-    desc.entry_dtype                 = DataType::TYPE_UINT8;
-    desc.explicit_entry_count        = 1;
-    desc.block_stride_bytes_override = 3;
-    desc.is_state_cache              = false;
+    desc.tag                          = "odd_bytes";
+    desc.cache_type                   = KVCacheSpecType::CompressedKVCache;
+    desc.dtype                        = DataType::TYPE_UINT8;
+    desc.entry_elems                  = 2;
+    desc.entry_dtype                  = DataType::TYPE_UINT8;
+    desc.explicit_entry_count         = 1;
+    desc.block_stride_bytes_alignment = 3;
+    desc.is_state_cache               = false;
     SpecBuildContext ctx;
     ctx.dtype              = DataType::TYPE_UINT8;
     ctx.seq_size_per_block = kDsv4TokensPerBlock;
@@ -1004,7 +1000,7 @@ TEST(GenericOpaqueCacheSpecTest, FixedStateSpecCloneKeepsResolvedLayout) {
     auto original = buildFixedStateSpec("state", 32, 8, DataType::TYPE_FP32);
     ASSERT_NE(original, nullptr);
 
-    auto cloned = std::dynamic_pointer_cast<FixedStateCacheSpec>(original->clone());
+    auto cloned = std::dynamic_pointer_cast<SWAStateCacheSpec>(original->clone());
     ASSERT_NE(cloned, nullptr);
     EXPECT_EQ(cloned->block_size(), 8u * 32u);
     EXPECT_EQ(cloned->block_size_bytes(), 8u * 32u * 4u);
@@ -1012,7 +1008,7 @@ TEST(GenericOpaqueCacheSpecTest, FixedStateSpecCloneKeepsResolvedLayout) {
 }
 
 TEST(GenericOpaqueCacheSpecTest, FixedStateSpecReportsGenericKindsAndSlicesByEntries) {
-    auto spec = buildFixedStateSpec("tail_state", 32, 8, DataType::TYPE_FP32);
+    auto spec = buildFixedStateSpec("tail_state", 32, 8, DataType::TYPE_FP32, 0, true);
     ASSERT_NE(spec, nullptr);
     char      storage[8 * 32 * 4] = {};
     BlockInfo block;
@@ -1021,14 +1017,18 @@ TEST(GenericOpaqueCacheSpecTest, FixedStateSpecReportsGenericKindsAndSlicesByEnt
 
     auto sliced = sliceStateBlockForPeer(*spec, {block}, 4, 2);
     ASSERT_EQ(sliced.size(), 1u);
-    EXPECT_EQ(spec->type, KVCacheSpecType::OpaqueState);
+    EXPECT_EQ(spec->type, KVCacheSpecType::SWAState);
     EXPECT_EQ(sliced[0].addr, storage + 2 * 2 * 32 * 4);
     EXPECT_EQ(sliced[0].size_bytes, 2u * 32u * 4u);
 }
 
-TEST(GenericOpaqueCacheSpecTest, FixedStateSpecSlicesOverrideByBytes) {
-    auto spec =
-        buildFixedStateSpec("tail_bytes", kDsv4Fp8KvEntryBytes, kDsv4TokensPerBlock, DataType::TYPE_UINT8, 74880);
+TEST(GenericOpaqueCacheSpecTest, FixedStateSpecSlicesAlignedStrideByBytes) {
+    auto spec = buildFixedStateSpec("tail_bytes",
+                                    kDsv4Fp8KvEntryBytes,
+                                    kDsv4TokensPerBlock,
+                                    DataType::TYPE_UINT8,
+                                    DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES,
+                                    true);
     ASSERT_NE(spec, nullptr);
     char      storage[74880] = {};
     BlockInfo block;
@@ -1047,13 +1047,8 @@ TEST(GenericOpaqueCacheSpecTest, FixedStateSpecSlicesOverrideByBytes) {
 }
 
 TEST(GenericOpaqueCacheSpecTest, FixedStateSpecSlicesAlignedBlockByPhysicalBytes) {
-    auto spec = buildFixedStateSpec("aligned_tail",
-                                    kDsv4Fp8KvEntryBytes,
-                                    132,
-                                    DataType::TYPE_UINT8,
-                                    0,
-                                    DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES,
-                                    DSV4_SWA_WINDOW_ENTRIES);
+    auto spec = buildFixedStateSpec(
+        "aligned_tail", kDsv4Fp8KvEntryBytes, 132, DataType::TYPE_UINT8, DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES, true);
     ASSERT_NE(spec, nullptr);
     ASSERT_EQ(spec->block_size(), 77088u);
     ASSERT_EQ(spec->block_size_bytes(), 77184u);
@@ -1069,13 +1064,8 @@ TEST(GenericOpaqueCacheSpecTest, FixedStateSpecSlicesAlignedBlockByPhysicalBytes
 }
 
 TEST(GenericOpaqueCacheSpecTest, SWAFp8StateSpecUsesPaddedPhysicalBlockSize) {
-    auto spec = buildFixedStateSpec("swa_kv",
-                                    kDsv4Fp8KvEntryBytes,
-                                    kDsv4TokensPerBlock,
-                                    DataType::TYPE_UINT8,
-                                    0,
-                                    DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES,
-                                    DSV4_SWA_WINDOW_ENTRIES);
+    auto spec = buildFixedStateSpec(
+        "swa_kv", kDsv4Fp8KvEntryBytes, kDsv4TokensPerBlock, DataType::TYPE_UINT8, DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES);
     ASSERT_NE(spec, nullptr);
 
     EXPECT_EQ(spec->block_size(), kDsv4TokensPerBlock * kDsv4Fp8KvEntryBytes);
@@ -1443,7 +1433,7 @@ TEST(CacheConfigTest, SpecBuilderDerivesHybridPoolRuntimeFieldsFromContext) {
 
     KVCacheSpecDesc compressed_desc;
     compressed_desc.tag                = "compressed";
-    compressed_desc.cache_type         = KVCacheSpecType::OpaqueKV;
+    compressed_desc.cache_type         = KVCacheSpecType::CompressedKVCache;
     compressed_desc.entry_elems        = 16;
     compressed_desc.compression_ratio  = 4;
     compressed_desc.entry_dtype        = DataType::TYPE_UINT8;
@@ -1459,7 +1449,7 @@ TEST(CacheConfigTest, SpecBuilderDerivesHybridPoolRuntimeFieldsFromContext) {
 
     KVCacheSpecDesc state_desc;
     state_desc.tag                                  = "state";
-    state_desc.cache_type                           = KVCacheSpecType::OpaqueState;
+    state_desc.cache_type                           = KVCacheSpecType::SWAState;
     state_desc.entry_elems                          = 32;
     state_desc.entry_dtype                          = DataType::TYPE_FP32;
     state_desc.block_stride_bytes_alignment         = 64;
@@ -1468,11 +1458,10 @@ TEST(CacheConfigTest, SpecBuilderDerivesHybridPoolRuntimeFieldsFromContext) {
     state_desc.state_ring_overlap                   = 1;
     state_desc.state_ring_include_gen_num_per_cycle = true;
     state_desc.cp                                   = CacheCpPolicyDesc{};
-    state_desc.cp->align_payload                    = true;
-    state_desc.cp->prefill_slice_layout             = CpPrefillSliceLayout::PAYLOAD;
+    state_desc.cp->slice                            = true;
     state_desc.cp->scale_seq_size                   = true;
 
-    auto prefill_state = std::dynamic_pointer_cast<FixedStateCacheSpec>(SpecBuilder::build(state_desc, ctx));
+    auto prefill_state = std::dynamic_pointer_cast<SWAStateCacheSpec>(SpecBuilder::build(state_desc, ctx));
     ASSERT_NE(prefill_state, nullptr);
     EXPECT_EQ(opaqueEntriesPerBlock(*prefill_state, 32u * getTypeSize(DataType::TYPE_FP32)), 6u);
     EXPECT_EQ(prefill_state->block_size_bytes(), 768u);
@@ -1484,7 +1473,7 @@ TEST(CacheConfigTest, SpecBuilderDerivesHybridPoolRuntimeFieldsFromContext) {
     decode_parallelism.prefill_cp_config.kv_cache_sharded = true;
     decode_parallelism.prefill_cp_config.prefill_cp_size  = 2;
     ctx.parallelism_config                                = &decode_parallelism;
-    auto decode_state = std::dynamic_pointer_cast<FixedStateCacheSpec>(SpecBuilder::build(state_desc, ctx));
+    auto decode_state = std::dynamic_pointer_cast<SWAStateCacheSpec>(SpecBuilder::build(state_desc, ctx));
     ASSERT_NE(decode_state, nullptr);
     EXPECT_EQ(opaqueEntriesPerBlock(*decode_state, 32u * getTypeSize(DataType::TYPE_FP32)), 12u);
     EXPECT_EQ(decode_state->seq_size_per_block, 256u);
@@ -1513,10 +1502,6 @@ TEST(CacheConfigTest, ExactBlockBudgetHandlesStepAndRoundingBoundaries) {
 }
 
 TEST(CacheConfigTest, FinalizeBlockNumsUpdatesGlobalBlockNumForSharedPools) {
-    RuntimeConfig runtime_config;
-    runtime_config.max_generate_batch_size                      = 8;
-    runtime_config.fifo_scheduler_config.max_context_batch_size = 4;
-
     ParallelismConfig pc;
     ModelConfig       single_model_config;
     single_model_config.num_layers                   = 1;
@@ -1525,27 +1510,35 @@ TEST(CacheConfigTest, FinalizeBlockNumsUpdatesGlobalBlockNumForSharedPools) {
     single_model_config.attn_config.tokens_per_block = 1;
     setDefaultKvCacheSpec(single_model_config);
     auto single_config = CacheConfigCreator::createBasicConfig(single_model_config, pc, false, 0);
-    single_config.finalizeBlockNums(123, runtime_config);
+    single_config.finalizeBlockNums(123);
     EXPECT_EQ(single_config.block_num, 123u);
     EXPECT_TRUE(single_config.groupBlockNumsSnapshot().empty());
     EXPECT_EQ(single_config.explicitly_sized_pool_reserve_bytes, 0u);
 
     auto hybrid_config = CacheConfigCreator::createBasicConfig(makeHybridAttentionModelConfig(false), pc, false, 0);
-    hybrid_config.finalizeBlockNums(123, runtime_config);
+    hybrid_config.finalizeBlockNums(123);
     EXPECT_EQ(hybrid_config.block_num, 123u);
     EXPECT_FALSE(hybrid_config.use_independent_block_pools);
     EXPECT_TRUE(hybrid_config.groupBlockNumsSnapshot().empty());
     EXPECT_EQ(hybrid_config.explicitly_sized_pool_reserve_bytes, 0u);
 }
 
-TEST(CacheConfigTest, FinalizeBlockNumsAppliesToIndependentPools) {
-    RuntimeConfig runtime_config;
-    runtime_config.max_generate_batch_size                      = 5;
-    runtime_config.fifo_scheduler_config.max_context_batch_size = 3;
+TEST(CacheConfigTest, ExplicitPoolReserveIsAvailableBeforeFinalization) {
+    ParallelismConfig pc;
+    auto              config        = CacheConfigCreator::createBasicConfig(makeProModelConfig(), pc, false, 0);
+    const auto        hca_state_gid = gidForTag(config, "hca_state");
+    const auto        before        = config.groupBlockNumsSnapshot();
 
+    const size_t expected_reserve = 256u * config.blockSizeBytesForGroup(hca_state_gid);
+    EXPECT_EQ(config.explicitPoolReserveBytes(), expected_reserve);
+    EXPECT_EQ(config.groupBlockNumsSnapshot(), before);
+    EXPECT_THROW(config.finalizeBlockNums(0), std::exception);
+}
+
+TEST(CacheConfigTest, FinalizeBlockNumsAppliesToIndependentPools) {
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createBasicConfig(makeProModelConfig(), pc, false, 0);
-    config.finalizeBlockNums(100, runtime_config);
+    config.finalizeBlockNums(100);
 
     ASSERT_EQ(config.groupBlockNumsSnapshot().size(), static_cast<size_t>(kDsv4PoolNum));
     const auto hca_state_gid = gidForTag(config, "hca_state");
@@ -1592,14 +1585,10 @@ TEST(CacheConfigTest, HcaStateReserveDeductedFromPagedBudget) {
 }
 
 TEST(CacheConfigTest, DSV4ExplicitHcaStatePoolBlocksIgnoreLinearStep) {
-    RuntimeConfig runtime_config;
-    runtime_config.max_generate_batch_size                      = 4;
-    runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
-
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createBasicConfig(makeProModelConfig(), pc, false, 0);
     config.linear_step       = 4;
-    config.finalizeBlockNums(100, runtime_config);
+    config.finalizeBlockNums(100);
 
     // The explicit pool keeps its requested capacity. Non-explicit FULL/LINEAR
     // groups keep N, while non-explicit SWA groups use ceil(N / step).
@@ -1792,21 +1781,19 @@ TEST(HybridPoolConfigCreatorTest, MtpGenNum2RingEntriesMatch) {
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 7u);
     // Pool 3: INDEXER_STATE (ratio=4, overlap=1) → R=10
     auto* indexer_state =
-        dynamic_cast<const FixedStateCacheSpec*>(config.specForGroup(gidForTag(config, "indexer_state")).get());
+        dynamic_cast<const SWAStateCacheSpec*>(config.specForGroup(gidForTag(config, "indexer_state")).get());
     ASSERT_NE(indexer_state, nullptr);
     EXPECT_EQ(opaqueEntriesPerBlock(*indexer_state, kDsv4IndexerStateEntryBytes), 10u);
     // Pool 4: CSA_STATE (ratio=4, overlap=1) → R=10
-    auto* csa_state =
-        dynamic_cast<const FixedStateCacheSpec*>(config.specForGroup(gidForTag(config, "csa_state")).get());
+    auto* csa_state = dynamic_cast<const SWAStateCacheSpec*>(config.specForGroup(gidForTag(config, "csa_state")).get());
     ASSERT_NE(csa_state, nullptr);
     EXPECT_EQ(opaqueEntriesPerBlock(*csa_state, kDsv4CsaStateEntryBytes), 10u);
     // Pool 5: HCA_STATE (ratio=128, overlap=0) → R=130
-    auto* hca_state =
-        dynamic_cast<const FixedStateCacheSpec*>(config.specForGroup(gidForTag(config, "hca_state")).get());
+    auto* hca_state = dynamic_cast<const SWAStateCacheSpec*>(config.specForGroup(gidForTag(config, "hca_state")).get());
     ASSERT_NE(hca_state, nullptr);
     EXPECT_EQ(opaqueEntriesPerBlock(*hca_state, kDsv4HcaStateEntryBytes), 130u);
     // Pool 6: SWA_KV (window=128, overlap=0) → R=130, same as HCA_STATE
-    auto* swa_kv = dynamic_cast<const FixedStateCacheSpec*>(config.specForGroup(gidForTag(config, "swa_kv")).get());
+    auto* swa_kv = dynamic_cast<const SWAStateCacheSpec*>(config.specForGroup(gidForTag(config, "swa_kv")).get());
     ASSERT_NE(swa_kv, nullptr);
     EXPECT_EQ(swa_kv->tag, "swa_kv");
     EXPECT_EQ(opaqueEntriesPerBlock(*swa_kv, kDsv4KvEntryBytes), 130u);
@@ -1823,24 +1810,26 @@ TEST(HybridPoolConfigCreatorTest, PrefillCp8MtpGenNum2PadsStateRingBeforeSlicing
 
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 7u);
     auto* indexer_state =
-        dynamic_cast<const FixedStateCacheSpec*>(config.specForGroup(gidForTag(config, "indexer_state")).get());
-    auto* csa_state =
-        dynamic_cast<const FixedStateCacheSpec*>(config.specForGroup(gidForTag(config, "csa_state")).get());
-    auto* hca_state =
-        dynamic_cast<const FixedStateCacheSpec*>(config.specForGroup(gidForTag(config, "hca_state")).get());
-    auto* swa_kv = dynamic_cast<const FixedStateCacheSpec*>(config.specForGroup(gidForTag(config, "swa_kv")).get());
+        dynamic_cast<const SWAStateCacheSpec*>(config.specForGroup(gidForTag(config, "indexer_state")).get());
+    auto* csa_state = dynamic_cast<const SWAStateCacheSpec*>(config.specForGroup(gidForTag(config, "csa_state")).get());
+    auto* hca_state = dynamic_cast<const SWAStateCacheSpec*>(config.specForGroup(gidForTag(config, "hca_state")).get());
+    auto* swa_kv    = dynamic_cast<const SWAStateCacheSpec*>(config.specForGroup(gidForTag(config, "swa_kv")).get());
     ASSERT_NE(indexer_state, nullptr);
     ASSERT_NE(csa_state, nullptr);
     ASSERT_NE(hca_state, nullptr);
     ASSERT_NE(swa_kv, nullptr);
 
     // gen_num_per_cycle=2 gives raw INDEXER/CSA R=10, HCA/SWA R=130.
-    // Fixed state pools are CP-sliced by entries; SWA_KV keeps full logical
-    // entries and slices its packed bytes instead.
+    // Every sliced group pads to a CP-sized entry multiple, then uses the same
+    // local prefill layout calculation.
     EXPECT_EQ(opaqueEntriesPerBlock(*indexer_state, kDsv4IndexerStateEntryBytes), 2u);
     EXPECT_EQ(opaqueEntriesPerBlock(*csa_state, kDsv4CsaStateEntryBytes), 2u);
     EXPECT_EQ(opaqueEntriesPerBlock(*hca_state, kDsv4HcaStateEntryBytes), 17u);
-    EXPECT_EQ(opaqueEntriesPerBlock(*swa_kv, kDsv4KvEntryBytes), 136u);
+    EXPECT_EQ(opaqueEntriesPerBlock(*swa_kv, kDsv4KvEntryBytes), 17u);
+    EXPECT_EQ(indexer_state->entryPaddingCount(), 6u);
+    EXPECT_EQ(csa_state->entryPaddingCount(), 6u);
+    EXPECT_EQ(hca_state->entryPaddingCount(), 6u);
+    EXPECT_EQ(swa_kv->entryPaddingCount(), 6u);
 }
 
 TEST(HybridPoolConfigCreatorTest, DecodePrefillCp8MtpGenNum2ExpandsFixedAndSwaSlices) {
@@ -1870,32 +1859,32 @@ TEST(HybridPoolConfigCreatorTest, DecodePrefillCp8MtpGenNum2ExpandsFixedAndSwaSl
     for (const auto& tag : {"indexer_state", "csa_state", "hca_state"}) {
         const auto prefill_gid = gidForTag(prefill_config, tag);
         const auto decode_gid  = gidForTag(decode_config, tag);
-        auto* prefill_spec = dynamic_cast<const FixedStateCacheSpec*>(prefill_config.specForGroup(prefill_gid).get());
-        auto* decode_spec  = dynamic_cast<const FixedStateCacheSpec*>(decode_config.specForGroup(decode_gid).get());
+        auto* prefill_spec     = dynamic_cast<const SWAStateCacheSpec*>(prefill_config.specForGroup(prefill_gid).get());
+        auto* decode_spec      = dynamic_cast<const SWAStateCacheSpec*>(decode_config.specForGroup(decode_gid).get());
         ASSERT_NE(prefill_spec, nullptr) << tag;
         ASSERT_NE(decode_spec, nullptr) << tag;
         EXPECT_EQ(decode_spec->tag, prefill_spec->tag) << tag;
         const auto expected_entries = opaqueEntriesPerBlock(*prefill_spec, stateEntryBytesForTag(tag)) * cp_size;
         EXPECT_EQ(opaqueEntriesPerBlock(*decode_spec, stateEntryBytesForTag(tag)), expected_entries) << tag;
     }
-    auto* prefill_swa = dynamic_cast<const FixedStateCacheSpec*>(
-        prefill_config.specForGroup(gidForTag(prefill_config, "swa_kv")).get());
+    auto* prefill_swa =
+        dynamic_cast<const SWAStateCacheSpec*>(prefill_config.specForGroup(gidForTag(prefill_config, "swa_kv")).get());
     auto* decode_swa =
-        dynamic_cast<const FixedStateCacheSpec*>(decode_config.specForGroup(gidForTag(decode_config, "swa_kv")).get());
+        dynamic_cast<const SWAStateCacheSpec*>(decode_config.specForGroup(gidForTag(decode_config, "swa_kv")).get());
     ASSERT_NE(prefill_swa, nullptr);
     ASSERT_NE(decode_swa, nullptr);
-    EXPECT_EQ(opaqueEntriesPerBlock(*prefill_swa, kDsv4KvEntryBytes), 136u);
+    EXPECT_EQ(opaqueEntriesPerBlock(*prefill_swa, kDsv4KvEntryBytes), 17u);
     EXPECT_EQ(opaqueEntriesPerBlock(*decode_swa, kDsv4KvEntryBytes),
-              opaqueEntriesPerBlock(*prefill_swa, kDsv4KvEntryBytes));
+              opaqueEntriesPerBlock(*prefill_swa, kDsv4KvEntryBytes) * cp_size);
 
-    auto* indexer_state = dynamic_cast<const FixedStateCacheSpec*>(
+    auto* indexer_state = dynamic_cast<const SWAStateCacheSpec*>(
         decode_config.specForGroup(gidForTag(decode_config, "indexer_state")).get());
-    auto* csa_state = dynamic_cast<const FixedStateCacheSpec*>(
-        decode_config.specForGroup(gidForTag(decode_config, "csa_state")).get());
-    auto* hca_state = dynamic_cast<const FixedStateCacheSpec*>(
-        decode_config.specForGroup(gidForTag(decode_config, "hca_state")).get());
+    auto* csa_state =
+        dynamic_cast<const SWAStateCacheSpec*>(decode_config.specForGroup(gidForTag(decode_config, "csa_state")).get());
+    auto* hca_state =
+        dynamic_cast<const SWAStateCacheSpec*>(decode_config.specForGroup(gidForTag(decode_config, "hca_state")).get());
     auto* swa_kv =
-        dynamic_cast<const FixedStateCacheSpec*>(decode_config.specForGroup(gidForTag(decode_config, "swa_kv")).get());
+        dynamic_cast<const SWAStateCacheSpec*>(decode_config.specForGroup(gidForTag(decode_config, "swa_kv")).get());
     ASSERT_NE(indexer_state, nullptr);
     ASSERT_NE(csa_state, nullptr);
     ASSERT_NE(hca_state, nullptr);
@@ -1931,22 +1920,22 @@ TEST(HybridPoolConfigCreatorTest, DecodeExplicitPrefillCpSizeHandlesDp16) {
     for (const auto& tag : {"indexer_state", "csa_state", "hca_state"}) {
         const auto prefill_gid = gidForTag(prefill_config, tag);
         const auto decode_gid  = gidForTag(decode_config, tag);
-        auto* prefill_spec = dynamic_cast<const FixedStateCacheSpec*>(prefill_config.specForGroup(prefill_gid).get());
-        auto* decode_spec  = dynamic_cast<const FixedStateCacheSpec*>(decode_config.specForGroup(decode_gid).get());
+        auto* prefill_spec     = dynamic_cast<const SWAStateCacheSpec*>(prefill_config.specForGroup(prefill_gid).get());
+        auto* decode_spec      = dynamic_cast<const SWAStateCacheSpec*>(decode_config.specForGroup(decode_gid).get());
         ASSERT_NE(prefill_spec, nullptr) << tag;
         ASSERT_NE(decode_spec, nullptr) << tag;
         const auto expected_entries = opaqueEntriesPerBlock(*prefill_spec, stateEntryBytesForTag(tag)) * cp_size;
         EXPECT_EQ(opaqueEntriesPerBlock(*decode_spec, stateEntryBytesForTag(tag)), expected_entries) << tag;
     }
-    auto* prefill_swa = dynamic_cast<const FixedStateCacheSpec*>(
-        prefill_config.specForGroup(gidForTag(prefill_config, "swa_kv")).get());
+    auto* prefill_swa =
+        dynamic_cast<const SWAStateCacheSpec*>(prefill_config.specForGroup(gidForTag(prefill_config, "swa_kv")).get());
     auto* decode_swa =
-        dynamic_cast<const FixedStateCacheSpec*>(decode_config.specForGroup(gidForTag(decode_config, "swa_kv")).get());
+        dynamic_cast<const SWAStateCacheSpec*>(decode_config.specForGroup(gidForTag(decode_config, "swa_kv")).get());
     ASSERT_NE(prefill_swa, nullptr);
     ASSERT_NE(decode_swa, nullptr);
-    EXPECT_EQ(opaqueEntriesPerBlock(*prefill_swa, kDsv4KvEntryBytes), 136u);
+    EXPECT_EQ(opaqueEntriesPerBlock(*prefill_swa, kDsv4KvEntryBytes), 17u);
     EXPECT_EQ(opaqueEntriesPerBlock(*decode_swa, kDsv4KvEntryBytes),
-              opaqueEntriesPerBlock(*prefill_swa, kDsv4KvEntryBytes));
+              opaqueEntriesPerBlock(*prefill_swa, kDsv4KvEntryBytes) * cp_size);
 }
 
 TEST(CacheConfigTest, DSV4NonMtpSpConfigDoesNotInflateRing) {
@@ -1965,7 +1954,7 @@ TEST(CacheConfigTest, DSV4NonMtpSpConfigDoesNotInflateRing) {
     auto config = CacheConfigCreator::createConfig(mc, pc, rc, kvc, std::nullopt, std::make_optional(sp_none));
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 7u);
     // CSA_STATE (pool 4): ratio=4, overlap=1, gen_num=0 → R=8
-    auto* csa = dynamic_cast<const FixedStateCacheSpec*>(config.specForGroup(gidForTag(config, "csa_state")).get());
+    auto* csa = dynamic_cast<const SWAStateCacheSpec*>(config.specForGroup(gidForTag(config, "csa_state")).get());
     ASSERT_NE(csa, nullptr);
     EXPECT_EQ(opaqueEntriesPerBlock(*csa, kDsv4CsaStateEntryBytes), 8u) << "SP_TYPE_NONE should not inflate ring";
 }
@@ -2005,7 +1994,7 @@ static CacheConfig makeDSV4AllocatorConfig(bool use_flash = false) {
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
     // Set enough blocks for tests (7 groups × N blocks each)
-    config.finalizeBlockNums(/*global_block_num=*/200, RuntimeConfig{});
+    config.finalizeBlockNums(/*global_block_num=*/200);
     return config;
 }
 
@@ -2035,7 +2024,7 @@ protected:
 
 TEST_F(DSV4AllocatorTest, InitAndBasicProperties) {
     auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     // 7 groups → HybridTypeKVCacheAllocator path
@@ -2048,7 +2037,7 @@ TEST_F(DSV4AllocatorTest, InitAndBasicProperties) {
 TEST_F(DSV4AllocatorTest, CpPageRrFixedAndSwaAllocateOneBlockPerVirtualBlock) {
     constexpr uint32_t cp_size   = 4;
     auto               config    = makeDSV4CpAllocatorConfig(cp_size);
-    auto               allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto               allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     const int spb     = allocator->seqSizePerBlock();
@@ -2082,7 +2071,7 @@ TEST_F(DSV4AllocatorTest, CpPageRrFixedAndSwaAllocateOneBlockPerVirtualBlock) {
 
 TEST_F(DSV4AllocatorTest, FlashInitAndBasicProperties) {
     auto config    = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     EXPECT_EQ(config.groupNums(), 7);
@@ -2092,7 +2081,7 @@ TEST_F(DSV4AllocatorTest, FlashInitAndBasicProperties) {
 
 TEST_F(DSV4AllocatorTest, AddressLookupAllGroups) {
     auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     // Verify address lookup works for a layer in each group
@@ -2109,7 +2098,7 @@ TEST_F(DSV4AllocatorTest, AddressLookupAllGroups) {
 
 TEST_F(DSV4AllocatorTest, BlockPoolCreatedWithCorrectTensors) {
     auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     auto block_pool = allocator->getBlockPool();
@@ -2127,7 +2116,7 @@ TEST_F(DSV4AllocatorTest, BlockPoolCreatedWithCorrectTensors) {
 
 TEST_F(DSV4AllocatorTest, SharedLogicalGroupsProduceDeduplicatedMrBufferList) {
     auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     const auto layout               = allocator->allLayerCacheBase();
@@ -2158,7 +2147,7 @@ TEST_F(DSV4AllocatorTest, SharedLogicalGroupsProduceDeduplicatedMrBufferList) {
 
 TEST_F(DSV4AllocatorTest, ConvertIndexToBufferAllGroups) {
     auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     // convertIndexToBuffer should work for layers in each of the 7 groups
@@ -2172,7 +2161,7 @@ TEST_F(DSV4AllocatorTest, ConvertIndexToBufferAllGroups) {
 
 TEST_F(DSV4AllocatorTest, MallocAndFreeBlocks) {
     auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     auto block_pool = allocator->getBlockPool();
@@ -2274,7 +2263,7 @@ TEST_F(DSV4AllocatorTest, FlashGroupTypes) {
 
 TEST_F(DSV4AllocatorTest, FlashAddressLookupAllGroups) {
     auto config    = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     for (int gid = 0; gid < 7; gid++) {
@@ -2287,7 +2276,7 @@ TEST_F(DSV4AllocatorTest, FlashAddressLookupAllGroups) {
 
 TEST_F(DSV4AllocatorTest, FlashBlockPoolTensors) {
     auto config    = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     auto layout = allocator->allLayerCacheBase();
@@ -2324,7 +2313,7 @@ TEST_F(DSV4AllocatorTest, FlashSpecBlockSizes) {
 
 TEST_F(DSV4AllocatorTest, FlashMallocAndFree) {
     auto config    = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     auto   block_pool  = allocator->getBlockPool();
@@ -2345,7 +2334,7 @@ TEST_F(DSV4AllocatorTest, FlashMallocAndFree) {
 
 TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
     auto config       = makeDSV4AllocatorConfig();
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
@@ -2407,7 +2396,7 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
 
 TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
     auto config       = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
@@ -2465,7 +2454,7 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
 
 TEST_F(DSV4AllocatorTest, PrefixCacheReusePagedGroupsOnly) {
     auto config       = makeDSV4AllocatorConfig();
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
@@ -2533,7 +2522,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReusePagedGroupsOnly) {
 
 TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresSWATailHit) {
     auto config       = makeDSV4AllocatorConfig();
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
@@ -2582,7 +2571,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresSWATailHit) {
 
 TEST_F(DSV4AllocatorTest, PrefixCacheReuseDoesNotRequireHCAStateHit) {
     auto config       = makeDSV4AllocatorConfig();
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
@@ -2640,7 +2629,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseDoesNotRequireHCAStateHit) {
 
 TEST_F(DSV4AllocatorTest, PrefixCacheReuseAcceptsSingleLatestSWATailHit) {
     auto config       = makeDSV4AllocatorConfig();
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
@@ -2689,7 +2678,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseAcceptsSingleLatestSWATailHit) {
 
 TEST_F(DSV4AllocatorTest, FlashPrefixCacheReusePagedGroupsOnly) {
     auto config       = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
@@ -2753,8 +2742,7 @@ TEST_F(DSV4AllocatorTest, FlashPrefixCacheReusePagedGroupsOnly) {
 
 TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksAreDistributedAcrossGroups) {
     auto config    = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(
-        config, AllocationType::DEVICE, nullptr, /*reserve_block_ratio=*/10);
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, nullptr, /*reserve_block_ratio=*/10);
     ASSERT_TRUE(allocator->init());
 
     auto batch_res = std::make_shared<BatchKVCacheResource>();
@@ -2794,8 +2782,7 @@ TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksDoNotReduceExplicitHcaStateCapa
     }
     setGroupBlockNumsForTest(config, block_nums);
 
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(
-        config, AllocationType::DEVICE, nullptr, /*reserve_block_ratio=*/50);
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, nullptr, /*reserve_block_ratio=*/50);
     ASSERT_TRUE(allocator->init());
 
     auto batch_res = std::make_shared<BatchKVCacheResource>();
@@ -2827,8 +2814,8 @@ TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksDoNotReduceExplicitHcaStateCapa
 
 TEST_F(DSV4AllocatorTest, SWAGroupParticipatesInPrefixCacheReuse) {
     auto config = makeDSV4AllocatorConfig();
-    config.finalizeBlockNums(/*global_block_num=*/100, RuntimeConfig{});
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    config.finalizeBlockNums(/*global_block_num=*/100);
+    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
@@ -2883,7 +2870,7 @@ TEST_F(DSV4AllocatorTest, SWAGroupParticipatesInPrefixCacheReuse) {
 
 TEST_F(DSV4AllocatorTest, SWAPrefixCacheRestoresTailReuse) {
     auto config       = makeDSV4AllocatorConfig();
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
@@ -2941,7 +2928,7 @@ TEST_F(DSV4AllocatorTest, SWAPrefixCacheRestoresTailReuse) {
 
 TEST_F(DSV4AllocatorTest, IncrMallocDecodeGrowsBlocks) {
     auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     int spb = allocator->seqSizePerBlock();
@@ -2997,7 +2984,7 @@ TEST_F(DSV4AllocatorTest, IncrMallocDecodeGrowsBlocks) {
 
 TEST_F(DSV4AllocatorTest, FreeReturnsBlocksToPool) {
     auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     size_t free_before = allocator->freeBlocksNum();
@@ -3052,7 +3039,7 @@ TEST_F(DSV4AllocatorTest, FreeReturnsBlocksToPool) {
 
 TEST_F(DSV4AllocatorTest, FlashIncrMallocDecode) {
     auto config    = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     int spb = allocator->seqSizePerBlock();

@@ -2,6 +2,7 @@
 #include <stdexcept>
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 
 namespace rtp_llm {
@@ -122,6 +123,43 @@ TEST_F(CPSlotMapperTest, NonShardedPassthrough) {
     EXPECT_EQ(mapper.effectiveSeqLenForAlloc(10), 10);
 }
 
+TEST_F(CPSlotMapperTest, BuildStorePlanNormalMappingKeepsLogicalIndices) {
+    CPSlotMapper     mapper(0, 2, 4);
+    CacheGroupPolicy policy = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+    policy.cp_mapping       = CpBlockMappingMode::NONE;
+
+    const auto plan = mapper.buildStorePlan(policy,
+                                            /*total_logical_blocks=*/5,
+                                            /*reuse_block_size=*/2,
+                                            /*use_hybrid=*/false);
+
+    ASSERT_EQ(plan.size(), 3);
+    EXPECT_EQ(plan[0].cache_key_index, 2);
+    EXPECT_EQ(plan[0].block_table_index, 2);
+    EXPECT_EQ(plan[1].cache_key_index, 3);
+    EXPECT_EQ(plan[1].block_table_index, 3);
+    EXPECT_EQ(plan[2].cache_key_index, 4);
+    EXPECT_EQ(plan[2].block_table_index, 4);
+}
+
+TEST_F(CPSlotMapperTest, BuildStorePlanRoundRobinMapsToRankLocalIndices) {
+    CPSlotMapper     mapper(/*cp_rank=*/1, /*cp_size=*/2, /*block_size=*/4);
+    CacheGroupPolicy policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+
+    const auto plan = mapper.buildStorePlan(policy,
+                                            /*total_logical_blocks=*/6,
+                                            /*reuse_block_size=*/0,
+                                            /*use_hybrid=*/false);
+
+    ASSERT_EQ(plan.size(), 3);
+    EXPECT_EQ(plan[0].cache_key_index, 1);
+    EXPECT_EQ(plan[0].block_table_index, 0);
+    EXPECT_EQ(plan[1].cache_key_index, 3);
+    EXPECT_EQ(plan[1].block_table_index, 1);
+    EXPECT_EQ(plan[2].cache_key_index, 5);
+    EXPECT_EQ(plan[2].block_table_index, 2);
+}
+
 TEST_F(CPSlotMapperTest, BuildStorePlanUsesPolicyActiveTailBlocks) {
     CPSlotMapper mapper(0, 2, 4);
 
@@ -130,10 +168,10 @@ TEST_F(CPSlotMapperTest, BuildStorePlanUsesPolicyActiveTailBlocks) {
                                              /*reuse_block_size=*/0,
                                              /*use_hybrid=*/true);
     ASSERT_EQ(default_swa.size(), 2);
-    EXPECT_EQ(default_swa[0].key_index, 3);
-    EXPECT_EQ(default_swa[0].offset_index, 1);
-    EXPECT_EQ(default_swa[1].key_index, 4);
-    EXPECT_EQ(default_swa[1].offset_index, 2);
+    EXPECT_EQ(default_swa[0].cache_key_index, 3);
+    EXPECT_EQ(default_swa[0].block_table_index, 1);
+    EXPECT_EQ(default_swa[1].cache_key_index, 4);
+    EXPECT_EQ(default_swa[1].block_table_index, 2);
 
     CacheGroupPolicy policy   = defaultCacheGroupPolicy(CacheGroupType::SWA);
     policy.active_tail_blocks = 1;
@@ -142,11 +180,11 @@ TEST_F(CPSlotMapperTest, BuildStorePlanUsesPolicyActiveTailBlocks) {
                                             /*reuse_block_size=*/0,
                                             /*use_hybrid=*/true);
     ASSERT_EQ(custom_swa.size(), 1);
-    EXPECT_EQ(custom_swa[0].key_index, 4);
-    EXPECT_EQ(custom_swa[0].offset_index, 2);
+    EXPECT_EQ(custom_swa[0].cache_key_index, 4);
+    EXPECT_EQ(custom_swa[0].block_table_index, 2);
 }
 
-TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
+TEST_F(CPSlotMapperTest, FullGroupDoesNotSliceWhileSwaUsesSpecMetadata) {
     CacheConfig config;
     config.seq_size_per_block = 8;
     config.layer_num          = 1;
@@ -160,23 +198,32 @@ TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
     full_group.layer_ids         = {0};
     full_group.policy            = defaultCacheGroupPolicy(CacheGroupType::FULL);
     full_group.policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
-    full_group.policy.cp_slice   = CpBlockSliceMode::EQUAL_BYTES;
 
-    auto swa_spec = std::make_shared<MHAKVCacheSpec>();
-    swa_spec->tag = "swa";
+    KVCacheSpecDesc swa_desc;
+    swa_desc.tag                  = "swa";
+    swa_desc.cache_type           = KVCacheSpecType::SWAState;
+    swa_desc.entry_elems          = 1;
+    swa_desc.entry_dtype          = DataType::TYPE_UINT8;
+    swa_desc.entry_count_mode     = OpaqueBlockEntryCountMode::EXPLICIT;
+    swa_desc.explicit_entry_count = 2;
+    swa_desc.cp                   = CacheCpPolicyDesc{};
+    swa_desc.cp->slice            = true;
+    ParallelismConfig parallelism_config;
+    SpecBuildContext  build_ctx;
+    build_ctx.parallelism_config = &parallelism_config;
+    auto      swa_spec           = SpecBuilder::build(swa_desc, build_ctx);
     GroupBase swa_group;
-    swa_group.tag             = swa_spec->tag;
-    swa_group.spec            = swa_spec;
-    swa_group.layer_ids       = {0};
-    swa_group.policy          = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    swa_group.policy.cp_slice = CpBlockSliceMode::EQUAL_BYTES;
+    swa_group.tag       = swa_spec->tag;
+    swa_group.spec      = swa_spec;
+    swa_group.layer_ids = {0};
+    swa_group.policy    = defaultCacheGroupPolicy(CacheGroupType::SWA);
     config.setTopology({std::move(full_group), std::move(swa_group)}, {{0, {"full", "swa"}}});
 
     CPSlotMapper mapper(0, 2, 8);
 
     EXPECT_EQ(mapper.layoutForGroup(config, 0).mapping, CpBlockMappingMode::BLOCK_ROUND_ROBIN);
-    EXPECT_EQ(mapper.layoutForGroup(config, 0).slice, CpBlockSliceMode::NONE);
-    EXPECT_EQ(mapper.layoutForGroup(config, 1).slice, CpBlockSliceMode::EQUAL_BYTES);
+    EXPECT_EQ(mapper.layoutForGroup(config, 0).slice, false);
+    EXPECT_EQ(mapper.layoutForGroup(config, 1).slice, true);
 }
 
 }  // namespace test

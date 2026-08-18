@@ -79,10 +79,9 @@ bool HybridKVCacheAllocator::cpCompactSwaGroup(int gid, const std::shared_ptr<CP
 }
 
 HybridKVCacheAllocator::HybridKVCacheAllocator(const CacheConfig&                 config,
-                                               AllocationType                     allocation_type,
                                                const kmonitor::MetricsReporterPtr metrics_reporter,
                                                int64_t                            reserve_block_ratio):
-    KVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio) {}
+    KVCacheAllocator(config, metrics_reporter, reserve_block_ratio) {}
 
 int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cache_keys,
                                        BatchKVCacheResource&                kv_resource,
@@ -591,26 +590,41 @@ bool HybridKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  batch
         return true;
     }
 
-    const int old_batch_size = batch_kv_cache_resource->batchSize();
-    const int new_batch_size = static_cast<int>(block_src_batch.size());
-    const int group_nums     = batch_kv_cache_resource->groupNums();
-
-    std::vector<int> batch_fork_count(old_batch_size, 0);
-    for (const int old_batch_idx : block_src_batch) {
-        RTP_LLM_CHECK_WITH_INFO(old_batch_idx >= 0 && old_batch_idx < old_batch_size,
-                                "try to reuse an old batch %d that out of range %d",
-                                old_batch_idx,
-                                old_batch_size);
-        ++batch_fork_count[old_batch_idx];
+    auto plan = buildKVBlockUpdatePlan(*batch_kv_cache_resource, block_src_batch, copy_last_block);
+    if (!reserveReplacementBlocks(plan)) {
+        return false;
     }
 
-    std::vector<int> new_blocks_num(static_cast<size_t>(group_nums), 0);
-    for (int old_batch_idx = 0; old_batch_idx < old_batch_size; ++old_batch_idx) {
-        const int fork_count = batch_fork_count[old_batch_idx];
+    // No recoverable operation is allowed below this point: dropped ownership
+    // is committed before the batch resource is rebuilt.
+    releaseDroppedBatchBlocks(*batch_kv_cache_resource, plan);
+    rebuildBatchResources(batch_kv_cache_resource, block_src_batch, copy_last_block, plan, block_update_mapping);
+    return true;
+}
+
+HybridKVCacheAllocator::KVBlockUpdatePlan HybridKVCacheAllocator::buildKVBlockUpdatePlan(
+    const BatchKVCacheResource& resource, const std::vector<int>& block_src_batch, bool copy_last_block) const {
+    KVBlockUpdatePlan plan;
+    plan.old_batch_size = resource.batchSize();
+    plan.new_batch_size = static_cast<int>(block_src_batch.size());
+    plan.group_nums     = resource.groupNums();
+    plan.fork_counts.assign(static_cast<size_t>(plan.old_batch_size), 0);
+    plan.groups.resize(static_cast<size_t>(plan.group_nums));
+
+    for (const int old_batch_idx : block_src_batch) {
+        RTP_LLM_CHECK_WITH_INFO(old_batch_idx >= 0 && old_batch_idx < plan.old_batch_size,
+                                "try to reuse an old batch %d that out of range %d",
+                                old_batch_idx,
+                                plan.old_batch_size);
+        ++plan.fork_counts[old_batch_idx];
+    }
+
+    for (int old_batch_idx = 0; old_batch_idx < plan.old_batch_size; ++old_batch_idx) {
+        const int fork_count = plan.fork_counts[old_batch_idx];
         if (fork_count > 1 && copy_last_block) {
-            for (int gid = 0; gid < group_nums; ++gid) {
-                if (!batch_kv_cache_resource->blocks(old_batch_idx, gid).empty()) {
-                    new_blocks_num[static_cast<size_t>(gid)] += fork_count - 1;
+            for (int gid = 0; gid < plan.group_nums; ++gid) {
+                if (!resource.blocks(old_batch_idx, gid).empty()) {
+                    plan.groups[static_cast<size_t>(gid)].replacement_count += fork_count - 1;
                 }
             }
         }
@@ -619,18 +633,15 @@ bool HybridKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  batch
     // Transfer request ownership from dropped batches before allocating new
     // blocks. This keeps the operation transactional while allowing net-feasible
     // drop-and-fork updates to succeed when the pool is otherwise full.
-    std::vector<BlockIndicesType>                      replacement_blocks(static_cast<size_t>(group_nums));
-    std::vector<BlockIndicesType>                      allocated_replacements(static_cast<size_t>(group_nums));
-    std::vector<std::unordered_map<BlockIdxType, int>> transferred_ref_counts(static_cast<size_t>(group_nums));
-    for (int gid = 0; gid < group_nums; ++gid) {
+    for (int gid = 0; gid < plan.group_nums; ++gid) {
         std::unordered_set<BlockIdxType>      retained_blocks;
         std::unordered_map<BlockIdxType, int> dropped_block_counts;
-        for (int old_batch_idx = 0; old_batch_idx < old_batch_size; ++old_batch_idx) {
-            for (const auto block : batch_kv_cache_resource->blocks(old_batch_idx, gid)) {
+        for (int old_batch_idx = 0; old_batch_idx < plan.old_batch_size; ++old_batch_idx) {
+            for (const auto block : resource.blocks(old_batch_idx, gid)) {
                 if (isNullBlockIdx(block) || block <= 0) {
                     continue;
                 }
-                if (batch_fork_count[old_batch_idx] == 0) {
+                if (plan.fork_counts[old_batch_idx] == 0) {
                     ++dropped_block_counts[block];
                 } else {
                     retained_blocks.insert(block);
@@ -638,72 +649,78 @@ bool HybridKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  batch
             }
         }
 
-        auto&     replacements = replacement_blocks[static_cast<size_t>(gid)];
-        auto&     transferred  = transferred_ref_counts[static_cast<size_t>(gid)];
-        const int need         = new_blocks_num[static_cast<size_t>(gid)];
-        for (int old_batch_idx = 0; old_batch_idx < old_batch_size && static_cast<int>(replacements.size()) < need;
+        auto& group_plan = plan.groups[static_cast<size_t>(gid)];
+        for (int old_batch_idx = 0;
+             old_batch_idx < plan.old_batch_size
+             && static_cast<int>(group_plan.replacement_blocks.size()) < group_plan.replacement_count;
              ++old_batch_idx) {
-            if (batch_fork_count[old_batch_idx] != 0) {
+            if (plan.fork_counts[old_batch_idx] != 0) {
                 continue;
             }
-            const auto& dropped = batch_kv_cache_resource->blocks(old_batch_idx, gid);
+            const auto& dropped = resource.blocks(old_batch_idx, gid);
             if (dropped.empty()) {
                 continue;
             }
             const auto block = dropped.back();
             if (!isNullBlockIdx(block) && block > 0 && dropped_block_counts[block] == 1 && !retained_blocks.count(block)
-                && !transferred.count(block)) {
-                replacements.push_back(block);
-                transferred[block] = 1;
+                && !group_plan.transferred_ref_counts.count(block)) {
+                group_plan.replacement_blocks.push_back(block);
+                group_plan.transferred_ref_counts[block] = 1;
             }
         }
     }
+    return plan;
+}
 
-    auto rollback_replacements = [&]() {
-        for (int gid = 0; gid < group_nums; ++gid) {
-            auto& blocks = allocated_replacements[static_cast<size_t>(gid)];
-            if (!blocks.empty()) {
-                kv_cache_groups_[static_cast<size_t>(gid)]->free(blocks);
-                blocks.clear();
-            }
-        }
-    };
-    for (int gid = 0; gid < group_nums; ++gid) {
-        const int need_blocks = new_blocks_num[static_cast<size_t>(gid)];
-        auto&     reserved    = replacement_blocks[static_cast<size_t>(gid)];
-        reserved.reserve(static_cast<size_t>(need_blocks));
-        for (int i = static_cast<int>(reserved.size()); i < need_blocks; ++i) {
+bool HybridKVCacheAllocator::reserveReplacementBlocks(KVBlockUpdatePlan& plan) {
+    for (int gid = 0; gid < plan.group_nums; ++gid) {
+        auto& group_plan = plan.groups[static_cast<size_t>(gid)];
+        group_plan.replacement_blocks.reserve(static_cast<size_t>(group_plan.replacement_count));
+        while (static_cast<int>(group_plan.replacement_blocks.size()) < group_plan.replacement_count) {
             BlockIds   one_block;
             const bool ok = kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
                 one_block, kv_cache_groups_[static_cast<size_t>(gid)]->seqSizePerBlock());
             const auto& blocks = one_block.blocks();
             if (ok && blocks.size() == 1 && !isNullBlockIdx(blocks.front())) {
-                reserved.push_back(blocks.front());
-                allocated_replacements[static_cast<size_t>(gid)].push_back(blocks.front());
+                group_plan.replacement_blocks.push_back(blocks.front());
+                group_plan.allocated_replacements.push_back(blocks.front());
                 continue;
             }
             if (!blocks.empty()) {
-                allocated_replacements[static_cast<size_t>(gid)].insert(
-                    allocated_replacements[static_cast<size_t>(gid)].end(), blocks.begin(), blocks.end());
+                group_plan.allocated_replacements.insert(
+                    group_plan.allocated_replacements.end(), blocks.begin(), blocks.end());
             }
             RTP_LLM_LOG_WARNING(
                 "reserve replacement block failed for hybrid kv cache update, group=%d need=%d reserved=%zu",
                 gid,
-                need_blocks,
-                reserved.size());
-            rollback_replacements();
+                group_plan.replacement_count,
+                group_plan.replacement_blocks.size());
+            rollbackAllocatedReplacementBlocks(plan);
             return false;
         }
     }
+    return true;
+}
 
-    for (int old_batch_idx = 0; old_batch_idx < old_batch_size; ++old_batch_idx) {
-        if (batch_fork_count[old_batch_idx] != 0) {
+void HybridKVCacheAllocator::rollbackAllocatedReplacementBlocks(KVBlockUpdatePlan& plan) {
+    for (int gid = 0; gid < plan.group_nums; ++gid) {
+        auto& blocks = plan.groups[static_cast<size_t>(gid)].allocated_replacements;
+        if (!blocks.empty()) {
+            kv_cache_groups_[static_cast<size_t>(gid)]->free(blocks);
+            blocks.clear();
+        }
+    }
+}
+
+void HybridKVCacheAllocator::releaseDroppedBatchBlocks(const BatchKVCacheResource& resource, KVBlockUpdatePlan& plan) {
+    for (int old_batch_idx = 0; old_batch_idx < plan.old_batch_size; ++old_batch_idx) {
+        if (plan.fork_counts[old_batch_idx] != 0) {
             continue;
         }
-        for (int gid = 0; gid < group_nums; ++gid) {
+        for (int gid = 0; gid < plan.group_nums; ++gid) {
             BlockIndicesType to_free;
-            auto&            transferred = transferred_ref_counts[static_cast<size_t>(gid)];
-            for (const auto block : batch_kv_cache_resource->blocks(old_batch_idx, gid)) {
+            auto&            transferred = plan.groups[static_cast<size_t>(gid)].transferred_ref_counts;
+            for (const auto block : resource.blocks(old_batch_idx, gid)) {
                 if (isNullBlockIdx(block) || block <= 0) {
                     continue;
                 }
@@ -719,58 +736,69 @@ bool HybridKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  batch
             }
         }
     }
+}
 
+void HybridKVCacheAllocator::rebuildBatchResources(const BatchKVCacheResourcePtr&  resource,
+                                                   const std::vector<int>&         block_src_batch,
+                                                   bool                            copy_last_block,
+                                                   KVBlockUpdatePlan&              plan,
+                                                   std::vector<TaggedBlockIdPair>& block_update_mapping) {
     std::vector<KVCacheResource> old_resources;
-    batch_kv_cache_resource->resetAndReturnOldResources(new_batch_size, old_resources);
-    batch_kv_cache_resource->initGroups(config_.topologyPtr());
-    std::vector<size_t> next_replacement(static_cast<size_t>(group_nums), 0);
+    resource->resetAndReturnOldResources(plan.new_batch_size, old_resources);
+    resource->initGroups(config_.topologyPtr());
 
-    for (int new_batch_idx = 0; new_batch_idx < new_batch_size; ++new_batch_idx) {
+    for (int new_batch_idx = 0; new_batch_idx < plan.new_batch_size; ++new_batch_idx) {
         const int old_batch_idx = block_src_batch[new_batch_idx];
-        auto&     fork_count    = batch_fork_count[old_batch_idx];
+        auto&     fork_count    = plan.fork_counts[old_batch_idx];
         RTP_LLM_CHECK_WITH_INFO(fork_count > 0, "old batch %d has been forked too many times", old_batch_idx);
 
         if (fork_count == 1) {
-            batch_kv_cache_resource->moveBatchResource(new_batch_idx, std::move(old_resources[old_batch_idx]));
+            resource->moveBatchResource(new_batch_idx, std::move(old_resources[old_batch_idx]));
         } else {
-            batch_kv_cache_resource->setBatchCacheKeys(new_batch_idx, old_resources[old_batch_idx].cacheKeys());
-            for (int gid = 0; gid < group_nums; ++gid) {
-                auto& block_ids = batch_kv_cache_resource->mutableBlockIds(new_batch_idx, gid);
+            resource->setBatchCacheKeys(new_batch_idx, old_resources[old_batch_idx].cacheKeys());
+            for (int gid = 0; gid < plan.group_nums; ++gid) {
+                auto& block_ids = resource->mutableBlockIds(new_batch_idx, gid);
                 kv_cache_groups_[static_cast<size_t>(gid)]->reference(block_ids,
                                                                       old_resources[old_batch_idx].blocks(gid));
 
                 if (copy_last_block && !block_ids.blocks().empty()) {
-                    const int  old_block       = block_ids.popBack();
-                    const bool old_block_valid = !isNullBlockIdx(old_block) && old_block > 0;
-                    if (old_block_valid) {
-                        kv_cache_groups_[static_cast<size_t>(gid)]->free({old_block});
-                    }
-
-                    auto&      reserved     = replacement_blocks[static_cast<size_t>(gid)];
-                    const auto reserved_idx = next_replacement[static_cast<size_t>(gid)]++;
-                    RTP_LLM_CHECK_WITH_INFO(reserved_idx < reserved.size(),
-                                            "missing reserved replacement block for hybrid kv cache update, group=%d",
-                                            gid);
-                    const int new_block = reserved[reserved_idx];
-                    block_ids.add({new_block});
-                    if (old_block_valid && !isNullBlockIdx(new_block) && new_block > 0) {
-                        block_update_mapping.push_back(
-                            {config_.topology().groupById(static_cast<size_t>(gid)).tag, old_block, new_block});
-                    }
+                    replaceForkedLastBlock(gid, block_ids, plan.groups[static_cast<size_t>(gid)], block_update_mapping);
                 }
             }
         }
         --fork_count;
     }
-    for (int gid = 0; gid < group_nums; ++gid) {
+    for (int gid = 0; gid < plan.group_nums; ++gid) {
+        const auto& group_plan = plan.groups[static_cast<size_t>(gid)];
         RTP_LLM_CHECK_WITH_INFO(
-            next_replacement[static_cast<size_t>(gid)] == replacement_blocks[static_cast<size_t>(gid)].size(),
+            group_plan.next_replacement == group_plan.replacement_blocks.size(),
             "unused replacement blocks after hybrid kv cache update, group=%d used=%zu reserved=%zu",
             gid,
-            next_replacement[static_cast<size_t>(gid)],
-            replacement_blocks[static_cast<size_t>(gid)].size());
+            group_plan.next_replacement,
+            group_plan.replacement_blocks.size());
     }
-    return true;
+}
+
+void HybridKVCacheAllocator::replaceForkedLastBlock(int                             gid,
+                                                    BlockIds&                       block_ids,
+                                                    GroupKVBlockUpdatePlan&         group_plan,
+                                                    std::vector<TaggedBlockIdPair>& block_update_mapping) {
+    const int  old_block       = block_ids.popBack();
+    const bool old_block_valid = !isNullBlockIdx(old_block) && old_block > 0;
+    if (old_block_valid) {
+        kv_cache_groups_[static_cast<size_t>(gid)]->free({old_block});
+    }
+
+    const auto replacement_idx = group_plan.next_replacement++;
+    RTP_LLM_CHECK_WITH_INFO(replacement_idx < group_plan.replacement_blocks.size(),
+                            "missing reserved replacement block for hybrid kv cache update, group=%d",
+                            gid);
+    const int new_block = group_plan.replacement_blocks[replacement_idx];
+    block_ids.add({new_block});
+    if (old_block_valid && !isNullBlockIdx(new_block) && new_block > 0) {
+        block_update_mapping.push_back(
+            {config_.topology().groupById(static_cast<size_t>(gid)).tag, old_block, new_block});
+    }
 }
 
 int HybridKVCacheAllocator::seqSizePerBlock() const {
@@ -839,7 +867,7 @@ void HybridKVCacheAllocator::rollbackIncrMalloc(BatchKVCacheResource&           
 
 MemoryType HybridKVCacheAllocator::memoryTypeForGroup(int gid) const {
     (void)gid;
-    return allocation_type_ == AllocationType::DEVICE ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
+    return MemoryType::MEMORY_GPU;
 }
 
 void HybridKVCacheAllocator::copyBlockMappingForGroup(int                             gid,

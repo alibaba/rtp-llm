@@ -135,7 +135,7 @@ static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
     mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
-    config.finalizeBlockNums(block_num, RuntimeConfig{});
+    config.finalizeBlockNums(block_num);
     return config;
 }
 
@@ -212,8 +212,7 @@ static size_t validBlockCount(const BlockIndicesType& blocks) {
 // Create HybridPoolKVCacheAllocator with SharedBlockCache injected (required before init()).
 static HybridPoolKVCacheAllocatorPtr
 makeAllocator(const CacheConfig& config, RoleType role_type = RoleType::PDFUSION, int64_t reserve_block_ratio = 0) {
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(
-        config, AllocationType::DEVICE, nullptr, reserve_block_ratio, role_type);
+    auto allocator    = std::make_shared<HybridPoolKVCacheAllocator>(config, nullptr, reserve_block_ratio, role_type);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     return allocator;
@@ -1127,8 +1126,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesHcaStatePoolBloc
     const size_t explicit_gid = firstExplicitIndependentGroup(config);
     setExplicitBlocksForGroup(config, explicit_gid, 50);
 
-    RuntimeConfig rt;  // unused inside finalizeBlockNums today
-    config.finalizeBlockNums(/*global_block_num=*/200, rt);
+    config.finalizeBlockNums(/*global_block_num=*/200);
 
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
         const uint32_t expected = config.policyForGroup(gid).explicit_block_num > 0 ? 50u : 200u;
@@ -1143,8 +1141,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesGlobalBlocksWhen
     auto config = makeDSV4HybridPoolConfig(/*block_num=*/123);
     setExplicitBlocksForGroup(config, firstExplicitIndependentGroup(config), 0);
 
-    RuntimeConfig rt;
-    config.finalizeBlockNums(/*global_block_num=*/123, rt);
+    config.finalizeBlockNums(/*global_block_num=*/123);
 
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
         EXPECT_EQ(config.blockNumForGroup(gid), 123u);
@@ -1157,8 +1154,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4GpuHcaStatePoolIncludesFixedReserve) 
     const size_t explicit_gid = firstExplicitIndependentGroup(config);
     setExplicitBlocksForGroup(config, explicit_gid, 50);
 
-    RuntimeConfig rt;
-    config.finalizeBlockNums(/*global_block_num=*/200, rt);
+    config.finalizeBlockNums(/*global_block_num=*/200);
 
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
         const uint32_t expected = config.policyForGroup(gid).explicit_block_num > 0 ? 50u : 200u;
@@ -1177,8 +1173,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateSwaPoolsWithoutExplicitBlocksSca
     auto config        = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
     config.linear_step = 4;
 
-    RuntimeConfig rt;
-    config.finalizeBlockNums(/*global_block_num=*/128, rt);
+    config.finalizeBlockNums(/*global_block_num=*/128);
 
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
         const uint32_t expected = config.typeForGroup(gid) == CacheGroupType::SWA ? 32u : 128u;
@@ -1190,22 +1185,20 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateSwaPoolsWithoutExplicitBlocksSca
 TEST_F(HybridPoolKVCacheAllocatorTest, FinalizeNonExplicitSwaBlocksUsesCeilDivision) {
     auto config        = makeTinySwaMultiPoolHybridConfig();
     config.linear_step = 4;
-    RuntimeConfig rt;
-
-    config.finalizeBlockNums(/*global_block_num=*/1, rt);
+    config.finalizeBlockNums(/*global_block_num=*/1);
     EXPECT_EQ(config.blockNumForGroup(/*linear gid=*/0), 1u);
     EXPECT_EQ(config.blockNumForGroup(/*swa gid=*/1), 1u);
 
-    config.finalizeBlockNums(/*global_block_num=*/8, rt);
+    config.finalizeBlockNums(/*global_block_num=*/8);
     EXPECT_EQ(config.blockNumForGroup(/*linear gid=*/0), 8u);
     EXPECT_EQ(config.blockNumForGroup(/*swa gid=*/1), 2u);
 
-    config.finalizeBlockNums(/*global_block_num=*/9, rt);
+    config.finalizeBlockNums(/*global_block_num=*/9);
     EXPECT_EQ(config.blockNumForGroup(/*linear gid=*/0), 9u);
     EXPECT_EQ(config.blockNumForGroup(/*swa gid=*/1), 3u);
 
     config.linear_step = 1;
-    config.finalizeBlockNums(/*global_block_num=*/9, rt);
+    config.finalizeBlockNums(/*global_block_num=*/9);
     EXPECT_EQ(config.blockNumForGroup(/*linear gid=*/0), 9u);
     EXPECT_EQ(config.blockNumForGroup(/*swa gid=*/1), 9u);
 }

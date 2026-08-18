@@ -357,7 +357,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                 return;
             }
 
-            if (cp_size > 1 && group.policy.cp_slice != CpBlockSliceMode::NONE) {
+            if (cp_size > 1 && group.spec->cpSlice()) {
                 RTP_LLM_CHECK_WITH_INFO(cp_rank >= 0 && cp_rank < cp_size,
                                         "cache-store tag=%s invalid cp_rank=%d cp_size=%d",
                                         layer_kv.tag.c_str(),
@@ -382,7 +382,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                               layer_kv.layer_id,
                               cp_rank,
                               cp_size,
-                              static_cast<int>(group.policy.cp_slice),
+                              static_cast<int>(group.spec->cpSlice()),
                               key_index,
                               offset_index,
                               block_id,
@@ -439,7 +439,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
             cp_rank,
             cp_size);
         for (const auto& pair : block_plan) {
-            addBlock(pair.key_index, pair.offset_index);
+            addBlock(pair.cache_key_index, pair.block_table_index);
         }
 
         auto storeCallback = [layer_id = layer_kv.layer_id,

@@ -60,7 +60,8 @@ CpGroupLayout CPSlotMapper::layoutForGroup(const CacheConfig& config, size_t gid
     layout.mapping = policy.cp_mapping;
     // FULL groups use page/block-level CP mapping. Byte slicing is only valid for
     // state/SWA-style groups whose writer stores matching sliced payloads.
-    layout.slice = policy.group_type == CacheGroupType::FULL ? CpBlockSliceMode::NONE : policy.cp_slice;
+    const auto spec = config.specForGroup(gid);
+    layout.slice    = policy.group_type != CacheGroupType::FULL && spec != nullptr && spec->cpSlice();
     return layout;
 }
 
@@ -122,11 +123,11 @@ CPSlotMapper::localCacheKeys(const CacheConfig& config, size_t gid, const CacheK
     return usesCpCanonicalKeys(config, gid) ? canonicalCacheKeys(full_keys) : full_keys;
 }
 
-std::vector<CacheStoreBlockPair> CPSlotMapper::buildStorePlan(const CacheConfig& config,
-                                                              size_t             gid,
-                                                              size_t             total_logical_blocks,
-                                                              size_t             reuse_block_size,
-                                                              bool               use_hybrid) const {
+std::vector<CacheStoreBlockMapping> CPSlotMapper::buildStorePlan(const CacheConfig& config,
+                                                                 size_t             gid,
+                                                                 size_t             total_logical_blocks,
+                                                                 size_t             reuse_block_size,
+                                                                 bool               use_hybrid) const {
     auto policy = gid < static_cast<size_t>(config.groupNums()) ? config.policyForGroup(gid) :
                                                                   defaultCacheGroupPolicy(CacheGroupType::FULL);
     if (!isSharded() || gid >= static_cast<size_t>(config.groupNums())) {
@@ -135,17 +136,17 @@ std::vector<CacheStoreBlockPair> CPSlotMapper::buildStorePlan(const CacheConfig&
     return buildCacheStorePlan(policy, total_logical_blocks, reuse_block_size, use_hybrid, cp_rank_, cp_size_);
 }
 
-std::vector<CacheStoreBlockPair> CPSlotMapper::buildStorePlan(CacheGroupType group_type,
-                                                              size_t         total_logical_blocks,
-                                                              size_t         reuse_block_size,
-                                                              bool           use_hybrid) const {
+std::vector<CacheStoreBlockMapping> CPSlotMapper::buildStorePlan(CacheGroupType group_type,
+                                                                 size_t         total_logical_blocks,
+                                                                 size_t         reuse_block_size,
+                                                                 bool           use_hybrid) const {
     return buildStorePlan(defaultCacheGroupPolicy(group_type), total_logical_blocks, reuse_block_size, use_hybrid);
 }
 
-std::vector<CacheStoreBlockPair> CPSlotMapper::buildStorePlan(const CacheGroupPolicy& policy,
-                                                              size_t                  total_logical_blocks,
-                                                              size_t                  reuse_block_size,
-                                                              bool                    use_hybrid) const {
+std::vector<CacheStoreBlockMapping> CPSlotMapper::buildStorePlan(const CacheGroupPolicy& policy,
+                                                                 size_t                  total_logical_blocks,
+                                                                 size_t                  reuse_block_size,
+                                                                 bool                    use_hybrid) const {
     return buildCacheStorePlan(policy, total_logical_blocks, reuse_block_size, use_hybrid, cp_rank_, cp_size_);
 }
 
@@ -154,7 +155,7 @@ std::vector<BlockInfo> CPSlotMapper::sliceBlockForPeer(const CacheConfig&     co
                                                        std::vector<BlockInfo> parts,
                                                        size_t                 peer_idx) const {
     const auto layout = layoutForGroup(config, gid);
-    if (!isSharded() || layout.slice == CpBlockSliceMode::NONE) {
+    if (!isSharded() || !layout.slice) {
         return parts;
     }
     RTP_LLM_CHECK_WITH_INFO(parts.size() == 1, "CP byte slicing expects one block part, got %zu", parts.size());
@@ -165,22 +166,13 @@ std::vector<BlockInfo> CPSlotMapper::sliceBlockForPeer(const CacheConfig&     co
     auto& block = parts[0];
     RTP_LLM_CHECK_WITH_INFO(block.addr != nullptr, "CP byte slicing got null block addr");
 
-    size_t slice_bytes = 0;
-    if (layout.slice == CpBlockSliceMode::EQUAL_BYTES) {
-        RTP_LLM_CHECK_WITH_INFO(block.size_bytes % static_cast<size_t>(cp_size_) == 0,
-                                "CP block bytes %zu not divisible by cp_size %d",
-                                block.size_bytes,
-                                cp_size_);
-        slice_bytes = block.size_bytes / static_cast<size_t>(cp_size_);
-    } else {
-        const auto payload_bytes = spec->k_block_payload_bytes();
-        RTP_LLM_CHECK_WITH_INFO(payload_bytes > 0, "CP payload slicing requires positive payload bytes");
-        RTP_LLM_CHECK_WITH_INFO(payload_bytes % static_cast<size_t>(cp_size_) == 0,
-                                "CP payload bytes %zu not divisible by cp_size %d",
-                                payload_bytes,
-                                cp_size_);
-        slice_bytes = payload_bytes / static_cast<size_t>(cp_size_);
-    }
+    const size_t full_stride_bytes = spec->k_block_size_bytes();
+    RTP_LLM_CHECK_WITH_INFO(full_stride_bytes > 0, "CP block slicing requires positive block stride");
+    RTP_LLM_CHECK_WITH_INFO(full_stride_bytes % static_cast<size_t>(cp_size_) == 0,
+                            "CP block stride %zu not divisible by cp_size %d",
+                            full_stride_bytes,
+                            cp_size_);
+    const size_t slice_bytes = full_stride_bytes / static_cast<size_t>(cp_size_);
 
     const size_t slice_offset = slice_bytes * peer_idx;
     RTP_LLM_CHECK_WITH_INFO(slice_offset + slice_bytes <= block.size_bytes,
@@ -219,7 +211,7 @@ KVCacheResource CPSlotMapper::projectConnectorResource(const KVCacheResource& so
         dst_blocks.reserve(selected_keys.size());
 
         const auto layout = layoutForGroup(config, static_cast<size_t>(gid));
-        if (layout.slice != CpBlockSliceMode::NONE) {
+        if (layout.slice) {
             for (size_t i = 0; i < selected_keys.size(); ++i) {
                 dst_blocks.push_back(i < src_blocks.size() ? src_blocks[i] : NULL_BLOCK_IDX);
             }
