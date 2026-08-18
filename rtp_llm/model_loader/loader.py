@@ -332,12 +332,38 @@ class ModelLoader:
                 f"doubling model_mem estimate for fastsafetensor memory check"
             )
         max_file_mem = max_file_size / (1024.0**2)
+        transient_mem = self._fastsafetensors_transient_budget_bytes(max_file_size) / (
+            1024.0**2
+        )
+        enough = (free_mem - model_mem) > transient_mem
         logging.info(
             f"fastsafetensor memory check: free_mem={free_mem:.0f}MB, "
             f"model_mem={model_mem:.0f}MB, max_file_mem={max_file_mem:.0f}MB, "
-            f"enough={(free_mem - model_mem) > (3 * max_file_mem)}"
+            f"transient_mem={transient_mem:.0f}MB, enough={enough}"
         )
-        return (free_mem - model_mem) > (3 * max_file_mem)
+        return enough
+
+    @staticmethod
+    def _fastsafetensors_transient_budget_bytes(max_file_size: int) -> int:
+        """Return the configured bounded-loader peak or the legacy estimate.
+
+        New fastsafetensors versions expose queue/producer-aware batch-buffer
+        accounting. Keep the historical three-shard estimate when loading an
+        older wheel or when ``max_batch_bytes`` is unset.
+        """
+        legacy_budget = 3 * max_file_size
+        try:
+            from fastsafetensors import load_config
+
+            config = load_config()
+            estimate = getattr(config, "estimated_peak_device_bytes", None)
+            return legacy_budget if estimate is None else estimate
+        except (ImportError, ModuleNotFoundError, AttributeError, ValueError) as error:
+            logging.warning(
+                "failed to read bounded fastsafetensors memory config; "
+                f"use legacy estimate: {error}"
+            )
+            return legacy_budget
 
     @staticmethod
     def _build_stacked_key_config(weight_info_list) -> dict:

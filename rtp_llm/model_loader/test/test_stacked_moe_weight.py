@@ -6,9 +6,11 @@ Covers:
   - ModelLoader._build_stacked_key_config: stacked key mapping construction
 """
 
+import sys
+import types
 import unittest
 from typing import Dict, List
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import torch
 
@@ -296,6 +298,34 @@ class TestBuildStackedKeyConfig(unittest.TestCase):
 
         result = ModelLoader._build_stacked_key_config([wi])
         self.assertEqual(len(result), 0)
+
+
+class TestFastsafetensorsTransientBudget(unittest.TestCase):
+    def test_uses_configured_bounded_peak(self):
+        from rtp_llm.model_loader.loader import ModelLoader
+
+        module = types.ModuleType("fastsafetensors")
+        module.load_config = lambda: types.SimpleNamespace(
+            estimated_peak_device_bytes=8 * 1024
+        )
+        with patch.dict(sys.modules, {"fastsafetensors": module}):
+            self.assertEqual(
+                ModelLoader._fastsafetensors_transient_budget_bytes(4096),
+                8 * 1024,
+            )
+
+    def test_legacy_loader_uses_three_max_files(self):
+        from rtp_llm.model_loader.loader import ModelLoader
+
+        module = types.ModuleType("fastsafetensors")
+        module.load_config = lambda: types.SimpleNamespace(
+            estimated_peak_device_bytes=None
+        )
+        with patch.dict(sys.modules, {"fastsafetensors": module}):
+            self.assertEqual(
+                ModelLoader._fastsafetensors_transient_budget_bytes(4096),
+                3 * 4096,
+            )
 
 
 class TestIterStackedMoeWeights(unittest.TestCase):
