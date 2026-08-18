@@ -84,10 +84,15 @@ worker 选择契约，两者组合完成多角色多阶段路由。
    `ttft = prefillTime + runningQueueTime`（本地维护的队列时间估计）。
 4. **选择**：
    - 按 ttft 升序排（并列时 `lastSelectedTime` 早者优先）；
+   - 仅 PREFILL/PDFUSION 且配置了正的 `outstandingUncachedTokensThreshold` 时，过滤
+     `outstandingUncachedTokens + max(0, seqLen − hitCacheTokens)` 超阈值的 worker；若仍有
+     eligible worker，后续选择只在其中进行；若全部超阈值，恢复完整候选集并重跑后续
+     Top 候选/相似/cache 偏好流程（仍可能选中超阈值的 cache-preferred worker），决策 reason
+     记录 `SHORTEST_TTFT_OUTSTANDING_GUARD_FALLBACK`；
    - 取 Top 候选：≤3 个全取，否则 `max(2, ⌈数量×0.3⌉)`；
    - 相似阈值 `max(minTTFT × shortestTtftSimilarityThresholdRatio(0.2), 标准差 × 0.5)`，
      筛出与最短 ttft 相近的 worker；
-   - 相似集合内做 **cache 偏好**：cache 命中只要高于最短 ttft worker 就改选 cache leader；
+   - 相似集合内做 **cache 偏好**：cache 命中高于最短 ttft worker 时改选 cache leader；
    - **CAS 抢占**：按偏好序对 `lastSelectedTime` 做 `compareAndSet(快照值, now)`，第一个
      成功者当选——防止并发调度线程用同一快照选中同一 worker。
 5. **提交**：`putLocalTask()` 记账（预扣队列时间与 KV token）、上报 cache 命中指标、
@@ -95,12 +100,16 @@ worker 选择契约，两者组合完成多角色多阶段路由。
 
 ### CacheAffinityFirstStrategy（继承 ShortestTTFT，只重写选择步骤）
 
-- **终态 TTFT 成本守卫**：每个 worker 的 `ttft` 已包含当前请求的预估 Prefill 时间和已有队列时间。
-  计算 cache leader 相对最短 ttft worker 的 `extraTtft`；只有该差异不大于
-  固定配置的 `cacheAffinityFirstMaxExtraWorkTokens(25000)`
-  且缓存命中更多时，才选 leader
-  （`CACHE_LEADER`），否则选最短 ttft（`SHORTEST_TTFT`）。
-- CAS 抢占失败落到其他 worker 时记 `CONCURRENT_FALLBACK`。决策快照（debug 级）写入
+- **终态 prefill 工作守卫**：每个 worker 的 `ttft` 已包含当前请求的未命中 Prefill token 和已有队列
+  未命中 token。计算 cache leader 相对最短 ttft worker 的额外工作；只有该差异不大于
+  `cacheAffinityFirstMaxExtraWorkTokens`，且缓存命中更多时，才选 leader（`CACHE_LEADER`），否则选最短
+  ttft（`SHORTEST_TTFT`）。在选 cache leader 前也复用同一 outstanding-threshold guard；低于
+  `cacheAffinityFirstMinHitRate` 的 cache leader 不参与 cache affinity
+  （`SHORTEST_TTFT_LOW_CACHE_HIT`）；超阈值的 cache leader 直接回退到最短 eligible worker
+  （`SHORTEST_TTFT_OUTSTANDING_GUARD`）。与 ShortestTTFT 不同，全部 worker 超阈值时**不做
+  cache 取舍，直接按最短 ttft 选择**（同样记录 `SHORTEST_TTFT_OUTSTANDING_GUARD_FALLBACK`）。
+- CAS 抢占失败时按剩余 eligible worker 继续选择；决策 reason 为
+  `CACHE_AFFINITY_FALLBACK` 或 `SHORTEST_TTFT_FALLBACK`。决策快照（debug 级）写入
   `BalanceContext.shortestTtftDecisionByRole`。
 
 ### WeightedCacheLoadBalancer（DECODE 默认）

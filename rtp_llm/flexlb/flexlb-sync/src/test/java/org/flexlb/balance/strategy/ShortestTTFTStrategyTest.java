@@ -38,6 +38,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * description:
  * date: 2025/3/11
  */
+@SuppressWarnings("deprecation")
 class ShortestTTFTStrategyTest {
 
     private ch.qos.logback.classic.Logger businessLogger;
@@ -225,6 +226,26 @@ class ShortestTTFTStrategyTest {
     }
 
     @Test
+    void keepsSimilarCachePreferenceWithoutAnAdditionalWorkLimit() {
+        FlexlbConfig config = cacheFocusedConfig();
+        WorkerStatus shortestTtftWorker = createWorkerStatus("127.0.0.1", 0, 2128);
+        WorkerStatus oneBlockLeader = createWorkerStatus("127.0.0.2", 2500, 2128);
+        WorkerStatus thirdWorker = createWorkerStatus("127.0.0.3", 1000, 2128);
+
+        SelectionResult selection = select(
+                List.of(shortestTtftWorker, oneBlockLeader, thirdWorker),
+                Map.of(
+                        shortestTtftWorker.getIpPort(), 15,
+                        oneBlockLeader.getIpPort(), 16,
+                        thirdWorker.getIpPort(), 15),
+                config,
+                50000,
+                "shortest-cache-preference");
+
+        Assertions.assertEquals(oneBlockLeader.getIp(), selection.serverStatus().getServerIp());
+    }
+
+    @Test
     void doesNotPreferCacheLeaderWhenItsQueueMakesTtftTooLong() {
         FlexlbConfig config = cacheFocusedConfig();
         WorkerStatus shortestTtftWorker = createWorkerStatus("127.0.0.1", 0, 2128);
@@ -244,6 +265,138 @@ class ShortestTTFTStrategyTest {
         Assertions.assertEquals(shortestTtftWorker.getIp(), selection.serverStatus().getServerIp());
     }
 
+    @Test
+    void skipsOverThresholdWorkerWithoutRemovingItFromDecisionSnapshot() {
+        FlexlbConfig config = cacheFocusedConfig();
+        config.setOutstandingUncachedTokensThreshold(1_000_000L);
+        WorkerStatus overThresholdWorker = createWorkerStatus("127.0.0.1", 0, 2128);
+        WorkerStatus eligibleWorker = createWorkerStatus("127.0.0.2", 0, 2128);
+        putPendingTask(overThresholdWorker, "existing", 960_000, 0);
+
+        SelectionResult selection = select(
+                List.of(overThresholdWorker, eligibleWorker),
+                Map.of(overThresholdWorker.getIpPort(), 3, eligibleWorker.getIpPort(), 0),
+                config,
+                50_000,
+                "outstanding-over-threshold");
+
+        Assertions.assertEquals(eligibleWorker.getIp(), selection.serverStatus().getServerIp());
+        Assertions.assertFalse(overThresholdWorker.getLocalTaskMap().containsKey("outstanding-over-threshold"));
+        Assertions.assertTrue(eligibleWorker.getLocalTaskMap().containsKey("outstanding-over-threshold"));
+        var decision = selection.balanceContext().getShortestTtftDecisionByRole().get(RoleType.PREFILL);
+        Assertions.assertEquals(2, decision.totalWorkerCount());
+        Assertions.assertFalse(decision.workers().stream()
+                .filter(worker -> worker.ip().equals(overThresholdWorker.getIp()))
+                .findFirst()
+                .orElseThrow()
+                .outstandingGuardEligible());
+    }
+
+    @Test
+    void usesRegularShortestTtftSelectionWhenAllWorkersExceedThreshold() {
+        FlexlbConfig config = cacheFocusedConfig();
+        config.setOutstandingUncachedTokensThreshold(1_000_000L);
+        WorkerStatus shortestTtftWorker = createWorkerStatus("127.0.0.1", 0, 2128);
+        WorkerStatus cachePreferredWorker = createWorkerStatus("127.0.0.2", 0, 2128);
+        putPendingTask(shortestTtftWorker, "shortest-existing", 980_000, 0);
+        putPendingTask(cachePreferredWorker, "cache-existing", 970_000, 0);
+        cachePreferredWorker.getRunningQueueTime().set(990_000);
+
+        SelectionResult selection = select(
+                List.of(shortestTtftWorker, cachePreferredWorker),
+                Map.of(cachePreferredWorker.getIpPort(), 3),
+                config,
+                50_000,
+                "all-outstanding-over-threshold");
+
+        Assertions.assertEquals(cachePreferredWorker.getIp(), selection.serverStatus().getServerIp());
+        Assertions.assertTrue(cachePreferredWorker.getLocalTaskMap().containsKey("all-outstanding-over-threshold"));
+        var decision = selection.balanceContext().getShortestTtftDecisionByRole().get(RoleType.PREFILL);
+        Assertions.assertEquals("SHORTEST_TTFT_OUTSTANDING_GUARD_FALLBACK", decision.selectionReason());
+        Assertions.assertEquals(2, decision.candidateWorkerCount());
+        Assertions.assertTrue(decision.workers().stream().noneMatch(worker -> worker.outstandingGuardEligible()));
+    }
+
+    @Test
+    void recordsWorkersGuardEligibleWhenGuardDoesNotApplyToDecode() {
+        FlexlbConfig config = cacheFocusedConfig();
+        config.setOutstandingUncachedTokensThreshold(1_000L);
+        WorkerStatus decodeWorker = createWorkerStatus("127.0.0.1", 0, 2128);
+
+        SelectionResult selection = select(
+                RoleType.DECODE,
+                List.of(decodeWorker),
+                Map.of(),
+                config,
+                50_000,
+                "decode-without-outstanding-guard");
+
+        Assertions.assertTrue(selection.serverStatus().isSuccess());
+        var decision = selection.balanceContext().getShortestTtftDecisionByRole().get(RoleType.DECODE);
+        Assertions.assertTrue(decision.workers().getFirst().outstandingGuardEligible());
+    }
+
+    @Test
+    void recordsWorkersGuardEligibleWhenGuardDoesNotApplyToVit() {
+        FlexlbConfig config = cacheFocusedConfig();
+        config.setOutstandingUncachedTokensThreshold(1_000L);
+        WorkerStatus vitWorker = createWorkerStatus("127.0.0.1", 0, 2128);
+
+        SelectionResult selection = select(
+                RoleType.VIT,
+                List.of(vitWorker),
+                Map.of(),
+                config,
+                50_000,
+                "vit-without-outstanding-guard");
+
+        Assertions.assertTrue(selection.serverStatus().isSuccess());
+        var decision = selection.balanceContext().getShortestTtftDecisionByRole().get(RoleType.VIT);
+        Assertions.assertTrue(decision.workers().getFirst().outstandingGuardEligible());
+    }
+
+    @Test
+    void legacyCacheAffinityThresholdDoesNotGateShortestTtft() {
+        FlexlbConfig config = cacheFocusedConfig();
+        config.setCacheAffinityFirstOutstandingUncachedTokensThreshold(1_000L);
+        WorkerStatus overLegacyThresholdWorker = createWorkerStatus("127.0.0.1", 0, 2128);
+        putPendingTask(overLegacyThresholdWorker, "existing", 960_000, 0);
+
+        SelectionResult selection = select(
+                List.of(overLegacyThresholdWorker),
+                Map.of(),
+                config,
+                50_000,
+                "legacy-threshold-ignored");
+
+        Assertions.assertEquals(overLegacyThresholdWorker.getIp(), selection.serverStatus().getServerIp());
+        Assertions.assertTrue(overLegacyThresholdWorker.getLocalTaskMap().containsKey("legacy-threshold-ignored"));
+        var decision = selection.balanceContext().getShortestTtftDecisionByRole().get(RoleType.PREFILL);
+        Assertions.assertEquals("SHORTEST_TTFT", decision.selectionReason());
+        Assertions.assertTrue(decision.workers().getFirst().outstandingGuardEligible());
+    }
+
+    @Test
+    void skipsOverThresholdWorkerForPdFusionRole() {
+        FlexlbConfig config = cacheFocusedConfig();
+        config.setOutstandingUncachedTokensThreshold(1_000_000L);
+        WorkerStatus overThresholdWorker = createWorkerStatus("127.0.0.1", 0, 2128);
+        WorkerStatus eligibleWorker = createWorkerStatus("127.0.0.2", 0, 2128);
+        putPendingTask(overThresholdWorker, "existing", 960_000, 0);
+
+        SelectionResult selection = select(
+                RoleType.PDFUSION,
+                List.of(overThresholdWorker, eligibleWorker),
+                Map.of(overThresholdWorker.getIpPort(), 3, eligibleWorker.getIpPort(), 0),
+                config,
+                50_000,
+                "pdfusion-outstanding-over-threshold");
+
+        Assertions.assertEquals(eligibleWorker.getIp(), selection.serverStatus().getServerIp());
+        Assertions.assertFalse(overThresholdWorker.getLocalTaskMap().containsKey("pdfusion-outstanding-over-threshold"));
+        Assertions.assertTrue(eligibleWorker.getLocalTaskMap().containsKey("pdfusion-outstanding-over-threshold"));
+    }
+
     private FlexlbConfig cacheFocusedConfig() {
         FlexlbConfig config = new FlexlbConfig();
         config.setShortestTtftSimilarityThresholdRatio(0.2);
@@ -256,10 +409,21 @@ class ShortestTTFTStrategyTest {
             FlexlbConfig config,
             long inputTokens,
             String requestId) {
-        Map<String, WorkerStatus> prefillStatusMap =
-                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        return select(RoleType.PREFILL, workers, cacheMatches, config, inputTokens, requestId);
+    }
+
+    private SelectionResult select(
+            RoleType roleType,
+            List<WorkerStatus> workers,
+            Map<String, Integer> cacheMatches,
+            FlexlbConfig config,
+            long inputTokens,
+            String requestId) {
+        Map<String, WorkerStatus> workerStatusMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getRoleStatusMap(roleType);
         for (WorkerStatus worker : workers) {
-            prefillStatusMap.put(worker.getIpPort(), worker);
+            worker.setRole(roleType.getCode());
+            workerStatusMap.put(worker.getIpPort(), worker);
         }
 
         Request request = new Request();
@@ -291,7 +455,7 @@ class ShortestTTFTStrategyTest {
         balanceContext.setConfig(config);
         balanceContext.setRequest(request);
         return new SelectionResult(
-                strategy.select(balanceContext, RoleType.PREFILL, null), balanceContext);
+                strategy.select(balanceContext, roleType, null), balanceContext);
     }
 
     private WorkerStatus createWorkerStatus(String ip, long runningQueueTime, long blockSize) {
@@ -324,6 +488,14 @@ class ShortestTTFTStrategyTest {
         task.setPredictedPrefixLength(prefixLength);
         task.updateTaskState(TaskStateEnum.IN_TRANSIT);
         return task;
+    }
+
+    private void putPendingTask(WorkerStatus worker,
+                                String requestId,
+                                long inputTokens,
+                                long predictedHitTokens) {
+        TaskInfo task = createTask(requestId, inputTokens, predictedHitTokens);
+        worker.putLocalTask(requestId, task);
     }
 
     WorkerStatus createWorkerStatus(String ip,

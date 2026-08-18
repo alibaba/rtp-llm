@@ -39,7 +39,8 @@ Nacos DataId 必须存在，内容必须是非空 JSON object。可识别的 `Fl
 ```json
 {
   "enableQueueing": true,
-  "cacheAffinityFirstOutstandingUncachedTokensThreshold": 800000
+  "outstandingUncachedTokensThreshold": 800000,
+  "cacheAffinityFirstMaxExtraWorkTokens": 25000
 }
 ```
 
@@ -63,10 +64,13 @@ Nacos DataId 必须存在，内容必须是非空 JSON object。可识别的 `Fl
 | `maxRetryCount` | 0（不限） | 路由重试上限 |
 | `routingRetryIntervalMs` | 10 | 重试间隔 |
 | `taskConfirmTimeoutMs` | 300000 | IN_TRANSIT 任务确认超时 |
-| `prefillQueueSizeThreshold` | 3 | Prefill 停止分流阈值（低于该值可选）及水位 100% 刻度 |
+| `prefillQueueSizeThreshold` | 1024 | Prefill 策略前的停止分流阈值（低于该值可选）及水位 100% 刻度；达到阈值的 worker 会被过滤，对策略不可见。优先使用策略内的 `outstandingUncachedTokensThreshold` |
 | `p2pHitDiscount` | 0.2 | KVCM 单远端 P2P 拉取后新增命中 block 的路由折扣；本地命中始终按 1.0 计入 |
 | `shortestTtftSimilarityThresholdRatio` | 0.2 | ttft 相似阈值比例 |
-| `cacheAffinityFirstMaxExtraWorkTokens` | 25000 | cache leader 相对最短 estimated-work worker 最多可增加的 token-equivalent work；不随 cache lead 或 cache 折扣缩放 |
+| `outstandingUncachedTokensThreshold` | 未设置 | SHORTEST_TTFT 与 CACHE_AFFINITY_FIRST 共用的未命中 token 阈值；显式 0 禁用两种策略的保护，未设置时 SHORTEST_TTFT 禁用保护，CACHE_AFFINITY_FIRST 使用兼容字段 |
+| `cacheAffinityFirstMaxExtraWorkTokens` | 0 | CACHE_AFFINITY_FIRST cache 偏好允许的最大额外未命中 prefill 工作 token；0 表示不容忍额外工作。注意两个参数零值语义相反：`outstandingUncachedTokensThreshold=0` 是**禁用**水位保护，`cacheAffinityFirstMaxExtraWorkTokens=0` 是**最严格**（零容忍） |
+| `cacheAffinityFirstMinHitRate` | 5 | CACHE_AFFINITY_FIRST cache leader 参与 cache affinity 所需的最低命中率（%）；0 禁用该门控 |
+| `cacheAffinityFirstOutstandingUncachedTokensThreshold` | 0（禁用） | 已废弃；仅在统一水位未设置时作为 CACHE_AFFINITY_FIRST 的兼容配置 |
 | `decodeAvailableMemoryThreshold` | 90 | Decode 可用性滞回阈值（%） |
 | `hysteresisBiasPercent` | 15 | Decode 可用性滞回带宽（%） |
 | `scheduleWorkerSize` | CPU 核数 | 调度线程数 = 最大许可数 |

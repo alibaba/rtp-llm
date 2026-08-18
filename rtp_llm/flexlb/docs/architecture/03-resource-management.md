@@ -42,10 +42,11 @@ FlexLB 可依据后端资源水位动态调整**路由并发许可数**，把请
 即时维护的 `localTaskMap.size()` 两者中的较大值。两份数据存在重叠，因此不相加；本地计数用于
 弥补引擎 step 执行期间 WorkerStatus 快照更新不及时的问题。
 
-- 单 worker 水位：`queueSize ≤ 0` → 0；`≥ prefillQueueSizeThreshold(3)` → 100；
+- 单 worker 水位：`queueSize ≤ 0` → 0；`≥ prefillQueueSizeThreshold(1024)` → 100；
   否则 `queueSize × 100 / prefillQueueSizeThreshold`。
 - `isResourceAvailable()`（策略层候选过滤用）：alive 且队列长度对
-  `prefillQueueSizeThreshold(3)` 做即时判断：`queueSize < 3` 可用，`queueSize ≥ 3` 不可用。
+  `prefillQueueSizeThreshold(1024)` 做即时判断：`queueSize < 1024` 可用，`queueSize ≥ 1024` 不可用。
+  该过滤发生在策略前，故被过滤的 worker 对策略不可见；策略内的未命中 token 阈值应优先用于路由保护。
 
 ### DecodeResourceMeasure（指标 `REMAINING_KV_CACHE`）
 
@@ -84,6 +85,6 @@ PDFUSION/PREFILL/VIT → `WAIT_TIME`，DECODE → `REMAINING_KV_CACHE`。
 
 ## 相关配置（默认值）
 
-`resourceCheckIntervalMs=10`、`scheduleWorkerSize=CPU核数`、`fixedScheduleWorkerPermits=false`、`prefillQueueSizeThreshold=3`、
+`resourceCheckIntervalMs=10`、`scheduleWorkerSize=CPU核数`、`fixedScheduleWorkerPermits=false`、`prefillQueueSizeThreshold=1024`、
 `decodeFullSpeedThreshold=40`、`decodeStopThreshold=80`、
 `decodeAvailableMemoryThreshold=90`、`hysteresisBiasPercent=15`。

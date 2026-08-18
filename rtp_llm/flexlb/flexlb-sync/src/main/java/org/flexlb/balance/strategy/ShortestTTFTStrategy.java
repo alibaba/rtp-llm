@@ -22,6 +22,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.worker.ScoredWorker;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
+import org.flexlb.enums.StrategySelectionReason;
 import org.flexlb.enums.TaskStateEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -35,6 +36,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.stream.Collectors;
 
 /**
@@ -367,8 +369,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * Select best worker considering TTFT and cache preference
      *
      * <p>Algorithm: 1. Sort workers by TTFT. 2. Consider all workers in a small cluster,
-     * otherwise the top 30%. 3. Among workers with similar TTFT, prefer the worker whose
-     * cache lead over the shortest-TTFT worker reaches the configured block threshold.
+     * otherwise the top 30%. 3. Among workers with similar TTFT, prefer cache.
      *
      * @param scoredWorkers List of scored workers
      * @return Best worker
@@ -385,7 +386,11 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         }
 
         List<ScoredWorker> sortedWorkers = sortByTTFT(scoredWorkers);
-        List<ScoredWorker> candidates = selectTopCandidates(sortedWorkers);
+        List<ScoredWorker> eligibleWorkers = filterByOutstandingUncachedTokens(
+                sortedWorkers, roleType, seqLen, config);
+        boolean outstandingGuardFallback = eligibleWorkers.isEmpty();
+        List<ScoredWorker> selectionWorkers = outstandingGuardFallback ? sortedWorkers : eligibleWorkers;
+        List<ScoredWorker> candidates = selectTopCandidates(selectionWorkers);
         Logger.debug("Select best worker, sortedWorkers size: {}, candidates size: {}", sortedWorkers.size(), candidates.size());
 
         if (candidates.isEmpty()) {
@@ -399,7 +404,6 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 config.getShortestTtftSimilarityThresholdRatio());
 
         List<ScoredWorker> similarWorkers = filterSimilarWorkers(candidates, minTTFT, threshold);
-
         ScoredWorker selectedWorker = selectWorkerByCachePreference(similarWorkers, candidates);
         recordDecisionSnapshot(
                 balanceContext,
@@ -412,34 +416,41 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 roleType,
                 group,
                 seqLen,
-                "SHORTEST_TTFT");
+                (outstandingGuardFallback
+                                ? StrategySelectionReason.SHORTEST_TTFT_OUTSTANDING_GUARD_FALLBACK
+                                : StrategySelectionReason.SHORTEST_TTFT)
+                        .name(),
+                null,
+                outstandingUncachedTokensThresholdForSnapshot(roleType, config));
         return selectedWorker;
     }
 
-    protected void recordDecisionSnapshot(BalanceContext balanceContext,
-                                          ScoredWorker selectedWorker,
-                                          List<ScoredWorker> sortedWorkers,
-                                          List<ScoredWorker> topCandidates,
-                                          List<ScoredWorker> similarWorkers,
-                                          long minimumTtft,
-                                          double similarTtftThreshold,
-                                          RoleType roleType,
-                                          String group,
-                                          long seqLen,
-                                          String selectionReason) {
-        recordDecisionSnapshot(
-                balanceContext,
-                selectedWorker,
-                sortedWorkers,
-                topCandidates,
-                similarWorkers,
-                minimumTtft,
-                similarTtftThreshold,
-                roleType,
-                group,
-                seqLen,
-                selectionReason,
-                null);
+    protected List<ScoredWorker> filterByOutstandingUncachedTokens(List<ScoredWorker> workers,
+                                                                   RoleType roleType,
+                                                                   long seqLen,
+                                                                   FlexlbConfig config) {
+        long threshold = configuredOutstandingUncachedTokensThreshold(config);
+        if (!outstandingUncachedTokensGuardEnabled(roleType, threshold)) {
+            return workers;
+        }
+        return workers.stream()
+                .filter(worker -> worker.worker().getOutstandingUncachedTokens()
+                        + Math.max(0, seqLen - worker.hitCacheTokens()) <= threshold)
+                .toList();
+    }
+
+    private boolean outstandingUncachedTokensGuardEnabled(RoleType roleType, long threshold) {
+        return (roleType == RoleType.PREFILL || roleType == RoleType.PDFUSION)
+                && threshold > 0;
+    }
+
+    protected long configuredOutstandingUncachedTokensThreshold(FlexlbConfig config) {
+        return config.getEffectiveOutstandingUncachedTokensThreshold(strategy);
+    }
+
+    protected long outstandingUncachedTokensThresholdForSnapshot(RoleType roleType, FlexlbConfig config) {
+        long threshold = configuredOutstandingUncachedTokensThreshold(config);
+        return outstandingUncachedTokensGuardEnabled(roleType, threshold) ? threshold : 0;
     }
 
     protected void recordDecisionSnapshot(BalanceContext balanceContext,
@@ -453,7 +464,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                                           String group,
                                           long seqLen,
                                           String selectionReason,
-                                          CacheAffinityDecision cacheAffinityDecision) {
+                                          CacheAffinityDecision cacheAffinityDecision,
+                                          long outstandingUncachedTokensThreshold) {
         balanceContext.recordSelectionReason(roleType, selectionReason);
         balanceContext.recordShortestTtftDecision(buildDecisionSnapshot(
                 balanceContext,
@@ -467,7 +479,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 group,
                 seqLen,
                 selectionReason,
-                cacheAffinityDecision));
+                cacheAffinityDecision,
+                outstandingUncachedTokensThreshold));
     }
 
     protected void reportCacheAffinityDecision(RoleType roleType, String engineIp, String decision) {
@@ -485,7 +498,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                                                        String group,
                                                        long seqLen,
                                                        String selectionReason,
-                                                       CacheAffinityDecision cacheAffinityDecision) {
+                                                       CacheAffinityDecision cacheAffinityDecision,
+                                                       long outstandingUncachedTokensThreshold) {
         long decisionTimeMs = System.currentTimeMillis();
         long decisionTimeUs = System.nanoTime() / 1000;
         List<ScoredWorker> snapshotWorkers = selectSnapshotWorkers(
@@ -499,7 +513,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                         similarWorkers,
                         seqLen,
                         decisionTimeUs,
-                        cacheAffinityDecision))
+                        cacheAffinityDecision,
+                        outstandingUncachedTokensThreshold))
                 .toList();
         return new ShortestTtftDecision(
                 roleType,
@@ -560,7 +575,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                                                List<ScoredWorker> similarWorkers,
                                                long seqLen,
                                                long decisionTimeUs,
-                                               CacheAffinityDecision cacheAffinityDecision) {
+                                               CacheAffinityDecision cacheAffinityDecision,
+                                               long outstandingUncachedTokensThreshold) {
         WorkerStatus worker = scoredWorker.worker();
         long requestPrefillTime = TaskInfo.estimatePrefillTimeMs(seqLen, scoredWorker.hitCacheTokens());
         long requestUncachedTokens = Math.max(0, seqLen - scoredWorker.hitCacheTokens());
@@ -586,10 +602,9 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 isDecisionWorker(worker, cacheAffinityDecision == null
                         ? sortedWorkerIpPort(topCandidates)
                         : cacheAffinityDecision.shortestTtftWorkerIpPort()),
-                cacheAffinityDecision == null
-                        || cacheAffinityDecision.outstandingUncachedTokensThreshold() <= 0
+                outstandingUncachedTokensThreshold <= 0
                         || outstandingUncachedTokens + requestUncachedTokens
-                                <= cacheAffinityDecision.outstandingUncachedTokensThreshold(),
+                                <= outstandingUncachedTokensThreshold,
                 blockSize,
                 scoredWorker.hitCacheTokens(),
                 requestHitRatePct,
@@ -635,7 +650,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     private int countTasks(Map<String, TaskInfo> tasks) {
         return MapUtils.isEmpty(tasks)
                 ? 0
-                : (int) tasks.values().stream().filter(task -> task != null).count();
+                : (int) tasks.values().stream().filter(Objects::nonNull).count();
     }
 
     private int countTrackedRunningTasks(Map<String, TaskInfo> tasks) {
@@ -650,7 +665,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         return MapUtils.isEmpty(tasks)
                 ? 0
                 : tasks.values().stream()
-                        .filter(task -> task != null)
+                        .filter(Objects::nonNull)
                         .mapToLong(this::uncachedTokens)
                         .sum();
     }
@@ -659,7 +674,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         return MapUtils.isEmpty(tasks)
                 ? 0
                 : tasks.values().stream()
-                        .filter(task -> task != null)
+                        .filter(Objects::nonNull)
                         .mapToLong(task -> task.getRemainingPrefillTokens() >= 0
                                 ? task.getRemainingPrefillTokens()
                                 : uncachedTokens(task))

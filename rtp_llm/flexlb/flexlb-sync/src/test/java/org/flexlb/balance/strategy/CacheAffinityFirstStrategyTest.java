@@ -31,6 +31,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+@SuppressWarnings("deprecation")
 class CacheAffinityFirstStrategyTest {
 
     private static final long BLOCK_SIZE = 2000;
@@ -64,7 +65,7 @@ class CacheAffinityFirstStrategyTest {
     }
 
     @Test
-    void usesCacheLeaderWhenExtraTtftIsWithinTolerance() {
+    void usesCacheLeaderWhenExtraWorkTokensAreWithinTolerance() {
         WorkerStatus cacheLeader = createWorker("127.0.0.1", 6000);
         WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
         WorkerStatus thirdWorker = createWorker("127.0.0.3", 1000);
@@ -87,7 +88,26 @@ class CacheAffinityFirstStrategyTest {
     }
 
     @Test
-    void usesShortestTtftWorkerWhenExtraTtftExceedsTolerance() {
+    void cacheAffinityExtraWorkTokensLimitControlsCachePreference() {
+        WorkerStatus cacheLeader = createWorker("127.0.0.1", 6000);
+        WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
+        WorkerStatus thirdWorker = createWorker("127.0.0.3", 1000);
+        CacheAffinityFirstStrategy strategy = createStrategy(
+                List.of(cacheLeader, shortestTtftWorker, thirdWorker),
+                Map.of(
+                        cacheLeader.getIpPort(), 16,
+                        shortestTtftWorker.getIpPort(), 15,
+                        thirdWorker.getIpPort(), 15));
+        FlexlbConfig config = cacheAffinityConfig();
+        config.setCacheAffinityFirstMaxExtraWorkTokens(0);
+
+        ServerStatus selected = select(strategy, config, "cache-affinity-extra-work-limit");
+
+        Assertions.assertEquals(shortestTtftWorker.getIp(), selected.getServerIp());
+    }
+
+    @Test
+    void usesShortestTtftWorkerWhenExtraWorkTokensExceedTolerance() {
         WorkerStatus overloadedCacheLeader = createWorker("127.0.0.1", 30000);
         WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
         WorkerStatus thirdWorker = createWorker("127.0.0.3", 1000);
@@ -361,6 +381,48 @@ class CacheAffinityFirstStrategyTest {
     }
 
     @Test
+    void usesUnifiedOutstandingUncachedTokensThreshold() {
+        WorkerStatus cacheLeader = createWorker("127.0.0.1", 0);
+        WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
+        putPendingTask(cacheLeader, "existing", 960_000, 0);
+        CacheAffinityFirstStrategy strategy = createStrategy(
+                List.of(cacheLeader, shortestTtftWorker),
+                Map.of(cacheLeader.getIpPort(), 3, shortestTtftWorker.getIpPort(), 0));
+        FlexlbConfig config = cacheAffinityConfig();
+        config.setCacheAffinityFirstMaxExtraWorkTokens(2_000_000);
+        config.setOutstandingUncachedTokensThreshold(1_000_000L);
+
+        ServerStatus selected = select(strategy, config, "unified-outstanding-threshold");
+
+        Assertions.assertEquals(shortestTtftWorker.getIp(), selected.getServerIp());
+    }
+
+    @Test
+    void explicitUnifiedZeroDisablesOutstandingGuardForCacheAffinity() {
+        WorkerStatus cacheLeader = createWorker("127.0.0.1", 0);
+        WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
+        putPendingTask(cacheLeader, "existing", 960_000, 0);
+        CacheAffinityFirstStrategy strategy = createStrategy(
+                List.of(cacheLeader, shortestTtftWorker), Map.of());
+        FlexlbConfig legacyOnly = cacheAffinityConfig();
+        legacyOnly.setCacheAffinityFirstMinHitRate(0);
+        legacyOnly.setCacheAffinityFirstOutstandingUncachedTokensThreshold(1_000_000);
+        FlexlbConfig unifiedZero = cacheAffinityConfig();
+        unifiedZero.setCacheAffinityFirstMinHitRate(0);
+        unifiedZero.setCacheAffinityFirstOutstandingUncachedTokensThreshold(1_000_000);
+        unifiedZero.setOutstandingUncachedTokensThreshold(0L);
+        List<ScoredWorker> workers = List.of(
+                scored(cacheLeader, 20_000, 2_000),
+                scored(shortestTtftWorker, 10_000, 0));
+
+        Assertions.assertSame(shortestTtftWorker, strategy.selectBestWorker(
+                workers, new BalanceContext(), RoleType.PREFILL, null, INPUT_TOKENS, legacyOnly).worker());
+
+        Assertions.assertSame(cacheLeader, strategy.selectBestWorker(
+                workers, new BalanceContext(), RoleType.PREFILL, null, INPUT_TOKENS, unifiedZero).worker());
+    }
+
+    @Test
     void fallsBackToShortestTtftWhenAllWorkersExceedOutstandingThreshold() {
         WorkerStatus cacheLeader = createWorker("127.0.0.1", 0);
         WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
@@ -399,7 +461,7 @@ class CacheAffinityFirstStrategyTest {
     }
 
     @Test
-    void usesLatestRunningRemainingTokensForOutstandingWatermark() {
+    void usesLatestRunningRemainingTokensForOutstandingThreshold() {
         WorkerStatus cacheLeader = createWorker("127.0.0.1", 0);
         WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
         putPendingTask(cacheLeader, "running-request", 1_200_000, 0);

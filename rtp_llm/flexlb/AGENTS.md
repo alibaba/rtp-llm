@@ -48,7 +48,7 @@ management).
 ./mvnw test
 
 # Run tests for a specific module
-./mvnw test -pl flexlb-sync
+./mvnw test -pl flexlb-sync -am
 
 # Run a single test class
 ./mvnw test -Dtest=DefaultRouterTest

@@ -97,10 +97,13 @@ public class FlexlbConfig {
     private long taskConfirmTimeoutMs = 300_000;
 
     /**
-     * Prefill role queuing threshold
-     * When below this threshold, the Worker is considered available
+     * Prefill queue threshold used by pre-strategy resource filtering.
+     *
+     * <p>Once a worker reaches this value, it is hidden from the balancing strategy, so the
+     * strategy cannot consider it or record its decision state. Prefer
+     * {@link #outstandingUncachedTokensThreshold} for strategy-level routing control.
      */
-    private long prefillQueueSizeThreshold = 3;
+    private long prefillQueueSizeThreshold = 1024;
 
     /**
      * Credit applied to cache blocks made available through one P2P fetch.
@@ -117,17 +120,22 @@ public class FlexlbConfig {
     private double shortestTtftSimilarityThresholdRatio = 0.2;
 
     /**
-     * Maximum token-equivalent work that CACHE_AFFINITY_FIRST may add relative to the
-     * shortest estimated-work worker.
+     * Maximum additional uncached prefill work allowed by CACHE_AFFINITY_FIRST when preferring
+     * a worker for cache affinity.
      */
     private long cacheAffinityFirstMaxExtraWorkTokens = 0;
 
     /**
-     * Outstanding uncached-token watermark for CACHE_AFFINITY_FIRST admission.
-     * A worker is eligible when its current work plus the incoming request's predicted
-     * uncached tokens does not exceed this value. If every available worker exceeds it, routing
-     * falls back to the shortest-TTFT worker. A value less than or equal to zero disables the watermark.
+     * Outstanding uncached-token threshold shared by SHORTEST_TTFT and
+     * CACHE_AFFINITY_FIRST. When absent, CACHE_AFFINITY_FIRST can use its deprecated
+     * compatibility setting, while SHORTEST_TTFT leaves this protection disabled.
      */
+    private Long outstandingUncachedTokensThreshold;
+
+    /**
+     * @deprecated Use {@link #outstandingUncachedTokensThreshold}.
+     */
+    @Deprecated
     private long cacheAffinityFirstOutstandingUncachedTokensThreshold = 0;
 
     /**
@@ -219,10 +227,7 @@ public class FlexlbConfig {
      */
     public LoadBalanceStrategyEnum getStrategyForRoleType(RoleType roleType) {
         switch (roleType) {
-            case PDFUSION -> {
-                return this.loadBalanceStrategy != null ? loadBalanceStrategy : SHORTEST_TTFT;
-            }
-            case PREFILL -> {
+            case PDFUSION, PREFILL -> {
                 return this.loadBalanceStrategy != null ? loadBalanceStrategy : SHORTEST_TTFT;
             }
             case DECODE -> {
@@ -238,6 +243,22 @@ public class FlexlbConfig {
     }
 
     /**
+     * Gets the outstanding uncached-token threshold for a balancing strategy.
+     *
+     * <p>The neutral configuration applies to both strategies. When it is absent, only
+     * CACHE_AFFINITY_FIRST reads the deprecated cache-affinity compatibility value.
+     */
+    public long getEffectiveOutstandingUncachedTokensThreshold(LoadBalanceStrategyEnum strategy) {
+        if (outstandingUncachedTokensThreshold != null) {
+            return Math.max(0L, outstandingUncachedTokensThreshold);
+        }
+        if (strategy == LoadBalanceStrategyEnum.CACHE_AFFINITY_FIRST) {
+            return Math.max(0L, cacheAffinityFirstOutstandingUncachedTokensThreshold);
+        }
+        return 0L;
+    }
+
+    /**
      * Get resource measure indicator for a role type
      * Returns configured value if exists, otherwise returns default from map
      *
@@ -246,17 +267,11 @@ public class FlexlbConfig {
      */
     public ResourceMeasureIndicatorEnum getResourceMeasureIndicator(RoleType roleType) {
         switch (roleType) {
-            case PDFUSION -> {
-                return WAIT_TIME;
-            }
-            case PREFILL -> {
+            case PDFUSION, PREFILL, VIT -> {
                 return WAIT_TIME;
             }
             case DECODE -> {
                 return REMAINING_KV_CACHE;
-            }
-            case VIT -> {
-                return WAIT_TIME;
             }
             default -> {
                 return null;
