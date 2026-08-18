@@ -55,14 +55,14 @@ trace:
   otel:
     web:
       filter-order: 0x7fffffff
-      skip-pattern: ${OTEL_TRACE_SKIP_PATTERN}
+      skip-pattern: ${OTEL_TRACE_SKIP_PATTERN:/health|/hook/.*}
     config:
       service-name: flexlb
       instrumentation-name: trace
     exporter:
       otlp:
         enabled: true
-        endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT}
+        endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://127.0.0.1:4317}
       logging:
         enabled: true
         format: json

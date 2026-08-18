@@ -174,7 +174,8 @@ zookeeperConfig{zkHost, zkTimeoutMs}}`。环境变量
   `CacheMetricsReporter`（flexlb-cache）、`GrpcReporter`/`KvcmMetricsReporter`（flexlb-grpc）、
   `OptimizerClient`。
 - Tracing：OpenTelemetry 仅配置 W3C TraceContext 传播；OTLP endpoint 经
-  `OTEL_EXPORTER_OTLP_ENDPOINT`，skip pattern 经 `OTEL_TRACE_SKIP_PATTERN`。
+  `OTEL_EXPORTER_OTLP_ENDPOINT` 配置（默认 `http://127.0.0.1:4317`），skip pattern 经
+  `OTEL_TRACE_SKIP_PATTERN` 配置（默认 `/health|/hook/.*`）。
 
 ## 端口与 Spring profile
 
