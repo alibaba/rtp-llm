@@ -9,17 +9,39 @@
 
 namespace rtp_llm {
 
-using GilThreadStateStorage = pybind11::thread_specific_storage<PyThreadState>;
+// pybind11 2.11 has no thread-local wrapper at all and stores `internals::tstate` as a raw
+// TSS key, while pybind11 3.x keeps `thread_specific_storage` under `detail`. Own the storage
+// here so the ownership checks do not depend on either internal layout.
+class GilThreadStateStorage {
+public:
+    PyThreadState* get() const noexcept {
+        return current();
+    }
+    void set(PyThreadState* thread_state) noexcept {
+        current() = thread_state;
+    }
+    void reset() noexcept {
+        current() = nullptr;
+    }
+
+private:
+    static PyThreadState*& current() noexcept {
+        static thread_local PyThreadState* thread_state = nullptr;
+        return thread_state;
+    }
+};
 
 inline std::atomic<GilThreadStateStorage*>& gilThreadStateStorage() noexcept {
     static std::atomic<GilThreadStateStorage*> storage{nullptr};
     return storage;
 }
 
-// This must run while the caller owns the GIL. It makes the pybind TLS key available
-// to no-GIL ownership checks without taking pybind's slow initialization path there.
+// This must run while the caller owns the GIL. It records the calling thread's state so
+// no-GIL ownership checks stay allocation-free and never enter pybind's slow paths.
 inline void initializeGilThreadStateTracking() {
-    gilThreadStateStorage().store(&pybind11::detail::get_internals().tstate, std::memory_order_release);
+    static GilThreadStateStorage tracked_storage;
+    tracked_storage.set(pybind11::detail::get_thread_state_unchecked());
+    gilThreadStateStorage().store(&tracked_storage, std::memory_order_release);
 }
 
 inline bool currentThreadHoldsGilFromTrackedState(bool gil_state_check) noexcept {
