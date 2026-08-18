@@ -31,6 +31,7 @@ from rtp_llm.utils.base_model_datatypes import GenerateOutputs
 
 _DEFAULT_MAX_THINKING_TOKENS = 131072
 _DEFAULT_MAX_NEW_TOKENS = 131072
+_FRONTEND_MAX_NEW_TOKENS_ENV = "FRONTEND_MAX_NEW_TOKENS"
 _PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV = "DASH_SC_PACK_EOS_FOR_EMPTY_GENERATED_IDS"
 _TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 
@@ -40,6 +41,35 @@ def _pack_eos_for_empty_generated_ids() -> bool:
         os.environ.get(_PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV, "").strip().lower()
         in _TRUE_ENV_VALUES
     )
+
+
+def _cap_frontend_max_new_tokens(max_new_tokens: int) -> int:
+    """Apply the optional DashSC frontend output-length cap.
+
+    Read the environment for each request so test/performance runners can set
+    it before serving without changing the normal request defaults. Invalid or
+    non-positive values leave the request unchanged.
+    """
+    raw_cap = os.environ.get(_FRONTEND_MAX_NEW_TOKENS_ENV)
+    if raw_cap is None:
+        return max_new_tokens
+    try:
+        cap = int(raw_cap)
+    except ValueError:
+        logging.warning(
+            "ignore invalid %s=%r: expected a positive integer",
+            _FRONTEND_MAX_NEW_TOKENS_ENV,
+            raw_cap,
+        )
+        return max_new_tokens
+    if cap <= 0:
+        logging.warning(
+            "ignore invalid %s=%r: expected a positive integer",
+            _FRONTEND_MAX_NEW_TOKENS_ENV,
+            raw_cap,
+        )
+        return max_new_tokens
+    return min(max_new_tokens, cap)
 
 
 class LLMFinishReason(IntEnum):
@@ -920,6 +950,10 @@ class SamplingParams:
                 backend_max_new_tokens = min(
                     backend_max_new_tokens, int(self.max_total_tokens)
                 )
+        if backend_max_new_tokens > 0:
+            backend_max_new_tokens = _cap_frontend_max_new_tokens(
+                backend_max_new_tokens
+            )
         return GenerateConfig(
             max_new_tokens=backend_max_new_tokens,
             num_return_sequences=self.num_return_sequences,
