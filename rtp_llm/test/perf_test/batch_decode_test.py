@@ -448,7 +448,13 @@ def main() -> str:
                 seq_size_per_block=_positive_int_arg(
                     remaining, "seq_size_per_block", 1
                 ),
-                num_variants=_reuse_query_variant_count(),
+                # Concurrent reuse-cache requests must share only the seeded
+                # prefix. Give every request in the largest grid batch a
+                # distinct suffix; otherwise identical requests can reuse one
+                # another and invalidate the requested hit-rate measurement.
+                num_variants=max(
+                    _reuse_query_variant_count(), max(batch_size_list) * args.dp_size
+                ),
             )
 
         if args.partial in (0, 1):
