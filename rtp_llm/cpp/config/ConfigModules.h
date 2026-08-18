@@ -237,8 +237,14 @@ struct HWKernelConfig {
     bool        use_swizzleA                 = false;
     bool        enable_cuda_graph            = false;
     bool        enable_cuda_graph_debug_mode = false;
-    bool        enable_native_cuda_graph     = false;
-    int         num_native_cuda_graph        = 200;
+    // Experimental full-model prefill CUDA graph for graph-safe, no-prefix
+    // generative attention backends. It is intentionally independent from
+    // decode CUDA graph and defaults to disabled.
+    bool   enable_full_prefill_cuda_graph            = false;
+    int    full_prefill_cuda_graph_max_requests      = 8;
+    double full_prefill_cuda_graph_max_padding_ratio = 0.25;
+    bool   enable_native_cuda_graph                  = false;
+    int    num_native_cuda_graph                     = 200;
     // Prefill CUDA Graph capture configuration
     // Can be set via: prefill_capture_file_path, prefill_capture_seq_lens, or prefill_capture_max_seq_len + step
     std::vector<int> prefill_capture_seq_lens;

@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <utility>
 #include <vector>
 
@@ -7,6 +8,51 @@
 
 namespace rtp_llm {
 namespace {
+
+TEST(CudaGraphReplayContractsTest, BuildsDynamicFullPrefillSentinelLayout) {
+    std::vector<int32_t> input_lengths{24, 32, -1, -1, -1};
+    std::vector<int32_t> cu_seqlens(6, -1);
+    std::vector<int32_t> padding_offset(64, -1);
+
+    ASSERT_TRUE(
+        prepareFullPrefillReplayMetadata(input_lengths.data(), cu_seqlens.data(), padding_offset.data(), 2, 4, 56, 64));
+    EXPECT_EQ(input_lengths, (std::vector<int32_t>{24, 32, 0, 0, 8}));
+    EXPECT_EQ(cu_seqlens, (std::vector<int32_t>{0, 24, 56, 56, 56, 64}));
+    EXPECT_TRUE(
+        std::all_of(padding_offset.begin(), padding_offset.begin() + 24, [](int32_t value) { return value == 0; }));
+    EXPECT_TRUE(std::all_of(
+        padding_offset.begin() + 24, padding_offset.begin() + 56, [](int32_t value) { return value == 40; }));
+    EXPECT_TRUE(
+        std::all_of(padding_offset.begin() + 56, padding_offset.end(), [](int32_t value) { return value == 200; }));
+}
+
+TEST(CudaGraphReplayContractsTest, AllowsZeroLengthSentinelAtExactTokenCapacity) {
+    std::vector<int32_t> input_lengths{16, 48, -1};
+    std::vector<int32_t> cu_seqlens(4, -1);
+    std::vector<int32_t> padding_offset(64, -1);
+
+    ASSERT_TRUE(
+        prepareFullPrefillReplayMetadata(input_lengths.data(), cu_seqlens.data(), padding_offset.data(), 2, 2, 64, 64));
+    EXPECT_EQ(input_lengths, (std::vector<int32_t>{16, 48, 0}));
+    EXPECT_EQ(cu_seqlens, (std::vector<int32_t>{0, 16, 64, 64}));
+}
+
+TEST(CudaGraphReplayContractsTest, RejectsInvalidFullPrefillMetadata) {
+    std::vector<int32_t> input_lengths{24, 32, -1};
+    std::vector<int32_t> cu_seqlens(4, -1);
+    std::vector<int32_t> padding_offset(64, -1);
+
+    EXPECT_FALSE(
+        prepareFullPrefillReplayMetadata(input_lengths.data(), cu_seqlens.data(), padding_offset.data(), 0, 2, 56, 64));
+    EXPECT_FALSE(
+        prepareFullPrefillReplayMetadata(input_lengths.data(), cu_seqlens.data(), padding_offset.data(), 3, 2, 56, 64));
+    EXPECT_FALSE(
+        prepareFullPrefillReplayMetadata(input_lengths.data(), cu_seqlens.data(), padding_offset.data(), 2, 2, 55, 64));
+
+    input_lengths = {24, 0, -1};
+    EXPECT_FALSE(
+        prepareFullPrefillReplayMetadata(input_lengths.data(), cu_seqlens.data(), padding_offset.data(), 2, 2, 24, 64));
+}
 
 TEST(CudaGraphReplayContractsTest, AcceptsExactComboSourceAndDestinationSizes) {
     if (!torch::cuda::is_available()) {
