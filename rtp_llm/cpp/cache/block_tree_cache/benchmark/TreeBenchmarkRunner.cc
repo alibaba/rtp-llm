@@ -17,6 +17,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/BenchmarkFixture.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm::benchmark {
 
@@ -41,8 +42,8 @@ std::string joinSizeValues(const std::vector<size_t>& values) {
 
 size_t hardFailureCount(const OnlineSchedulerMetrics& metrics) {
     return metrics.loads_failed + metrics.loads_cancelled + metrics.load_target_allocation_failed
-           + metrics.suffix_allocation_failed + metrics.load_commit_failed + metrics.joined_holder_failed
-           + metrics.cancel_request_failed + metrics.lifecycle_timeouts + metrics.dependency_failed_descendants;
+           + metrics.suffix_allocation_failed + metrics.load_commit_failed + metrics.cancel_request_failed
+           + metrics.lifecycle_timeouts + metrics.dependency_failed_descendants;
 }
 
 // Test-only injection seam: the GPU smoke suite sets this env var so the
@@ -77,6 +78,30 @@ public:
             outcome.load_ticket = std::move(result.async_context);
         }
         return outcome;
+    }
+
+    void materializeRequestBlocks(MatchOutcome& outcome) override {
+        for (const MultiNodeResource& resource : outcome.matched_device_resources) {
+            for (const auto& [_, blocks] : resource.node_blocks) {
+                appendRequestBlocks(cache_.groupSets()[resource.group_set_id], blocks, outcome.request_blocks);
+            }
+        }
+        outcome.matched_device_resources.clear();
+        if (outcome.load_ticket != nullptr) {
+            const auto& descs  = outcome.load_ticket->loadDescs();
+            const auto& joined = outcome.load_ticket->joinedLoads();
+            for (size_t desc_index = 0; desc_index < descs.size(); ++desc_index) {
+                const TransferDescriptor& desc = descs[desc_index];
+                if (joined[desc_index]) {
+                    appendRequestBlocks(
+                        cache_.groupSets()[desc.group_set_id], desc.target_blocks, outcome.request_blocks);
+                    outcome.joined_target_block_count += desc.target_blocks.size();
+                } else if (desc.source_tier == Tier::DEVICE) {
+                    appendRequestBlocks(
+                        cache_.groupSets()[desc.group_set_id], desc.source_blocks, outcome.request_blocks);
+                }
+            }
+        }
     }
 
     bool allocateLoadTargets(const MatchOutcome& outcome, PreparedRequestResources& out) override {
@@ -116,46 +141,6 @@ public:
             out.load_target_blocks[gs] = std::move(blocks.value());
         }
         out.load_targets_allocated = true;
-        return true;
-    }
-
-    bool holdJoinedBlocks(const MatchOutcome& outcome, PreparedRequestResources& out) override {
-        if (outcome.load_ticket == nullptr) {
-            return true;  // no ticket, nothing to hold
-        }
-        const auto& context    = outcome.load_ticket;
-        const auto& group_sets = cache_.groupSets();
-        const auto& joined     = context->joinedLoads();
-        const auto& descs      = context->loadDescs();
-
-        // LoadJoinRegistry::join() already placed the initiator's real target
-        // blocks in each joined descriptor. Take this request's own REQUEST
-        // refs before commit() releases the loader's temporary holder.
-        out.joined_holder_blocks.resize(group_sets.size());
-        std::vector<std::unordered_set<BlockIdxType>> held(group_sets.size());
-        for (size_t gs = 0; gs < out.load_target_blocks.size() && gs < held.size(); ++gs) {
-            held[gs].insert(out.load_target_blocks[gs].begin(), out.load_target_blocks[gs].end());
-        }
-        bool referenced_any = false;
-        for (size_t d = 0; d < descs.size(); ++d) {
-            if (descs[d].source_tier == Tier::DEVICE || !joined[d]) {
-                continue;
-            }
-            const size_t gs            = descs[d].group_set_id;
-            const auto&  target_blocks = descs[d].target_blocks;
-            if (target_blocks.empty() || gs >= group_sets.size() || group_sets[gs]->devicePools().empty()) {
-                return false;
-            }
-            for (const BlockIdxType block : target_blocks) {
-                if (!held[gs].insert(block).second) {
-                    continue;
-                }
-                group_sets[gs]->devicePools()[0]->incRef(block, BlockRefType::REQUEST);
-                out.joined_holder_blocks[gs].push_back(block);
-                referenced_any = true;
-            }
-        }
-        out.joined_holder_allocated = referenced_any;
         return true;
     }
 
@@ -206,10 +191,10 @@ public:
         return true;
     }
 
-    void publishInsert(const PathKeys&                 path,
-                       size_t                          actual_matched_depth,
-                       PreparedRequestResources&       out,
-                       std::vector<MultiNodeResource>& matched_resources) override {
+    void publishInsert(const PathKeys&                path,
+                       size_t                         actual_matched_depth,
+                       PreparedRequestResources&      out,
+                       std::vector<BlockIndicesType>& request_blocks) override {
         const auto&                                group_sets = cache_.groupSets();
         std::vector<std::vector<GroupSetResource>> resources(path.size(),
                                                              std::vector<GroupSetResource>(group_sets.size()));
@@ -224,20 +209,36 @@ public:
         cache_.insert(path, resources, Tier::DEVICE);
         // Publish REQUEST-holder transitions: blocks accepted by the tree keep
         // BLOCK_CACHE ownership, rejected ones return to the pool.
-        releaseMatched(matched_resources);
+        releaseRequestBlocks(request_blocks);
         releasePrepared(out);
     }
 
-    void releaseMatched(std::vector<MultiNodeResource>& resources) override {
-        if (!resources.empty()) {
-            cache_.releaseMatchedResources(resources);
-            resources.clear();
+    void releaseRequestBlocks(std::vector<BlockIndicesType>& blocks) override {
+        const auto&       group_sets = cache_.groupSets();
+        BlockReleaseBatch releases;
+        for (const GroupSetPtr& group_set : group_sets) {
+            const auto& group_ids = group_set->groupIds();
+            const auto& pools     = group_set->devicePools();
+            RTP_LLM_CHECK(group_ids.size() == pools.size());
+            for (size_t member_index = 0; member_index < group_ids.size(); ++member_index) {
+                const size_t group_id = group_ids[member_index];
+                if (group_id >= blocks.size() || blocks[group_id].empty()) {
+                    continue;
+                }
+                releases.append(group_id,
+                                pools[member_index]->decRefWithResult(blocks[group_id], BlockRefType::REQUEST));
+            }
+        }
+        blocks.clear();
+        const auto receipts = releases.finish();
+        if (!receipts.empty()) {
+            cache_.onBlocksReleased(receipts);
         }
     }
 
-    void rollback(PreparedRequestResources& out, std::vector<MultiNodeResource>& matched_resources) override {
+    void rollback(PreparedRequestResources& out, std::vector<BlockIndicesType>& request_blocks) override {
         releasePrepared(out);
-        releaseMatched(matched_resources);
+        releaseRequestBlocks(request_blocks);
     }
 
     // Bounded drain for setup/warmup/measured/finalize with a configurable deadline.
@@ -252,9 +253,23 @@ public:
     }
 
 private:
+    static void appendRequestBlocks(const GroupSetPtr&             group_set,
+                                    const BlockIndicesType&        blocks,
+                                    std::vector<BlockIndicesType>& request_blocks) {
+        const auto& group_ids = group_set->groupIds();
+        RTP_LLM_CHECK(group_ids.size() == blocks.size());
+        for (size_t member_index = 0; member_index < group_ids.size(); ++member_index) {
+            const size_t group_id = group_ids[member_index];
+            if (request_blocks.size() <= group_id) {
+                request_blocks.resize(group_id + 1);
+            }
+            request_blocks[group_id].push_back(blocks[member_index]);
+        }
+    }
+
     static BlockIndicesType uniqueHeldBlocks(const PreparedRequestResources& out, size_t group_set_id) {
         std::unordered_set<BlockIdxType> unique;
-        for (const auto* groups : {&out.load_target_blocks, &out.joined_holder_blocks, &out.suffix_blocks}) {
+        for (const auto* groups : {&out.load_target_blocks, &out.suffix_blocks}) {
             if (group_set_id < groups->size()) {
                 unique.insert((*groups)[group_set_id].begin(), (*groups)[group_set_id].end());
             }
@@ -349,6 +364,10 @@ bool insertPathFromPrefix(BlockTreeCache& cache, const PathKeys& path, size_t ex
 }
 
 }  // anonymous namespace
+
+std::unique_ptr<OnlineCacheApi> makeBlockTreeCacheAdapterForTest(BlockTreeCache& cache) {
+    return std::make_unique<BlockTreeCacheAdapter>(cache);
+}
 
 TreeBenchmarkRunner::TreeBenchmarkRunner(const ModelProfile& profile,
                                          const TreeOptions&  options,
@@ -759,8 +778,7 @@ bool TreeBenchmarkRunner::runOnlineBenchmark(const OnlineTreeWorkloadConfig& con
     writer_.addMetric("load_target_allocation_failed", static_cast<double>(m.load_target_allocation_failed));
     writer_.addMetric("suffix_allocation_failed", static_cast<double>(m.suffix_allocation_failed));
     writer_.addMetric("load_commit_failed", static_cast<double>(m.load_commit_failed));
-    writer_.addMetric("joined_holder_failed", static_cast<double>(m.joined_holder_failed));
-    writer_.addMetric("joined_holder_blocks_total", static_cast<double>(m.joined_holder_blocks_total));
+    writer_.addMetric("joined_target_blocks_total", static_cast<double>(m.joined_target_blocks_total));
     writer_.addMetric("admission_allocation_retries", static_cast<double>(m.admission_allocation_retries));
     writer_.addMetric("unexpected_extra_match_count", static_cast<double>(m.unexpected_extra_match_count));
     writer_.addMetric("trace_exhaustions", static_cast<double>(m.trace_exhaustions));

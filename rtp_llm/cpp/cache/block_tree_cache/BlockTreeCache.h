@@ -136,9 +136,6 @@ public:
     void                                      onBlocksReleased(const std::vector<BlockReleaseReceipt>& receipts);
     bool                                      cancelLoad(const std::shared_ptr<AsyncContext>& context);
 
-    // Release path-lock references acquired during match().
-    void releaseMatchedResources(const std::vector<MultiNodeResource>& resources);
-
     BlockIndicesType matchedBlocksForGroup(size_t                                group_id,
                                            const std::vector<MultiNodeResource>& matched_resources) const;
 

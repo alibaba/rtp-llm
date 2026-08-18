@@ -88,6 +88,7 @@ OnlineTreeScheduler::AdmitResult OnlineTreeScheduler::admit(OnlineRequestContext
 
     auto outcome = cache_.match(ctx.path);
     metrics_.match_ns.push_back(elapsedNs(admit_start, std::chrono::steady_clock::now()));
+    cache_.materializeRequestBlocks(outcome);
     if (outcome.actual_matched_depth > ctx.planned_reuse_blocks) {
         ++metrics_.unexpected_extra_match_count;
     }
@@ -97,10 +98,16 @@ OnlineTreeScheduler::AdmitResult OnlineTreeScheduler::admit(OnlineRequestContext
     ctx.matched_depth            = outcome.actual_matched_depth;
     ctx.matched_device_blocks    = outcome.matched_device_blocks;
     ctx.host_matched_blocks      = outcome.host_matched_blocks;
-    ctx.matched_device_resources = std::move(outcome.matched_device_resources);
+    ctx.request_blocks            = std::move(outcome.request_blocks);
+    ctx.joined_target_block_count = outcome.joined_target_block_count;
 
     const size_t suffix_block_count = ctx.path.size() - ctx.matched_depth;
-    enum class AdmissionFailure { NONE, LOAD_TARGETS, JOINED_HOLDER, SUFFIX, COMMIT };
+    enum class AdmissionFailure {
+        NONE,
+        LOAD_TARGETS,
+        SUFFIX,
+        COMMIT
+    };
     AdmissionFailure failure = AdmissionFailure::NONE;
 
     for (size_t attempt = 0; attempt <= config_.admission_allocation_retry_limit; ++attempt) {
@@ -112,8 +119,6 @@ OnlineTreeScheduler::AdmitResult OnlineTreeScheduler::admit(OnlineRequestContext
             const auto commit_start = std::chrono::steady_clock::now();
             if (!cache_.allocateLoadTargets(outcome, ctx.prepared)) {
                 failure = AdmissionFailure::LOAD_TARGETS;
-            } else if (!cache_.holdJoinedBlocks(outcome, ctx.prepared)) {
-                failure = AdmissionFailure::JOINED_HOLDER;
             } else if (!cache_.allocateSuffixBlocks(suffix_block_count, ctx.prepared)) {
                 failure = AdmissionFailure::SUFFIX;
             } else if (!cache_.commitLoad(outcome.load_ticket, ctx.prepared)) {
@@ -135,17 +140,14 @@ OnlineTreeScheduler::AdmitResult OnlineTreeScheduler::admit(OnlineRequestContext
         // Allocation hit a temporarily exhausted pool: roll back the partial
         // allocations and wait for the cache's event-driven watermark
         // eviction to free capacity. The scheduler never evicts directly.
-        std::vector<MultiNodeResource> no_matched;
-        cache_.rollback(ctx.prepared, no_matched);
+        std::vector<BlockIndicesType> no_request_blocks;
+        cache_.rollback(ctx.prepared, no_request_blocks);
     }
 
     if (failure != AdmissionFailure::NONE) {
         switch (failure) {
             case AdmissionFailure::LOAD_TARGETS:
                 ++metrics_.load_target_allocation_failed;
-                break;
-            case AdmissionFailure::JOINED_HOLDER:
-                ++metrics_.joined_holder_failed;
                 break;
             case AdmissionFailure::SUFFIX:
                 ++metrics_.suffix_allocation_failed;
@@ -162,9 +164,7 @@ OnlineTreeScheduler::AdmitResult OnlineTreeScheduler::admit(OnlineRequestContext
     }
 
     ctx.load_ticket = std::move(outcome.load_ticket);
-    for (const auto& blocks : ctx.prepared.joined_holder_blocks) {
-        metrics_.joined_holder_blocks_total += blocks.size();
-    }
+    metrics_.joined_target_blocks_total += ctx.joined_target_block_count;
     active_tokens_ += ctx.target_tokens;
     ctx.tokens_counted = true;
 
@@ -195,9 +195,9 @@ void OnlineTreeScheduler::cleanupRequest(OnlineRequestContext& ctx) {
         return;
     }
     if (ctx.prepared.holdsBlocks()) {
-        cache_.rollback(ctx.prepared, ctx.matched_device_resources);
-    } else if (!ctx.matched_device_resources.empty()) {
-        cache_.releaseMatched(ctx.matched_device_resources);
+        cache_.rollback(ctx.prepared, ctx.request_blocks);
+    } else if (!ctx.request_blocks.empty()) {
+        cache_.releaseRequestBlocks(ctx.request_blocks);
     }
     if (ctx.tokens_counted) {
         active_tokens_ -= ctx.target_tokens;
@@ -251,12 +251,11 @@ bool OnlineTreeScheduler::runPhase(const std::vector<OnlineRequestDescriptor>& t
                     break;
             }
             if (ctx.state == OnlineRequestState::LOADING_CACHE || ctx.state == OnlineRequestState::READY) {
-                held += ctx.matched_device_blocks;
+                for (const auto& blocks : ctx.request_blocks)
+                    held += blocks.size();
                 for (const auto& blocks : ctx.prepared.load_target_blocks)
                     held += blocks.size();
                 for (const auto& blocks : ctx.prepared.suffix_blocks)
-                    held += blocks.size();
-                for (const auto& blocks : ctx.prepared.joined_holder_blocks)
                     held += blocks.size();
             }
             if (ctx.state == OnlineRequestState::WAITING && ctx.is_continuation
@@ -361,7 +360,7 @@ bool OnlineTreeScheduler::runPhase(const std::vector<OnlineRequestDescriptor>& t
             std::this_thread::sleep_for(std::chrono::milliseconds(config_.forward_sleep_ms));
             for (auto* ctx : batch) {
                 const auto insert_start = std::chrono::steady_clock::now();
-                cache_.publishInsert(ctx->path, ctx->matched_depth, ctx->prepared, ctx->matched_device_resources);
+                cache_.publishInsert(ctx->path, ctx->matched_depth, ctx->prepared, ctx->request_blocks);
                 metrics_.insert_ns.push_back(elapsedNs(insert_start, std::chrono::steady_clock::now()));
                 if (ctx->tokens_counted) {
                     active_tokens_ -= ctx->target_tokens;

@@ -94,6 +94,7 @@ cc_library(
         "//rtp_llm/cpp/engine_base/system_prompt/test:__pkg__",
     ],
     deps = [
+        "//rtp_llm/cpp/cache:block_release_batch",
         "//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils",
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
