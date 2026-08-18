@@ -92,3 +92,12 @@ py_test (
    tags = ["open_skip", "H20"],
    exec_properties = {'gpu':'H20'},
 )
+
+py_test (
+   name = "indexer_head_gate_test",
+   srcs = ["indexer_head_gate_test.py"],
+   deps = py_test_deps + [
+        "//rtp_llm:testlib",
+   ],
+   env = test_envs,
+)
