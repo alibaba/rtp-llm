@@ -1,3 +1,4 @@
+#include <limits>
 #include <memory>
 #include <numeric>
 #include "torch/all.h"
@@ -10,6 +11,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
+#include "rtp_llm/cpp/models/logits_processor/MultiSeqLogitsProcessor.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -39,7 +41,20 @@ static void initFullCacheConfig(CacheConfig& cache_config, int layer_num) {
     cache_config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
 }
 
-class NormalBatchStreamProcessorTest: public DeviceTestBase {};
+class NormalBatchStreamProcessorTest: public DeviceTestBase {
+protected:
+    static ModelConfig makeOutputVocabModelConfig(std::vector<int64_t> output_vocab_ids = {0, 2, 7},
+                                                  int64_t              padded_size      = 0) {
+        ModelConfig model_config;
+        model_config.max_seq_len      = 8;
+        model_config.vocab_size       = 10;
+        model_config.num_layers       = 1;
+        model_config.output_vocab_ids = std::move(output_vocab_ids);
+        model_config.output_vocab_padded_size =
+            padded_size > 0 ? padded_size : static_cast<int64_t>(model_config.output_vocab_ids.size());
+        return model_config;
+    }
+};
 
 TEST_F(NormalBatchStreamProcessorTest, testWarmUpWithoutCacheManager) {
     ResourceContext resource_context;
@@ -408,6 +423,467 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
     EXPECT_TRUE(softmax_probs.defined());
     EXPECT_EQ(2048, softmax_probs.numel());
     EXPECT_NEAR(0.731058, softmax_probs.data_ptr<float>()[1], 0.0001);
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testOutputVocabMapsGreedyTokenBeforeStreamUpdate) {
+    ResourceContext resource_context;
+    auto            model_config = makeOutputVocabModelConfig();
+    RuntimeConfig   runtime_config;
+
+    auto query             = make_shared<GenerateInput>();
+    query->input_ids       = hostIntBuffer({2});
+    query->generate_config = make_shared<GenerateConfig>();
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    NormalBatchStreamProcessor  processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+    StreamGroups stream_groups({stream});
+    MergedOutput merge_outputs;
+    merge_outputs.sampler_output.token_ids = torch::tensor({2, 2}, torch::kInt32).reshape({1, 2});
+
+    ASSERT_TRUE(processor.dispatch(stream_groups, merge_outputs).ok());
+    EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{2, 7}));
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testOutputVocabSamplerFailureDoesNotBlockPeerStream) {
+    ResourceContext resource_context;
+    auto            model_config = makeOutputVocabModelConfig();
+    RuntimeConfig   runtime_config;
+
+    auto make_stream = [&]() {
+        auto query             = make_shared<GenerateInput>();
+        query->input_ids       = hostIntBuffer({2});
+        query->generate_config = make_shared<GenerateConfig>();
+        auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        return stream;
+    };
+    auto failed_stream  = make_stream();
+    auto healthy_stream = make_stream();
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    NormalBatchStreamProcessor  processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+    StreamGroups stream_groups({failed_stream, healthy_stream});
+    MergedOutput merge_outputs;
+    merge_outputs.sampler_output.token_ids = torch::tensor({2, 99, 2, 2}, torch::kInt32).reshape({2, 2});
+    merge_outputs.sampler_output.success   = torch::tensor({false, true}, torch::kBool);
+
+    ASSERT_TRUE(processor.dispatch(stream_groups, merge_outputs).ok());
+    EXPECT_TRUE(failed_stream->hasError());
+    EXPECT_EQ(failed_stream->completeTokenIdsVec(0), (std::vector<int>{2}));
+    EXPECT_FALSE(healthy_stream->hasError());
+    EXPECT_EQ(healthy_stream->completeTokenIdsVec(0), (std::vector<int>{2, 7}));
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testInvalidCompactTokenDoesNotIndexProbabilitiesOrBlockPeer) {
+    ResourceContext resource_context;
+    auto            model_config = makeOutputVocabModelConfig();
+    RuntimeConfig   runtime_config;
+
+    auto make_stream = [&]() {
+        auto query                                   = make_shared<GenerateInput>();
+        query->input_ids                             = hostIntBuffer({2});
+        query->generate_config                       = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens       = 1;
+        query->generate_config->return_softmax_probs = true;
+        auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        return stream;
+    };
+    auto failed_stream  = make_stream();
+    auto healthy_stream = make_stream();
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    NormalBatchStreamProcessor  processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+    StreamGroups stream_groups({failed_stream, healthy_stream});
+    MergedOutput merge_outputs;
+    merge_outputs.model_output.logits =
+        torch::tensor({0.0f, 1.0f, 9.0f, 0.0f, 1.0f, 9.0f}, torch::kFloat32).reshape({2, 3}).to(torch::kCUDA);
+    merge_outputs.sampler_output.token_ids = torch::tensor({2, 99, 2, 2}, torch::kInt32).reshape({2, 2});
+    merge_outputs.sampler_output.success   = torch::tensor({true, true}, torch::kBool);
+
+    ASSERT_TRUE(processor.dispatch(stream_groups, merge_outputs).ok());
+    EXPECT_TRUE(failed_stream->hasError());
+    EXPECT_EQ(failed_stream->completeTokenIdsVec(0), (std::vector<int>{2}));
+    EXPECT_FALSE(healthy_stream->hasError());
+    EXPECT_EQ(healthy_stream->completeTokenIdsVec(0), (std::vector<int>{2, 7}));
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testDynamicBeamRejectsParentOutsidePreviousBatch) {
+    ResourceContext resource_context;
+    auto            model_config = makeOutputVocabModelConfig({0, 1, 2, 4, 7, 9});
+    RuntimeConfig   runtime_config;
+
+    auto query                                 = make_shared<GenerateInput>();
+    query->input_ids                           = hostIntBuffer({2});
+    query->generate_config                     = make_shared<GenerateConfig>();
+    query->generate_config->variable_num_beams = {2};
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    ASSERT_FALSE(stream->hasError());
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    NormalBatchStreamProcessor  processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+    StreamGroups stream_groups({stream});
+    MergedOutput merge_outputs;
+    merge_outputs.sampler_output.token_ids  = torch::tensor({2, 1, 2, 1}, torch::kInt32).reshape({2, 2});
+    merge_outputs.sampler_output.beam_index = torch::tensor({0, 1}, torch::kInt32);
+    merge_outputs.sampler_output.success    = torch::tensor({true}, torch::kBool);
+
+    ASSERT_TRUE(processor.dispatch(stream_groups, merge_outputs).ok());
+    EXPECT_TRUE(stream->hasError());
+    EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{2}));
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testOutputVocabRestoresOnlyCurrentBeamToken) {
+    NormalOutputDispatcher dispatcher({0, 2, 4, 7, 9});
+    auto batch_token_ids   = torch::tensor({100, 3, 101, 200, 4, 201}, torch::kInt32).reshape({2, 3}).contiguous();
+    auto current_token_ids = torch::tensor({3, 4}, torch::kInt32).reshape({2, 1}).contiguous();
+    GenerateStreamPtr unused_stream;
+
+    ASSERT_TRUE(dispatcher.restoreCurrentTokenIds(unused_stream, batch_token_ids, current_token_ids, 1));
+    EXPECT_EQ(toVec<int32_t>(batch_token_ids), (std::vector<int32_t>{100, 7, 101, 200, 9, 201}));
+    EXPECT_EQ(toVec<int32_t>(current_token_ids), (std::vector<int32_t>{7, 9}));
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testOutputVocabSelectedProbabilityUsesCompactToken) {
+    ResourceContext resource_context;
+    auto            model_config = makeOutputVocabModelConfig();
+    RuntimeConfig   runtime_config;
+
+    auto query                                   = make_shared<GenerateInput>();
+    query->input_ids                             = hostIntBuffer({2});
+    query->generate_config                       = make_shared<GenerateConfig>();
+    query->generate_config->max_new_tokens       = 1;
+    query->generate_config->return_softmax_probs = true;
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    NormalBatchStreamProcessor  processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+    StreamGroups stream_groups({stream});
+    MergedOutput merge_outputs;
+    merge_outputs.model_output.logits =
+        torch::tensor({0.0f, 1.0f, 9.0f}, torch::kFloat32).reshape({1, 3}).to(torch::kCUDA);
+    merge_outputs.sampler_output.token_ids = torch::tensor({2, 2}, torch::kInt32).reshape({1, 2});
+
+    ASSERT_TRUE(processor.dispatch(stream_groups, merge_outputs).ok());
+    EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{2, 7}));
+    const auto expected_probability = torch::softmax(torch::tensor({0.0f, 1.0f, 9.0f}), -1)[2].item<float>();
+    EXPECT_NEAR(stream->getSoftmaxProbs()[0][1].item<float>(), expected_probability, 1e-6);
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testOutputVocabClampsPositiveTopKToLogitsWidth) {
+    ResourceContext resource_context;
+    auto            model_config = makeOutputVocabModelConfig({0, 7});
+    RuntimeConfig   runtime_config;
+
+    auto query                    = make_shared<GenerateInput>();
+    query->input_ids              = hostIntBuffer({2});
+    query->generate_config        = make_shared<GenerateConfig>();
+    query->generate_config->top_k = 8;
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    NormalBatchStreamProcessor  processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+    StreamGroups    stream_groups({stream});
+    GptModelOutputs model_output;
+    model_output.logits = torch::zeros({1, 2}, torch::kFloat32).to(torch::kCUDA);
+
+    auto sampler_inputs = processor.gatherSamplerInput(stream_groups, GptModelInputs(), model_output);
+    ASSERT_TRUE(sampler_inputs.ok());
+    EXPECT_EQ(sampler_inputs->top_k.data_ptr<int32_t>()[0], 2);
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testDisabledOutputVocabPreservesTopK) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 8;
+    model_config.vocab_size  = 10;
+    model_config.num_layers  = 1;
+    RuntimeConfig runtime_config;
+
+    auto query                    = make_shared<GenerateInput>();
+    query->input_ids              = hostIntBuffer({2});
+    query->generate_config        = make_shared<GenerateConfig>();
+    query->generate_config->top_k = 8;
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    NormalBatchStreamProcessor  processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+    StreamGroups    stream_groups({stream});
+    GptModelOutputs model_output;
+    model_output.logits = torch::zeros({1, 2}, torch::kFloat32).to(torch::kCUDA);
+
+    auto sampler_inputs = processor.gatherSamplerInput(stream_groups, GptModelInputs(), model_output);
+    ASSERT_TRUE(sampler_inputs.ok());
+    EXPECT_EQ(sampler_inputs->top_k.data_ptr<int32_t>()[0], 8);
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testPaddedSizeLargerThanKKeepsDispatchAndSamplingOnK) {
+    ResourceContext resource_context;
+    auto            model_config = makeOutputVocabModelConfig({0, 2, 7}, /*padded_size=*/8);
+    RuntimeConfig   runtime_config;
+
+    auto query                    = make_shared<GenerateInput>();
+    query->input_ids              = hostIntBuffer({2});
+    query->generate_config        = make_shared<GenerateConfig>();
+    query->generate_config->top_k = 8;
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->generate_status_->status = StreamState::RUNNING;
+    EXPECT_EQ(stream->outputVocabSize(), 3u);
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    NormalBatchStreamProcessor  processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+    StreamGroups stream_groups({stream});
+
+    // top_k is clamped to the K-wide logits, not to the padded width P
+    GptModelOutputs model_output;
+    model_output.logits = torch::zeros({1, 3}, torch::kFloat32).to(torch::kCUDA);
+    auto sampler_inputs = processor.gatherSamplerInput(stream_groups, GptModelInputs(), model_output);
+    ASSERT_TRUE(sampler_inputs.ok());
+    EXPECT_EQ(sampler_inputs->vocab_size, 3u);
+    EXPECT_EQ(sampler_inputs->top_k.data_ptr<int32_t>()[0], 3);
+
+    // dispatch consumes K-wide results; compact-id restoration is insensitive to P
+    MergedOutput merge_outputs;
+    merge_outputs.sampler_output.token_ids = torch::tensor({2, 2}, torch::kInt32).reshape({1, 2});
+    ASSERT_TRUE(processor.dispatch(stream_groups, merge_outputs).ok());
+    EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{2, 7}));
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testOutputVocabPassesCompactEosOnlyToMultiSeqProcessor) {
+    ResourceContext resource_context;
+    auto            model_config             = makeOutputVocabModelConfig({0, 2, 4, 7, 9});
+    model_config.special_tokens.eos_token_id = 7;
+    RuntimeConfig runtime_config;
+
+    auto query                                   = make_shared<GenerateInput>();
+    query->input_ids                             = hostIntBuffer({2});
+    query->generate_config                       = make_shared<GenerateConfig>();
+    query->generate_config->num_return_sequences = 2;
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+
+    ASSERT_FALSE(stream->hasError());
+    ASSERT_EQ(stream->logits_processor_list_.size(), 1);
+    ASSERT_NE(std::dynamic_pointer_cast<MultiSeqLogitsProcessor>(stream->logits_processor_list_[0]), nullptr);
+
+    SamplerInputs inputs;
+    inputs.logits        = torch::zeros({2, 5}, torch::kFloat32).to(torch::kCUDA);
+    inputs.finished_mask = torch::tensor({false, true}, torch::kBool);
+    stream->logits_processor_list_[0]->process(inputs, 0, 2);
+
+    auto processed_logits = inputs.logits.cpu();
+    for (int token_id = 0; token_id < 5; ++token_id) {
+        if (token_id == 3) {
+            EXPECT_FLOAT_EQ(processed_logits[1][token_id].item<float>(), 0.0f);
+        } else {
+            EXPECT_EQ(processed_logits[1][token_id].item<float>(), -std::numeric_limits<float>::infinity());
+        }
+    }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testOutputVocabRejectsUnsupportedRequestOnCurrentStream) {
+    ResourceContext resource_context;
+    auto            model_config = makeOutputVocabModelConfig();
+    RuntimeConfig   runtime_config;
+
+    auto penalty_query                                 = make_shared<GenerateInput>();
+    penalty_query->input_ids                           = hostIntBuffer({2});
+    penalty_query->generate_config                     = make_shared<GenerateConfig>();
+    penalty_query->generate_config->repetition_penalty = 1.1f;
+    auto penalty_stream =
+        make_shared<NormalGenerateStream>(penalty_query, model_config, runtime_config, resource_context, nullptr);
+    EXPECT_TRUE(penalty_stream->hasError());
+    EXPECT_EQ(penalty_stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+
+    auto beam_query                        = make_shared<GenerateInput>();
+    beam_query->input_ids                  = hostIntBuffer({2});
+    beam_query->generate_config            = make_shared<GenerateConfig>();
+    beam_query->generate_config->num_beams = 2;
+    auto beam_stream =
+        make_shared<NormalGenerateStream>(beam_query, model_config, runtime_config, resource_context, nullptr);
+    EXPECT_TRUE(beam_stream->hasError());
+    EXPECT_EQ(beam_stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+
+    auto think_query                                  = make_shared<GenerateInput>();
+    think_query->input_ids                            = hostIntBuffer({2});
+    think_query->generate_config                      = make_shared<GenerateConfig>();
+    think_query->generate_config->in_think_mode       = true;
+    think_query->generate_config->max_thinking_tokens = 1;
+    think_query->generate_config->end_think_token_ids = {7};
+    auto think_stream =
+        make_shared<NormalGenerateStream>(think_query, model_config, runtime_config, resource_context, nullptr);
+    EXPECT_TRUE(think_stream->hasError());
+    EXPECT_EQ(think_stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testOutputVocabRejectsEachUnsupportedConfigItem) {
+    ResourceContext resource_context;
+    auto            model_config = makeOutputVocabModelConfig();
+    RuntimeConfig   runtime_config;
+
+    struct RejectCase {
+        std::string                          message_keyword;
+        std::function<void(GenerateConfig&)> mutate;
+    };
+    std::vector<RejectCase> cases = {
+        {"repetition", [](GenerateConfig& c) { c.repetition_penalty = 1.1f; }},
+        {"presence", [](GenerateConfig& c) { c.presence_penalty = 0.1f; }},
+        {"frequency", [](GenerateConfig& c) { c.frequency_penalty = 0.1f; }},
+        {"no_repeat_ngram_size", [](GenerateConfig& c) { c.no_repeat_ngram_size = 2; }},
+        {"full-vocabulary logits", [](GenerateConfig& c) { c.return_logits = true; }},
+        {"full-vocabulary logits", [](GenerateConfig& c) { c.return_prompt_logits = true; }},
+        {"full-vocabulary logits", [](GenerateConfig& c) { c.return_all_probs = ReturnAllProbsMode::DEFAULT; }},
+        {"full-vocabulary logits", [](GenerateConfig& c) { c.calculate_loss = 1; }},
+        {"full-vocabulary logits", [](GenerateConfig& c) { c.select_tokens_id = {2}; }},
+        {"full-vocabulary logits", [](GenerateConfig& c) { c.select_tokens_str = {"a"}; }},
+        {"think mode", [](GenerateConfig& c) { c.in_think_mode = true; }},
+    };
+    for (const auto& reject_case : cases) {
+        auto query             = make_shared<GenerateInput>();
+        query->input_ids       = hostIntBuffer({2});
+        query->generate_config = make_shared<GenerateConfig>();
+        reject_case.mutate(*query->generate_config);
+        auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        EXPECT_TRUE(stream->hasError()) << "keyword=" << reject_case.message_keyword;
+        EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS) << "keyword=" << reject_case.message_keyword;
+        EXPECT_NE(stream->statusInfo().ToString().find(reject_case.message_keyword), std::string::npos)
+            << "keyword=" << reject_case.message_keyword;
+    }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testOutputVocabRejectsMissingPrimaryEos) {
+    ResourceContext resource_context;
+    // Default special_tokens.eos_token_id is 0; this vocabulary does not contain it.
+    auto          model_config = makeOutputVocabModelConfig({2, 4, 7});
+    RuntimeConfig runtime_config;
+
+    auto query             = make_shared<GenerateInput>();
+    query->input_ids       = hostIntBuffer({2});
+    query->generate_config = make_shared<GenerateConfig>();
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    EXPECT_TRUE(stream->hasError());
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_NE(stream->statusInfo().ToString().find("EOS"), std::string::npos);
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testDynamicBeamDispatchReordersAndPlacesTokenAtSeqLength) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;  // no output vocab: beam layout is orthogonal to pruning
+    model_config.max_seq_len = 8;
+    model_config.vocab_size  = 10;
+    model_config.num_layers  = 1;
+    RuntimeConfig runtime_config;
+
+    auto query                                   = make_shared<GenerateInput>();
+    query->input_ids                             = hostIntBuffer({5});
+    query->generate_config                       = make_shared<GenerateConfig>();
+    query->generate_config->variable_num_beams   = {2, 2};
+    query->generate_config->max_new_tokens       = 2;
+    query->generate_config->return_hidden_states = true;
+    query->generate_config->return_logits        = true;
+    query->generate_config->return_softmax_probs = true;
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    ASSERT_FALSE(stream->hasError());
+
+    // Advance one beam step so currentBatchSize == nextBatchSize == 2 and the
+    // stream uses the beam token layout (seqLength 1 -> 2).
+    int  error_token_id = -1;
+    auto first_tokens   = torch::tensor({5, 1, 5, 2}, torch::kInt32).reshape({2, 2});
+    ASSERT_TRUE(
+        stream->complete_token_ids_->update(first_tokens, 0, 1, 1, 8, 10, true, stream->streamId(), error_token_id));
+    stream->generate_status_->status = StreamState::RUNNING;
+    ASSERT_EQ(stream->currentBatchSize(), 2);
+    ASSERT_EQ(stream->nextBatchSize(), 2);
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    NormalBatchStreamProcessor  processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+    StreamGroups stream_groups({stream});
+    MergedOutput merge_outputs;
+    // Per-output-beam rows; the new token sits at column seqLength()==2 while the
+    // trailing column holds a different token, so a wrong token_position (last column)
+    // would be observable instead of silently passing.
+    merge_outputs.sampler_output.token_ids  = torch::tensor({5, 1, 2, 1, 5, 2, 3, 1}, torch::kInt32).reshape({2, 4});
+    merge_outputs.sampler_output.beam_index = torch::tensor({1, 0}, torch::kInt32);
+    merge_outputs.sampler_output.success    = torch::tensor({true, true}, torch::kBool);
+    // Distinct per-row values so parent reordering is observable.
+    merge_outputs.model_output.hidden_states =
+        torch::tensor({10.0f, 10.0f, 20.0f, 20.0f}).reshape({2, 2}).to(torch::kCUDA);
+    merge_outputs.model_output.logits =
+        torch::tensor({0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f}).reshape({2, 4}).to(torch::kCUDA);
+
+    ASSERT_TRUE(processor.dispatch(stream_groups, merge_outputs).ok());
+    ASSERT_FALSE(stream->hasError()) << "code=" << static_cast<int>(stream->statusInfo().code())
+                                     << " msg=" << stream->statusInfo().ToString();
+
+    // (1) New tokens land in the seqLength column (index 2), not the last column,
+    // and each beam keeps its own parent history.
+    EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{5, 1, 2}));
+    EXPECT_EQ(stream->completeTokenIdsVec(1), (std::vector<int>{5, 2, 3}));
+
+    // (2) Hidden states and logits follow beam_index: output row 0 <- parent row 1,
+    // output row 1 <- parent row 0.
+    auto outputs_status = stream->nextOutput();
+    ASSERT_TRUE(outputs_status.ok());
+    auto outputs = std::move(outputs_status.value());
+    ASSERT_EQ(outputs.generate_outputs.size(), 2u);
+    ASSERT_TRUE(outputs.generate_outputs[0].hidden_states.has_value());
+    ASSERT_TRUE(outputs.generate_outputs[1].hidden_states.has_value());
+    ASSERT_TRUE(outputs.generate_outputs[0].logits.has_value());
+    ASSERT_TRUE(outputs.generate_outputs[1].logits.has_value());
+    EXPECT_EQ(toVec<float>(*outputs.generate_outputs[0].hidden_states), (std::vector<float>{20.0f, 20.0f}));
+    EXPECT_EQ(toVec<float>(*outputs.generate_outputs[1].hidden_states), (std::vector<float>{10.0f, 10.0f}));
+    EXPECT_EQ(toVec<float>(*outputs.generate_outputs[0].logits), (std::vector<float>{4.0f, 5.0f, 6.0f, 7.0f}));
+    EXPECT_EQ(toVec<float>(*outputs.generate_outputs[1].logits), (std::vector<float>{0.0f, 1.0f, 2.0f, 3.0f}));
+
+    // (3) Softmax probabilities are gathered from the parent's raw logits row:
+    // beam 0 <- raw row 1 at token 2, beam 1 <- raw row 0 at token 3.
+    auto probs = stream->getSoftmaxProbs();
+    ASSERT_TRUE(probs.defined());
+    const auto row1_softmax  = torch::softmax(torch::tensor({4.0f, 5.0f, 6.0f, 7.0f}), -1);
+    const auto row0_softmax  = torch::softmax(torch::tensor({0.0f, 1.0f, 2.0f, 3.0f}), -1);
+    bool       beam0_matched = false, beam1_matched = false;
+    for (int pos = 0; pos < probs.size(1); ++pos) {
+        if (std::abs(probs[0][pos].item<float>() - row1_softmax[2].item<float>()) < 1e-5) {
+            beam0_matched = true;
+        }
+        if (std::abs(probs[1][pos].item<float>() - row0_softmax[3].item<float>()) < 1e-5) {
+            beam1_matched = true;
+        }
+    }
+    EXPECT_TRUE(beam0_matched);
+    EXPECT_TRUE(beam1_matched);
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testLoss) {

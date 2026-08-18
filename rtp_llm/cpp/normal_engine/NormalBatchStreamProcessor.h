@@ -19,6 +19,14 @@ namespace rtp_llm {
 
 class NormalBatchStreamProcessor {
 public:
+    NormalBatchStreamProcessor(const ModelConfig&                 model_config,
+                               const PDSepConfig&                 pd_sep_config,
+                               const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
+                               const CacheConfig&                 cache_config,
+                               bool                               warm_up):
+        NormalBatchStreamProcessor(
+            nullptr, model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up) {}
+
     NormalBatchStreamProcessor(std::shared_ptr<autil::LockFreeThreadPool> thread_pool_,
                                const ModelConfig&                         model_config,
                                const PDSepConfig&                         pd_sep_config,

@@ -188,6 +188,7 @@ public:
     int  nextNumBeams() const;
     int  maxNumBeams() const;
     bool hasNumBeams() const;
+    bool usesBeamSearchTokenLayoutForCurrentStep() const;
 
     bool needTilingForSampling() const;
 
@@ -323,7 +324,9 @@ public:
     const ResourceContext&      resourceContext() const;
     void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);
     void                        setLoss(const torch::Tensor& loss);
-    void                        setSoftmaxProbs(const torch::Tensor& softmax_probs, int start_pos);
+    void                        setSoftmaxProbs(const torch::Tensor& softmax_probs,
+                                                int                  start_pos,
+                                                const torch::Tensor& src_batch_indices = torch::Tensor());
     const BatchKVCacheResource& kvCache() const;
     BatchKVCacheResource&       kvCacheMutable();
     BatchKVCacheResourcePtr     kvCachePtr();
@@ -383,6 +386,10 @@ public:
 
     int64_t vocabSize() const {
         return vocab_size_;
+    }
+
+    size_t outputVocabSize() const {
+        return output_vocab_size_;
     }
 
     size_t outputTokenLen() const {
@@ -769,6 +776,7 @@ protected:
     std::vector<StreamState>              sub_generate_status_;
     int                                   max_seq_len_;
     int64_t                               vocab_size_;
+    size_t                                output_vocab_size_;
     std::shared_ptr<CompleteTokenIds>     complete_token_ids_;
     int64_t                               begin_time_us_;
     int64_t                               wait_time_us_                = 0;

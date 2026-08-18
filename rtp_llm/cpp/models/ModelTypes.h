@@ -21,14 +21,16 @@ struct GptModelDescription {
     rtp_llm::FfnConfigs       ffn_conf;
     rtp_llm::NormType         norm_type;
     DataType                  data_type;
-    rtp_llm::QScheme          act_qscheme            = rtp_llm::QScheme::NoQuantize;
-    const DataType            compute_type           = rtp_llm::DataType::TYPE_INVALID;
-    double                    layernorm_eps          = 1e-5;
-    size_t                    vocab_size             = 0;
-    bool                      post_layernorm         = false;
-    double                    input_embedding_scalar = 1;
-    double                    residual_scalar        = 1;
-    bool                      reverse_e_h_norm       = false;
+    rtp_llm::QScheme          act_qscheme              = rtp_llm::QScheme::NoQuantize;
+    const DataType            compute_type             = rtp_llm::DataType::TYPE_INVALID;
+    double                    layernorm_eps            = 1e-5;
+    size_t                    vocab_size               = 0;
+    size_t                    output_vocab_size        = 0;
+    size_t                    output_vocab_padded_size = 0;
+    bool                      post_layernorm           = false;
+    double                    input_embedding_scalar   = 1;
+    double                    residual_scalar          = 1;
+    bool                      reverse_e_h_norm         = false;
 };
 
 struct GptModelInitParams {

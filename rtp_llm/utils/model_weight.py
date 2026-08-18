@@ -653,33 +653,33 @@ def qkv_gather(
     ].reshape(dim0, -1)
 
 
-def sp_0_pad8(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
+def sp_0_pad8_size(row_count: int, tp: int) -> int:
+    if row_count < 0:
+        raise ValueError(f"row_count must be non-negative, got {row_count}")
+    if tp <= 0:
+        raise ValueError(f"tp must be positive, got {tp}")
     align_size = tp * 8
-    paded_size = int(math.ceil(t.shape[0] * 1.0 / align_size) * align_size)
-    pad_size = int(paded_size - t.shape[0])
-    per_slice_size = int(paded_size / tp)
-    if pad_size != 0 and tp_rank == tp - 1:
-        if len(t.shape) == 2:
-            return torch.concat(
-                [
-                    t[tp_rank * per_slice_size :, :],
-                    torch.zeros([pad_size, t.shape[1]], device=t.device).to(t.dtype),
-                ],
-                dim=0,
-            )
-        else:
-            return torch.concat(
-                [
-                    t[tp_rank * per_slice_size :, :],
-                    torch.zeros([pad_size], device=t.device).to(t.dtype),
-                ],
-                dim=0,
-            )
-    else:
-        if len(t.shape) == 2:
-            return t[tp_rank * per_slice_size : (tp_rank + 1) * per_slice_size, :]
-        else:
-            return t[tp_rank * per_slice_size : (tp_rank + 1) * per_slice_size]
+    return int(math.ceil(row_count / align_size) * align_size)
+
+
+def sp_0_pad8(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
+    if t.dim() == 0:
+        raise ValueError("sp_0_pad8 requires a tensor with at least one dimension")
+    if tp_rank < 0 or tp_rank >= tp:
+        raise ValueError(f"tp_rank must be in [0, {tp}), got {tp_rank}")
+
+    padded_size = sp_0_pad8_size(t.shape[0], tp)
+    per_slice_size = padded_size // tp
+    slice_start = tp_rank * per_slice_size
+    available_rows = max(0, min(per_slice_size, t.shape[0] - slice_start))
+    shard = t.narrow(0, min(slice_start, t.shape[0]), available_rows)
+    pad_size = per_slice_size - available_rows
+    if pad_size:
+        pad_shape = list(t.shape)
+        pad_shape[0] = pad_size
+        shard = torch.concat([shard, t.new_zeros(pad_shape)], dim=0)
+
+    return shard
 
 
 def merge_qkv_hf(ts: List[torch.Tensor]):

@@ -2,6 +2,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <memory>
+#include <typeinfo>
 #include <ATen/Generator.h>
 #if defined(USING_CUDA) || defined(USING_ROCM)
 #include <ATen/cuda/CUDAGeneratorImpl.h>
@@ -15,6 +16,7 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/models/logits_processor/MultiSeqLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/LinearBlocksUtil.h"
 
 using namespace std;
@@ -22,6 +24,26 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
+
+std::optional<std::string> validateOutputVocabRequest(GenerateConfig& config, size_t output_vocab_size) {
+    if (config.repetition_penalty != 1.0f || config.presence_penalty != 0.0f || config.frequency_penalty != 0.0f) {
+        return "output vocabulary pruning does not support active repetition, presence, or frequency penalties";
+    }
+    if (config.no_repeat_ngram_size.value_or(0) > 0) {
+        return "output vocabulary pruning does not support no_repeat_ngram_size";
+    }
+    if (config.in_think_mode) {
+        return "output vocabulary pruning does not support think mode";
+    }
+    if (config.return_logits || config.return_prompt_logits || config.return_all_probs != ReturnAllProbsMode::NONE
+        || config.calculate_loss != 0 || !config.select_tokens_id.empty() || !config.select_tokens_str.empty()) {
+        return "output vocabulary pruning does not support full-vocabulary logits, probabilities, labels, or loss";
+    }
+    if (config.hasNumBeams() && output_vocab_size <= 2 * static_cast<size_t>(config.maxNumBeams())) {
+        return "output vocabulary size must be greater than twice the maximum beam width";
+    }
+    return std::nullopt;
+}
 
 bool useStreamAsyncReserveTokens() {
     static const bool enabled = autil::EnvUtil::getEnv("RTP_LLM_STREAM_ASYNC", false);
@@ -40,6 +62,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     generate_input_(input),
     max_seq_len_(model_config.max_seq_len),
     vocab_size_(model_config.vocab_size),
+    output_vocab_size_(model_config.output_vocab_ids.size()),
     stream_cache_resource_(std::make_shared<StreamCacheResource>(
         this, resource_context, input->need_release_resource, input->generate_config->adapter_name)),
     need_release_resource_(input->need_release_resource),
@@ -71,9 +94,6 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     if (generate_input_->generate_config->calculate_loss && inputLength() > 1) {
         loss_ = torch::zeros({(int64_t)inputLength() - 1}, torch::kFloat32);
     }
-    if (generate_input_->generate_config->return_softmax_probs) {
-        softmax_probs_ = torch::zeros({(int64_t)init_batch_size, (int64_t)max_seq_len_}, torch::kFloat32);
-    }
     if (generate_input_->generate_config->return_all_hidden_states) {
         setReturnLastHiddenStates(true);
     }
@@ -96,13 +116,44 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
+    int64_t processor_eos_token_id = special_tokens_.eos_token_id;
+    if (output_vocab_size_ > 0) {
+        const auto& output_vocab_ids = model_config.output_vocab_ids;
+        const auto  eos_it =
+            std::lower_bound(output_vocab_ids.begin(), output_vocab_ids.end(), special_tokens_.eos_token_id);
+        if (eos_it == output_vocab_ids.end() || *eos_it != special_tokens_.eos_token_id) {
+            reportError(ErrorCode::INVALID_PARAMS, "primary EOS token is absent from the configured output vocabulary");
+            return;
+        }
+        processor_eos_token_id = std::distance(output_vocab_ids.begin(), eos_it);
+
+        if (auto error = validateOutputVocabRequest(*generateConfig(), output_vocab_size_)) {
+            reportError(ErrorCode::INVALID_PARAMS, *error);
+            return;
+        }
+    }
+
     auto processors_result = LogitsProcessorFactory::createLogitsProcessors(
-        generate_input_, init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
+        generate_input_, init_batch_size, maxBatchSize(), processor_eos_token_id);
     if (processors_result.ok()) {
-        logits_processor_list_ = std::move(processors_result.value());
+        auto processors = std::move(processors_result.value());
+        if (output_vocab_size_ > 0) {
+            for (const auto& processor : processors) {
+                if (typeid(*processor) != typeid(MultiSeqLogitsProcessor)) {
+                    reportError(ErrorCode::INVALID_PARAMS,
+                                "output vocabulary pruning only supports the MultiSeq logits processor");
+                    return;
+                }
+            }
+        }
+        logits_processor_list_ = std::move(processors);
     } else {
         const auto& err = processors_result.status();
         reportEventWithoutLock(StreamEvents::Error, err.code(), err.ToString());
+    }
+
+    if (calculateSoftmaxProbs()) {
+        softmax_probs_ = torch::zeros({(int64_t)maxBatchSize(), (int64_t)maxTokenNum()}, torch::kFloat32);
     }
 
     if (generateConfig()->random_seed.has_value()) {
@@ -329,6 +380,10 @@ int GenerateStream::maxNumBeams() const {
 
 bool GenerateStream::hasNumBeams() const {
     return generate_input_->generate_config->hasNumBeams();
+}
+
+bool GenerateStream::usesBeamSearchTokenLayoutForCurrentStep() const {
+    return currentNumBeams() > 1 || nextNumBeams() > 1;
 }
 
 bool GenerateStream::needTilingForSampling() const {
@@ -1025,7 +1080,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
                                      generate_input_->inputLength(),
                                      maxTokenNum(),
                                      vocab_size_,
-                                     hasNumBeams(),
+                                     usesBeamSearchTokenLayoutForCurrentStep(),
                                      streamId(),
                                      error_token_id,
                                      update_info.src_batch_indices)) {
@@ -1147,17 +1202,33 @@ void GenerateStream::setLoss(const torch::Tensor& loss) {
     loss_index_ += loss_size;
 }
 
-void GenerateStream::setSoftmaxProbs(const torch::Tensor& softmax_probs, int start_pos) {
+void GenerateStream::setSoftmaxProbs(const torch::Tensor& softmax_probs,
+                                     int                  start_pos,
+                                     const torch::Tensor& src_batch_indices) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto probs_cpu = softmax_probs.is_cuda() ? softmax_probs.cpu() : softmax_probs;
+    RTP_LLM_CHECK(softmax_probs_.defined());
+    auto probs_cpu = softmax_probs.to(torch::kCPU, torch::kFloat32).contiguous();
     RTP_LLM_CHECK(probs_cpu.dim() == 2);
     RTP_LLM_CHECK(probs_cpu.size(0) == currentBatchSize());
     auto num_probs = probs_cpu.size(1);
-    for (int i = 0; i < currentBatchSize(); ++i) {
-        memcpy(softmax_probs_.data_ptr<float>() + i * softmax_probs_.size(1) + start_pos,
-               probs_cpu[i].data_ptr<float>(),
-               num_probs * sizeof(float));
+    RTP_LLM_CHECK(start_pos >= 0);
+    RTP_LLM_CHECK(start_pos + num_probs <= softmax_probs_.size(1));
+    RTP_LLM_CHECK(currentBatchSize() <= softmax_probs_.size(0));
+
+    if (src_batch_indices.defined()) {
+        auto indices_cpu = src_batch_indices.to(torch::kCPU, torch::kLong).contiguous();
+        RTP_LLM_CHECK(indices_cpu.dim() == 1);
+        RTP_LLM_CHECK(indices_cpu.numel() == currentBatchSize());
+        RTP_LLM_CHECK(indices_cpu.min().item<int64_t>() >= 0);
+        RTP_LLM_CHECK(indices_cpu.max().item<int64_t>() < softmax_probs_.size(0));
+
+        if (start_pos > 0) {
+            auto history = softmax_probs_.narrow(1, 0, start_pos).index_select(0, indices_cpu);
+            softmax_probs_.narrow(0, 0, currentBatchSize()).narrow(1, 0, start_pos).copy_(history);
+        }
     }
+
+    softmax_probs_.narrow(0, 0, currentBatchSize()).narrow(1, start_pos, num_probs).copy_(probs_cpu);
 }
 
 torch::Tensor GenerateStream::getLoss() {

@@ -3,6 +3,8 @@
 #include <optional>
 
 #include <torch/all.h>
+#include <utility>
+#include <vector>
 #include "absl/status/status.h"
 #include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
@@ -20,10 +22,20 @@ public:
     NormalOutputDispatcher() = default;
     NormalOutputDispatcher(std::shared_ptr<autil::LockFreeThreadPool> thread_pool):
         thread_pool_(std::move(thread_pool)) {}
+    explicit NormalOutputDispatcher(std::vector<int64_t> output_vocab_ids):
+        output_vocab_ids_(std::move(output_vocab_ids)) {}
+    NormalOutputDispatcher(std::shared_ptr<autil::LockFreeThreadPool> thread_pool,
+                           std::vector<int64_t>                       output_vocab_ids):
+        thread_pool_(std::move(thread_pool)), output_vocab_ids_(std::move(output_vocab_ids)) {}
 
     absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
 
 private:
+    bool restoreCurrentTokenIds(const GenerateStreamPtr& stream,
+                                torch::Tensor&           batch_token_ids,
+                                torch::Tensor&           current_token_ids,
+                                size_t                   token_position) const;
+
     void dispatchSingleStream(GenerateStreamPtr    stream,
                               const MergedOutput&  merge_outputs,
                               int                  batch_idx_in,
@@ -34,6 +46,7 @@ private:
                               const torch::Tensor& success_cpu) const;
 
     std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;
+    std::vector<int64_t>                       output_vocab_ids_;
 };
 
 }  // namespace rtp_llm
