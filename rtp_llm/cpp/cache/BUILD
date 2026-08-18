@@ -395,3 +395,11 @@ cc_library(
         "//conditions:default": [],
     }),
 )
+
+cc_library(
+    name = "block_ref_counter",
+    hdrs = ["BlockRefCounter.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = ["//rtp_llm/cpp/utils:core_utils"],
+)
