@@ -472,7 +472,7 @@ class PrefillEndpointTest {
     }
 
     @Test
-    void calibrateMissingBatchIdPreservesDispatchReconciliationFence() {
+    void calibrateMissingBatchIdFinishedEvidenceOverridesReconciliationFence() {
         endpoint.commitBatch(700L, 100, List.of(
                 createBatchItem(101L, 500, 200),
                 createBatchItem(102L, 300, 100)));
@@ -483,12 +483,16 @@ class PrefillEndpointTest {
                 "a non-protected sibling must be repacked, not erase the protected batch");
         assertEquals(1, endpoint.realPendingCount());
 
+        // 17:04 fix: the engine reported the fenced member finished — that
+        // evidence outranks the fence, so the batch settles without waiting
+        // for a reconcile ACK that may never arrive.
         TaskInfo canceled = priorityCanceledTask(101L, -1L);
         calibrate(Map.of("101", canceled), Map.of());
-        assertEquals(1, endpoint.getInflightBatchCount(),
-                "generic endpoint calibration must not bypass the reconciliation owner");
-        assertEquals(1, endpoint.realPendingCount());
+        assertEquals(0, endpoint.getInflightBatchCount(),
+                "engine-finished evidence must settle the fenced member immediately");
+        assertEquals(0, endpoint.realPendingCount());
 
+        // Idempotent: the full-member settle already dropped the fence record.
         endpoint.endDispatchReconciliation(700L, 101L);
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0, endpoint.realPendingCount());
@@ -578,7 +582,7 @@ class PrefillEndpointTest {
     }
 
     @Test
-    void calibrateSuccessOnlyRetiresSiblingWhileBatchMemberReconciles() {
+    void calibrateSuccessRetiresFencedMemberOnceEngineReportsFinished() {
         BatchItem reconciling = createBatchItem(101L, 500, 200);
         BatchItem sibling = createBatchItem(102L, 300, 100);
         endpoint.commitBatch(7L, 100, List.of(reconciling, sibling));
@@ -598,10 +602,12 @@ class PrefillEndpointTest {
         ambiguousMemberSuccess.setBatchId(7L);
         ambiguousMemberSuccess.setRequestId(101L);
         ambiguousMemberSuccess.setErrorCode(0);
+        // 17:04 fix: the engine's own success report settles the fenced member
+        // without a reconcile ACK, clearing the fence and releasing the gate.
         calibrate(Map.of("101", ambiguousMemberSuccess), Map.of());
-        assertEquals(1, endpoint.getInflightBatchCount(),
-                "ordinary success is not a reconciliation terminal");
-        assertEquals(1, endpoint.realPendingCount());
+        assertEquals(0, endpoint.getInflightBatchCount(),
+                "engine-finished evidence is a settlement terminal for fenced members");
+        assertEquals(0, endpoint.realPendingCount());
 
         endpoint.endDispatchReconciliation(7L, 101L);
         assertEquals(0, endpoint.getInflightBatchCount());
@@ -617,10 +623,13 @@ class PrefillEndpointTest {
 
         TaskInfo protectedFailure = taskInfo(101L, 7L, null, 500, 40);
         TaskInfo siblingFailure = taskInfo(102L, 7L, null, 501, 50);
+        // 17:04 fix: both terminals are engine-finished evidence, so both
+        // settle inside this one snapshot; the full-member settle also
+        // clears the fence in the same critical section.
         calibrate(Map.of("101", protectedFailure, "102", siblingFailure), Map.of());
 
-        assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(1, endpoint.realPendingCount());
+        assertEquals(0, endpoint.getInflightBatchCount());
+        assertEquals(0, endpoint.realPendingCount());
 
         endpoint.endDispatchReconciliation(7L, 101L);
         assertEquals(0, endpoint.getInflightBatchCount());
@@ -629,6 +638,68 @@ class PrefillEndpointTest {
                 anyString(), anyString(), org.mockito.ArgumentMatchers.anyLong());
 
         endpoint.endDispatchReconciliation(7L, 101L);
+        assertEquals(0, endpoint.realPendingCount());
+    }
+
+    // ---- 17:04 fix: engine-finished evidence outranks the fence ----
+
+    @Test
+    void fencedBatchSettlesImmediatelyWhenAllMembersReportFinished() {
+        endpoint.commitBatch(701L, 100, List.of(
+                createBatchItem(711L, 500, 200),
+                createBatchItem(712L, 300, 100)));
+        endpoint.beginDispatchReconciliation(701L, 711L);
+
+        calibrate(Map.of(
+                "711", taskInfo(711L, 701L, null, 0, 40),
+                "712", taskInfo(712L, 701L, null, 0, 50)), Map.of());
+
+        assertEquals(0, endpoint.getInflightBatchCount(),
+                "a fenced batch whose members all reported finished must settle at once");
+        assertEquals(0, endpoint.realPendingCount(), "the inflight gate must be released");
+
+        // The full-member settle already dropped the fence: end stays idempotent.
+        endpoint.endDispatchReconciliation(701L, 711L);
+        assertEquals(0, endpoint.getInflightBatchCount());
+        assertEquals(0, endpoint.realPendingCount());
+    }
+
+    @Test
+    void fencedBatchWithoutFinishedEvidenceStaysSettleDeferred() throws InterruptedException {
+        endpoint.commitBatch(702L, 100, List.of(createBatchItem(721L, 500, 200)));
+        endpoint.beginDispatchReconciliation(702L, 721L);
+
+        // Running observations are NOT finished evidence: the fenced member
+        // must stay deferred (regression guard for the fence's caution).
+        calibrate(Map.of(), Map.of("721", taskInfo(721L, 702L, TaskPhase.RUNNING, 0, 0)));
+        assertEquals(1, endpoint.getInflightBatchCount());
+        assertEquals(1, endpoint.realPendingCount());
+
+        Thread.sleep(10);
+        assertEquals(0, endpoint.evictExpiredBatches(1),
+                "the reconciliation fence must still defer age-only eviction");
+        assertEquals(1, endpoint.getInflightBatchCount());
+    }
+
+    @Test
+    void fencedBatchPartialFinishedSettlesOnlyFinishedMembers() {
+        endpoint.commitBatch(703L, 100, List.of(
+                createBatchItem(731L, 500, 200),
+                createBatchItem(732L, 300, 100)));
+        endpoint.beginDispatchReconciliation(703L, 731L);
+
+        calibrate(Map.of("731", taskInfo(731L, 703L, null, 0, 40)), Map.of());
+        assertEquals(1, endpoint.getInflightBatchCount(),
+                "the finished fenced member settles; the batch survives for the rest");
+        assertEquals(1, endpoint.realPendingCount());
+
+        calibrate(Map.of("732", taskInfo(732L, 703L, null, 0, 50)), Map.of());
+        assertEquals(0, endpoint.getInflightBatchCount(),
+                "the last member's terminal settles the batch and clears the fence");
+        assertEquals(0, endpoint.realPendingCount());
+
+        endpoint.endDispatchReconciliation(703L, 731L);
+        assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0, endpoint.realPendingCount());
     }
 

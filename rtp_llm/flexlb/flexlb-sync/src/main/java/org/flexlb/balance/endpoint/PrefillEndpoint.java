@@ -445,7 +445,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                                        long statusMs) {
         AtomicReference<BatchInflight> completed = new AtomicReference<>();
         inflightBatches.computeIfPresent(batchId, (id, batch) ->
-                applyFinishedObservations(id, batch, observations, statusMs, true, completed));
+                applyFinishedObservations(id, batch, observations, statusMs, completed));
 
         BatchInflight completedBatch = completed.get();
         if (completedBatch != null) {
@@ -457,14 +457,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
                                                      BatchInflight batch,
                                                      List<FinishedObservation> observations,
                                                      long statusMs,
-                                                     boolean deferReconciliation,
                                                      AtomicReference<BatchInflight> completed) {
         Set<Long> localRequestIds = batch.requests().stream()
                 .map(BatchItem::requestId)
                 .collect(Collectors.toSet());
         Set<Long> finishedIds = new HashSet<>();
         int foreignCount = 0;
-        int deferredByFence = 0;
 
         for (FinishedObservation observation : observations) {
             long requestId = observation.requestId();
@@ -485,11 +483,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
             } else {
                 batch.observeFailure();
             }
-            if (deferReconciliation && deferIfReconciling(batchId, observation)) {
-                deferredByFence++;
-                continue;
-            }
-
+            // 17:04 leak fix: an engine-finished report IS stronger evidence than
+            // the dispatch-reconciliation fence, so fenced members settle here
+            // immediately instead of waiting for a reconcile ACK that may never
+            // arrive. The fence keeps guarding only members WITHOUT finished
+            // evidence — through the TTL exemption (hasDispatchReconciliation)
+            // and the lost-detection fenced-skip.
             finishedIds.add(requestId);
             if (observation.errorCode() != 0) {
                 logger.debug("Prefill calibrate: batch failure batchId={} reqId={} error={}",
@@ -497,10 +496,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
             }
         }
 
-        if (deferredByFence > 0) {
-            warnSettleDeferredByFence(batchId, batch, deferredByFence,
-                    observations.size(), statusMs);
-        }
         if (foreignCount > 0) {
             logger.warn("Prefill calibrate: batchId={} has {} finished tasks with foreign requestIds; "
                             + "ignoring them",
@@ -516,43 +511,25 @@ public class PrefillEndpoint extends WorkerEndpoint {
         inflightRequestCount.addAndGet(-(batch.requests().size() - survivors.size()));
         cachedWaitTimeExpireAtMs = 0;
         if (survivors.isEmpty()) {
+            // Full-member settle: drop the batch and any residual fence in one
+            // critical section (lock order — inflight key first, reconciliation
+            // key second — matches begin/endDispatchReconciliation). The inflight
+            // gate was already released via inflightRequestCount above.
+            ConcurrentHashMap<Long, ReconciliationState> residualFence =
+                    reconciliationRequests.remove(batchId);
+            if (residualFence != null && !residualFence.isEmpty()) {
+                org.flexlb.util.Logger.warn(
+                        "event=inflight_settle_forced_by_finished_evidence endpoint={} "
+                                + "batch_id={} fence_size={} n_requests={} "
+                                + "reason=engine_finished_evidence_outranks_fence",
+                        getIp(), batchId, residualFence.size(), batch.requests().size());
+            }
             completed.set(batch);
             return null;
         }
 
         long newPredMs = (long) predictor.predictBatchMs(survivors);
         return batch.repack(newPredMs, survivors);
-    }
-
-    /** Anti-flood rate limit for the settle-deferred fence WARN (per batch). */
-    private static final long SETTLE_DEFER_WARN_RATE_MS = 60_000L;
-
-    /**
-     * Fence-deferred settle audit: finished members whose settle was skipped
-     * because the dispatch-reconciliation fence still owns them. One WARN
-     * per batch per {@link #SETTLE_DEFER_WARN_RATE_MS} — an unresolved fence
-     * otherwise repeats on every ~20ms calibrate round because finished
-     * snapshots re-report the same members. Pinpoints the "fence postpones
-     * settle" path when batches outlive their members' engine terminals.
-     */
-    private void warnSettleDeferredByFence(long batchId, BatchInflight batch,
-                                           int deferredMembers, int reportedMembers,
-                                           long statusMs) {
-        if (!batch.shouldWarnSettleDeferred(statusMs, SETTLE_DEFER_WARN_RATE_MS)) {
-            return;
-        }
-        ConcurrentHashMap<Long, ReconciliationState> fence =
-                reconciliationRequests.get(batchId);
-        org.flexlb.util.Logger.warn(
-                "event=inflight_settle_deferred_by_fence endpoint={} batch_id={} "
-                        + "reason=dispatch_reconciliation_fence deferred_members={} "
-                        + "reported_finished_members={} fence_size={} age_ms={} "
-                        + "last_observed_ago_ms={} n_requests={}",
-                getIp(), batchId, deferredMembers, reportedMembers,
-                fence != null ? fence.size() : 0,
-                statusMs - batch.createdAtMs(),
-                statusMs - batch.lastObservedAtMs(),
-                batch.requests().size());
     }
 
     /**
@@ -1075,29 +1052,18 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 batch.touch(statusMs);
                 return batch;
             }
-            // The fence was removed under the same inflight-key critical section,
-            // so apply the cached terminal directly instead of trying to defer it again.
+            // Defensive path only: since the 17:04 fix, engine-finished
+            // evidence outranks the fence and is applied at observation time,
+            // so the cached deferredTerminal is always null today. Kept so a
+            // cached terminal would still be honored if a defer mechanism is
+            // ever reintroduced.
             return applyFinishedObservations(
-                    id, batch, List.of(observation), statusMs, false, completed);
+                    id, batch, List.of(observation), statusMs, completed);
         });
         BatchInflight completedBatch = completed.get();
         if (completedBatch != null) {
             reportBatchCompletion(batchId, completedBatch);
         }
-    }
-
-    private boolean deferIfReconciling(long batchId, FinishedObservation observation) {
-        AtomicBoolean deferred = new AtomicBoolean(false);
-        reconciliationRequests.computeIfPresent(batchId, (ignored, requests) -> {
-            requests.computeIfPresent(observation.requestId(), (requestId, state) -> {
-                deferred.set(true);
-                FinishedObservation existing = state.deferredTerminal();
-                return new ReconciliationState(existing == null
-                        ? observation : existing.merge(observation));
-            });
-            return requests.isEmpty() ? null : requests;
-        });
-        return deferred.get();
     }
 
     private boolean hasDispatchReconciliation(long batchId) {

@@ -180,25 +180,6 @@ final class BatchInflight implements InflightEvictor.TtlTracked {
         return observationMisses.get();
     }
 
-    /** Last wall-clock time a settle-deferred WARN was emitted for this batch. */
-    private volatile long lastDeferWarnAtMs;
-
-    /**
-     * Anti-spam gate for the settle-deferred audit WARN: allows at most one
-     * line per {@code rateLimitMs} window (calibrate runs every ~20ms and
-     * finished snapshots repeat members, so an unresolved fence would
-     * otherwise flood). Race-tolerant by design — a concurrent pass may
-     * emit one extra line, never fewer than one per window per instance.
-     */
-    boolean shouldWarnSettleDeferred(long nowMs, long rateLimitMs) {
-        long last = lastDeferWarnAtMs;
-        if (nowMs - last < rateLimitMs) {
-            return false;
-        }
-        lastDeferWarnAtMs = nowMs;
-        return true;
-    }
-
     boolean running() {
         return running;
     }
