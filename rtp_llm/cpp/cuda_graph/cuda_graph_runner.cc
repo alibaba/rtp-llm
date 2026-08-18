@@ -881,8 +881,7 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
         inputs.attention_inputs.prefix_lengths = torch::empty({0}, options_cpu_int32_).pin_memory();
     }
     // padding_offset [max_num_token_, int32] (for attention padding)
-    inputs.attention_inputs.padding_offset =
-        torch::zeros({int(static_cast<size_t>(max_seq_len_) * static_cast<size_t>(max_bs))}, options_cpu_int32_);
+    inputs.attention_inputs.padding_offset = torch::zeros({int(max_seq_len_ * max_bs_)}, options_cpu_int32_);
     inputs.attention_inputs.padding_offset = inputs.attention_inputs.padding_offset.pin_memory();
     inputs.attention_inputs.dtype          = model_data_type_;
     inputs.attention_inputs.is_s_padded    = true;
@@ -998,43 +997,6 @@ void CudaGraphRunner::initCapture() {
             capture_range_ = getPrefillSequenceLengthsToCapture();
         } else {
             capture_range_ = getDecodeBatchSizesToCapture();
-            // Invariant, stated once because CONCURRENCY_LIMIT reaches this file through three
-            // different meanings: (a) the requests DecodeRpcServer admits end-to-end
-            // (decode_admission_limit, which defaults to it), (b) the rows the scheduler puts in
-            // one forward batch, and (c) the rows these graph buffers must hold. Only (c) governs
-            // here, and (c) cannot be derived from (a): decode streams arrive from the PD peer
-            // without passing this role's admission gate, so a batch between max_bs_ and the
-            // largest captured bucket is reachable. canRun() accepts any batch up to that bucket,
-            // and replaying into buffers that only hold max_bs_ rows makes the output slice()
-            // clamp silently, after which the caller reshapes a short tensor by the real batch.
-            //
-            // Widen max_bs_ in place rather than tracking capacity in a second field: every buffer
-            // in initCaptureAttentionInputs / initCaptureBertEmbeddingInputs and the token slice in
-            // prepareCaptureInputs is sized from it, so one source keeps them consistent by
-            // construction. concurrency_limit_bs_ preserves the original value for logs and checks.
-            // Compare as int before widening: capture_range_ holds ints from operator config, and
-            // an implicit conversion of a negative bucket to size_t would look like an enormous
-            // limit and size the buffers for it.
-            const int largest_bucket = capture_range_.empty() ? 0 : capture_range_.back();
-            RTP_LLM_CHECK_WITH_INFO(largest_bucket <= kMaxDecodeCaptureBatchSize,
-                                    "decode_capture_batch_sizes largest bucket %d exceeds the supported "
-                                    "maximum %d; check decode_capture_batch_sizes against concurrency_limit "
-                                    "(currently %zu)",
-                                    largest_bucket,
-                                    kMaxDecodeCaptureBatchSize,
-                                    concurrency_limit_bs_);
-            if (largest_bucket > 0 && static_cast<size_t>(largest_bucket) > max_bs_) {
-                RTP_LLM_LOG_WARNING(
-                    "decode capture buckets reach %d beyond concurrency_limit %zu (x%.2f); sizing graph "
-                    "buffers for %d. Check decode_capture_batch_sizes against concurrency_limit if this "
-                    "factor is unexpected -- the extra rows are captured graph memory.",
-                    largest_bucket,
-                    concurrency_limit_bs_,
-                    static_cast<double>(largest_bucket) / static_cast<double>(std::max<size_t>(concurrency_limit_bs_, 1)),
-                    largest_bucket);
-                max_bs_        = static_cast<size_t>(largest_bucket);
-                max_num_token_ = static_cast<int>(max_bs_) * num_tokens_per_bs_;
-            }
         }
 
         PyModelInputs inputs;

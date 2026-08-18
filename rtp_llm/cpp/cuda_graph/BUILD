@@ -18,12 +18,6 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-cc_library(
-    name = "mtp_draft_prefill_buckets",
-    hdrs = ["mtp_draft_prefill_buckets.h"],
-    visibility = ["//visibility:public"],
-)
-
 filegroup(
     name = "cuda_graph_srcs",
     srcs = [
@@ -44,7 +38,6 @@ filegroup(
         "cuda_graph_device_shims.h",
         "cuda_graph_utils.h",
         "cuda_graph_runner.h",
-        "mtp_draft_prefill_buckets.h",
     ],
     visibility = ["//visibility:public"],
 )
@@ -82,7 +75,6 @@ cc_library(
         ":cuda_graph_base",
         ":combo_position_ids_validation",
         ":cuda_graph_hdrs_lib",
-        ":mtp_draft_prefill_buckets",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:profiling_scope",

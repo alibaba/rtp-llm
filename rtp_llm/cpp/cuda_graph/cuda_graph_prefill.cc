@@ -1,6 +1,5 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
-#include "rtp_llm/cpp/cuda_graph/mtp_draft_prefill_buckets.h"
 #include <optional>
 
 namespace rtp_llm {
@@ -101,22 +100,12 @@ void CudaGraphRunner::capturePrefill() {
 std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
     // MTP draft prefill: capture at multiples of num_tokens_per_bs_
     if (isMtpDraftPrefillCudaGraph()) {
-        // Do NOT let prefill_capture_seq_lens_ override this. It is the embedding-prefill
-        // capture list and hw_kernel_group_args._parse_prefill_capture_config() populates it
-        // unconditionally (160 lengths at step=1 in the EAGLE cudagraph smoke), so treating it
-        // as an opt-in rollback knob here silently replaced the capture set with keys that are
-        // not multiples of num_tokens_per_bs_ and aborted during capture (SIGABRT on rank 1 in
-        // rocm_eagle_qwen2_14b_cudagraph). A rollback switch would need its own config field.
-        //
-        // The set covers every batch size 1..max_bs, one key per batch. It must not be thinned
-        // to a sparse set: the prefill graph bakes in the captured batch's attention layout, so a
-        // draft batch with no exact key replays a larger key's graph over mismatched cu_seqlens
-        // and reads out of bounds (decode-side CUDA illegal memory access at concurrency > 1).
-        // Rationale and the degenerate-config guard live with the helper, unit tested in
-        // tests/mtp_draft_prefill_buckets_test.cc.
-        std::vector<int> result = mtpDraftPrefillCaptureSeqLens(max_bs_, num_tokens_per_bs_);
+        std::vector<int> result;
+        for (int i = 1; i <= max_bs_; ++i) {
+            result.push_back(i * num_tokens_per_bs_);
+        }
         RTP_LLM_LOG_INFO(
-            "Draft model prefill: capture seq_lens at %d intervals, %zu total (max_bs=%zu, num_tokens_per_bs=%d)",
+            "Draft model prefill: capture seq_lens at %d intervals, %zu total (max_bs=%d, num_tokens_per_bs=%d)",
             num_tokens_per_bs_,
             result.size(),
             max_bs_,
