@@ -678,8 +678,30 @@ public class PrefillEndpoint extends WorkerEndpoint {
      */
     public int evictExpiredBatches(long ttlMs, long hardMaxAgeMs, long batchInflightMaxAgeMs,
                                    long batchInflightStaleMs, LongPredicate schedulerOwnsRequest) {
+        return evictExpiredBatchesByReason(ttlMs, hardMaxAgeMs, batchInflightMaxAgeMs,
+                batchInflightStaleMs, schedulerOwnsRequest).total();
+    }
+
+    /**
+     * Same eviction pass as
+     * {@link #evictExpiredBatches(long, long, long, long, LongPredicate)} but
+     * returns the per-exit counts, so the eviction metric can carry one
+     * {@code reason} tag per exit ({@code all_terminal} / {@code age_capped}
+     * / {@code hard_age_cap} / {@code ttl}) instead of folding all exits into
+     * one number. The eviction logic, exit ordering and thresholds are
+     * identical.
+     *
+     * @return per-exit eviction counts
+     */
+    public EvictionBreakdown evictExpiredBatchesByReason(long ttlMs, long hardMaxAgeMs,
+                                                         long batchInflightMaxAgeMs,
+                                                         long batchInflightStaleMs,
+                                                         LongPredicate schedulerOwnsRequest) {
         long nowMs = System.currentTimeMillis();
-        AtomicInteger evictedCount = new AtomicInteger();
+        AtomicInteger allTerminalCount = new AtomicInteger();
+        AtomicInteger ageCappedCount = new AtomicInteger();
+        AtomicInteger hardCappedCount = new AtomicInteger();
+        AtomicInteger ttlCount = new AtomicInteger();
         for (Long batchId : inflightBatches.keySet()) {
             AtomicReference<BatchInflight> evicted = new AtomicReference<>();
             AtomicReference<BatchInflight> forced = new AtomicReference<>();
@@ -749,7 +771,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                         schedulerOwned, terminalBatch.observationMisses());
                 inflightRequestCount.addAndGet(-terminalBatch.requests().size());
                 cachedWaitTimeExpireAtMs = 0;
-                evictedCount.incrementAndGet();
+                allTerminalCount.incrementAndGet();
                 continue;
             }
             BatchInflight cappedBatch = ageCapped.get();
@@ -757,7 +779,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 forceSettleAgeCappedBatch(batchId, cappedBatch,
                         nowMs - cappedBatch.createdAtMs(),
                         nowMs - cappedBatch.lastObservedAtMs(), batchInflightMaxAgeMs);
-                evictedCount.incrementAndGet();
+                ageCappedCount.incrementAndGet();
                 continue;
             }
             BatchInflight forcedBatch = forced.get();
@@ -780,10 +802,15 @@ public class PrefillEndpoint extends WorkerEndpoint {
             if (removed != null) {
                 inflightRequestCount.addAndGet(-removed.requests().size());
                 cachedWaitTimeExpireAtMs = 0;
-                evictedCount.incrementAndGet();
+                if (forcedBatch != null) {
+                    hardCappedCount.incrementAndGet();
+                } else {
+                    ttlCount.incrementAndGet();
+                }
             }
         }
-        return evictedCount.get();
+        return new EvictionBreakdown(allTerminalCount.get(), ageCappedCount.get(),
+                hardCappedCount.get(), ttlCount.get());
     }
 
     /**

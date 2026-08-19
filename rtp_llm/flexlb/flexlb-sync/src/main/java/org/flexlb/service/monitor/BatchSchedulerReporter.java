@@ -316,12 +316,18 @@ public class BatchSchedulerReporter {
 
     /**
      * Report inflight entries evicted from an endpoint ledger
-     * (PrefillEndpoint.evictExpiredBatches / DecodeEndpoint.evictExpiredRequests
-     * / orphan decode reservation reclaims) via the same
+     * (PrefillEndpoint.evictExpiredBatchesByReason /
+     * DecodeEndpoint.evictExpiredRequestsByReason, plus the scheduler-side
+     * orphan decode reservation reclaim) via the same
      * {@code app.flexlb.inflight.ttl.expired.qps} series family.
      * <p>Endpoint-side evictions were previously log-only
      * (event=endpoint_inflight_ttl_eviction); this closes the gap with the
-     * shared {role, engineIp, reason} tag schema.
+     * shared {role, engineIp, reason} tag schema. Reason values split by
+     * eviction exit: {@code all_terminal} (all-terminal release),
+     * {@code age_capped} (F-F batch age cap), {@code hard_age_cap} (guarded
+     * hard cap — same value as the scheduler-side series), {@code ttl}
+     * (normal unobserved TTL) and {@code orphan_reservation} (scheduler-side
+     * orphan decode reservation reclaim); only non-zero buckets are reported.
      */
     public void reportEndpointInflightTtlExpired(String role, String engineIp, String reason, int count) {
         FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,

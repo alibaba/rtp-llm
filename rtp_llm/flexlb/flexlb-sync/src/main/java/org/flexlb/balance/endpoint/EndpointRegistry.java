@@ -271,30 +271,51 @@ public class EndpointRegistry {
         LongPredicate schedulerOwns = batchScheduler()::hasInflightRequest;
         prefillEndpoints.forEach((endpoint, ep) ->
                 reportEndpointEviction(RoleType.PREFILL, endpoint, ep.getIp(),
-                        ep.evictExpiredBatches(ttlMs, hardMaxAgeMs, batchInflightMaxAgeMs,
+                        ep.evictExpiredBatchesByReason(ttlMs, hardMaxAgeMs, batchInflightMaxAgeMs,
                                 batchInflightStaleMs, schedulerOwns), ttlMs));
         decodeEndpoints.forEach((endpoint, ep) ->
                 reportEndpointEviction(RoleType.DECODE, endpoint, ep.getIp(),
-                        ep.evictExpiredRequests(ttlMs, hardMaxAgeMs, schedulerOwns), ttlMs));
+                        ep.evictExpiredRequestsByReason(ttlMs, hardMaxAgeMs, schedulerOwns), ttlMs));
         pdFusionEndpoints.forEach((endpoint, ep) ->
                 reportEndpointEviction(RoleType.PDFUSION, endpoint, ep.getIp(),
-                        ep.evictExpiredBatches(ttlMs, hardMaxAgeMs, batchInflightMaxAgeMs,
+                        ep.evictExpiredBatchesByReason(ttlMs, hardMaxAgeMs, batchInflightMaxAgeMs,
                                 batchInflightStaleMs, schedulerOwns), ttlMs));
     }
 
+    /**
+     * Report one endpoint's eviction sweep on the shared
+     * {@code app.flexlb.inflight.ttl.expired.qps} series, split by exit
+     * reason. Reason buckets mirror the eviction exits and reuse the
+     * scheduler-side series naming: {@code all_terminal} — every member's
+     * scheduler-side future is already terminal (all-terminal release);
+     * {@code age_capped} — progress-aware batch-level age cap (F-F);
+     * {@code hard_age_cap} — guarded hard cap overriding fences and
+     * observation keep-alives; {@code ttl} — normal unobserved TTL. Only
+     * non-zero buckets are reported, so decode endpoints (no batch-ledger
+     * exits) never emit {@code all_terminal}/{@code age_capped}.
+     */
     private void reportEndpointEviction(RoleType role,
                                         String endpoint,
                                         String engineIp,
-                                        int evicted,
+                                        EvictionBreakdown evictions,
                                         long ttlMs) {
+        int evicted = evictions.total();
         if (evicted > 0) {
             Logger.info("event=endpoint_inflight_ttl_eviction role={} endpoint={} "
-                            + "evicted={} ttl_ms={}",
-                    role, endpoint, evicted, ttlMs);
-            // Endpoint-ledger evictions were previously log-only. The endpoint
-            // eviction APIs do not split TTL vs hard-cap counts, so reason=ttl
-            // covers both here.
-            reporter.reportEndpointInflightTtlExpired(role.name(), engineIp, "ttl", evicted);
+                            + "evicted={} ttl_ms={} all_terminal={} age_capped={} "
+                            + "hard_age_cap={} ttl={}",
+                    role, endpoint, evicted, ttlMs, evictions.allTerminal(),
+                    evictions.ageCapped(), evictions.hardAgeCap(), evictions.ttl());
+            reportEvictionReason(role, engineIp, "all_terminal", evictions.allTerminal());
+            reportEvictionReason(role, engineIp, "age_capped", evictions.ageCapped());
+            reportEvictionReason(role, engineIp, "hard_age_cap", evictions.hardAgeCap());
+            reportEvictionReason(role, engineIp, "ttl", evictions.ttl());
+        }
+    }
+
+    private void reportEvictionReason(RoleType role, String engineIp, String reason, int count) {
+        if (count > 0) {
+            reporter.reportEndpointInflightTtlExpired(role.name(), engineIp, reason, count);
         }
     }
 

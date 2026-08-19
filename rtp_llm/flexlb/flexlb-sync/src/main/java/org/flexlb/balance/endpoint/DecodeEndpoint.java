@@ -1018,14 +1018,31 @@ public class DecodeEndpoint extends WorkerEndpoint {
      */
     public int evictExpiredRequests(long ttlMs, long hardMaxAgeMs,
                                     LongPredicate schedulerOwnsRequest) {
+        return evictExpiredRequestsByReason(ttlMs, hardMaxAgeMs, schedulerOwnsRequest).total();
+    }
+
+    /**
+     * Same eviction pass as
+     * {@link #evictExpiredRequests(long, long, LongPredicate)} but returns
+     * the per-exit counts for the reason-split eviction metric. Decode has
+     * exactly two exits: {@code ttl} (regular unobserved TTL pass) and
+     * {@code hard_age_cap} (guarded hard cap force-releasing zombie
+     * preemption claims) — the batch-ledger exits ({@code all_terminal},
+     * {@code age_capped}) do not exist here and stay zero.
+     *
+     * @return per-exit eviction counts
+     */
+    public EvictionBreakdown evictExpiredRequestsByReason(long ttlMs, long hardMaxAgeMs,
+                                                          LongPredicate schedulerOwnsRequest) {
         admissionLock.lock();
         try {
             // A priority claim is a stronger accounting owner than generic
             // TTL cleanup. In particular, an ENGINE_MAY_HAVE_SEEN shadow must
             // remain charged until typed Prefill CANCELED or explicit
             // NOT_FOUND/UNKNOWN reconciliation settles the claim.
-            int evicted = requestEvictor.evictExpired(
+            int ttlEvicted = requestEvictor.evictExpired(
                     ttlMs, requestId -> !preemptionClaims.containsKey(requestId));
+            int hardCapped = 0;
             // Hard age cap pass: whatever survived above (claim-exempted) but
             // exceeds the cap is force-released with full counter cleanup.
             if (hardMaxAgeMs > 0) {
@@ -1048,7 +1065,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     if (claim != null) {
                         releaseHeldKv(claim);
                     }
-                    evicted++;
+                    hardCapped++;
                     logger.warn("event=inflight_hard_age_eviction role=DECODE endpoint={} "
                                     + "request_id={} age_ms={} hard_max_age_ms={} created_at_ms={} "
                                     + "kv_tokens={} expected_kv_tokens={} priority={} deadline_ms={} "
@@ -1074,10 +1091,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     .removeIf(task -> task.lastSeenMs() < cutoff);
             boolean canceledTombstonesPurged = priorityCanceledTombstones.entrySet()
                     .removeIf(entry -> entry.getValue() < cutoff);
+            int evicted = ttlEvicted + hardCapped;
             if (evicted > 0 || trackedPurged || canceledTombstonesPurged) {
                 admissionVersion.incrementAndGet();
             }
-            return evicted;
+            return new EvictionBreakdown(0, 0, hardCapped, ttlEvicted);
         } finally {
             admissionLock.unlock();
         }

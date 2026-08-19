@@ -1013,6 +1013,80 @@ class PrefillEndpointTest {
                 "R5 compensation re-reserves the member as engine-untracked");
     }
 
+    // ---- reason-split eviction breakdown (metric tag layer) ----
+
+    @Test
+    void evictionBreakdownBucketsAllTerminalExit() {
+        BatchItem first = createBatchItemWithFuture(911L, 500, 200);
+        BatchItem second = createBatchItemWithFuture(912L, 300, 100);
+        endpoint.commitBatch(910L, 100, List.of(first, second));
+        first.future().complete(null);
+        second.future().complete(null);
+
+        // Huge TTL, no caps, scheduler "owns" every member: only the
+        // all-terminal leg can release the batch — it must land in its own
+        // bucket, not the ttl one.
+        EvictionBreakdown breakdown =
+                endpoint.evictExpiredBatchesByReason(300_000, 0, 0, 0, requestId -> true);
+
+        assertEquals(1, breakdown.allTerminal());
+        assertEquals(0, breakdown.ageCapped());
+        assertEquals(0, breakdown.hardAgeCap());
+        assertEquals(0, breakdown.ttl());
+        assertEquals(1, breakdown.total());
+    }
+
+    @Test
+    void evictionBreakdownBucketsAgeCappedExit() throws InterruptedException {
+        endpoint.commitBatch(920L, 100, List.of(createBatchItem(921L, 500, 200)));
+        Thread.sleep(10);
+        // age > 5ms AND unobserved > 5ms → F-F age cap (ttlMs=60s keeps the
+        // normal TTL leg out of the picture).
+        EvictionBreakdown breakdown =
+                endpoint.evictExpiredBatchesByReason(60_000, 0, 5, 5, requestId -> false);
+
+        assertEquals(0, breakdown.allTerminal());
+        assertEquals(1, breakdown.ageCapped());
+        assertEquals(0, breakdown.hardAgeCap());
+        assertEquals(0, breakdown.ttl());
+        assertEquals(1, breakdown.total());
+    }
+
+    @Test
+    void evictionBreakdownBucketsHardCappedExit() throws InterruptedException {
+        endpoint.commitBatch(930L, 100, List.of(createBatchItem(931L, 500, 200)));
+        endpoint.beginDispatchReconciliation(930L, 931L);
+        Thread.sleep(10);
+        // A keep-alive observation refreshes lastObservedAtMs so the normal
+        // TTL leg cannot fire; only the guarded hard cap can release.
+        calibrate(Map.of(), Map.of("931", taskInfo(931L, 930L, TaskPhase.RUNNING, 0, 0)));
+
+        EvictionBreakdown breakdown =
+                endpoint.evictExpiredBatchesByReason(1, 5, 0, 0, requestId -> false);
+
+        assertEquals(0, breakdown.allTerminal());
+        assertEquals(0, breakdown.ageCapped());
+        assertEquals(1, breakdown.hardAgeCap());
+        assertEquals(0, breakdown.ttl());
+        assertEquals(1, breakdown.total());
+    }
+
+    @Test
+    void evictionBreakdownBucketsTtlExit() throws InterruptedException {
+        endpoint.commitBatch(940L, 100, List.of(createBatchItem(941L, 500, 200)));
+        Thread.sleep(10);
+
+        // No fence, no caps: pure unobserved-TTL eviction.
+        EvictionBreakdown breakdown =
+                endpoint.evictExpiredBatchesByReason(1, 0, 0, 0, requestId -> false);
+
+        assertEquals(0, breakdown.allTerminal());
+        assertEquals(0, breakdown.ageCapped());
+        assertEquals(0, breakdown.hardAgeCap());
+        assertEquals(1, breakdown.ttl());
+        assertEquals(1, breakdown.total());
+    }
+
     @Test
     void calibrateRecordsCancelOverlayObservationForForensics() throws Exception {
         endpoint.commitBatch(1L, 100, List.of(createBatchItem(1L, 500, 0)));
