@@ -3,7 +3,6 @@
 #include <torch/torch.h>
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
-#include "rtp_llm/models_py/bindings/cuda/kernels/no_aux_tc_kernels.h"
 
 namespace rtp_llm {
 
@@ -19,6 +18,25 @@ public:
                  int64_t              topk,
                  bool                 renormalize,
                  double               routed_scaling_factor);
+    void forwardFused(torch::Tensor&       topk_values,
+                      torch::Tensor&       topk_indices,
+                      torch::Tensor const& logits,
+                      torch::Tensor const& correction_bias,
+                      int64_t              n_group,
+                      int64_t              topk_group,
+                      int64_t              topk,
+                      bool                 renormalize,
+                      double               routed_scaling_factor);
+    void forwardAuto(torch::Tensor&       topk_values,
+                     torch::Tensor&       topk_indices,
+                     torch::Tensor const& logits,
+                     torch::Tensor const& correction_bias,
+                     int64_t              n_group,
+                     int64_t              topk_group,
+                     int64_t              topk,
+                     bool                 renormalize,
+                     double               routed_scaling_factor,
+                     bool                 enable_fused);
 };
 
 void registerGroupTopKOp(const pybind11::module& m);

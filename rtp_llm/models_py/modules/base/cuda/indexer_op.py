@@ -11,6 +11,8 @@ from rtp_llm.models_py.distributed.collective_torch import Group, barrier
 from rtp_llm.models_py.distributed.pynccl_cp import all_gather
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
+from rtp_llm.models_py.triton_kernels.sparse_mla.topk_index_postprocess import fused_stage1_request_indices
+from rtp_llm.models_py.utils.fuse_config import glm5_prefill_refine_enabled
 from rtp_llm.ops.compute_ops import KVCache, rtp_llm_ops
 
 # Try to import CUDA dependencies, but don't fail if running on CPU
@@ -238,6 +240,7 @@ class IndexerOp(nn.Module):
         self.block_size = block_size
         self.scale_fmt = scale_fmt
         self.is_neox_style = is_neox_style
+        self._fuse_prefill_index_ops = glm5_prefill_refine_enabled()
 
         glm5_topk_backend = os.environ.get(
             "GLM5_INDEXER_TOPK_BACKEND", "dsv4_persistent"
@@ -892,12 +895,20 @@ class IndexerOp(nn.Module):
             )
             if _fp8_prefill_topk_canonicalize():
                 topk_part = _canonicalize_topk_indices(topk_part)
-            topk_result[row_start:row_end] = torch.where(
-                topk_part >= 0,
-                topk_part
-                + fmha_params.topk_indices_offset[row_start:row_end].unsqueeze(1),
-                topk_part,
-            )
+            output = topk_result[row_start:row_end]
+            fused_output = None
+            if self._fuse_prefill_index_ops:
+                fused_output = fused_stage1_request_indices(
+                    topk_part,
+                    fmha_params.topk_indices_offset[row_start:row_end],
+                    output=output,
+                )
+            if fused_output is None:
+                output.copy_(torch.where(
+                    topk_part >= 0,
+                    topk_part + fmha_params.topk_indices_offset[row_start:row_end].unsqueeze(1),
+                    topk_part,
+                ))
             del logits, topk_part
             row_start = row_end
 
@@ -1089,11 +1100,20 @@ class IndexerOp(nn.Module):
                 )
                 if _fp8_prefill_topk_canonicalize():
                     topk_part = _canonicalize_topk_indices(topk_part)
-                topk_result[row_start:row_end] = torch.where(
-                    topk_part >= 0,
-                    topk_part + topk_off[row_start:row_end].unsqueeze(1),
-                    topk_part,
-                )
+                output = topk_result[row_start:row_end]
+                fused_output = None
+                if self._fuse_prefill_index_ops:
+                    fused_output = fused_stage1_request_indices(
+                        topk_part,
+                        topk_off[row_start:row_end],
+                        output=output,
+                    )
+                if fused_output is None:
+                    output.copy_(torch.where(
+                        topk_part >= 0,
+                        topk_part + topk_off[row_start:row_end].unsqueeze(1),
+                        topk_part,
+                    ))
                 del logits_p, topk_part
                 row_start = row_end
             return topk_result

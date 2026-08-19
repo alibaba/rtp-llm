@@ -40,6 +40,9 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.triton_kv_scatter import (
     triton_kv_scatter,
 )
+from rtp_llm.models_py.triton_kernels.sparse_mla.topk_index_postprocess import (
+    fused_stage2_global_indices,
+)
 from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 
@@ -50,6 +53,7 @@ from .flashmla_sparse_impl import (
     _as_uint8,
     _GatherWorkspace,
     _topk_2d,
+    supports_q_rope_direct_write,
 )
 
 
@@ -916,7 +920,26 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         gathered = all_gather(
             local_fused.contiguous(), group=Group.TP, role="mla_history"
         ).reshape(-1, local_fused.size(-1))
-        ws.fused_kv.copy_(gathered[self.sharded_kv_restore_indices])
+        restore_indices = self.sharded_kv_restore_indices
+        direct_restore = (
+            self._fuse_prefill_index_ops
+            and gathered.is_cuda
+            and gathered.is_contiguous()
+            and ws.fused_kv.is_cuda
+            and ws.fused_kv.is_contiguous()
+            and restore_indices.is_cuda
+            and restore_indices.is_contiguous()
+            and restore_indices.dtype == torch.int64
+            and gathered.dtype == ws.fused_kv.dtype
+            and gathered.ndim == ws.fused_kv.ndim == 2
+            and restore_indices.ndim == 1
+            and restore_indices.numel() == ws.fused_kv.size(0)
+            and gathered.size(1) == ws.fused_kv.size(1)
+        )
+        if direct_restore:
+            torch.index_select(gathered, 0, restore_indices, out=ws.fused_kv)
+        else:
+            ws.fused_kv.copy_(gathered[restore_indices])
 
     def _attend_with_kvcache(
         self,
@@ -977,14 +1000,16 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             )
         offsets = ws.workspace_starts[self.precomputed_req_ids]
         topk_2d = _topk_2d(topk)
-        # FIX: topk_2d contains -1 as padding (invalid KV position).
-        # Adding offsets to -1 turns it into a large positive index that
-        # points into another request's KV region in fused_kv, causing
-        # cross-request KV pollution → gibberish / repeat output.
-        # Preserve -1 so flash_mla_sparse_fwd skips these positions.
-        padding_mask = topk_2d < 0
-        raw_global = topk_2d + offsets.unsqueeze(1)
-        global_indices = raw_global.masked_fill(padding_mask, -1).unsqueeze(1)
+        global_indices = None
+        if self._fuse_prefill_index_ops:
+            global_indices = fused_stage2_global_indices(topk_2d, offsets)
+        if global_indices is None:
+            # Preserve -1 padding so flash_mla_sparse_fwd skips invalid positions.
+            padding_mask = topk_2d < 0
+            raw_global = topk_2d + offsets.unsqueeze(1)
+            global_indices = raw_global.masked_fill(padding_mask, -1).unsqueeze(1)
+        else:
+            global_indices = global_indices.unsqueeze(1)
         out, _, _ = flash_mla_sparse_fwd(
             q0,
             ws.fused_kv.unsqueeze(1),
@@ -1213,15 +1238,52 @@ class SparseMlaCpImpl(SparseMlaImpl):
         # get pos=0 but never read: q is selected by total_local_ids; k_pe is
         # all-gathered then re-indexed by kv_restore_unpad_indices.
         q_pe = q[:, :, self.nope_head_dim :]
+        q_transformed: Optional[torch.Tensor] = None
+        direct_q_output = (
+            getattr(self, "_glm5_prefill_refine_enabled", False)
+            and self.is_prefill
+            and self.fmha_impl.full_rope_pos_ids is not None
+            and self._kv_cache_type == "fp8_ds_mla"
+            and self.num_heads == 64
+            and self.nope_head_dim == 192
+            and self.rope_head_dim == 64
+            and self.kv_lora_rank == 512
+            and q.is_cuda
+            and q.dtype == torch.bfloat16
+            and q.is_contiguous()
+            and q.ndim == 3
+            and tuple(q.shape[1:]) == (64, 256)
+        )
+        if direct_q_output:
+            candidate = self._allocate_q_transformed(q)
+            if supports_q_rope_direct_write(
+                q,
+                candidate,
+                kv_lora_rank=self.kv_lora_rank,
+                rope_head_dim=self.rope_head_dim,
+                is_neox_style=self._is_neox_style,
+                kv_cache_type=self._kv_cache_type,
+            ):
+                q_transformed = candidate
         if self.fmha_impl.full_rope_pos_ids is not None:
             self.rope_impl.forward(
                 q_pe,
                 k_pe,
                 self.rope_params,
                 precomputed_pos_ids=self.fmha_impl.full_rope_pos_ids,
+                q_rope_output=(
+                    q_transformed[..., self.kv_lora_rank :]
+                    if q_transformed is not None
+                    else None
+                ),
             )
 
-        q_transformed = self._apply_input_bmm(q, layer_id)
+        q_transformed = self._apply_input_bmm(
+            q,
+            layer_id,
+            q_transformed=q_transformed,
+            q_rope_is_packed=q_transformed is not None,
+        )
         attn_output = self.fmha_impl.forward(
             q_transformed,
             compressed_kv,

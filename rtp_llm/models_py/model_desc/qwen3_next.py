@@ -933,6 +933,11 @@ class Qwen3NextDecoderLayer(nn.Module):
         attention_inputs: Optional[PyAttentionInputs] = None,
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        mlp_phase_kwargs = (
+            {"is_prefill": bool(attention_inputs and attention_inputs.is_prefill)}
+            if isinstance(self.mlp, GenericMoeLayer)
+            else {}
+        )
         if self._fuse_input_norm_quant and hidden_states.dim() == 2:
             # Dual-output: fp8 feeds qkv_proj/gate (which take fp8+scale via
             # ``x_fp8/x_scale``), AND bf16_hs replaces hidden_states for any
@@ -993,7 +998,12 @@ class Qwen3NextDecoderLayer(nn.Module):
                 group_size=128,
                 scale_ue8m0=self.mlp.up_proj.scale_ue8m0,
             )
-            hidden_states = self.mlp(hidden_states, x_fp8=fp8_hs, x_scale=scale)
+            hidden_states = self.mlp(
+                hidden_states,
+                x_fp8=fp8_hs,
+                x_scale=scale,
+                **mlp_phase_kwargs,
+            )
         elif self._fuse_post_norm_quant_moe and hidden_states.dim() == 2:
             bf16_hs, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
                 hidden_states,
@@ -1003,12 +1013,20 @@ class Qwen3NextDecoderLayer(nn.Module):
                 group_size=128,
                 scale_ue8m0=self.mlp.shared_expert.up_proj.scale_ue8m0,
             )
-            hidden_states = self.mlp(bf16_hs, x_fp8=fp8_hs, x_scale=scale)
+            hidden_states = self.mlp(
+                bf16_hs,
+                x_fp8=fp8_hs,
+                x_scale=scale,
+                **mlp_phase_kwargs,
+            )
         else:
             hidden_states, residual = self.post_attention_layernorm(
                 hidden_states, residual
             )
-            hidden_states = self.mlp(hidden_states)
+            hidden_states = self.mlp(
+                hidden_states,
+                **mlp_phase_kwargs,
+            )
         return hidden_states, residual
 
 

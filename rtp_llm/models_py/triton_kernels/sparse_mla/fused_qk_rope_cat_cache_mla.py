@@ -167,6 +167,7 @@ def _fused_qk_rope_cat_cache_mla_bf16_kernel(
 @triton.jit
 def _fused_qk_rope_cat_cache_mla_fp8_kernel(
     Q,
+    Q_TRANSFORMED,
     K_PE,
     KV_CACHE_FP8,
     KV_CACHE_FP32,
@@ -178,6 +179,8 @@ def _fused_qk_rope_cat_cache_mla_fp8_kernel(
     SCALE_MIN_PTR,
     stride_q_t,
     stride_q_h,
+    stride_qout_t,
+    stride_qout_h,
     stride_kpe_t,
     stride_ck_t,
     stride_kvc_u8_page,
@@ -189,11 +192,14 @@ def _fused_qk_rope_cat_cache_mla_fp8_kernel(
     BLOCK_SIZE: tl.constexpr,
     H: tl.constexpr,
     Q_ROPE_OFFSET: tl.constexpr,
+    Q_OUT_OFFSET: tl.constexpr,
     KV_LORA: tl.constexpr,
     ROPE: tl.constexpr,
     HALF_ROPE: tl.constexpr,
     QUANT_BLOCK: tl.constexpr,
     IS_NEOX: tl.constexpr,
+    WRITE_Q_OUTPUT: tl.constexpr,
+    WRITE_Q_INPLACE: tl.constexpr,
     BLOCK_H_TILE: tl.constexpr,
     H_TILES: tl.constexpr,
     NUM_K_BLOCKS: tl.constexpr,
@@ -211,6 +217,7 @@ def _fused_qk_rope_cat_cache_mla_fp8_kernel(
         h_offs = h_start + tl.arange(0, BLOCK_H_TILE)
         h_mask = h_offs < H
         q_base = t * stride_q_t
+        qout_base = t * stride_qout_t
         m2d = h_mask[:, None]
 
         if IS_NEOX:
@@ -226,10 +233,25 @@ def _fused_qk_rope_cat_cache_mla_fp8_kernel(
             )
             x1 = tl.load(Q + addrs_lo, mask=m2d, other=0.0).to(tl.float32)
             x2 = tl.load(Q + addrs_hi, mask=m2d, other=0.0).to(tl.float32)
-            y1 = tl.extra.libdevice.fma_rn(x1, c[None, :], -x2 * s[None, :])
-            y2 = tl.extra.libdevice.fma_rn(x2, c[None, :], x1 * s[None, :])
-            tl.store(Q + addrs_lo, y1.to(tl.bfloat16), mask=m2d)
-            tl.store(Q + addrs_hi, y2.to(tl.bfloat16), mask=m2d)
+            y1_bf = tl.extra.libdevice.fma_rn(
+                x1, c[None, :], -x2 * s[None, :]
+            ).to(tl.bfloat16)
+            y2_bf = tl.extra.libdevice.fma_rn(
+                x2, c[None, :], x1 * s[None, :]
+            ).to(tl.bfloat16)
+            if WRITE_Q_OUTPUT:
+                out_lo = (
+                    qout_base
+                    + h_offs[:, None] * stride_qout_h
+                    + Q_OUT_OFFSET
+                    + rh[None, :]
+                )
+                out_hi = out_lo + HALF_ROPE
+                tl.store(Q_TRANSFORMED + out_lo, y1_bf, mask=m2d)
+                tl.store(Q_TRANSFORMED + out_hi, y2_bf, mask=m2d)
+            if WRITE_Q_INPLACE:
+                tl.store(Q + addrs_lo, y1_bf, mask=m2d)
+                tl.store(Q + addrs_hi, y2_bf, mask=m2d)
         else:
             addrs_e = (
                 q_base + h_offs[:, None] * stride_q_h + Q_ROPE_OFFSET + 2 * rh[None, :]
@@ -237,10 +259,25 @@ def _fused_qk_rope_cat_cache_mla_fp8_kernel(
             addrs_o = addrs_e + 1
             xe = tl.load(Q + addrs_e, mask=m2d, other=0.0).to(tl.float32)
             xo = tl.load(Q + addrs_o, mask=m2d, other=0.0).to(tl.float32)
-            ye = tl.extra.libdevice.fma_rn(xe, c[None, :], -xo * s[None, :])
-            yo = tl.extra.libdevice.fma_rn(xo, c[None, :], xe * s[None, :])
-            tl.store(Q + addrs_e, ye.to(tl.bfloat16), mask=m2d)
-            tl.store(Q + addrs_o, yo.to(tl.bfloat16), mask=m2d)
+            ye_bf = tl.extra.libdevice.fma_rn(
+                xe, c[None, :], -xo * s[None, :]
+            ).to(tl.bfloat16)
+            yo_bf = tl.extra.libdevice.fma_rn(
+                xo, c[None, :], xe * s[None, :]
+            ).to(tl.bfloat16)
+            if WRITE_Q_OUTPUT:
+                out_e = (
+                    qout_base
+                    + h_offs[:, None] * stride_qout_h
+                    + Q_OUT_OFFSET
+                    + 2 * rh[None, :]
+                )
+                out_o = out_e + 1
+                tl.store(Q_TRANSFORMED + out_e, ye_bf, mask=m2d)
+                tl.store(Q_TRANSFORMED + out_o, yo_bf, mask=m2d)
+            if WRITE_Q_INPLACE:
+                tl.store(Q + addrs_e, ye_bf, mask=m2d)
+                tl.store(Q + addrs_o, yo_bf, mask=m2d)
 
     elif h_blk < H_TILES + NUM_K_BLOCKS - 1:
         slot = tl.load(SLOT_MAPPING + t).to(tl.int64)
@@ -318,6 +355,33 @@ def _fused_qk_rope_cat_cache_mla_fp8_kernel(
             )
 
 
+def supports_q_rope_direct_write(
+    q: torch.Tensor,
+    q_transformed: torch.Tensor,
+    *,
+    kv_lora_rank: int,
+    rope_head_dim: int,
+    is_neox_style: bool,
+    kv_cache_type: str,
+) -> bool:
+    """Return whether the validated GLM5 FP8 direct-output contract holds."""
+    return (
+        kv_cache_type == "fp8_ds_mla"
+        and kv_lora_rank == 512
+        and rope_head_dim == 64
+        and q.is_cuda
+        and q.dtype == torch.bfloat16
+        and q.is_contiguous()
+        and q.ndim == 3
+        and tuple(q.shape[1:]) == (64, 256)
+        and q_transformed.is_cuda
+        and q_transformed.device == q.device
+        and q_transformed.dtype == torch.bfloat16
+        and q_transformed.is_contiguous()
+        and q_transformed.shape == (q.shape[0], 64, 576)
+    )
+
+
 def fused_qk_rope_cat_cache_mla(
     q: torch.Tensor,
     compressed_kv: torch.Tensor,
@@ -330,6 +394,7 @@ def fused_qk_rope_cat_cache_mla(
     rope_head_dim: int,
     is_neox_style: bool,
     kv_cache_type: str = "auto",
+    q_transformed: Optional[torch.Tensor] = None,
 ) -> None:
     """Fused RoPE + paged KV cache write for sparse MLA.
 
@@ -347,12 +412,28 @@ def fused_qk_rope_cat_cache_mla(
         rope_head_dim: RoPE dimension (e.g. 64)
         is_neox_style: True for NEOX rotation
         kv_cache_type: "auto" or "fp8_ds_mla"
+        q_transformed: optional GLM5 FP8 output [T, 64, 576]; when set,
+                       rotated Q is written to its suffix instead of q in-place
     """
     assert q.dim() == 3 and q.dtype == torch.bfloat16
     assert compressed_kv.dim() == 2 and compressed_kv.dtype == torch.bfloat16
     assert k_pe.dim() == 2 and k_pe.dtype == torch.bfloat16
     assert kv_cache.dim() == 3
     assert cos_sin_cache.dtype == torch.float32
+
+    if q_transformed is not None and not supports_q_rope_direct_write(
+        q,
+        q_transformed,
+        kv_lora_rank=kv_lora_rank,
+        rope_head_dim=rope_head_dim,
+        is_neox_style=is_neox_style,
+        kv_cache_type=kv_cache_type,
+    ):
+        raise ValueError(
+            "q_transformed direct output requires contiguous GLM5 FP8 tensors: "
+            "q [T,64,256] BF16 and output [T,64,576] BF16"
+        )
+    direct_q_output = q_transformed is not None
 
     T, H, qk_head_dim = q.shape
     nope_head_dim = qk_head_dim - rope_head_dim
@@ -409,9 +490,11 @@ def fused_qk_rope_cat_cache_mla(
         kvc_fp8 = kv_cache.view(torch.float8_e4m3fn)
         kvc_fp32 = kv_cache.view(torch.float32)
         kvc_bf16 = kv_cache.view(torch.bfloat16)
+        q_output = q if q_transformed is None else q_transformed
         fp8_grid = (T, h_tiles + _NUM_FP8_K_BLOCKS)
         _fused_qk_rope_cat_cache_mla_fp8_kernel[fp8_grid](
             q,
+            q_output,
             k_pe,
             kvc_fp8,
             kvc_fp32,
@@ -423,6 +506,8 @@ def fused_qk_rope_cat_cache_mla(
             _get_fp8_scale_min(kv_cache.device),
             q.stride(0),
             q.stride(1),
+            q_output.stride(0),
+            q_output.stride(1),
             k_pe.stride(0),
             compressed_kv.stride(0),
             kvc_fp8.stride(0),
@@ -434,11 +519,14 @@ def fused_qk_rope_cat_cache_mla(
             BLOCK_SIZE=block_size,
             H=H,
             Q_ROPE_OFFSET=nope_head_dim,
+            Q_OUT_OFFSET=kv_lora_rank,
             KV_LORA=kv_lora_rank,
             ROPE=rope_head_dim,
             HALF_ROPE=half_rope,
             QUANT_BLOCK=128,
             IS_NEOX=is_neox_style,
+            WRITE_Q_OUTPUT=direct_q_output,
+            WRITE_Q_INPLACE=not direct_q_output,
             BLOCK_H_TILE=_BLOCK_H_TILE,
             H_TILES=h_tiles,
             NUM_K_BLOCKS=_NUM_FP8_K_BLOCKS,

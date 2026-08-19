@@ -27,12 +27,13 @@ class NewMlaRotaryEmbeddingOp(object):
         key: torch.Tensor,
         fmha_params: rtp_llm_ops.SparseMlaParams,
         precomputed_pos_ids: torch.Tensor = None,
+        q_rope_output: Optional[torch.Tensor] = None,
     ):
 
         rope._apply_rope_pos_ids_cos_sin_cache(
             q=query,
             k=key.unsqueeze(1),
-            q_rope=query,
+            q_rope=query if q_rope_output is None else q_rope_output,
             k_rope=key.unsqueeze(1),
             cos_sin_cache=self.cos_sin_cache,
             pos_ids=(

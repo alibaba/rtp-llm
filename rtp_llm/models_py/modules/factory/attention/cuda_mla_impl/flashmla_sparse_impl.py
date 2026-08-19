@@ -43,8 +43,15 @@ from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
 )
 from rtp_llm.models_py.triton_kernels.sparse_mla.fused_qk_rope_cat_cache_mla import (
     fused_qk_rope_cat_cache_mla,
+    supports_q_rope_direct_write,
 )
-from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
+from rtp_llm.models_py.triton_kernels.sparse_mla.topk_index_postprocess import (
+    fused_stage2_global_indices,
+)
+from rtp_llm.models_py.utils.fuse_config import (
+    fuse_kernels_enabled,
+    glm5_prefill_refine_enabled,
+)
 from rtp_llm.ops import (
     AttentionConfigs,
     FMHAConfig,
@@ -106,6 +113,7 @@ class SparseMlaOp(object):
         self.softmax_extra_scale = softmax_extra_scale
         self.scale = (self.qk_head_dim**-0.5) * softmax_extra_scale
         self.top_k = top_k
+        self._fuse_prefill_index_ops = glm5_prefill_refine_enabled()
 
         # Filled by plan() each forward
         self.block_table: Optional[torch.Tensor] = None
@@ -149,6 +157,22 @@ class SparseMlaOp(object):
             BLOCK_N=min(128, topk),
             HAS_PREFILL_WORKSPACE=False,
         )
+        return global_2d.unsqueeze(1)
+
+    def _convert_topk_indices_to_workspace(
+        self,
+        topk_indices: torch.Tensor,
+        workspace_offsets: torch.Tensor,
+    ) -> torch.Tensor:
+        """Request-local TopK to gather-workspace offsets, preserving sentinels."""
+        topk_2d = _topk_2d(topk_indices)
+        global_2d = None
+        if self._fuse_prefill_index_ops:
+            global_2d = fused_stage2_global_indices(topk_2d, workspace_offsets)
+        if global_2d is None:
+            padding_mask = topk_2d < 0
+            raw_global = topk_2d + workspace_offsets.unsqueeze(1)
+            global_2d = raw_global.masked_fill(padding_mask, -1)
         return global_2d.unsqueeze(1)
 
     def forward(
@@ -345,10 +369,9 @@ class SparseMlaFp8Op(SparseMlaOp):
 
         # Request-local topk → workspace offset (ws_starts[req] + local_pos)
         offsets = ws.workspace_starts[self.mla_params.batch_indice_d]
-        topk_2d = _topk_2d(topk_indices)
-        padding_mask = topk_2d < 0
-        raw_global = topk_2d + offsets.unsqueeze(1)
-        global_indices = raw_global.masked_fill(padding_mask, -1).unsqueeze(1)
+        global_indices = self._convert_topk_indices_to_workspace(
+            topk_indices, offsets
+        )
 
         out, _, _ = flash_mla_sparse_fwd(
             q,
@@ -472,6 +495,7 @@ class SparseMlaImpl(MlaImplBase):
         )
 
         self._fuse_qk_rope_cat_cache_mla = fuse_kernels_enabled()
+        self._glm5_prefill_refine_enabled = glm5_prefill_refine_enabled()
         self._kv_cache_type = (
             "fp8_ds_mla"
             if attn_configs.kv_cache_dtype == KvCacheDataType.FP8
@@ -655,24 +679,41 @@ class SparseMlaImpl(MlaImplBase):
 
     # -- BMMs ----------------------------------------------------------------
 
-    def _apply_input_bmm(self, q: torch.Tensor, layer_id: int) -> torch.Tensor:
-        """Project q_nope @ W_kc to kv_lora_rank, assemble [T, H, kv_lora_rank|rope].
-
-        q_pe is a strided view from torch.split — calling .contiguous() here would
-        re-introduce the very copy the strided triton kernel is replacing.
-        """
-        q_nope, q_pe = q.view(
-            -1, self.num_heads, self.nope_head_dim + self.rope_head_dim
-        ).split([self.nope_head_dim, self.rope_head_dim], dim=-1)
-
-        q_transformed = torch.empty(
-            q_nope.shape[0],
+    def _allocate_q_transformed(self, q: torch.Tensor) -> torch.Tensor:
+        return torch.empty(
+            q.shape[0],
             self.num_heads,
             self.kv_lora_rank + self.rope_head_dim,
             dtype=q.dtype,
             device=q.device,
         )
-        strided_slice_copy_(q_transformed, q_pe, self.kv_lora_rank)
+
+    def _apply_input_bmm(
+        self,
+        q: torch.Tensor,
+        layer_id: int,
+        q_transformed: Optional[torch.Tensor] = None,
+        q_rope_is_packed: bool = False,
+    ) -> torch.Tensor:
+        """Project q_nope @ W_kc to kv_lora_rank, assemble [T, H, kv_lora_rank|rope].
+
+        The GLM5 FP8 prefill fast path writes rotated Q directly into the suffix
+        before this BMM. Other paths retain the strided Q-RoPE copy fallback.
+        """
+        q_nope, q_pe = q.view(
+            -1, self.num_heads, self.nope_head_dim + self.rope_head_dim
+        ).split([self.nope_head_dim, self.rope_head_dim], dim=-1)
+
+        if q_transformed is None:
+            q_transformed = self._allocate_q_transformed(q)
+        else:
+            assert q_transformed.shape == (
+                q_nope.shape[0],
+                self.num_heads,
+                self.kv_lora_rank + self.rope_head_dim,
+            )
+        if not q_rope_is_packed:
+            strided_slice_copy_(q_transformed, q_pe, self.kv_lora_rank)
 
         if q_nope.shape[0] > 0:
             k_weight = self.weights[layer_id][W.mla_kc]
@@ -716,7 +757,35 @@ class SparseMlaImpl(MlaImplBase):
 
         # 1. RoPE on q_pe and k_pe; write KV to cache + optional store
         q_pe = q[:, :, self.nope_head_dim :]
+        q_transformed: Optional[torch.Tensor] = None
         if self._fuse_qk_rope_cat_cache_mla and kv_cache is not None:
+            direct_q_output = (
+                self._glm5_prefill_refine_enabled
+                and self.is_prefill
+                and not bool(getattr(self.attn_inputs, "is_target_verify", False))
+                and self._kv_cache_type == "fp8_ds_mla"
+                and self.num_heads == 64
+                and self.nope_head_dim == 192
+                and self.rope_head_dim == 64
+                and self.kv_lora_rank == 512
+                and self._is_neox_style
+                and q.is_cuda
+                and q.dtype == torch.bfloat16
+                and q.is_contiguous()
+                and q.ndim == 3
+                and tuple(q.shape[1:]) == (64, 256)
+            )
+            if direct_q_output:
+                candidate = self._allocate_q_transformed(q)
+                if supports_q_rope_direct_write(
+                    q,
+                    candidate,
+                    kv_lora_rank=self.kv_lora_rank,
+                    rope_head_dim=self.rope_head_dim,
+                    is_neox_style=self._is_neox_style,
+                    kv_cache_type=self._kv_cache_type,
+                ):
+                    q_transformed = candidate
             fused_qk_rope_cat_cache_mla(
                 q=q,
                 compressed_kv=compressed_kv,
@@ -729,6 +798,7 @@ class SparseMlaImpl(MlaImplBase):
                 rope_head_dim=self.rope_head_dim,
                 is_neox_style=self._is_neox_style,
                 kv_cache_type=self._kv_cache_type,
+                q_transformed=q_transformed,
             )
         else:
             self.rope_impl.forward(q_pe, k_pe, self.rope_params)
@@ -740,7 +810,12 @@ class SparseMlaImpl(MlaImplBase):
         )
 
         # 2. Project q via W_kc into the absorbed kv_lora_rank space
-        q_transformed = self._apply_input_bmm(q, layer_id)
+        q_transformed = self._apply_input_bmm(
+            q,
+            layer_id,
+            q_transformed=q_transformed,
+            q_rope_is_packed=q_transformed is not None,
+        )
 
         # 3. Sparse attention. FP8 op consumes paged shape; BF16 op wants flat.
         if self.fmha_impl.expects_paged_kv:
