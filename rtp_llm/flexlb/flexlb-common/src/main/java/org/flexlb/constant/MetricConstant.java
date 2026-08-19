@@ -278,6 +278,11 @@ public class MetricConstant {
             "app.cache.routing.candidate.max.hit.tokens";
 
     /**
+     * Cache-affinity routing decisions. Tagged by role, engineIp, and decision.
+     */
+    public static final String CACHE_AFFINITY_DECISION = "app.cache.affinity.decision.qps";
+
+    /**
      * Cache request total count
      */
     public static final String CACHE_REQUEST_TOTAL = "app.cache.request.total";

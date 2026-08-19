@@ -166,14 +166,19 @@ The `DefaultRouter` orchestrates routing across these stages. If a later stage f
 
 ### Load Balancing Strategies
 
-Four strategies are available (registered with `LoadBalanceStrategyFactory`):
+Four baseline strategies are available (registered with `LoadBalanceStrategyFactory`):
 
 - **RANDOM**: Random worker selection
 - **COST_BASED_PREFILL**: Select worker with lowest cost for prefill requests
 - **COST_BASED_DECODE**: Select worker with lowest cost for decode requests
 - **SHORTEST_TTFT**: Select worker with lowest predicted TTFT (prefill time + queue time) using candidate pool mechanism (RATIO/FIXED modes) with CAS fairness
 
-Each `RoleType` can use a different strategy. See `LoadBalanceStrategyEnum` in flexlb-common.
+Each `RoleType` can use a different compatible strategy. `SHORTEST_TTFT` and
+`COST_BASED_PREFILL` are intended for PREFILL/PDFUSION endpoints, not DECODE or VIT. See
+`LoadBalanceStrategyEnum` in flexlb-common. Both prefill strategies can enable the same bounded
+cache-affinity policy with `cacheAffinityEnabled: true`; configure
+`cacheAffinityMaxExtraTtftMs` and `cacheAffinityMinHitRate` for its cost and hit-rate gates.
+The feature defaults to disabled; threshold defaults are `0` ms and `5` percent.
 
 ### Queue-Based Request Scheduling
 

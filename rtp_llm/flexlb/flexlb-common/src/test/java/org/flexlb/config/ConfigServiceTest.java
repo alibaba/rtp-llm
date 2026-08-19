@@ -4,6 +4,7 @@ import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.LoggerFactory;
@@ -82,6 +83,48 @@ class ConfigServiceTest {
                 "DECODE_CONCURRENCY_LIMIT", "32"));
 
         assertEquals(32, configService.loadBalanceConfig().getDecodeConcurrencyLimit());
+    }
+
+    @Test
+    void should_load_cache_affinity_for_shortest_ttft() {
+        ConfigService configService = new ConfigService(Map.of(
+                "FLEXLB_CONFIG", """
+                        {
+                          "loadBalanceStrategy": "ShortestTtft",
+                          "cacheAffinityEnabled": true,
+                          "cacheAffinityMaxExtraTtftMs": 125,
+                          "cacheAffinityMinHitRate": 12.5
+                        }
+                        """));
+
+        FlexlbConfig config = configService.loadBalanceConfig();
+        assertEquals(LoadBalanceStrategyEnum.SHORTEST_TTFT, config.getLoadBalanceStrategy());
+        assertTrue(config.isCacheAffinityEnabled());
+        assertEquals(125L, config.getCacheAffinityMaxExtraTtftMs());
+        assertEquals(12.5, config.getCacheAffinityMinHitRate());
+    }
+
+    @Test
+    void scalar_environment_should_override_embedded_cache_affinity_config() {
+        ConfigService configService = new ConfigService(Map.of(
+                "FLEXLB_CONFIG", """
+                        {
+                          "loadBalanceStrategy": "ShortestTtft",
+                          "cacheAffinityEnabled": false,
+                          "cacheAffinityMaxExtraTtftMs": 10,
+                          "cacheAffinityMinHitRate": 2
+                        }
+                        """,
+                "LOAD_BALANCE_STRATEGY", "CostBasedPrefill",
+                "CACHE_AFFINITY_ENABLED", "true",
+                "CACHE_AFFINITY_MAX_EXTRA_TTFT_MS", "125",
+                "CACHE_AFFINITY_MIN_HIT_RATE", "12.5"));
+
+        FlexlbConfig config = configService.loadBalanceConfig();
+        assertEquals(LoadBalanceStrategyEnum.COST_BASED_PREFILL, config.getLoadBalanceStrategy());
+        assertTrue(config.isCacheAffinityEnabled());
+        assertEquals(125L, config.getCacheAffinityMaxExtraTtftMs());
+        assertEquals(12.5, config.getCacheAffinityMinHitRate());
     }
 
     @Test
@@ -190,24 +233,33 @@ class ConfigServiceTest {
                 "dumpEffectiveConfig should log autoTpmCancelAckTimeoutMs");
         assertTrue(lines.stream().anyMatch(line -> line.contains("autoTpmCancelCompletionTimeoutMs=")),
                 "dumpEffectiveConfig should log autoTpmCancelCompletionTimeoutMs");
+        assertTrue(lines.stream().anyMatch(line -> line.contains("loadBalanceStrategy=")),
+                "dumpEffectiveConfig should log loadBalanceStrategy");
+        assertTrue(lines.stream().anyMatch(line -> line.contains("cacheAffinityEnabled=")),
+                "dumpEffectiveConfig should log cache-affinity configuration");
     }
 
     // ---- F3 (P0-3): unmatched env var scan ----
 
     @Test
     void unmatched_env_scan_reports_only_prefixed_unknown_names() {
-        Map<String, String> environment = Map.of(
-                "AUTO_TPM_ENABLED", "true",                  // correct name → matched
-                "FLEXLB_BATCH_QUEUE_MAX_SIZE", "2048",       // correct name → matched
-                "COST_FORMULA", "1.0",                       // correct name → matched
-                "AUTO_TPM_ENABLE", "true",                   // misspelled → warned
-                "FLEXLB_BATCH_QUEUE_MAXSIZE", "2048",        // misspelled → warned
-                "MAX_QUEUE_SIZE", "5000",                    // no scanned prefix → out of scope
-                "PATH", "/usr/bin",                          // unrelated → ignored
-                "FLEXLB_CONFIG", "{}",                       // special entry point → matched
-                "FLEXLB_BATCH_ENABLED", "true");             // deprecated → dedicated warning only
+        Map<String, String> environment = Map.ofEntries(
+                Map.entry("AUTO_TPM_ENABLED", "true"),                  // correct name → matched
+                Map.entry("FLEXLB_BATCH_QUEUE_MAX_SIZE", "2048"),       // correct name → matched
+                Map.entry("COST_FORMULA", "1.0"),                       // correct name → matched
+                Map.entry("CACHE_AFFINITY_ENABLED", "true"),            // correct name → matched
+                Map.entry("AUTO_TPM_ENABLE", "true"),                   // misspelled → warned
+                Map.entry("FLEXLB_BATCH_QUEUE_MAXSIZE", "2048"),        // misspelled → warned
+                Map.entry("CACHE_AFFINITY_ENABLE", "true"),              // misspelled → warned
+                Map.entry("MAX_QUEUE_SIZE", "5000"),                    // no scanned prefix → out of scope
+                Map.entry("PATH", "/usr/bin"),                          // unrelated → ignored
+                Map.entry("FLEXLB_CONFIG", "{}"),                       // special entry point → matched
+                Map.entry("FLEXLB_BATCH_ENABLED", "true"));             // deprecated → dedicated warning only
 
-        assertEquals(List.of("AUTO_TPM_ENABLE", "FLEXLB_BATCH_QUEUE_MAXSIZE"),
+        assertEquals(List.of(
+                        "AUTO_TPM_ENABLE",
+                        "CACHE_AFFINITY_ENABLE",
+                        "FLEXLB_BATCH_QUEUE_MAXSIZE"),
                 ConfigService.findUnmatchedEnvVars(environment));
     }
 
@@ -248,6 +300,26 @@ class ConfigServiceTest {
     void invalid_flexlb_batch_queue_max_size_aborts_startup() {
         assertThrows(ConfigValidationException.class,
                 () -> new ConfigService(Map.of("FLEXLB_BATCH_QUEUE_MAX_SIZE", "abc")));
+    }
+
+    @Test
+    void invalid_cache_affinity_environment_aborts_startup() {
+        assertThrows(ConfigValidationException.class,
+                () -> new ConfigService(Map.of("CACHE_AFFINITY_ENABLED", "notabool")));
+        assertThrows(ConfigValidationException.class,
+                () -> new ConfigService(Map.of("CACHE_AFFINITY_MAX_EXTRA_TTFT_MS", "invalid")));
+        assertThrows(ConfigValidationException.class,
+                () -> new ConfigService(Map.of("CACHE_AFFINITY_MIN_HIT_RATE", "invalid")));
+    }
+
+    @Test
+    void unsafe_cache_affinity_bounds_abort_startup() {
+        assertThrows(ConfigValidationException.class,
+                () -> new ConfigService(Map.of("CACHE_AFFINITY_MAX_EXTRA_TTFT_MS", "-1")));
+        assertThrows(ConfigValidationException.class,
+                () -> new ConfigService(Map.of("CACHE_AFFINITY_MIN_HIT_RATE", "NaN")));
+        assertThrows(ConfigValidationException.class,
+                () -> new ConfigService(Map.of("CACHE_AFFINITY_MIN_HIT_RATE", "101")));
     }
 
     @Test

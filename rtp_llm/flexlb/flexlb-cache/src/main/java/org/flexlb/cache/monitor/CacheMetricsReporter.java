@@ -10,6 +10,7 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 
+import static org.flexlb.constant.MetricConstant.CACHE_AFFINITY_DECISION;
 import static org.flexlb.constant.MetricConstant.CACHE_DIFF_ADDED_BLOCKS_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_DIFF_REMOVED_BLOCKS_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_BYTES;
@@ -93,6 +94,7 @@ public class CacheMetricsReporter {
         monitor.register(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, FlexMetricType.QPS);
         monitor.register(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, FlexMetricType.QPS);
         monitor.register(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, FlexMetricType.QPS);
+        monitor.register(CACHE_AFFINITY_DECISION, FlexMetricType.QPS);
         monitor.register(CACHE_REQUEST_TOTAL, FlexMetricType.QPS);
 
         // Cache service response time metrics
@@ -195,6 +197,20 @@ public class CacheMetricsReporter {
                 "role", roleType.name()
         );
         monitor.report(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, tags, hitTokens);
+    }
+
+    /** Report the outcome of a cache-affinity routing decision. */
+    public void reportCacheAffinityDecision(RoleType roleType,
+                                            String engineIp,
+                                            String decision) {
+        if (roleType == null || engineIp == null || decision == null) {
+            return;
+        }
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", roleType.name(),
+                "engineIp", engineIp,
+                "decision", decision);
+        monitor.report(CACHE_AFFINITY_DECISION, tags, 1.0);
     }
 
     private void reportRoutingCacheMatchMetrics(String hitMetric,

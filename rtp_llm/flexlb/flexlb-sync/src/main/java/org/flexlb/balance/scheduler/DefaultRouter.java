@@ -31,7 +31,12 @@ import java.util.Map;
 import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
 
 @Component
-@DependsOn({"randomStrategy", "costBasedDecodeStrategy", "costBasedPrefillStrategy", "shortestTtftStrategy"})
+@DependsOn({
+        "randomStrategy",
+        "costBasedDecodeStrategy",
+        "costBasedPrefillStrategy",
+        "shortestTtftStrategy"
+})
 public class DefaultRouter implements Router {
 
     private final Map<RoleType, LoadBalanceStrategy> loadBalanceStrategyMap;
