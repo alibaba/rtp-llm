@@ -35,6 +35,10 @@ cc_test_wrapper(
         "@com_google_googletest//:gtest_main",
     ],
     timeout = "short",
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
 )
 
 cc_test_wrapper(
@@ -49,6 +53,10 @@ cc_test_wrapper(
         "@com_google_googletest//:gtest_main",
     ],
     timeout = "short",
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
 )
 
 cc_library(

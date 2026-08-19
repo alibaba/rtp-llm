@@ -62,6 +62,8 @@ cc_test(
     ],
     env = {
         "CACHE_STORE_RDMA_MODE": "0",
+        "TEST_USING_DEVICE": "CUDA",
     },
     copts = ["-fno-access-control"] + copts(),
+    exec_properties = {'gpu':'H20'},
 )
