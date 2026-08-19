@@ -710,12 +710,14 @@ TEST_F(GenerateStreamTest, testNonStreamingFinalOutputReturnsCachedAllHiddenStat
                                     torch::Tensor(),
                                     torch::Tensor(),
                                     first_all_hidden_states,
+                                    torch::Tensor(),
                                     false});
     ASSERT_FALSE(stream->hasOutput());
 
     stream->step();
     stream->update(StreamUpdateInfo{torch::tensor({11}, torch::kInt32).reshape({1, 1}),
                                     1,
+                                    torch::Tensor(),
                                     torch::Tensor(),
                                     torch::Tensor(),
                                     torch::Tensor(),
