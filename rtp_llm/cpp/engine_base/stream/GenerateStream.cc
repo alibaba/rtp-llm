@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <memory>
@@ -199,49 +198,12 @@ bool GenerateStream::hasPendingAsyncBookkeeping() const {
 }
 
 void GenerateStream::waitPendingAsyncBookkeeping() {
-    // Historical unbounded semantics, preserved for existing callers.
-    (void)waitPendingAsyncBookkeeping(/*timeout_ms=*/-1);
-}
-
-bool GenerateStream::waitPendingAsyncBookkeeping(int64_t timeout_ms) {
     std::unique_lock<std::mutex> lk(async_bookkeeping_->mu);
-    if (timeout_ms < 0) {
-        async_bookkeeping_->cv.wait(lk,
-                                    [this] { return async_bookkeeping_->count.load(std::memory_order_acquire) == 0; });
-        return true;
-    }
-    // R4/W-1: bounded wait so a wedged async worker can never pin the caller
-    // (e.g. the priority finalizer) forever. Returns false on timeout; the
-    // caller decides whether to defer the release instead of blocking on.
-    return async_bookkeeping_->cv.wait_for(lk, std::chrono::milliseconds(timeout_ms), [this] {
-        return async_bookkeeping_->count.load(std::memory_order_acquire) == 0;
-    });
-}
-
-int GenerateStream::pendingAsyncBookkeepingCount() const {
-    return async_bookkeeping_->count.load(std::memory_order_acquire);
+    async_bookkeeping_->cv.wait(lk, [this] { return async_bookkeeping_->count.load(std::memory_order_acquire) == 0; });
 }
 
 void GenerateStream::markDeferredRelease() {
-    bool last_worker_already_gone = false;
-    {
-        // Handshake with the last async worker's decrement path: either it
-        // observes our flag (and performs the release), or we observe
-        // count == 0 (it already left without taking over) and release here.
-        // Without this, a plain store can strand the flag with nobody left
-        // to consume it and defer the KV release to stream destruction.
-        std::lock_guard<std::mutex> lk(async_bookkeeping_->mu);
-        if (async_bookkeeping_->count.load(std::memory_order_acquire) == 0) {
-            last_worker_already_gone = true;
-        } else {
-            async_bookkeeping_->defer_release.store(true, std::memory_order_release);
-        }
-    }
-    if (last_worker_already_gone) {
-        // count == 0, so releaseResource()'s internal bookkeeping wait
-        // returns immediately — this cannot block.
-        releaseResource();
-    }
+    async_bookkeeping_->defer_release.store(true, std::memory_order_release);
 }
 
 bool GenerateStream::isDeferredReleasePending() const {
@@ -735,21 +697,56 @@ void GenerateStream::setReserveStep(size_t reserve_step) {
     generate_status_->setReserveStep(reserve_step);
 }
 
+void GenerateStream::setFinishCallback(FinishCallback callback) {
+    FinishCallback fire_now;
+    {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        if (generate_status_->getStatus() == StreamState::FINISHED) {
+            // Registration lost the race with the terminal transition: fire
+            // immediately (outside the lock) so no completion goes unseen.
+            fire_now = std::move(callback);
+        } else {
+            finish_callback_ = std::move(callback);
+        }
+    }
+    if (fire_now) {
+        try {
+            fire_now();
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("finish callback failed on an already-finished stream: %s", e.what());
+        }
+    }
+}
+
 StreamState GenerateStream::moveToNext() {
     checkTimeout();
-    StreamState state;
-    bool        should_report_metric = false;
+    StreamState    state;
+    bool           should_report_metric = false;
+    FinishCallback finish_callback;
     {
         std::lock_guard<std::mutex> lock(*mutex_);
         auto                        old_state = generate_status_->getStatus();
         state                                 = generate_status_->moveToNext();
         should_report_metric                  = old_state != StreamState::FINISHED && state == StreamState::FINISHED;
+        if (should_report_metric) {
+            // One-shot handoff: take the callback under the lock, fire it
+            // outside so it may safely call back into stream/meta APIs.
+            finish_callback  = std::move(finish_callback_);
+            finish_callback_ = nullptr;
+        }
     }
 
     // notify one thread waiting for stream completion
     if (state == StreamState::FINISHED) {
         if (should_report_metric) {
             reportMetricOnce();
+        }
+        if (finish_callback) {
+            try {
+                finish_callback();
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_WARNING("finish callback failed on terminal transition: %s", e.what());
+            }
         }
         cv_->notify_one();
         // C-1 (Z1) terminal-path exit: a consumer parked in nextOutput()'s

@@ -83,18 +83,13 @@ private:
                                   const std::list<GenerateStreamPtr>& already_admitted_streams);
     void   evaluateWaitingGroupQueue();
     void   evaluateLoadingCacheGroupQueue();
-    // Terminal-error sweep across EVERY group of the queue, not only the head.
-    // Admission gating (evaluateWaitingGroupQueue's guard, the head-only rule)
-    // must never gate error finalization: a non-head errored victim otherwise
-    // waits forever for a moveToNext() that admission never performs.
-    void sweepErroredGroupStreams(StreamGroupQueue& group_queue);
-    bool loadingGroupReady() const;
-    void advanceLoadingGroup(StreamGroup& group);
-    void moveGroupToNewStreams(StreamGroup& group);
-    void moveGroupToAllocatingGroup(StreamGroup& group);
-    void dispatchPreparedGroup(StreamGroup& group);
-    void cancelStreams(std::list<GenerateStreamPtr>& streams);
-    void cancelGroups(StreamGroupQueue& group_queue);
+    bool   loadingGroupReady() const;
+    void   advanceLoadingGroup(StreamGroup& group);
+    void   moveGroupToNewStreams(StreamGroup& group);
+    void   moveGroupToAllocatingGroup(StreamGroup& group);
+    void   dispatchPreparedGroup(StreamGroup& group);
+    void   cancelStreams(std::list<GenerateStreamPtr>& streams);
+    void   cancelGroups(StreamGroupQueue& group_queue);
 
 protected:
     void                            evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);

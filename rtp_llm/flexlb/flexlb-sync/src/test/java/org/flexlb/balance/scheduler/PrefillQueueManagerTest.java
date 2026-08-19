@@ -20,8 +20,8 @@ import static org.mockito.Mockito.mock;
 
 /**
  * Phase 2 tests for {@link PrefillQueueManager} + {@link WorkerBatcher}:
- * Auto-TPM queue order (design doc 8.1), the 8.4 wait estimate,
- * legacy-order regression and the version-checked atomic victim
+ * Auto-TPM queue order (design doc 8.1), the measured queue-age wait
+ * estimate, legacy-order regression and the version-checked atomic victim
  * replace (17.2).
  *
  * <p>Uses the {@code fixed_window} algorithm so {@code computeSortKey}
@@ -104,30 +104,67 @@ class PrefillQueueManagerTest {
         assertEquals(List.of(1L, 2L, 3L), order);
     }
 
-    // ==================== 8.4 wait estimate ====================
+    // ==================== measured queue-age estimate ====================
 
     @Test
-    void estimate_wait_counts_only_items_ahead_and_is_monotonic_in_priority() {
-        config.setFlexlbBatchSizeMax(1);
-        config.setFlexlbBatchFixedWaitMs(200);
+    void empty_queue_estimates_zero_wait() {
+        WorkerBatcher batcher = newBatcher();
+        assertEquals(0, batcher.queueManager().estimateWaitMs(70, Long.MAX_VALUE, 999));
+    }
+
+    @Test
+    void queue_age_grows_with_wall_clock_since_head_enqueue() throws InterruptedException {
         WorkerBatcher batcher = newBatcher();
         long now = System.currentTimeMillis();
-        // Ancient arrivals zero out the head's remaining window for determinism
-        assertTrue(batcher.tryOffer(item(1, 50, now, now - 100_000, 128)));
-        assertTrue(batcher.tryOffer(item(2, 50, now, now - 100_000, 128)));
-
+        assertTrue(batcher.tryOffer(item(1, 50, now + 60_000, now, 128)));
         PrefillQueueManager manager = batcher.queueManager();
-        long waitP70 = manager.estimateWaitMs(70, now + 60_000, 999);
-        long waitP50 = manager.estimateWaitMs(50, now + 60_000, 999);
-        long waitP30 = manager.estimateWaitMs(30, now + 60_000, 999);
 
-        // P70 jumps ahead of both P50 items: 0 cycles ahead
-        assertEquals(0, waitP70);
-        // P50/P30 wait behind both: 2 cycles x avgDispatchIntervalMs
-        // (no dispatch observed yet -> fixed_window fallback = fixedWaitMs)
-        assertEquals(400, waitP50);
-        assertEquals(400, waitP30);
-        assertTrue(waitP70 <= waitP50 && waitP50 <= waitP30);
+        long before = manager.estimateWaitMs(70, now + 60_000, 999);
+        Thread.sleep(120);
+        long after = manager.estimateWaitMs(70, now + 60_000, 999);
+
+        assertTrue(before < after, "age must grow with the wall clock");
+        assertTrue(after >= 100, "120ms sleep must show up in the measured age, got " + after);
+    }
+
+    @Test
+    void queue_age_is_priority_blind() {
+        WorkerBatcher batcher = newBatcher();
+        long now = System.currentTimeMillis();
+        // Ancient head for a large, deterministic age.
+        assertTrue(batcher.tryOffer(item(1, 50, now + 60_000, now - 100_000, 128)));
+        PrefillQueueManager manager = batcher.queueManager();
+
+        long waitP70 = manager.estimateWaitMs(70, now + 60_000, 999);
+        long waitP50 = manager.estimateWaitMs(50, now + 60_000, 998);
+        long waitP30 = manager.estimateWaitMs(30, now + 60_000, 997);
+
+        // Priority-blind by design: every probe sees the same measured head
+        // age (a small band tolerates wall-clock drift between the probes).
+        assertTrue(Math.abs(waitP70 - waitP30) <= 50,
+                "probes of any priority must see the same head age: "
+                        + waitP70 + "/" + waitP50 + "/" + waitP30);
+        assertTrue(waitP30 >= 99_000, "head waited 100s, the age must reflect it: " + waitP30);
+    }
+
+    @Test
+    void queue_age_depends_on_the_head_not_depth() {
+        // Same head age, wildly different depths: the estimate is the same —
+        // the head age is the congestion signal. Behavioral pin of the O(1)
+        // design (no per-item iteration, deep and shallow queues cost alike).
+        WorkerBatcher shallow = newBatcher();
+        WorkerBatcher deep = newBatcher();
+        long now = System.currentTimeMillis();
+        assertTrue(shallow.tryOffer(item(1, 50, now + 60_000, now - 50_000, 128)));
+        for (long requestId = 1; requestId <= 100; requestId++) {
+            assertTrue(deep.tryOffer(item(requestId, 30, now + 60_000, now - 50_000, 128)));
+        }
+
+        long shallowAge = shallow.queueManager().estimateWaitMs(70, now + 60_000, 999);
+        long deepAge = deep.queueManager().estimateWaitMs(70, now + 60_000, 999);
+        assertTrue(Math.abs(shallowAge - deepAge) <= 50,
+                "depth must not change the head-age estimate: " + shallowAge + " vs " + deepAge);
+        assertTrue(deepAge >= 49_000, "head waited 50s, the age must reflect it: " + deepAge);
     }
 
     // ==================== 17.2 atomic victim replace ====================

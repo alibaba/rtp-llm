@@ -38,9 +38,11 @@ import static org.mockito.ArgumentMatchers.anyList;
 /**
  * Task34 类别一：策略层复杂多节点选择正确性 —— 3~8 个 endpoint 组成的
  * 快照矩阵（不同存活状态 / 资源可用性 / endpoint 等待 / batcher 队列构成），
- * 验证：正常 placement 评分选对（含 auto-tpm 开启时 batcherEstimatedWaitMs
- * 参与 P 评分且是优先级感知的）、不可行 endpoint 绝不入选、全不可行 →
- * 明确失败、仅一可行 → 必选。
+ * 验证：正常 placement 评分选对（含 auto-tpm 开启时实测 queue-age 的
+ * batcherEstimatedWaitMs 参与 P 评分且是优先级无关的实测拥堵度）、不可行
+ * endpoint 绝不入选、全不可行 → 明确失败、仅一可行 → 必选。
+ * 另含 Round-2 拥挤过滤（CONGESTED_QUEUE_FILTERED，编译期 RATIO=0.8）：
+ * 超阈引擎即使评分最优也被 bench、未超阈正常参选、全超回退 least-loaded。
  */
 class CostBasedPrefillMultiNodeSelectionTest {
 
@@ -94,18 +96,18 @@ class CostBasedPrefillMultiNodeSelectionTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
     }
 
-    // ============ auto-tpm 开启：batcherEstimatedWaitMs 参与 P 评分 ============
+    // ============ auto-tpm 开启：实测 queue-age（batcherEstimatedWaitMs）参与 P 评分 ============
 
     @Test
-    void autoTpmScoringPrefersEndpointWhoseQueueYieldsToIncomingPriority() {
-        // w1 队列 40 个 P70（全部排在 P50 前 → 4 个 batch cycle ≈ 4000ms），
-        // w2 队列 40 个 P30（全部排在 P50 后 → 0ms）。除队列优先级构成外
-        // 两 endpoint 完全对称 → 必选 w2，证明评分是优先级感知的。
+    void autoTpmScoringPrefersEndpointWhoseQueueHeadIsYounger() {
+        // w1 队头已积压 5s（慢引擎实测拥堵），w2 队头刚入队（age≈0）。
+        // 除队头年龄外两 endpoint 完全对称 → 必选 w2，证明评分吃到实测
+        // queue-age 项（队头等得久的引擎看起来更贵）。
         setUpAutoTpmBatcherConfig();
         PrefillEndpoint w1 = parkedEndpoint("10.0.0.1");
         PrefillEndpoint w2 = parkedEndpoint("10.0.0.2");
-        fillQueue(w1, 70, 40, 1000);
-        fillQueue(w2, 30, 40, 2000);
+        fillQueue(w1, 50, 10, 1000, -5_000);
+        fillQueue(w2, 50, 10, 2000, 0);
 
         ServerStatus result = strategy.select(
                 priorityContext(9001L, 50), RoleType.PREFILL, null);
@@ -115,20 +117,76 @@ class CostBasedPrefillMultiNodeSelectionTest {
     }
 
     @Test
-    void autoTpmScoringFlipsWhenQueuePriorityCompositionIsReversed() {
-        // 与上一用例镜像对称：w1 队列 P30、w2 队列 P70 → 必选 w1。
-        // 两个方向都成立，排除“恰好偏向某个 endpointId”的假阳性。
+    void autoTpmScoringFlipsWhenQueueHeadAgeIsReversed() {
+        // 与上一用例镜像对称：w1 队头年轻、w2 队头老 → 必选 w1。两个方向
+        // 都成立，排除“恰好偏向某个 endpointId”的假阳性。
         setUpAutoTpmBatcherConfig();
         PrefillEndpoint w1 = parkedEndpoint("10.0.0.1");
         PrefillEndpoint w2 = parkedEndpoint("10.0.0.2");
-        fillQueue(w1, 30, 40, 1000);
-        fillQueue(w2, 70, 40, 2000);
+        fillQueue(w1, 50, 10, 1000, 0);
+        fillQueue(w2, 50, 10, 2000, -5_000);
 
         ServerStatus result = strategy.select(
                 priorityContext(9002L, 50), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.1", result.getServerIp());
+    }
+
+    // ============ Round-2 拥挤过滤（CONGESTED_QUEUE_FILTERED，RATIO=0.8） ============
+
+    @Test
+    void congestedQueueEndpointIsBenchedEvenWhenItsScoreIsBest() {
+        // w1 队列 900 ≥ ceil(0.8×1024)=820 → congested；其队头年龄≈0 使
+        // score 严格更优（w2 队头老 5s，score 差 5000ms）。拥挤过滤必须
+        // 压倒评分：必选 w2（8/17 慢引擎吸引子的直接反制）。
+        setUpAutoTpmBatcherConfig();
+        PrefillEndpoint w1 = parkedEndpoint("10.0.0.1");
+        PrefillEndpoint w2 = parkedEndpoint("10.0.0.2");
+        fillQueue(w1, 50, 900, 1000, 0);
+        fillQueue(w2, 50, 10, 2000, -5_000);
+
+        ServerStatus result = strategy.select(
+                priorityContext(9101L, 50), RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.2", result.getServerIp());
+    }
+
+    @Test
+    void belowThresholdQueueStillCompetesAndWins() {
+        // w1 队列 800 < 820：未达阈值，正常参选；w2 队头老 5s（score 更
+        // 差）→ 必选 w1。阈值边界不误伤。
+        setUpAutoTpmBatcherConfig();
+        PrefillEndpoint w1 = parkedEndpoint("10.0.0.1");
+        PrefillEndpoint w2 = parkedEndpoint("10.0.0.2");
+        fillQueue(w1, 50, 800, 1000, 0);
+        fillQueue(w2, 50, 10, 2000, -5_000);
+
+        ServerStatus result = strategy.select(
+                priorityContext(9201L, 50), RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.1", result.getServerIp());
+    }
+
+    @Test
+    void allCongestedFallsBackToLeastLoadedEndpoint() {
+        // 两队列都 900（全 congested）→ survivor 全滤空 → least-loaded
+        // 回退：endpointWait 对称（60_000）时 first-seen（w1）胜出，且
+        // 路由不 fail-closed。
+        setUpAutoTpmBatcherConfig();
+        PrefillEndpoint w1 = parkedEndpoint("10.0.0.1");
+        PrefillEndpoint w2 = parkedEndpoint("10.0.0.2");
+        fillQueue(w1, 50, 900, 1000, 0);
+        fillQueue(w2, 50, 900, 2000, 0);
+
+        ServerStatus result = strategy.select(
+                priorityContext(9301L, 50), RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess(), "all-congested must fall back, never fail closed");
+        assertEquals("10.0.0.1", result.getServerIp(),
+                "symmetric wait → least-loaded fallback keeps the first-seen endpoint");
     }
 
     // ============ 多节点矩阵：不可行 endpoint 绝不入选 ============
@@ -181,12 +239,6 @@ class CostBasedPrefillMultiNodeSelectionTest {
 
     /** auto-tpm 开启 + 背压 park 配置：batcher 队列确定性驻留不被 drain。 */
     private void setUpAutoTpmBatcherConfig() {
-        // na130_4 depth term note: the two auto-tpm cases below keep both
-        // engines' queueSize symmetric (40 each), so the default-on depth
-        // penalty adds the same wait to both scores and cancels out — the
-        // priority-composition asymmetry stays the only deciding factor.
-        // New asymmetric-queue cases must control
-        // flexlbQueueDepthPenaltyEnabled explicitly.
         config.setAutoTpmEnabled(true);
         config.setFlexlbBatchFixedWaitMs(1_000);
         config.setFlexlbBatchSizeMax(10);
@@ -204,13 +256,17 @@ class CostBasedPrefillMultiNodeSelectionTest {
                 RoleType.PREFILL, ip + ":8080", w);
         createdEndpoints.add(ep);
         // 两 endpoint 使用同样的 predictMs，endpointWaitMs 对称抵消（几 ms 漂移
-        // 远小于 batcherEstimatedWaitMs 的 cycle 差 4000ms）
+        // 远小于 batcherEstimatedWaitMs 的队头年龄差 5000ms）
         ep.commitBatch(800_000L + ip.hashCode(), 60_000, List.of());
         return ep;
     }
 
-    /** 向 parked batcher 队列灌入 count 个指定优先级的 item。 */
-    private void fillQueue(PrefillEndpoint ep, int priority, int count, long idBase) {
+    /**
+     * 向 parked batcher 队列灌入 count 个指定优先级的 item；
+     * {@code ageOffsetMs} 直接偏移 enqueuedAtMs，用于控制队头年龄
+     * （负值 = 队头已积压 |offset| ms）。
+     */
+    private void fillQueue(PrefillEndpoint ep, int priority, int count, long idBase, long ageOffsetMs) {
         long now = System.currentTimeMillis();
         for (int i = 0; i < count; i++) {
             Request req = new Request();
@@ -220,7 +276,7 @@ class CostBasedPrefillMultiNodeSelectionTest {
             BalanceContext ctx = new BalanceContext();
             ctx.setRequest(req);
             ctx.setBudget(ScheduleBudget.forDeadline(priority, now, now + 30_000));
-            BatchItem item = new BatchItem(ctx, null, null, null, null, ep, null, now);
+            BatchItem item = new BatchItem(ctx, null, null, null, null, ep, null, now + ageOffsetMs);
             ep.getBatcher().offer(item);
         }
         assertEquals(count, ep.getBatcher().queueSize(),

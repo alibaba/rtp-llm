@@ -2,8 +2,6 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.scheduler.priority.PrefillQueueSnapshot;
 import org.flexlb.balance.scheduler.priority.QueuedRequestSnapshot;
-import org.flexlb.util.Prioritized;
-import org.flexlb.util.PriorityOrdering;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -46,86 +44,89 @@ public final class PrefillQueueManager {
      * Consistent point-in-time view of the queue for eviction planning:
      * version + per-item {@link QueuedRequestSnapshot} in queue order.
      * The hard capacity reuses {@code flexlbBatchQueueMaxSize} (0 = unbounded).
+     *
+     * <p>task61 M2: only the membership copy and the version capture run under
+     * the queue lock; the O(n log n) sort runs on the thread-confined copy
+     * outside it, so the submit path's {@code offer()} never blocks behind a
+     * snapshot sort. Correctness: the copy and the version are captured
+     * atomically under the same lock hold, every queue mutation bumps the
+     * version under that lock, and item sort fields are frozen once enqueued
+     * ({@code sortKey} is set before the item enters the queue), so the
+     * "version unchanged ⇒ queue content unchanged" invariant and the output
+     * order are both preserved bit-for-bit.
      */
     public PrefillQueueSnapshot snapshot() {
+        List<BatchItem> queued;
+        long version;
         ctx.queueLock().lock();
         try {
             // Only live queue members are actionable eviction victims. A
             // staged callback member remains capacity-charged, but cannot be
             // removed by the versioned queue mutation APIs.
-            List<BatchItem> queued = ctx.sortedItems();
-            List<QueuedRequestSnapshot> items = new ArrayList<>(queued.size());
-            for (BatchItem item : queued) {
-                items.add(new QueuedRequestSnapshot(
-                        item.requestId(), item.priority(), item.deadlineMs(),
-                        item.enqueuedAtMs(), item.seqLen(), item.hitCache(),
-                        QueuedRequestSnapshot.PREFILL_QUEUED));
-            }
-            return new PrefillQueueSnapshot(ctx.key(), batcher.queueVersion(),
-                    ctx.cfg().getFlexlbBatchQueueMaxSize(), items);
+            queued = ctx.copiedItems();
+            version = batcher.queueVersion();
         } finally {
             ctx.queueLock().unlock();
         }
+        queued.sort(ctx.queueOrder());
+        List<QueuedRequestSnapshot> items = new ArrayList<>(queued.size());
+        for (BatchItem item : queued) {
+            items.add(new QueuedRequestSnapshot(
+                    item.requestId(), item.priority(), item.deadlineMs(),
+                    item.enqueuedAtMs(), item.seqLen(), item.hitCache(),
+                    QueuedRequestSnapshot.PREFILL_QUEUED));
+        }
+        return new PrefillQueueSnapshot(ctx.key(), version,
+                ctx.cfg().getFlexlbBatchQueueMaxSize(), items);
     }
 
     /**
-     * Estimated queue wait for an incoming request (design doc 8.4):
-     * {@code itemsAhead → batchCyclesAhead → estimatedWaitMs}, using the
-     * dispatch-interval sliding average as the per-cycle cost and the head's
-     * remaining window as the partial first cycle.
+     * Measured queue congestion for an incoming request: the age of the
+     * queue head — how long the oldest-next request has been waiting
+     * ({@code now - head.enqueuedAtMs()}, 0 for an empty queue).
+     *
+     * <p>Design semantics (measured replaces predicted): the legacy chain
+     * counted items ordered ahead of the probe ({@code ordersBefore} +
+     * itemsAhead) and folded them into {@code batchCyclesAhead ×
+     * dispatch-interval EMA + partial first cycle}. That chain needs a
+     * per-cycle cost model that is cold-start blind — right after a master
+     * restart the interval EMA falls back to the batching window and the
+     * estimate collapses exactly when routing decisions matter most. The
+     * head age is a direct measurement: a slow engine's head waits long,
+     * so its age is large — no conversion factor to calibrate, no
+     * cold-start distortion, no per-dispatch bookkeeping (the dispatch
+     * interval EMA was removed together with this rewrite).
+     *
+     * <p>Priority-blind by design: the estimate answers "how congested is
+     * this queue", not "when will this priority be served" — a P70 probe
+     * sees the same congestion as a P30 probe. That is intentionally
+     * conservative for routing: the 8/17 slow-engine attractor showed a
+     * priority-aware jump estimate keeps looking cheap for high-priority
+     * probes while the target engine drowns; a probe must never price
+     * jumping into a congested queue below the queue's measured drain
+     * latency.
+     *
+     * <p>O(1): one {@code peek()} and one subtraction under the queue lock,
+     * no iteration over the queue. Clamped to {@code 1L << 40} outside the
+     * lock so a pathological {@code enqueuedAtMs} cannot overflow the
+     * downstream long score arithmetic.
+     *
+     * <p>The {@code priority}/{@code deadlineMs}/{@code requestId}
+     * parameters are retained for call-site stability
+     * (CostBasedPrefillStrategy → {@code PrefillEndpoint.batcherEstimatedWaitMs}
+     * → this method) and are no longer part of the estimate.
      */
     public long estimateWaitMs(int priority, long deadlineMs, long requestId) {
         long now = ctx.now();
-        int itemsAhead = 0;
-        BatchItem head = null;
+        long queueAgeMs;
         ctx.queueLock().lock();
         try {
-            for (BatchItem item : ctx.sortedItems()) {
-                if (head == null) {
-                    head = item;
-                }
-                if (ordersBefore(item, priority, deadlineMs, now, requestId)) {
-                    itemsAhead++;
-                }
-            }
+            BatchItem head = ctx.peek();
+            queueAgeMs = head != null ? Math.max(0, now - head.enqueuedAtMs()) : 0L;
         } finally {
             ctx.queueLock().unlock();
         }
-        int maxBatchSize = Math.max(1, ctx.cfg().getFlexlbBatchSizeMax());
-        long intervalMs = ctx.avgDispatchIntervalMs();
-        long batchCyclesAhead = itemsAhead / maxBatchSize;
-        long headRemainingWindowMs = 0;
-        if (head != null) {
-            long headWaitedMs = Math.max(0, now - head.enqueuedAtMs());
-            headRemainingWindowMs = Math.max(0, intervalMs - headWaitedMs);
-        }
-        return batchCyclesAhead * intervalMs + headRemainingWindowMs;
-    }
-
-    /**
-     * Whether a queued item is ordered before an incoming probe under
-     * {@link WorkerBatcher#AUTO_TPM_QUEUE_ORDER} (priority desc → enqueue-seq
-     * asc → requestId asc). The probe's enqueue-seq is its would-be arrival
-     * time ({@code now}) — it has not been enqueued yet.
-     *
-     * <p>Delegates the priority + enqueue-seq comparison to
-     * {@link PriorityOrdering#STRICT} via a temporary {@link Prioritized}
-     * view of the probe, then breaks residual ties by {@code requestId}.
-     * The {@code deadlineMs} parameter is retained for call-site stability
-     * but is no longer part of the ordering rule (PR-B removed the deadline
-     * key).
-     */
-    private static boolean ordersBefore(BatchItem item, int priority, long deadlineMs,
-                                        long arrivalMs, long requestId) {
-        Prioritized probe = new Prioritized() {
-            @Override public int priority() { return priority; }
-            @Override public long enqueueSeq() { return arrivalMs; }
-        };
-        int cmp = PriorityOrdering.STRICT.compare(item, probe);
-        if (cmp != 0) {
-            return cmp < 0;
-        }
-        return item.requestId() < requestId;
+        return Math.min(queueAgeMs, 1L << 40);
     }
 
     /**

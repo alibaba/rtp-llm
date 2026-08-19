@@ -98,12 +98,8 @@ public:
     bool                            tryMarkOtherTerminal();
     PrefillTerminalCause            terminalCause() const;
     void                            tryCancelDownstream();
-    // force_advance_stream: set by the finalizer's bounded-retry caller when
-    // waiting for the scheduler's terminal transition has exceeded its budget.
-    // It performs one forced moveToNext() (error already latched -> FINISHED)
-    // instead of returning false for a later retry.
-    bool finalizePriorityPreemption(bool force_advance_stream = false);
-    void setLocalStreamSchedulerOwned(bool owned);
+    bool                            finalizePriorityPreemption();
+    void                            setLocalStreamSchedulerOwned(bool owned);
     // Linearizes ordinary runtime-meta removal with installation of the
     // priority-preemption first cause and its CANCELING overlay.
     void         dequeueStreamFromRuntimeMeta();

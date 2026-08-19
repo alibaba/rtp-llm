@@ -19,15 +19,20 @@ public:
 
     void updateOutput(const StreamUpdateInfo&) override {}
 
-    // Terminal-state drivers for A2 promotion tests: the scheduler normally
-    // moves a stream through moveToNext(); these write the same public state
-    // machine fields directly.
+    // Terminal-state drivers for A2 promotion tests: completion is
+    // event-driven now, so these must drive the real state-machine FINISHED
+    // transition through moveToNext() (as the scheduler does each step)
+    // instead of writing the status word directly — that transition is what
+    // fires the stream's finish callback.
     void forceFinished() {
-        generate_status_->status.store(StreamState::FINISHED, std::memory_order_release);
+        generate_status_->status.store(StreamState::RUNNING, std::memory_order_release);
+        generate_status_->reportEvent(StreamEvents::GenerateDone);
+        moveToNext();
     }
 
     void forceError(ErrorCode code, const std::string& msg) {
         generate_status_->reportEvent(StreamEvents::Error, code, msg);
+        moveToNext();
     }
 
 private:
@@ -275,11 +280,13 @@ TEST(RpcServerRuntimeMetaTest, ComputeExecutionTimeExcludesQueueWait) {
               800);
 }
 
-// A2: a stream that reached FINISHED must be promoted into the finished
-// report even while its Decode-side fetch()/dequeue() call has not arrived
-// yet — the Master's next GetWorkerStatus poll settles the member without
-// waiting for the P/D fetch link.
-TEST(RpcServerRuntimeMetaTest, GetEngineScheduleInfoPromotesFinishedStreamWithoutDequeue) {
+// A2 event-driven promotion: the finish callback registered by
+// PrefillGenerateContext::setStream migrates the runtime-meta entry into
+// the finished report at the stream's terminal transition, even while its
+// Decode-side fetch()/dequeue() call has not arrived yet — the Master's
+// next GetWorkerStatus poll settles the member without waiting for the
+// P/D fetch link.
+TEST(RpcServerRuntimeMetaTest, FinishCallbackPromotesFinishedStreamWithoutDequeue) {
     RpcServerRuntimeMeta meta;
 
     auto make_stream = [](int64_t request_id, int64_t batch_id) {
@@ -295,6 +302,16 @@ TEST(RpcServerRuntimeMetaTest, GetEngineScheduleInfoPromotesFinishedStreamWithou
     meta.enqueue(501, running);
     auto done = make_stream(/*request_id=*/502, /*batch_id=*/91);
     meta.enqueue(502, done);
+    // Mirror PrefillGenerateContext::setStream's registration: only the
+    // meta, the request id, and a weak stream reference are captured. The
+    // callback fires synchronously inside forceFinished(), while the stack
+    // meta object is still alive.
+    std::weak_ptr<GenerateStream> weak_done = done;
+    done->setFinishCallback([&meta, rid = int64_t{502}, weak_done]() {
+        if (auto finished = weak_done.lock()) {
+            meta.dequeue(rid, finished);
+        }
+    });
     done->forceFinished();
 
     auto info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
@@ -318,9 +335,10 @@ TEST(RpcServerRuntimeMetaTest, GetEngineScheduleInfoPromotesFinishedStreamWithou
     EXPECT_TRUE(after.finished_task_info_list.empty());
 }
 
-// A2 error terminal: an errored stream (not yet FINISHED state-wise) is
-// promoted too, and the finished record carries the stream's error_code.
-TEST(RpcServerRuntimeMetaTest, GetEngineScheduleInfoPromotesErroredStreamWithErrorCode) {
+// A2 error terminal: the finish callback fires on an errored stream's
+// FINISHED transition too (the Error event converges to FINISHED in
+// moveToNext()), and the finished record carries the stream's error_code.
+TEST(RpcServerRuntimeMetaTest, FinishCallbackPromotesErroredStreamWithErrorCode) {
     RpcServerRuntimeMeta meta;
     auto                 input = std::make_shared<GenerateInput>();
     input->request_id          = 503;
@@ -329,6 +347,12 @@ TEST(RpcServerRuntimeMetaTest, GetEngineScheduleInfoPromotesErroredStreamWithErr
     input->input_ids           = torch::tensor({1, 2, 3}, torch::kInt32);
     auto failed                = std::make_shared<RuntimeMetaTestStream>(input);
     meta.enqueue(503, failed);
+    std::weak_ptr<GenerateStream> weak_failed = failed;
+    failed->setFinishCallback([&meta, rid = int64_t{503}, weak_failed]() {
+        if (auto finished = weak_failed.lock()) {
+            meta.dequeue(rid, finished);
+        }
+    });
     failed->forceError(ErrorCode::LONG_PROMPT_ERROR, "prompt exceeds context window");
 
     auto info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);

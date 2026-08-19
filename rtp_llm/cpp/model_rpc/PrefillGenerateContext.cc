@@ -6,14 +6,6 @@ using grpc::ClientContext;
 
 namespace rtp_llm {
 
-namespace {
-// R4/W-1: bounded wait for async bookkeeping workers in the priority
-// finalizer. Far above any healthy worker turnaround; on expiry the finalizer
-// proceeds with markRequestEnd and hands the release to the deferred-release
-// path instead of blocking the finalizer executor forever.
-constexpr int64_t kPriorityFinalizeBookkeepingWaitMs = 30 * 1000;
-}  // namespace
-
 PrefillStatInfo::ExecuteStage PrefillStatInfo::saveStage() const {
     return stage;
 }
@@ -82,6 +74,23 @@ void PrefillGenerateContext::setStream(const std::shared_ptr<GenerateStream>& st
     stream_ = stream;
     if (stream) {
         meta->enqueue(task_identity_, stream_);
+        // A2 event-driven promotion: migrate the runtime-meta entry to the
+        // finished list as soon as the local stream reaches its terminal
+        // FINISHED state (normal completion or error converges there),
+        // instead of a lazy scan at getEngineScheduleInfo() time. A later
+        // fetch() or stopStream() dequeue is find-miss idempotent. Only the
+        // meta shared_ptr, the request id, and a weak stream reference are
+        // captured: the context itself is not captured (it may already be
+        // destroyed when the callback fires) and the weak ref cannot extend
+        // the stream's lifetime or create an ownership cycle.
+        auto                          meta_holder = meta;
+        auto                          rid         = request_id;
+        std::weak_ptr<GenerateStream> weak_stream = stream;
+        stream->setFinishCallback([meta_holder, rid, weak_stream]() {
+            if (auto finished = weak_stream.lock()) {
+                meta_holder->dequeue(rid, finished);
+            }
+        });
     }
 }
 
@@ -227,7 +236,7 @@ void PrefillGenerateContext::setLocalStreamSchedulerOwned(bool owned) {
     local_stream_scheduler_owned_ = owned;
 }
 
-bool PrefillGenerateContext::finalizePriorityPreemption(bool force_advance_stream) {
+bool PrefillGenerateContext::finalizePriorityPreemption() {
     std::lock_guard<std::mutex> lock(priority_finalize_mu_);
     if (priority_finalized_) {
         return true;
@@ -256,37 +265,10 @@ bool PrefillGenerateContext::finalizePriorityPreemption(bool force_advance_strea
         // managed finalizer executor until the scheduler has completed its
         // terminal transition; never occupy a worker with an unbounded poll.
         if (local_stream_scheduler_owned_ && stream_->getStatus() != StreamState::FINISHED) {
-            if (!force_advance_stream) {
-                return false;
-            }
-            // Bounded-wait exhaustion path (caller retried ~30s). The error
-            // event is already latched above, so one forced moveToNext() must
-            // reach FINISHED, where the stream state machine releases its
-            // resources. The scheduler may be running its own moveToNext() in
-            // the same rare window: both calls serialize on the per-stream
-            // mutex and the FINISHED transition itself is idempotent, so this
-            // cannot double-release or corrupt stream state.
-            RTP_LLM_LOG_WARNING("request [%ld] priority finalizer forcing stream terminal transition after "
-                                "scheduler-wait budget exhausted (stream state [%d])",
-                                request_id,
-                                static_cast<int>(stream_->getStatus()));
-            stream_->moveToNext();
+            return false;
         }
-        // R4/W-1: bounded wait instead of the unbounded cv.wait. On expiry the
-        // release itself is handed to the deferred-release path: the last
-        // async worker to decrement the pending count performs
-        // releaseResource() (see decPendingAsyncBookkeepingAndMaybeRelease), so
-        // we must NOT fall into releaseResource()'s own unbounded wait here.
-        if (stream_->waitPendingAsyncBookkeeping(kPriorityFinalizeBookkeepingWaitMs)) {
-            stream_->releaseResource();
-        } else {
-            stream_->markDeferredRelease();
-            RTP_LLM_LOG_WARNING("request [%ld] priority finalizer timed out (%ld ms) waiting for [%d] pending async "
-                                "bookkeeping worker(s); deferring resource release to the last worker",
-                                request_id,
-                                kPriorityFinalizeBookkeepingWaitMs,
-                                stream_->pendingAsyncBookkeepingCount());
-        }
+        stream_->waitPendingAsyncBookkeeping();
+        stream_->releaseResource();
         markRequestEnd();
         stream_.reset();
     }

@@ -135,8 +135,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * Auto-TPM priority-aware queue wait estimate (design doc 8.4):
-     * counts only items ordered ahead of the incoming request.
+     * Auto-TPM measured queue-wait estimate (measured queue-age design):
+     * the age of the batcher queue head — a direct congestion measurement
+     * of how slowly this engine drains its queue, priority-blind and
+     * O(1). See {@code PrefillQueueManager.estimateWaitMs}.
      */
     public long batcherEstimatedWaitMs(int priority, long deadlineMs, long requestId) {
         return batcher.queueManager().estimateWaitMs(priority, deadlineMs, requestId);

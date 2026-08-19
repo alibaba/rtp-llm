@@ -29,11 +29,6 @@ struct DeferredPrefillContext {
     // because RPCContext keeps a raw pointer into input.
     std::unique_ptr<PrefillGenerateContext> context;
     std::shared_ptr<grpc::Alarm>            ttl_alarm;
-    // Retries of finalizePriorityPreemption's "wait for scheduler FINISHED"
-    // turn. Touched only by the single finalizer claimant that owns this
-    // deferred context (priority_finalize_claimed_), so a plain counter is
-    // sufficient; it lives here (not in a global) so the budget is per request.
-    int64_t priority_finalize_scheduler_wait_iters = 0;
 
     void cancel(const grpc::Status& status);
     // Return true exactly once when the caller becomes the asynchronous

@@ -5,8 +5,6 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
-#include <utility>
-#include <vector>
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
 
@@ -41,12 +39,6 @@ public:
     }
 
     EngineScheduleInfo getEngineScheduleInfo(int64_t latest_finished_version) {
-        // A2: report a Prefill result as soon as the stream reached its
-        // terminal state, without waiting for the Decode-side fetch() to
-        // call dequeue(). Otherwise a broken P/D fetch link leaves the
-        // Master's inflight accounting stuck on a member the engine has
-        // already finished.
-        promoteFinishedStreams();
         std::shared_lock<std::shared_mutex> lock(read_write_lock_);
         EngineScheduleInfo                  info;
         std::unordered_set<int64_t>         emitted_preemption_overlays;
@@ -215,31 +207,6 @@ public:
         int64_t version = version_.fetch_add(1, std::memory_order_relaxed);
         finished_streams_.push_back(std::make_pair(version, task_info));
         running_streams_.erase(ptr);
-    }
-
-    // A2 helper: collect running entries whose stream already reached its
-    // terminal state (FINISHED, or errored — isActive() covers both) under
-    // the read lock, then migrate each through the ordinary dequeue()
-    // semantics (priority-cancel CANCELING overlay guard, error_code
-    // extraction, finished-capacity trim, version bump) under the write
-    // lock. getEngineScheduleInfo() runs under a read lock, so the
-    // promotion happens before that lock is taken. dequeue() is idempotent:
-    // a racing fetch-driven dequeue either wins first (the entry is then
-    // absent here) or loses (its later find() misses and it returns), so
-    // both orders publish exactly one finished record.
-    void promoteFinishedStreams() {
-        std::vector<std::pair<int64_t, GenerateStreamPtr>> finished;
-        {
-            std::shared_lock<std::shared_mutex> lock(read_write_lock_);
-            for (auto& [id, entry] : running_streams_) {
-                if (entry.stream && !entry.stream->isActive()) {
-                    finished.emplace_back(id, entry.stream);
-                }
-            }
-        }
-        for (const auto& [id, stream] : finished) {
-            dequeue(id, stream);
-        }
     }
 
     void finishTask(int64_t            request_id,

@@ -8,8 +8,9 @@ import java.util.Comparator;
  *
  * <p>Before this refactor the ordering logic was duplicated: the
  * Auto-TPM batcher comparator in {@code WorkerBatcher} and the probe
- * comparison in {@code PrefillQueueManager.ordersBefore} were hand-mirrored
- * copies of the same rule. Both now delegate to {@link #STRICT}, so any
+ * comparison in {@code PrefillQueueManager.ordersBefore} (removed by the
+ * measured queue-age estimate rewrite) were hand-mirrored copies of the
+ * same rule. The comparator now delegates to {@link #STRICT}, so any
  * future change to the ordering rule is made in exactly one place.
  *
  * <p><b>Ordering rule (STRICT):</b>

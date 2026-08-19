@@ -3,7 +3,6 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/AtomicUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
-#include "autil/EnvUtil.h"
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -152,11 +151,6 @@ int64_t batchErrorCode(const grpc::Status& status) {
 // need to cover the rolling dispatch/reconciliation window. Keeping the two
 // registries on the same bounded lifetime also prevents unbounded id history.
 constexpr int64_t kPriorityCancelRegistryTtlMs = 10 * 60 * 1000;
-
-// Bounded wait for the scheduler's terminal transition in the priority
-// finalizer. Each retry costs one executor turn plus a 1ms sleep, so
-// 30000 retries is approximately 30 seconds before the forced advance.
-constexpr int64_t kMaxPriorityFinalizeSchedulerWaitIters = 30000;
 
 }  // namespace
 
@@ -577,28 +571,9 @@ void PrefillBatchRpcServer::finalizePriorityPreemption(int64_t                  
                                                        std::shared_ptr<DeferredPrefillContext> deferred) {
     if (!deferred->context->finalizePriorityPreemption()) {
         // The scheduler still owns the local stream. Retry in a later executor
-        // turn rather than occupying a worker in an unbounded polling loop,
-        // but cap the total wait so a wedged scheduler cannot pin the CANCELING
-        // overlay forever: kMaxPriorityFinalizeSchedulerWaitIters retries with
-        // a 1ms sleep each ~= 30s.
-        if (++deferred->priority_finalize_scheduler_wait_iters < kMaxPriorityFinalizeSchedulerWaitIters) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            schedulePriorityFinalization(request_id, std::move(deferred));
-            return;
-        }
-        // Budget exhausted. The context has already latched the PRIORITY_PREEMPTED
-        // error on the stream, so a forced moveToNext() must reach FINISHED and
-        // release resources (idempotent; serialized on the stream mutex against
-        // a concurrent scheduler moveToNext() in the same rare window). The
-        // runtime-meta overlay aging sweep remains the ledger backstop if even
-        // this path fails.
-        RTP_LLM_LOG_WARNING("request [%ld] priority finalizer exceeded %ld scheduler-wait retries (~%ld ms); "
-                            "forcing terminal transition",
-                            request_id,
-                            kMaxPriorityFinalizeSchedulerWaitIters,
-                            kMaxPriorityFinalizeSchedulerWaitIters);
-        deferred->context->finalizePriorityPreemption(/*force_advance_stream=*/true);
-        deferred_contexts_->publishPriorityPreemptionCanceled(request_id, deferred.get());
+        // turn rather than occupying a worker in an unbounded polling loop.
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        schedulePriorityFinalization(request_id, std::move(deferred));
         return;
     }
     deferred_contexts_->publishPriorityPreemptionCanceled(request_id, deferred.get());
