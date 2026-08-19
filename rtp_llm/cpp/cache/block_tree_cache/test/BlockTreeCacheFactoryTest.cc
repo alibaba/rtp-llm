@@ -10,7 +10,6 @@
 #include "gtest/gtest.h"
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
-#include "rtp_llm/cpp/cache/BlockReleaseBatch.h"
 #include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
@@ -393,22 +392,13 @@ insertOneKeyThroughAllocator(const CacheConfig& config, const KVCacheAllocatorPt
     return blocks;
 }
 
-void releaseInsertedRequestBlocks(const KVCacheAllocatorPtr&       allocator,
-                                  const std::vector<BlockIdxType>& blocks,
-                                  BlockReleaseBatch&               releases) {
+void releaseInsertedRequestBlocks(const KVCacheAllocatorPtr& allocator, const std::vector<BlockIdxType>& blocks) {
     const auto groups = allocator->cacheGroups();
     ASSERT_EQ(groups.size(), blocks.size());
     for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
         if (!isNullBlockIdx(blocks[group_id])) {
-            releases.append(group_id, groups[group_id]->release({blocks[group_id]}, BlockRefType::REQUEST));
+            groups[group_id]->release({blocks[group_id]}, BlockRefType::REQUEST);
         }
-    }
-}
-
-void submitBlockReleases(const std::shared_ptr<BlockTreeCache>& cache, BlockReleaseBatch& releases) {
-    const std::vector<BlockReleaseReceipt> receipts = releases.finish();
-    if (!receipts.empty()) {
-        cache->onBlocksReleased(receipts);
     }
 }
 
@@ -648,9 +638,7 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteMatchReceivesCompleteKeysAndExplicitLoca
     EXPECT_TRUE(context->success());
 
     block_tree_cache_test::releaseRequestRefsForTest(*cache, result.matched_device_resources);
-    BlockReleaseBatch releases;
-    releaseInsertedRequestBlocks(allocator, request_blocks, releases);
-    submitBlockReleases(cache, releases);
+    releaseInsertedRequestBlocks(allocator, request_blocks);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, RemoteBackendInitFailureIsFatal) {
@@ -960,9 +948,7 @@ TEST_F(BlockTreeCacheFactoryTest, CompatibleInsertPacksOneGroupSetResourceInGrou
     ASSERT_EQ(cache->matchedBlocksForGroup(1, match.matched_device_resources), (BlockIndicesType{blocks[1]}));
     block_tree_cache_test::releaseRequestRefsForTest(*cache, match.matched_device_resources);
 
-    BlockReleaseBatch releases;
-    releaseInsertedRequestBlocks(allocator, blocks, releases);
-    submitBlockReleases(cache, releases);
+    releaseInsertedRequestBlocks(allocator, blocks);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, BlockTreeCacheCanOnlyBeAttachedOnce) {
@@ -1024,9 +1010,7 @@ TEST_F(BlockTreeCacheFactoryTest, MiddleDisabledGroupIsExcludedWithoutShiftingRe
     }
     block_tree_cache_test::releaseRequestRefsForTest(*cache, match.matched_device_resources);
 
-    BlockReleaseBatch releases;
-    releaseInsertedRequestBlocks(allocator, blocks, releases);
-    submitBlockReleases(cache, releases);
+    releaseInsertedRequestBlocks(allocator, blocks);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkSharesPendingReleasesAcrossGroupSets) {
@@ -1060,11 +1044,9 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkSharesPendingRel
         request_blocks.push_back(insertOneKeyThroughAllocator(config, allocator, key));
     }
     ASSERT_EQ(backing->freeBlocksNum(), 1u);
-    BlockReleaseBatch releases;
     for (const auto& blocks : request_blocks) {
-        releaseInsertedRequestBlocks(allocator, blocks, releases);
+        releaseInsertedRequestBlocks(allocator, blocks);
     }
-    submitBlockReleases(cache, releases);
 
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
@@ -1110,9 +1092,8 @@ TEST_F(BlockTreeCacheFactoryTest, FailedWatermarkPlanStopsThisPassAndRecomputesO
     const auto blocks  = insertOneKeyThroughAllocator(config, allocator, /*key=*/810);
     ASSERT_EQ(backing->freeBlocksNum(), 6u);
     block_tree_cache_test::BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.01);
-    BlockReleaseBatch releases;
-    releaseInsertedRequestBlocks(allocator, blocks, releases);
-    submitBlockReleases(cache, releases);
+    releaseInsertedRequestBlocks(allocator, blocks);
+    block_tree_cache_test::BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     // The failed accepted async plan is not recursively retried in the same
@@ -1149,9 +1130,7 @@ TEST_F(BlockTreeCacheFactoryTest, DeviceMinFreeDoesNotTriggerBlockTreeWatermarkE
     const auto blocks  = insertOneKeyThroughAllocator(config, allocator, /*key=*/811);
     auto       backing = allocator->cacheGroups().front()->blockPool();
     ASSERT_EQ(backing->freeBlocksNum(), 6u);
-    BlockReleaseBatch releases;
-    releaseInsertedRequestBlocks(allocator, blocks, releases);
-    submitBlockReleases(cache, releases);
+    releaseInsertedRequestBlocks(allocator, blocks);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     EXPECT_EQ(scripted_copy->submittedDescriptorCount(), 0u);
@@ -1179,9 +1158,7 @@ TEST_F(BlockTreeCacheFactoryTest, IncompatibleGroupsKeepSeparateGroupSetResource
     EXPECT_EQ(cache->groupSets()[0]->devicePools()[0]->refCount(blocks[0]), 2u);
     EXPECT_EQ(cache->groupSets()[1]->devicePools()[0]->refCount(blocks[1]), 2u);
 
-    BlockReleaseBatch releases;
-    releaseInsertedRequestBlocks(allocator, blocks, releases);
-    submitBlockReleases(cache, releases);
+    releaseInsertedRequestBlocks(allocator, blocks);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) {
@@ -1205,9 +1182,7 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
 
     const auto original_blocks = insertOneKeyThroughAllocator(config, allocator, /*key=*/703);
     ASSERT_EQ(original_blocks.size(), 2u);
-    BlockReleaseBatch releases;
-    releaseInsertedRequestBlocks(allocator, original_blocks, releases);
-    submitBlockReleases(cache, releases);
+    releaseInsertedRequestBlocks(allocator, original_blocks);
 
     auto find = cache->tree()->findNode(CacheKeysType{703});
     ASSERT_EQ(find.size(), 1u);
@@ -1215,7 +1190,6 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
     ASSERT_EQ(node->group_set_resources.size(), 2u);
     auto clear_group_set_a = [&](BlockIdxType block) {
         const MultiNodeResource device_resource{0, Tier::DEVICE, {{node, {block}}}};
-        group_set_a->unmapDeviceBlocksFromTreeNode(device_resource);
         node->group_set_resources[0].evictFromTier(Tier::DEVICE);
         group_set_a->unreferenceBlocks(device_resource, BlockRefType::BLOCK_CACHE);
     };
@@ -1259,8 +1233,8 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
     expectDevicePattern(
         allocator->cacheGroups()[1]->convertIndexToAddr(b_layer, original_blocks[1]).kv_addr, b_bytes, 0x5a);
 
-    EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
-    block_tree_cache_test::releaseDeviceBlocksAndNotify(
+    EXPECT_EQ(cache->getStats().device_heap_total_size, 2u);
+    block_tree_cache_test::releaseDeviceBlocks(
         *cache, allocator->cacheGroups()[0]->blockPool(), *refill_a, BlockRefType::REQUEST);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 2u);
 

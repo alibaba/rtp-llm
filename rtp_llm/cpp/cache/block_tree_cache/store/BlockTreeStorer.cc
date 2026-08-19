@@ -167,7 +167,8 @@ size_t BlockTreeStorer::settleLocked(const StoreTask& task, bool publish) {
         source_path   = &fallback_path;
     }
 
-    // Release temporary holders before candidate admission.
+    // Publication owns the target through BLOCK_CACHE; temporary STORE holders
+    // are no longer needed once every target has been installed.
     store_task_runner_.releaseTaskResources(task);
     for (const TransferDescriptor& descriptor : task.descriptors) {
         if (descriptor.path_index >= source_path->size()) {

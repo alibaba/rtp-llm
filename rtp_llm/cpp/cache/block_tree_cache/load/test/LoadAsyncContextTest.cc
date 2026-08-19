@@ -196,15 +196,14 @@ std::shared_ptr<const CacheTopology> makeTopology(std::vector<CacheGroupType> ty
 }
 
 void initBackend(ManualBackend& backend, const std::shared_ptr<IBlockPool>& pool) {
-    RTP_LLM_CHECK(backend.init(
-        makeTopology(), {pool}, [](int, int, int) { return std::vector<BlockInfo>{}; }, [](const auto&) {}));
+    RTP_LLM_CHECK(backend.init(makeTopology(), {pool}, [](int, int, int) { return std::vector<BlockInfo>{}; }));
 }
 
 void initBackend(ManualBackend&                                  backend,
                  std::shared_ptr<const CacheTopology>            topology,
                  const std::vector<std::shared_ptr<IBlockPool>>& pools) {
-    RTP_LLM_CHECK(backend.init(
-        std::move(topology), pools, [](int, int, int) { return std::vector<BlockInfo>{}; }, [](const auto&) {}));
+    RTP_LLM_CHECK(
+        backend.init(std::move(topology), pools, [](int, int, int) { return std::vector<BlockInfo>{}; }));
 }
 
 StorageRequest makeRequest(size_t key_count) {

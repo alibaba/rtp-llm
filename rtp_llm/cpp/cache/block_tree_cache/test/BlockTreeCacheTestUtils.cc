@@ -1,6 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 
-#include "rtp_llm/cpp/cache/BlockReleaseBatch.h"
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
@@ -265,8 +264,7 @@ size_t treeCachedBlocksNum(const IBlockPool& pool) {
 }
 
 void releaseRequestRefsForTest(BlockTreeCache& cache, const std::vector<MultiNodeResource>& resources) {
-    BlockReleaseBatch releases;
-    const auto&       group_sets = cache.groupSets();
+    const auto& group_sets = cache.groupSets();
     for (const MultiNodeResource& resource : resources) {
         RTP_LLM_CHECK(resource.tier == Tier::DEVICE);
         RTP_LLM_CHECK(resource.group_set_id < group_sets.size());
@@ -277,27 +275,22 @@ void releaseRequestRefsForTest(BlockTreeCache& cache, const std::vector<MultiNod
         for (const auto& [_, blocks] : resource.node_blocks) {
             RTP_LLM_CHECK(blocks.size() == pools.size());
             for (size_t member_group_id = 0; member_group_id < blocks.size(); ++member_group_id) {
-                releases.append(group_ids[member_group_id],
-                                pools[member_group_id]->decRefWithResult(
-                                    {blocks[member_group_id]}, BlockRefType::REQUEST));
+                pools[member_group_id]->decRef(blocks[member_group_id], BlockRefType::REQUEST);
             }
         }
     }
-    cache.onBlocksReleased(releases.finish());
 }
 
-void releaseDeviceBlocksAndNotify(BlockTreeCache&           cache,
-                                  const DeviceBlockPoolPtr& pool,
-                                  const BlockIdList&        blocks,
-                                  BlockRefType              ref_type) {
+void releaseDeviceBlocks(BlockTreeCache&           cache,
+                         const DeviceBlockPoolPtr& pool,
+                         const BlockIdList&        blocks,
+                         BlockRefType              ref_type) {
     for (const GroupSetPtr& group_set : cache.groupSets()) {
         for (size_t member_group_id = 0; member_group_id < group_set->devicePools().size(); ++member_group_id) {
             if (group_set->devicePools()[member_group_id] != pool) {
                 continue;
             }
-            BlockReleaseBatch releases;
-            releases.append(group_set->groupIds()[member_group_id], pool->decRefWithResult(blocks, ref_type));
-            cache.onBlocksReleased(releases.finish());
+            pool->decRef(blocks, ref_type);
             return;
         }
     }
@@ -438,10 +431,7 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
         RTP_LLM_CHECK_WITH_INFO(
             cache->storageBackend()->init(std::move(storage_topology),
                                           std::move(storage_device_pools),
-                                          std::move(storage_buffer_resolver),
-                                          [cache_ptr = cache.get()](const std::vector<BlockReleaseReceipt>& receipts) {
-                                              cache_ptr->onBlocksReleased(receipts);
-                                          }),
+                                          std::move(storage_buffer_resolver)),
             "StorageBackend init failed");
     }
     if (!cache->init()) {
@@ -507,6 +497,13 @@ void BlockTreeCacheTestPeer::setTierWatermarkForTest(BlockTreeCache& cache, Tier
         default:
             break;
     }
+}
+
+void BlockTreeCacheTestPeer::refreshCandidateForTest(BlockTreeCache& cache,
+                                                      TreeNode*       node,
+                                                      size_t          group_set_id) {
+    std::lock_guard<std::mutex> lock(cache.mutex_);
+    cache.evictor_.refreshCandidate(node, group_set_id);
 }
 
 size_t BlockTreeCacheTestPeer::pendingEvictionReleasesForTest(const BlockTreeCache& cache) {

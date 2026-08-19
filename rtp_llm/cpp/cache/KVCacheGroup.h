@@ -65,11 +65,8 @@ public:
     virtual MatchResult matchSingleKey(CacheKeyType cache_key) const;
     virtual void
          insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident);
-    virtual std::vector<BlockRefTransition>
-    release(const BlockIndicesType& block_indices, BlockRefType ref_type = BlockRefType::REQUEST) = 0;
-    virtual void free(const BlockIndicesType& block_indices)                                      = 0;
-    virtual std::vector<BlockRefTransition>
-    releaseSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
+    virtual void release(const BlockIndicesType& block_indices, BlockRefType ref_type = BlockRefType::REQUEST) = 0;
+    virtual void free(const BlockIndicesType& block_indices) = 0;
     virtual void
     removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
     virtual int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const                      = 0;
@@ -139,7 +136,7 @@ protected:
     }
 
     void                            addBlockRefs(const BlockIndicesType& blocks, BlockRefType ref_type);
-    std::vector<BlockRefTransition> releaseBlockRefs(const BlockIndicesType& blocks, BlockRefType ref_type);
+    void releaseBlockRefs(const BlockIndicesType& blocks, BlockRefType ref_type);
 
     GroupBase                    cache_group_;
     DeviceBlockPoolPtr           block_pool_;
