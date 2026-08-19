@@ -1,6 +1,5 @@
 #pragma once
 #include <atomic>
-#include <cstdint>
 #include <list>
 #include <shared_mutex>
 #include <string>
@@ -10,27 +9,6 @@
 #include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
 
 namespace rtp_llm {
-
-// Verification-log sampling state for the A2 event-driven runtime-meta
-// promotion fix (the finish callback registered by
-// PrefillGenerateContext::setStream). Pure observability: cumulative atomic
-// counters plus time-throttled INFO lines only; no behavior change.
-// C++17 inline variables keep one process-wide instance across every
-// translation unit that includes this header. Emission policy: at most one
-// INFO line per event per kPromotionLogIntervalMs (<= 2 lines/s combined), so
-// thousands of callback fires per second cannot flood the log, while every
-// emitted line carries the cumulative counters so the evidence stays complete
-// between samples.
-namespace promotion_log_detail {
-constexpr int64_t kPromotionLogIntervalMs = 1000;
-
-inline std::atomic<uint64_t> g_finish_callback_fires{0};     // callback-driven dequeue() invocations
-inline std::atomic<uint64_t> g_finish_callback_promoted{0};  // fires that migrated the entry out of running_streams_
-inline std::atomic<int64_t>  g_finish_callback_last_log_ms{0};
-inline std::atomic<uint64_t> g_fetch_dequeue_miss_total{0};     // fetch/teardown-driven find-miss count
-inline std::atomic<uint64_t> g_fetch_dequeue_miss_promoted{0};  // misses where finished_streams_ already held the entry
-inline std::atomic<int64_t>  g_fetch_dequeue_miss_last_log_ms{0};
-}  // namespace promotion_log_detail
 
 struct TaskIdentity {
     const int64_t request_id;
@@ -188,30 +166,11 @@ public:
         return true;
     }
 
-    // Migrates the runtime-meta entry of request_id out of running_streams_:
-    // publishes a finished record, or hands the entry to the priority-
-    // preemption overlay when Cancel installed one. Returns true when this
-    // call was the migrator; false on an idempotent find-miss (the entry was
-    // already migrated, e.g. by the A2 finish callback, or was never
-    // enqueued). from_finish_callback=true marks the A2 event-driven
-    // promotion call site (PrefillGenerateContext::setStream) so its
-    // effectiveness is verifiable via sampled INFO logs; it never changes the
-    // migration semantics.
-    bool dequeue(int64_t request_id, const GenerateStreamPtr& stream, bool from_finish_callback = false) {
-        if (from_finish_callback) {
-            promotion_log_detail::g_finish_callback_fires.fetch_add(1, std::memory_order_relaxed);
-        }
+    void dequeue(int64_t request_id, const GenerateStreamPtr& stream) {
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
         auto                                ptr = running_streams_.find(request_id);
         if (ptr == running_streams_.end()) {
-            // A find-miss on the fetch/teardown path with the entry already in
-            // finished_streams_ is the direct counter-evidence that the A2
-            // finish callback promoted it first (see
-            // noteFetchDequeueMissLocked).
-            if (!from_finish_callback) {
-                noteFetchDequeueMissLocked(request_id, stream);
-            }
-            return false;
+            return;
         }
         auto&   task_info           = ptr->second.task_info;
         int64_t current             = autil::TimeUtility::currentTimeInMilliSeconds();
@@ -233,15 +192,8 @@ public:
             overlay->second.error_code  = 0;
             overlay->second.error_message.clear();
             overlay->second.priority_preemption_progress = PriorityPreemptionProgress::CANCELING;
-            const int64_t migrated_batch_id              = task_info.batch_id;
             running_streams_.erase(ptr);
-            if (from_finish_callback) {
-                // The callback still migrated the entry out of running_streams_
-                // (handed over to the priority finalizer), so it counts as a
-                // promotion and proves the callback fired.
-                noteFinishCallbackPromotedLocked(request_id, migrated_batch_id);
-            }
-            return true;
+            return;
         }
 
         if (finished_streams_.size() >= finished_capacity_) {
@@ -254,12 +206,7 @@ public:
 
         int64_t version = version_.fetch_add(1, std::memory_order_relaxed);
         finished_streams_.push_back(std::make_pair(version, task_info));
-        const int64_t migrated_batch_id = task_info.batch_id;
         running_streams_.erase(ptr);
-        if (from_finish_callback) {
-            noteFinishCallbackPromotedLocked(request_id, migrated_batch_id);
-        }
-        return true;
     }
 
     void finishTask(int64_t            request_id,
@@ -308,77 +255,6 @@ protected:
             return identity.batch_id;
         }
         return stream_batch_id;
-    }
-
-    // Verification log for the A2 finish callback being the migrator: this
-    // dequeue call removed the entry from running_streams_ (published a
-    // finished record, or handed it to the priority-preemption overlay).
-    // Time-throttled to at most one INFO per kPromotionLogIntervalMs; the
-    // counters are cumulative so each sampled line still proves how many
-    // fires happened and how many were promotions.
-    void noteFinishCallbackPromotedLocked(int64_t request_id, int64_t batch_id) {
-        const uint64_t fires = promotion_log_detail::g_finish_callback_fires.load(std::memory_order_relaxed);
-        const uint64_t promoted =
-            promotion_log_detail::g_finish_callback_promoted.fetch_add(1, std::memory_order_relaxed) + 1;
-        const int64_t now_ms  = autil::TimeUtility::currentTimeInMilliSeconds();
-        int64_t       last_ms = promotion_log_detail::g_finish_callback_last_log_ms.load(std::memory_order_relaxed);
-        if (now_ms - last_ms >= promotion_log_detail::kPromotionLogIntervalMs
-            && promotion_log_detail::g_finish_callback_last_log_ms.compare_exchange_strong(
-                last_ms, now_ms, std::memory_order_acq_rel)) {
-            RTP_LLM_LOG_INFO("event=finish_callback_promoted request_id=%ld batch_id=%ld "
-                             "callback_fires_total=%lu callback_promoted_total=%lu (sampled 1/s): "
-                             "A2 finish callback migrated the runtime-meta entry out of running_streams_",
-                             request_id,
-                             batch_id,
-                             fires,
-                             promoted);
-        }
-    }
-
-    // Counter-evidence verification log: a fetch/teardown-driven dequeue
-    // find-miss whose entry is already in finished_streams_ (with an error
-    // code consistent with this stream) proves the A2 finish callback
-    // promoted the entry before the FetchResponse arrived. A find-miss with
-    // no matching finished record (never enqueued, or a finishTask record
-    // with a different error code) stays silent by design.
-    // Called with read_write_lock_ held; scans finished_streams_ from the
-    // newest end, so the common case (the callback migrated this very entry
-    // moments before the fetch) terminates after a few nodes.
-    void noteFetchDequeueMissLocked(int64_t request_id, const GenerateStreamPtr& stream) {
-        promotion_log_detail::g_fetch_dequeue_miss_total.fetch_add(1, std::memory_order_relaxed);
-        if (!stream) {
-            return;
-        }
-        for (auto it = finished_streams_.rbegin(); it != finished_streams_.rend(); ++it) {
-            if (it->second.request_id != request_id) {
-                continue;
-            }
-            const bool error_consistent =
-                (it->second.error_code == 0 && !stream->hasError())
-                || (stream->hasError() && it->second.error_code == static_cast<int64_t>(stream->statusInfo().code()));
-            if (!error_consistent) {
-                break;
-            }
-            const uint64_t miss_total =
-                promotion_log_detail::g_fetch_dequeue_miss_total.load(std::memory_order_relaxed);
-            const uint64_t promoted =
-                promotion_log_detail::g_fetch_dequeue_miss_promoted.fetch_add(1, std::memory_order_relaxed) + 1;
-            const int64_t now_ms = autil::TimeUtility::currentTimeInMilliSeconds();
-            int64_t last_ms = promotion_log_detail::g_fetch_dequeue_miss_last_log_ms.load(std::memory_order_relaxed);
-            if (now_ms - last_ms >= promotion_log_detail::kPromotionLogIntervalMs
-                && promotion_log_detail::g_fetch_dequeue_miss_last_log_ms.compare_exchange_strong(
-                    last_ms, now_ms, std::memory_order_acq_rel)) {
-                RTP_LLM_LOG_INFO("event=fetch_found_already_promoted request_id=%ld batch_id=%ld "
-                                 "dequeue_miss_total=%lu already_promoted_total=%lu (sampled 1/s): "
-                                 "fetch/teardown dequeue found the runtime-meta entry already migrated "
-                                 "by the A2 finish callback",
-                                 request_id,
-                                 it->second.batch_id,
-                                 miss_total,
-                                 promoted);
-            }
-            break;
-        }
     }
 
     static EngineScheduleInfo::TaskInfo

@@ -309,7 +309,7 @@ TEST(RpcServerRuntimeMetaTest, FinishCallbackPromotesFinishedStreamWithoutDequeu
     std::weak_ptr<GenerateStream> weak_done = done;
     done->setFinishCallback([&meta, rid = int64_t{502}, weak_done]() {
         if (auto finished = weak_done.lock()) {
-            meta.dequeue(rid, finished, /*from_finish_callback=*/true);
+            meta.dequeue(rid, finished);
         }
     });
     done->forceFinished();
@@ -350,7 +350,7 @@ TEST(RpcServerRuntimeMetaTest, FinishCallbackPromotesErroredStreamWithErrorCode)
     std::weak_ptr<GenerateStream> weak_failed = failed;
     failed->setFinishCallback([&meta, rid = int64_t{503}, weak_failed]() {
         if (auto finished = weak_failed.lock()) {
-            meta.dequeue(rid, finished, /*from_finish_callback=*/true);
+            meta.dequeue(rid, finished);
         }
     });
     failed->forceError(ErrorCode::LONG_PROMPT_ERROR, "prompt exceeds context window");
