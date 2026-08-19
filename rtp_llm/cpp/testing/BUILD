@@ -1,6 +1,18 @@
 load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
+cc_import(
+    name = "cuda13_torch_nvshmem",
+    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+)
+
+cuda13_torch_link_deps = select({
+    "@//:using_cuda13_x86": [
+        ":cuda13_torch_nvshmem",
+    ],
+    "//conditions:default": [],
+})
+
 test_copts = [
     "-fno-access-control",
 ] + copts()
@@ -28,8 +40,8 @@ cc_library(
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/runtime:cuda_runtime_hdrs",
-        "//rtp_llm/models_py/bindings/core:runtime_ops_test_impls",
-    ],
+        "//rtp_llm/cpp/runtime:cuda_runtime_impl",
+    ] + cuda13_torch_link_deps,
     visibility = ["//visibility:public"],
     copts = copts(),
 )

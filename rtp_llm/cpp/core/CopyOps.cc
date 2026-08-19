@@ -20,6 +20,7 @@
 
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAEvent.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
 #include "ATen/ops/cat.h"
@@ -226,6 +227,16 @@ at::cuda::CUDAStream getNoBlockCopyStream(int device_id) {
     return stream->second;
 }
 
+void waitForCurrentStream(const at::cuda::CUDAStream& copy_stream) {
+    const auto current_stream = at::cuda::getCurrentCUDAStream(copy_stream.device_index());
+    if (current_stream.stream() == copy_stream.stream()) {
+        return;
+    }
+    c10::cuda::CUDAEvent ready;
+    ready.record(current_stream);
+    ready.block(copy_stream);
+}
+
 int getCopyDevice(const torch::Tensor& dst, const torch::Tensor& src) {
     if (dst.is_cuda()) {
         return static_cast<int>(dst.get_device());
@@ -346,7 +357,7 @@ bool ensureStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch,
     if (scratch.host_capacity < host_bytes) {
         if (scratch.host_staging != nullptr) {
             (void)cudaFreeHost(scratch.host_staging);
-            scratch.host_staging = nullptr;
+            scratch.host_staging  = nullptr;
             scratch.host_capacity = 0;
         }
         const auto err = cudaHostAlloc(&scratch.host_staging, host_bytes, cudaHostAllocDefault);
@@ -781,7 +792,9 @@ void runtimeNoBlockCopy(const CopyParams& params) {
 #if USING_CUDA
     const auto  copy_device = getCopyDevice(dst, src);
     DeviceGuard device_guard(copy_device);
-    auto        stream = getNoBlockCopyStream(copy_device).stream();
+    const auto  copy_stream = getNoBlockCopyStream(copy_device);
+    waitForCurrentStream(copy_stream);
+    auto stream = copy_stream.stream();
     RTP_LLM_DEVICE_CHECK(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), src.nbytes(), cudaMemcpyDefault, stream));
     RTP_LLM_DEVICE_CHECK(cudaStreamSynchronize(stream));
     RTP_LLM_DEVICE_CHECK_DEBUG(stream);
@@ -802,7 +815,9 @@ void runtimeNoBlockCopy(const MultiCopyParams& params) {
     const int   copy_device = params.multi_dst.empty() ? static_cast<int>(at::cuda::current_device()) :
                                                          getCopyDevice(params.multi_dst[0], params.multi_src[0]);
     DeviceGuard device_guard(copy_device);
-    auto        stream = getNoBlockCopyStream(copy_device).stream();
+    const auto  copy_stream = getNoBlockCopyStream(copy_device);
+    waitForCurrentStream(copy_stream);
+    auto stream = copy_stream.stream();
 
     if (params.split_kv_layer_num > 0 && has_cuda_tensor
         && splitKvMultiCopy(params.multi_src,
@@ -866,7 +881,9 @@ bool runtimeBatchedMemoryCopy(const BatchedMemoryCopyParams& params) {
 
 #if CUDART_VERSION >= 12080
     DeviceGuard device_guard(params.device_index);
-    auto        stream = getNoBlockCopyStream(params.device_index).stream();
+    const auto  copy_stream = getNoBlockCopyStream(params.device_index);
+    waitForCurrentStream(copy_stream);
+    auto stream = copy_stream.stream();
 
     std::vector<void*>       dsts;
     std::vector<const void*> srcs;
@@ -898,7 +915,7 @@ bool runtimeBatchedMemoryCopy(const BatchedMemoryCopyParams& params) {
         mutable_srcs.push_back(const_cast<void*>(src));
     }
     size_t fail_idx = 0;
-    auto   err = cudaMemcpyBatchAsync(
+    auto   err      = cudaMemcpyBatchAsync(
         dsts.data(), mutable_srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, &fail_idx, stream);
 #endif
     if (err == cudaSuccess) {
@@ -941,7 +958,9 @@ bool runtimeStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryC
     }
 
     DeviceGuard device_guard(params.device_index);
-    auto        stream = getNoBlockCopyStream(params.device_index).stream();
+    const auto  copy_stream = getNoBlockCopyStream(params.device_index);
+    waitForCurrentStream(copy_stream);
+    auto stream = copy_stream.stream();
 
     std::vector<void*>  host_ptrs;
     std::vector<size_t> host_offsets;
@@ -969,8 +988,8 @@ bool runtimeStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryC
     }
 
     StagedMemoryCopyScratch local_scratch;
-    auto*                   work_scratch = scratch != nullptr ? scratch : &local_scratch;
-    const auto cleanup_local_scratch = [&]() {
+    auto*                   work_scratch          = scratch != nullptr ? scratch : &local_scratch;
+    const auto              cleanup_local_scratch = [&]() {
         if (scratch == nullptr) {
             releaseStagedMemoryCopyScratch(local_scratch);
         }
@@ -992,11 +1011,8 @@ bool runtimeStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryC
                               stream);
     }
     if (err == cudaSuccess) {
-        err = cudaMemcpyAsync(work_scratch->device_sizes,
-                              host_sizes.data(),
-                              tile_num * sizeof(size_t),
-                              cudaMemcpyHostToDevice,
-                              stream);
+        err = cudaMemcpyAsync(
+            work_scratch->device_sizes, host_sizes.data(), tile_num * sizeof(size_t), cudaMemcpyHostToDevice, stream);
     }
 
     if (err == cudaSuccess && params.direction == StagedMemoryCopyDirection::H2D) {

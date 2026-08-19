@@ -332,12 +332,25 @@ TEST_F(RuntimeOpsTest, testCopyD2H) {
 }
 
 TEST_F(RuntimeOpsTest, testNoBlockCopy) {
-    auto       src = torch::randn({32}, torch::kCUDA);
-    auto       dst = torch::empty({32}, torch::kCUDA);
+    auto       src = torch::randn({1 << 20}, torch::kCUDA);
+    auto       dst = torch::empty_like(src);
     CopyParams params{dst, src};
     ASSERT_NO_THROW(runtimeNoBlockCopy(params));
     runtimeSyncAndCheck();
     ASSERT_TRUE(torch::equal(src, dst));
+}
+
+TEST_F(RuntimeOpsTest, testNoBlockMultiCopy) {
+    auto src_a = torch::randn({1 << 19}, torch::kCUDA);
+    auto src_b = torch::randn({1 << 19}, torch::kCUDA);
+    auto dst_a = torch::empty_like(src_a);
+    auto dst_b = torch::empty_like(src_b);
+
+    MultiCopyParams params{{dst_a, dst_b}, {src_a, src_b}};
+    ASSERT_NO_THROW(runtimeNoBlockCopy(params));
+    runtimeSyncAndCheck();
+    EXPECT_TRUE(torch::equal(src_a, dst_a));
+    EXPECT_TRUE(torch::equal(src_b, dst_b));
 }
 
 TEST_F(RuntimeOpsTest, testBatchCopyD2D) {

@@ -11,6 +11,8 @@
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 
 #include <algorithm>
+#include <chrono>
+#include <thread>
 #include <utility>
 
 namespace rtp_llm {
@@ -61,7 +63,9 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
     // copies (metadata) and KV cache writes were enqueued, so blocking
     // here guarantees all pinned buffers are populated.
     if (pre_created_event) {
-        pre_created_event->synchronize();
+        while (!pre_created_event->query()) {
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
+        }
     }
 
     RTP_LLM_CHECK_WITH_INFO(
