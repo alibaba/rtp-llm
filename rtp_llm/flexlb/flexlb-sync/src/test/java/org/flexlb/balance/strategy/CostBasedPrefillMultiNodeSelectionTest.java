@@ -41,8 +41,9 @@ import static org.mockito.ArgumentMatchers.anyList;
  * 验证：正常 placement 评分选对（含 auto-tpm 开启时实测 queue-age 的
  * batcherEstimatedWaitMs 参与 P 评分且是优先级无关的实测拥堵度）、不可行
  * endpoint 绝不入选、全不可行 → 明确失败、仅一可行 → 必选。
- * 另含 Round-2 拥挤过滤（CONGESTED_QUEUE_FILTERED，编译期 RATIO=0.8）：
- * 超阈引擎即使评分最优也被 bench、未超阈正常参选、全超回退 least-loaded。
+ * 另含 Round-2 拥挤过滤（CONGESTED_QUEUE_FILTERED，threshold=队列硬上限
+ * flexlbBatchQueueMaxSize 本身）：满容引擎即使评分最优也被 bench、
+ * 未满正常参选、全满回退 least-loaded。
  */
 class CostBasedPrefillMultiNodeSelectionTest {
 
@@ -133,17 +134,17 @@ class CostBasedPrefillMultiNodeSelectionTest {
         assertEquals("10.0.0.1", result.getServerIp());
     }
 
-    // ============ Round-2 拥挤过滤（CONGESTED_QUEUE_FILTERED，RATIO=0.8） ============
+    // ============ Round-2 拥挤过滤（CONGESTED_QUEUE_FILTERED，capacity 精确阈值） ============
 
     @Test
     void congestedQueueEndpointIsBenchedEvenWhenItsScoreIsBest() {
-        // w1 队列 90 ≥ ceil(0.8×100)=80 → congested；其队头年龄≈0 使
+        // w1 队列 100 ≥ maxSize=100 → 满容 congested；其队头年龄≈0 使
         // score 严格更优（w2 队头老 5s，score 差 5000ms）。拥挤过滤必须
         // 压倒评分：必选 w2（8/17 慢引擎吸引子的直接反制）。
         setUpAutoTpmBatcherConfig();
         PrefillEndpoint w1 = parkedEndpoint("10.0.0.1");
         PrefillEndpoint w2 = parkedEndpoint("10.0.0.2");
-        fillQueue(w1, 50, 90, 1000, 0);
+        fillQueue(w1, 50, 100, 1000, 0);
         fillQueue(w2, 50, 10, 2000, -5_000);
 
         ServerStatus result = strategy.select(
@@ -155,12 +156,12 @@ class CostBasedPrefillMultiNodeSelectionTest {
 
     @Test
     void belowThresholdQueueStillCompetesAndWins() {
-        // w1 队列 79 < 80：未达阈值，正常参选；w2 队头老 5s（score 更
+        // w1 队列 99 < 100：未满容，正常参选；w2 队头老 5s（score 更
         // 差）→ 必选 w1。阈值边界不误伤。
         setUpAutoTpmBatcherConfig();
         PrefillEndpoint w1 = parkedEndpoint("10.0.0.1");
         PrefillEndpoint w2 = parkedEndpoint("10.0.0.2");
-        fillQueue(w1, 50, 79, 1000, 0);
+        fillQueue(w1, 50, 99, 1000, 0);
         fillQueue(w2, 50, 10, 2000, -5_000);
 
         ServerStatus result = strategy.select(
@@ -172,16 +173,16 @@ class CostBasedPrefillMultiNodeSelectionTest {
 
     @Test
     void allCongestedFallsBackToLeastLoadedEndpoint() {
-        // 两队列都 90（全 congested）→ survivor 全滤空 → least-loaded 回退。
-        // w2 追加第二个 inflight batch（totalPredict 120_000 > w1 的 60_000，
-        // 两端的 elapsed 衰减差只有几 ms）→ w1 恒为 least-loaded → 回退必
-        // 选 w1，且路由不 fail-closed。
+        // 两队列都 100（全满容 congested）→ survivor 全滤空 → least-loaded
+        // 回退。w2 追加第二个 inflight batch（totalPredict 120_000 > w1 的
+        // 60_000，两端的 elapsed 衰减差只有几 ms）→ w1 恒为 least-loaded
+        // → 回退必选 w1，且路由不 fail-closed。
         setUpAutoTpmBatcherConfig();
         PrefillEndpoint w1 = parkedEndpoint("10.0.0.1");
         PrefillEndpoint w2 = parkedEndpoint("10.0.0.2");
         w2.commitBatch(810_002L, 60_000, List.of());
-        fillQueue(w1, 50, 90, 1000, 0);
-        fillQueue(w2, 50, 90, 2000, 0);
+        fillQueue(w1, 50, 100, 1000, 0);
+        fillQueue(w2, 50, 100, 2000, 0);
 
         ServerStatus result = strategy.select(
                 priorityContext(9301L, 50), RoleType.PREFILL, null);
@@ -245,12 +246,17 @@ class CostBasedPrefillMultiNodeSelectionTest {
         config.setFlexlbBatchFixedWaitMs(1_000);
         config.setFlexlbBatchSizeMax(10);
         config.setFlexlbBatchFixedMaxInflightBatches(1);
-        // Small hard cap so the congestion tests can cross the 0.8 threshold
-        // (ceil(0.8×100)=80) with ~90 quick offers: filling 900 items against
-        // the default cap of 1024 is slow enough under a loaded CI JVM that
-        // the fixed window (1000ms) expires on the early head and the
-        // batcher starts draining the queue mid-test (observed as a flaky
-        // all-congested fallback on the full-module run).
+        // Small hard cap (100) so the congestion tests reach the capacity
+        // threshold (queueSize == maxSize) with ~100 quick offers — this
+        // only keeps each fill in the millisecond range. Determinism does
+        // NOT come from the small cap: the backpressure park above
+        // (maxInflightBatches=1 + one committed batch, see parkedEndpoint)
+        // guarantees the batcher never dispatches during the test. The
+        // historical full-module flaky was NOT window expiry — it was a
+        // same-millisecond endpointWaitMs tie in the all-congested
+        // fallback, where iteration order picked first-seen; that is
+        // eliminated by w2's second inflight batch (60s predict gap →
+        // strictly lower wait on w1), not by the smaller fill.
         config.setFlexlbBatchQueueMaxSize(100);
     }
 

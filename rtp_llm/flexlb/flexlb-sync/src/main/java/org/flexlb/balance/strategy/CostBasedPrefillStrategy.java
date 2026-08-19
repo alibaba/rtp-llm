@@ -42,24 +42,6 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
      */
     private static final double ENGINE_WAIT_PENALTY_MS_PER_WAIT_STREAM = 20.0;
 
-    /**
-     * Queue-occupancy ratio (0-1, compile-time constant — zero new config)
-     * at which the Round-2 congested-queue filter excludes a prefill
-     * endpoint from routing candidates: an endpoint whose batcher queue
-     * holds at least {@code ceil(CONGESTED_QUEUE_RATIO ×
-     * flexlbBatchQueueMaxSize)} queued requests is "congested" and skipped
-     * with a {@code CONGESTED_QUEUE_FILTERED} rejection. Evidence (8/17
-     * slow-engine attractor): a slow engine kept winning the score race on
-     * its low engineWait report while its queue was flooded far past what
-     * the score terms reflected — once the queue is at/above 80% of its
-     * hard cap the endpoint is benched until it drains, regardless of what
-     * it reports. A non-positive {@code flexlbBatchQueueMaxSize}
-     * (unbounded) disables the filter, and when every feasible endpoint is
-     * congested the existing least-loaded fallback still returns one
-     * endpoint, so routing never fails closed.
-     */
-    private static final double CONGESTED_QUEUE_RATIO = 0.8;
-
     private final ThreadLocal<CandidateSet> candidateSets =
             ThreadLocal.withInitial(CandidateSet::new);
 
@@ -318,11 +300,12 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                 leastLoadedScore = feasible.score(i);
             }
 
-            // Congested-queue filter (8/17 slow-engine attractor): bench any
-            // endpoint whose batcher queue is at/above 80% of its hard cap —
-            // its score can no longer win routing regardless of how low its
-            // reported wait is. Tracked above so the least-loaded fallback
-            // still sees it when every feasible endpoint is congested.
+            // Congested-queue filter: bench any endpoint whose batcher
+            // queue is at capacity (queueSize >= flexlbBatchQueueMaxSize)
+            // — its score can no longer win routing regardless of how low
+            // its reported wait is. Tracked above so the least-loaded
+            // fallback still sees it when every feasible endpoint is
+            // congested.
             if (congestedQueueThreshold > 0
                     && feasible.endpoint(i).getBatcher().queueSize() >= congestedQueueThreshold) {
                 rejections.merge("CONGESTED_QUEUE_FILTERED", 1, Integer::sum);
@@ -352,18 +335,28 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
 
     /**
      * Batch-queue depth at or above which an endpoint is congested:
-     * {@code ceil(CONGESTED_QUEUE_RATIO × flexlbBatchQueueMaxSize)}. A
-     * non-positive {@code flexlbBatchQueueMaxSize} (unbounded) returns 0,
-     * which disables the filter — the caller guards the trigger with
+     * {@code flexlbBatchQueueMaxSize} itself — the queue is at capacity,
+     * so the very next offer would already bounce off the offer-time
+     * capacity wall (the {@code reserveQueueSlot} CAS in WorkerBatcher).
+     * Excluding such an endpoint from candidacy moves that wall into
+     * candidate selection, saving the failed-offer + re-route retry
+     * cycle. Applies to both legacy and Auto-TPM prefill routing — the
+     * lack of an Auto-TPM gate is intentional: capacity exhaustion
+     * disqualifies an endpoint in both modes; Auto-TPM only changes how
+     * the score terms are computed. A non-positive
+     * {@code flexlbBatchQueueMaxSize} (unbounded) returns 0, which
+     * disables the filter — the caller guards the trigger with
      * {@code congestedQueueThreshold > 0} so 0 never fires on an empty
-     * queue.
+     * queue. When every feasible endpoint is congested the least-loaded
+     * fallback (tracked before the filter) still returns one endpoint,
+     * so routing never fails closed.
      */
     private static long congestedQueueThreshold(FlexlbConfig config) {
         int maxQueueSize = config.getFlexlbBatchQueueMaxSize();
         if (maxQueueSize <= 0) {
             return 0;
         }
-        return (long) Math.ceil(CONGESTED_QUEUE_RATIO * maxQueueSize);
+        return maxQueueSize;
     }
 
     private EndpointFilterResult getAvailableEndpoints(RoleType roleType, String group,

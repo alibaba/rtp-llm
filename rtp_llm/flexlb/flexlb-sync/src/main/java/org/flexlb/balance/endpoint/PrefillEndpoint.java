@@ -136,9 +136,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /**
      * Auto-TPM measured queue-wait estimate (measured queue-age design):
-     * the age of the batcher queue head — a direct congestion measurement
-     * of how slowly this engine drains its queue, priority-blind and
-     * O(1). See {@code PrefillQueueManager.estimateWaitMs}.
+     * the age of the next-to-dispatch head (service-order head, i.e. the
+     * oldest item of the highest-priority lane) — a direct congestion
+     * measurement of how slowly this engine drains its queue, O(1) and
+     * priority-blind. For a probe below the head's priority lane the
+     * value is a lower bound on its true wait (the probe queues behind
+     * that head); that conservative form is intentional — see
+     * {@code PrefillQueueManager.estimateWaitMs} for the full argument.
      */
     public long batcherEstimatedWaitMs(int priority, long deadlineMs, long requestId) {
         return batcher.queueManager().estimateWaitMs(priority, deadlineMs, requestId);
