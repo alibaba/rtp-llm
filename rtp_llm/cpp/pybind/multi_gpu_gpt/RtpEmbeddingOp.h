@@ -28,6 +28,7 @@ public:
     RtpEmbeddingOp();
     ~RtpEmbeddingOp();
     void       init(py::object model, py::object engine_config, py::object vit_config, py::object mm_process_engine);
+    void       requestStop();
     void       stop();
     py::object decode(th::Tensor                   token_ids,
                       th::Tensor                   token_type_ids,

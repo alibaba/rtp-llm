@@ -47,10 +47,14 @@ absl::Status EmbeddingEngine::startLoop() {
     return absl::OkStatus();
 }
 
+absl::Status EmbeddingEngine::requestStop() {
+    running_ = false;
+    return scheduler_->stop();
+}
+
 absl::Status EmbeddingEngine::stop() {
     RTP_LLM_LOG_INFO("stop embedding engine");
-    running_ = false;
-    RETURN_IF_STATUS_ERROR(scheduler_->stop());
+    RETURN_IF_STATUS_ERROR(requestStop());
     if (loop_thread_.joinable()) {
         loop_thread_.join();
     }
