@@ -8,7 +8,53 @@ import time
 from enum import Enum
 from subprocess import check_call
 from typing import Dict, Optional, Tuple, Type
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
+
+_PUBLIC_OSS_QUERY_KEYS = {"ENDPOINT", "HOST", "OSS_ENDPOINT"}
+_SENSITIVE_QUERY_KEYS = {
+    "ACCESS_KEY",
+    "ACCESS_KEY_ID",
+    "ACCESS_KEY_SECRET",
+    "AK",
+    "ID",
+    "KEY",
+    "OSS_ACCESS_ID",
+    "OSS_ACCESS_KEY",
+    "SECURITY_TOKEN",
+    "SK",
+    "TOKEN",
+}
+
+
+def _redact_uri(path: str) -> str:
+    """Remove credentials from a remote URI before it reaches logs."""
+    try:
+        parsed = urlsplit(path)
+    except ValueError:
+        return "<redacted-invalid-uri>"
+    if not parsed.scheme:
+        return path
+
+    netloc = parsed.netloc
+    if "@" in netloc:
+        netloc = "***@" + netloc.rsplit("@", 1)[1]
+
+    redacted_query = []
+    for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+        normalized_key = key.upper()
+        sensitive = normalized_key in _SENSITIVE_QUERY_KEYS
+        if parsed.scheme.lower() == "oss":
+            sensitive = normalized_key not in _PUBLIC_OSS_QUERY_KEYS
+        redacted_query.append((key, "***" if sensitive else value))
+    return urlunsplit(
+        (
+            parsed.scheme,
+            netloc,
+            parsed.path,
+            urlencode(redacted_query),
+            parsed.fragment,
+        )
+    )
 
 
 class RetryableError(Exception):
@@ -138,7 +184,12 @@ class Fuser:
                 {"cacheOptions": {"writeMode": "WRITE_THROGH", "enableRemove": True}}
             )
 
-        logging.info(f"mount request to {self._fuse_uri}/FuseService/mount: {req_json}")
+        display_path = _redact_uri(path)
+        display_req_json = dict(req_json)
+        display_req_json["uri"] = display_path
+        logging.info(
+            f"mount request to {self._fuse_uri}/FuseService/mount: {display_req_json}"
+        )
         mount_result = (
             _requests_module()
             .post(f"{self._fuse_uri}/FuseService/mount", json=req_json, timeout=600)
@@ -146,8 +197,10 @@ class Fuser:
         )
         error_code = mount_result["errorCode"]
         if error_code != 0:
-            raise RetryableError(f"mount {path} -> {mnt_path} failed: {mount_result}")
-        logging.info(f"mount dir success: {path} -> {mnt_path}")
+            raise RetryableError(
+                f"mount {display_path} -> {mnt_path} failed: errorCode={error_code}"
+            )
+        logging.info(f"mount dir success: {display_path} -> {mnt_path}")
 
         with self.lock:
             if mnt_path in self._mount_src_map:
@@ -314,7 +367,7 @@ def fetch_remote_file_to_local(
         logging.info(f"try mount nas path {path}")
         return _nfs_manager.mount_nfs_dir(path)
     else:
-        logging.info(f"try fuse path {path}")
+        logging.info(f"try fuse path {_redact_uri(path)}")
         return _get_fuser().mount_dir(path, mount_mode, enable_mnt_ref)
 
 
