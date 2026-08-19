@@ -30,6 +30,42 @@ pipeline.stop()
 
 ```
 
+## Cache Tiers (L1 / L2 / L3)
+
+Reused KV cache can live in three local tiers, each controlled by its own independent switch:
+
+| Tier | Location | Switch | Required companion settings |
+|------|----------|--------|-----------------------------|
+| L1 | GPU device memory | `ENABLE_DEVICE_CACHE` (default on) | — |
+| L2 | Pinned host memory | `ENABLE_HOST_CACHE` (default off) | `HOST_CACHE_SIZE_MB` |
+| L3 | Local disk | `ENABLE_DISK_CACHE` (default off) | `DISK_CACHE_SIZE_MB`, `DISK_CACHE_PATHS` |
+
+`DEVICE_CACHE_MIN_FREE_BLOCKS` sets the global L1 free-block headroom. With independent device pools, the value is distributed in proportion to each participating pool’s block capacity; zero keeps automatic sizing.
+
+All eight combinations are valid, including L2-only and L3-only deployments. Enabling a tier
+without its capacity or path settings is a startup error rather than a silent downgrade, so a
+misconfiguration never degrades quietly into a smaller cache than intended.
+
+When MULTI_TASK_PROMPT is configured, the server automatically enables `REUSE_CACHE` and L1 to
+preserve the existing static system-prompt behavior. Disable MULTI_TASK_PROMPT when testing a pure
+L2-only or L3-only configuration.
+
+`REUSE_CACHE` remains the master switch: with it off, no tier is consulted or written.
+
+### Lookup versus store target
+
+Lookup and store are decided separately:
+
+- **Lookup** consults every tier the deployment has enabled. A request cannot narrow it.
+- **Store target** is the highest tier that both the deployment and the request permit
+  (L1, then L2, then L3). If no tier is permitted, nothing is stored.
+
+The per-request switches `enable_device_cache`, `enable_host_cache` and `enable_disk_cache`
+in `generate_config` only restrict where a request's own KV is written. All three default to `true`.
+A request that forbids L1 still benefits from an L1 hit and stores into L2
+or L3 instead. Writes into L2/L3 happen asynchronously after the request completes, so they do
+not delay releasing the request's blocks.
+
 # MultiTaskPrompt
 Create static cache for long-text System Prompts, directly reading KV cache from static cache in each request instead of recomputing. This method can significantly reduce the model's First Token Latency.
 
@@ -83,6 +119,7 @@ pipeline.stop()
 ```
 
 ### Note:
-When using MULTI_TASK_PROMPT, if the REUSE_CACHE function is enabled, then KV cache can be reused. Refer to the document [ReuseKVCache](docs/ReuseKVCache-Tutorial.md).
+MULTI_TASK_PROMPT is served out of L1. When configured, it automatically enables `REUSE_CACHE`
+and `ENABLE_DEVICE_CACHE`, preserving the existing behavior.
 When a task ID is specified, the system prompt of the task_id is used to concatenate the request, and the longest matching historical request is found in the KV cache to reuse the KV cache.
 When no task ID is specified, the user's prompt is used to find the longest matching historical request in the KV cache to reuse the KV cache.

@@ -119,157 +119,116 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="在测试时强制指定BLOCK的数量",
     )
     kv_cache_group.add_argument(
+        "--enable_host_cache",
         "--enable_memory_cache",
-        env_name="ENABLE_MEMORY_CACHE",
-        bind_to=(kv_cache_config, "enable_memory_cache"),
+        env_name="ENABLE_HOST_CACHE",
+        env_aliases=("ENABLE_MEMORY_CACHE",),
+        bind_to=(kv_cache_config, "enable_host_cache"),
         type=str2bool,
         default=False,
-        help="内存 KVCache 开关. 当开启时, 需要显示通过 MEMORY_CACHE_SIZE_MB 设置内存大小",
+        help="Host KVCache 开关。开启时必须通过 HOST_CACHE_SIZE_MB 设置容量",
     )
     kv_cache_group.add_argument(
-        "--enable_memory_cache_sm_copy",
-        env_name="ENABLE_MEMORY_CACHE_SM_COPY",
-        bind_to=(kv_cache_config, "enable_memory_cache_sm_copy"),
+        "--enable_host_cache_pinned",
+        env_name="ENABLE_HOST_CACHE_PINNED",
+        bind_to=(kv_cache_config, "enable_host_cache_pinned"),
+        type=str2bool,
+        default=True,
+        help="Host KVCache 是否使用 pinned memory。",
+    )
+    kv_cache_group.add_argument(
+        "--enable_disk_cache",
+        "--enable_memory_cache_disk",
+        env_name="ENABLE_DISK_CACHE",
+        env_aliases=("ENABLE_MEMORY_CACHE_DISK",),
+        bind_to=(kv_cache_config, "enable_disk_cache"),
         type=str2bool,
         default=False,
-        help="内存 Cache 拷贝是否启用 split-KV SM scatter/gather（CUDA 上满足布局条件时）。默认 False；True 时满足条件可走 SM copy。",
+        help="磁盘 KVCache (L3) 开关。开启时必须配置 DISK_CACHE_SIZE_MB 和 "
+        "DISK_CACHE_PATHS。",
     )
     kv_cache_group.add_argument(
+        "--host_cache_size_mb",
         "--memory_cache_size_mb",
-        env_name="MEMORY_CACHE_SIZE_MB",
-        bind_to=(kv_cache_config, "memory_cache_size_mb"),
+        env_name="HOST_CACHE_SIZE_MB",
+        env_aliases=("MEMORY_CACHE_SIZE_MB",),
+        bind_to=(kv_cache_config, "host_cache_size_mb"),
         type=int,
         default=0,
-        help="单个RANK Memory Cache 的大小, 单位为MB",
+        help="单个 rank 的 Host KVCache 容量，单位 MB",
     )
     kv_cache_group.add_argument(
+        "--host_cache_sync_timeout_ms",
         "--memory_cache_sync_timeout_ms",
-        env_name="MEMORY_CACHE_SYNC_TIMEOUT_MS",
-        bind_to=(kv_cache_config, "memory_cache_sync_timeout_ms"),
+        env_name="HOST_CACHE_SYNC_TIMEOUT_MS",
+        env_aliases=("MEMORY_CACHE_SYNC_TIMEOUT_MS",),
+        bind_to=(kv_cache_config, "host_cache_sync_timeout_ms"),
         type=int,
         default=10000,
-        help="Memory Cache 多TP同步的超时时间, 单位为毫秒",
+        help="Host KVCache 多 TP 同步超时，单位毫秒",
     )
     kv_cache_group.add_argument(
-        "--enable_memory_cache_disk",
-        env_name="ENABLE_MEMORY_CACHE_DISK",
-        bind_to=(kv_cache_config, "enable_memory_cache_disk"),
-        type=str2bool,
-        default=False,
-        help="控制是否启用磁盘 KV cache。默认关闭。",
-    )
-    kv_cache_group.add_argument(
+        "--disk_cache_paths",
         "--memory_cache_disk_paths",
-        env_name="MEMORY_CACHE_DISK_PATHS",
-        bind_to=(kv_cache_config, "memory_cache_disk_paths"),
+        env_name="DISK_CACHE_PATHS",
+        env_aliases=("MEMORY_CACHE_DISK_PATHS",),
+        bind_to=(kv_cache_config, "disk_cache_paths"),
         type=str,
         default="",
         help="磁盘 KV cache 路径；多个路径的格式由磁盘 cache 实现解析。",
     )
     kv_cache_group.add_argument(
+        "--disk_cache_size_mb",
         "--memory_cache_disk_size_mb",
-        env_name="MEMORY_CACHE_DISK_SIZE_MB",
-        bind_to=(kv_cache_config, "memory_cache_disk_size_mb"),
+        env_name="DISK_CACHE_SIZE_MB",
+        env_aliases=("MEMORY_CACHE_DISK_SIZE_MB",),
+        bind_to=(kv_cache_config, "disk_cache_size_mb"),
         type=int,
         default=0,
         help="单个 rank 的磁盘 KV cache 容量，单位 MB。",
     )
     kv_cache_group.add_argument(
+        "--disk_cache_buffered_io",
         "--memory_cache_disk_buffered_io",
-        env_name="MEMORY_CACHE_DISK_BUFFERED_IO",
-        bind_to=(kv_cache_config, "memory_cache_disk_buffered_io"),
+        env_name="DISK_CACHE_BUFFERED_IO",
+        env_aliases=("MEMORY_CACHE_DISK_BUFFERED_IO",),
+        bind_to=(kv_cache_config, "disk_cache_buffered_io"),
         type=str2bool,
         default=True,
         help="磁盘 KV cache 是否使用 buffered I/O。默认开启。",
     )
     kv_cache_group.add_argument(
+        "--disk_cache_sync_timeout_ms",
         "--memory_cache_disk_sync_timeout_ms",
-        env_name="MEMORY_CACHE_DISK_SYNC_TIMEOUT_MS",
-        bind_to=(kv_cache_config, "memory_cache_disk_sync_timeout_ms"),
+        env_name="DISK_CACHE_SYNC_TIMEOUT_MS",
+        env_aliases=("MEMORY_CACHE_DISK_SYNC_TIMEOUT_MS",),
+        bind_to=(kv_cache_config, "disk_cache_sync_timeout_ms"),
         type=int,
         default=30000,
         help="磁盘 KV cache 同步超时，单位毫秒。",
     )
     kv_cache_group.add_argument(
-        "--enable_gpu_prefix_tree",
-        env_name="ENABLE_GPU_PREFIX_TREE",
-        bind_to=(kv_cache_config, "enable_gpu_prefix_tree"),
-        type=str2bool,
-        default=False,
-        help="控制是否启用 GPU prefix-tree cache 策略。默认关闭。",
-    )
-    kv_cache_group.add_argument(
-        "--enable_prefix_tree_memory_cache",
-        env_name="ENABLE_PREFIX_TREE_MEMORY_CACHE",
-        bind_to=(kv_cache_config, "enable_prefix_tree_memory_cache"),
-        type=str2bool,
-        default=False,
-        help="控制 memory cache 是否使用 prefix-tree 策略。默认关闭。",
-    )
-    kv_cache_group.add_argument(
-        "--enable_legacy_memory_connector_fallback",
-        env_name="ENABLE_LEGACY_MEMORY_CONNECTOR_FALLBACK",
-        bind_to=(kv_cache_config, "enable_legacy_memory_connector_fallback"),
-        type=str2bool,
-        default=True,
-        help="新 memory cache 路径不可用时是否回退 legacy connector。默认开启。",
-    )
-    kv_cache_group.add_argument(
-        "--prefix_tree_memory_state_swa_pool_ratio",
-        env_name="PREFIX_TREE_MEMORY_STATE_SWA_POOL_RATIO",
-        bind_to=(kv_cache_config, "prefix_tree_memory_state_swa_pool_ratio"),
+        "--disk_cache_staging_block_count",
+        env_name="DISK_CACHE_STAGING_BLOCK_COUNT",
+        bind_to=(kv_cache_config, "disk_cache_staging_block_count"),
         type=int,
-        default=0,
-        help="Prefix-tree memory cache 中 state/SWA pool 的容量比例。",
+        default=4,
+        help="单个 rank Device<->Disk 直传的 Host staging block 数，决定直传并发容量。",
     )
     kv_cache_group.add_argument(
-        "--enable_independent_group_eviction",
-        env_name="ENABLE_INDEPENDENT_GROUP_EVICTION",
-        bind_to=(kv_cache_config, "enable_independent_group_eviction"),
-        type=str2bool,
-        default=False,
-        help="控制各 KV cache group 是否独立驱逐。默认关闭。",
-    )
-    # Deprecated DSv4 alias for --enable_independent_group_eviction above.
-    #
-    # enable_independent_group_eviction is a verbatim rename of the DSv4-era
-    # enable_dsv4_state_block_independent_eviction: both read sites are identical
-    # apart from the field name --
-    #   KVCacheManager::init          guards on
-    #       enable_memory_cache && enable_prefix_tree_memory_cache && <flag>
-    #   KVCacheMemoryConnector.cc     takes the popOldestStateOrChainEvictable
-    #       path on `<flag> && copy_info.kind == CacheBlockKind::STATE_SWA_KV`
-    # so this is one knob, not two, and it is bound to the live field. (The dead
-    # C++ field KVCacheConfig::enable_dsv4_state_block_independent_eviction has
-    # been deleted.)
-    #
-    # The alias is kept because deployed DSv4 bizes set the old env name; dropping
-    # it would silently disable STATE/SWA independent eviction on upgrade.
-    #
-    # Two registration details are load-bearing:
-    #   * default=None -- config bindings whose parsed value is None are skipped
-    #     (EnvArgumentParser._apply_config_bindings), so an unset alias never
-    #     clobbers the canonical flag's value with None.
-    #   * must be registered AFTER the canonical flag -- within the same source
-    #     (env/default vs CLI) bindings apply in registration order, so the alias
-    #     can override the canonical default; an explicitly-passed CLI flag always
-    #     wins over env-derived values regardless of order
-    #     (EnvArgumentParser._apply_config_bindings two-pass rule).
-    kv_cache_group.add_argument(
-        "--enable_dsv4_state_block_independent_eviction",
-        env_name="ENABLE_DSV4_STATE_BLOCK_INDEPENDENT_EVICTION",
-        bind_to=(kv_cache_config, "enable_independent_group_eviction"),
-        type=str2bool,
-        default=None,
-        help="[deprecated] --enable_independent_group_eviction 的旧名，等价开关，请使用新名。",
+        "--memory_cache_max_descriptors_per_transfer_batch",
+        env_name="MEMORY_CACHE_MAX_DESCRIPTORS_PER_TRANSFER_BATCH",
+        bind_to=(kv_cache_config, "memory_cache_max_descriptors_per_transfer_batch"),
+        type=int,
+        default=64,
+        help="单次直接传输底层批调用包含的最大 descriptor 数。",
     )
     kv_cache_group.add_argument(
         "--write_cache_sync",
         env_name="WRITE_CACHE_SYNC",
-        bind_to=(kv_cache_config, "write_cache_sync"),
         type=str2bool,
-        default=False,
-        help="KVCache 同步写入开关. 当开启时, 在写入 Cache 时会等待写入完成. 默认关闭(即异步写入), Smoke 测试时需开启",
+        default=None,
+        help="Deprecated compatibility option. BlockTree cache settlement is always coordinated internally.",
     )
 
     # Remote connector configuration arguments
@@ -433,21 +392,12 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         default="",
     )
     kv_cache_group.add_argument(
-        "--enable_tiered_memory_cache",
-        env_name="ENABLE_TIERED_MEMORY_CACHE",
-        bind_to=(kv_cache_config, "enable_tiered_memory_cache"),
-        type=str2bool,
-        default=False,
-        help="分层 cache 开关。开启后，stream 释放时只全量写 remote，再按 GPU 空闲 block 阈值将冷 block 淘汰到 memory。",
-    )
-    kv_cache_group.add_argument(
         "--device_cache_min_free_blocks",
         env_name="DEVICE_CACHE_MIN_FREE_BLOCKS",
         bind_to=(kv_cache_config, "device_cache_min_free_blocks"),
         type=int,
         default=0,
-        help="分层 cache 模式下 GPU 侧至少保留的空闲 block 数；当空闲 block 低于该阈值时，会把冷 block 从 GPU 淘汰到 memory。"
-        "不填或填 0 时自动计算为 min(max_context_batch_size * max_seq_len, max_batch_tokens_size) / seq_size_per_block。",
+        help="Device KVCache 全局最小空闲 block 数；独立 pool 按各自 block 容量占比分摊。0 表示按调度容量自动计算。",
     )
     kv_cache_group.add_argument(
         "--dsv4_fixed_pool_blocks",
