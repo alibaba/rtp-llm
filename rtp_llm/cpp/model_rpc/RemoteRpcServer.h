@@ -13,6 +13,7 @@ public:
     grpc::Status init(const EngineInitParams&                                maga_init_params,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                       py::object                                             mm_process_engine);
+    void stop() override;
 
     auto& resource() {
         return resource_;
