@@ -69,6 +69,8 @@ from .minimax_m3_vl_vit import (  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
+_VIDEO_DECODE_CHUNK_FRAMES = 16
+
 
 class _MiniMaxM3VLPreprocessBuffers(nn.Module):
     """FP32 normalization constants that follow the active ViT device."""
@@ -563,9 +565,9 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
             max_file_size_kb=vit_config.mm_video_max_file_size_kb,
         )
         try:
-            vr = VideoReader(video_bytes)
-            total_frames = len(vr)
-            video_fps = float(vr.get_avg_fps())
+            probe_vr = VideoReader(video_bytes, num_threads=0)
+            total_frames = len(probe_vr)
+            video_fps = float(probe_vr.get_avg_fps())
         except Exception:
             raise_mm(MMErr.VIDEO_INVALID)
 
@@ -590,11 +592,11 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
         if not indices:
             raise_mm(MMErr.VIDEO_REQ.format("no video frames can be sampled"))
 
-        # Decode the sampled frames only (the "load" step).  Resize/normalize/
-        # patch-fold happen on GPU in embedding(); here we just keep raw uint8
-        # frames + the cheap target size + timestamps.
+        # Probe one sampled frame before batch decode so source-resolution frames
+        # are never materialized for every sample at once.
         try:
-            frames_tensor = vr.get_batch(indices)  # (N, H, W, C) uint8 torch (CPU)
+            probe_frame = probe_vr[indices[0]]
+            src_h, src_w = int(probe_frame.shape[0]), int(probe_frame.shape[1])
         except Exception:
             raise_mm(MMErr.VIDEO_INVALID)
 
@@ -603,7 +605,6 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
         temporal_patch_size = kwargs.get("temporal_patch_size", 2)
         factor = patch_size * merge_size
 
-        num_frames, src_h, src_w, _ = frames_tensor.shape
         # sglang uses get_hw_multiple_of with frame_max_size (longest-edge cap)
         frame_max_size = getattr(processor, "max_pixels", None)
         if frame_max_size and isinstance(frame_max_size, int):
@@ -613,6 +614,44 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
             target_w, target_h = get_hw_multiple_of((src_w, src_h), factor, edge)
         else:
             target_w, target_h = get_hw_multiple_of((src_w, src_h), factor, None)
+
+        # Let Decord scale during decode so the sampled-frame tensor is bounded by
+        # the model target size. Small sequential batches bound result-buffer
+        # memory without forcing one seek/decode operation per frame.
+        try:
+            if (src_h, src_w) == (target_h, target_w):
+                vr = probe_vr
+            else:
+                del probe_frame
+                del probe_vr
+                video_bytes.seek(0)
+                vr = VideoReader(
+                    video_bytes,
+                    width=target_w,
+                    height=target_h,
+                    num_threads=0,
+                )
+
+            num_frames = len(indices)
+            frames_tensor = torch.empty(
+                (num_frames, target_h, target_w, 3), dtype=torch.uint8
+            )
+            for start in range(0, num_frames, _VIDEO_DECODE_CHUNK_FRAMES):
+                end = min(start + _VIDEO_DECODE_CHUNK_FRAMES, num_frames)
+                frame_chunk = vr.get_batch(indices[start:end])
+                if tuple(frame_chunk.shape) != (end - start, target_h, target_w, 3):
+                    raise ValueError(
+                        f"unexpected decoded video chunk shape: {tuple(frame_chunk.shape)}"
+                    )
+                frames_tensor[start:end].copy_(frame_chunk)
+            expected_shape = (num_frames, target_h, target_w, 3)
+            if tuple(frames_tensor.shape) != expected_shape:
+                raise ValueError(
+                    f"unexpected decoded video shape: expected {expected_shape}, "
+                    f"got {tuple(frames_tensor.shape)}"
+                )
+        except Exception:
+            raise_mm(MMErr.VIDEO_INVALID)
 
         # grid_t after temporal padding (matches the fold done in _gpu_fold).
         pad_n = (
@@ -719,11 +758,12 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
         # Transfer compact uint8 input first, then cast on GPU. Combining the
         # device and dtype conversion makes pageable H2D copies much slower.
         frames = frames_nchw.to(device=device).float()
-        frames = torchvision.transforms.functional.resize(
-            frames,
-            [target_h, target_w],
-            interpolation=torchvision.transforms.InterpolationMode.BICUBIC,
-        )
+        if tuple(frames.shape[-2:]) != (target_h, target_w):
+            frames = torchvision.transforms.functional.resize(
+                frames,
+                [target_h, target_w],
+                interpolation=torchvision.transforms.InterpolationMode.BICUBIC,
+            )
 
         video = frames.unsqueeze(0)  # (1, T, C, H, W)
         mean, std = self._ensure_preprocess_buffers_on_device()
