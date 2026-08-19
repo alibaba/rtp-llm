@@ -285,7 +285,7 @@ class PriorityAdmissionSchedulerTest {
         untrackedRunning.setInputLength(128L);
         WorkerStatusResponse workerStatus = new WorkerStatusResponse();
         workerStatus.setRunningTaskInfo(Map.of("900", untrackedRunning));
-        decodeEp.onWorkerStatusUpdate(decodeStatus, workerStatus);
+        decodeEp.applyWorkerStatusResponse(decodeStatus, workerStatus);
 
         // The worker-status task was never reserved by this Master: its
         // numeric sentinel/value is not trusted priority provenance.

@@ -81,6 +81,7 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
         reset(router);
         when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
             BalanceContext ctx = inv.getArgument(0);
+            reserveDecodeForRoute(ctx);
             boolean useB = routeCounter.getAndIncrement() % 2 == 1;
             return buildRouteResponse(ctx.getRequestId(), useB);
         });

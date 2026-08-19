@@ -14,8 +14,6 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.WriteBufferWaterMark;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import lombok.Getter;
-import org.flexlb.cache.core.EngineLocalView;
-import org.flexlb.cache.core.GlobalCacheIndex;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
 import org.flexlb.util.CommonUtils;
@@ -43,10 +41,8 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
     public EngineGrpcClient(CustomNameResolver nameResolver,
                             @Qualifier("managedChannelThreadPoolExecutor") ThreadPoolExecutor executor,
                             @Qualifier("managedChannelEventLoopGroup") EventLoopGroup eventLoopGroup,
-                            EngineLocalView engineLocalView,
-                            GlobalCacheIndex globalCacheIndex,
                             GrpcReporter grpcReporter) {
-        super(engineLocalView, globalCacheIndex, grpcReporter);
+        super(grpcReporter);
         this.executor = executor;
         this.eventLoopGroup = eventLoopGroup;
         nameResolver.start(this);
@@ -139,11 +135,9 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
             Invoker invoker = getInvoker(channelKey);
 
             if (invoker == null) {
-                Logger.debug("ip:{} {} grpc channel not found, creating and adding to pool", ip, serviceType);
                 ManagedChannel newChannel = createChannel(channelKey);
                 invoker = putInvokerIfAbsent(channelKey, newChannel);
             } else if (invoker.getChannel().isShutdown() || invoker.getChannel().isTerminated()) {
-                Logger.debug("ip:{} {} grpc channel is shutdown or terminated, recreating and updating pool", ip, serviceType);
                 ManagedChannel newChannel = createChannel(channelKey);
                 invoker = replaceInvoker(channelKey, invoker, newChannel);
             }
@@ -180,19 +174,15 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
                         long connectionDuration = finalInvoker.getConnectionDuration();
                         grpcReporter.reportConnectionDuration(
                                 serviceType.getOperationName(), connectionDuration);
-                        Logger.debug("Connection broken for {}:{} {}, duration: {}μs, recreating channel and retrying once async, msh:{}",
-                                ip, port, serviceType, connectionDuration, e.getMessage());
                         retryWithNewChannelAsync(channelKey, finalInvoker, grpcCall, requestTimeoutMs,
                                 ip, port, serviceType, resultFuture, startTime);
                     } else {
-                        Logger.debug("Exception during async {} gRPC call for {}:{}", serviceType.getOperationName(), ip, port, t);
                         resultFuture.completeExceptionally(t);
                     }
                 }
             }, Runnable::run);
 
         } catch (Exception e) {
-            Logger.debug("Exception initiating async {} gRPC call for {}:{}", serviceType.getOperationName(), ip, port, e);
             resultFuture.completeExceptionally(e);
         }
 
@@ -210,8 +200,6 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
         try {
             ManagedChannel newChannel = createChannel(channelKey);
             Invoker newInvoker = replaceInvoker(channelKey, staleInvoker, newChannel);
-
-            Logger.debug("Retrying async gRPC call with new channel for {}:{} {}", ip, port, serviceType);
 
             GrpcFutureStubWrapper stubWrapper = new GrpcFutureStubWrapper(
                     RpcServiceGrpc.newFutureStub(newInvoker.getChannel()),
@@ -236,13 +224,11 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
 
                 @Override
                 public void onFailure(Throwable t) {
-                    Logger.debug("Async retry failed for {}:{} {}", ip, port, serviceType, t);
                     resultFuture.completeExceptionally(t);
                 }
             }, Runnable::run);
 
         } catch (Exception e) {
-            Logger.debug("Exception during async retry for {}:{} {}", ip, port, serviceType, e);
             resultFuture.completeExceptionally(e);
         }
     }

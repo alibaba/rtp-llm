@@ -42,6 +42,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -71,7 +72,7 @@ import static org.mockito.Mockito.when;
  * of the target port, so dispatch, fault injection, prefill→decode handoff and
  * CANCELLED completions all run through real mock-engine code. The WorkerStatus
  * pump reads real {@code getWorkerStatus} snapshots and feeds them back into
- * {@code scheduler.onWorkerStatusUpdate} + {@code DecodeEndpoint.onWorkerStatusUpdate},
+ * the endpoint generation plus the scheduler activity/lifecycle APIs,
  * closing the calibrate/settle loop exactly like production polling would.
  *
  * <p>Only {@code ConfigService}/{@code Router}/{@code EngineGrpcClient}/reporters
@@ -111,6 +112,9 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     private final Map<Integer, WorkerStatus> statusByPort = new ConcurrentHashMap<>();
     private final Map<Integer, String> ipPortByEnginePort = new ConcurrentHashMap<>();
     private final Map<Integer, Long> pumpCursor = new ConcurrentHashMap<>();
+    private final AtomicReference<CompletableFuture<Void>> nextBatchAckGate =
+            new AtomicReference<>();
+    private final Set<CompletableFuture<Void>> batchAckGates = ConcurrentHashMap.newKeySet();
     private final Object pumpLock = new Object();
     private ScheduledExecutorService pumpExecutor;
     private final Path tempDir;
@@ -196,6 +200,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                             });
                     CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> future =
                             new CompletableFuture<>();
+                    CompletableFuture<Void> ackGate = nextBatchAckGate.getAndSet(null);
                     svc.enqueueBatch(request, new StreamObserver<>() {
                         private EngineRpcService.EnqueueBatchResponsePB response;
 
@@ -214,7 +219,12 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                             future.complete(response);
                         }
                     });
-                    return future;
+                    if (ackGate == null) {
+                        return future;
+                    }
+                    return future.thenCompose(response ->
+                                    ackGate.thenApply(ignored -> response))
+                            .whenComplete((ignored, failure) -> batchAckGates.remove(ackGate));
                 });
 
         AtomicReference<FlexlbBatchScheduler> schedulerRef = new AtomicReference<>();
@@ -254,6 +264,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         int grpcPort = svc.getGrpcPort();
         int httpPort = httpPort(grpcPort);
         WorkerStatus ws = new WorkerStatus();
+        ws.setRole(role);
         ws.setIp("127.0.0.1");
         ws.setPort(httpPort);
         ws.setGrpcPort(grpcPort);
@@ -268,7 +279,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         pumpCursor.put(grpcPort, 0L);
         if (role == RoleType.DECODE) {
             decodeEndpoint(decodeEngines.indexOf(svc))
-                    .onWorkerStatusUpdate(ws, new WorkerStatusResponse());
+                    .applyWorkerStatusResponse(ws, new WorkerStatusResponse());
         }
     }
 
@@ -291,7 +302,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         WorkerStatus status = statusByPort.get(grpcPort);
         status.getAvailableKvCacheTokens().set(available);
         status.getTotalKvCacheTokens().set(total);
-        decodeEndpoint(index).onWorkerStatusUpdate(status, new WorkerStatusResponse());
+        decodeEndpoint(index).applyWorkerStatusResponse(status, new WorkerStatusResponse());
     }
 
     ServerStatus prefillServer(int index, long requestId) {
@@ -413,13 +424,17 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         }
         resp.setFinishedTaskInfo(finished);
 
-        scheduler.onWorkerStatusUpdate(resp);
+        WorkerStatus ws = statusByPort.get(port);
         if (isDecode) {
-            WorkerStatus ws = statusByPort.get(port);
             ws.getAvailableKvCacheTokens().set(status.getAvailableKvCache());
             endpointRegistry.getDecode(ipPortByEnginePort.get(port))
-                    .onWorkerStatusUpdate(ws, resp);
+                    .applyWorkerStatusResponse(ws, resp);
+        } else {
+            endpointRegistry.getPrefill(ipPortByEnginePort.get(port))
+                    .applyWorkerStatusResponse(ws, resp);
         }
+        scheduler.recordRequestActivity(ws, resp);
+        scheduler.updateRequestLifecycleFromWorkerStatus(ws, resp);
     }
 
     static TaskInfo toTaskInfo(EngineRpcService.TaskInfoPB task) {
@@ -477,6 +492,16 @@ final class AutoTpmE2EHarness implements AutoCloseable {
             pumpExecutor.shutdownNow();
             pumpExecutor = null;
         }
+    }
+
+    /** Hold exactly the next BatchEnqueue acknowledgement without blocking its engine work. */
+    CompletableFuture<Void> holdNextBatchAck() {
+        CompletableFuture<Void> gate = new CompletableFuture<>();
+        if (!nextBatchAckGate.compareAndSet(null, gate)) {
+            throw new IllegalStateException("a BatchEnqueue acknowledgement is already gated");
+        }
+        batchAckGates.add(gate);
+        return gate;
     }
 
     // ==================== misc helpers ====================
@@ -555,6 +580,9 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     @Override
     public void close() {
         stopAutoPump();
+        nextBatchAckGate.set(null);
+        batchAckGates.forEach(gate -> gate.complete(null));
+        batchAckGates.clear();
         scheduler.shutdown();
         for (JavaMockEngineCluster.FastRpcService svc : services.values()) {
             svc.shutdown();

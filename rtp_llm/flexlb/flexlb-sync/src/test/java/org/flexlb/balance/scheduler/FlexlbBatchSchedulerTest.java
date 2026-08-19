@@ -19,6 +19,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.PriorityPreemptionProgress;
+import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -33,6 +34,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 
@@ -82,6 +84,7 @@ class FlexlbBatchSchedulerTest {
 
         when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
             BalanceContext ctx = inv.getArgument(0);
+            reserveDefaultDecode(ctx);
             return successRoute(ctx.getRequestId());
         });
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
@@ -99,6 +102,7 @@ class FlexlbBatchSchedulerTest {
         // Create endpoint and batcher for the worker that successRoute() returns
         String ipPort = "10.0.0.1:8080";
         WorkerStatus ws = new WorkerStatus();
+        ws.setRole(RoleType.PREFILL);
         ws.setIp("10.0.0.1");
         ws.setPort(8080);
         ws.setGrpcPort(8081);
@@ -108,6 +112,7 @@ class FlexlbBatchSchedulerTest {
         prefill.setGrpcPort(8081);
         prefill.setRole(RoleType.PREFILL);
         endpointRegistry.ensureEndpoint(RoleType.PREFILL, ipPort, ws);
+        ensureDecodeEndpoint("10.0.0.2", 8081, 8082);
     }
 
     @AfterEach
@@ -154,6 +159,7 @@ class FlexlbBatchSchedulerTest {
         when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
             BalanceContext ctx = inv.getArgument(0);
             long requestId = ctx.getRequestId();
+            reserveDefaultDecode(ctx);
             return successRouteWithPrefillDp(requestId, requestId == 71L ? 0 : 1);
         });
 
@@ -390,7 +396,7 @@ class FlexlbBatchSchedulerTest {
         WorkerStatusResponse status = new WorkerStatusResponse();
         status.setRole(RoleType.DECODE);
         status.setFinishedTaskInfo(Map.of("85", finished));
-        scheduler.onWorkerStatusUpdate(status);
+        applyWorkerStatus(status);
 
         // Decode completion is terminal: the schedule future completes right away
         // without waiting for the EnqueueBatch ack.
@@ -483,12 +489,8 @@ class FlexlbBatchSchedulerTest {
     }
 
     private BatchItem offerFailureItem(long requestId) {
-        Response route = successRoute(requestId);
-        return new BatchItem(context(requestId), new CompletableFuture<>(), route,
-                FlexlbBatchScheduler.findServer(route, RoleType.PREFILL),
-                FlexlbBatchScheduler.findServer(route, RoleType.DECODE),
-                endpointRegistry.getPrefill("10.0.0.1:8080"), null,
-                System.currentTimeMillis());
+        return batchItemWithDefaultEndpoints(
+                requestId, endpointRegistry.getPrefill("10.0.0.1:8080"));
     }
 
     @Test
@@ -733,10 +735,7 @@ class FlexlbBatchSchedulerTest {
         config.setAutoTpmEnabled(true);
 
         PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
-        BatchItem item = new BatchItem(context(303), new CompletableFuture<>(), successRoute(303),
-                server(RoleType.PREFILL, "10.0.0.1", 8080, 8081, 303),
-                server(RoleType.DECODE, "10.0.0.2", 8081, 8082, 303),
-                endpoint, null, System.currentTimeMillis());
+        BatchItem item = batchItemWithDefaultEndpoints(303, endpoint);
         assertTrue(scheduler.registerInflight(item));
 
         CountDownLatch dispatchClaimed = new CountDownLatch(1);
@@ -749,7 +748,7 @@ class FlexlbBatchSchedulerTest {
             return predictor;
         });
         BatchItem blockingItem = new BatchItem(item.ctx(), item.future(), item.routeResponse(),
-                item.prefill(), item.decode(), blockingEndpoint, null, item.enqueuedAtMs());
+                item.prefill(), item.decode(), blockingEndpoint, item.decodeEp(), item.enqueuedAtMs());
         scheduler.unregisterInflight(item);
         assertTrue(scheduler.registerInflight(blockingItem));
 
@@ -778,6 +777,53 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
+    void cleanupInflight_betweenStartDispatchAndCommit_reconcilesBeforeFinalSend()
+            throws Exception {
+        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
+        BatchItem item = reconciliationItem(314L, endpoint);
+        assertTrue(scheduler.registerInflight(item));
+
+        CountDownLatch dispatchClaimed = new CountDownLatch(1);
+        CountDownLatch allowPrediction = new CountDownLatch(1);
+        PrefillTimePredictor predictor = endpoint.getPredictor();
+        PrefillEndpoint blockingEndpoint = org.mockito.Mockito.spy(endpoint);
+        when(blockingEndpoint.getPredictor()).thenAnswer(inv -> {
+            dispatchClaimed.countDown();
+            assertTrue(allowPrediction.await(5, TimeUnit.SECONDS));
+            return predictor;
+        });
+        BatchItem blockingItem = new BatchItem(item.ctx(), item.future(), item.routeResponse(),
+                item.prefill(), item.decode(), blockingEndpoint, item.decodeEp(),
+                item.enqueuedAtMs());
+        scheduler.unregisterInflight(item);
+        assertTrue(scheduler.registerInflight(blockingItem));
+
+        CompletableFuture<Void> flush = CompletableFuture.runAsync(() ->
+                scheduler.onBatchReady(List.of(blockingItem), new DispatchMeta("ttl_race", 0)));
+        try {
+            assertTrue(dispatchClaimed.await(2, TimeUnit.SECONDS));
+
+            // Avoid a wall-clock sleep: after startDispatch owns a positive
+            // batch id, a negative TTL makes this entry deterministically due.
+            config.setFlexlbInflightTtlMs(-1);
+            scheduler.cleanupInflight();
+
+            verify(cancelChannel).cancel(any(), eq(314L), anyLong());
+            Response response = blockingItem.future().get(1, TimeUnit.SECONDS);
+            assertFalse(response.isSuccess());
+            assertEquals(0, scheduler.getInflightSize());
+            assertFalse(blockingItem.decodeEp().reservedView()
+                    .containsKey(blockingItem.requestId()));
+        } finally {
+            allowPrediction.countDown();
+        }
+
+        flush.get(2, TimeUnit.SECONDS);
+        assertTrue(sentBatches.isEmpty(),
+                "the final ownership filter must drop a TTL-reconciled request");
+    }
+
+    @Test
     void dispatchUncertain_legacyNotFoundRetainsFutureAndBothLedgers() throws Exception {
         when(cancelChannel.cancel(any(), anyLong(), anyLong())).thenReturn(
                 CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.notFound()));
@@ -788,10 +834,7 @@ class FlexlbBatchSchedulerTest {
                     return CompletableFuture.failedFuture(new TimeoutException("lost ack"));
                 });
         PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
-        BatchItem item = new BatchItem(context(305), new CompletableFuture<>(), successRoute(305),
-                server(RoleType.PREFILL, "10.0.0.1", 8080, 8081, 305),
-                server(RoleType.DECODE, "10.0.0.2", 8081, 8082, 305),
-                endpoint, null, System.currentTimeMillis());
+        BatchItem item = batchItemWithDefaultEndpoints(305, endpoint);
         assertTrue(scheduler.registerInflight(item));
         scheduler.onBatchReady(List.of(item), new DispatchMeta("test", 0));
         long deadline = System.currentTimeMillis() + 1_000;
@@ -811,6 +854,44 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
+    void cleanupInflight_afterDispatchClaimReconcilesBeforeReleasingAccounting()
+            throws Exception {
+        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> enqueueAck =
+                new CompletableFuture<>();
+        CompletableFuture<EngineCancelChannel.CancelOutcome> cancelAck =
+                new CompletableFuture<>();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+                .thenAnswer(inv -> {
+                    sentBatches.add(inv.getArgument(2));
+                    return enqueueAck;
+                });
+        when(cancelChannel.cancel(any(), eq(313L), anyLong())).thenReturn(cancelAck);
+
+        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
+        BatchItem item = reconciliationItem(313L, endpoint);
+        assertTrue(scheduler.registerInflight(item));
+        scheduler.onBatchReady(List.of(item), new DispatchMeta("test", 0));
+        awaitCondition(() -> !sentBatches.isEmpty());
+
+        config.setFlexlbInflightTtlMs(0);
+        Thread.sleep(2);
+        scheduler.cleanupInflight();
+
+        verify(cancelChannel).cancel(any(), eq(313L), anyLong());
+        assertFalse(item.future().isDone(),
+                "TTL cannot release a request after startDispatch");
+        assertEquals(1, scheduler.getInflightSize());
+        assertEquals(1, endpoint.getInflightBatchCount());
+        assertTrue(item.decodeEp().reservedView().containsKey(item.requestId()));
+
+        cancelAck.complete(EngineCancelChannel.CancelOutcome.tombstoned());
+        assertFalse(item.future().get(1, TimeUnit.SECONDS).isSuccess());
+        awaitCondition(() -> scheduler.getInflightSize() == 0);
+        assertEquals(0, endpoint.getInflightBatchCount());
+        assertFalse(item.decodeEp().reservedView().containsKey(item.requestId()));
+    }
+
+    @Test
     void dispatchUncertain_acceptedCancelWaitsForTypedPrefillFinished() throws Exception {
         when(cancelChannel.cancel(any(), anyLong(), anyLong())).thenReturn(
                 CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.accepted()));
@@ -821,10 +902,7 @@ class FlexlbBatchSchedulerTest {
                     return CompletableFuture.failedFuture(new TimeoutException("lost ack"));
                 });
         PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
-        BatchItem item = new BatchItem(context(306), new CompletableFuture<>(), successRoute(306),
-                server(RoleType.PREFILL, "10.0.0.1", 8080, 8081, 306),
-                server(RoleType.DECODE, "10.0.0.2", 8081, 8082, 306),
-                endpoint, null, System.currentTimeMillis());
+        BatchItem item = batchItemWithDefaultEndpoints(306, endpoint);
         assertTrue(scheduler.registerInflight(item));
         scheduler.onBatchReady(List.of(item), new DispatchMeta("test", 0));
         long deadline = System.currentTimeMillis() + 1_000;
@@ -844,7 +922,7 @@ class FlexlbBatchSchedulerTest {
         WorkerStatusResponse status = new WorkerStatusResponse();
         status.setRole(RoleType.PREFILL);
         status.setFinishedTaskInfo(Map.of("306", finished));
-        scheduler.onWorkerStatusUpdate(status);
+        applyWorkerStatus(status);
 
         Response response = item.future().get(1, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
@@ -856,10 +934,7 @@ class FlexlbBatchSchedulerTest {
     void dispatchUncertainAfterAcknowledgedFutureDoesNotStartCancelReconciliation()
             throws Exception {
         PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
-        BatchItem item = new BatchItem(context(307), new CompletableFuture<>(), successRoute(307),
-                server(RoleType.PREFILL, "10.0.0.1", 8080, 8081, 307),
-                server(RoleType.DECODE, "10.0.0.2", 8081, 8082, 307),
-                endpoint, null, System.currentTimeMillis());
+        BatchItem item = batchItemWithDefaultEndpoints(307, endpoint);
         assertTrue(scheduler.registerInflight(item));
         scheduler.onBatchReady(List.of(item), new DispatchMeta("test", 0));
         Response response = item.future().get(2, TimeUnit.SECONDS);
@@ -940,6 +1015,120 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
+    void dispatchUncertain_configFailureIsRetriedWithoutStrandingInflight() throws Exception {
+        AtomicBoolean failNextConfigRead = new AtomicBoolean();
+        when(configService.loadBalanceConfig()).thenAnswer(inv -> {
+            if (failNextConfigRead.compareAndSet(true, false)) {
+                throw new IllegalStateException("transient config failure");
+            }
+            return config;
+        });
+        AtomicInteger cancelCalls = new AtomicInteger();
+        when(cancelChannel.cancel(any(), anyLong(), anyLong())).thenAnswer(inv -> {
+            cancelCalls.incrementAndGet();
+            return CompletableFuture.completedFuture(
+                    EngineCancelChannel.CancelOutcome.tombstoned());
+        });
+        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> ack =
+                new CompletableFuture<>();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+                .thenAnswer(inv -> {
+                    sentBatches.add(inv.getArgument(2));
+                    return ack;
+                });
+
+        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
+        BatchItem item = reconciliationItem(311, endpoint);
+        assertTrue(scheduler.registerInflight(item));
+        scheduler.onBatchReady(List.of(item), new DispatchMeta("test", 0));
+        awaitCondition(() -> !sentBatches.isEmpty());
+
+        failNextConfigRead.set(true);
+        ack.completeExceptionally(new TimeoutException("lost ack"));
+
+        Response response = item.future().get(2, TimeUnit.SECONDS);
+        assertFalse(response.isSuccess());
+        awaitCondition(() -> scheduler.getInflightSize() == 0);
+        assertEquals(1, cancelCalls.get(), "the retry must reach the Cancel transport");
+        assertEquals(0, endpoint.getInflightBatchCount());
+        assertFalse(item.decodeEp().reservedView().containsKey(item.requestId()));
+    }
+
+    @Test
+    void dispatchUncertain_retiredGenerationRetainsAccountingUntilExactDecodeOwnership()
+            throws Exception {
+        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> ack =
+                new CompletableFuture<>();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+                .thenAnswer(inv -> {
+                    sentBatches.add(inv.getArgument(2));
+                    return ack;
+                });
+
+        PrefillEndpoint original = endpointRegistry.getPrefill("10.0.0.1:8080");
+        BatchItem item = reconciliationItem(310, original);
+        assertTrue(scheduler.registerInflight(item));
+        scheduler.onBatchReady(List.of(item), new DispatchMeta("test", 0));
+        awaitCondition(() -> !sentBatches.isEmpty());
+
+        original.close();
+        PrefillEndpoint replacement = replacePrefillEndpoint();
+        assertFalse(replacement == original);
+        ack.completeExceptionally(new TimeoutException("lost ack after restart"));
+
+        Thread.sleep(20);
+        assertFalse(item.future().isDone(),
+                "Master retirement is not an Engine terminal proof");
+        assertEquals(1, scheduler.getInflightSize());
+        assertTrue(item.decodeEp().reservedView().containsKey(item.requestId()));
+        verify(cancelChannel, never()).cancel(any(), eq(310L), anyLong());
+
+        long batchId = sentBatches.getLast().getBatchId();
+        applyWorkerStatus(decodeRunning(310L, batchId));
+
+        assertTrue(item.future().get(1, TimeUnit.SECONDS).isSuccess());
+        assertTrue(item.decodeEp().isConfirmedTracked(item.requestId()));
+        assertEquals(RequestLifecycleState.ACKNOWLEDGED,
+                scheduler.getRequestState(item.requestId(), batchId).state());
+
+        applyWorkerStatus(decodeFinished(310L, batchId, 0));
+        assertEquals(0, scheduler.getInflightSize());
+    }
+
+    @Test
+    void dispatchUncertain_retiredGenerationAcceptsExactDecodeTerminal() throws Exception {
+        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> ack =
+                new CompletableFuture<>();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+                .thenAnswer(inv -> {
+                    sentBatches.add(inv.getArgument(2));
+                    return ack;
+                });
+
+        PrefillEndpoint original = endpointRegistry.getPrefill("10.0.0.1:8080");
+        BatchItem item = reconciliationItem(312, original);
+        assertTrue(scheduler.registerInflight(item));
+        scheduler.onBatchReady(List.of(item), new DispatchMeta("test", 0));
+        awaitCondition(() -> !sentBatches.isEmpty());
+        long batchId = sentBatches.getLast().getBatchId();
+
+        original.close();
+        replacePrefillEndpoint();
+        ack.completeExceptionally(new TimeoutException("lost ack after restart"));
+        Thread.sleep(20);
+        assertFalse(item.future().isDone());
+
+        applyWorkerStatus(decodeFinished(312L, batchId, 9001));
+
+        Response response = item.future().get(1, TimeUnit.SECONDS);
+        assertEquals(StrategyErrorType.WORKER_EXECUTION_FAILED.getErrorCode(),
+                response.getCode());
+        assertEquals(0, scheduler.getInflightSize());
+        assertFalse(item.decodeEp().reservedView().containsKey(item.requestId()));
+        verify(cancelChannel, never()).cancel(any(), eq(312L), anyLong());
+    }
+
+    @Test
     void dispatchUncertain_onlyMatchingTypedCanceled8429IsTerminal() throws Exception {
         AtomicInteger cancelCalls = new AtomicInteger();
         when(cancelChannel.cancel(any(), anyLong(), anyLong())).thenAnswer(inv -> {
@@ -964,17 +1153,17 @@ class FlexlbBatchSchedulerTest {
         }
         long batchId = sentBatches.getLast().getBatchId();
 
-        scheduler.onWorkerStatusUpdate(prefillFinished(
+        applyWorkerStatus(prefillFinished(
                 309, batchId, 0, PriorityPreemptionProgress.NONE));
-        scheduler.onWorkerStatusUpdate(prefillFinished(
+        applyWorkerStatus(prefillFinished(
                 309, batchId, 500, PriorityPreemptionProgress.NONE));
-        scheduler.onWorkerStatusUpdate(prefillFinished(
+        applyWorkerStatus(prefillFinished(
                 309, batchId + 1, 8429, PriorityPreemptionProgress.CANCELED));
         assertFalse(item.future().isDone());
         assertEquals(1, scheduler.getInflightSize());
         assertEquals(1, endpoint.getInflightBatchCount());
 
-        scheduler.onWorkerStatusUpdate(prefillFinished(
+        applyWorkerStatus(prefillFinished(
                 309, batchId, 8429, PriorityPreemptionProgress.CANCELED));
         Response response = item.future().get(1, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
@@ -1010,11 +1199,37 @@ class FlexlbBatchSchedulerTest {
     }
 
     private BatchItem reconciliationItem(long requestId, PrefillEndpoint endpoint) {
-        return new BatchItem(context(requestId), new CompletableFuture<>(),
-                successRoute(requestId),
-                server(RoleType.PREFILL, "10.0.0.1", 8080, 8081, requestId),
-                server(RoleType.DECODE, "10.0.0.2", 8081, 8082, requestId),
-                endpoint, null, System.currentTimeMillis());
+        return batchItemWithDefaultEndpoints(requestId, endpoint);
+    }
+
+    private BatchItem batchItemWithDefaultEndpoints(
+            long requestId, PrefillEndpoint prefillEndpoint) {
+        BalanceContext ctx = context(requestId);
+        Response route = successRoute(requestId);
+        DecodeEndpoint decodeEndpoint = reserveDefaultDecode(ctx);
+        return new BatchItem(ctx, new CompletableFuture<>(), route,
+                FlexlbBatchScheduler.findServer(route, RoleType.PREFILL),
+                FlexlbBatchScheduler.findServer(route, RoleType.DECODE),
+                prefillEndpoint, decodeEndpoint, System.currentTimeMillis());
+    }
+
+    private void applyWorkerStatus(WorkerStatusResponse response) {
+        WorkerStatus source;
+        if (response.getRole() == RoleType.PREFILL) {
+            PrefillEndpoint endpoint =
+                    endpointRegistry.getPrefill("10.0.0.1:8080");
+            source = endpoint.getStatus();
+            endpoint.applyWorkerStatusResponse(source, response);
+        } else if (response.getRole() == RoleType.DECODE) {
+            DecodeEndpoint endpoint =
+                    endpointRegistry.getDecode("10.0.0.2:8081");
+            source = endpoint.getStatus();
+            endpoint.applyWorkerStatusResponse(source, response);
+        } else {
+            throw new IllegalArgumentException("unsupported test role " + response.getRole());
+        }
+        scheduler.recordRequestActivity(source, response);
+        scheduler.updateRequestLifecycleFromWorkerStatus(source, response);
     }
 
     private static WorkerStatusResponse prefillFinished(
@@ -1029,6 +1244,29 @@ class FlexlbBatchSchedulerTest {
         finished.setPriorityPreemptionProgress(progress);
         WorkerStatusResponse status = new WorkerStatusResponse();
         status.setRole(RoleType.PREFILL);
+        status.setFinishedTaskInfo(Map.of(Long.toString(requestId), finished));
+        return status;
+    }
+
+    private static WorkerStatusResponse decodeRunning(long requestId, long batchId) {
+        TaskInfo running = new TaskInfo();
+        running.setRequestId(requestId);
+        running.setBatchId(batchId);
+        running.setPhase(TaskPhase.RUNNING);
+        WorkerStatusResponse status = new WorkerStatusResponse();
+        status.setRole(RoleType.DECODE);
+        status.setRunningTaskInfo(Map.of(Long.toString(requestId), running));
+        return status;
+    }
+
+    private static WorkerStatusResponse decodeFinished(
+            long requestId, long batchId, long errorCode) {
+        TaskInfo finished = new TaskInfo();
+        finished.setRequestId(requestId);
+        finished.setBatchId(batchId);
+        finished.setErrorCode(errorCode);
+        WorkerStatusResponse status = new WorkerStatusResponse();
+        status.setRole(RoleType.DECODE);
         status.setFinishedTaskInfo(Map.of(Long.toString(requestId), finished));
         return status;
     }
@@ -1121,12 +1359,21 @@ class FlexlbBatchSchedulerTest {
 
     private DecodeEndpoint ensureDecodeEndpoint(String ip, int httpPort, int grpcPort) {
         WorkerStatus ws = new WorkerStatus();
+        ws.setRole(RoleType.DECODE);
         ws.setIp(ip);
         ws.setPort(httpPort);
         ws.setGrpcPort(grpcPort);
         ws.setAlive(true);
         return (DecodeEndpoint) endpointRegistry.ensureEndpoint(
                 RoleType.DECODE, ip + ":" + httpPort, ws);
+    }
+
+    private DecodeEndpoint reserveDefaultDecode(BalanceContext ctx) {
+        DecodeEndpoint endpoint = endpointRegistry.getDecode("10.0.0.2:8081");
+        Request request = ctx.getRequest();
+        endpoint.reserve(request.getRequestId(), request.getSeqLen(),
+                request.getSeqLen() + request.getMaxNewTokens());
+        return endpoint;
     }
 
     private static void awaitCondition(BooleanSupplier condition) throws InterruptedException {

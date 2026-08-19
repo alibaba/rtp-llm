@@ -65,7 +65,7 @@ public class GlobalCacheIndex {
      * @param engineIp      Engine IP
      * @param blockCacheKey Cache block hash value
      */
-    public void removeCacheBlock(String engineIp, Long blockCacheKey) {
+    void removeCacheBlock(String engineIp, Long blockCacheKey) {
         if (blockCacheKey == null || engineIp == null) {
             return;
         }
@@ -112,16 +112,6 @@ public class GlobalCacheIndex {
     void removeEngineCacheBlocks(String engineIpPort, Set<Long> cacheBlocks) {
         for (Long block : cacheBlocks) {
             removeCacheBlock(engineIpPort, block);
-        }
-    }
-
-    /** Compatibility cleanup for the legacy gRPC channel owner. */
-    @Deprecated
-    public void removeAllCacheBlockOfEngine(String engineIpPort) {
-        for (Map.Entry<Long, Set<String>> entry : blockToEnginesMap.entrySet()) {
-            if (entry.getValue().contains(engineIpPort)) {
-                removeCacheBlock(engineIpPort, entry.getKey());
-            }
         }
     }
 

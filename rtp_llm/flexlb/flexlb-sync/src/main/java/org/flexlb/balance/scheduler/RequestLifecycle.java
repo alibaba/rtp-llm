@@ -127,6 +127,12 @@ final class RequestLifecycle {
         return state.isTerminal();
     }
 
+    synchronized void touch() {
+        if (!state.isTerminal()) {
+            updatedAtMs = System.currentTimeMillis();
+        }
+    }
+
     /**
      * Whether dispatch has crossed the point where the engine may observe the
      * request. Once a batch id is assigned, a racing timeout cannot prove that

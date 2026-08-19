@@ -894,6 +894,10 @@ public final class JavaMockEngineCluster {
                         EngineRpcService.PriorityPreemptionProgressPB
                                 .PRIORITY_PREEMPTION_CANCELED);
             }
+            long batchId = recordedBatchId(requestId);
+            if (batchId > 0) {
+                taskBuilder.setBatchId(batchId);
+            }
             EngineRpcService.TaskInfoPB task = taskBuilder.build();
             completions.add(new VersionedTask(version, task));
             statusVersion.incrementAndGet();
@@ -1040,7 +1044,7 @@ public final class JavaMockEngineCluster {
                                                       EngineRpcService.TaskPhase phase) {
             addPriorityCancelTombstone(requestId);
             long version = completionVersion.incrementAndGet();
-            EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
+            EngineRpcService.TaskInfoPB.Builder taskBuilder = EngineRpcService.TaskInfoPB.newBuilder()
                     .setRequestId(requestId)
                     .setPhase(phase)
                     .setPriorityPreemptionProgress(EngineRpcService.PriorityPreemptionProgressPB
@@ -1050,8 +1054,12 @@ public final class JavaMockEngineCluster {
                             .setErrorMessage("preempted by higher-priority request")
                             .build())
                     .setEndTimeMs(System.currentTimeMillis())
-                    .setDpRank(0)
-                    .build();
+                    .setDpRank(0);
+            long batchId = recordedBatchId(requestId);
+            if (batchId > 0) {
+                taskBuilder.setBatchId(batchId);
+            }
+            EngineRpcService.TaskInfoPB task = taskBuilder.build();
             completions.add(new VersionedTask(version, task));
             statusVersion.incrementAndGet();
         }
@@ -1871,6 +1879,14 @@ public final class JavaMockEngineCluster {
                     lifecycle.put("end_ms", System.currentTimeMillis());
                     lifecycle.put("end_state", cancelled ? "cancelled" : "completed");
                 }
+            }
+        }
+
+        private long recordedBatchId(long requestId) {
+            synchronized (requestLifecycles) {
+                Map<String, Object> lifecycle = requestLifecycles.get(requestId);
+                Object value = lifecycle == null ? null : lifecycle.get("batch_id");
+                return value instanceof Number number ? number.longValue() : -1L;
             }
         }
 

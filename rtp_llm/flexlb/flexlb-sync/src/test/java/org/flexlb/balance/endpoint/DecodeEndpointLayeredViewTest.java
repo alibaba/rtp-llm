@@ -355,7 +355,7 @@ class DecodeEndpointLayeredViewTest {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRunningTaskInfo(running);
         response.setFinishedTaskInfo(finished);
-        endpoint.onWorkerStatusUpdate(status, response);
+        endpoint.applyWorkerStatusResponse(status, response);
     }
 
     private static TaskInfo runningTask(long requestId, TaskPhase phase, long inputLength) {

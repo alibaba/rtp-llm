@@ -14,58 +14,24 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * AutoCloseable admission lease — the single ownership boundary between the
- * Auto-TPM admission scheduler and the dispatch/completion pipeline
- * (Luoli redesign §2.2).
- *
- * <p><b>Four-state CAS</b>: the original
- * two-state {@code settled} flag sealed the lease on prefill success, making
- * {@code close()} a permanent no-op and leaking KV cache blocks forever. The
- * state machine records the one ownership decision that matters: an
- * authoritative Decode acceptance transfers ownership even if the Enqueue
- * ACK is lost, delayed, or negative.
- *
- * <ul>
- *   <li>{@link #handoverToEngine()} — the <b>success</b> path
- *       ({@code PENDING→HANDOVER_WAIT}):
- *       prefill succeeded, the engine now owns the decode reservation. After
- *       sealing, a <em>soft timeout</em> is scheduled: if the decode endpoint
- *       hasn't accepted the request within {@code softTimeoutMs}, the lease is
- *       force-closed and a cancel signal is sent to the engine.</li>
- *   <li>{@link #close()} — the <b>failure</b> path
- *       ({@code PENDING→CLOSED_CLEANUP} only):
- *       timeout, dispatch error, SLO expiry, eviction. Releases all resources
- *       (tryRemove + release + unregisterInflight). Post-handover cleanup
- *       routes through {@link #forceCloseAfterHandover()} or
- *       {@link #markDecodeAccepted()} only.</li>
- *   <li>{@link #forceCloseAfterHandover()} — the <b>soft-timeout</b> path
- *       ({@code HANDOVER_WAIT→CLOSED_CLEANUP}): same resource release as
- *       {@code close()}, <em>plus</em>
- *       sends a cancel signal ({@code finishYieldedById}) to the prefill
- *       engine so the C++ side releases the {@code con_ref} (KV cache block)
- *       that would otherwise stay pinned. Includes a TOCTOU double-check:
- *       if decode accepted between the soft-timeout lambda's
- *       {@code isConfirmedTracked} check and this CAS, only the counter is
- *       decremented (no resource release, no cancel signal).</li>
- *   <li>{@link #markDecodeAccepted()} — the <b>decode-accepted</b> path
- *       ({@code PENDING/HANDOVER_WAIT→CLOSED_ENGINE_OWNED}). It never releases
- *       resources: the Decode engine has authoritative ownership.</li>
- * </ul>
- *
- * <p>Each resource-release step is idempotent, so concurrent terminal paths
- * (dispatch pipeline, calibrate, soft timeout) are harmless.
+ * Tracks the admission ownership handoff from the local queue to the engines.
+ * Before EnqueueBatch succeeds, this lease may roll back queue/Decode/inflight
+ * resources. After success, ownership is ambiguous until Decode WorkerStatus
+ * confirms it; a timeout must therefore enter the scheduler's authoritative
+ * Engine reconciliation instead of releasing local accounting optimistically.
  *
  * <p><b>Legacy path</b> ({@code budget == null}): never constructs a lease;
  * the legacy dispatch lifecycle is unchanged byte-for-byte.
  */
 public final class AdmissionLease implements AutoCloseable {
 
-    // ==================== Four-state CAS ====================
+    // ==================== Ownership state CAS ====================
 
     private static final int STATE_PENDING = 0;
     private static final int STATE_HANDOVER_WAIT = 1;
     private static final int STATE_CLOSED_CLEANUP = 2;
     private static final int STATE_CLOSED_ENGINE_OWNED = 3;
+    private static final int STATE_RECONCILING = 4;
 
     /**
      * Daemon single-thread scheduler for post-success soft timeouts. A daemon
@@ -152,8 +118,6 @@ public final class AdmissionLease implements AutoCloseable {
         } finally {
             notifyCloseCallback();
         }
-        Logger.debug("[auto-tpm] admission lease closed: request_id={}",
-                item.requestId());
     }
 
     /**
@@ -168,8 +132,6 @@ public final class AdmissionLease implements AutoCloseable {
                 if (!leaseState.compareAndSet(STATE_PENDING, STATE_HANDOVER_WAIT)) {
                     continue;
                 }
-                Logger.debug("[auto-tpm] admission lease awaiting decode acceptance: request_id={}",
-                        item.requestId());
                 scheduleSoftTimeout();
                 return;
             }
@@ -178,57 +140,28 @@ public final class AdmissionLease implements AutoCloseable {
     }
 
     /**
-     * Soft-timeout force-close path: CAS HANDED_OVER→CLOSED. Releases all
-     * resources <em>and</em> sends a cancel signal ({@code finishYieldedById})
-     * to the prefill engine, triggering the C++ side to release the
-     * {@code con_ref} (KV cache block) that was pinned by the successful
-     * prefill but never consumed by decode.
-     *
-     * <p>TOCTOU fix: after the CAS succeeds, re-check
-     * {@code isConfirmedTracked}. If decode accepted between the
-     * soft-timeout lambda's check and this CAS, only decrement the counter
-     * (no resource release, no cancel signal) — the engine owns the decode
-     * reservation.
+     * Start post-handover reconciliation. No local resource is released here:
+     * EnqueueBatch has already succeeded, so only Decode WorkerStatus or the
+     * scheduler's Engine Cancel/TOMBSTONED reducer may settle ownership.
      */
     public void forceCloseAfterHandover() {
-        if (!leaseState.compareAndSet(STATE_HANDOVER_WAIT, STATE_CLOSED_CLEANUP)) {
+        if (!leaseState.compareAndSet(STATE_HANDOVER_WAIT, STATE_RECONCILING)) {
             return;
         }
-        // try-finally: ensure notifyCloseCallback() runs even if any intermediate
-        // step (cancelSoftTimeout, isConfirmedTracked, releaseResources,
-        // finishYieldedById) throws. Without this, a thrown exception would
-        // leak the activeLeaseCount backpressure counter (Fix: counter leak).
         try {
             cancelSoftTimeout();
-            // TOCTOU fix: decode may have accepted between the isConfirmedTracked
-            // check in the soft-timeout lambda and this CAS. Re-check here — if
-            // decode has accepted, only decrement the counter (don't release
-            // resources or send cancel signal).
             if (decodeEp != null && decodeEp.isConfirmedTracked(item.requestId())) {
-                Logger.debug("[auto-tpm] admission lease force-closed after handover "
-                                + "(decode accepted, TOCTOU): request_id={}",
-                        item.requestId());
-            } else {
-                // Cleanup and priority Cancel share one registrar-owned
-                // linearization point. If Cancel already owns the request,
-                // neither the lease nor its follow-up terminal signal may
-                // release Decode accounting ahead of typed CANCELED.
-                if (releaseResourcesIfOwned("post_success_soft_timeout")) {
-                    // Fix B: send cancel signal to engine so C++ releases con_ref.
-                    // Only on the soft-timeout path — the normal close() failure path
-                    // doesn't need this (the engine already knows the request failed).
-                    registrar.finishYieldedById(item.requestId(), "post_success_soft_timeout");
-                    Logger.debug("[auto-tpm] admission lease force-closed after handover: "
-                                    + "request_id={} reason=post_success_soft_timeout",
-                            item.requestId());
-                }
+                markDecodeAccepted();
+                return;
+            }
+            if (!registrar.requestPostHandoverReconciliation(
+                    item, "post_success_soft_timeout")) {
+                completeSchedulerSettlement();
             }
         } catch (Exception e) {
             Logger.error("[auto-tpm] admission lease forceCloseAfterHandover error: "
                             + "request_id={} lease_state={} error={}",
                     item.requestId(), leaseState.get(), e.getMessage(), e);
-        } finally {
-            notifyCloseCallback();
         }
     }
 
@@ -240,11 +173,35 @@ public final class AdmissionLease implements AutoCloseable {
     public void markDecodeAccepted() {
         while (true) {
             int state = leaseState.get();
-            if (state != STATE_PENDING && state != STATE_HANDOVER_WAIT) {
+            if (state != STATE_PENDING && state != STATE_HANDOVER_WAIT
+                    && state != STATE_RECONCILING) {
                 return;
             }
             if (leaseState.compareAndSet(state, STATE_CLOSED_ENGINE_OWNED)) {
                 finishEngineOwned();
+                return;
+            }
+        }
+    }
+
+    /**
+     * Close lease bookkeeping after the scheduler has already settled request
+     * ownership and resources. This method never releases queue/Decode/inflight
+     * state itself; it only cancels the timer and decrements the admission
+     * backpressure counter exactly once.
+     */
+    public void completeSchedulerSettlement() {
+        while (true) {
+            int state = leaseState.get();
+            if (state == STATE_CLOSED_CLEANUP || state == STATE_CLOSED_ENGINE_OWNED) {
+                return;
+            }
+            if (leaseState.compareAndSet(state, STATE_CLOSED_CLEANUP)) {
+                try {
+                    cancelSoftTimeout();
+                } finally {
+                    notifyCloseCallback();
+                }
                 return;
             }
         }
@@ -255,14 +212,23 @@ public final class AdmissionLease implements AutoCloseable {
         // throws. Without this, the counter leaks (Fix: counter leak).
         try {
             cancelSoftTimeout();
-            Logger.debug("[auto-tpm] admission lease marked decode-accepted: request_id={}",
-                    item.requestId());
         } catch (Exception e) {
             Logger.error("[auto-tpm] admission lease markDecodeAccepted error: "
                             + "request_id={} error={}",
                     item.requestId(), e.getMessage(), e);
         } finally {
             notifyCloseCallback();
+        }
+    }
+
+    /**
+     * Detach optional lease tracking after the queue handoff without touching
+     * queue membership or Decode accounting. The ordinary inflight lifecycle
+     * remains authoritative.
+     */
+    void abandonWithoutCleanup() {
+        if (leaseState.compareAndSet(STATE_PENDING, STATE_CLOSED_ENGINE_OWNED)) {
+            finishEngineOwned();
         }
     }
 
@@ -313,9 +279,6 @@ public final class AdmissionLease implements AutoCloseable {
      */
     private boolean releaseResourcesIfOwned(String detail) {
         if (registrar.registrarOwnsAdmissionCleanup(item, detail)) {
-            Logger.debug("[auto-tpm] admission lease cleanup deferred to priority preemption: "
-                            + "request_id={} reason={}",
-                    item.requestId(), detail);
             return false;
         }
         releaseResources();
@@ -329,8 +292,8 @@ public final class AdmissionLease implements AutoCloseable {
      *   <li>If accepted ({@code isConfirmedTracked} returns true) →
      *       {@link #markDecodeAccepted()}: decrement the backpressure counter
      *       only (no resource release — the engine owns the decode reservation).</li>
-     *   <li>If not accepted → {@link #forceCloseAfterHandover()}: release
-     *       resources + send cancel signal.</li>
+     *   <li>If not accepted → {@link #forceCloseAfterHandover()}: ask the
+     *       scheduler to start its Engine reconciliation reducer.</li>
      * </ul>
      */
     private void scheduleSoftTimeout() {
@@ -344,14 +307,6 @@ public final class AdmissionLease implements AutoCloseable {
         long requestId = item.decode() != null
                 ? item.decode().getRequestId() : item.requestId();
         softTimeoutFuture = SOFT_TIMEOUT_EXECUTOR.schedule(() -> {
-            // try-catch: ScheduledExecutorService silently swallows exceptions
-            // from failed tasks — without this catch, a thrown exception
-            // (e.g. from isConfirmedTracked, releaseResources, or
-            // finishYieldedById) would leave the lease stuck in HANDED_OVER
-            // forever, leaking the activeLeaseCount counter. The forceClose
-            // fallback ensures the CAS transitions to CLOSED even if the
-            // first attempt threw mid-way (CAS is idempotent — a second call
-            // after a successful CAS harmlessly returns).
             try {
                 if (decodeEp != null && decodeEp.isConfirmedTracked(requestId)) {
                     // Decode accepted — mark lease closed (decrement counter only).
@@ -364,17 +319,6 @@ public final class AdmissionLease implements AutoCloseable {
                 Logger.error("[auto-tpm] soft timeout task failed: request_id={}"
                                 + " lease_state={} error={}",
                         requestId, leaseState.get(), e.getMessage(), e);
-                // Best-effort fallback: force-close to ensure counter decrement.
-                // If the first call's CAS already succeeded (threw after CAS),
-                // this call's CAS will fail harmlessly. If it failed before CAS,
-                // this call will succeed and close the lease.
-                try {
-                    forceCloseAfterHandover();
-                } catch (Exception fallback) {
-                    Logger.error("[auto-tpm] soft timeout fallback force-close"
-                                    + " failed: request_id={} error={}",
-                            requestId, fallback.getMessage(), fallback);
-                }
             }
         }, softTimeoutMs, TimeUnit.MILLISECONDS);
     }
@@ -399,7 +343,7 @@ public final class AdmissionLease implements AutoCloseable {
      * Returns the current lease state (for testing/diagnostics).
      *
      * @return 0=PENDING, 1=HANDOVER_WAIT, 2=CLOSED_CLEANUP,
-     *         3=CLOSED_ENGINE_OWNED
+     *         3=CLOSED_ENGINE_OWNED, 4=RECONCILING
      */
     int leaseState() {
         return leaseState.get();

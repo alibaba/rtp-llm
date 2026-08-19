@@ -486,9 +486,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * Typed Prefill CANCELED settlement.  This is the sole transition that
-     * deletes the victim accounting; duplicate observations are
-     * a token-fenced no-op.
+     * Settle priority-cancel accounting after a token-fenced authoritative
+     * proof. Normal callers provide typed Prefill CANCELED; after an ACCEPTED
+     * Cancel exceeds its completion budget, the scheduler may instead combine
+     * that accepted first-cause with an exact Decode terminal. Duplicate
+     * observations are a token-fenced no-op.
      */
     public boolean settlePriorityCanceled(long attemptToken, long requestId) {
         admissionLock.lock();
@@ -686,9 +688,35 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     @Override
-    public void onWorkerStatusUpdate(WorkerStatus ws, WorkerStatusResponse resp) {
-        super.onWorkerStatusUpdate(ws, resp);
+    protected void updateFromWorkerStatus(WorkerStatusResponse resp) {
         calibrate(resp.getRunningTaskInfo(), resp.getFinishedTaskInfo());
+    }
+
+    @Override
+    protected void refreshActivityFromWorkerStatus(WorkerStatusResponse resp) {
+        Map<String, TaskInfo> runningTasks = resp.getRunningTaskInfo();
+        if (runningTasks == null || runningTasks.isEmpty()) {
+            return;
+        }
+        long nowMs = System.currentTimeMillis();
+        admissionLock.lock();
+        try {
+            for (TaskInfo task : runningTasks.values()) {
+                if (task == null || task.priorityCancelOverlayOnly()) {
+                    continue;
+                }
+                TaskPhase phase = task.getPhase();
+                if (phase != TaskPhase.KV_ALLOCATED && phase != TaskPhase.RUNNING) {
+                    continue;
+                }
+                ConfirmedTask tracked = trackedConfirmed.get(task.getRequestId());
+                if (tracked != null) {
+                    tracked.touch(nowMs);
+                }
+            }
+        } finally {
+            admissionLock.unlock();
+        }
     }
 
     /**
@@ -1097,7 +1125,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     @Override
-    public long getLoadMetric() {
+    long schedulingLoad() {
         return getTotalLoad();
     }
 
@@ -1136,6 +1164,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
         /** Refresh layer membership and liveness on every calibrate round. */
         void refresh(DecodeTaskPhase layer, long now) {
             this.phase = layer;
+            this.lastSeenMs = now;
+        }
+
+        /** Refresh liveness without invalidating an equal-version admission snapshot. */
+        void touch(long now) {
             this.lastSeenMs = now;
         }
     }

@@ -1,20 +1,20 @@
 package org.flexlb.sync.schedule;
 
 import org.apache.commons.collections4.MapUtils;
-import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.config.ConfigService;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
+import org.flexlb.sync.status.WorkerGenerationManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
-import java.util.Iterator;
-import java.util.Map;
+import java.util.concurrent.ConcurrentMap;
 
 /**
  * Periodically evicts workers that have stopped sending WorkerStatus reports
@@ -40,11 +40,11 @@ public class ExpirationCleaner {
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
     private final long workerTimeoutUs;
-    private final EndpointRegistry endpointRegistry;
+    private final WorkerGenerationManager generationManager;
 
     @Autowired
-    public ExpirationCleaner(EndpointRegistry endpointRegistry, ConfigService configService) {
-        this(endpointRegistry, resolveWorkerTimeoutUs(configService));
+    public ExpirationCleaner(WorkerGenerationManager generationManager, ConfigService configService) {
+        this(generationManager, resolveWorkerTimeoutUs(configService));
     }
 
     /**
@@ -76,8 +76,8 @@ public class ExpirationCleaner {
         return configMs * 1000L;
     }
 
-    ExpirationCleaner(EndpointRegistry endpointRegistry, long workerTimeoutUs) {
-        this.endpointRegistry = endpointRegistry;
+    ExpirationCleaner(WorkerGenerationManager generationManager, long workerTimeoutUs) {
+        this.generationManager = generationManager;
         this.workerTimeoutUs = workerTimeoutUs;
     }
 
@@ -88,27 +88,22 @@ public class ExpirationCleaner {
         this.doClean(modelWorkerStatus.getDecodeStatusMap(), RoleType.DECODE);
         this.doClean(modelWorkerStatus.getPdFusionStatusMap(), RoleType.PDFUSION);
         this.doClean(modelWorkerStatus.getVitStatusMap(), RoleType.VIT);
+        this.doClean(modelWorkerStatus.getFrontendStatusMap(), RoleType.FRONTEND);
     }
 
-    public void doClean(Map<String, WorkerStatus> workerStatusMap, RoleType role) {
+    public void doClean(ConcurrentMap<String, WorkerStatus> workerStatusMap, RoleType role) {
         if (MapUtils.isEmpty(workerStatusMap)) {
             return;
         }
 
-        for (Iterator<Map.Entry<String, WorkerStatus>> it = workerStatusMap.entrySet().iterator(); it.hasNext(); ) {
-            Map.Entry<String, WorkerStatus> item = it.next();
-            WorkerStatus workerStatus = item.getValue();
-
-            long expirationTime = workerStatus.getStatusLastUpdateTime().get() + workerTimeoutUs;
-            long currentTime = System.nanoTime() / 1000;
-            if (currentTime > expirationTime) {
-                workerStatus.setAlive(false);
-                boolean statusRemoved = workerStatusMap.remove(item.getKey(), workerStatus);
-                boolean endpointRemoved = endpointRegistry.remove(role, item.getKey(), workerStatus);
-                if (statusRemoved || endpointRemoved) {
-                    logger.warn("Removed expired worker: {}, role: {}, statusRemoved={}, endpointRemoved={}",
-                            item.getKey(), role, statusRemoved, endpointRemoved);
-                }
+        for (var item : workerStatusMap.entrySet()) {
+            WorkerStatus expected = item.getValue();
+            boolean removed = generationManager.retireIf(
+                    workerStatusMap, role, item.getKey(), expected,
+                    current -> System.nanoTime() / 1000
+                            > current.getStatusLastUpdateTime().get() + workerTimeoutUs);
+            if (removed) {
+                logger.warn("Removed expired worker: {}, role: {}", item.getKey(), role);
             }
         }
     }

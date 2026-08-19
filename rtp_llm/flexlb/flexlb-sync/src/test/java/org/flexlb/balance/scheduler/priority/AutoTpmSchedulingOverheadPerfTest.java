@@ -358,6 +358,7 @@ class AutoTpmSchedulingOverheadPerfTest {
 
             // Register endpoints
             WorkerStatus prefillWs = new WorkerStatus();
+            prefillWs.setRole(RoleType.PREFILL);
             prefillWs.setIp(PREFILL_IP);
             prefillWs.setPort(PREFILL_HTTP);
             prefillWs.setGrpcPort(PREFILL_GRPC);
@@ -365,7 +366,7 @@ class AutoTpmSchedulingOverheadPerfTest {
 
             endpointRegistry.ensureEndpoint(RoleType.DECODE, DECODE_IP_PORT, decodeStatus);
             endpointRegistry.getDecode(DECODE_IP_PORT)
-                    .onWorkerStatusUpdate(decodeStatus, new WorkerStatusResponse());
+                    .applyWorkerStatusResponse(decodeStatus, new WorkerStatusResponse());
         }
 
         private static void reportDecodeAccepted(FlexlbBatchScheduler scheduler,
@@ -382,12 +383,14 @@ class AutoTpmSchedulingOverheadPerfTest {
             WorkerStatusResponse response = new WorkerStatusResponse();
             response.setRole(RoleType.DECODE);
             response.setRunningTaskInfo(running);
-            registry.getDecode(DECODE_IP_PORT).onWorkerStatusUpdate(decodeStatus, response);
-            scheduler.onWorkerStatusUpdate(response);
+            registry.getDecode(DECODE_IP_PORT).applyWorkerStatusResponse(decodeStatus, response);
+            scheduler.recordRequestActivity(decodeStatus, response);
+            scheduler.updateRequestLifecycleFromWorkerStatus(decodeStatus, response);
         }
 
         private static WorkerStatus decodeWs() {
             WorkerStatus status = new WorkerStatus();
+            status.setRole(RoleType.DECODE);
             status.setIp(DECODE_IP);
             status.setPort(DECODE_HTTP);
             status.setGrpcPort(DECODE_GRPC);

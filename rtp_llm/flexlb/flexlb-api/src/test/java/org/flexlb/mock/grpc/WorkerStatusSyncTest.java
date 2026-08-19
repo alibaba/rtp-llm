@@ -46,8 +46,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *   <li>{@link EngineStatusConverter#convertToWorkerStatusResponse} converts the PB
  *       to a {@link WorkerStatusResponse}</li>
  *   <li>{@link WorkerStatus#updateFromResponse} updates the in-memory status</li>
- *   <li>{@link PrefillEndpoint#onWorkerStatusUpdate} replaces the endpoint's status
- *       reference and calls {@code calibrate()} for inflight reconciliation</li>
+ *   <li>{@link PrefillEndpoint#applyWorkerStatusResponse} applies the response to
+ *       the endpoint's exact WorkerStatus generation and reconciles inflight state</li>
  * </ul>
  *
  * <p>Note: In production, {@link org.flexlb.sync.runner.GrpcWorkerStatusRunner} performs
@@ -158,7 +158,8 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
      * <ol>
      *   <li>Convert {@code WorkerStatusPB} → {@code WorkerStatusResponse}</li>
      *   <li>Update {@code WorkerStatus} via {@code updateFromResponse}</li>
-     *   <li>Notify {@code PrefillEndpoint} via {@code onWorkerStatusUpdate}</li>
+     *   <li>Apply it to the exact endpoint generation via
+     *       {@code applyWorkerStatusResponse}</li>
      * </ol>
      */
     private void applyWorkerStatus(EngineRpcService.WorkerStatusPB pb) {
@@ -169,6 +170,6 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
 
         WorkerStatus ws = getPrefillEndpoint().getStatus();
         ws.updateFromResponse(response);
-        getPrefillEndpoint().onWorkerStatusUpdate(ws, response);
+        getPrefillEndpoint().applyWorkerStatusResponse(ws, response);
     }
 }

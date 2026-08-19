@@ -24,7 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 2. Submit request → ACK succeeds (proves the gRPC link works)
  * 4. Stop the mock prefill worker's gRPC server (simulates worker crash)
  * 5. Submit a new request → gRPC call fails (connection refused / channel broken)
- * 6. Verify: request fails with BATCH_DISPATCH_FAILED, inflight cleaned up,
+ * 6. Verify: the started RPC is reconciled to BATCH_SLO_EXPIRED, inflight cleaned up,
  *    error message contains gRPC failure indication
  *
  * <p>Key mechanism:
@@ -82,11 +82,13 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
         CompletableFuture<Response> future2 = submitRequest(20002);
         Response failResponse = future2.get(10, TimeUnit.SECONDS);
 
-        // 6. Verify: request failed with BATCH_DISPATCH_FAILED
+        // 6. The async RPC invocation started before the connection failure became
+        // visible.  Treat ownership as uncertain until Cancel returns TOMBSTONED;
+        // only then is it safe to release the Master-side ledgers.
         assertFalse(failResponse.isSuccess(),
                 "Request should fail when prefill worker is offline");
-        assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), failResponse.getCode(),
-                "Request should have BATCH_DISPATCH_FAILED error code");
+        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), failResponse.getCode(),
+                "A started RPC must be fenced before reporting the timeout");
 
         // 7. Verify: error message contains gRPC failure indication
         String errMsg = failResponse.getErrorMessage();

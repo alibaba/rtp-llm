@@ -62,7 +62,7 @@ class CostBasedDecodeStrategyTest {
             DecodeEndpoint ep = (DecodeEndpoint) registry.ensureEndpoint(
                     RoleType.DECODE, entry.getKey(), ws);
             // Initialize reported KV cache from status
-            ep.onWorkerStatusUpdate(ws, new WorkerStatusResponse());
+            ep.applyWorkerStatusResponse(ws, new WorkerStatusResponse());
         }
         return registry;
     }

@@ -266,7 +266,8 @@ class FaultInjectionE2ETest {
 
     @Test
     @Timeout(30)
-    void c09_crash_after_n_requests_yields_missing_ack_and_other_engine_survives() throws Exception {
+    void c09_crash_after_n_requests_fences_uncertain_ownership_and_other_engine_survives()
+            throws Exception {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 80, 2, 1, "5", 1.0, false)) {
             arm(h);
             JavaMockEngineCluster.FastRpcService prefill = h.prefillEngines.get(0);
@@ -277,20 +278,31 @@ class FaultInjectionE2ETest {
             Response first = submitTo(h, 0, 9901);
             assertTrue(first.isSuccess(), "requests before the crash threshold succeed");
 
-            // 第 2 个 enqueue 触发 crash：空响应（无 ack）→ 8510 missing ack
-            Response crashed = submitTo(h, 0, 9902);
-            assertFalse(crashed.isSuccess());
-            assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), crashed.getCode());
-            assertTrue(crashed.getErrorMessage().contains("missing ack"), crashed.getErrorMessage());
+            // 第 2 个 enqueue 触发 crash 并返回空响应。缺少逐请求 ACK 只能证明
+            // ownership 不确定，不能证明 Engine 未接收；Master 必须保留账目，
+            // 直到 Cancel/WorkerStatus 等权威证据完成 reconciliation。
+            h.prefillSelector = ctx -> 0;
+            CompletableFuture<Response> crashed = h.scheduler.submit(h.context(9902, 50));
+            AutoTpmE2EHarness.await(prefill::isStopped, 1_000,
+                    "engine must stop at the configured crash threshold");
+            AutoTpmE2EHarness.await(
+                    () -> {
+                        var state = h.scheduler.getRequestState(9902, 0);
+                        return state != null && state.batchId() > 0;
+                    },
+                    1_000,
+                    "uncertain request must retain its dispatch generation");
+            assertFalse(crashed.isDone(),
+                    "missing ACK is not authoritative absence and must not release ownership");
+            assertTrue(h.decodeEndpoint(0).reservedView().containsKey(9902L),
+                    "Decode accounting must remain fenced while ownership is uncertain");
             assertTrue(prefill.isStopped(), "engine is down after the crash threshold");
 
-            // crash 后的请求继续明确失败（调度器不崩溃、不挂起）
-            Response afterCrash = submitTo(h, 0, 9903);
-            assertFalse(afterCrash.isSuccess());
-            assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), afterCrash.getCode());
-
-            Response healthy = submitTo(h, 1, 9904);
+            Response healthy = submitTo(h, 1, 9903);
             assertTrue(healthy.isSuccess(), "the crash never spreads to the healthy engine");
+            assertFalse(crashed.isDone(),
+                    "healthy traffic must not settle the unrelated uncertain generation");
+            assertTrue(h.decodeEndpoint(0).reservedView().containsKey(9902L));
         }
     }
 

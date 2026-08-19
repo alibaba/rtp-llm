@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler.priority;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 
 import java.util.concurrent.CompletableFuture;
 
@@ -35,12 +36,33 @@ public interface EngineCancelChannel {
     /**
      * Cancel routing information.
      *
-     * @param prefillIp       original Prefill endpoint IP
-     * @param prefillGrpcPort original Prefill endpoint gRPC port
+     * @param prefillIp         original Prefill endpoint IP
+     * @param prefillGrpcPort   original Prefill endpoint gRPC port
+     * @param prefillGeneration exact Master-side endpoint generation that owns
+     *                          the request; production orchestration must bind it
      */
-    record CancelTarget(String prefillIp, int prefillGrpcPort) {
+    record CancelTarget(String prefillIp,
+                        int prefillGrpcPort,
+                        PrefillEndpoint prefillGeneration) {
+
+        /** Raw-address constructor for transport-only tests. */
+        public CancelTarget(String prefillIp, int prefillGrpcPort) {
+            this(prefillIp, prefillGrpcPort, null);
+        }
+
+        /** Production constructor: address and generation come from one source. */
+        public CancelTarget(PrefillEndpoint prefillGeneration) {
+            this(prefillGeneration == null ? null : prefillGeneration.getIp(),
+                    prefillGeneration == null ? 0 : prefillGeneration.getGrpcPort(),
+                    prefillGeneration);
+        }
+
         public boolean isRoutable() {
             return prefillIp != null && !prefillIp.isBlank() && prefillGrpcPort > 0;
+        }
+
+        public boolean isGenerationBound() {
+            return prefillGeneration != null;
         }
     }
 

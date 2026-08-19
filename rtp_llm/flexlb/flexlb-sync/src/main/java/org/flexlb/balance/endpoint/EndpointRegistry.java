@@ -1,9 +1,10 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.BatchDecisionHandler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
@@ -12,6 +13,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
+import java.util.Collections;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 
@@ -22,15 +24,23 @@ public class EndpointRegistry {
     private final ConcurrentHashMap<String, DecodeEndpoint> decodeEndpoints = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, PrefillEndpoint> pdFusionEndpoints = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, SimpleWorkerEndpoint> vitEndpoints = new ConcurrentHashMap<>();
+    private final Map<String, PrefillEndpoint> prefillEndpointView =
+            Collections.unmodifiableMap(prefillEndpoints);
+    private final Map<String, DecodeEndpoint> decodeEndpointView =
+            Collections.unmodifiableMap(decodeEndpoints);
+    private final Map<String, PrefillEndpoint> pdFusionEndpointView =
+            Collections.unmodifiableMap(pdFusionEndpoints);
+    private final Map<String, SimpleWorkerEndpoint> vitEndpointView =
+            Collections.unmodifiableMap(vitEndpoints);
     private final ConfigService configService;
-    private final ObjectFactory<FlexlbBatchScheduler> batchSchedulerFactory;
+    private final ObjectFactory<BatchDecisionHandler> batchDecisionHandlerFactory;
     private final BatchSchedulerReporter reporter;
 
     public EndpointRegistry(ConfigService configService,
-                            ObjectFactory<FlexlbBatchScheduler> batchSchedulerFactory,
+                            ObjectFactory<BatchDecisionHandler> batchDecisionHandlerFactory,
                             BatchSchedulerReporter reporter) {
         this.configService = configService;
-        this.batchSchedulerFactory = batchSchedulerFactory;
+        this.batchDecisionHandlerFactory = batchDecisionHandlerFactory;
         this.reporter = reporter;
     }
 
@@ -52,16 +62,16 @@ public class EndpointRegistry {
 
     public Map<String, ? extends WorkerEndpoint> getEndpoints(RoleType roleType) {
         if (roleType == RoleType.PREFILL) {
-            return prefillEndpoints;
+            return prefillEndpointView;
         }
         if (roleType == RoleType.DECODE) {
-            return decodeEndpoints;
+            return decodeEndpointView;
         }
         if (roleType == RoleType.PDFUSION) {
-            return pdFusionEndpoints;
+            return pdFusionEndpointView;
         }
         if (roleType == RoleType.VIT) {
-            return vitEndpoints;
+            return vitEndpointView;
         }
         return Map.of();
     }
@@ -83,6 +93,10 @@ public class EndpointRegistry {
     }
 
     public WorkerEndpoint ensureEndpoint(RoleType roleType, String ipPort, WorkerStatus status) {
+        if (!supportsTopology(roleType, status)) {
+            throw new UnsupportedOperationException(
+                    roleType + " endpoint does not support dp_size=" + status.getDpSize());
+        }
         if (roleType == RoleType.PREFILL) {
             return ensurePrefillEndpoint(ipPort, status, roleType);
         }
@@ -96,6 +110,87 @@ public class EndpointRegistry {
             return ensureVitEndpoint(ipPort, status);
         }
         throw new IllegalArgumentException("Unsupported role: " + roleType);
+    }
+
+    /**
+     * Apply one current-generation worker response to the endpoint domain.
+     * Scheduler lifecycle processing is intentionally not part of this API.
+     */
+    public void updateEndpointFromWorkerStatus(
+            WorkerStatus status, WorkerStatusResponse response) {
+        RoleType role = validateStatusResponse(status, response);
+        String ipPort = status.getIpPort();
+        if (!isEndpointRole(role)) {
+            status.setReportedSchedulingLoad(0);
+            return;
+        }
+        if (!status.isAlive()) {
+            remove(role, ipPort, status);
+            status.setReportedSchedulingLoad(0);
+            return;
+        }
+        if (!supportsTopology(role, status)) {
+            remove(role, ipPort, status);
+            status.setReportedSchedulingLoad(0);
+            return;
+        }
+
+        WorkerEndpoint previous = get(role, ipPort);
+        boolean installsEndpoint = previous == null || previous.getStatus() != status;
+        WorkerEndpoint endpoint = ensureEndpoint(role, ipPort, status);
+        try {
+            endpoint.applyWorkerStatusResponse(status, response);
+        } catch (RuntimeException | Error applyFailure) {
+            if (installsEndpoint) {
+                try {
+                    remove(role, ipPort, status);
+                } catch (RuntimeException | Error cleanupFailure) {
+                    applyFailure.addSuppressed(cleanupFailure);
+                }
+            }
+            throw applyFailure;
+        }
+        status.setReportedSchedulingLoad(endpoint.schedulingLoad());
+    }
+
+    /**
+     * Refresh existing endpoint activity anchors for an equal-version response.
+     * Missing, retired, or topology-changing endpoints fall back to the full
+     * update path; the common case performs no absence reconciliation.
+     */
+    public void refreshEndpointActivity(WorkerStatus status, WorkerStatusResponse response) {
+        RoleType role = validateStatusResponse(status, response);
+        WorkerEndpoint endpoint = get(role, status.getIpPort());
+        if (!isEndpointRole(role) || !status.isAlive() || !supportsTopology(role, status)
+                || endpoint == null || endpoint.getStatus() != status) {
+            updateEndpointFromWorkerStatus(status, response);
+            return;
+        }
+        endpoint.refreshWorkerStatusActivity(status, response);
+        status.setReportedSchedulingLoad(endpoint.schedulingLoad());
+    }
+
+    private static RoleType validateStatusResponse(
+            WorkerStatus status, WorkerStatusResponse response) {
+        if (status == null || response == null || status.getRole() == null) {
+            throw new IllegalArgumentException("status, response and role are required");
+        }
+        RoleType role = status.getRole();
+        if (response.getRole() != role) {
+            throw new IllegalArgumentException(
+                    "WorkerStatus role mismatch: expected=" + role + ", response=" + response.getRole());
+        }
+        return role;
+    }
+
+    private static boolean isEndpointRole(RoleType role) {
+        return role == RoleType.PREFILL || role == RoleType.DECODE
+                || role == RoleType.PDFUSION || role == RoleType.VIT;
+    }
+
+    private static boolean supportsTopology(RoleType role, WorkerStatus status) {
+        return (role != RoleType.PREFILL && role != RoleType.PDFUSION)
+                || status.getDpSize() <= 1;
     }
 
     private PrefillEndpoint ensurePrefillEndpoint(String ipPort, WorkerStatus status, RoleType roleType) {
@@ -149,6 +244,7 @@ public class EndpointRegistry {
                 candidate.close();
                 return current;
             }
+            current.beginRetirement();
             if (endpoints.replace(ipPort, current, candidate)) {
                 current.close();
                 return candidate;
@@ -164,7 +260,6 @@ public class EndpointRegistry {
         if (expectedStatus == null) {
             return false;
         }
-        expectedStatus.setAlive(false);
         if (roleType == RoleType.PREFILL) {
             return remove(prefillEndpoints, ipPort, expectedStatus);
         }
@@ -180,26 +275,45 @@ public class EndpointRegistry {
         return false;
     }
 
+    /**
+     * Stop new generation-specific work before the WorkerStatus map changes.
+     * The exact-status check prevents an old retirement from fencing a newer
+     * endpoint generation at the same address.
+     */
+    public boolean beginEndpointRetirement(
+            RoleType roleType, String ipPort, WorkerStatus expectedStatus) {
+        WorkerEndpoint endpoint = get(roleType, ipPort);
+        if (endpoint == null || endpoint.getStatus() != expectedStatus) {
+            return false;
+        }
+        endpoint.beginRetirement();
+        return true;
+    }
+
     private <T extends WorkerEndpoint> boolean remove(ConcurrentHashMap<String, T> endpoints,
                                                        String ipPort,
                                                        WorkerStatus expectedStatus) {
         T endpoint = endpoints.get(ipPort);
-        if (endpoint == null || endpoint.getStatus() != expectedStatus
-                || !endpoints.remove(ipPort, endpoint)) {
+        if (endpoint == null || endpoint.getStatus() != expectedStatus) {
             return false;
         }
+        endpoint.beginRetirement();
+        if (!endpoints.remove(ipPort, endpoint)) {
+            return false;
+        }
+        expectedStatus.setReportedSchedulingLoad(0);
         endpoint.close();
         return true;
     }
 
-    private FlexlbBatchScheduler batchScheduler() {
-        return batchSchedulerFactory.getObject();
+    private BatchDecisionHandler batchDecisionHandler() {
+        return batchDecisionHandlerFactory.getObject();
     }
 
     private PrefillEndpoint createPrefillEndpoint(WorkerStatus status, RoleType roleType) {
         FlexlbConfig config = configService.loadBalanceConfig();
         prepareEndpointMetrics(roleType, status);
-        return new PrefillEndpoint(status, config, batchScheduler(), reporter);
+        return new PrefillEndpoint(status, config, batchDecisionHandler(), reporter);
     }
 
     private DecodeEndpoint createDecodeEndpoint(WorkerStatus status) {
@@ -226,15 +340,15 @@ public class EndpointRegistry {
     /**
      * Expose all prefill endpoints for per-worker metrics reporting.
      */
-    public ConcurrentHashMap<String, PrefillEndpoint> getPrefillEndpoints() {
-        return prefillEndpoints;
+    public Map<String, PrefillEndpoint> getPrefillEndpoints() {
+        return prefillEndpointView;
     }
 
     /**
      * Expose all decode endpoints for per-worker metrics reporting.
      */
-    public ConcurrentHashMap<String, DecodeEndpoint> getDecodeEndpoints() {
-        return decodeEndpoints;
+    public Map<String, DecodeEndpoint> getDecodeEndpoints() {
+        return decodeEndpointView;
     }
 
     public int getEndpointCount(RoleType roleType) {

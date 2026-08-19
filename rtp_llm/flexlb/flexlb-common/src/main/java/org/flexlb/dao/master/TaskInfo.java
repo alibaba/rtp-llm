@@ -41,4 +41,14 @@ public class TaskInfo {
     private PriorityPreemptionProgress priorityPreemptionProgress =
             PriorityPreemptionProgress.NONE;
 
+    /**
+     * Whether this record is only the control-plane cancel overlay and does
+     * not prove that the request is actively executing on the worker.
+     */
+    public boolean priorityCancelOverlayOnly() {
+        return phase == TaskPhase.PENDING
+                && (priorityPreemptionProgress == PriorityPreemptionProgress.CANCELING
+                    || priorityPreemptionProgress == PriorityPreemptionProgress.CANCELED);
+    }
+
 }

@@ -65,7 +65,7 @@ public class EngineLocalView {
      *
      * @param engineIPort Engine IP
      */
-    public void removeAllCacheBlockOfEngine(String engineIPort) {
+    void removeAllCacheBlockOfEngine(String engineIPort) {
         if (engineIPort == null) {
             return;
         }
@@ -79,7 +79,7 @@ public class EngineLocalView {
      * @param engineIPort Engine IP
      * @return Cache block ID set
      */
-    public Set<Long> getEngineCacheBlocks(String engineIPort) {
+    Set<Long> getEngineCacheBlocks(String engineIPort) {
         if (engineIPort == null) {
             return Collections.emptySet();
         }
@@ -97,7 +97,7 @@ public class EngineLocalView {
 
     }
 
-    public int size(String engineIpPort) {
+    int size(String engineIpPort) {
         Set<Long> engineCache = engineViews.get(engineIpPort);
         return engineCache == null ? 0 : engineCache.size();
     }
@@ -107,13 +107,7 @@ public class EngineLocalView {
      *
      * @return engineViews map size
      */
-    public int getEngineViewsMapSize() {
+    int getEngineViewsMapSize() {
         return engineViews.size();
-    }
-
-    /** Compatibility view for the legacy gRPC cleanup owner. */
-    @Deprecated
-    public Set<String> getAllEngineIpPorts() {
-        return engineViews.keySet();
     }
 }

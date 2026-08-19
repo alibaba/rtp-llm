@@ -7,8 +7,8 @@ import org.flexlb.dao.route.RoleType;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 @Data
 @NoArgsConstructor
@@ -17,24 +17,26 @@ public class ModelWorkerStatus {
     /**
      * Non-PD separation mode
      */
-    private Map<String/*ipPort*/, WorkerStatus> pdFusionStatusMap = new ConcurrentHashMap<>();
+    private ConcurrentMap<String/*ipPort*/, WorkerStatus> pdFusionStatusMap = new ConcurrentHashMap<>();
 
-    private Map<String/*ipPort*/, WorkerStatus> prefillStatusMap = new ConcurrentHashMap<>();
+    private ConcurrentMap<String/*ipPort*/, WorkerStatus> prefillStatusMap = new ConcurrentHashMap<>();
 
-    private Map<String/*ipPort*/, WorkerStatus> decodeStatusMap = new ConcurrentHashMap<>();
+    private ConcurrentMap<String/*ipPort*/, WorkerStatus> decodeStatusMap = new ConcurrentHashMap<>();
 
-    private Map<String/*ipPort*/, WorkerStatus> vitStatusMap = new ConcurrentHashMap<>();
+    private ConcurrentMap<String/*ipPort*/, WorkerStatus> vitStatusMap = new ConcurrentHashMap<>();
 
-    private Map<String/*ipPort*/, WorkerStatus> frontendStatusMap = new ConcurrentHashMap<>();
+    private ConcurrentMap<String/*ipPort*/, WorkerStatus> frontendStatusMap = new ConcurrentHashMap<>();
 
-    public Map<String, WorkerStatus> getRoleStatusMap(RoleType roleType) {
+    public ConcurrentMap<String, WorkerStatus> getRoleStatusMap(RoleType roleType) {
+        if (roleType == null) {
+            throw new IllegalArgumentException("roleType must not be null");
+        }
         return switch (roleType) {
             case DECODE -> decodeStatusMap;
             case PREFILL -> prefillStatusMap;
             case PDFUSION -> pdFusionStatusMap;
             case VIT -> vitStatusMap;
             case FRONTEND -> frontendStatusMap;
-            case null -> Map.of();
         };
     }
 

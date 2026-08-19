@@ -327,6 +327,7 @@ class PriorityConcurrencyStressTest {
             registerPrefill(PREFILL2_IP_PORT, "10.0.0.3");
 
             decodeWs = new WorkerStatus();
+            decodeWs.setRole(RoleType.DECODE);
             decodeWs.setIp("10.0.0.2");
             decodeWs.setPort(8081);
             decodeWs.setGrpcPort(8082);
@@ -334,7 +335,7 @@ class PriorityConcurrencyStressTest {
             decodeWs.setTotalKvCacheTokens(new AtomicLong(2_000_000L));
             endpointRegistry.ensureEndpoint(RoleType.DECODE, DECODE_IP_PORT, decodeWs);
             endpointRegistry.getDecode(DECODE_IP_PORT)
-                    .onWorkerStatusUpdate(decodeWs, new WorkerStatusResponse());
+                    .applyWorkerStatusResponse(decodeWs, new WorkerStatusResponse());
         }
 
         private FlexlbBatchScheduler getScheduler() {
@@ -343,6 +344,7 @@ class PriorityConcurrencyStressTest {
 
         private void registerPrefill(String ipPort, String ip) {
             WorkerStatus ws = new WorkerStatus();
+            ws.setRole(RoleType.PREFILL);
             ws.setIp(ip);
             ws.setPort(8080);
             ws.setGrpcPort(8081);
@@ -364,8 +366,9 @@ class PriorityConcurrencyStressTest {
             WorkerStatusResponse resp = new WorkerStatusResponse();
             resp.setRole(RoleType.DECODE);
             resp.setFinishedTaskInfo(finished);
-            scheduler.onWorkerStatusUpdate(resp);
-            endpointRegistry.getDecode(DECODE_IP_PORT).onWorkerStatusUpdate(decodeWs, resp);
+            endpointRegistry.getDecode(DECODE_IP_PORT).applyWorkerStatusResponse(decodeWs, resp);
+            scheduler.recordRequestActivity(decodeWs, resp);
+            scheduler.updateRequestLifecycleFromWorkerStatus(decodeWs, resp);
         }
 
         /** 容量感知 route 替身：镜像生产 decode 硬过滤 + 带优先级的影子预留。 */

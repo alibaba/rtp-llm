@@ -17,10 +17,11 @@ import org.mockito.Mockito;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class WorkerEndpointTest {
@@ -232,45 +233,40 @@ class WorkerEndpointTest {
         assertEquals(10L, (long) status.getAvailableConcurrency());
     }
 
-    // ==================== onWorkerStatusUpdate ====================
+    // ==================== applyWorkerStatusResponse ====================
 
     @Test
-    void onWorkerStatusUpdate_replaces_status_reference() {
+    void applyWorkerStatusResponse_rejects_different_generation() {
         WorkerStatusResponse resp = new WorkerStatusResponse();
         WorkerStatus newStatus = new WorkerStatus();
         newStatus.setSite("site-a");
         newStatus.setGroup("group-b");
         newStatus.setAlive(true);
 
-        assertNotSame(newStatus, endpoint.getStatus());
-
-        endpoint.onWorkerStatusUpdate(newStatus, resp);
-
-        assertSame(newStatus, endpoint.getStatus());
-        assertEquals("site-a", endpoint.getStatus().getSite());
-        assertEquals("group-b", endpoint.getStatus().getGroup());
+        assertThrows(IllegalArgumentException.class,
+                () -> endpoint.applyWorkerStatusResponse(newStatus, resp));
+        assertSame(status, endpoint.getStatus());
     }
 
     @Test
-    void onWorkerStatusUpdate_calibrates_prefill() {
+    void applyWorkerStatusResponse_calibrates_prefill() {
         WorkerStatusResponse resp = new WorkerStatusResponse();
         resp.setFinishedTaskInfo(Map.of("100", task(100L, 1000, 0, 1L)));
 
         // PrefillEndpoint calibrates even when runningTaskInfo is null
-        endpoint.onWorkerStatusUpdate(status, resp);
+        endpoint.applyWorkerStatusResponse(status, resp);
         // No exception = calibrate handled null gracefully
     }
 
     @Test
-    void onWorkerStatusUpdate_preserves_engine_state_from_ws() {
+    void applyWorkerStatusResponse_reads_engine_state_from_bound_generation() {
         WorkerStatusResponse resp = new WorkerStatusResponse();
-        WorkerStatus ws = new WorkerStatus();
-        ws.setSite("site-x");
-        ws.setGroup("group-x");
-        ws.setDpRank(5);
-        ws.setAlive(true);
+        status.setSite("site-x");
+        status.setGroup("group-x");
+        status.setDpRank(5);
+        status.setAlive(true);
 
-        endpoint.onWorkerStatusUpdate(ws, resp);
+        endpoint.applyWorkerStatusResponse(status, resp);
 
         assertEquals("site-x", endpoint.getStatus().getSite());
         assertEquals("group-x", endpoint.getStatus().getGroup());
@@ -278,11 +274,30 @@ class WorkerEndpointTest {
         assertTrue(endpoint.getStatus().isAlive());
     }
 
+    @Test
+    void generationDispatch_rejects_when_any_decode_dependency_is_retired() {
+        WorkerStatus decodeStatus = new WorkerStatus();
+        decodeStatus.setIp("10.0.0.2");
+        decodeStatus.setPort(8080);
+        decodeStatus.setGrpcPort(8081);
+        decodeStatus.setRole(RoleType.DECODE);
+        DecodeEndpoint decodeEndpoint = new DecodeEndpoint(decodeStatus);
+        decodeEndpoint.beginRetirement();
+        AtomicInteger invocations = new AtomicInteger();
+
+        assertThrows(WorkerEndpoint.EndpointRetiredException.class,
+                () -> endpoint.initiateGenerationDispatch(
+                        List.of(decodeEndpoint),
+                        () -> invocations.incrementAndGet()));
+
+        assertEquals(0, invocations.get());
+    }
+
     private void calibrate(Map<String, TaskInfo> finished, Map<String, TaskInfo> running) {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setFinishedTaskInfo(finished);
         response.setRunningTaskInfo(running);
-        endpoint.onWorkerStatusUpdate(status, response);
+        endpoint.applyWorkerStatusResponse(status, response);
     }
 
     private BalanceContext ctx(long requestId, long seqLen) {

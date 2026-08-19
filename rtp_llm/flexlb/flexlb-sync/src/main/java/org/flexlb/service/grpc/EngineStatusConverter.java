@@ -9,10 +9,8 @@ import org.flexlb.enums.TaskPhase;
 import org.flexlb.enums.PriorityPreemptionProgress;
 
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * Converter between gRPC protobuf messages and Java objects for engine status
@@ -56,19 +54,14 @@ public class EngineStatusConverter {
     /**
      * Convert CacheStatusPB to CacheStatus
      */
-    public static CacheStatus convertToCacheStatus(EngineRpcService.CacheStatusPB cacheStatusPB) {
+    public static CacheStatus convertToCacheStatusMetadata(EngineRpcService.CacheStatusPB cacheStatusPB) {
         CacheStatus cacheStatus = new CacheStatus();
         cacheStatus.setAvailableKvCache(cacheStatusPB.getAvailableKvCache());
         cacheStatus.setTotalKvCache(cacheStatusPB.getTotalKvCache());
         cacheStatus.setBlockSize(cacheStatusPB.getBlockSize());
         cacheStatus.setVersion(cacheStatusPB.getVersion());
 
-        Map<Long, Boolean> cacheKeysMap = cacheStatusPB.getCacheKeysMap();
-        // Copy the keySet: protobuf MapField#keySet() returns a VIEW that keeps
-        // the whole WorkerStatusPB message graph reachable until the next sync.
-        Set<Long> cachedKeysSet = new HashSet<>(cacheKeysMap.keySet());
-        cacheStatus.setCachedKeys(cachedKeysSet);
-        cacheStatus.setCacheKeySize(cacheKeysMap.size());
+        cacheStatus.setCacheKeySize(cacheStatusPB.getCacheKeysCount());
         return cacheStatus;
     }
 

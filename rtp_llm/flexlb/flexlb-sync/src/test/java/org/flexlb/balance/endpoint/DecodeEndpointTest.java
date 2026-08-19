@@ -250,7 +250,7 @@ class DecodeEndpointTest {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRunningTaskInfo(running);
         response.setFinishedTaskInfo(finished);
-        endpoint.onWorkerStatusUpdate(status, response);
+        endpoint.applyWorkerStatusResponse(status, response);
     }
 
     private TaskInfo task(long requestId) {

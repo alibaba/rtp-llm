@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler.priority;
 
 import org.flexlb.balance.scheduler.BatchItem;
+import org.flexlb.dao.loadbalance.Response;
 
 import java.util.concurrent.CompletableFuture;
 
@@ -36,6 +37,32 @@ public interface InflightRegistrar {
 
     /** Remove a previously registered item (offer failed, plan aborted). */
     void unregisterInflight(BatchItem item);
+
+    /**
+     * Keep the request-id admission fence alive while an asynchronous
+     * pre-inflight transaction owns provisional resources.
+     */
+    boolean retainPendingAdmission(long requestId,
+                                   CompletableFuture<Response> expectedFuture);
+
+    /** Release a hold acquired by {@link #retainPendingAdmission}. */
+    void releasePendingAdmission(long requestId,
+                                 CompletableFuture<Response> expectedFuture);
+
+    /**
+     * Start the authoritative Engine reconciliation for an EnqueueBatch that
+     * was acknowledged but has not appeared in Decode WorkerStatus before
+     * the post-handover deadline.
+     *
+     * <p>The registrar remains the sole owner of inflight, Decode reservation
+     * and terminal settlement. The caller must not release those resources
+     * before the reconciliation reaches a terminal fence.
+     *
+     * @return {@code true} when a live scheduler lifecycle owns the request
+     *         (including an already-running reconciliation/preemption);
+     *         {@code false} when the request is already gone
+     */
+    boolean requestPostHandoverReconciliation(BatchItem item, String detail);
 
     /**
      * Atomically decide whether an AdmissionLease cleanup or a priority
@@ -96,6 +123,14 @@ public interface InflightRegistrar {
     /** Cancel ACCEPTED; does not complete the victim or release resources. */
     boolean markPreemptionCancelAccepted(long requestId, long attemptToken);
 
+    /**
+     * The typed Prefill CANCELED completion budget elapsed after an ACCEPTED
+     * Cancel. The accepted first-cause remains authoritative; an exact Decode
+     * terminal may now prove resource release without reclassifying the victim
+     * as an ordinary completion.
+     */
+    boolean markPreemptionCompletionTimedOut(long requestId, long attemptToken);
+
     /** Explicit negative acknowledgement; keeps a stale reconciliation fence. */
     boolean markPreemptionNotFound(long requestId, long attemptToken);
 
@@ -111,9 +146,6 @@ public interface InflightRegistrar {
 
     /** Token-fenced terminal settlement after the endpoint accounting CAS wins. */
     boolean finishPreemptedById(long requestId, long attemptToken, String detail);
-
-    /** Fresh active observation reopens a NOT_FOUND_STALE victim. */
-    boolean reconcilePreemptionActive(long requestId);
 
     /**
      * Resolve the original Prefill route from the authoritative inflight

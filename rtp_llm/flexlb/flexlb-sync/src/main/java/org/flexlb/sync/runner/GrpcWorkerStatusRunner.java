@@ -1,7 +1,6 @@
 package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -10,21 +9,28 @@ import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.sync.status.WorkerGenerationFence;
+import org.flexlb.sync.status.WorkerGenerationManager;
 import org.flexlb.util.CommonUtils;
-import org.flexlb.util.IdUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.util.Map;
-import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executor;
 
 import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
 
+/** Applies one current WorkerStatus generation response. */
 public class GrpcWorkerStatusRunner implements Runnable {
 
-    private static final Logger logger = LoggerFactory.getLogger("syncLogger");
+    private static final int MAX_CONSECUTIVE_FAILURES = 3;
+
+    private enum StatusApplyResult {
+        STALE_GENERATION,
+        VERSION_ROLLBACK,
+        APPLIED
+    }
 
     private final String ipPort;
     private final String modelName;
@@ -32,32 +38,35 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final RoleType roleType;
     private final String group;
     private final WorkerStatus workerStatus;
-    private final Map<String, WorkerStatus> workerStatusMap;
+    private final ConcurrentMap<String, WorkerStatus> workerStatusMap;
     private final EngineHealthReporter engineHealthReporter;
     private final EngineGrpcService engineGrpcService;
     private final FlexlbBatchScheduler batchScheduler;
+    private final EndpointRegistry endpointRegistry;
+    private final WorkerGenerationManager generationManager;
+    private final WorkerGenerationFence generationFence;
     private final String ip;
     private final int grpcPort;
-    private final long createTimeUs = System.nanoTime() / 1000;
-    private final String id = IdUtils.fastUuid();
     private final long syncRequestTimeoutMs;
-    private static final int MAX_CONSECUTIVE_FAILURES = 3;
-    private final EndpointRegistry endpointRegistry;
     private final Executor callbackExecutor;
 
-    public GrpcWorkerStatusRunner(String modelName, String ipPort, String site, RoleType roleType, String group,
+    public GrpcWorkerStatusRunner(String modelName, String ipPort, String site,
+                                  RoleType roleType, String group,
                                   WorkerStatus workerStatus,
-                                  Map<String, WorkerStatus> workerStatusMap,
+                                  ConcurrentMap<String, WorkerStatus> workerStatusMap,
                                   EngineHealthReporter engineHealthReporter,
                                   EngineGrpcService engineGrpcService,
                                   long syncRequestTimeoutMs,
                                   FlexlbBatchScheduler batchScheduler,
                                   EndpointRegistry endpointRegistry,
+                                  WorkerGenerationManager generationManager,
+                                  WorkerGenerationFence generationFence,
                                   Executor callbackExecutor) {
         this.ipPort = ipPort;
-        String[] split = ipPort.split(":");
-        this.ip = split[0];
-        this.grpcPort = CommonUtils.toGrpcPort(Integer.parseInt(split[1]));
+        int separator = ipPort.lastIndexOf(':');
+        this.ip = ipPort.substring(0, separator);
+        this.grpcPort = CommonUtils.toGrpcPort(
+                Integer.parseInt(ipPort.substring(separator + 1)));
         this.modelName = modelName;
         this.workerStatus = workerStatus;
         this.workerStatusMap = workerStatusMap;
@@ -69,186 +78,207 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
         this.batchScheduler = batchScheduler;
         this.endpointRegistry = endpointRegistry;
+        this.generationManager = generationManager;
+        this.generationFence = generationFence;
         this.callbackExecutor = callbackExecutor;
     }
 
     @Override
     public void run() {
-        boolean asyncInitiated = false;
+        boolean callbackInstalled = false;
         try {
-            logger.debug("GrpcWorkerStatusRunner run for {}", ipPort);
-            long startTime = System.nanoTime() / 1000;
-
-            long latestFinishedTaskVersion = workerStatus.getLatestFinishedTaskVersion().get();
-
-            engineGrpcService.getWorkerStatusAsync(ip, grpcPort, latestFinishedTaskVersion,
+            long startTimeUs = System.nanoTime() / 1000;
+            CompletableFuture<WorkerStatusResponse> rpc = engineGrpcService
+                    .getWorkerStatusAsync(
+                            ip, grpcPort,
+                            workerStatus.getLatestFinishedTaskVersion().get(),
                             syncRequestTimeoutMs, roleType)
-                    .thenApply(EngineStatusConverter::convertToWorkerStatusResponse)
-                    .whenCompleteAsync((response, ex) -> {
-                        try {
-                            if (ex != null) {
-                                Throwable throwable = ex instanceof CompletionException ? ex.getCause() : ex;
-                                handleException(throwable);
-                                long failures = workerStatus.getConsecutiveFailures().incrementAndGet();
-                                logger.debug("gRPC status check failed, consecutiveFailures={}/{}, msg={}",
-                                        failures, MAX_CONSECUTIVE_FAILURES, throwable.getMessage());
-                                if (failures >= MAX_CONSECUTIVE_FAILURES) {
-                                    workerStatus.setAlive(false);
-                                    if (endpointRegistry != null) {
-                                        endpointRegistry.remove(roleType, ipPort, workerStatus);
-                                    }
-                                    if (failures == MAX_CONSECUTIVE_FAILURES) {
-                                        logger.error("worker {} marked dead after {} consecutive gRPC failures", ipPort, failures);
-                                    }
-                                }
-                            } else {
-                                handleStatusResponse(response, startTime);
-                            }
-                        } finally {
-                            workerStatus.getStatusCheckInProgress().set(false);
+                    .thenApply(EngineStatusConverter::convertToWorkerStatusResponse);
+            CompletableFuture<WorkerStatusResponse> callback = rpc.whenCompleteAsync(
+                    (response, failure) -> {
+                        if (failure != null) {
+                            handleFailure(unwrap(failure));
+                            return;
                         }
+                        handleResponse(response, startTimeUs);
                     }, callbackExecutor);
-            asyncInitiated = true;
+            callback.whenComplete((ignored, callbackFailure) ->
+                    workerStatus.getStatusCheckInProgress().set(false));
+            callbackInstalled = true;
         } finally {
-            if (!asyncInitiated) {
+            if (!callbackInstalled) {
                 workerStatus.getStatusCheckInProgress().set(false);
             }
         }
     }
 
-    private void handleStatusResponse(WorkerStatusResponse newWorkerStatus, long startTime) {
+    private void handleResponse(WorkerStatusResponse response, long startTimeUs) {
         try {
-            if (newWorkerStatus == null) {
-                logger.debug("query engine worker status via gRPC, response body is null");
-                engineHealthReporter.reportStatusCheckerFail(
-                        modelName, BalanceStatusEnum.RESPONSE_NULL, roleType);
+            if (response == null) {
+                if (isCurrentGeneration()) {
+                    engineHealthReporter.reportStatusCheckerFail(
+                            modelName, BalanceStatusEnum.RESPONSE_NULL, roleType);
+                }
                 return;
             }
-            if (workerStatusMap != null && workerStatusMap.get(ipPort) != workerStatus) {
-                logger.debug("Ignore stale worker status callback for {}, role: {}", ipPort, roleType);
+            if (response.getRole() != roleType) {
+                if (isCurrentGeneration()) {
+                    engineHealthReporter.reportStatusCheckerFail(
+                            modelName, BalanceStatusEnum.UNKNOWN_ERROR, roleType);
+                }
                 return;
             }
-            // Only report success worker status check info
             engineHealthReporter.reportStatusCheckRemoteInfo(
-                    modelName, newWorkerStatus.getRole().name(), startTime);
+                    modelName, roleType.name(), startTimeUs);
 
-            Long responseVersion = newWorkerStatus.getStatusVersion();
-            if (responseVersion == 0L) {
-                logger.debug("workerStatuses.get(ip) is null for gRPC call");
+            long responseVersion = response.getStatusVersion();
+            if (responseVersion < 0) {
                 return;
             }
-            workerStatus.getConsecutiveFailures().set(0);
-
-            workerStatus.setSite(site);
-            workerStatus.setGroup(group);
-
-            long currentVersion = workerStatus.getStatusVersion().get();
-            WorkerEndpoint ep = endpointRegistry != null ? endpointRegistry.get(roleType, ipPort) : null;
-            boolean versionAdvanced = currentVersion < responseVersion;
-
-            if (versionAdvanced) {
-                // 1. WorkerStatusResponse directly updates WorkerStatus
-                workerStatus.updateFromResponse(newWorkerStatus);
-
-                if (endpointRegistry != null) {
-                    if (workerStatus.isAlive()) {
-                        ep = endpointRegistry.ensureEndpoint(roleType, ipPort, workerStatus);
-                    } else {
-                        endpointRegistry.remove(roleType, ipPort, workerStatus);
-                        ep = null;
-                    }
-                }
-
-                // 2. Notify EP (calibration) — passes both updated status and raw response
-                if (ep != null) {
-                    ep.onWorkerStatusUpdate(workerStatus, newWorkerStatus);
-                }
-
-                // 3. Notify scheduler (cleanup finished requests)
-                if (batchScheduler != null) {
-                    batchScheduler.onWorkerStatusUpdate(newWorkerStatus);
-                }
-
-                Long latestFinishedVersion = newWorkerStatus.getLatestFinishedVersion();
-
-                // 4. Advance latestFinishedVersion only after calibrate has processed finished tasks.
-                // If this is done outside the version guard, a skipped calibrate (version not
-                // advanced) would still consume the incremental version, causing the engine to
-                // filter out those finished tasks on the next poll — leaking inflight entries.
-                if (latestFinishedVersion != null
-                        && latestFinishedVersion > workerStatus.getLatestFinishedTaskVersion().get()) {
-                    workerStatus.getLatestFinishedTaskVersion().set(latestFinishedVersion);
-                }
-            } else {
-                workerStatus.refreshStatusHeartbeat(newWorkerStatus.isAlive());
-                if (endpointRegistry != null) {
-                    if (workerStatus.isAlive()) {
-                        ep = endpointRegistry.ensureEndpoint(roleType, ipPort, workerStatus);
-                    } else {
-                        endpointRegistry.remove(roleType, ipPort, workerStatus);
-                        ep = null;
-                    }
-                }
+            StatusApplyResult result = generationFence.read(
+                    ipPort, () -> applyCurrentGeneration(response));
+            if (result == StatusApplyResult.VERSION_ROLLBACK) {
+                generationManager.rotateOnVersionRollback(
+                        workerStatusMap, roleType, ipPort, workerStatus, responseVersion);
+                return;
+            }
+            if (result != StatusApplyResult.APPLIED) {
+                return;
             }
 
-            engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus, ep,
-                    Optional.ofNullable(newWorkerStatus.getRunningTaskInfo()).map(Map::size).orElse(0),
-                    Optional.ofNullable(newWorkerStatus.getFinishedTaskInfo()).map(Map::size).orElse(0));
-
-            logWorkerStatusUpdate(startTime, workerStatus);
-
-        } catch (Throwable e) {
-            log("engine worker status check via gRPC exception, msg: " + e.getMessage());
+            engineHealthReporter.reportStatusCheckerSuccess(
+                    modelName, workerStatus,
+                    sizeOf(response.getRunningTaskInfo()),
+                    sizeOf(response.getFinishedTaskInfo()));
+        } catch (Throwable applyFailure) {
             engineHealthReporter.reportStatusCheckerFail(
                     modelName, BalanceStatusEnum.UNKNOWN_ERROR, roleType);
         }
     }
 
-    private void logWorkerStatusUpdate(long startTime, WorkerStatus workerStatus) {
-        logger.debug("gRPC Worker Status - {}, role:{}, alive:{}, concurrency:{}, "
-                        + "step_latency_ms:{}, iterate_count:{}, "
-                        + "dp_rank:{}, dp_size:{}, tp_size:{}, "
-                        + "avail_kv_tokens:{}, used_kv_tokens:{}, "
-                        + "waiting_tasks:{}, running_tasks:{}, "
-                        + "version:{}, sync_cost_us:{}",
-                ipPort,
-                workerStatus.getRole(),
-                workerStatus.isAlive(),
-                workerStatus.getAvailableConcurrency(),
-                workerStatus.getStepLatencyMs(),
-                workerStatus.getIterateCount(),
-                workerStatus.getDpRank(),
-                workerStatus.getDpSize(),
-                workerStatus.getTpSize(),
-                workerStatus.getAvailableKvCacheTokens(),
-                workerStatus.getTotalKvCacheTokens().get() - workerStatus.getAvailableKvCacheTokens().get(),
-                workerStatus.getRunningTaskList() != null ? workerStatus.getRunningTaskList().values().stream().filter(t -> t.getPhase() != org.flexlb.enums.TaskPhase.RUNNING).count() : 0,
-                workerStatus.getRunningTaskList() != null ? workerStatus.getRunningTaskList().size() : 0,
-                workerStatus.getStatusVersion(),
-                System.nanoTime() / 1000 - startTime);
-    }
-
-    private void handleException(Throwable ex) {
-        log("gRPC worker status check failed, msg=" + ex.getMessage());
-        // Report specific error based on exception type
-        if (ex.getMessage() != null && ex.getMessage().toLowerCase().contains(DEADLINE_EXCEEDED_MESSAGE.toLowerCase())) {
-            logger.debug("gRPC worker status check timeout, msg={}, ipPort: {}, rt: {}", ex.getMessage(), ipPort, System.nanoTime() / 1000 - createTimeUs);
-            engineHealthReporter.reportStatusCheckerFail(
-                    modelName, BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, roleType);
-        } else {
-            engineHealthReporter.reportStatusCheckerFail(
-                    modelName, BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE, roleType);
+    private StatusApplyResult applyCurrentGeneration(WorkerStatusResponse response) {
+        if (!generationManager.isCurrent(workerStatusMap, ipPort, workerStatus)) {
+            return StatusApplyResult.STALE_GENERATION;
         }
-        workerStatus.refreshStatusHeartbeat(workerStatus.isAlive());
+        long responseVersion = response.getStatusVersion();
+        long currentVersion = workerStatus.getStatusVersion().get();
+        if (responseVersion < currentVersion) {
+            return StatusApplyResult.VERSION_ROLLBACK;
+        }
+
+        boolean aliveChanged = workerStatus.isAlive() != response.isAlive();
+        boolean versionAdvanced = responseVersion > currentVersion;
+        workerStatus.getConsecutiveFailures().set(0);
+        workerStatus.setSite(site);
+        workerStatus.setGroup(group);
+        if (versionAdvanced) {
+            workerStatus.updateFromResponse(response);
+        } else {
+            workerStatus.refreshStatusHeartbeat(response.isAlive());
+        }
+
+        RuntimeException pipelineFailure = null;
+        if (batchLifecycleEnabled()) {
+            try {
+                batchScheduler.recordRequestActivity(workerStatus, response);
+            } catch (RuntimeException activityFailure) {
+                pipelineFailure = activityFailure;
+            }
+        }
+
+        long finishedVersion = response.getLatestFinishedVersion() == null
+                ? -1L : response.getLatestFinishedVersion();
+        boolean finishedCursorPending = finishedVersion
+                > workerStatus.getLatestFinishedTaskVersion().get();
+        boolean statusUpdatePending = responseVersion
+                > workerStatus.getLastAppliedStatusVersion().get();
+        try {
+            if (statusUpdatePending || finishedCursorPending || aliveChanged) {
+                endpointRegistry.updateEndpointFromWorkerStatus(workerStatus, response);
+            } else {
+                endpointRegistry.refreshEndpointActivity(workerStatus, response);
+            }
+        } catch (RuntimeException endpointFailure) {
+            pipelineFailure = mergeFailure(pipelineFailure, endpointFailure);
+        }
+        if (statusUpdatePending || finishedCursorPending || aliveChanged) {
+            if (batchLifecycleEnabled()) {
+                try {
+                    batchScheduler.updateRequestLifecycleFromWorkerStatus(
+                            workerStatus, response);
+                } catch (RuntimeException lifecycleFailure) {
+                    pipelineFailure = mergeFailure(pipelineFailure, lifecycleFailure);
+                }
+            }
+            if (pipelineFailure != null) {
+                throw pipelineFailure;
+            }
+            if (!generationManager.isCurrent(workerStatusMap, ipPort, workerStatus)) {
+                return StatusApplyResult.STALE_GENERATION;
+            }
+            if (finishedCursorPending) {
+                workerStatus.getLatestFinishedTaskVersion().set(finishedVersion);
+            }
+            workerStatus.getLastAppliedStatusVersion().set(responseVersion);
+        }
+        if (pipelineFailure != null) {
+            throw pipelineFailure;
+        }
+        return StatusApplyResult.APPLIED;
     }
 
-    private void log(String msg) {
-        logger.debug("[gRPC][{}][{}][{}][{}][{}μs]: {}",
-                id,
-                site,
-                ipPort,
-                modelName,
-                System.nanoTime() / 1000 - createTimeUs,
-                msg);
+    private void handleFailure(Throwable failure) {
+        String message = failure == null ? null : failure.getMessage();
+        BalanceStatusEnum status = message != null
+                && message.toLowerCase().contains(DEADLINE_EXCEEDED_MESSAGE.toLowerCase())
+                ? BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT
+                : BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE;
+        // A failed RPC is not a WorkerStatus heartbeat. Keep the generation
+        // probeable, but leave its last-success timestamp unchanged so the
+        // expiration owner can eventually retire endpoint and cache state.
+        boolean currentGeneration = generationFence.read(ipPort, () -> {
+            if (!generationManager.isCurrent(workerStatusMap, ipPort, workerStatus)) {
+                return false;
+            }
+            long failures = workerStatus.getConsecutiveFailures().incrementAndGet();
+            if (failures >= MAX_CONSECUTIVE_FAILURES) {
+                endpointRegistry.beginEndpointRetirement(roleType, ipPort, workerStatus);
+                workerStatus.setAlive(false);
+                endpointRegistry.remove(roleType, ipPort, workerStatus);
+            }
+            return true;
+        });
+        if (currentGeneration) {
+            engineHealthReporter.reportStatusCheckerFail(modelName, status, roleType);
+        }
+    }
+
+    private boolean batchLifecycleEnabled() {
+        return batchScheduler != null
+                && (roleType == RoleType.PREFILL || roleType == RoleType.DECODE);
+    }
+
+    private boolean isCurrentGeneration() {
+        return generationFence.read(
+                ipPort, () -> generationManager.isCurrent(
+                        workerStatusMap, ipPort, workerStatus));
+    }
+
+    private static int sizeOf(Map<?, ?> value) {
+        return value == null ? 0 : value.size();
+    }
+
+    private static RuntimeException mergeFailure(
+            RuntimeException previous, RuntimeException next) {
+        if (previous == null) {
+            return next;
+        }
+        previous.addSuppressed(next);
+        return previous;
+    }
+
+    private static Throwable unwrap(Throwable failure) {
+        return failure instanceof CompletionException && failure.getCause() != null
+                ? failure.getCause() : failure;
     }
 }

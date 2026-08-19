@@ -207,7 +207,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 anyString(), anyString(), anyString());
         getDecodeEndpoint().getStatus().getAvailableKvCacheTokens().set(1_000_000_000L);
         getDecodeEndpoint().getStatus().getTotalKvCacheTokens().set(2_000_000_000L);
-        getDecodeEndpoint().onWorkerStatusUpdate(
+        getDecodeEndpoint().applyWorkerStatusResponse(
                 getDecodeEndpoint().getStatus(), new WorkerStatusResponse());
 
         RouteService routeService = new RouteService(
@@ -959,8 +959,18 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         }
 
         @Override
-        public WorkerCacheUpdateResult updateEngineBlockCache(WorkerStatus workerStatus) {
-            return null;
+        public WorkerCacheUpdateResult publishEngineCacheSnapshot(
+                String engineIpPort, RoleType roleType, Set<Long> cachedKeys) {
+            return WorkerCacheUpdateResult.builder()
+                    .success(true)
+                    .engineIpPort(engineIpPort)
+                    .cacheBlockCount(cachedKeys.size())
+                    .build();
+        }
+
+        @Override
+        public void clearEngineCache(String engineIpPort) {
+            // No cache state in this performance-test stub.
         }
     }
 }

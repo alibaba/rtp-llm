@@ -7,8 +7,6 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
-import java.util.Set;
-
 @Data
 @JsonIgnoreProperties(ignoreUnknown = true)
 @NoArgsConstructor
@@ -26,8 +24,6 @@ public class CacheStatus {
     private long blockSize;
     @JsonProperty("version")
     private long version = -1;
-    @JsonProperty("cached_keys")
-    private Set<Long> cachedKeys;
     @JsonProperty("cache_key_size")
     private long cacheKeySize;
 }

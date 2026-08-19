@@ -233,7 +233,7 @@ class CostBasedPrefillStrategyTest {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setFinishedTaskInfo(Map.of());
         response.setRunningTaskInfo(engineOnlyTasks);
-        hot.onWorkerStatusUpdate(hot.getStatus(), response);
+        hot.applyWorkerStatusResponse(hot.getStatus(), response);
 
         FlexlbConfig resourceConfig = new FlexlbConfig();
         resourceConfig.setPrefillQueueSizeThreshold(64);
@@ -388,8 +388,9 @@ class CostBasedPrefillStrategyTest {
         PrefillEndpoint ep = (PrefillEndpoint) endpointRegistry.ensureEndpoint(
                 RoleType.PREFILL, ipPort, w);
         if (estimatedWaitMs > 0) {
-            ep.commitBatch(900000L + ip.hashCode(), estimatedWaitMs,
-                    List.of(batchItem(900000L + ip.hashCode(), estimatedWaitMs, 0)));
+            long batchId = 900000L + Integer.toUnsignedLong(ip.hashCode());
+            ep.commitBatch(batchId, estimatedWaitMs,
+                    List.of(batchItem(batchId, estimatedWaitMs, 0)));
         }
         return w;
     }

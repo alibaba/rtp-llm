@@ -31,6 +31,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -241,8 +242,18 @@ class CostBasedPrefillRoutingPerformanceTest {
         }
 
         @Override
-        public WorkerCacheUpdateResult updateEngineBlockCache(WorkerStatus workerStatus) {
-            return null;
+        public WorkerCacheUpdateResult publishEngineCacheSnapshot(
+                String engineIpPort, RoleType roleType, Set<Long> cachedKeys) {
+            return WorkerCacheUpdateResult.builder()
+                    .success(true)
+                    .engineIpPort(engineIpPort)
+                    .cacheBlockCount(cachedKeys.size())
+                    .build();
+        }
+
+        @Override
+        public void clearEngineCache(String engineIpPort) {
+            // No cache state in this performance-test stub.
         }
     }
 }

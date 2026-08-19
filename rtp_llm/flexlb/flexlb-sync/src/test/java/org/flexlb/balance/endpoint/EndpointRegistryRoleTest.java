@@ -4,6 +4,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -11,6 +12,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.util.HashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -20,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class EndpointRegistryRoleTest {
 
@@ -84,11 +87,11 @@ class EndpointRegistryRoleTest {
         SimpleWorkerEndpoint endpoint = (SimpleWorkerEndpoint) registry.ensureEndpoint(
                 RoleType.VIT, "127.0.0.1:8080", status);
 
-        assertEquals(2, endpoint.getLoadMetric());
+        assertEquals(2, endpoint.schedulingLoad());
     }
 
     @Test
-    void should_not_remove_new_generation_with_expired_status() {
+    void should_not_remove_new_generation_or_mutate_old_status() {
         String ipPort = "127.0.0.1:8080";
         WorkerStatus expired = status(RoleType.VIT, 8080);
         WorkerEndpoint oldEndpoint = registry.ensureEndpoint(RoleType.VIT, ipPort, expired);
@@ -98,11 +101,31 @@ class EndpointRegistryRoleTest {
 
         assertNotSame(oldEndpoint, newEndpoint);
         assertFalse(registry.remove(RoleType.VIT, ipPort, expired));
-        assertFalse(expired.isAlive());
+        assertTrue(expired.isAlive());
         assertSame(newEndpoint, registry.get(RoleType.VIT, ipPort));
 
         assertTrue(registry.remove(RoleType.VIT, ipPort, replacement));
         assertNull(registry.get(RoleType.VIT, ipPort));
+    }
+
+    @Test
+    void failed_initial_calibration_should_not_publish_half_initialized_endpoint() {
+        String ipPort = "127.0.0.1:8080";
+        WorkerStatus status = status(RoleType.DECODE, 8080);
+        WorkerStatusResponse malformed = response(RoleType.DECODE);
+        Map<String, TaskInfo> running = new HashMap<>();
+        running.put("broken", null);
+        malformed.setRunningTaskInfo(running);
+
+        assertThrows(NullPointerException.class,
+                () -> registry.updateEndpointFromWorkerStatus(status, malformed));
+        assertNull(registry.get(RoleType.DECODE, ipPort));
+
+        WorkerStatusResponse retry = response(RoleType.DECODE);
+        retry.setRunningTaskInfo(Map.of());
+        retry.setFinishedTaskInfo(Map.of());
+        registry.updateEndpointFromWorkerStatus(status, retry);
+        assertSame(status, registry.get(RoleType.DECODE, ipPort).getStatus());
     }
 
     private static WorkerStatus status(RoleType roleType, int port) {
@@ -113,5 +136,13 @@ class EndpointRegistryRoleTest {
         status.setGrpcPort(port + 1);
         status.setAlive(true);
         return status;
+    }
+
+    private static WorkerStatusResponse response(RoleType roleType) {
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRole(roleType);
+        response.setAlive(true);
+        response.setDpSize(1);
+        return response;
     }
 }

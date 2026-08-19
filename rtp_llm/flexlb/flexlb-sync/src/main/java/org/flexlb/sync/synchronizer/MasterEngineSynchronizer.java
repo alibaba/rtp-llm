@@ -16,7 +16,9 @@ import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.runner.EngineSyncRunner;
 import org.flexlb.sync.status.EngineWorkerStatus;
+import org.flexlb.sync.status.WorkerGenerationFence;
 import org.flexlb.sync.status.ModelWorkerStatus;
+import org.flexlb.sync.status.WorkerGenerationManager;
 import org.flexlb.util.IdUtils;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
@@ -40,6 +42,8 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
     private final CacheAwareService localKvCacheAwareManager;
     private final FlexlbBatchScheduler batchScheduler;
     private final EndpointRegistry endpointRegistry;
+    private final WorkerGenerationManager generationManager;
+    private final WorkerGenerationFence generationFence;
     private final long syncRequestTimeoutMs;
     private final LongAdder syncCount = new LongAdder();
     private final Long syncEngineStatusInterval;
@@ -54,6 +58,8 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                     @org.springframework.beans.factory.annotation.Autowired(required = false)
                                     FlexlbBatchScheduler batchScheduler,
                                     EndpointRegistry endpointRegistry,
+                                    WorkerGenerationManager generationManager,
+                                    WorkerGenerationFence generationFence,
                                     ConfigService configService) {
 
         super(workerAddressService, engineHealthReporter, engineWorkerStatus, modelMetaConfig, configService);
@@ -62,6 +68,8 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
         this.localKvCacheAwareManager = localKvCacheAwareManager;
         this.batchScheduler = batchScheduler;
         this.endpointRegistry = endpointRegistry;
+        this.generationManager = generationManager;
+        this.generationFence = generationFence;
 
         this.syncEngineStatusInterval = System.getenv("SYNC_STATUS_INTERVAL") != null
                 ? Long.parseLong(System.getenv("SYNC_STATUS_INTERVAL"))
@@ -87,7 +95,6 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
 
     public void syncEngineStatus() {
         syncCount.increment();
-        logger.debug("sync engine status start, times:{}, modelNames:{}", syncCount.longValue(), modelNames);
         try {
             for (String modelName : modelNames) {
                 ModelWorkerStatus modelWorkerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
@@ -110,7 +117,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                 workerAddressService, statusCheckExecutor, engineHealthReporter,
                                 engineGrpcService, roleType, localKvCacheAwareManager,
                                 syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
-                                batchScheduler, endpointRegistry
+                                batchScheduler, endpointRegistry, generationManager, generationFence
                         ));
                     } else {
                         logger.error("roleEndpoints is null, by roleType : {}", roleType);

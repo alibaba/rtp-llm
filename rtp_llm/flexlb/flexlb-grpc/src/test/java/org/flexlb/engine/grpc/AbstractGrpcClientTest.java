@@ -1,8 +1,6 @@
 package org.flexlb.engine.grpc;
 
 import io.grpc.ManagedChannel;
-import org.flexlb.cache.core.EngineLocalView;
-import org.flexlb.cache.core.GlobalCacheIndex;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.junit.jupiter.api.Test;
 
@@ -33,7 +31,7 @@ class AbstractGrpcClientTest {
     private static final class TestGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.GrpcStubWrapper> {
 
         private TestGrpcClient() {
-            super(mock(EngineLocalView.class), mock(GlobalCacheIndex.class), mock(GrpcReporter.class));
+            super(mock(GrpcReporter.class));
         }
 
         @Override

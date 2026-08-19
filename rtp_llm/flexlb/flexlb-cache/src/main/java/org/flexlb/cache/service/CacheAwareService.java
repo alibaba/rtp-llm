@@ -1,7 +1,6 @@
 package org.flexlb.cache.service;
 
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
-import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 
 import java.util.List;
@@ -34,23 +33,9 @@ public interface CacheAwareService {
      * Cache lookup is advisory and may observe an update in progress; writers
      * are serialized per engine address, while readers remain lock-free.
      */
-    default WorkerCacheUpdateResult publishEngineCacheSnapshot(
-            String engineIpPort, RoleType roleType, Set<Long> cachedKeys) {
-        throw new UnsupportedOperationException("cache snapshot publication is not implemented");
-    }
-
-    /**
-     * Compatibility bridge for status publishers that have not migrated to
-     * the explicit snapshot API yet. Removed once the generation-fenced
-     * status runner is committed.
-     */
-    @Deprecated
-    WorkerCacheUpdateResult updateEngineBlockCache(WorkerStatus workerStatus);
+    WorkerCacheUpdateResult publishEngineCacheSnapshot(
+            String engineIpPort, RoleType roleType, Set<Long> cachedKeys);
 
     /** Remove all cache-locality state for an engine address. */
-    default void clearEngineCache(String engineIpPort) {
-        // Compatibility for implementations that only support the legacy
-        // WorkerStatus-based update API. The generation-aware migration
-        // removes this default once all implementations are updated.
-    }
+    void clearEngineCache(String engineIpPort);
 }

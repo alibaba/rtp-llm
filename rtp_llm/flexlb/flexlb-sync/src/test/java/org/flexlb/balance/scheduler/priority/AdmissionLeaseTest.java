@@ -11,7 +11,6 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -19,7 +18,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -44,7 +42,7 @@ import static org.mockito.Mockito.when;
  *   <li>null decodeEp / null prefillQueue are safe (skip the corresponding
  *       cleanup step, still execute the remaining steps).</li>
  *   <li>onCloseCallback is decremented exactly once on every terminal path:
- *       close(), forceCloseAfterHandover(), markDecodeAccepted();</li>
+ *       close(), completed reconciliation, or Decode acceptance;</li>
  *   <li>onCloseCallback is called even if releaseResources() throws
  *       (try-finally guarantee).</li>
  * </ol>
@@ -222,11 +220,12 @@ class AdmissionLeaseTest {
     // ==================== onCloseCallback counter guarantee ====================
 
     /**
-     * onCloseCallback must decrement on the forceCloseAfterHandover path:
-     * create (increment) → handover → forceClose (decrement).
+     * A post-handover timeout only transfers ownership to reconciliation.
+     * The active lease and all request resources remain held until the
+     * scheduler reports a terminal reconciliation fence.
      */
     @Test
-    void onCloseCallback_decrements_on_forceCloseAfterHandover() {
+    void postHandoverReconciliation_retainsActiveLeaseUntilCompletion() {
         AtomicInteger activeCount = new AtomicInteger(0);
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         DecodeEndpoint decodeEp = mock(DecodeEndpoint.class);
@@ -234,6 +233,8 @@ class AdmissionLeaseTest {
         BatchItem item = batchItemWithDecode(2001L, new CompletableFuture<>(), 2001L);
 
         when(decodeEp.isConfirmedTracked(2001L)).thenReturn(false);
+        when(registrar.requestPostHandoverReconciliation(
+                item, "post_success_soft_timeout")).thenReturn(true);
 
         activeCount.incrementAndGet();
         AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar,
@@ -244,11 +245,18 @@ class AdmissionLeaseTest {
 
         lease.forceCloseAfterHandover();
 
+        assertEquals(4, lease.leaseState()); // RECONCILING
+        assertEquals(1, activeCount.get());
+        verify(registrar, times(1)).requestPostHandoverReconciliation(
+                item, "post_success_soft_timeout");
+        verify(prefillQueue, never()).tryRemove(anyLong(), any());
+        verify(decodeEp, never()).release(anyLong());
+        verify(registrar, never()).unregisterInflight(any());
+
+        lease.completeSchedulerSettlement();
+
         assertEquals(2, lease.leaseState()); // CLOSED_CLEANUP
-        assertEquals(0, activeCount.get()); // counter decremented
-        // Resources released on force-close (decode not accepted)
-        verify(registrar, times(1)).unregisterInflight(item);
-        verify(registrar, times(1)).finishYieldedById(2001L, "post_success_soft_timeout");
+        assertEquals(0, activeCount.get());
     }
 
     /**
@@ -275,7 +283,7 @@ class AdmissionLeaseTest {
         assertEquals(0, activeCount.get()); // counter decremented
         // Resources NOT released (engine owns them)
         verify(registrar, never()).unregisterInflight(any());
-        verify(registrar, never()).finishYieldedById(anyLong(), anyString());
+        verify(registrar, never()).unregisterInflight(any());
     }
 
     /**
@@ -305,7 +313,7 @@ class AdmissionLeaseTest {
 
         // Resources released exactly once (by close())
         verify(registrar, times(1)).unregisterInflight(item);
-        verify(registrar, never()).finishYieldedById(anyLong(), anyString());
+        verify(registrar, never()).requestPostHandoverReconciliation(any(), any());
     }
 
     /**
@@ -334,36 +342,6 @@ class AdmissionLeaseTest {
         assertEquals(2, lease.leaseState()); // CLOSED_CLEANUP — CAS succeeded
         assertEquals(0, activeCount.get()); // counter decremented despite exception
         verify(prefillQueue, times(1)).tryRemove(2004L, "LEASE_RELEASE");
-    }
-
-    /**
-     * try-finally guarantee for forceCloseAfterHandover: if
-     * finishYieldedById throws, onCloseCallback must still be called.
-     */
-    @Test
-    void onCloseCallback_called_even_if_finishYieldedById_throws() {
-        AtomicInteger activeCount = new AtomicInteger(0);
-        InflightRegistrar registrar = mock(InflightRegistrar.class);
-        DecodeEndpoint decodeEp = mock(DecodeEndpoint.class);
-        PrefillQueueManager prefillQueue = mock(PrefillQueueManager.class);
-        BatchItem item = batchItemWithDecode(2005L, new CompletableFuture<>(), 2005L);
-
-        when(decodeEp.isConfirmedTracked(2005L)).thenReturn(false);
-        // Make finishYieldedById throw
-        doThrow(new RuntimeException("simulated cancel error"))
-                .when(registrar).finishYieldedById(2005L, "post_success_soft_timeout");
-
-        activeCount.incrementAndGet();
-        AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar,
-                0, activeCount::decrementAndGet);
-        lease.handoverToEngine();
-
-        // forceCloseAfterHandover should catch the exception and still call notifyCloseCallback
-        lease.forceCloseAfterHandover();
-
-        assertEquals(2, lease.leaseState()); // CLOSED_CLEANUP
-        assertEquals(0, activeCount.get()); // counter decremented despite exception
-        verify(registrar, times(1)).finishYieldedById(2005L, "post_success_soft_timeout");
     }
 
     // ==================== helpers ====================

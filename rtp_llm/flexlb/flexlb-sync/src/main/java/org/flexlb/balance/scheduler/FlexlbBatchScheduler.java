@@ -4,6 +4,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.RequestInflight;
+import org.flexlb.balance.endpoint.WorkerEndpoint.EndpointRetiredException;
 import org.flexlb.balance.scheduler.priority.AdmissionFailure;
 import org.flexlb.balance.scheduler.priority.AdmissionFailureClassifier;
 import org.flexlb.balance.scheduler.priority.AdmissionLease;
@@ -22,6 +23,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.PriorityPreemptionProgress;
@@ -76,6 +78,8 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     private final EngineCancelChannel engineCancelChannel;
     private final Map<Long, InflightEntry> inflight = new ConcurrentHashMap<>();
     private final Map<Long, RequestLifecycleSnapshot> terminalStates = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Long, AdmissionClaim> admissionClaims =
+            new ConcurrentHashMap<>();
     private final BatchIdGenerator batchIdGenerator;
     /** Linearizes the final endpoint-ledger commit/RPC handoff with fencing. */
     private final Object dispatchFence = new Object();
@@ -136,12 +140,23 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
     public CompletableFuture<Response> submit(BalanceContext ctx) {
         CompletableFuture<Response> future = new CompletableFuture<>();
+        boolean ownsSubmissionClaim = false;
+        boolean autoTpmPath = false;
+        Response routeResponse = null;
+        InflightEntry registeredEntry = null;
+        boolean queueOwnsItem = false;
         try {
             if (ctx == null || ctx.getRequest() == null) {
                 completeError(future, StrategyErrorType.INVALID_REQUEST, null);
                 return future;
             }
 
+            ownsSubmissionClaim = tryAcquireAdmissionClaim(ctx.getRequestId(), future);
+            if (!ownsSubmissionClaim) {
+                completeError(future, StrategyErrorType.INVALID_REQUEST,
+                        "duplicate request_id: " + ctx.getRequestId());
+                return future;
+            }
             if (inflight.containsKey(ctx.getRequestId()) || terminalStates.containsKey(ctx.getRequestId())) {
                 completeError(future, StrategyErrorType.INVALID_REQUEST,
                         "duplicate request_id: " + ctx.getRequestId());
@@ -168,6 +183,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             // normalize() always assigns 1-100, so every request participates
             // when Auto-TPM is enabled; no separate hasPriority gate needed.
             if (configService.loadBalanceConfig().isAutoTpmEnabled() && priorityScheduler != null) {
+                autoTpmPath = true;
                 priorityScheduler.schedule(ctx, future, this);
                 // The deadline is an ordinary terminal event in the same
                 // reducer as dispatch/worker failures. It must compete with a
@@ -176,7 +192,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 return future;
             }
 
-            Response routeResponse = router.route(ctx);
+            routeResponse = router.route(ctx);
             if (routeResponse == null || !routeResponse.isSuccess()) {
                 if (routeResponse != null) {
                     future.complete(routeResponse);
@@ -206,11 +222,17 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             if (decode != null) {
                 String decodeIpPort = decode.getServerIp() + ":" + decode.getHttpPort();
                 decodeEp = endpointRegistry.getDecode(decodeIpPort);
+                if (decodeEp == null) {
+                    rollback(routeResponse);
+                    completeError(future, StrategyErrorType.NO_DECODE_WORKER, null);
+                    return future;
+                }
             }
 
             BatchItem item = new BatchItem(ctx, future, routeResponse, copyOf(prefill), copyOf(decode),
                     prefillEp, decodeEp, System.currentTimeMillis());
             InflightEntry entry = new InflightEntry(item, false);
+            registeredEntry = entry;
             InflightEntry existing = inflight.putIfAbsent(ctx.getRequestId(), entry);
             if (existing != null || terminalStates.containsKey(ctx.getRequestId())) {
                 if (existing == null) {
@@ -224,20 +246,35 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             WorkerBatcher batcher = prefillEp.getBatcher();
             ctx.setRouteSubmittedNanos(System.nanoTime());
             batcher.offer(item);
+            queueOwnsItem = true;
 
             // Report route+submit time: from schedule() entry (ctx.startTime) to batcher offer completion
-            reporter.reportRouteSubmitTimeMs(
-                    RoleType.PREFILL.name(),
-                    prefillEp.getIp(),
-                    System.currentTimeMillis() - ctx.getStartTime());
+            try {
+                reporter.reportRouteSubmitTimeMs(
+                        RoleType.PREFILL.name(),
+                        prefillEp.getIp(),
+                        System.currentTimeMillis() - ctx.getStartTime());
+            } catch (RuntimeException metricFailure) {
+                Logger.warn("Failed to report route submit metric: request_id={}",
+                        ctx.getRequestId(), metricFailure);
+            }
         } catch (Throwable t) {
-            if (ctx != null) {
-                inflight.remove(ctx.getRequestId());
+            if (!autoTpmPath && registeredEntry != null && !queueOwnsItem
+                    && inflight.remove(ctx.getRequestId(), registeredEntry)) {
+                rollbackOnce(registeredEntry);
+            } else if (!autoTpmPath && registeredEntry == null && routeResponse != null) {
+                rollback(routeResponse);
             }
             Logger.error("FlexlbBatchScheduler submit failed for request id: {}",
                     ctx == null ? null : ctx.getRequestId(), t);
-            completeError(future, StrategyErrorType.BATCH_DISPATCH_FAILED,
-                    "Submit failed: " + t.getMessage());
+            if (!queueOwnsItem) {
+                completeError(future, StrategyErrorType.BATCH_DISPATCH_FAILED,
+                        "Submit failed: " + t.getMessage());
+            }
+        } finally {
+            if (ownsSubmissionClaim) {
+                releaseAdmissionHold(ctx.getRequestId(), future);
+            }
         }
         return future;
     }
@@ -308,11 +345,6 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     // after this lock is released. Completing 8431 and deleting
                     // the ledgers here would let the frontend retry while the
                     // original request is still accepted by the engine.
-                    Logger.debug("Admission deadline observed after dispatch claim; "
-                                    + "starting Engine fence reconciliation: "
-                                    + "request_id={} batch_id={} lifecycle={}",
-                            requestId, entry.lifecycle.snapshot().batchId(),
-                            entry.lifecycle.snapshot().state());
                     if (startDispatchReconciliationLocked(entry)) {
                         CompletableFuture.runAsync(() -> reconcileUncertainDispatch(entry, 0));
                     }
@@ -379,6 +411,106 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     }
 
     @Override
+    public boolean retainPendingAdmission(
+            long requestId, CompletableFuture<Response> expectedFuture) {
+        AdmissionClaim claim = admissionClaims.get(requestId);
+        if (claim == null || claim.future != expectedFuture) {
+            return false;
+        }
+        synchronized (claim) {
+            if (admissionClaims.get(requestId) != claim
+                    || claim.publicCompleted || expectedFuture.isDone()) {
+                return false;
+            }
+            claim.holds++;
+            return true;
+        }
+    }
+
+    @Override
+    public void releasePendingAdmission(
+            long requestId, CompletableFuture<Response> expectedFuture) {
+        releaseAdmissionHold(requestId, expectedFuture);
+    }
+
+    @Override
+    public boolean requestPostHandoverReconciliation(BatchItem item, String detail) {
+        InflightEntry entry = entryFor(item);
+        if (entry == null) {
+            return false;
+        }
+        boolean start = false;
+        synchronized (dispatchFence) {
+            synchronized (entry) {
+                if (inflight.get(item.requestId()) != entry
+                        || entry.cleanupOwned || entry.lifecycle.isTerminal()) {
+                    return false;
+                }
+                if (entry.dispatchOwnership == DispatchOwnership.DECODE_OWNED) {
+                    if (entry.admissionLease != null) {
+                        entry.admissionLease.markDecodeAccepted();
+                    }
+                    return true;
+                }
+                if (entry.preemption != null) {
+                    // The tokenized priority Cancel already owns all Engine
+                    // side effects. Resume handover reconciliation only if
+                    // that attempt later proves NOT_FOUND and replays the ACK.
+                    entry.postHandoverReconciliationRequested = true;
+                    return true;
+                }
+                if (entry.dispatchReconciliation) {
+                    return true;
+                }
+                start = startDispatchReconciliationLocked(entry);
+            }
+        }
+        if (start) {
+            reconcileUncertainDispatch(entry, 0);
+        }
+        return start;
+    }
+
+    private boolean tryAcquireAdmissionClaim(
+            long requestId, CompletableFuture<Response> future) {
+        AdmissionClaim claim = new AdmissionClaim(future);
+        if (admissionClaims.putIfAbsent(requestId, claim) != null) {
+            return false;
+        }
+        future.whenComplete((ignored, failure) -> {
+            synchronized (claim) {
+                if (admissionClaims.get(requestId) != claim) {
+                    return;
+                }
+                claim.publicCompleted = true;
+                removeAdmissionClaimIfReleased(requestId, claim);
+            }
+        });
+        return true;
+    }
+
+    private void releaseAdmissionHold(
+            long requestId, CompletableFuture<Response> expectedFuture) {
+        AdmissionClaim claim = admissionClaims.get(requestId);
+        if (claim == null || claim.future != expectedFuture) {
+            return;
+        }
+        synchronized (claim) {
+            if (admissionClaims.get(requestId) != claim || claim.holds == 0) {
+                return;
+            }
+            claim.holds--;
+            removeAdmissionClaimIfReleased(requestId, claim);
+        }
+    }
+
+    private void removeAdmissionClaimIfReleased(long requestId, AdmissionClaim claim) {
+        if (claim.publicCompleted && claim.holds == 0) {
+            admissionClaims.remove(requestId, claim);
+        }
+    }
+
+    @Override
     public boolean registrarOwnsAdmissionCleanup(BatchItem item, String detail) {
         InflightEntry entry = entryFor(item);
         if (entry == null) {
@@ -433,13 +565,8 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         if (entry != null) {
             finishPreempted(entry.item, detail);
         } else {
-            // N1: a settle on an unknown id is harmless (already terminal or
-            // never registered) but worth surfacing — a burst points at a
-            // registration/cleanup race.
-            Logger.debug("finishPreemptedById miss: request_id={} not inflight, detail={}",
-                    requestId, detail);
-            // P2-2: surface the miss as a metric too — warn logs alone are
-            // not alertable.
+            // A settle on an unknown id is harmless (already terminal or
+            // never registered); surface it through an alertable metric.
             if (priorityScheduler != null) {
                 priorityScheduler.onInflightSettleMiss("preempted");
             }
@@ -468,10 +595,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         if (entry != null) {
             finishYielded(entry.item, detail);
         } else {
-            // N1: same rationale as finishPreemptedById — no-op, but observable.
-            Logger.debug("finishYieldedById miss: request_id={} not inflight, detail={}",
-                    requestId, detail);
-            // P2-2: metric alongside the warn log.
+            // Same rationale as finishPreemptedById.
             if (priorityScheduler != null) {
                 priorityScheduler.onInflightSettleMiss("yielded");
             }
@@ -550,6 +674,24 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     }
 
     @Override
+    public boolean markPreemptionCompletionTimedOut(long requestId, long attemptToken) {
+        InflightEntry entry = inflight.get(requestId);
+        if (entry == null) {
+            return false;
+        }
+        synchronized (entry) {
+            if (!entry.hasPreemption(attemptToken)
+                    || entry.preemption.state
+                        != PreemptionRegistrationState.CANCEL_REQUESTED) {
+                return false;
+            }
+            entry.preemption.acceptedCompletionTimedOut = true;
+            settleAcceptedCancelFromDecodeTerminalLocked(entry);
+            return true;
+        }
+    }
+
+    @Override
     public boolean markPreemptionNotFound(long requestId, long attemptToken) {
         InflightEntry entry = inflight.get(requestId);
         if (entry == null) {
@@ -624,45 +766,26 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     || !entry.preemption.priorityCanceled.isDone()) {
                 return false;
             }
-            entry.preemption.state = PreemptionRegistrationState.SETTLED;
-            entry.cleanupOwned = true;
-            rollbackOnce(entry);
-            // A typed priority-cancel terminal is allowed to omit the original
-            // Prefill batch id (production Engine currently reports -1).  The
-            // lifecycle still owns the authoritative dispatch generation, so
-            // retire this member from the Master-side batch ledger here instead
-            // of waiting for the generic inflight TTL to unblock the worker.
-            // repackBatch is member-scoped and idempotent: endpoint calibration
-            // may already have removed the same member before this callback.
-            removeFromPrefillBatch(entry);
-            RequestLifecycleSnapshot terminal = entry.lifecycle.cancel(detail);
-            completeError(entry.item.future(), StrategyErrorType.PRIORITY_PREEMPTED, detail);
-            finishEntry(entry, terminal);
+            // The typed terminal was already fenced by the exact positive
+            // Prefill batch generation before this signal was completed.
+            finishPriorityPreemptedLocked(entry, entry.preemption, detail);
             return true;
         }
     }
 
-    @Override
-    public boolean reconcilePreemptionActive(long requestId) {
-        InflightEntry entry = inflight.get(requestId);
-        if (entry == null) {
+    private boolean reconcilePreemptionActiveLocked(InflightEntry entry) {
+        if (entry.preemption == null
+                || entry.preemption.state != PreemptionRegistrationState.NOT_FOUND_STALE) {
             return false;
         }
-        synchronized (entry) {
-            if (entry.preemption == null
-                    || entry.preemption.state != PreemptionRegistrationState.NOT_FOUND_STALE) {
-                return false;
-            }
-            DecodeEndpoint endpoint = entry.item.decodeEp();
-            if (endpoint != null && !endpoint.reconcilePriorityVictimActive(requestId)) {
-                // A racing typed CANCELED or ordinary terminal may already
-                // own the endpoint CAS. Keep the scheduler token fence intact
-                // so that winner can finish its corresponding transition.
-                return false;
-            }
-            entry.preemption = null;
-            return true;
+        DecodeEndpoint endpoint = entry.item.decodeEp();
+        if (endpoint != null
+                && !endpoint.reconcilePriorityVictimActive(entry.item.requestId())) {
+            return false;
         }
+        entry.preemption = null;
+        resumePostHandoverReconciliationLocked(entry);
+        return true;
     }
 
     private boolean transitionPreemption(long requestId, long attemptToken,
@@ -691,141 +814,191 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         if (entry == null) {
             return null;
         }
-        ServerStatus prefill = entry.item.prefill();
-        if (prefill == null) {
+        PrefillEndpoint prefillGeneration = entry.item.prefillEp();
+        if (prefillGeneration == null) {
             return null;
         }
-        return new EngineCancelChannel.CancelTarget(
-                prefill.getServerIp(), prefill.getGrpcPort());
+        return new EngineCancelChannel.CancelTarget(prefillGeneration);
     }
 
     // ==================== Completion from worker status ====================
 
-    public void onWorkerStatusUpdate(WorkerStatusResponse response) {
-        if (response == null) {
+    public void recordRequestActivity(WorkerStatus source,
+                                      WorkerStatusResponse response) {
+        if (!validWorkerSource(source, response)) {
+            return;
+        }
+        touchObservedTasks(source, response.getRunningTaskInfo(), true);
+        touchObservedTasks(source, response.getFinishedTaskInfo(), false);
+    }
+
+    /**
+     * Apply worker observations to request lifecycles. Endpoint calibration is
+     * a separate EndpointRegistry responsibility.
+     */
+    public void updateRequestLifecycleFromWorkerStatus(
+            WorkerStatus source, WorkerStatusResponse response) {
+        if (!validWorkerSource(source, response)) {
             return;
         }
         boolean isPrefill = response.getRole() == RoleType.PREFILL;
         boolean isDecode = response.getRole() == RoleType.DECODE;
 
-        // Decode KV_ALLOCATED/RUNNING is the authoritative acceptance signal
-        // for the post-success lease.  Close the lease immediately instead of
-        // retaining one active slot until its 30s fallback timer.  RECEIVED is
-        // deliberately excluded: the engine has seen the request but has not
-        // yet accepted Decode ownership/KV.
-        if (isDecode && response.getRunningTaskInfo() != null) {
-            for (TaskInfo task : response.getRunningTaskInfo().values()) {
-                TaskPhase phase = task.getPhase();
-                if (phase == TaskPhase.KV_ALLOCATED || phase == TaskPhase.RUNNING) {
-                    markDecodeAccepted(task.getRequestId());
+        Map<String, TaskInfo> running = response.getRunningTaskInfo();
+        if (running != null) {
+            for (TaskInfo task : running.values()) {
+                if (task == null || task.priorityCancelOverlayOnly()) {
+                    continue;
+                }
+                InflightEntry entry = inflight.get(task.getRequestId());
+                if (entry == null) {
+                    continue;
+                }
+                synchronized (dispatchFence) {
+                  synchronized (entry) {
+                    if (inflight.get(task.getRequestId()) != entry
+                            || !matchesAuthoritativeWorkerObservation(
+                                    entry, source, task)) {
+                        continue;
+                    }
+                    if (isDecode) {
+                        TaskPhase phase = task.getPhase();
+                        if (phase == TaskPhase.KV_ALLOCATED
+                                || phase == TaskPhase.RUNNING) {
+                            markDecodeAcceptedLocked(entry);
+                            if (entry.dispatchReconciliation) {
+                                clearDispatchReconciliation(entry);
+                                applyAcknowledgeLocked(entry,
+                                        entry.lifecycle.snapshot().batchId());
+                            }
+                        }
+                    } else if (isPrefill) {
+                        reconcilePreemptionActiveLocked(entry);
+                    }
+                  }
                 }
             }
         }
 
-        // NOT_FOUND_STALE is reopened only by a fresh active observation from
-        // the original Prefill control owner.
-        if (isPrefill && response.getRunningTaskInfo() != null) {
-            for (TaskInfo task : response.getRunningTaskInfo().values()) {
-                reconcilePreemptionActive(task.getRequestId());
-            }
-        }
-
-        Map<String, TaskInfo> finishedTaskInfo = response.getFinishedTaskInfo();
-        if (finishedTaskInfo == null || finishedTaskInfo.isEmpty()) {
+        Map<String, TaskInfo> finished = response.getFinishedTaskInfo();
+        if (finished == null || finished.isEmpty()) {
             return;
         }
-
-        for (TaskInfo task : finishedTaskInfo.values()) {
+        for (TaskInfo task : finished.values()) {
+            if (task == null) {
+                continue;
+            }
             long requestId = task.getRequestId();
-            WorkerTerminalObservation observation = new WorkerTerminalObservation(
-                    isPrefill, task.getBatchId(), task.getErrorCode());
-
             InflightEntry entry = inflight.get(requestId);
             if (entry == null) {
                 continue;
             }
+            PriorityCanceledEffect priorityCanceledEffect = null;
             synchronized (dispatchFence) {
               synchronized (entry) {
-                if (isPrefill && entry.dispatchReconciliation) {
-                    RequestLifecycleSnapshot snapshot = entry.lifecycle.snapshot();
-                    boolean authoritativeCanceled = task.getBatchId() == snapshot.batchId()
-                            && task.getPriorityPreemptionProgress()
-                                == PriorityPreemptionProgress.CANCELED
-                            && task.getErrorCode() == ENGINE_ERROR_PRIORITY_PREEMPTED;
+                if (inflight.get(requestId) != entry
+                        || !matchesAuthoritativeWorkerObservation(
+                                    entry, source, task)) {
+                    continue;
+                }
+                boolean authoritativeCanceled = isPrefill
+                        && task.getPriorityPreemptionProgress()
+                            == PriorityPreemptionProgress.CANCELED
+                        && task.getErrorCode() == ENGINE_ERROR_PRIORITY_PREEMPTED;
+                if (entry.dispatchReconciliation) {
                     if (authoritativeCanceled) {
-                        // Only the typed cancel terminal for the exact dispatch
-                        // generation proves that the ambiguous Engine ownership
-                        // has been settled. Ordinary Prefill success/error may
-                        // belong to normal execution (or stale status) and must
-                        // not roll back the Master ledgers underneath it.
                         reduceOrdinaryTerminalLocked(entry, DeferredTerminal.timeout(
                                 "EnqueueBatch reconciled by typed Prefill CANCELED"));
-                    } else {
-                        Logger.debug("Ignoring non-authoritative Prefill terminal during "
-                                        + "dispatch reconciliation: request_id={} "
-                                        + "task_batch_id={} entry_batch_id={} error_code={} "
-                                        + "preemption_progress={}",
-                                requestId, task.getBatchId(), snapshot.batchId(),
-                                task.getErrorCode(), task.getPriorityPreemptionProgress());
+                    } else if (isDecode) {
+                        // The original Prefill generation may no longer be
+                        // reachable for Cancel. An exact observation from the
+                        // Decode generation held by this BatchItem is still an
+                        // authoritative ownership/terminal proof.
+                        markDecodeAcceptedLocked(entry);
+                        WorkerTerminalObservation observation =
+                                new WorkerTerminalObservation(false, task.getErrorCode());
+                        reduceOrdinaryTerminalLocked(entry,
+                                DeferredTerminal.worker(observation));
                     }
-                    continue;
-                }
-                if (entry.preemption != null) {
-                    boolean authoritativeCanceled = isPrefill
-                            && task.getPriorityPreemptionProgress()
-                                == PriorityPreemptionProgress.CANCELED
-                            && task.getErrorCode() == ENGINE_ERROR_PRIORITY_PREEMPTED;
-                    if (authoritativeCanceled) {
-                        // This only wakes the token owner. Decode accounting
-                        // and victim terminal settlement happen in the
-                        // coordinator's token-fenced continuation.
-                        entry.preemption.priorityCanceled.complete(
-                                new PriorityCanceledObservation(requestId,
-                                        task.getErrorCode()));
-                        continue;
+                } else if (entry.preemption != null && authoritativeCanceled) {
+                    PreemptionRegistration registration = entry.preemption;
+                    if (!registration.priorityCanceledObserved) {
+                        registration.priorityCanceledObserved = true;
+                        priorityCanceledEffect = new PriorityCanceledEffect(
+                                registration.priorityCanceled,
+                                new PriorityCanceledObservation(
+                                        requestId, task.getErrorCode()));
+                    }
+                } else {
+                    if (isDecode) {
+                        markDecodeAcceptedLocked(entry);
+                    }
+                    WorkerTerminalObservation observation =
+                            new WorkerTerminalObservation(isPrefill, task.getErrorCode());
+                    if (observation.isTerminal()) {
+                        reduceOrdinaryTerminalLocked(entry,
+                                DeferredTerminal.worker(observation));
                     }
                 }
-                if (isDecode) {
-                    // A Decode terminal proves acceptance even when no active
-                    // phase was reported. Linearize that ownership transfer
-                    // with the terminal reducer under the same entry lock, so
-                    // a racing Enqueue failure cannot publish false success in
-                    // between the two observations.
-                    markDecodeAcceptedLocked(entry);
-                }
-                // Successful Prefill completion is not the end of a P/D
-                // request; Decode still owns it.
-                if (!observation.isTerminal()) {
-                    continue;
-                }
-                reduceOrdinaryTerminalLocked(entry,
-                        DeferredTerminal.worker(observation));
               }
+            }
+            if (priorityCanceledEffect != null) {
+                priorityCanceledEffect.publish();
             }
         }
     }
 
-    private void markDecodeAccepted(long requestId) {
-        InflightEntry entry = inflight.get(requestId);
-        if (entry == null) {
+    private void touchObservedTasks(WorkerStatus source,
+                                    Map<String, TaskInfo> tasks,
+                                    boolean activeSnapshot) {
+        if (tasks == null) {
             return;
         }
-        synchronized (dispatchFence) {
+        for (TaskInfo task : tasks.values()) {
+            if (task == null || (activeSnapshot && task.priorityCancelOverlayOnly())) {
+                continue;
+            }
+            InflightEntry entry = inflight.get(task.getRequestId());
+            if (entry == null) {
+                continue;
+            }
             synchronized (entry) {
-                if (inflight.get(requestId) != entry) {
-                    return;
-                }
-                markDecodeAcceptedLocked(entry);
-                if (entry.dispatchReconciliation) {
-                    // Decode KV ownership is stronger than a missing Prefill
-                    // Enqueue ACK. Stop the Prefill cancel-fence retry chain
-                    // and publish the logical ACK while both ownership paths
-                    // are linearized by the same dispatch fence.
-                    clearDispatchReconciliation(entry);
-                    applyAcknowledgeLocked(entry, entry.lifecycle.snapshot().batchId());
+                if (inflight.get(task.getRequestId()) == entry
+                        && matchesAuthoritativeWorkerObservation(entry, source, task)) {
+                    entry.lifecycle.touch();
                 }
             }
         }
+    }
+
+    private static boolean validWorkerSource(WorkerStatus source,
+                                             WorkerStatusResponse response) {
+        return source != null && response != null
+                && source.getRole() == response.getRole()
+                && (response.getRole() == RoleType.PREFILL
+                    || response.getRole() == RoleType.DECODE);
+    }
+
+    private static boolean matchesAuthoritativeWorkerObservation(
+            InflightEntry entry, WorkerStatus source, TaskInfo task) {
+        RoleType role = source.getRole();
+        long expectedBatchId = entry.lifecycle.snapshot().batchId();
+        long taskBatchId = task.getBatchId();
+        if (role == RoleType.PREFILL) {
+            PrefillEndpoint endpoint = entry.item.prefillEp();
+            return endpoint != null
+                    && endpoint.getStatus() == source
+                    && expectedBatchId > 0
+                    && taskBatchId > 0
+                    && taskBatchId == expectedBatchId;
+        }
+        if (role == RoleType.DECODE) {
+            DecodeEndpoint endpoint = entry.item.decodeEp();
+            return endpoint != null
+                    && endpoint.getStatus() == source
+                    && (taskBatchId <= 0 || taskBatchId == expectedBatchId);
+        }
+        return false;
     }
 
     /** Record authoritative Decode ownership. Called with {@code entry} locked. */
@@ -887,6 +1060,9 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             applyOrdinaryTerminalLocked(entry, terminal);
             return;
         }
+        if (terminal.decodeWorkerTerminal()) {
+            registration.decodeTerminalObserved = true;
+        }
         if (registration.pendingTerminal == null
                 || (!registration.pendingTerminal.authoritativeWorker()
                     && terminal.authoritativeWorker())) {
@@ -896,7 +1072,45 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             replayAfterNegativeCancelLocked(entry, registration.attemptToken, false);
         } else if (registration.state == PreemptionRegistrationState.CANCEL_UNKNOWN) {
             replayAfterNegativeCancelLocked(entry, registration.attemptToken, true);
+        } else if (registration.state == PreemptionRegistrationState.CANCEL_REQUESTED
+                && registration.acceptedCompletionTimedOut) {
+            settleAcceptedCancelFromDecodeTerminalLocked(entry);
         }
+    }
+
+    /**
+     * ACCEPTED fixes the priority first-cause; an exact Decode terminal fixes
+     * resource ownership. Once the typed-completion budget has elapsed, the
+     * combination is sufficient to settle as PRIORITY_PREEMPTED without ever
+     * replaying the Decode terminal as an ordinary client outcome.
+     */
+    private boolean settleAcceptedCancelFromDecodeTerminalLocked(InflightEntry entry) {
+        PreemptionRegistration registration = entry.preemption;
+        if (registration == null
+                || registration.state != PreemptionRegistrationState.CANCEL_REQUESTED
+                || !registration.acceptedCompletionTimedOut
+                || !registration.decodeTerminalObserved) {
+            return false;
+        }
+        DecodeEndpoint endpoint = entry.item.decodeEp();
+        if (endpoint == null || !endpoint.settlePriorityCanceled(
+                registration.attemptToken, entry.item.requestId())) {
+            return false;
+        }
+        finishPriorityPreemptedLocked(entry, registration, registration.detail);
+        return true;
+    }
+
+    /** Complete the already token-owned priority outcome exactly once. */
+    private void finishPriorityPreemptedLocked(
+            InflightEntry entry, PreemptionRegistration registration, String detail) {
+        registration.state = PreemptionRegistrationState.SETTLED;
+        entry.cleanupOwned = true;
+        rollbackOnce(entry);
+        removeFromPrefillBatch(entry);
+        RequestLifecycleSnapshot terminal = entry.lifecycle.cancel(detail);
+        completeError(entry.item.future(), StrategyErrorType.PRIORITY_PREEMPTED, detail);
+        finishEntry(entry, terminal);
     }
 
     /**
@@ -912,6 +1126,11 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         } else if (registration.pendingAcknowledgeBatchId != 0) {
             applyAcknowledgeLocked(entry, registration.pendingAcknowledgeBatchId);
         }
+        // A post-handover timeout may have arrived after the ACK was already
+        // applied, so there is not necessarily a pending ACK or terminal to
+        // replay. Releasing the preemption claim is itself the ownership
+        // transition that makes the deferred reconciliation runnable.
+        resumePostHandoverReconciliationLocked(entry);
     }
 
     /**
@@ -961,6 +1180,19 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             long batchId = registration.pendingAcknowledgeBatchId;
             entry.preemption = null;
             applyAcknowledgeLocked(entry, batchId);
+            resumePostHandoverReconciliationLocked(entry);
+        }
+    }
+
+    /** Called with {@code entry} locked after a priority claim releases. */
+    private void resumePostHandoverReconciliationLocked(InflightEntry entry) {
+        if (!entry.postHandoverReconciliationRequested
+                || entry.preemption != null || entry.dispatchReconciliation
+                || entry.cleanupOwned || entry.lifecycle.isTerminal()) {
+            return;
+        }
+        if (startDispatchReconciliationLocked(entry)) {
+            CompletableFuture.runAsync(() -> reconcileUncertainDispatch(entry, 0));
         }
     }
 
@@ -994,17 +1226,6 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     /** Existing ordinary worker-terminal semantics, called with entry locked. */
     private void applyWorkerTerminalLocked(InflightEntry entry,
                                            WorkerTerminalObservation observation) {
-        long requestId = entry.item.requestId();
-        RequestLifecycleSnapshot current = entry.lifecycle.snapshot();
-        // Decode workers do not carry a reliable Prefill batch id.
-        if (observation.batchId() >= 0 && observation.batchId() != current.batchId()) {
-            Logger.warn("Worker completion batchId mismatch: "
-                            + "request_id={} task_batch_id={} entry_batch_id={} is_prefill={}",
-                    requestId, observation.batchId(), current.batchId(), observation.prefill());
-            if (observation.prefill()) {
-                return;
-            }
-        }
         RequestLifecycleSnapshot terminal;
         if (observation.errorCode() == 0) {
             terminal = entry.lifecycle.complete("decode completed");
@@ -1051,29 +1272,48 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         int expiredCount = 0;
         long oldestExpiredAgeMs = 0;
         List<Long> expiredRequestSamples = new ArrayList<>(3);
+        List<InflightEntry> reconciliationStarts = new ArrayList<>();
         for (Map.Entry<Long, InflightEntry> candidate : inflight.entrySet()) {
             InflightEntry entry = candidate.getValue();
-            long ageMs = now - entry.createdAtMs();
-            if (ageMs <= ttlMs) {
+            long idleMs = now - entry.updatedAtMs();
+            if (idleMs <= ttlMs) {
                 continue;
             }
-            synchronized (entry) {
-                if (inflight.get(candidate.getKey()) != entry) {
-                    continue;
-                }
-                if (entry.preemption != null || entry.dispatchReconciliation || entry.cleanupOwned) {
+            synchronized (dispatchFence) {
+              synchronized (entry) {
+                idleMs = now - entry.updatedAtMs();
+                if (inflight.get(candidate.getKey()) != entry || idleMs <= ttlMs
+                        || entry.preemption != null || entry.dispatchReconciliation
+                        || entry.cleanupOwned) {
                     // Cancel ambiguity is reconciled by token/WorkerStatus;
                     // a concurrent cleanup owner is likewise already settling
                     // the entry and must not be raced by TTL.
                     continue;
                 }
-                oldestExpiredAgeMs = Math.max(oldestExpiredAgeMs, ageMs);
+                if (entry.lifecycle.hasDispatchClaim()) {
+                    // Once startDispatch assigned a positive batch id, TTL no
+                    // longer proves that the Engine did not observe the
+                    // request. Keep both ledgers and enter the same Cancel
+                    // reconciliation used by an uncertain dispatch callback.
+                    if (entry.dispatchOwnership == DispatchOwnership.DECODE_OWNED) {
+                        applyAcknowledgeLocked(
+                                entry, entry.lifecycle.snapshot().batchId());
+                    } else if (startDispatchReconciliationLocked(entry)) {
+                        reconciliationStarts.add(entry);
+                    }
+                    continue;
+                }
+                oldestExpiredAgeMs = Math.max(oldestExpiredAgeMs, idleMs);
                 if (expiredRequestSamples.size() < 3) {
                     expiredRequestSamples.add(candidate.getKey());
                 }
                 timeoutEntry(entry, "inflight TTL expired");
                 expiredCount++;
+              }
             }
+        }
+        for (InflightEntry entry : reconciliationStarts) {
+            reconcileUncertainDispatch(entry, 0);
         }
         if (expiredCount > 0) {
             reporter.reportInflightTtlExpired(expiredCount);
@@ -1261,7 +1501,6 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
                 // [ASYNC] Delegate gRPC dispatch — dispatcher owns its own thread pool
                 long nowMs = System.currentTimeMillis();
-                long waitMs = nowMs - items.get(0).enqueuedAtMs();
                 // Batch wait tagged by normalized priority: one report per priority
                 // present in the batch, using that priority's oldest enqueue time.
                 Map<Integer, Long> oldestEnqueueByPriority = new HashMap<>();
@@ -1273,14 +1512,6 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     reporter.reportBatchWaitTimeMs(
                             RoleType.PREFILL.name(), engineIp, nowMs - waitEntry.getValue(), waitEntry.getKey());
                 }
-                FlexlbConfig config = configService.loadBalanceConfig();
-                Logger.debug("flexlb_batch_dispatch batch_id={} reason={} batch_size={} wait_ms={} "
-                                + "predicted_ms={} threshold_ms={} fixed_wait_ms={} batch_size_max={} "
-                                + "queue_after={} worker={}",
-                        batchId, reason, dispatchable.size(), waitMs, predMs,
-                        config.getFlexlbBatchPredictThresholdMs(), config.getFlexlbBatchFixedWaitMs(),
-                        config.getFlexlbBatchSizeMax(), meta.queueDepth(),
-                        prefillEp != null ? prefillEp.ipPort() : "");
 
                 // Record dispatch timestamp for dispatch-to-ACK latency metric
                 for (BatchItem item : dispatchable) {
@@ -1367,14 +1598,9 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             }
             long assignedBatchId = entry.lifecycle.snapshot().batchId();
             if (batchId != assignedBatchId) {
-                Logger.debug("Ignoring stale EnqueueBatch ACK request_id={} batch_id={}",
-                        item.requestId(), batchId);
                 return;
             }
             if (entry.dispatchReconciliation) {
-                Logger.debug("Retaining late EnqueueBatch ACK during reconciliation: "
-                                + "request_id={} batch_id={}",
-                        item.requestId(), batchId);
                 return;
             }
             if (entry.preemption != null) {
@@ -1417,8 +1643,6 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         }
         if (!item.future().isDone()) {
             completeSuccess(item);
-            Logger.debug("FlexLB batch enqueued request {} in batch_id={}",
-                    item.requestId(), batchId);
         }
     }
 
@@ -1440,10 +1664,6 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         if (entry != null) {
             synchronized (entry) {
                 if (entry.dispatchReconciliation) {
-                    Logger.debug("Retaining EnqueueBatch failure during reconciliation: "
-                                    + "request_id={} batch_id={} cause={}",
-                            item.requestId(), entry.lifecycle.snapshot().batchId(),
-                            error == null ? "unknown" : error.getMessage());
                     return;
                 }
                 // Even a raw EnqueueBatch 8429 is not the priority resource
@@ -1470,10 +1690,6 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         }
         synchronized (entry) {
             if (entry.dispatchReconciliation) {
-                Logger.debug("Retaining EnqueueBatch timeout during reconciliation: "
-                                + "request_id={} batch_id={} cause={}",
-                        item.requestId(), entry.lifecycle.snapshot().batchId(),
-                        error == null ? "unknown" : error.getMessage());
                 return;
             }
             reduceOrdinaryTerminalLocked(entry, DeferredTerminal.timeout(
@@ -1506,11 +1722,6 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             }
         }
         if (start) {
-            Logger.debug("EnqueueBatch ACK uncertain; fencing before settlement: "
-                            + "request_id={} batch_id={} engine={} cause={}",
-                    item.requestId(), batchId,
-                    item.prefillEp() != null ? item.prefillEp().ipPort() : "unknown",
-                    error == null ? "deadline exceeded" : error.getMessage());
             reconcileUncertainDispatch(entry, 0);
         }
     }
@@ -1524,6 +1735,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             applyAcknowledgeLocked(entry, entry.lifecycle.snapshot().batchId());
             return false;
         }
+        entry.postHandoverReconciliationRequested = false;
         entry.dispatchReconciliation = true;
         long batchId = entry.lifecycle.snapshot().batchId();
         PrefillEndpoint prefill = entry.item.prefillEp();
@@ -1536,29 +1748,44 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     private void reconcileUncertainDispatch(InflightEntry entry, int attempt) {
         CompletableFuture<EngineCancelChannel.CancelOutcome> cancelFuture = null;
         Throwable synchronousFailure = null;
-        synchronized (dispatchFence) {
-            synchronized (entry) {
-                if (inflight.get(entry.item.requestId()) != entry
-                        || !entry.dispatchReconciliation || entry.cleanupOwned
-                        || entry.lifecycle.isTerminal()) {
-                    return;
-                }
-                ServerStatus prefill = entry.item.prefill();
-                EngineCancelChannel.CancelTarget target = prefill == null ? null
-                        : new EngineCancelChannel.CancelTarget(
-                                prefill.getServerIp(), prefill.getGrpcPort());
-                long timeoutMs = Math.max(1,
-                        configService.loadBalanceConfig().getAutoTpmCancelAckTimeoutMs());
+        boolean generationRetired = false;
+        synchronized (entry) {
+            if (inflight.get(entry.item.requestId()) != entry
+                    || !entry.dispatchReconciliation || entry.cleanupOwned
+                    || entry.lifecycle.isTerminal()) {
+                return;
+            }
+            PrefillEndpoint prefillGeneration = entry.item.prefillEp();
+            if (prefillGeneration == null) {
+                generationRetired = true;
+            } else {
                 try {
-                    // Invoke while holding the entry fence so a delayed retry
-                    // cannot pass its liveness check, lose to a terminal
-                    // WorkerStatus, and then install a stale absent tombstone.
-                    cancelFuture = engineCancelChannel.cancel(
-                            target, entry.item.requestId(), timeoutMs);
+                    long timeoutMs = Math.max(1,
+                            configService.loadBalanceConfig().getAutoTpmCancelAckTimeoutMs());
+                    EngineCancelChannel.CancelTarget target =
+                            new EngineCancelChannel.CancelTarget(prefillGeneration);
+                    // Hold only the original endpoint generation's synchronous
+                    // invocation boundary. The lease is released as soon as
+                    // cancel() returns its future.
+                    cancelFuture = prefillGeneration.initiateGenerationDispatch(
+                            List.of(), () -> engineCancelChannel.cancel(
+                                    target, entry.item.requestId(), timeoutMs));
+                } catch (EndpointRetiredException retired) {
+                    generationRetired = true;
                 } catch (Throwable error) {
                     synchronousFailure = error;
                 }
             }
+        }
+        if (generationRetired) {
+            // Retirement prevents this generation from receiving any new
+            // control RPC, but it is not proof that an earlier EnqueueBatch
+            // failed to reach Prefill or Decode. Keep reconciliation and both
+            // ledgers fenced until the exact Decode generation reports
+            // ownership/terminal state (or typed Prefill CANCELED was already
+            // observed). Never redirect the old request-id Cancel to a
+            // replacement process at the same address.
+            return;
         }
         if (synchronousFailure != null) {
             Logger.warn("EnqueueBatch reconciliation Cancel threw synchronously: "
@@ -1607,11 +1834,6 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                         // Continue the same serialized retry chain until the
                         // Engine returns TOMBSTONED or typed WorkerStatus
                         // CANCELED settles the exact batch member.
-                        Logger.debug("EnqueueBatch reconciliation cancel accepted; "
-                                        + "retrying until terminal fence: "
-                                        + "request_id={} batch_id={} attempt={}",
-                                entry.item.requestId(),
-                                entry.lifecycle.snapshot().batchId(), attempt);
                         retry = true;
                     }
                     case NOT_FOUND, FAILED, UNSUPPORTED -> retry = true;
@@ -1704,8 +1926,6 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         PrefillEndpoint prefillEp = entry.item.prefillEp();
         if (prefillEp != null) {
             prefillEp.repackBatch(batchId, Set.of(entry.item.requestId()));
-            Logger.debug("FlexLB remove from prefill batch: request_id={} batch_id={} engine={}",
-                    entry.item.requestId(), batchId, prefillEp.getIp());
         }
     }
 
@@ -1723,10 +1943,6 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         rollbackOnce(entry);
         removeFromPrefillBatch(entry);
         if (admissionFailure != null) {
-            Logger.debug("[auto-tpm] admission timeout classified: request_id={} "
-                            + "priority={} lifecycle={} error_code={} reason={} trigger={}",
-                    entry.item.requestId(), entry.item.priority(), terminal.state(),
-                    admissionFailure.errorType().getErrorCode(), admissionFailure.reason(), detail);
             completeAdmissionError(entry.item.future(), admissionFailure, detail);
         } else {
             completeError(entry.item.future(), StrategyErrorType.BATCH_SLO_EXPIRED, detail);
@@ -1779,6 +1995,10 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     private void finishEntry(InflightEntry entry,
                              RequestLifecycleSnapshot terminal) {
         clearDispatchReconciliation(entry);
+        entry.postHandoverReconciliationRequested = false;
+        if (entry.admissionLease != null) {
+            entry.admissionLease.completeSchedulerSettlement();
+        }
         // Publish the tombstone before removing inflight. submit() then observes
         // at least one side of the handoff and cannot revive the request ID.
         terminalStates.put(terminal.requestId(), terminal);
@@ -1898,6 +2118,16 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
     // ==================== Inflight entry ====================
 
+    private static final class AdmissionClaim {
+        private final CompletableFuture<Response> future;
+        private int holds = 1;
+        private boolean publicCompleted;
+
+        private AdmissionClaim(CompletableFuture<Response> future) {
+            this.future = future;
+        }
+    }
+
     private static final class InflightEntry {
         final BatchItem item;
         final RequestLifecycle lifecycle;
@@ -1908,6 +2138,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         boolean cleanupOwned;
         PreemptionRegistration preemption;
         boolean dispatchReconciliation;
+        boolean postHandoverReconciliationRequested;
 
         InflightEntry(BatchItem item, boolean autoTpmAdmission) {
             this.item = Objects.requireNonNull(item);
@@ -1916,8 +2147,8 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             this.autoTpmAdmission = autoTpmAdmission;
         }
 
-        public long createdAtMs() {
-            return lifecycle.snapshot().createdAtMs();
+        long updatedAtMs() {
+            return lifecycle.snapshot().updatedAtMs();
         }
 
         boolean hasPreemption(long attemptToken) {
@@ -1946,6 +2177,12 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         private final String detail;
         private final CompletableFuture<PriorityCanceledObservation> priorityCanceled =
                 new CompletableFuture<>();
+        /** First exact typed CANCELED observation captured under the entry fence. */
+        private boolean priorityCanceledObserved;
+        /** ACCEPTED waited its full typed-completion budget without a typed terminal. */
+        private boolean acceptedCompletionTimedOut;
+        /** Exact Decode terminal observed while the priority claim owned settlement. */
+        private boolean decodeTerminalObserved;
         private PreemptionRegistrationState state = PreemptionRegistrationState.CLAIMED;
         private DeferredTerminal pendingTerminal;
         private long pendingAcknowledgeBatchId;
@@ -1956,8 +2193,16 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         }
     }
 
+    /** Publishes the already-fenced typed observation after scheduler locks are released. */
+    private record PriorityCanceledEffect(
+            CompletableFuture<PriorityCanceledObservation> signal,
+            PriorityCanceledObservation observation) {
+        void publish() {
+            signal.complete(observation);
+        }
+    }
+
     private record WorkerTerminalObservation(boolean prefill,
-                                             long batchId,
                                              long errorCode) {
         boolean isTerminal() {
             return !prefill || errorCode != 0;
@@ -2002,6 +2247,10 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
         boolean authoritativeWorker() {
             return kind == DeferredTerminalKind.WORKER;
+        }
+
+        boolean decodeWorkerTerminal() {
+            return authoritativeWorker() && !workerObservation.prefill();
         }
 
         boolean dispatchAckFailure() {

@@ -1,20 +1,14 @@
 package org.flexlb.dao.master;
 
 import lombok.Data;
-import lombok.extern.slf4j.Slf4j;
 import org.flexlb.dao.route.RoleType;
-import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.ReentrantLock;
 
 @Data
-@Slf4j
 public class WorkerStatus {
-    private static final org.slf4j.Logger logger = LoggerFactory.getLogger("syncLogger");
-    public final transient ReentrantLock lock = new ReentrantLock();
     private RoleType role;
     private String group;
     private String ip;
@@ -30,9 +24,11 @@ public class WorkerStatus {
     private volatile boolean alive;
     private AtomicLong availableKvCacheTokens = new AtomicLong();
     private AtomicLong totalKvCacheTokens = new AtomicLong();
-    private CacheStatus cacheStatus;
-    private Map<String, TaskInfo> runningTaskList;
+    private volatile CacheStatus cacheStatus;
+    private volatile Map<String, TaskInfo> runningTaskList;
     private AtomicLong latestFinishedTaskVersion = new AtomicLong(-1L);
+    /** Last status version whose Endpoint and request-lifecycle effects both completed. */
+    private AtomicLong lastAppliedStatusVersion = new AtomicLong(-1L);
 
     private double stepLatencyMs;
     private long iterateCount;
@@ -47,12 +43,13 @@ public class WorkerStatus {
     private AtomicLong statusLastUpdateTime = new AtomicLong(-1);
     private AtomicLong statusUpdateIntervalUs = new AtomicLong(0);
     private AtomicLong cacheLastUpdateTime = new AtomicLong(-1);
-    private AtomicLong lastSelectedTime = new AtomicLong(-1);
     private AtomicBoolean resourceAvailable = new AtomicBoolean(true);
     private AtomicBoolean statusCheckInProgress = new AtomicBoolean(false);
     private AtomicBoolean cacheCheckInProgress = new AtomicBoolean(false);
     private AtomicLong statusVersion = new AtomicLong(-1L);
     private AtomicLong consecutiveFailures = new AtomicLong(0);
+    /** Last scheduling-load snapshot published by EndpointRegistry for monitoring. */
+    private volatile long reportedSchedulingLoad;
 
     /**
      * Absorb all dynamic engine fields from a gRPC status response.
@@ -75,16 +72,13 @@ public class WorkerStatus {
         this.maxBatchTokensSize = resp.getMaxBatchTokensSize();
         this.availableKvCacheTokens.set(resp.getAvailableKvCacheTokens());
         this.totalKvCacheTokens.set(resp.getTotalKvCacheTokens());
-        // GetWorkerStatus response does not include cache status; preserve the one
-        // set by GrpcCacheStatusCheckRunner to avoid nullifying it on every status sync.
-        if (resp.getCacheStatus() != null) {
-            this.cacheStatus = resp.getCacheStatus();
-        }
+        // Cache metadata belongs exclusively to GrpcCacheStatusCheckRunner.
+        // Status and cache callbacks intentionally run concurrently.
         this.runningTaskList = resp.getRunningTaskInfo();
         this.statusVersion.set(resp.getStatusVersion());
         // NOTE: latestFinishedTaskVersion is NOT set here. It is advanced only after
-        // calibrate has processed finished tasks, in GrpcWorkerStatusRunner.handleStatusResponse().
-        // Setting it here would advance the version before calibrate runs, causing the engine
+        // endpoint and request-lifecycle consumers have processed finished tasks.
+        // Setting it here would advance the cursor before those consumers run, causing the engine
         // to filter out unprocessed finished tasks on the next poll — leaking inflight entries.
 
         updateStatusHeartbeatTime();

@@ -12,7 +12,6 @@ import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.slf4j.Logger;
@@ -61,6 +60,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private final AtomicInteger inflightRequestCount = new AtomicInteger(0);
     private final WorkerBatcher batcher;
     private final BatchSchedulerReporter reporter;
+    private final AtomicBoolean closeStarted = new AtomicBoolean(false);
 
     /** Active Engine tasks not already represented in the local batch ledger. */
     private volatile long engineUntrackedRequestCount = 0;
@@ -90,11 +90,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     @Override
     public void close() {
-        try {
-            batcher.shutdown();
-        } finally {
-            super.close();
+        super.close();
+        if (!closeStarted.compareAndSet(false, true)) {
+            return;
         }
+        batcher.shutdown();
     }
 
     public long batcherWaitMs() {
@@ -117,13 +117,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     public void commitBatch(long batchId, long predictMs, List<BatchItem> requests) {
+        if (batchId <= 0) {
+            throw new IllegalArgumentException("batchId must be positive");
+        }
         BatchInflight newBatch = new BatchInflight(predictMs, requests);
         BatchInflight prev = inflightBatches.putIfAbsent(batchId, newBatch);
         if (prev != null) {
-            // batchId already exists — subtract the old request count before overwriting,
-            // otherwise the old value is silently lost and the counter stays inflated.
-            inflightRequestCount.addAndGet(-prev.requests().size());
-            inflightBatches.put(batchId, newBatch);
+            throw new IllegalStateException("duplicate prefill batchId: " + batchId);
         }
         inflightRequestCount.addAndGet(requests.size());
         cachedWaitTimeExpireAtMs = 0;
@@ -175,10 +175,21 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     @Override
-    public void onWorkerStatusUpdate(WorkerStatus ws, WorkerStatusResponse resp) {
-        super.onWorkerStatusUpdate(ws, resp);
+    protected void updateFromWorkerStatus(WorkerStatusResponse resp) {
         calibrate(resp.getFinishedTaskInfo(), resp.getRunningTaskInfo());
         updateEngineUntrackedRequestCount(resp);
+    }
+
+    @Override
+    protected void refreshActivityFromWorkerStatus(WorkerStatusResponse resp) {
+        Map<String, TaskInfo> runningTasks = resp.getRunningTaskInfo();
+        if (runningTasks == null || runningTasks.isEmpty()) {
+            return;
+        }
+        long nowMs = System.currentTimeMillis();
+        for (TaskInfo task : runningTasks.values()) {
+            touchObservedTask(task, nowMs);
+        }
     }
 
     /**
@@ -187,24 +198,18 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private void calibrate(Map<String, TaskInfo> finishedTaskInfo, Map<String, TaskInfo> runningTaskInfo) {
         long statusMs = System.currentTimeMillis();
 
-        int finishedSize = finishedTaskInfo != null ? finishedTaskInfo.size() : 0;
-        int runningSize = runningTaskInfo != null ? runningTaskInfo.size() : 0;
-        if (finishedSize > 0 || !inflightBatches.isEmpty()) {
-            logger.debug("Prefill calibrate: finishedTasks={}, runningTasks={}, inflightBatches={}",
-                    finishedSize, runningSize, inflightBatches.size());
-        }
-
-        // Phase 1: collect request-level terminal observations and reconcile tasks whose Engine
-        // status omitted batch_id. Legacy non-batch requests use requestId as
-        // the inflight key; real batch members are resolved by membership.
+        // Phase 1: collect request-level terminal observations. A positive
+        // batch id addresses an exact Master batch. Missing ids may only
+        // settle a request-keyed direct reservation; they never scan real
+        // batches by request id.
         Map<Long, List<FinishedObservation>> finishedByBatch = new HashMap<>();
 
         if (finishedTaskInfo != null) {
             for (TaskInfo task : finishedTaskInfo.values()) {
                 FinishedObservation observation = FinishedObservation.from(task);
                 long batchId = task.getBatchId();
-                if (batchId < 0) {
-                    reconcileFinishedWithoutBatchId(observation, statusMs);
+                if (batchId <= 0) {
+                    removeFinishedDirectReservation(observation);
                     continue;
                 }
                 finishedByBatch.computeIfAbsent(batchId, k -> new ArrayList<>()).add(observation);
@@ -224,9 +229,14 @@ public class PrefillEndpoint extends WorkerEndpoint {
         Map<Long, List<TaskInfo>> activeByBatch = new HashMap<>();
         if (runningTaskInfo != null) {
             for (TaskInfo task : runningTaskInfo.values()) {
+                if (task == null || task.priorityCancelOverlayOnly()) {
+                    continue;
+                }
                 long batchId = task.getBatchId();
-                if (batchId >= 0) {
+                if (batchId > 0) {
                     activeByBatch.computeIfAbsent(batchId, ignored -> new ArrayList<>()).add(task);
+                } else {
+                    touchObservedTask(task, statusMs);
                 }
             }
         }
@@ -255,20 +265,27 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 return batch;
             });
         }
+    }
 
-        // Phase 4: check running requests for anomalies
-        if (runningTaskInfo != null) {
-            for (TaskInfo task : runningTaskInfo.values()) {
-                long batchId = task.getBatchId();
-                if (batchId < 0) {
-                    continue;
-                }
-                if (!inflightBatches.containsKey(batchId)) {
-                    logger.debug("Prefill calibrate: running request reqId={} batchId={} not in inflight",
-                            task.getRequestId(), batchId);
-                }
-            }
+    private void touchObservedTask(TaskInfo task, long statusMs) {
+        if (task == null || task.priorityCancelOverlayOnly()) {
+            return;
         }
+        long batchId = task.getBatchId();
+        long ledgerId = batchId > 0 ? batchId : task.getRequestId();
+        inflightBatches.computeIfPresent(ledgerId, (id, batch) -> {
+            boolean owned;
+            if (batchId > 0) {
+                owned = batch.containsCurrentRequest(task.getRequestId());
+            } else {
+                owned = batch.requests().isEmpty();
+            }
+            if (!owned) {
+                return batch;
+            }
+            batch.touch(statusMs);
+            return batch;
+        });
     }
 
     private void settleFinishedMembers(long batchId,
@@ -320,10 +337,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
             }
 
             finishedIds.add(requestId);
-            if (observation.errorCode() != 0) {
-                logger.debug("Prefill calibrate: batch failure batchId={} reqId={} error={}",
-                        batchId, requestId, observation.errorMessage());
-            }
         }
 
         if (foreignCount > 0) {
@@ -350,64 +363,20 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * Reconcile a finished task whose Engine status omitted the original batch id.
-     *
-     * <p>Legacy non-batch reservations are keyed by request id and carry an empty
-     * member list. A real batch is keyed by its generated batch id and always
-     * carries its request members. Checking the value shape before the direct
-     * removal prevents an unrelated real batch from being erased when its batch
-     * id happens to equal this request id.
-     *
-     * <p>Production priority-cancel terminals may currently report
-     * {@code batch_id=-1} even though the Master committed the request as a member
-     * of a real batch. In that case scan the live ledger for the unique owning
-     * batch and remove only the matching member. The member is revalidated inside
-     * the map compute, so a concurrent release/repack/TTL eviction is an idempotent
-     * no-op rather than a counter double-decrement. No reverse index is retained,
-     * keeping every existing ledger mutation path consistent automatically.
+     * Remove a finished direct request whose status has no positive batch id. Direct
+     * reservations are request-keyed and carry an empty member list. Real Master
+     * batches always require their exact positive batch id.
      */
-    private void reconcileFinishedWithoutBatchId(FinishedObservation observation, long statusMs) {
+    private void removeFinishedDirectReservation(FinishedObservation observation) {
         long requestId = observation.requestId();
-        AtomicBoolean removedNonBatch = new AtomicBoolean(false);
         inflightBatches.computeIfPresent(requestId, (id, batch) -> {
             if (!batch.requests().isEmpty()) {
                 return batch;
             }
-            removedNonBatch.set(true);
             reconciliationRequests.remove(id);
-            inflightRequestCount.addAndGet(-batch.requests().size());
             cachedWaitTimeExpireAtMs = 0;
             return null;
         });
-        if (removedNonBatch.get()) {
-            return;
-        }
-
-        List<Long> matchingBatchIds = new ArrayList<>();
-        for (Map.Entry<Long, BatchInflight> entry : inflightBatches.entrySet()) {
-            boolean containsRequest = entry.getValue().requests().stream()
-                    .anyMatch(item -> item.requestId() == requestId);
-            if (containsRequest) {
-                matchingBatchIds.add(entry.getKey());
-            }
-        }
-        if (matchingBatchIds.isEmpty()) {
-            logger.debug("Prefill calibrate: finished task with no batch id reqId={} not in inflight",
-                    requestId);
-            return;
-        }
-        if (matchingBatchIds.size() != 1) {
-            // A request is expected to belong to exactly one live batch. Do not
-            // guess when that invariant is already broken: member-scoped cleanup
-            // in multiple generations could erase a newer dispatch.
-            logger.warn("Prefill calibrate: finished task with no batch id reqId={} matches batches={}; "
-                            + "skipping ambiguous cleanup",
-                    requestId, matchingBatchIds);
-            return;
-        }
-
-        long resolvedBatchId = matchingBatchIds.get(0);
-        settleFinishedMembers(resolvedBatchId, List.of(observation), statusMs);
     }
 
     private void updateEngineUntrackedRequestCount(WorkerStatusResponse response) {
@@ -422,7 +391,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         Map<String, TaskInfo> runningTasks = response.getRunningTaskInfo();
         if (runningTasks != null) {
             for (TaskInfo task : runningTasks.values()) {
-                if (task == null || isPriorityCancelOverlayOnly(task)) {
+                if (task == null || task.priorityCancelOverlayOnly()) {
                     continue;
                 }
                 if (!localRequestIds.contains(task.getRequestId())) {
@@ -439,13 +408,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
         // counts. Keep the request-id union when details exist and conservatively
         // retain the scalar lower bound when the detail list is empty or partial.
         engineUntrackedRequestCount = Math.max(untracked.size(), scalarLowerBound);
-    }
-
-    private static boolean isPriorityCancelOverlayOnly(TaskInfo task) {
-        PriorityPreemptionProgress progress = task.getPriorityPreemptionProgress();
-        return (progress == PriorityPreemptionProgress.CANCELING
-                || progress == PriorityPreemptionProgress.CANCELED)
-                && task.getPhase() == TaskPhase.PENDING;
     }
 
     // ==================== Pending Count ====================
@@ -574,7 +536,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     @Override
-    public long getLoadMetric() {
+    long schedulingLoad() {
         return realWaitTimeMs();
     }
 
@@ -609,21 +571,16 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /**
      * On batch completion, compare the formula-predicted execution time against the
      * engine-reported actual execution time (max across the batch's finished tasks),
-     * then log and emit prediction-accuracy metrics.
+     * then emit prediction-accuracy metrics.
      */
     private void reportBatchCompletion(long batchId, BatchInflight batch) {
         long actualMs = batch.maxExecutionTimeMs();
         if (!batch.successfulCompletionObserved() || actualMs <= 0) {
-            logger.debug("batch completion not reportable: batchId={} success={} actualMs={}",
-                    batchId, batch.successfulCompletionObserved(), actualMs);
             return;
         }
 
         long predictedMs = batch.originalPredictTimeMs();
         long gapMs = actualMs - predictedMs;
-        org.flexlb.util.Logger.debug(
-                "flexlb_batch_complete batch_id={} predicted_ms={} actual_ms={} gap_ms={} batch_size={} engine={}",
-                batchId, predictedMs, actualMs, gapMs, batch.originalFeatures().batchSize(), getIp());
 
         // A failed/removed member makes the original batch an invalid learning
         // sample even if another member completed successfully.

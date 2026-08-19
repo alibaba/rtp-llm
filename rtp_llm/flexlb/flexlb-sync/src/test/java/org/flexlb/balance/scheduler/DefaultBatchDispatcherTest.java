@@ -1,12 +1,14 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -22,6 +24,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -31,6 +34,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -154,6 +158,84 @@ class DefaultBatchDispatcherTest {
 
         // Should fail synchronously when executor is shut down
         assertEquals(1, callback.failureCount.get());
+    }
+
+    @Test
+    void dispatch_should_fail_before_send_when_endpoint_generation_is_retired() throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        doThrow(new WorkerEndpoint.EndpointRetiredException("127.0.0.1:8080"))
+                .when(prefillEp).initiateGenerationDispatch(any(), any());
+        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+
+        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "retired", callback);
+
+        assertTrue(callback.failureLatch.await(5, TimeUnit.SECONDS));
+        assertEquals(1, callback.failureCount.get());
+        assertEquals(0, callback.uncertainCount.get());
+        verify(prefillEp).releaseBatch(1L);
+        verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
+    }
+
+    @Test
+    void dispatch_should_fail_before_send_when_decode_generation_is_missing() throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        BatchItem base = createBatchItem(1L, 500, 200, prefillEp);
+        ServerStatus decode = new ServerStatus();
+        decode.setRole(RoleType.DECODE);
+        decode.setServerIp("127.0.0.2");
+        decode.setHttpPort(8081);
+        decode.setGrpcPort(8091);
+        decode.setRequestId(1L);
+        BatchItem missingDecodeGeneration = new BatchItem(
+                base.ctx(), base.future(), base.routeResponse(), base.prefill(), decode,
+                prefillEp, null, base.enqueuedAtMs());
+
+        dispatcher.dispatch(List.of(missingDecodeGeneration), prefillEp,
+                1L, 100, "missing_decode_generation", callback);
+
+        assertTrue(callback.failureLatch.await(5, TimeUnit.SECONDS));
+        assertEquals(1, callback.failureCount.get());
+        assertEquals(0, callback.uncertainCount.get());
+        verify(prefillEp).releaseBatch(1L);
+        verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
+    }
+
+    @Test
+    void queued_dispatch_should_not_invoke_grpc_after_endpoint_retirement() throws Exception {
+        dispatcher.shutdown();
+        config.setFlexlbBatchDispatchPoolSize(1);
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
+
+        PrefillEndpoint blocker = createPrefillEndpoint();
+        PrefillEndpoint retiring = createRealPrefillEndpoint("127.0.0.2", 8081, 8091);
+        TestCallback blockerCallback = new TestCallback();
+        TestCallback retiringCallback = new TestCallback();
+        CountDownLatch invocationEntered = new CountDownLatch(1);
+        CountDownLatch releaseInvocation = new CountDownLatch(1);
+        AtomicInteger rpcInvocations = new AtomicInteger();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+                .thenAnswer(ignored -> {
+                    rpcInvocations.incrementAndGet();
+                    invocationEntered.countDown();
+                    if (!releaseInvocation.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("test dispatch release timed out");
+                    }
+                    return CompletableFuture.completedFuture(ackResponse(11L, List.of(1L)));
+                });
+
+        dispatcher.dispatch(List.of(createBatchItem(1L, 500, 200, blocker)),
+                blocker, 11L, 100, "block_dispatch_executor", blockerCallback);
+        assertTrue(invocationEntered.await(5, TimeUnit.SECONDS));
+
+        dispatcher.dispatch(List.of(createBatchItem(2L, 500, 200, retiring)),
+                retiring, 22L, 100, "queued_then_retired", retiringCallback);
+        retiring.close();
+        releaseInvocation.countDown();
+
+        assertTrue(retiringCallback.failureLatch.await(5, TimeUnit.SECONDS));
+        assertEquals(1, retiringCallback.failureCount.get());
+        assertEquals(0, retiringCallback.uncertainCount.get());
+        assertEquals(1, rpcInvocations.get(), "retired queued batch must never invoke gRPC");
     }
 
     @Test
@@ -488,7 +570,25 @@ class DefaultBatchDispatcherTest {
         when(endpoint.getIp()).thenReturn("127.0.0.1");
         when(endpoint.getHttpPort()).thenReturn(8080);
         when(endpoint.getGrpcPort()).thenReturn(8090);
+        when(endpoint.initiateGenerationDispatch(any(), any())).thenAnswer(invocation -> {
+            Supplier<?> start = invocation.getArgument(1);
+            return start.get();
+        });
         return endpoint;
+    }
+
+    private PrefillEndpoint createRealPrefillEndpoint(String ip, int httpPort, int grpcPort) {
+        WorkerStatus status = new WorkerStatus();
+        status.setIp(ip);
+        status.setPort(httpPort);
+        status.setGrpcPort(grpcPort);
+        status.setRole(RoleType.PREFILL);
+        FlexlbConfig endpointConfig = new FlexlbConfig();
+        endpointConfig.setCostFormula("10 + batchSize");
+        endpointConfig.setFlexlbBatchQueueMaxSize(10);
+        endpointConfig.setFlexlbBatchFixedWaitMs(1000);
+        return new PrefillEndpoint(
+                status, endpointConfig, mock(BatchDecisionHandler.class), reporter);
     }
 
     private BatchItem createBatchItem(long requestId, long seqLen, long hitCacheLen, PrefillEndpoint prefillEp) {

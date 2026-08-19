@@ -4,8 +4,6 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.CompletableFuture;
@@ -13,8 +11,6 @@ import java.util.concurrent.CompletableFuture;
 /** Engine gRPC service for worker and cache status queries. */
 @Component
 public class EngineGrpcService {
-
-    private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
     private final EngineGrpcClient engineGrpcClient;
 
@@ -42,11 +38,9 @@ public class EngineGrpcService {
         boolean needCacheKeys = workerStatus.getRole() == RoleType.PREFILL
                 || workerStatus.getRole() == RoleType.PDFUSION;
         EngineRpcService.CacheVersionPB request = EngineRpcService.CacheVersionPB.newBuilder()
-                .setLatestCacheVersion((int) cacheVersion)
+                .setLatestCacheVersion(cacheVersion)
                 .setNeedCacheKeys(needCacheKeys)
                 .build();
-        logger.debug("Get cache status Request: {}, cacheVersion: {}, needCacheKeys: {}",
-                ip, cacheVersion, needCacheKeys);
 
         if (RoleType.VIT.equals(roleType)) {
             return engineGrpcClient.getMultimodalCacheStatusAsync(

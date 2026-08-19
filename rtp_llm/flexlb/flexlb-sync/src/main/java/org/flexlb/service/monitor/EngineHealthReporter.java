@@ -4,7 +4,6 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.SingleThreadEventExecutor;
 import org.apache.commons.collections4.CollectionUtils;
-import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.dao.BalanceContext;
@@ -147,7 +146,6 @@ public class EngineHealthReporter {
         FlexMetricTags metricTags = FlexMetricTags.of("model", modelName, "role", role);
         monitor.report(ENGINE_WORKER_INFO_STEP_LATENCY_VAR, metricTags, result);
         monitor.report(ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR, metricTags, result2);
-        logger.debug("Latency metric - model: {}, role: {}, stepLatency: {}, queryLen: {}", modelName, role, result, result2);
     }
 
     @Scheduled(fixedRate = 2000)
@@ -216,7 +214,6 @@ public class EngineHealthReporter {
 
     public void reportStatusCheckerSuccess(String modelName,
                                            WorkerStatus workerStatus,
-                                           WorkerEndpoint ep,
                                            int runningTaskInfoSize,
                                            int finishedTaskListSize) {
 
@@ -233,7 +230,8 @@ public class EngineHealthReporter {
         if (lastUpdateTime > 0) {
             monitor.report(ENGINE_STATUS_CHECK_SUCCESS_PERIOD, metricTags, (double) System.nanoTime() / 1000 - lastUpdateTime);
         }
-        monitor.report(ENGINE_RUNNING_QUEUE_TIME, metricTags, ep != null ? ep.getLoadMetric() : 0);
+        monitor.report(ENGINE_RUNNING_QUEUE_TIME, metricTags,
+                workerStatus.getReportedSchedulingLoad());
 
         monitor.report(ENGINE_FINISHED_TASK_LIST_SIZE, metricTags, finishedTaskListSize);
         monitor.report(ENGINE_RUNNING_TASK_INFO_SIZE, metricTags, runningTaskInfoSize);

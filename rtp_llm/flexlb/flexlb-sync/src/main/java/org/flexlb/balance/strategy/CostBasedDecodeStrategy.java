@@ -21,7 +21,6 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 
 @Component("costBasedDecodeStrategy")
@@ -49,16 +48,13 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         FlexlbConfig config = balanceContext.getConfig();
         long expectedKvTokens = seqLen + config.effectiveMaxNewTokensForReservation(maxNewTokens);
 
-        EndpointFilterResult filterResult = getAvailableEndpoints(roleType, group, config.getResourceMeasureIndicator(roleType));
-        List<DecodeEndpoint> eligible = filterResult.endpoints();
+        List<DecodeEndpoint> eligible = getAvailableEndpoints(
+                roleType, group, config.getResourceMeasureIndicator(roleType));
         if (CollectionUtils.isEmpty(eligible)) {
-            Logger.debug("Decode select failed: no available endpoints, request_id={}, registered={}, eligible=0, rejections={}",
-                    balanceContext.getRequestId(), filterResult.registered(), filterResult.rejections());
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
-        FilterResult hardFilterResult = applyHardFilters(eligible, seqLen, config);
-        List<DecodeEndpoint> survivors = hardFilterResult.endpoints();
+        List<DecodeEndpoint> survivors = applyHardFilters(eligible, seqLen, config);
 
         DecodeEndpoint selectedEndpoint = weightedRandomSelection(survivors);
 
@@ -67,53 +63,40 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
                     roleType, balanceContext);
         }
 
-        Map<String, Integer> merged = new java.util.HashMap<>(filterResult.rejections());
-        hardFilterResult.rejections().forEach((k, v) -> merged.merge(k, v, Integer::sum));
-        Logger.debug("Decode select failed: all filtered out, request_id={}, rejections={}",
-                balanceContext.getRequestId(), merged);
         return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
     }
 
-    private record EndpointFilterResult(List<DecodeEndpoint> endpoints, Map<String, Integer> rejections, int registered) {}
-    private record FilterResult(List<DecodeEndpoint> endpoints, Map<String, Integer> rejections) {}
-
-    private EndpointFilterResult getAvailableEndpoints(RoleType roleType, String group, ResourceMeasureIndicatorEnum indicator) {
+    private List<DecodeEndpoint> getAvailableEndpoints(
+            RoleType roleType, String group, ResourceMeasureIndicatorEnum indicator) {
         DecodeResourceMeasure measure = (DecodeResourceMeasure) resourceMeasureFactory.getMeasure(indicator);
         if (measure == null) {
-            return new EndpointFilterResult(new ArrayList<>(), Map.of("NO_REGISTERED", 1), 0);
+            return new ArrayList<>();
         }
         List<DecodeEndpoint> result = new ArrayList<>(engineWorkerStatus.getModelWorkerCapacity(roleType));
-        Map<String, Integer> rejections = new java.util.HashMap<>();
-        int registered = engineWorkerStatus.forEachModelWorkerEndpoint(roleType, group, (ipPort, ep) -> {
+        engineWorkerStatus.forEachModelWorkerEndpoint(roleType, group, (ipPort, ep) -> {
             if (!(ep instanceof DecodeEndpoint de)) {
                 return;
             }
             if (!de.getStatus().isAlive()) {
-                rejections.merge("NOT_ALIVE", 1, Integer::sum);
                 return;
             }
             if (!measure.isResourceAvailable(de)) {
-                rejections.merge("RESOURCE_UNAVAILABLE", 1, Integer::sum);
                 return;
             }
             result.add(de);
         });
-        if (registered == 0) {
-            return new EndpointFilterResult(result, Map.of("NO_REGISTERED", 1), 0);
-        }
-        return new EndpointFilterResult(result, rejections, registered);
+        return result;
     }
 
     @Override
     public void rollBack(WorkerEndpoint ep, long requestId) {
-        Logger.debug("Decode rollBack - ip: {}, requestId: {}", ep.ipPort(), requestId);
-
         if (ep instanceof DecodeEndpoint de) {
             de.release(requestId);
         }
     }
 
-    private FilterResult applyHardFilters(List<DecodeEndpoint> eligible, long seqLen, FlexlbConfig config) {
+    private List<DecodeEndpoint> applyHardFilters(
+            List<DecodeEndpoint> eligible, long seqLen, FlexlbConfig config) {
         double hotspotMultiplier = config.getDecodeHotspotMultiplier();
         double imbalanceMultiplier = config.getDecodeImbalanceMultiplier();
 
@@ -134,29 +117,25 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         long avgCacheUsed = sumCacheUsed / n;
 
         List<DecodeEndpoint> survivors = new ArrayList<>(n);
-        Map<String, Integer> rejections = new java.util.HashMap<>();
         for (int i = 0; i < n; i++) {
             DecodeEndpoint ep = eligible.get(i);
             long availableKv = ep.realKvAvailable();
             long totalKv = ep.realKvTotal();
             if (totalKv > 0 && availableKv < seqLen) {
-                rejections.merge("KV_CAPACITY", 1, Integer::sum);
                 continue;
             }
             if (hotspotMultiplier > 0 && avgLoad > 0
                     && loads[i] > avgLoad * hotspotMultiplier) {
-                rejections.merge("HOTSPOT_FILTERED", 1, Integer::sum);
                 continue;
             }
             if (imbalanceMultiplier > 0 && avgCacheUsed > 0
                     && kvUseds[i] > avgCacheUsed * imbalanceMultiplier) {
-                rejections.merge("IMBALANCE_FILTERED", 1, Integer::sum);
                 continue;
             }
             survivors.add(ep);
         }
 
-        return new FilterResult(survivors, rejections);
+        return survivors;
     }
 
     private DecodeEndpoint weightedRandomSelection(List<DecodeEndpoint> candidateEndpoints) {

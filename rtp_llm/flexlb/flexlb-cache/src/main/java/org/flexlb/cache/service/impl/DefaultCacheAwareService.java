@@ -5,7 +5,6 @@ import org.flexlb.cache.core.KvCacheManager;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -91,20 +90,6 @@ public class DefaultCacheAwareService implements CacheAwareService {
 
             return result;
         }
-    }
-
-    @Override
-    @Deprecated
-    public WorkerCacheUpdateResult updateEngineBlockCache(WorkerStatus workerStatus) {
-        if (workerStatus == null || workerStatus.getCacheStatus() == null) {
-            return buildFailureResult(
-                    workerStatus == null ? null : workerStatus.getIpPort(),
-                    "Worker Cache Status is null");
-        }
-        return publishEngineCacheSnapshot(
-                workerStatus.getIpPort(),
-                workerStatus.getRole(),
-                workerStatus.getCacheStatus().getCachedKeys());
     }
 
     @Override

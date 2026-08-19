@@ -1,11 +1,13 @@
 package org.flexlb.balance.scheduler.priority;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.endpoint.WorkerEndpoint.EndpointRetiredException;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
@@ -76,45 +78,66 @@ public final class DecodePreemptionCoordinator {
                                                        InflightRegistrar registrar) {
         long token = nextToken();
         List<PreemptionAttempt.Victim> victims = new ArrayList<>(request.victims().size());
-        for (DecodeRequestSnapshot victim : request.victims()) {
-            EngineCancelChannel.CancelTarget target =
-                    registrar.resolveCancelTarget(victim.requestId());
-            if (target == null || !target.isRoutable()) {
-                return CompletableFuture.completedFuture(ExecutionResult.of(
-                        ResultCode.CONTROL_FAILED, null,
-                        "cancel_owner_missing:" + victim.requestId()));
+        try {
+            for (DecodeRequestSnapshot victim : request.victims()) {
+                EngineCancelChannel.CancelTarget target =
+                        registrar.resolveCancelTarget(victim.requestId());
+                if (target == null || !target.isRoutable()
+                        || !target.isGenerationBound()) {
+                    return CompletableFuture.completedFuture(ExecutionResult.of(
+                            ResultCode.CONTROL_FAILED, null,
+                            "cancel_owner_missing:" + victim.requestId()));
+                }
+                victims.add(new PreemptionAttempt.Victim(victim.requestId(), victim.priority(),
+                        victim.kvTokens(), victim.phase(), target));
             }
-            victims.add(new PreemptionAttempt.Victim(victim.requestId(), victim.priority(),
-                    victim.kvTokens(), victim.phase(), target));
+        } catch (RuntimeException targetFailure) {
+            return CompletableFuture.completedFuture(ExecutionResult.of(
+                    ResultCode.CONTROL_FAILED, null, "cancel_owner_resolution_failed"));
         }
 
         PreemptionAttempt attempt = new PreemptionAttempt(token,
                 request.incomingRequestId(), request.snapshotVersion(),
                 victims);
 
-        List<Long> claimedInflight = new ArrayList<>(victims.size());
-        for (PreemptionAttempt.Victim victim : victims) {
-            if (!registrar.claimForPreemption(victim.requestId(), token, request.detail())) {
-                for (Long claimed : claimedInflight) {
-                    registrar.releasePreemptionClaim(claimed, token);
+        try {
+            for (PreemptionAttempt.Victim victim : victims) {
+                if (!registrar.claimForPreemption(
+                        victim.requestId(), token, request.detail())) {
+                    releaseRegistrarClaims(registrar, victims, token);
+                    attempt.markAborted(false);
+                    return CompletableFuture.completedFuture(ExecutionResult.of(
+                            ResultCode.CONFLICT, attempt, "victim_inflight_gone"));
                 }
-                attempt.markAborted(false);
-                return CompletableFuture.completedFuture(ExecutionResult.of(
-                        ResultCode.CONFLICT, attempt, "victim_inflight_gone"));
             }
-            claimedInflight.add(victim.requestId());
+        } catch (RuntimeException claimFailure) {
+            releaseRegistrarClaims(registrar, victims, token);
+            attempt.markAborted(true);
+            return CompletableFuture.completedFuture(ExecutionResult.of(
+                    ResultCode.CONTROL_FAILED, attempt, "victim_claim_failed"));
         }
 
-        DecodeEndpoint.PreemptionBeginResult begin = request.endpoint().beginPriorityPreemption(
-                token, victims.stream().map(PreemptionAttempt.Victim::requestId).toList(),
-                request.incomingRequestId(), request.incomingKvTokens(),
-                request.incomingExpectedKvTokens(), request.incomingPriority(),
-                request.incomingDeadlineMs(), request.snapshotVersion(),
-                request.requireVersionMatch());
-        if (begin != DecodeEndpoint.PreemptionBeginResult.SUCCESS) {
-            for (Long claimed : claimedInflight) {
-                registrar.releasePreemptionClaim(claimed, token);
+        DecodeEndpoint.PreemptionBeginResult begin;
+        try {
+            begin = request.endpoint().beginPriorityPreemption(
+                    token, victims.stream().map(PreemptionAttempt.Victim::requestId).toList(),
+                    request.incomingRequestId(), request.incomingKvTokens(),
+                    request.incomingExpectedKvTokens(), request.incomingPriority(),
+                    request.incomingDeadlineMs(), request.snapshotVersion(),
+                    request.requireVersionMatch());
+        } catch (RuntimeException beginFailure) {
+            try {
+                request.endpoint().releaseIfHeld(request.incomingRequestId());
+            } catch (RuntimeException ignored) {
+                // Continue clearing registrar ownership.
             }
+            releaseRegistrarClaims(registrar, victims, token);
+            attempt.markAborted(true);
+            return CompletableFuture.completedFuture(ExecutionResult.of(
+                    ResultCode.CONTROL_FAILED, attempt, "begin_failed"));
+        }
+        if (begin != DecodeEndpoint.PreemptionBeginResult.SUCCESS) {
+            releaseRegistrarClaims(registrar, victims, token);
             attempt.markAborted(false);
             ResultCode code = begin == DecodeEndpoint.PreemptionBeginResult.VERSION_MISMATCH
                     || begin == DecodeEndpoint.PreemptionBeginResult.VICTIM_GONE
@@ -123,52 +146,151 @@ public final class DecodePreemptionCoordinator {
             return CompletableFuture.completedFuture(
                     ExecutionResult.of(code, attempt, "begin_" + begin.name().toLowerCase()));
         }
-        attempt.claimAll();
+        if (!attempt.claimAll()) {
+            return abortBeforeRpc(request, registrar, attempt, victims,
+                    "attempt_claim_linearization_failed");
+        }
 
-        if (!request.endpoint().markPriorityCancelInFlight(token)) {
-            request.endpoint().abortPriorityPreemption(token);
-            for (Long claimed : claimedInflight) {
-                registrar.releasePreemptionClaim(claimed, token);
+        try {
+            if (!request.endpoint().markPriorityCancelInFlight(token)) {
+                return abortBeforeRpc(request, registrar, attempt, victims,
+                        "endpoint_cancel_linearization_failed");
             }
-            attempt.markAborted(true);
-            return CompletableFuture.completedFuture(ExecutionResult.of(
-                    ResultCode.CONTROL_FAILED, attempt, "endpoint_cancel_linearization_failed"));
-        }
-        for (PreemptionAttempt.Victim victim : victims) {
-            if (!registrar.markPreemptionCancelInFlight(victim.requestId(), token)) {
-                request.endpoint().abortPriorityPreemption(token);
-                for (Long claimed : claimedInflight) {
-                    registrar.releasePreemptionClaim(claimed, token);
+            for (PreemptionAttempt.Victim victim : victims) {
+                if (!registrar.markPreemptionCancelInFlight(victim.requestId(), token)) {
+                    return abortBeforeRpc(request, registrar, attempt, victims,
+                            "inflight_cancel_linearization_failed:" + victim.requestId());
                 }
-                attempt.markAborted(true);
-                return CompletableFuture.completedFuture(ExecutionResult.of(
-                        ResultCode.CONTROL_FAILED, attempt,
-                        "inflight_cancel_linearization_failed:" + victim.requestId()));
             }
-        }
-        if (!attempt.markCancelInFlight()) {
-            request.endpoint().abortPriorityPreemption(token);
-            for (Long claimed : claimedInflight) {
-                registrar.releasePreemptionClaim(claimed, token);
+            if (!attempt.markCancelInFlight()) {
+                return abortBeforeRpc(request, registrar, attempt, victims,
+                        "attempt_cancel_linearization_failed");
             }
-            attempt.markAborted(true);
-            return CompletableFuture.completedFuture(ExecutionResult.of(
-                    ResultCode.CONTROL_FAILED, attempt, "attempt_cancel_linearization_failed"));
+        } catch (RuntimeException linearizationFailure) {
+            return abortBeforeRpc(request, registrar, attempt, victims,
+                    "cancel_linearization_failed");
         }
 
         // All state is CANCEL_IN_FLIGHT before the first RPC is invoked.
-        List<CompletableFuture<EngineCancelChannel.CancelOutcome>> acknowledgements =
-                new ArrayList<>(victims.size());
-        for (PreemptionAttempt.Victim victim : victims) {
-            acknowledgements.add(cancelChannel.cancel(victim.target(), victim.requestId(),
-                    request.cancelAckTimeoutMs()).exceptionally(ignored ->
-                            EngineCancelChannel.CancelOutcome.failed()));
+        List<CompletableFuture<EngineCancelChannel.CancelOutcome>> acknowledgements;
+        try {
+            acknowledgements = initiateCancelRequests(
+                    request.endpoint(), victims, request.cancelAckTimeoutMs());
+        } catch (EndpointRetiredException retired) {
+            return abortBeforeRpc(request, registrar, attempt, victims,
+                    "cancel_generation_retired");
         }
 
-        return CompletableFuture.allOf(
+        CompletableFuture<ExecutionResult> execution = CompletableFuture.allOf(
                         acknowledgements.toArray(new CompletableFuture[0]))
                 .thenCompose(ignored -> handleAcknowledgements(
                         request, registrar, attempt, acknowledgements));
+        return execution.handle((result, failure) -> {
+            if (failure == null && result != null) {
+                return result;
+            }
+            abortAfterRpcFailure(request, registrar, attempt);
+            return ExecutionResult.of(
+                    ResultCode.CONTROL_FAILED, attempt, "cancel_transaction_failed");
+        });
+    }
+
+    /**
+     * Invoke every Cancel while the exact Decode owner and all original
+     * Prefill generations hold a shared dispatch lease. If any generation is
+     * already retired, the supplier is never entered and no victim RPC is
+     * invoked.
+     */
+    private List<CompletableFuture<EngineCancelChannel.CancelOutcome>>
+            initiateCancelRequests(DecodeEndpoint decodeGeneration,
+                                   List<PreemptionAttempt.Victim> victims,
+                                   long timeoutMs) {
+        PrefillEndpoint owner = victims.getFirst().target().prefillGeneration();
+        List<WorkerEndpoint> generations = new ArrayList<>(victims.size() + 1);
+        generations.add(decodeGeneration);
+        for (PreemptionAttempt.Victim victim : victims) {
+            generations.add(victim.target().prefillGeneration());
+        }
+        return owner.initiateGenerationDispatch(generations, () -> {
+            List<CompletableFuture<EngineCancelChannel.CancelOutcome>> acknowledgements =
+                    new ArrayList<>(victims.size());
+            for (PreemptionAttempt.Victim victim : victims) {
+                acknowledgements.add(requestCancel(victim, timeoutMs));
+            }
+            return acknowledgements;
+        });
+    }
+
+    private CompletableFuture<EngineCancelChannel.CancelOutcome> requestCancel(
+            PreemptionAttempt.Victim victim, long timeoutMs) {
+        try {
+            CompletableFuture<EngineCancelChannel.CancelOutcome> acknowledgement =
+                    cancelChannel.cancel(victim.target(), victim.requestId(), timeoutMs);
+            if (acknowledgement == null) {
+                return CompletableFuture.completedFuture(
+                        EngineCancelChannel.CancelOutcome.failed());
+            }
+            return acknowledgement.handle((outcome, failure) ->
+                    failure == null && outcome != null
+                            ? outcome : EngineCancelChannel.CancelOutcome.failed());
+        } catch (RuntimeException synchronousFailure) {
+            return CompletableFuture.completedFuture(
+                    EngineCancelChannel.CancelOutcome.failed());
+        }
+    }
+
+    private static CompletableFuture<ExecutionResult> abortBeforeRpc(
+            Request request,
+            InflightRegistrar registrar,
+            PreemptionAttempt attempt,
+            List<PreemptionAttempt.Victim> victims,
+            String detail) {
+        try {
+            request.endpoint().abortPriorityPreemption(attempt.token());
+        } catch (RuntimeException ignored) {
+            // Registrar claims are an independent ownership domain.
+        }
+        releaseRegistrarClaims(registrar, victims, attempt.token());
+        attempt.markAborted(true);
+        return CompletableFuture.completedFuture(ExecutionResult.of(
+                ResultCode.CONTROL_FAILED, attempt, detail));
+    }
+
+    private static void releaseRegistrarClaims(
+            InflightRegistrar registrar,
+            List<PreemptionAttempt.Victim> victims,
+            long token) {
+        for (PreemptionAttempt.Victim victim : victims) {
+            try {
+                registrar.releasePreemptionClaim(victim.requestId(), token);
+            } catch (RuntimeException ignored) {
+                // Continue releasing independent victim claims.
+            }
+        }
+    }
+
+    private static void abortAfterRpcFailure(
+            Request request,
+            InflightRegistrar registrar,
+            PreemptionAttempt attempt) {
+        for (PreemptionAttempt.Victim victim : attempt.victims()) {
+            try {
+                PreemptionAttempt.VictimState state =
+                        attempt.victimState(victim.requestId());
+                if (state == PreemptionAttempt.VictimState.CANCEL_IN_FLIGHT
+                        || state == PreemptionAttempt.VictimState.CANCEL_REQUESTED) {
+                    markUnknown(request, registrar, attempt, victim.requestId());
+                }
+            } catch (RuntimeException ignored) {
+                // Preserve the remaining victims' reconciliation fences.
+            }
+        }
+        try {
+            request.endpoint().abortPriorityPreemption(attempt.token());
+        } catch (RuntimeException ignored) {
+            // The result is still control-failed; preserve victim fences.
+        }
+        attempt.markAborted(true);
     }
 
     private CompletableFuture<ExecutionResult> handleAcknowledgements(
@@ -277,10 +399,14 @@ public final class DecodePreemptionCoordinator {
                         return ExecutionResult.of(ResultCode.COMMITTED, attempt, "committed");
                     }
                     for (int i = 0; i < boundedSettlements.size(); i++) {
-                        if (!boundedSettlements.get(i).join()
-                                && !acceptedAcknowledgements.get(i)) {
-                            markUnknown(request, registrar, attempt,
-                                    completionCandidates.get(i).requestId());
+                        if (!boundedSettlements.get(i).join()) {
+                            long requestId = completionCandidates.get(i).requestId();
+                            if (acceptedAcknowledgements.get(i)) {
+                                markAcceptedCompletionTimedOut(
+                                        registrar, attempt.token(), requestId);
+                            } else {
+                                markUnknown(request, registrar, attempt, requestId);
+                            }
                         }
                     }
                     request.endpoint().abortPriorityPreemption(attempt.token());
@@ -297,6 +423,17 @@ public final class DecodePreemptionCoordinator {
                             ackNotFound
                                     ? "cancel_partial_not_found" : "cancel_completion_unknown");
                 });
+    }
+
+    private static void markAcceptedCompletionTimedOut(
+            InflightRegistrar registrar, long attemptToken, long requestId) {
+        try {
+            registrar.markPreemptionCompletionTimedOut(requestId, attemptToken);
+        } catch (RuntimeException ignored) {
+            // Preserve the accepted first-cause and its accounting fence. A
+            // telemetry/control callback failure must never downgrade it to
+            // transport UNKNOWN or release the victim locally.
+        }
     }
 
     private static boolean settleTypedCanceled(
@@ -326,7 +463,9 @@ public final class DecodePreemptionCoordinator {
                                     InflightRegistrar registrar,
                                     PreemptionAttempt attempt,
                                     long requestId) {
-        attempt.recordUnknown(requestId);
+        if (!attempt.recordUnknown(requestId)) {
+            return;
+        }
         request.endpoint().markPriorityCancelUnknown(attempt.token(), requestId);
         registrar.markPreemptionUnknown(requestId, attempt.token());
     }

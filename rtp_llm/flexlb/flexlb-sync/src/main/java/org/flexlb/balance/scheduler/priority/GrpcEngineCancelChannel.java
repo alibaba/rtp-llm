@@ -1,7 +1,6 @@
 package org.flexlb.balance.scheduler.priority;
 
 import io.grpc.Context;
-import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -25,7 +24,6 @@ import java.util.concurrent.CompletableFuture;
  * these map to the matching local outcomes, while
  * any transport failure to {@code failed()} — never throws synchronously.
  */
-@Slf4j
 public class GrpcEngineCancelChannel implements EngineCancelChannel {
 
     private final EngineGrpcClient engineGrpcClient;
@@ -51,8 +49,6 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
             // No routable endpoint — report the transport-failure branch: the
             // intent never reached the engine, but release is still settled by
             // the WorkerStatus report (iron rule 4).
-            log.debug("[auto-tpm] cancel has no prefill control owner for request_id={}, not routed",
-                    requestId);
             return CompletableFuture.completedFuture(CancelOutcome.failed());
         }
 
@@ -73,11 +69,7 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
                             requestPB,
                             Math.max(1, timeoutMs))
                     .thenApply(GrpcEngineCancelChannel::mapResponse)
-                    .exceptionally(t -> {
-                        log.debug("[auto-tpm] cancel rpc failed for request_id={}: {}",
-                                requestId, t.getMessage());
-                        return CancelOutcome.failed();
-                    });
+                    .exceptionally(ignored -> CancelOutcome.failed());
         } finally {
             fork.detach(previous);
         }

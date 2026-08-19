@@ -5,7 +5,9 @@ import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.util.NamedThreadFactory;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.constant.MetricConstant;
 import org.flexlb.dao.loadbalance.Request;
@@ -113,7 +115,7 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
     public void dispatch(List<BatchItem> items, PrefillEndpoint prefillEp,
                          long batchId, long predMs, String reason, DispatchCallback callback) {
         try {
-            dispatchExecutor.execute(() -> doDispatch(items, prefillEp, batchId, predMs, reason, callback));
+            dispatchExecutor.execute(() -> doDispatch(items, prefillEp, batchId, callback));
         } catch (RejectedExecutionException e) {
             Logger.warn("FlexLB batch dispatch rejected by executor, failing {} items", items.size());
             failItems(items, prefillEp, batchId, e, callback);
@@ -128,10 +130,10 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
     // ==================== Internal: dispatch pipeline (runs on executor thread) ====================
 
     private void doDispatch(List<BatchItem> items, PrefillEndpoint prefillEp,
-                            long batchId, long predMs, String reason, DispatchCallback callback) {
+                            long batchId, DispatchCallback callback) {
         DispatchAttempt attempt = new DispatchAttempt();
         try {
-            doDispatchInternal(items, prefillEp, batchId, predMs, reason, callback, attempt);
+            doDispatchInternal(items, prefillEp, batchId, callback, attempt);
         } catch (Throwable unexpectedFailure) {
             Logger.error("Unexpected dispatch failure batch_id={} rpc_invocation_started={}",
                     batchId, attempt.rpcInvocationStarted, unexpectedFailure);
@@ -146,7 +148,7 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
     }
 
     private void doDispatchInternal(List<BatchItem> items, PrefillEndpoint prefillEp,
-                                    long batchId, long predMs, String reason, DispatchCallback callback,
+                                    long batchId, DispatchCallback callback,
                                     DispatchAttempt attempt) {
         // 1. Build gRPC request
         EngineRpcService.EnqueueBatchRequestPB request;
@@ -158,31 +160,45 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
             return;
         }
 
-        // 2. Log dispatch
-        try {
-            logDispatch(batchId, items, prefillEp, predMs, reason);
-        } catch (Throwable loggingFailure) {
-            failItems(items, prefillEp, batchId,
-                    "Batch dispatch preparation failed: " + loggingFailure.getMessage(), callback);
-            return;
-        }
-
-        // 3. Send gRPC (async)
+        // 2. Send gRPC (async)
         // Resolve every potentially fallible argument before entering the RPC
         // invocation block. A failure here is definitely pre-send and is
         // handled by doDispatch's outer guard.
         long deadlineMs = configService.loadBalanceConfig().getFlexlbBatchEnqueueDeadlineMs();
         String prefillIp = prefillEp.getIp();
         int prefillGrpcPort = prefillEp.getGrpcPort();
+        List<WorkerEndpoint> dispatchDependencies = new ArrayList<>();
+        for (BatchItem item : items) {
+            if (item.prefillEp() != prefillEp) {
+                failItems(items, prefillEp, batchId,
+                        "Batch contains an item from a different Prefill generation", callback);
+                return;
+            }
+            DecodeEndpoint decodeEp = item.decodeEp();
+            if (item.decode() != null && decodeEp == null) {
+                failItems(items, prefillEp, batchId,
+                        "Decode endpoint generation is unavailable before batch RPC invocation", callback);
+                return;
+            }
+            if (decodeEp != null) {
+                dispatchDependencies.add(decodeEp);
+            }
+        }
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture;
         try {
-            attempt.rpcInvocationStarted = true;
-            rpcFuture = grpcClient.batchEnqueueAsync(
-                    prefillIp, prefillGrpcPort, request, deadlineMs);
+            rpcFuture = prefillEp.initiateGenerationDispatch(dispatchDependencies, () -> {
+                        attempt.rpcInvocationStarted = true;
+                        return grpcClient.batchEnqueueAsync(
+                                prefillIp, prefillGrpcPort, request, deadlineMs);
+                    });
         } catch (Throwable invocationFailure) {
-            // Once client invocation starts, a synchronous exception does not
-            // prove that no bytes were written. Treat it as ambiguous.
-            markUncertain(items, batchId, invocationFailure, callback);
+            if (attempt.rpcInvocationStarted) {
+                // Once client invocation starts, a synchronous exception does
+                // not prove that no bytes were written. Treat it as ambiguous.
+                markUncertain(items, batchId, invocationFailure, callback);
+            } else {
+                failItems(items, prefillEp, batchId, invocationFailure, callback);
+            }
             return;
         }
         if (rpcFuture == null) {
@@ -196,8 +212,6 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
                 try {
                     if (ex != null) {
                         Throwable cause = unwrapCompletionFailure(ex);
-                        Logger.debug("EnqueueBatch failed batchId: {}, entrypoint: {}:{}, err: {}",
-                                batchId, prefillIp, prefillGrpcPort, cause.getMessage());
                         // Once the asynchronous RPC is invoked, no
                         // transport status proves the server did not
                         // accept the request. Reconcile every transport
@@ -406,41 +420,6 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
                 .setHttpPort(serverStatus.getHttpPort())
                 .setGrpcPort(serverStatus.getGrpcPort())
                 .build());
-    }
-
-    // ==================== Logging ====================
-
-    private void logDispatch(long batchId, List<BatchItem> items,
-                             PrefillEndpoint prefillEp, long predMs, String reason) {
-        long totalTokens = 0;
-        long totalHit = 0;
-        StringBuilder itemDetail = new StringBuilder();
-        for (int i = 0; i < items.size(); i++) {
-            BatchItem item = items.get(i);
-            long seqLen = item.seqLen();
-            long hitCache = item.hitCache();
-            totalTokens += seqLen;
-            totalHit += hitCache;
-            if (i > 0) {
-                itemDetail.append(", ");
-            }
-            itemDetail.append("{req_id=").append(item.requestId())
-                    .append(" seq_len=").append(seqLen)
-                    .append(" hit_cache=").append(hitCache).append('}');
-        }
-
-        BatchItem head = items.get(0);
-        long now = System.currentTimeMillis();
-        long waitMs = now - head.enqueuedAtMs();
-        long budgetMs = head.sortKey() - now;
-
-        Logger.debug("flexlb_batch_dispatch batch_id={} batch_size={} total_tokens={} total_hit={} "
-                        + "pred_ms={} reason={} wait_ms={} budget_ms={} "
-                        + "prefill={}:{} items=[{}]",
-                batchId, items.size(), totalTokens, totalHit, predMs, reason,
-                waitMs, budgetMs,
-                prefillEp.getIp(), prefillEp.getHttpPort(),
-                itemDetail);
     }
 
     // ==================== Internal exception wrapper ====================

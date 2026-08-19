@@ -1,7 +1,5 @@
 package org.flexlb.balance.scheduler.priority;
 
-import ch.qos.logback.classic.spi.ILoggingEvent;
-import ch.qos.logback.core.read.ListAppender;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.resource.DecodeResourceMeasure;
@@ -31,7 +29,6 @@ import org.flexlb.service.monitor.PrioritySchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -69,8 +66,8 @@ import static org.mockito.Mockito.when;
  *       be reclaimed by the inflight TTL cleanup pass (P1-4).</li>
  *   <li>B-1: the SLO-deadline rejection must carry a machine-readable
  *       {@code reason=} tag so 8400s are attributable.</li>
- *   <li>D-1: the infeasible-eviction observability log must carry the plan
- *       phase and candidate counters.</li>
+ *   <li>D-1: an infeasible eviction must emit its stable metric and preserve
+ *       every existing reservation.</li>
  * </ul>
  */
 class PlanCommitConcurrencyRedesignTest {
@@ -318,10 +315,10 @@ class PlanCommitConcurrencyRedesignTest {
         assertTrue(response.getErrorMessage().contains("admission budget already expired"));
     }
 
-    // ==================== D-1: infeasible log carries phase + candidate counters ====================
+    // ==================== D-1: infeasible plan has metric + no side effects ====================
 
     @Test
-    void d1_infeasible_log_carries_phase_and_candidate_counters() throws Exception {
+    void d1_infeasible_plan_reports_metric_and_preserves_reservations() throws Exception {
         config.setAutoTpmDecodeReservedEvictEnabled(true);
         config.setDecodeConcurrencyLimit(4);
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
@@ -331,24 +328,18 @@ class PlanCommitConcurrencyRedesignTest {
         when(router.route(any(BalanceContext.class)))
                 .thenReturn(Response.error(StrategyErrorType.NO_DECODE_WORKER));
 
-        ch.qos.logback.classic.Logger flexlbLogger =
-                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("flexlbLogger");
-        ListAppender<ILoggingEvent> appender = new ListAppender<>();
-        appender.start();
-        flexlbLogger.addAppender(appender);
-        try {
-            scheduler.submit(context(400)).get(2, TimeUnit.SECONDS);
+        Response response = scheduler.submit(context(400)).get(2, TimeUnit.SECONDS);
 
-            List<String> messages = appender.list.stream()
-                    .map(ILoggingEvent::getFormattedMessage)
-                    .toList();
-            assertTrue(messages.stream().anyMatch(m -> m.contains("phase=decode_reserved")),
-                    "infeasible log must carry the plan phase, got: " + messages);
-            assertTrue(messages.stream().anyMatch(m -> m.contains("candidates_seen=")),
-                    "infeasible log must carry candidate counters, got: " + messages);
-        } finally {
-            flexlbLogger.detachAppender(appender);
-            appender.stop();
+        assertFalse(response.isSuccess());
+        assertEquals(AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+                response.getAdmissionRejectReason());
+        verify(priorityReporter).reportEvictionPlan(
+                50, "decode_slot_and_kv_full", "infeasible");
+        verify(priorityReporter, never()).reportEvictionCommit(
+                anyInt(), anyString(), anyString());
+        assertEquals(4, decodeEp.getInflightCount());
+        for (long id = 811; id <= 814; id++) {
+            assertTrue(decodeEp.reservedView().containsKey(id));
         }
     }
 

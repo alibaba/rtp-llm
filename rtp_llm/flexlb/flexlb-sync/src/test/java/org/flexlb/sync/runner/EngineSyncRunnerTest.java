@@ -11,6 +11,8 @@ import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.sync.status.WorkerGenerationFence;
+import org.flexlb.sync.status.WorkerGenerationManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -19,8 +21,8 @@ import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.LongAdder;
 
@@ -39,8 +41,7 @@ class EngineSyncRunnerTest {
 
     private final String modelName = "test-model";
 
-    @Mock
-    private Map<String, WorkerStatus> workerStatusMap;
+    private ConcurrentMap<String, WorkerStatus> workerStatusMap;
 
     @Mock
     private WorkerAddressService workerAddressService;
@@ -68,10 +69,17 @@ class EngineSyncRunnerTest {
     private final long syncEngineStatusInterval = 20L;
 
     private EngineSyncRunner engineSyncRunner;
+    private EndpointRegistry endpointRegistry;
+    private WorkerGenerationFence generationFence;
+    private WorkerGenerationManager generationManager;
 
     @BeforeEach
     void setUp() {
         workerStatusMap = new ConcurrentHashMap<>();
+        endpointRegistry = Mockito.mock(EndpointRegistry.class);
+        generationFence = new WorkerGenerationFence();
+        generationManager = new WorkerGenerationManager(
+                endpointRegistry, localKvCacheAwareManager, generationFence);
 
         engineSyncRunner = new EngineSyncRunner(
                 modelName,
@@ -86,7 +94,9 @@ class EngineSyncRunnerTest {
                 syncCount,
                 syncEngineStatusInterval,
                 null,
-                null
+                endpointRegistry,
+                generationManager,
+                generationFence
         );
     }
 
@@ -115,7 +125,9 @@ class EngineSyncRunnerTest {
                 syncCount,
                 syncEngineStatusInterval,
                 null,
-                null
+                endpointRegistry,
+                generationManager,
+                generationFence
         );
 
         // Execute
@@ -134,7 +146,8 @@ class EngineSyncRunnerTest {
                 modelName, workerStatusMap, workerAddressService, statusCheckExecutor,
                 engineHealthReporter, engineGrpcService, RoleType.VIT,
                 localKvCacheAwareManager, syncRequestTimeoutMs, syncCount,
-                syncEngineStatusInterval, null, null);
+                syncEngineStatusInterval, null, endpointRegistry,
+                generationManager, generationFence);
 
         runner.run();
 
@@ -147,7 +160,7 @@ class EngineSyncRunnerTest {
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         EndpointRegistry registry = new EndpointRegistry(
                 configService, () -> null, Mockito.mock(BatchSchedulerReporter.class));
-        Map<String, WorkerStatus> statuses = new ConcurrentHashMap<>();
+        ConcurrentMap<String, WorkerStatus> statuses = new ConcurrentHashMap<>();
         String ipPort = "127.0.0.1:8080";
         WorkerStatus status = new WorkerStatus();
         status.setRole(RoleType.PREFILL);
@@ -165,7 +178,10 @@ class EngineSyncRunnerTest {
                 modelName, statuses, workerAddressService, statusCheckExecutor,
                 engineHealthReporter, engineGrpcService, RoleType.PREFILL,
                 localKvCacheAwareManager, syncRequestTimeoutMs, syncCount,
-                syncEngineStatusInterval, null, registry);
+                syncEngineStatusInterval, null, registry,
+                new WorkerGenerationManager(
+                        registry, localKvCacheAwareManager, generationFence),
+                generationFence);
         runner.run();
 
         assertFalse(status.isAlive());
@@ -189,7 +205,9 @@ class EngineSyncRunnerTest {
                 syncCount,
                 syncEngineStatusInterval,
                 null,
-                null
+                endpointRegistry,
+                generationManager,
+                generationFence
         );
         when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
                 .thenReturn(List.of(new WorkerHost("127.0.0.1", 61000)));

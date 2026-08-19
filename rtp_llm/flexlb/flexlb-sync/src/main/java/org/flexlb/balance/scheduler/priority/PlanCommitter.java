@@ -1,7 +1,6 @@
 package org.flexlb.balance.scheduler.priority;
 
 import org.flexlb.balance.scheduler.WorkerBatcher;
-import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
 /**
@@ -47,53 +46,41 @@ public class PlanCommitter {
         OFFER_FAILED
     }
 
-    /** Legacy entry point — the versioned (optimistic-concurrency) protocol. */
-    public CommitResult commit(NormalPlacementPlan plan, InflightRegistrar registrar) {
-        return commit(plan, registrar, false);
-    }
-
     public CommitResult commit(NormalPlacementPlan plan, InflightRegistrar registrar,
                                boolean lockfree) {
         if (!lockfree && plan.decodeEp() != null
                 && plan.decodeEp().admissionVersion() != plan.decodeAdmissionVersion()) {
-            Logger.debug("[auto-tpm] commit version mismatch (decode admission), request_id={}",
-                    plan.envelope().requestId());
             return CommitResult.VERSION_MISMATCH;
         }
-        if (!registrar.registerInflight(plan.item())) {
-            Logger.warn("[auto-tpm] commit failed: duplicate request_id={}",
-                    plan.envelope().requestId());
+        InflightRegistration registration =
+                InflightRegistration.tryRegister(registrar, plan.item());
+        if (registration == null) {
             return CommitResult.OFFER_FAILED;
         }
-        if (lockfree) {
-            // N3 §3.3: no version checks — queue-full/stopped are decided
-            // locally and atomically inside the offer's queueLock section.
-            if (!plan.prefillEp().getBatcher().tryOffer(plan.item())) {
-                registrar.unregisterInflight(plan.item());
-                Logger.debug("[auto-tpm] commit offer failed (batcher stopped/full), request_id={}",
-                        plan.envelope().requestId());
-                return CommitResult.OFFER_FAILED;
-            }
-            return CommitResult.SUCCESS;
-        }
-        // Version check + enqueue in one queueLock critical section.
-        WorkerBatcher.OfferAtVersionResult offer = plan.prefillEp().getBatcher()
-                .offerAtVersion(plan.item(), plan.prefillQueueVersion());
-        switch (offer) {
-            case VERSION_MISMATCH -> {
-                registrar.unregisterInflight(plan.item());
-                Logger.debug("[auto-tpm] commit version mismatch (prefill queue), request_id={}",
-                        plan.envelope().requestId());
-                return CommitResult.VERSION_MISMATCH;
-            }
-            case OFFER_FAILED -> {
-                registrar.unregisterInflight(plan.item());
-                Logger.debug("[auto-tpm] commit offer failed (batcher stopped/full), request_id={}",
-                        plan.envelope().requestId());
-                return CommitResult.OFFER_FAILED;
-            }
-            default -> {
+        try (registration) {
+            if (lockfree) {
+                // N3 §3.3: no version checks — queue-full/stopped are decided
+                // locally and atomically inside the offer's queueLock section.
+                if (!plan.prefillEp().getBatcher().tryOffer(plan.item())) {
+                    return CommitResult.OFFER_FAILED;
+                }
+                registration.handoffToQueue();
                 return CommitResult.SUCCESS;
+            }
+            // Version check + enqueue in one queueLock critical section.
+            WorkerBatcher.OfferAtVersionResult offer = plan.prefillEp().getBatcher()
+                    .offerAtVersion(plan.item(), plan.prefillQueueVersion());
+            switch (offer) {
+                case VERSION_MISMATCH -> {
+                    return CommitResult.VERSION_MISMATCH;
+                }
+                case OFFER_FAILED -> {
+                    return CommitResult.OFFER_FAILED;
+                }
+                default -> {
+                    registration.handoffToQueue();
+                    return CommitResult.SUCCESS;
+                }
             }
         }
     }

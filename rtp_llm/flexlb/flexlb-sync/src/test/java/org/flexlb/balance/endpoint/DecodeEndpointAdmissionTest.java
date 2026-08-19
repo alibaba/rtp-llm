@@ -229,6 +229,33 @@ class DecodeEndpointAdmissionTest {
         assertEquals(0, endpoint.inflightHardKvReserved());
     }
 
+    @Test
+    void lightweightActivityRefreshRenewsConfirmedTtlWithoutInvalidatingAdmissionSnapshot()
+            throws InterruptedException {
+        TaskInfo running = new TaskInfo();
+        running.setRequestId(1L);
+        running.setPhase(TaskPhase.RUNNING);
+        updateStatus(Map.of("1", running), null, 10_000);
+        long admissionVersion = endpoint.admissionVersion();
+        DecodeTaskPhase phase = endpoint.layeredAdmissionView().confirmed().get(0).phase();
+        Thread.sleep(150);
+        running.setPhase(TaskPhase.KV_ALLOCATED);
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRunningTaskInfo(Map.of("1", running));
+
+        endpoint.refreshWorkerStatusActivity(status, response);
+
+        assertEquals(admissionVersion, endpoint.admissionVersion(),
+                "heartbeat-only refresh must not invalidate Auto-TPM admission snapshots");
+        assertEquals(phase, endpoint.layeredAdmissionView().confirmed().get(0).phase(),
+                "equal-version refresh must not mutate the versioned phase view");
+        endpoint.evictExpiredRequests(100);
+        assertTrue(endpoint.isConfirmedTracked(1L),
+                "the refreshed confirmed task must survive inactivity eviction");
+        assertEquals(admissionVersion, endpoint.admissionVersion());
+        assertEquals(1, endpoint.getTotalLoad());
+    }
+
     // ==================== helpers ====================
 
     private void updateStatus(Map<String, TaskInfo> running, Map<String, TaskInfo> finished,
@@ -237,6 +264,6 @@ class DecodeEndpointAdmissionTest {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRunningTaskInfo(running);
         response.setFinishedTaskInfo(finished);
-        endpoint.onWorkerStatusUpdate(status, response);
+        endpoint.applyWorkerStatusResponse(status, response);
     }
 }

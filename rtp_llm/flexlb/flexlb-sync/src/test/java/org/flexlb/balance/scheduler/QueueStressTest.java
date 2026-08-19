@@ -229,9 +229,9 @@ class QueueStressTest {
     // ==================== P0-2: WorkerBatcher concurrent overshoot (PR-B) ====================
 
     /**
-     * N threads concurrently tryOffer into a queue with maxSize=10. The CAS-based
-     * {@code reserveQueueSlot} must guarantee that {@code queueDepth} never exceeds
-     * maxSize — no unbounded overshoot is allowed.
+     * N threads concurrently tryOffer into a queue with maxSize=10. The final
+     * queue-lock transaction must validate charged depth and enqueue atomically,
+     * so {@code queueDepth} never exceeds maxSize.
      */
     @Test
     void concurrentOffer_queueDepthNeverExceedsMaxSize() throws Exception {
@@ -282,7 +282,7 @@ class QueueStressTest {
             t.join(5_000);
         }
 
-        // CAS-based reserveQueueSlot guarantees no overshoot
+        // Locked capacity check + enqueue guarantees no overshoot.
         assertTrue(batcher.queueSize() <= maxSize,
                 "queueSize=" + batcher.queueSize() + " must never exceed maxSize=" + maxSize);
         assertEquals(maxSize, successCount.get(),

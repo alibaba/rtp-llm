@@ -71,6 +71,15 @@ final class BatchInflight implements InflightEvictor.TtlTracked {
         return requests;
     }
 
+    boolean containsCurrentRequest(long requestId) {
+        for (BatchItem request : requests) {
+            if (request.requestId() == requestId) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     @Override
     public long createdAtMs() {
         return createdAtMs;

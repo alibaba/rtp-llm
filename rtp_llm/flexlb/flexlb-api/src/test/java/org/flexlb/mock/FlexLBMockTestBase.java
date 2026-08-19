@@ -7,8 +7,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.balance.scheduler.Router;
-import org.flexlb.cache.core.EngineLocalView;
-import org.flexlb.cache.core.GlobalCacheIndex;
+import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -39,6 +38,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -81,6 +81,7 @@ public abstract class FlexLBMockTestBase {
     protected DefaultBatchDispatcher dispatcher;
     protected BatchSchedulerReporter reporter;
     protected EngineWorkerStatus engineWorkerStatus;
+    protected EngineCancelChannel cancelChannel;
 
     private NioEventLoopGroup eventLoopGroup;
     private ThreadPoolExecutor grpcExecutor;
@@ -141,18 +142,19 @@ public abstract class FlexLBMockTestBase {
 
         CustomNameResolver nameResolver = (listener) -> { /* no-op */ };
         GrpcReporter grpcReporter = mock(GrpcReporter.class);
-        EngineLocalView engineLocalView = mock(EngineLocalView.class);
-        GlobalCacheIndex globalCacheIndex = mock(GlobalCacheIndex.class);
-
         grpcClient = new EngineGrpcClient(
-                nameResolver, grpcExecutor, eventLoopGroup,
-                engineLocalView, globalCacheIndex, grpcReporter);
+                nameResolver, grpcExecutor, eventLoopGroup, grpcReporter);
 
         // 4. Create real dispatcher
         dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
 
         // 5. Mock reporter (metrics no-op)
         reporter = mock(BatchSchedulerReporter.class);
+        cancelChannel = mock(EngineCancelChannel.class);
+        when(cancelChannel.isSupported(any(DecodeEndpoint.class))).thenReturn(true);
+        when(cancelChannel.cancel(any(), anyLong(), anyLong())).thenReturn(
+                CompletableFuture.completedFuture(
+                        EngineCancelChannel.CancelOutcome.tombstoned()));
 
         // 6. Create real EndpointRegistry (scheduler=null for now, replaced below)
         endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
@@ -192,7 +194,7 @@ public abstract class FlexLBMockTestBase {
         // 11. Create real scheduler
         scheduler = new FlexlbBatchScheduler(
                 configService, router,
-                endpointRegistry, dispatcher, reporter, null, null);
+                endpointRegistry, dispatcher, reporter, null, null, cancelChannel);
 
         // 12. Register prefill endpoint with the real scheduler as BatchDecisionHandler
         endpointRegistry.ensureEndpoint(RoleType.PREFILL, prefillIpPort, prefillWs);
@@ -268,9 +270,26 @@ public abstract class FlexLBMockTestBase {
         Router fixedRouter = mock(Router.class);
         when(fixedRouter.route(any(BalanceContext.class))).thenAnswer(inv -> {
             BalanceContext ctx = inv.getArgument(0);
+            reserveDecodeForRoute(ctx);
             return successRoute(ctx.getRequestId());
         });
         return fixedRouter;
+    }
+
+    /**
+     * Reproduce the ownership side effect performed by the production Decode strategy.
+     * A fixed test router that only returns an address would otherwise manufacture a
+     * route that no Decode endpoint owns, which the scheduler correctly rejects before
+     * sending the Prefill batch.
+     */
+    protected void reserveDecodeForRoute(BalanceContext ctx) {
+        DecodeEndpoint endpoint = getDecodeEndpoint();
+        if (endpoint == null) {
+            return;
+        }
+        Request request = ctx.getRequest();
+        endpoint.reserve(request.getRequestId(), request.getSeqLen(),
+                request.getSeqLen() + request.getMaxNewTokens());
     }
 
     /**
@@ -405,7 +424,7 @@ public abstract class FlexLBMockTestBase {
         ws.setTotalKvCacheTokens(new AtomicLong(2_000_000_000L));
 
         DecodeEndpoint endpoint = (DecodeEndpoint) endpointRegistry.ensureEndpoint(RoleType.DECODE, ipPort, ws);
-        endpoint.onWorkerStatusUpdate(ws, new WorkerStatusResponse());
+        endpoint.applyWorkerStatusResponse(ws, new WorkerStatusResponse());
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(ipPort, ws);
         additionalDecodeIpPorts.add(ipPort);
         return endpoint;

@@ -136,7 +136,7 @@ class DecodeEvictionSchedulerTest {
         // Calibrate once so reportedKvAvailable reflects the engine report
         // (plenty of KV: only the slot dimension is ever in deficit here).
         endpointRegistry.getDecode(DECODE_IP_PORT)
-                .onWorkerStatusUpdate(decodeWs, new WorkerStatusResponse());
+                .applyWorkerStatusResponse(decodeWs, new WorkerStatusResponse());
     }
 
     @AfterEach

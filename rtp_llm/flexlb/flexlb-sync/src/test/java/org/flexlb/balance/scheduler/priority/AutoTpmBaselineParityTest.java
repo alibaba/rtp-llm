@@ -6,6 +6,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.BatchDispatcher;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -310,12 +311,14 @@ class AutoTpmBaselineParityTest {
                     endpointRegistry, dispatcher, reporter, priorityScheduler, null);
 
             WorkerStatus prefillWs = new WorkerStatus();
+            prefillWs.setRole(RoleType.PREFILL);
             prefillWs.setIp("10.0.0.1");
             prefillWs.setPort(8080);
             prefillWs.setGrpcPort(8081);
             endpointRegistry.ensureEndpoint(RoleType.PREFILL, PREFILL_IP_PORT, prefillWs);
 
             WorkerStatus decodeWs = new WorkerStatus();
+            decodeWs.setRole(RoleType.DECODE);
             decodeWs.setIp("10.0.0.2");
             decodeWs.setPort(8081);
             decodeWs.setGrpcPort(8082);
@@ -323,7 +326,7 @@ class AutoTpmBaselineParityTest {
             decodeWs.setTotalKvCacheTokens(new AtomicLong(2_000_000L));
             endpointRegistry.ensureEndpoint(RoleType.DECODE, DECODE_IP_PORT, decodeWs);
             endpointRegistry.getDecode(DECODE_IP_PORT)
-                    .onWorkerStatusUpdate(decodeWs, new WorkerStatusResponse());
+                    .applyWorkerStatusResponse(decodeWs, new WorkerStatusResponse());
         }
 
         static void enableAll(FlexlbConfig cfg) {
@@ -388,17 +391,30 @@ class AutoTpmBaselineParityTest {
             task.setRequestId(requestId);
             task.setPhase(phase);
             task.setInputLength(128);
+            if (role == RoleType.PREFILL) {
+                RequestLifecycleSnapshot lifecycle =
+                        scheduler.getRequestState(requestId, 0);
+                if (lifecycle != null && lifecycle.batchId() > 0) {
+                    task.setBatchId(lifecycle.batchId());
+                }
+            }
             WorkerStatusResponse response = new WorkerStatusResponse();
             response.setRole(role);
             response.setRunningTaskInfo(Map.of(String.valueOf(requestId), task));
+            WorkerStatus source;
             if (role == RoleType.DECODE) {
-                endpointRegistry.getDecode(DECODE_IP_PORT)
-                        .onWorkerStatusUpdate(new WorkerStatus(), response);
+                DecodeEndpoint endpoint = endpointRegistry.getDecode(DECODE_IP_PORT);
+                source = endpoint.getStatus();
+                endpoint.applyWorkerStatusResponse(source, response);
             } else if (role == RoleType.PREFILL) {
-                endpointRegistry.getPrefill(PREFILL_IP_PORT)
-                        .onWorkerStatusUpdate(new WorkerStatus(), response);
+                PrefillEndpoint endpoint = endpointRegistry.getPrefill(PREFILL_IP_PORT);
+                source = endpoint.getStatus();
+                endpoint.applyWorkerStatusResponse(source, response);
+            } else {
+                throw new IllegalArgumentException("unsupported test role " + role);
             }
-            scheduler.onWorkerStatusUpdate(response);
+            scheduler.recordRequestActivity(source, response);
+            scheduler.updateRequestLifecycleFromWorkerStatus(source, response);
         }
 
         int activeLeaseCount() {

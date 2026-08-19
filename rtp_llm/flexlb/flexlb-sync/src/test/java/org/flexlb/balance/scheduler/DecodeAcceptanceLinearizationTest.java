@@ -79,6 +79,7 @@ class DecodeAcceptanceLinearizationTest {
                 dispatcher, reporter, null, null, cancelChannel);
 
         WorkerStatus prefillStatus = new WorkerStatus();
+        prefillStatus.setRole(RoleType.PREFILL);
         prefillStatus.setIp("10.0.0.1");
         prefillStatus.setPort(8080);
         prefillStatus.setGrpcPort(8081);
@@ -86,6 +87,7 @@ class DecodeAcceptanceLinearizationTest {
         prefillEndpoint = endpointRegistry.getPrefill(PREFILL_IP_PORT);
 
         WorkerStatus decodeStatus = new WorkerStatus();
+        decodeStatus.setRole(RoleType.DECODE);
         decodeStatus.setIp("10.0.0.2");
         decodeStatus.setPort(8081);
         decodeStatus.setGrpcPort(8082);
@@ -245,14 +247,15 @@ class DecodeAcceptanceLinearizationTest {
     void racingDecodeFinishedErrorAndFailedAckCannotPublishScheduleSuccess()
             throws Exception {
         WorkerStatusResponse finished = decodeFinishedError();
+        WorkerStatus decodeSource = decodeEndpoint.getStatus();
         endpointRegistry.getDecode(DECODE_IP_PORT)
-                .onWorkerStatusUpdate(new WorkerStatus(), finished);
+                .applyWorkerStatusResponse(decodeSource, finished);
         CountDownLatch start = new CountDownLatch(1);
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
             Future<?> worker = executor.submit(() -> {
                 await(start);
-                scheduler.onWorkerStatusUpdate(finished);
+                applySchedulerStatus(decodeSource, finished);
             });
             Future<?> ack = executor.submit(() -> {
                 await(start);
@@ -275,9 +278,10 @@ class DecodeAcceptanceLinearizationTest {
 
     private void reportDecodeFinishedError() {
         WorkerStatusResponse response = decodeFinishedError();
+        WorkerStatus decodeSource = decodeEndpoint.getStatus();
         endpointRegistry.getDecode(DECODE_IP_PORT)
-                .onWorkerStatusUpdate(new WorkerStatus(), response);
-        scheduler.onWorkerStatusUpdate(response);
+                .applyWorkerStatusResponse(decodeSource, response);
+        applySchedulerStatus(decodeSource, response);
     }
 
     private WorkerStatusResponse decodeFinishedError() {
@@ -322,11 +326,22 @@ class DecodeAcceptanceLinearizationTest {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(role);
         response.setRunningTaskInfo(Map.of(String.valueOf(REQUEST_ID), task));
+        WorkerStatus source;
         if (role == RoleType.DECODE) {
+            source = decodeEndpoint.getStatus();
             endpointRegistry.getDecode(DECODE_IP_PORT)
-                    .onWorkerStatusUpdate(new WorkerStatus(), response);
+                    .applyWorkerStatusResponse(source, response);
+        } else {
+            source = new WorkerStatus();
+            source.setRole(role);
         }
-        scheduler.onWorkerStatusUpdate(response);
+        applySchedulerStatus(source, response);
+    }
+
+    private void applySchedulerStatus(WorkerStatus source,
+                                      WorkerStatusResponse response) {
+        scheduler.recordRequestActivity(source, response);
+        scheduler.updateRequestLifecycleFromWorkerStatus(source, response);
     }
 
     private BatchItem item() {

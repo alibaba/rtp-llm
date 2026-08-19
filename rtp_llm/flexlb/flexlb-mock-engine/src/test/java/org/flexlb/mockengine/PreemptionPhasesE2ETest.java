@@ -7,17 +7,10 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.dao.master.TaskInfo;
-import org.flexlb.dao.master.WorkerStatusResponse;
-import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.enums.TaskPhase;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -133,27 +126,35 @@ class PreemptionPhasesE2ETest {
             h.config.setAutoTpmDecodeAcceptedEvictEnabled(true);
             h.config.setDecodeConcurrencyLimit(1);
             h.config.setFlexlbBatchWindowMs(10_000);
-            h.config.setFlexlbBatchSizeMax(100);
+            h.config.setFlexlbBatchSizeMax(1);
             h.config.setAutoTpmCancelCompletionTimeoutMs(3_000);
 
             DecodeEndpoint decodeEp = h.decodeEndpoint(0);
             JavaMockEngineCluster.FastRpcService prefillEngine = h.prefillEngines.get(0);
             JavaMockEngineCluster.FastRpcService decodeEngine = h.decodeEngines.get(0);
 
-            // victim P30 进入 reserved
-            CompletableFuture<Response> low = h.scheduler.submit(h.context(301, 30));
-            assertTrue(decodeEp.reservedView().containsKey(301L));
+            CompletableFuture<Void> lowAckGate = h.holdNextBatchAck();
 
-            // decode mock 真实持有该请求（KV 已分配、decode 长跑不自然完成）
-            startDecodeTask(prefillEngine, decodeEngine, 301, 128);
+            // victim P30 真实派发；只延迟 ACK，不阻塞 Prefill -> Decode 执行
+            CompletableFuture<Response> low = h.scheduler.submit(h.context(301, 30));
+            AutoTpmE2EHarness.await(() -> {
+                var state = h.scheduler.getRequestState(301, 0);
+                return state != null && state.batchId() > 0;
+            }, 2_000, "victim must acquire a real Prefill batch generation");
             AutoTpmE2EHarness.await(() -> decodeEngine.getRunningCount() >= 1, 2_000,
                     "victim running on decode mock");
 
-            // 引擎确认 accepted（kv_allocated）—— mock 引擎不上报 KV_ALLOCATED 阶段，
-            // 该确认按生产 WorkerStatus 语义手工注入
-            confirmAccepted(h, 301, 128);
-            assertEquals(1, decodeEp.getAcceptedLayerCount());
+            AutoTpmE2EHarness.await(() -> {
+                h.pumpOnce();
+                return decodeEp.isConfirmedTracked(301L);
+            }, 2_000, "WorkerStatus must confirm the real Decode owner");
+            assertTrue(decodeEp.isConfirmedTracked(301L));
+            assertEquals(1, decodeEp.getRunningLayerCount());
             assertFalse(low.isDone());
+
+            // Hold subsequent traffic in the batcher while high priority admission
+            // waits for the real Cancel completion.
+            h.config.setFlexlbBatchSizeMax(100);
 
             // 高优提交放到后台线程：commit 会同步等待 cancel 释放确认
             CompletableFuture<Response> high;
@@ -169,8 +170,11 @@ class PreemptionPhasesE2ETest {
             assertFalse(low.isDone(),
                     "victim must NOT get its terminal before the engine confirms the release (iron rule 4)");
 
-            // 泵回真实 WorkerStatus：CANCELLED completion → 释放确认 + 8429 归因
-            h.pumpOnce();
+            // 泵回真实 WorkerStatus，直到 Prefill typed-CANCELED 结算 victim。
+            AutoTpmE2EHarness.await(() -> {
+                h.pumpOnce();
+                return low.isDone();
+            }, 3_000, "typed Prefill cancel must settle the victim");
 
             submitter.join(5_000);
             high = highRef.get();
@@ -189,6 +193,9 @@ class PreemptionPhasesE2ETest {
             assertFalse(high.isDone(), "high request waits in the batcher (window held open)");
             assertEquals(1, decodeEp.getInflightCount());
 
+            // Late successful ACK belongs to an already-terminal lifecycle and is a no-op.
+            lowAckGate.complete(null);
+
             // 引擎侧无泄漏
             assertEquals(0, decodeEngine.getRunningCount());
             assertEquals(1, decodeEngine.getCancelledCount());
@@ -206,7 +213,7 @@ class PreemptionPhasesE2ETest {
             h.config.setAutoTpmDecodeAcceptedEvictEnabled(true);
             h.config.setDecodeConcurrencyLimit(1);
             h.config.setFlexlbBatchWindowMs(10_000);
-            h.config.setFlexlbBatchSizeMax(100);
+            h.config.setFlexlbBatchSizeMax(1);
             // 短等待窗口 + 不泵 → 引擎释放永远得不到确认 → 超时
             h.config.setAutoTpmCancelCompletionTimeoutMs(100);
 
@@ -214,12 +221,22 @@ class PreemptionPhasesE2ETest {
             JavaMockEngineCluster.FastRpcService prefillEngine = h.prefillEngines.get(0);
             JavaMockEngineCluster.FastRpcService decodeEngine = h.decodeEngines.get(0);
 
+            CompletableFuture<Void> lowAckGate = h.holdNextBatchAck();
             CompletableFuture<Response> low = h.scheduler.submit(h.context(311, 30));
-            startDecodeTask(prefillEngine, decodeEngine, 311, 128);
+            AutoTpmE2EHarness.await(() -> {
+                var state = h.scheduler.getRequestState(311, 0);
+                return state != null && state.batchId() > 0;
+            }, 2_000, "victim must acquire a real Prefill batch generation");
             AutoTpmE2EHarness.await(() -> decodeEngine.getRunningCount() >= 1, 2_000,
                     "victim running on decode mock");
-            confirmAccepted(h, 311, 128);
-            assertEquals(1, decodeEp.getAcceptedLayerCount());
+            AutoTpmE2EHarness.await(() -> {
+                h.pumpOnce();
+                return decodeEp.isConfirmedTracked(311L);
+            }, 2_000, "WorkerStatus must confirm the real Decode owner");
+            assertTrue(decodeEp.isConfirmedTracked(311L));
+            assertEquals(1, decodeEp.getRunningLayerCount());
+
+            h.config.setFlexlbBatchSizeMax(100);
 
             CompletableFuture<Response> high = h.scheduler.submit(h.context(312, 70));
 
@@ -236,10 +253,14 @@ class PreemptionPhasesE2ETest {
 
             // victim 保持 CANCEL_REQUESTED，等 WorkerStatus 迟到确认 → 8429 late confirm
             assertFalse(low.isDone());
-            h.pumpOnce();
+            AutoTpmE2EHarness.await(() -> {
+                h.pumpOnce();
+                return low.isDone();
+            }, 3_000, "late typed Prefill cancel must settle the victim");
             Response victim = low.get(2, TimeUnit.SECONDS);
             assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(), victim.getCode(),
                     "late CANCELLED confirm still attributes 8429");
+            lowAckGate.complete(null);
 
             // 无泄漏：确认层清空、引擎无 running、调度器 inflight 只剩尚未派发的项
             assertFalse(decodeEp.isConfirmedTracked(311L));
@@ -291,50 +312,4 @@ class PreemptionPhasesE2ETest {
         }
     }
 
-    // ==================== helpers ====================
-
-    /** 把 victim 作为长跑 decode 任务放进 decode mock（KV 已分配、可被 Cancel）。 */
-    private static void startDecodeTask(JavaMockEngineCluster.FastRpcService prefillEngine,
-                                        JavaMockEngineCluster.FastRpcService decodeEngine,
-                                        long requestId, int inputTokens) {
-        // The scheduler has not dispatched the held-open Prefill batch in this
-        // scenario, so model the exact P->D hand-off explicitly. Cancel still
-        // targets this Prefill and may reach only this Decode owner.
-        prefillEngine.registerDecodeOwnership(requestId, decodeEngine);
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(1)
-                        .build());
-        for (int token = 0; token < inputTokens; token++) {
-            input.addTokenIds(token);
-        }
-        decodeEngine.generateStreamCall(input.build(), new io.grpc.stub.StreamObserver<>() {
-            @Override
-            public void onNext(EngineRpcService.GenerateOutputsPB value) {
-            }
-
-            @Override
-            public void onError(Throwable t) {
-            }
-
-            @Override
-            public void onCompleted() {
-            }
-        });
-    }
-
-    /** 引擎 KV_ALLOCATED 确认（accepted 层）—— 生产 calibrate 语义的手工注入。 */
-    private static void confirmAccepted(AutoTpmE2EHarness h, long requestId, long inputLength) {
-        TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
-        task.setPhase(TaskPhase.KV_ALLOCATED);
-        task.setInputLength(inputLength);
-        Map<String, TaskInfo> running = new HashMap<>();
-        running.put(String.valueOf(requestId), task);
-        WorkerStatusResponse resp = new WorkerStatusResponse();
-        resp.setRole(RoleType.DECODE);
-        resp.setRunningTaskInfo(running);
-        h.decodeEndpoint(0).onWorkerStatusUpdate(h.decodeEndpoint(0).getStatus(), resp);
-    }
 }
