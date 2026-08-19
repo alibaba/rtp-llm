@@ -190,6 +190,9 @@ class KVCache:
     def get_layer_cache(self, arg0: int, arg1: str) -> LayerKVCache:
         """Return a LayerKVCache for the given layer and tag."""
         ...
+    def has_layer_cache(self, arg0: int, arg1: str) -> bool:
+        """Return whether the layer owns an allocated cache tensor for the tag."""
+        ...
     def get_layer_cache_groups(self, arg0: int) -> list[LayerKVCache]:
         """Return all LayerKVCache objects for every group the layer owns."""
         ...

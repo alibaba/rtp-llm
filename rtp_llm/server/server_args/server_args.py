@@ -135,6 +135,7 @@ class EnvArgumentGroup:
         self,
         *args,
         env_name: Optional[str] = None,
+        env_aliases: Optional[Sequence[str]] = None,
         bind_to: Optional[
             Union[Tuple[Any, str], str, List[Union[Tuple[Any, str], str]]]
         ] = None,
@@ -165,7 +166,7 @@ class EnvArgumentGroup:
             self._parser._register_config_binding(action, bind_to)
 
         # 保留 env 映射（用于兼容和日志）
-        self._parser._register_env_mapping(action, args, env_name)
+        self._parser._register_env_mapping(action, args, env_name, env_aliases)
         return action
 
     def __getattr__(self, name):
@@ -174,6 +175,7 @@ class EnvArgumentGroup:
 
 class EnvArgumentParser(argparse.ArgumentParser):
     _env_mappings: Dict[str, str] = {}
+    _env_alias_mappings: Dict[str, Tuple[str, ...]] = {}
 
     def __init__(self, *args, env_prefix: str = "", **kwargs):
         self.env_prefix = env_prefix.upper()
@@ -213,14 +215,18 @@ class EnvArgumentParser(argparse.ArgumentParser):
         return EnvArgumentGroup(group, self)
 
     def add_argument(
-        self, *args, env_name: Optional[str] = None, **kwargs
+        self,
+        *args,
+        env_name: Optional[str] = None,
+        env_aliases: Optional[Sequence[str]] = None,
+        **kwargs,
     ) -> argparse.Action:
         if args and isinstance(args[0], str) and not args[0].startswith("-"):
             action = self._positionals.add_argument(*args, **kwargs)
         else:
             action = self._optionals.add_argument(*args, **kwargs)
 
-        self._register_env_mapping(action, args, env_name)
+        self._register_env_mapping(action, args, env_name, env_aliases)
         return action
 
     def _register_env_mapping(
@@ -228,6 +234,7 @@ class EnvArgumentParser(argparse.ArgumentParser):
         action: argparse.Action,
         args: Sequence[Any],
         env_name: Optional[str] = None,
+        env_aliases: Optional[Sequence[str]] = None,
     ) -> None:
         effective_env_name = env_name
         if effective_env_name is None:
@@ -248,6 +255,24 @@ class EnvArgumentParser(argparse.ArgumentParser):
             full_env_name = effective_env_name
 
         EnvArgumentParser._env_mappings[action.dest] = full_env_name
+        EnvArgumentParser._env_alias_mappings[action.dest] = tuple(
+            f"{self.env_prefix}_{alias.upper().replace('-', '_')}"
+            if self.env_prefix
+            else alias.upper().replace("-", "_")
+            for alias in (env_aliases or ())
+        )
+
+    def _get_env_value(
+        self, dest: str, primary_env_name: str
+    ) -> Tuple[str, Optional[str]]:
+        """Return the first configured value, preferring the canonical name."""
+        for env_name in (
+            primary_env_name,
+            *self._env_alias_mappings.get(dest, ()),
+        ):
+            if env_name in os.environ:
+                return env_name, os.environ[env_name]
+        return primary_env_name, None
 
     def parse_args(
         self,
@@ -267,7 +292,7 @@ class EnvArgumentParser(argparse.ArgumentParser):
                 args = []
                 # Read values from environment variables for all registered arguments
                 for dest, env_name in self._env_mappings.items():
-                    env_value = os.environ.get(env_name)
+                    _, env_value = self._get_env_value(dest, env_name)
                     if env_value is not None:
                         # Find the action for this dest
                         action = None
@@ -343,7 +368,7 @@ class EnvArgumentParser(argparse.ArgumentParser):
             for dest, env_name in self._env_mappings.items():
                 # Only set from environment if the value wasn't provided via command line
                 if dest not in provided_args:
-                    env_value = os.environ.get(env_name)
+                    resolved_env_name, env_value = self._get_env_value(dest, env_name)
                     if env_value is not None:
                         # Find the action to get the type converter
                         action = None
@@ -362,7 +387,9 @@ class EnvArgumentParser(argparse.ArgumentParser):
                                     converted_value = action.type(env_value)
                                     setattr(parsed_args, dest, converted_value)
                                 except argparse.ArgumentTypeError as error:
-                                    self.error(f"{env_name} ({dest}): {error}")
+                                    self.error(
+                                        f"{resolved_env_name} ({dest}): {error}"
+                                    )
                                 except (ValueError, TypeError):
                                     # If conversion fails, skip this value
                                     pass

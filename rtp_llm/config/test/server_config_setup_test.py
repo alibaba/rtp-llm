@@ -69,16 +69,16 @@ class GenerateConfigTest(TestCase):
             "LOCAL_WORLD_SIZE": "1",
             "START_PORT": "20000",
             "MODEL_TYPE": "fake_model",
-            "ENABLE_MEMORY_CACHE_DISK": "1",
-            "MEMORY_CACHE_DISK_PATHS": "/tmp/cache-a,/tmp/cache-b",
-            "MEMORY_CACHE_DISK_SIZE_MB": "4096",
-            "MEMORY_CACHE_DISK_BUFFERED_IO": "0",
-            "MEMORY_CACHE_DISK_SYNC_TIMEOUT_MS": "12345",
-            "ENABLE_GPU_PREFIX_TREE": "1",
-            "ENABLE_PREFIX_TREE_MEMORY_CACHE": "1",
-            "ENABLE_LEGACY_MEMORY_CONNECTOR_FALLBACK": "0",
-            "PREFIX_TREE_MEMORY_STATE_SWA_POOL_RATIO": "25",
-            "ENABLE_INDEPENDENT_GROUP_EVICTION": "1",
+            "ENABLE_DISK_CACHE": "1",
+            "DISK_CACHE_PATHS": "/tmp/cache-a,/tmp/cache-b",
+            "DISK_CACHE_SIZE_MB": "4096",
+            "DISK_CACHE_BUFFERED_IO": "0",
+            "DISK_CACHE_SYNC_TIMEOUT_MS": "12345",
+            "DISK_CACHE_STAGING_BLOCK_COUNT": "8",
+            "ENABLE_HOST_CACHE": "1",
+            "ENABLE_HOST_CACHE_PINNED": "0",
+            "HOST_CACHE_SIZE_MB": "2048",
+            "HOST_CACHE_SYNC_TIMEOUT_MS": "6789",
         },
         clear=True,
     )
@@ -86,23 +86,146 @@ class GenerateConfigTest(TestCase):
         py_env_configs: PyEnvConfigs = setup_args()
         config = py_env_configs.kv_cache_config
 
-        self.assertTrue(config.enable_memory_cache_disk)
-        self.assertEqual(config.memory_cache_disk_paths, "/tmp/cache-a,/tmp/cache-b")
-        self.assertEqual(config.memory_cache_disk_size_mb, 4096)
-        self.assertFalse(config.memory_cache_disk_buffered_io)
-        self.assertEqual(config.memory_cache_disk_sync_timeout_ms, 12345)
-        self.assertTrue(config.enable_gpu_prefix_tree)
-        self.assertTrue(config.enable_prefix_tree_memory_cache)
-        self.assertFalse(config.enable_legacy_memory_connector_fallback)
-        self.assertEqual(config.prefix_tree_memory_state_swa_pool_ratio, 25)
-        self.assertTrue(config.enable_independent_group_eviction)
+        self.assertTrue(config.enable_disk_cache)
+        self.assertEqual(config.disk_cache_paths, "/tmp/cache-a,/tmp/cache-b")
+        self.assertEqual(config.disk_cache_size_mb, 4096)
+        self.assertFalse(config.disk_cache_buffered_io)
+        self.assertEqual(config.disk_cache_sync_timeout_ms, 12345)
+        self.assertEqual(config.disk_cache_staging_block_count, 8)
+        self.assertTrue(config.enable_host_cache)
+        self.assertFalse(config.enable_host_cache_pinned)
+        self.assertEqual(config.host_cache_size_mb, 2048)
+        self.assertEqual(config.host_cache_sync_timeout_ms, 6789)
 
     def test_kv_cache_strategy_defaults_are_rollback_safe(self):
         config = PyEnvConfigs().kv_cache_config
 
-        self.assertFalse(config.enable_gpu_prefix_tree)
-        self.assertFalse(config.enable_prefix_tree_memory_cache)
-        self.assertTrue(config.enable_legacy_memory_connector_fallback)
+        self.assertFalse(config.enable_host_cache)
+        self.assertTrue(config.enable_host_cache_pinned)
+        self.assertEqual(config.disk_cache_staging_block_count, 4)
+        self.assertEqual(config.device_eviction_policy, "lru")
+        self.assertEqual(config.host_eviction_policy, "lru")
+        self.assertEqual(config.disk_eviction_policy, "fifo")
+        self.assertEqual(config.device_cache_min_free_blocks, 0)
+
+    def test_legacy_kv_cache_cli_aliases(self):
+        config = setup_args(
+            [
+                "--enable_memory_cache",
+                "1",
+                "--memory_cache_size_mb",
+                "2048",
+                "--enable_memory_cache_disk",
+                "1",
+                "--memory_cache_disk_paths",
+                "/tmp/legacy-cache",
+                "--memory_cache_disk_size_mb",
+                "4096",
+                "--write_cache_sync",
+                "1",
+            ]
+        ).kv_cache_config
+
+        self.assertTrue(config.enable_host_cache)
+        self.assertEqual(config.host_cache_size_mb, 2048)
+        self.assertTrue(config.enable_disk_cache)
+        self.assertEqual(config.disk_cache_paths, "/tmp/legacy-cache")
+        self.assertEqual(config.disk_cache_size_mb, 4096)
+
+    @patch.dict(
+        "os.environ",
+        {
+            **_PINNED_DEVICES,
+            "MODEL_TYPE": "fake_model",
+            "ENABLE_MEMORY_CACHE": "1",
+            "MEMORY_CACHE_SIZE_MB": "1024",
+            "ENABLE_MEMORY_CACHE_DISK": "1",
+            "MEMORY_CACHE_DISK_PATHS": "/tmp/legacy-disk",
+            "MEMORY_CACHE_DISK_SIZE_MB": "2048",
+        },
+        clear=True,
+    )
+    def test_legacy_kv_cache_env_aliases(self):
+        config = setup_args().kv_cache_config
+
+        self.assertTrue(config.enable_host_cache)
+        self.assertEqual(config.host_cache_size_mb, 1024)
+        self.assertTrue(config.enable_disk_cache)
+        self.assertEqual(config.disk_cache_paths, "/tmp/legacy-disk")
+        self.assertEqual(config.disk_cache_size_mb, 2048)
+
+    @patch.dict(
+        "os.environ",
+        {
+            **_PINNED_DEVICES,
+            "MODEL_TYPE": "fake_model",
+            "ENABLE_HOST_CACHE": "0",
+            "ENABLE_MEMORY_CACHE": "1",
+            "HOST_CACHE_SIZE_MB": "512",
+            "MEMORY_CACHE_SIZE_MB": "1024",
+        },
+        clear=True,
+    )
+    def test_canonical_kv_cache_env_wins_over_legacy_alias(self):
+        config = setup_args().kv_cache_config
+
+        self.assertFalse(config.enable_host_cache)
+        self.assertEqual(config.host_cache_size_mb, 512)
+
+    def test_kv_cache_config_pickle_round_trip_includes_eviction_fields(self):
+        import pickle
+
+        from rtp_llm.ops import KVCacheConfig
+
+        config = KVCacheConfig()
+        config.disk_cache_staging_block_count = 8
+        config.enable_disk_cache = False
+        config.enable_host_cache_pinned = False
+        config.device_eviction_policy = "fifo"
+        config.host_eviction_policy = "lfu"
+        config.disk_eviction_policy = "lru"
+        config.device_cache_min_free_blocks = 123
+        config.dsv4_fixed_pool_blocks = 512
+        config.dsv4_hca_state_pool_blocks = 256
+        config.dsv4_fixed_pool_use_memory = True
+
+        state = config.__getstate__()
+        self.assertEqual(len(state), 56)
+        self.assertEqual(state[:2], ("KVCacheConfig", 1))
+
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertEqual(restored.disk_cache_staging_block_count, 8)
+        self.assertFalse(restored.enable_disk_cache)
+        self.assertFalse(restored.enable_host_cache_pinned)
+        self.assertEqual(restored.device_eviction_policy, "fifo")
+        self.assertEqual(restored.host_eviction_policy, "lfu")
+        self.assertEqual(restored.disk_eviction_policy, "lru")
+        self.assertEqual(restored.device_cache_min_free_blocks, 123)
+        self.assertEqual(restored.dsv4_fixed_pool_blocks, 512)
+        self.assertEqual(restored.dsv4_hca_state_pool_blocks, 256)
+        self.assertTrue(restored.dsv4_fixed_pool_use_memory)
+
+        config.enable_disk_cache = True
+        restored_enabled = pickle.loads(pickle.dumps(config))
+        self.assertTrue(restored_enabled.enable_disk_cache)
+
+    def test_kv_cache_config_pickle_rejects_incompatible_states(self):
+        from rtp_llm.ops import KVCacheConfig
+
+        def restore(state):
+            value = KVCacheConfig.__new__(KVCacheConfig)
+            value.__setstate__(state)
+            return value
+
+        state = KVCacheConfig().__getstate__()
+        for invalid_state in (
+            state[2:],
+            ("OtherConfig", *state[1:]),
+            (state[0], 99, *state[2:]),
+            state[:-1],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "invalid KVCacheConfig state"):
+                restore(invalid_state)
 
     def test_jit_config(self):
         valid = (
