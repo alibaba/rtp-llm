@@ -53,24 +53,85 @@ public:
 
             const auto mtp_layer_num = mtp_sub_config->layer_num;
 
-            size_t real_mtp_gid = 0;
-            for (size_t gid = 0; gid < static_cast<size_t>(mtp_sub_config->groupNums()); ++gid) {
-                if (!mtp_sub_config->layerIdsForGroup(gid).empty()) {
-                    real_mtp_gid = gid;
-                    break;
+            const size_t mtp_group_num = static_cast<size_t>(mtp_sub_config->groupNums());
+            size_t       real_mtp_gid  = mtp_group_num;
+            for (size_t gid = 0; gid < mtp_group_num; ++gid) {
+                if (mtp_sub_config->layerIdsForGroup(gid).empty()) {
+                    continue;
                 }
+                if (real_mtp_gid == mtp_group_num) {
+                    real_mtp_gid = gid;
+                    continue;
+                }
+                RTP_LLM_CHECK_WITH_INFO(
+                    false,
+                    "MTP module %zu has multiple non-empty cache groups, but one physical sub-model layout cannot "
+                    "represent selected_gid=%zu selected_tag=%s and gid=%zu tag=%s",
+                    i,
+                    real_mtp_gid,
+                    mtp_sub_config->tagForGroup(real_mtp_gid).c_str(),
+                    gid,
+                    mtp_sub_config->tagForGroup(gid).c_str());
             }
-            const auto& mtp_spec = mtp_sub_config->specForGroup(real_mtp_gid);
-            // MTP block size may differ from the main model. Use the real
-            // MTP group that owns a layer; target-aligned placeholder groups
-            // must not affect the sub-model memory layout.
+            RTP_LLM_CHECK_WITH_INFO(
+                real_mtp_gid < mtp_group_num, "MTP module %zu has no non-empty physical cache group", i);
+
+            const auto&  mtp_spec         = mtp_sub_config->specForGroup(real_mtp_gid);
+            const size_t mtp_kv_stride    = mtp_sub_config->kvBlockStrideBytesForGroup(real_mtp_gid);
+            const size_t mtp_scale_stride = mtp_sub_config->kvScaleStrideBytesForGroup(real_mtp_gid);
+            RTP_LLM_CHECK_WITH_INFO(mtp_kv_stride >= mtp_spec->block_size_bytes(),
+                                    "MTP module %zu tag=%s KV stride=%zu is smaller than spec block size=%zu",
+                                    i,
+                                    mtp_sub_config->tagForGroup(real_mtp_gid).c_str(),
+                                    mtp_kv_stride,
+                                    mtp_spec->block_size_bytes());
+            RTP_LLM_CHECK_WITH_INFO(
+                mtp_scale_stride >= mtp_spec->scale_block_size_bytes(),
+                "MTP module %zu tag=%s scale stride=%zu is smaller than spec scale block size=%zu",
+                i,
+                mtp_sub_config->tagForGroup(real_mtp_gid).c_str(),
+                mtp_scale_stride,
+                mtp_spec->scale_block_size_bytes());
+            // MLAKVCacheSpec does not override scale_block_size_bytes() (it has no indexer dims;
+            // the real sparse-indexer scale size is computed onto the group stride in
+            // SingleConfigCreator). So the `>=` above and the `|| is_sparse` disjunct below are
+            // both vacuously true under MLA+sparse and would NOT catch a scale region that failed
+            // to allocate -- which is exactly the shortfall this package fixes. Guard it directly:
+            // a sparse group must carry a non-empty aggregate scale stride. This checks non-empty,
+            // not exact bytes (the spec cannot supply the exact value).
+            RTP_LLM_CHECK_WITH_INFO(
+                !mtp_sub_config->is_sparse || mtp_scale_stride > 0,
+                "MTP module %zu tag=%s is sparse but aggregate scale stride is 0; the scale region "
+                "was not allocated",
+                i,
+                mtp_sub_config->tagForGroup(real_mtp_gid).c_str());
+            RTP_LLM_CHECK_WITH_INFO(
+                mtp_kv_stride == mtp_spec->block_size_bytes() || mtp_sub_config->use_mla,
+                "MTP module %zu tag=%s aggregate KV stride=%zu requires MLA layout; spec block size=%zu",
+                i,
+                mtp_sub_config->tagForGroup(real_mtp_gid).c_str(),
+                mtp_kv_stride,
+                mtp_spec->block_size_bytes());
+            RTP_LLM_CHECK_WITH_INFO(
+                mtp_scale_stride == mtp_spec->scale_block_size_bytes() || mtp_sub_config->is_sparse,
+                "MTP module %zu tag=%s aggregate scale stride=%zu requires sparse layout; spec scale block size=%zu",
+                i,
+                mtp_sub_config->tagForGroup(real_mtp_gid).c_str(),
+                mtp_scale_stride,
+                mtp_spec->scale_block_size_bytes());
+
+            CacheConfig mtp_layout_config = *mtp_sub_config;
+            mtp_layout_config.block_num   = cache_config.block_num;
+            // The spec describes its own payload, while the group stride also
+            // includes auxiliary cache data. Target-aligned placeholder groups
+            // must not determine the physical sub-model layout.
             MemoryLayoutConfig mtp_layout =
                 createMemoryLayoutConfig(false,
                                          mtp_layer_num,
-                                         mtp_spec->block_size_bytes(),
-                                         mtp_spec->scale_block_size_bytes(),
+                                         mtp_kv_stride,
+                                         mtp_scale_stride,
                                          mtp_spec,
-                                         cache_config,
+                                         mtp_layout_config,
                                          mtp_sub_config->localKvHeadNumForGroup(real_mtp_gid),
                                          mtp_sub_config->seqSizePerBlockForGroup(real_mtp_gid),
                                          mtp_sub_config->kernelBlocksPerKvBlockForGroup(real_mtp_gid));
