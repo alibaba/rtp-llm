@@ -9,6 +9,9 @@ from rtp_llm.models_py.kernels.cuda.fp8_quant import (
     align,
     ceil_to_ue8m0,
     create_per_token_group_quant_fp8_output_scale,
+    fp8_dtype,
+    fp8_max,
+    fp8_min,
     per_block_cast_to_fp8,
     requant_weight_ue8m0,
     scaled_fp8_per_tensor_quant,
@@ -26,6 +29,9 @@ logger = logging.getLogger(__name__)
 
 __all__ = (
     "create_per_token_group_quant_fp8_output_scale",
+    "fp8_dtype",
+    "fp8_max",
+    "fp8_min",
     "per_block_cast_to_fp8",
     "requant_weight_ue8m0",
     "scaled_fp8_per_tensor_quant",
