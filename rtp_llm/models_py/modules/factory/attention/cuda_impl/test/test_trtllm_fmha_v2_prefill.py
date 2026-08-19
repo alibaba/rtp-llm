@@ -23,7 +23,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.trt import (
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     PrefillCudaGraphCapability,
 )
-from rtp_llm.models_py.utils.arch import is_sm12x
+from rtp_llm.models_py.utils.arch import is_sm12x, is_sm90
 from rtp_llm.ops import KvCacheDataType, RopeStyle
 from rtp_llm.ops.compute_ops import get_typemeta
 
@@ -272,15 +272,17 @@ class TestTRTLLMFMHAv2PrefillOpBF16(TRTLLMFMHAv2TestBase):
                 torch.testing.assert_close(graph_output, expect_output, rtol=0, atol=0)
 
     def test_full_prefill_cuda_graph_rope_kv_and_dynamic_batch(self):
-        """Gate the production full-prefill contract on SM12x.
+        """Gate the production full-prefill contract on SM90 and SM12x.
 
         Capture five fixed sequence slots (four real slots plus one sentinel),
         then replay two real requests with a padded sentinel. This covers real
         RoPE, BF16 KV writes, dynamic zero-length slots, block-table refresh,
         and scratch isolation in one graph.
         """
-        if not is_sm12x():
-            self.skipTest("full prefill CUDA graph is initially allowlisted on SM12x")
+        if self.kv_cache_dtype != KvCacheDataType.BASE:
+            self.skipTest("full prefill CUDA graph requires BF16 KV cache")
+        if not (is_sm90() or is_sm12x()):
+            self.skipTest("full prefill CUDA graph is allowlisted on SM90 and SM12x")
 
         max_requests = 4
         token_capacity = 64

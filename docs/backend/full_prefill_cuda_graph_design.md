@@ -184,7 +184,7 @@ FULL_PREFILL_NO_PREFIX_GRAPH
 | Prefix | 所有 prefix_lengths 必须为 0 |
 | Dtype | BF16 input/output，BF16 KV cache |
 | CUDA | 不低于 backend 现有最低要求 |
-| GPU | 首先验证 SM120；SM90 通过同等测试后再加入 enable matrix |
+| GPU | SM90、SM120 |
 | Model | dense causal decoder-only |
 | Parallelism | TP=1、无 CP |
 | Layer micro batch | 关闭；当前 `forwardMicroBatched` 路径不经过 CUDA Graph runner |
@@ -284,7 +284,7 @@ input_lengths = [24, 32, 0, 0, 8]
 cu_seqlens = [0, 24, 56, 56, 56, 64]
 ~~~
 
-当 `T == Tg` 时，sentinel 是合法的零长度 sequence。SM120 FMHA v2 算子测试已经覆盖固定总 token、固定 slot capacity、动态 `B=1/2/4`、动态 sequence layout、零长度 slots、真实 RoPE、真实 KV cache 写入和 sentinel 为零/非零的两种情况。
+当 `T == Tg` 时，sentinel 是合法的零长度 sequence。SM90/SM120 FMHA v2 算子测试已经覆盖固定总 token、固定 slot capacity、动态 `B=1/2/4`、动态 sequence layout、零长度 slots、真实 RoPE、真实 KV cache 写入和 sentinel 为零/非零的两种情况。
 
 ### 7.3 为什么不把 padding 追加到真实请求
 
@@ -611,7 +611,7 @@ FULL_PREFILL_CUDA_GRAPH_MAX_PADDING_RATIO=0.25
 
 扩展 TRT-LLM FMHA v2 prefill CUDA Graph 测试：
 
-- BF16、SM120；
+- BF16、SM90/SM120；
 - MHA 和 GQA；
 - 使用与目标模型一致的 RoPE，而不是 RoPE disabled；
 - 使用真实 KV cache buffer 和 block table；
@@ -664,6 +664,12 @@ FULL_PREFILL_CUDA_GRAPH_MAX_PADDING_RATIO=0.25
 - `//rtp_llm/cpp/models/test:pywrapped_model_cache_store_integration_test` 通过，验证双 runner/scratch 资源相关生产代码可以完整编译链接；
 - 通过 `bazelisk test //rtp_llm/test:server_test` 启动 `/home/silu.zsl/ckpt/algr_bs`（BF16、dense GQA、SM120），`seq_len=64` Full Prefill Graph capture、首次 replay 和数值自检成功；
 - 同一条 `max_new_tokens=4`、greedy 请求分别在 eager-prefill 与 Full Prefill Graph 下返回完全一致的 4-token 结果；将 scheduler 配置为 `MAX_CONTEXT_BATCH_SIZE=4` 后，4 个并发请求被动态调度为 `B=1` 与 `B=3` 两次 Full Prefill Graph replay，4 个请求均成功返回，证明真实服务路径不限制为单请求。
+
+2026-08-19 补充 H20（SM90）验证：
+
+- `//rtp_llm/models_py/modules/factory/attention/cuda_impl/test:test_trtllm_fmha_v2_prefill_sm90` 通过，22 个 case 中 21 个执行成功、1 个按设计跳过 FP8 KV；同一 Full Prefill Graph case 在 H20 上覆盖了上述动态 B/layout、RoPE、BF16 KV 和 scratch isolation contract；
+- 使用 `/home/silu.zsl/ckpt/algr_bs`（BF16 dense GQA、TP=1）启动真实服务，`seq_len=64,128` 两张 Full Prefill Graph capture 和启动 replay self-check 均成功；55-token 和 104-token 请求分别命中 64/128 bucket，79-token 请求按 padding-ratio 阈值正确回退 eager；
+- `num_beams=128` 的 55-token 请求正常返回 128 条 beam，prefill 日志确认命中 64-token graph；beam 展开后 decode 是否命中独立 decode graph 仍由 `DECODE_CAPTURE_CONFIG` 决定。
 
 服务测试 target 是常驻进程，完成请求验证后由测试端主动中断，因此该次 Bazel invocation 的最终状态为 interrupted，而不是断言失败。exact-bucket 短测基线见 17.2；长期 replay、compute-sanitizer、qps=10、padding/fallback 分布和 timeline 门槛仍按 16.3、17 节继续执行。
 
@@ -802,7 +808,7 @@ FULL_PREFILL_CUDA_GRAPH_MAX_PADDING_RATIO=0.25
 
 1. Request-capacity/max-q-len sparse profiles：只有固定 Bmax 或保守 `max_q_len=Tg` 被实测为瓶颈时，才增加少量显式 profile，避免笛卡尔积爆炸。
 2. Prefix backend：需要 paged attention、动态 block table、prefix length 和 KV reuse 的独立 graph-safety 设计。
-3. SM90：按硬件配置补齐测试后扩展 allowlist。
+3. 其它 GPU 架构：按硬件配置补齐同等测试后扩展 allowlist。
 4. TP/NCCL capture：需要 collective graph capture 和多 rank 一致性验证。
 5. MoE：需要 routing、capacity、通信和动态 shape 审计。
 6. graph pool 共享：只有证明 decode/prefill 不并发且地址安全后才实施。
@@ -820,7 +826,7 @@ FULL_PREFILL_CUDA_GRAPH_MAX_PADDING_RATIO=0.25
 - [x] PREFILL_CAPTURE_CONFIG 继续表达一维 token buckets。
 - [x] 首版所有 buckets 共用 `FULL_PREFILL_CUDA_GRAPH_MAX_REQUESTS`，graph 数量不乘以 batch size。
 - [x] padding ratio 阈值默认值为 0.25。
-- [x] 首个 enable matrix 限定 BF16、TP=1、dense、SM120；head dim 沿用 backend 的常规 support matrix。
+- [x] enable matrix 限定 BF16、TP=1、dense、SM90/SM120；head dim 沿用 backend 的常规 support matrix。
 - [x] Prefix、prefill/decode mixed batch、Paged backend 和 Breakable Graph 均不进入首版。
 
 真实 checkpoint 的 capture、动态多请求 replay、decode-after-prefill 与 exact-bucket A/B 基线已完成；长期稳定性、qps=10、padding/fallback 分布和 timeline 门槛仍按第 16、17 节执行，未通过前保持实验开关默认关闭。

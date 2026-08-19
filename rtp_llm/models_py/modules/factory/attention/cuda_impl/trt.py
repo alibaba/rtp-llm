@@ -423,7 +423,7 @@ class FlashInferTRTLLMFMHAv2PrefillImpl(FMHAImplBase):
     def prefill_cuda_graph_capability(self) -> PrefillCudaGraphCapability:
         configs = self.fmha_impl.attn_configs
         if (
-            is_sm12x()
+            (is_sm90() or is_sm12x())
             and configs.dtype == torch.bfloat16
             and configs.kv_cache_dtype == KvCacheDataType.BASE
             and configs.is_causal
