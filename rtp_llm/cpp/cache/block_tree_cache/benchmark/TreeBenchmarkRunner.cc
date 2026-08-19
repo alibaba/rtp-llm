@@ -12,7 +12,6 @@
 #include <thread>
 #include <unordered_set>
 
-#include "rtp_llm/cpp/cache/BlockReleaseBatch.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/BenchmarkFixture.h"
@@ -206,15 +205,14 @@ public:
             }
         }
         cache_.insert(path, resources, Tier::DEVICE);
-        // Publish REQUEST-holder transitions: blocks accepted by the tree keep
-        // BLOCK_CACHE ownership, rejected ones return to the pool.
+        // Blocks accepted by the tree keep BLOCK_CACHE ownership; rejected ones
+        // return to the pool after their REQUEST reference is released.
         releaseRequestBlocks(request_blocks);
         releasePrepared(out);
     }
 
     void releaseRequestBlocks(std::vector<BlockIndicesType>& blocks) override {
-        const auto&       group_sets = cache_.groupSets();
-        BlockReleaseBatch releases;
+        const auto& group_sets = cache_.groupSets();
         for (const GroupSetPtr& group_set : group_sets) {
             const auto& group_ids = group_set->groupIds();
             const auto& pools     = group_set->devicePools();
@@ -224,15 +222,10 @@ public:
                 if (group_id >= blocks.size() || blocks[group_id].empty()) {
                     continue;
                 }
-                releases.append(group_id,
-                                pools[member_index]->decRefWithResult(blocks[group_id], BlockRefType::REQUEST));
+                pools[member_index]->decRef(blocks[group_id], BlockRefType::REQUEST);
             }
         }
         blocks.clear();
-        const auto receipts = releases.finish();
-        if (!receipts.empty()) {
-            cache_.onBlocksReleased(receipts);
-        }
     }
 
     void rollback(PreparedRequestResources& out, std::vector<BlockIndicesType>& request_blocks) override {
@@ -277,8 +270,7 @@ private:
     }
 
     void releasePrepared(PreparedRequestResources& out) {
-        const auto&       group_sets = cache_.groupSets();
-        BlockReleaseBatch releases;
+        const auto& group_sets = cache_.groupSets();
         for (size_t gs = 0; gs < group_sets.size(); ++gs) {
             if (group_sets[gs]->devicePools().empty()) {
                 continue;
@@ -287,12 +279,7 @@ private:
             if (held.empty()) {
                 continue;
             }
-            releases.append(group_sets[gs]->groupIds().front(),
-                            group_sets[gs]->devicePools()[0]->decRefWithResult(held, BlockRefType::REQUEST));
-        }
-        const auto receipts = releases.finish();
-        if (!receipts.empty()) {
-            cache_.onBlocksReleased(receipts);
+            group_sets[gs]->devicePools()[0]->decRef(held, BlockRefType::REQUEST);
         }
         out = PreparedRequestResources{};
     }
@@ -341,7 +328,6 @@ bool insertPathFromPrefix(BlockTreeCache& cache, const PathKeys& path, size_t ex
         return false;
     }
     cache.insert(path, resources, Tier::DEVICE);
-    BlockReleaseBatch releases;
     for (size_t gs = 0; gs < group_sets.size(); ++gs) {
         if (group_sets[gs]->devicePools().empty()) {
             continue;
@@ -352,12 +338,7 @@ bool insertPathFromPrefix(BlockTreeCache& cache, const PathKeys& path, size_t ex
             inserted_blocks.insert(
                 inserted_blocks.end(), resources[i][gs].device_blocks.begin(), resources[i][gs].device_blocks.end());
         }
-        releases.append(group_sets[gs]->groupIds().front(),
-                        group_sets[gs]->devicePools()[0]->decRefWithResult(inserted_blocks, BlockRefType::REQUEST));
-    }
-    const auto receipts = releases.finish();
-    if (!receipts.empty()) {
-        cache.onBlocksReleased(receipts);
+        group_sets[gs]->devicePools()[0]->decRef(inserted_blocks, BlockRefType::REQUEST);
     }
     return true;
 }

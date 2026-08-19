@@ -8,7 +8,6 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
-#include "rtp_llm/cpp/cache/BlockReleaseBatch.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
@@ -96,9 +95,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
             }
         }
         if (!valid_blocks.empty()) {
-            BlockReleaseBatch releases;
-            releases.append(/*group_id=*/0, full_kv_cache_group_->release(valid_blocks, BlockRefType::REQUEST));
-            submitBlockReleases(releases);
+            full_kv_cache_group_->release(valid_blocks, BlockRefType::REQUEST);
         }
         block_ids_0.resize(0);
         kv_resource->cacheResource(0).setDeviceReuseBlockNum(0);
@@ -352,7 +349,7 @@ MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
         }
     }
     if (!blocks_to_free.empty()) {
-        (void)full_kv_cache_group_->release(blocks_to_free, BlockRefType::REQUEST);
+        full_kv_cache_group_->release(blocks_to_free, BlockRefType::REQUEST);
     }
     return {false, 0};
 }
@@ -364,13 +361,11 @@ void SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
         return;
     }
 
-    BlockReleaseBatch releases;
-    auto              all_blocks = kv_cache_resource->getAllBatchBlocks(0);
+    auto all_blocks = kv_cache_resource->getAllBatchBlocks(0);
     for (const auto& blocks : all_blocks) {
-        releases.append(/*group_id=*/0, full_kv_cache_group_->release(blocks, BlockRefType::REQUEST));
+        full_kv_cache_group_->release(blocks, BlockRefType::REQUEST);
     }
     kv_cache_resource->clearBlocks();
-    submitBlockReleases(releases);
 }
 
 void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
@@ -533,9 +528,7 @@ void SingleTypeKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_r
     }
     if (!blocks_to_free.empty()) {
         const BlockRefType ref_type = is_connector ? BlockRefType::STORAGE_BACKEND : BlockRefType::REQUEST;
-        BlockReleaseBatch  releases;
-        releases.append(/*group_id=*/0, full_kv_cache_group_->release(blocks_to_free, ref_type));
-        submitBlockReleases(releases);
+        full_kv_cache_group_->release(blocks_to_free, ref_type);
     }
 }
 
@@ -564,22 +557,17 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  k
         ++batch_fork_count[old_batch_idx];
     }
 
-    BlockReleaseBatch releases;
-    uint32_t          new_blocks_num = 0;
+    uint32_t new_blocks_num = 0;
     for (int old_batch_idx = 0; old_batch_idx < old_batch_size; ++old_batch_idx) {
         const int fork_count = batch_fork_count[old_batch_idx];
         if (fork_count == 0) {
-            releases.append(
-                /*group_id=*/0,
-                full_kv_cache_group_->release(kv_cache_resource->blocks(old_batch_idx, 0), BlockRefType::REQUEST));
+            full_kv_cache_group_->release(kv_cache_resource->blocks(old_batch_idx, 0), BlockRefType::REQUEST);
         } else if (fork_count > 1 && copy_last_block) {
             new_blocks_num += static_cast<uint32_t>(fork_count - 1);
         }
     }
 
-    // Free disused blocks first and publish their transitions before requesting
-    // replacement capacity from the tree cache.
-    submitBlockReleases(releases);
+    // Free disused blocks before requesting replacement capacity from the tree cache.
 
     // ensure there are enough free blocks for last-block copies
     if (new_blocks_num > 0) {
@@ -610,7 +598,7 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  k
 
             if (copy_last_block && !block_ids.blocks().empty()) {
                 const int old_block = block_ids.popBack();
-                (void)full_kv_cache_group_->release({old_block}, BlockRefType::REQUEST);
+                full_kv_cache_group_->release({old_block}, BlockRefType::REQUEST);
 
                 // allocate exactly one new block via kvCacheGroup
                 int seq_len_target =

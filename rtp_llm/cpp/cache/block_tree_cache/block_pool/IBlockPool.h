@@ -34,14 +34,6 @@ enum class BlockRefType : uint8_t {
 
 constexpr size_t kBlockRefTypeCount = static_cast<size_t>(BlockRefType::COUNT);
 
-struct BlockRefTransition {
-    BlockIdxType block_id{NULL_BLOCK_IDX};
-    BlockRefType ref_type{BlockRefType::REQUEST};
-    uint32_t     old_total_ref_count{0};
-    uint32_t     new_total_ref_count{0};
-    bool         block_released{false};
-};
-
 struct BlockPoolConfigBase {
     virtual ~BlockPoolConfigBase() = default;
 
@@ -76,10 +68,9 @@ public:
     // Release one holder: decrement one reference and, only when the refcount reaches 0,
     // return the block's capacity to the free list. Category releases must use this rather
     // than free() directly. Requires refcount > 0.
-    void                            decRef(BlockIdxType block, BlockRefType ref_type);
-    void                            decRef(const BlockIdList& blocks, BlockRefType ref_type);
-    std::vector<BlockRefTransition> decRefWithResult(const BlockIdList& blocks, BlockRefType ref_type);
-    uint32_t                        refCount(BlockIdxType block) const;
+    void     decRef(BlockIdxType block, BlockRefType ref_type);
+    void     decRef(const BlockIdList& blocks, BlockRefType ref_type);
+    uint32_t refCount(BlockIdxType block) const;
     // Number of distinct blocks carrying at least one reference of this type.
     size_t referencedBlocksNum(BlockRefType ref_type) const;
 

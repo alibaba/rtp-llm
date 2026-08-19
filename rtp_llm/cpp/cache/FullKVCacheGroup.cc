@@ -119,10 +119,9 @@ bool FullKVCacheGroup::malloc(BlockIds&                  block_ids,
     return true;
 }
 
-std::vector<BlockRefTransition>
-FullKVCacheGroup::release(const BlockIndicesType& block_indices, BlockRefType ref_type) {
+void FullKVCacheGroup::release(const BlockIndicesType& block_indices, BlockRefType ref_type) {
     if (block_indices.empty()) {
-        return {};
+        return;
     }
 
     BlockIndicesType valid_blocks;
@@ -132,13 +131,12 @@ FullKVCacheGroup::release(const BlockIndicesType& block_indices, BlockRefType re
             valid_blocks.push_back(block);
         }
     }
-    auto transitions = releaseBlockRefs(valid_blocks, ref_type);
+    releaseBlockRefs(valid_blocks, ref_type);
     RTP_LLM_LOG_DEBUG("Freed %zu blocks", valid_blocks.size());
-    return transitions;
 }
 
 void FullKVCacheGroup::free(const BlockIndicesType& block_indices) {
-    (void)release(block_indices, BlockRefType::REQUEST);
+    release(block_indices, BlockRefType::REQUEST);
 }
 
 void FullKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
@@ -155,15 +153,9 @@ void FullKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& ne
     }
 }
 
-std::vector<BlockRefTransition>
-FullKVCacheGroup::releaseSkippedBlocks(BlockIds& /*block_ids*/,
-                                       bool /*enable_reuse_cache*/,
-                                       int /*reserve_step*/) {
-    return {};
-}
-
-void FullKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
-    (void)releaseSkippedBlocks(block_ids, enable_reuse_cache, reserve_step);
+void FullKVCacheGroup::removeSkippedBlocks(BlockIds& /*block_ids*/,
+                                           bool /*enable_reuse_cache*/,
+                                           int /*reserve_step*/) {
 }
 
 }  // namespace rtp_llm

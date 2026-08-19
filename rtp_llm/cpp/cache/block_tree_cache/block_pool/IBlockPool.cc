@@ -129,18 +129,14 @@ void IBlockPool::incRef(const BlockIdList& blocks, BlockRefType ref_type) {
 }
 
 void IBlockPool::decRef(BlockIdxType block, BlockRefType ref_type) {
-    (void)decRefWithResult(BlockIdList{block}, ref_type);
+    decRef(BlockIdList{block}, ref_type);
 }
 
 void IBlockPool::decRef(const BlockIdList& blocks, BlockRefType ref_type) {
-    (void)decRefWithResult(blocks, ref_type);
-}
-
-std::vector<BlockRefTransition> IBlockPool::decRefWithResult(const BlockIdList& blocks, BlockRefType ref_type) {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     if (blocks.empty()) {
-        return {};
+        return;
     }
     checkUniqueBlocksNoLock(blocks);
     const size_t ref_type_index = refTypeIndex(ref_type);
@@ -152,19 +148,12 @@ std::vector<BlockRefTransition> IBlockPool::decRefWithResult(const BlockIdList& 
                                 config_->pool_name.c_str());
     }
 
-    std::vector<BlockRefTransition> transitions;
-    transitions.reserve(blocks.size());
     for (const auto block : blocks) {
-        const uint32_t old_ref_count = refcounts_[block];
         decRefOneNoLock(block, ref_type_index);
-        const uint32_t new_ref_count = refcounts_[block];
-        const bool     released      = new_ref_count == 0;
-        transitions.push_back(BlockRefTransition{block, ref_type, old_ref_count, new_ref_count, released});
-        if (released) {
+        if (refcounts_[block] == 0) {
             freeAllocatedBlockNoLock(block);
         }
     }
-    return transitions;
 }
 
 uint32_t IBlockPool::refCount(BlockIdxType block) const {
