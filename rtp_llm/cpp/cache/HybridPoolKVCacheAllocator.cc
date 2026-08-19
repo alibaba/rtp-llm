@@ -450,6 +450,15 @@ size_t HybridPoolKVCacheAllocator::availableBlocksNum() const {
     return total;
 }
 
+std::vector<size_t> HybridPoolKVCacheAllocator::availableBlocksNumPerPool() const {
+    std::vector<size_t> available_blocks;
+    available_blocks.reserve(group_block_pools_.size());
+    for (const auto& pool : group_block_pools_) {
+        available_blocks.push_back(pool->availableBlocksNum());
+    }
+    return available_blocks;
+}
+
 BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t min_blocks_to_free) {
     if (min_blocks_to_free == 0 || !shared_block_cache_) {
         return nullptr;
