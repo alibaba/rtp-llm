@@ -311,7 +311,7 @@ bool HybridKVCacheAllocator::finishDeferredMalloc(const MallocInfo& malloc_info,
                                                   LoadAsyncContext& context,
                                                   size_t            matched_blocks) {
     bool success = materializeInitialBlocks(malloc_info, prepared, &context, matched_blocks);
-    success      = success && !context.isRequestCanceled() && incrMalloc(malloc_info).success && context.commit();
+    success      = success && incrMalloc(malloc_info).success && context.commit();
     if (!success) {
         free(FreeInfo{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids});
         return false;

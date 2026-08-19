@@ -313,8 +313,8 @@ void BlockTreeCache::onBlocksReleased(const std::vector<BlockReleaseReceipt>& re
     checkWatermark();
 }
 
-bool BlockTreeCache::cancelLoad(const std::shared_ptr<AsyncContext>& context) {
-    return loader_.cancelLoad(context);
+bool BlockTreeCache::abortPendingLoad(const std::shared_ptr<AsyncContext>& context) {
+    return loader_.abortPendingLoad(context);
 }
 
 void BlockTreeCache::onWorkflowSettledLocked(bool tree_data_mutated, bool check_watermark) {
