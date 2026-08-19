@@ -198,6 +198,18 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
             )
 
 
+def _ensure_impl(symbol: str) -> Callable[..., Any]:
+    """Resolve one optional DeepGEMM symbol on first use."""
+    impl_name = f"_{symbol}_impl"
+    impl = globals().get(impl_name)
+    if impl is None:
+        _lazy_init_deep_gemm([symbol])
+        impl = globals().get(impl_name)
+    if impl is None:
+        _missing_deep_gemm()
+    return impl
+
+
 @triton.jit
 def pack_ue8m0_kernel_vectorized(
     scale_ptr,
@@ -700,11 +712,9 @@ def fp8_fp4_gemm_nt(
     disable_ue8m0_cast: Optional[bool] = None,
 ) -> None:
     """Dense FP8-act × packed-FP4-weight GEMM with UE8M0 block scales."""
-    global _fp8_fp4_gemm_nt_impl
-    if _fp8_fp4_gemm_nt_impl is None:
-        return _missing_deep_gemm()
+    impl = _ensure_impl("fp8_fp4_gemm_nt")
     _require_sm100_packed_scale_for_fp8_fp4(a, b)
-    _fp8_fp4_gemm_nt_impl(
+    impl(
         a,
         b,
         output,
@@ -740,11 +750,9 @@ def m_grouped_fp8_fp4_gemm_nt_contiguous(
     the expert index owning token `i`. Tokens must already be permuted so
     each expert's rows are contiguous.
     """
-    global _m_grouped_fp8_fp4_gemm_nt_contiguous_impl
-    if _m_grouped_fp8_fp4_gemm_nt_contiguous_impl is None:
-        return _missing_deep_gemm()
+    impl = _ensure_impl("m_grouped_fp8_fp4_gemm_nt_contiguous")
     _require_sm100_packed_scale_for_fp8_fp4(a, b)
-    _m_grouped_fp8_fp4_gemm_nt_contiguous_impl(
+    impl(
         a,
         b,
         output,
@@ -777,11 +785,9 @@ def m_grouped_fp8_fp4_gemm_nt_masked(
 ) -> None:
     """Grouped FP8×FP4 GEMM with masked layout (data-dependent per-expert
     token counts; avoids a D2H sync, suitable for decode)."""
-    global _m_grouped_fp8_fp4_gemm_nt_masked_impl
-    if _m_grouped_fp8_fp4_gemm_nt_masked_impl is None:
-        return _missing_deep_gemm()
+    impl = _ensure_impl("m_grouped_fp8_fp4_gemm_nt_masked")
     _require_sm100_packed_scale_for_fp8_fp4(a, b)
-    _m_grouped_fp8_fp4_gemm_nt_masked_impl(
+    impl(
         a,
         b,
         output,
@@ -812,10 +818,8 @@ def fp8_fp4_paged_mqa_logits(
 ) -> torch.Tensor:
     """FP8-query × FP4-packed paged-KV MQA logits — same kernel V3.2 DSA
     uses for the lightning indexer score step."""
-    global _fp8_fp4_paged_mqa_logits_impl
-    if _fp8_fp4_paged_mqa_logits_impl is None:
-        return _missing_deep_gemm()
-    return _fp8_fp4_paged_mqa_logits_impl(
+    impl = _ensure_impl("fp8_fp4_paged_mqa_logits")
+    return impl(
         q,
         kv_cache,
         weights,
@@ -831,27 +835,18 @@ def fp8_fp4_paged_mqa_logits(
 def per_token_cast_to_fp4(*args: Any, **kwargs: Any) -> Any:
     """DeepGEMM helper: cast BF16 activations to packed-FP4 + UE8M0 scale.
     Thin passthrough — signature/kwargs owned by deep_gemm."""
-    global _per_token_cast_to_fp4_impl
-    if _per_token_cast_to_fp4_impl is None:
-        return _missing_deep_gemm()
-    return _per_token_cast_to_fp4_impl(*args, **kwargs)
+    return _ensure_impl("per_token_cast_to_fp4")(*args, **kwargs)
 
 
 def cast_back_from_fp4(*args: Any, **kwargs: Any) -> Any:
     """DeepGEMM helper: dequant packed-FP4 → BF16 (debug/inspection path)."""
-    global _cast_back_from_fp4_impl
-    if _cast_back_from_fp4_impl is None:
-        return _missing_deep_gemm()
-    return _cast_back_from_fp4_impl(*args, **kwargs)
+    return _ensure_impl("cast_back_from_fp4")(*args, **kwargs)
 
 
 def transpose_packed_fp4(*args: Any, **kwargs: Any) -> Any:
     """DeepGEMM helper: transpose a packed-FP4 weight in its int8 storage,
     preserving nibble ordering."""
-    global _transpose_packed_fp4_impl
-    if _transpose_packed_fp4_impl is None:
-        return _missing_deep_gemm()
-    return _transpose_packed_fp4_impl(*args, **kwargs)
+    return _ensure_impl("transpose_packed_fp4")(*args, **kwargs)
 
 
 def tf32_hc_prenorm_gemm(
@@ -866,9 +861,4 @@ def tf32_hc_prenorm_gemm(
     This symbol is optional in DeepGEMM, so it is not part of the eager
     wrapper initialization used by the unrelated GEMM paths.
     """
-    global _tf32_hc_prenorm_gemm_impl
-    if _tf32_hc_prenorm_gemm_impl is None:
-        _lazy_init_deep_gemm(["tf32_hc_prenorm_gemm"])
-    if _tf32_hc_prenorm_gemm_impl is None:
-        return _missing_deep_gemm()
-    return _tf32_hc_prenorm_gemm_impl(x, fn, out, sqrsum, num_split)
+    return _ensure_impl("tf32_hc_prenorm_gemm")(x, fn, out, sqrsum, num_split)
