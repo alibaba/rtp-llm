@@ -238,17 +238,6 @@ cc_library(
 )
 
 cc_library(
-    name = "block_release_batch",
-    srcs = ["BlockReleaseBatch.cc"],
-    hdrs = ["BlockReleaseBatch.h"],
-    copts = copts(),
-    visibility = ["//visibility:public"],
-    deps = [
-        "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
-    ],
-)
-
-cc_library(
     name = "kv_cache_allocator_hdr",
     hdrs = [
         "KVCacheAllocator.h",
@@ -282,7 +271,6 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
-        ":block_release_batch",
         ":cp_slot_mapper",
         ":device_block_pool_config_helper",
         ":kv_cache_allocator_hdr",

@@ -7,7 +7,6 @@
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/BlockReleaseBatch.h"
 #include "rtp_llm/cpp/cache/KVCacheGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
@@ -224,16 +223,6 @@ void KVCacheAllocator::attachBlockTreeCache(BlockTreeCachePtr block_tree_cache) 
 
 bool KVCacheAllocator::abortPendingLoad(const std::shared_ptr<AsyncContext>& context) {
     return block_tree_cache_ != nullptr && block_tree_cache_->abortPendingLoad(context);
-}
-
-void KVCacheAllocator::submitBlockReleases(BlockReleaseBatch& releases) {
-    std::vector<BlockReleaseReceipt> receipts = releases.finish();
-    if (receipts.empty()) {
-        return;
-    }
-    if (block_tree_cache_ != nullptr) {
-        block_tree_cache_->onBlocksReleased(receipts);
-    }
 }
 
 uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t model_id, int local_layer_id) const {
