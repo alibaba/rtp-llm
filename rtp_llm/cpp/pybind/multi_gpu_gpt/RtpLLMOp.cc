@@ -415,33 +415,46 @@ void RtpLLMOp::stop() {
             model_rpc_service_->beginShutdown();
         }
         if (grpc_server_) {
-            auto begin_wait_us = autil::TimeUtility::currentTimeInMicroSeconds();
-            while (auto onflight_request = model_rpc_service_->onflightRequestNum()) {
-                RTP_LLM_LOG_INFO("rpc service has [%lu] onflight request, waiting 1s, stop_timeout_ms=%ld",
-                                 onflight_request,
-                                 stop_timeout_ms);
-                sleep(1);
-                if (autil::TimeUtility::currentTimeInMicroSeconds() - begin_wait_us > stop_timeout_ms * 1000) {
-                    RTP_LLM_LOG_INFO("rpc service wait timeout, no more waiting");
-                    break;
+            {
+                pybind11::gil_scoped_release release;
+                auto begin_wait_us = autil::TimeUtility::currentTimeInMicroSeconds();
+                while (auto onflight_request = model_rpc_service_->onflightRequestNum()) {
+                    RTP_LLM_LOG_INFO("rpc service has [%lu] onflight request, waiting 1s, stop_timeout_ms=%ld",
+                                     onflight_request,
+                                     stop_timeout_ms);
+                    sleep(1);
+                    if (autil::TimeUtility::currentTimeInMicroSeconds() - begin_wait_us > stop_timeout_ms * 1000) {
+                        RTP_LLM_LOG_INFO("rpc service wait timeout, no more waiting");
+                        break;
+                    }
                 }
+                RTP_LLM_LOG_INFO("Server shutdowning");
+                grpc_server_->Shutdown();
             }
-            RTP_LLM_LOG_INFO("Server shutdowning");
-            grpc_server_->Shutdown();
             grpc_server_.reset();
         }
         if (model_rpc_service_) {
-            pybind11::gil_scoped_release release;
-            model_rpc_service_->stop();
-            pybind11::gil_scoped_acquire acquire;
+            {
+                pybind11::gil_scoped_release release;
+                model_rpc_service_->stop();
+            }
             model_rpc_service_.reset();
         }
         if (http_server_) {
-            http_server_->stop();
+            {
+                pybind11::gil_scoped_release release;
+                http_server_->stop();
+            }
             http_server_.reset();
         }
         is_server_shutdown_ = true;
         stopKmonitorFactory();
+    }
+}
+
+void RtpLLMOp::requestStop() {
+    if (!is_server_shutdown_ && model_rpc_service_) {
+        THROW_IF_STATUS_ERROR(model_rpc_service_->getEngine()->requestStop());
     }
 }
 
@@ -476,6 +489,7 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("world_info"),
              py::arg("tokenizer"),
              py::arg("render"))
+        .def("request_stop", &RtpLLMOp::requestStop)
         .def("stop", &RtpLLMOp::stop);
 }
 

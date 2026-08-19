@@ -42,6 +42,7 @@ from rtp_llm.openai.renderer_factory import ChatRendererFactory
 from rtp_llm.openai.renderers.custom_renderer import RendererParams
 from rtp_llm.ops import TaskType
 from rtp_llm.server.backend_rpc_server_visitor import create_backend_rpc_server_visitor
+from rtp_llm.utils.shutdown_config import effective_pre_stop_drain_seconds
 
 if TYPE_CHECKING:
     from rtp_llm.config.model_config import ModelConfig
@@ -57,36 +58,6 @@ _FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
 _PROXY_SERVICER_STARTUP_TIMEOUT_S = 30.0
 _SERVICER_CLOSE_TIMEOUT_S = 10.0
 _BIND_BARRIER_TIMEOUT_S = 600.0
-_PRE_STOP_DRAIN_SECONDS_ENV = "DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"
-_PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV = "RTP_LLM_PRE_STOP_DRAIN_HEADROOM_SECONDS"
-_DEFAULT_PRE_STOP_DRAIN_SECONDS = 120.0
-
-
-def _pre_stop_drain_seconds() -> float:
-    raw = os.environ.get(_PRE_STOP_DRAIN_SECONDS_ENV, "")
-    if not raw:
-        return _DEFAULT_PRE_STOP_DRAIN_SECONDS
-    try:
-        seconds = float(raw)
-    except ValueError:
-        return _DEFAULT_PRE_STOP_DRAIN_SECONDS
-    return max(0.0, seconds)
-
-
-def _pre_stop_drain_headroom_seconds(shutdown_timeout: float) -> float:
-    raw = os.environ.get(_PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV, "")
-    if raw:
-        try:
-            return max(0.0, float(raw))
-        except ValueError:
-            logging.warning(
-                "Invalid %s=%r, using default pre-stop drain headroom",
-                _PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV,
-                raw,
-            )
-    return min(60.0, max(1.0, float(shutdown_timeout) * 0.10))
-
-
 def _is_proxy_mode_enabled() -> bool:
     return os.environ.get(_PROXY_MODE_ENV_KEY, "").strip() == "1" or bool(
         os.environ.get(_FORWARD_ENV_KEY, "").strip()
@@ -827,20 +798,13 @@ class DashScApp:
         time.sleep(remaining)
 
     def _effective_pre_stop_drain_seconds(self) -> float:
-        drain_seconds = _pre_stop_drain_seconds()
-        shutdown_timeout = self.server_config.shutdown_timeout
-        if shutdown_timeout <= 0:
-            return drain_seconds
-        headroom_seconds = _pre_stop_drain_headroom_seconds(float(shutdown_timeout))
-        max_drain_seconds = max(0.0, float(shutdown_timeout) - headroom_seconds)
-        if drain_seconds <= max_drain_seconds:
-            return drain_seconds
-        logging.warning(
-            "[DashScApp] clamp pre-stop drain %.3fs to %.3fs "
-            "(shutdown_timeout=%ss, headroom=%.3fs)",
-            drain_seconds,
-            max_drain_seconds,
-            shutdown_timeout,
-            headroom_seconds,
+        return effective_pre_stop_drain_seconds(
+            configured_drain_seconds=(
+                self.server_config.dash_sc_grpc_pre_stop_drain_seconds
+            ),
+            shutdown_timeout=self.server_config.shutdown_timeout,
+            configured_headroom_seconds=(
+                self.server_config.pre_stop_drain_headroom_seconds
+            ),
+            component="dash_sc_grpc",
         )
-        return max_drain_seconds
