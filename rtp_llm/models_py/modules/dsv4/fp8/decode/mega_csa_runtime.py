@@ -17,7 +17,9 @@ from .mega_csa_weights import (
     MAIN_HEADS,
     MQA_SPLIT_KV,
     O_GROUPS,
+    PRO_GEOMETRY,
     Q_LORA_RANK,
+    CSAGeometry,
 )
 from .mega_hca_weights import HCA_FRONT_OUT_DIM
 
@@ -104,22 +106,27 @@ class MegaCSARuntime:
         self._active_is_cuda_graph = bool(getattr(metadata, "is_cuda_graph", False))
 
     @staticmethod
-    def num_hc_splits(m: int, device: torch.device) -> int:
+    def num_hc_splits(m: int, device: torch.device, dim: int = DIM) -> int:
         num_sms = torch.cuda.get_device_properties(device).multi_processor_count
         grid_size = max((m + 63) // 64, 1)
-        num_block_k = (HC * DIM + 63) // 64
+        num_block_k = (HC * dim + 63) // 64
         return max(min(max(num_sms, 1) // grid_size, num_block_k // 4), 1)
 
     def layer_workspace(
-        self, m: int, num_split: int, device: torch.device
+        self,
+        m: int,
+        num_split: int,
+        device: torch.device,
+        geometry: CSAGeometry = PRO_GEOMETRY,
     ) -> MegaCSALayerWorkspace:
-        key = (str(device), m, num_split)
+        g = geometry
+        key = (str(device), m, num_split, g.dim)
         workspace = self._layer_workspaces.get(key)
         if workspace is None:
-            o_heads_per_group = MAIN_HEADS // O_GROUPS
+            o_heads_per_group = g.main_heads // g.o_groups
             o_aligned_m = ((m + 3) // 4) * 4
             o_proj_fp8 = torch.empty(
-                O_GROUPS,
+                g.o_groups,
                 m,
                 o_heads_per_group * HEAD_DIM,
                 dtype=torch.float8_e4m3fn,
@@ -127,12 +134,12 @@ class MegaCSARuntime:
             ).transpose(0, 1)
             o_proj_scale = (
                 torch.empty(
-                    O_GROUPS * o_heads_per_group * o_aligned_m,
+                    g.o_groups * o_heads_per_group * o_aligned_m,
                     dtype=torch.int32,
                     device=device,
                 )
                 .as_strided(
-                    (O_GROUPS, m, o_heads_per_group),
+                    (g.o_groups, m, o_heads_per_group),
                     (o_heads_per_group * o_aligned_m, 1, o_aligned_m),
                 )
                 .transpose(0, 1)
@@ -142,27 +149,29 @@ class MegaCSARuntime:
                     num_split, m, HC_MIX, dtype=torch.float32, device=device
                 ),
                 hc_sum_sq=torch.empty(num_split, m, dtype=torch.float32, device=device),
-                collapsed=torch.empty(m, DIM, dtype=torch.bfloat16, device=device),
+                collapsed=torch.empty(m, g.dim, dtype=torch.bfloat16, device=device),
                 pre=torch.empty(m, HC, dtype=torch.float32, device=device),
                 post=torch.empty(m, HC, dtype=torch.float32, device=device),
                 comb=torch.empty(m, HC, HC, dtype=torch.float32, device=device),
                 mix=torch.empty(m, HC_MIX, dtype=torch.float32, device=device),
                 hidden_fp8=torch.empty(
-                    m, DIM, dtype=torch.float8_e4m3fn, device=device
+                    m, g.dim, dtype=torch.float8_e4m3fn, device=device
                 ),
-                hidden_sf=torch.empty(m, DIM // 128, dtype=torch.uint8, device=device),
+                hidden_sf=torch.empty(
+                    m, g.dim // 128, dtype=torch.uint8, device=device
+                ),
                 front_out=torch.empty(
-                    m, FRONT_OUT_DIM, dtype=torch.bfloat16, device=device
+                    m, g.front_out_dim, dtype=torch.bfloat16, device=device
                 ),
                 window_y=torch.empty(m, HEAD_DIM, dtype=torch.float32, device=device),
                 indexer_weights=torch.empty(
                     m, INDEX_HEADS, dtype=torch.float32, device=device
                 ),
                 q_lora_fp8=torch.empty(
-                    m, Q_LORA_RANK, dtype=torch.float8_e4m3fn, device=device
+                    m, g.q_lora_rank, dtype=torch.float8_e4m3fn, device=device
                 ),
                 q_lora_sf=torch.empty(
-                    m, Q_LORA_RANK // 128, dtype=torch.uint8, device=device
+                    m, g.q_lora_rank // 128, dtype=torch.uint8, device=device
                 ),
                 indexer_q=torch.empty(
                     m,

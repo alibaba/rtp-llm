@@ -10,17 +10,16 @@ import torch
 from .mega_csa_runtime import MegaCSARuntime, MegaCSASlotMappings
 from .mega_csa_weights import (
     COMPRESS_RATIO,
-    DIM,
+    GEOMETRY_BY_DIM,
     HC,
     HEAD_DIM,
     INDEX_HEAD_DIM,
     INDEX_HEADS,
-    MAIN_HEADS,
     MAX_BATCH,
-    O_GROUPS,
     O_LORA_RANK,
-    Q_LORA_RANK,
+    PRO_GEOMETRY,
     ROPE_DIM,
+    CSAGeometry,
     MegaCSAWeights,
 )
 
@@ -56,8 +55,8 @@ class MegaCSAAdapter:
         layer_weights: Dict[str, torch.Tensor],
         runtime: MegaCSARuntime,
     ) -> None:
-        self._validate_geometry(block)
-        self.weights = MegaCSAWeights.from_layer_weights(layer_weights)
+        self._geometry = self._validate_geometry(block)
+        self.weights = MegaCSAWeights.from_layer_weights(layer_weights, self._geometry)
         self.runtime = runtime
         self._runtime_checked = False
 
@@ -71,18 +70,23 @@ class MegaCSAAdapter:
         )
 
     @staticmethod
-    def _validate_geometry(block: "Block") -> None:
+    def _validate_geometry(block: "Block") -> CSAGeometry:
         attn = block.attn
+        geometry = GEOMETRY_BY_DIM.get(int(attn.dim))
+        if geometry is None:
+            raise ValueError(
+                f"DSV4 CSA mega geometry mismatch: dim={attn.dim} "
+                f"(compiled: {sorted(GEOMETRY_BY_DIM)})"
+            )
         expected = (
             ("tp_size", attn.tp_size, 1),
             ("tp_rank", attn.tp_rank, 0),
             ("compress_ratio", attn.compress_ratio, COMPRESS_RATIO),
-            ("dim", attn.dim, DIM),
-            ("q_lora_rank", attn.q_lora_rank, Q_LORA_RANK),
-            ("n_heads", attn.n_heads, MAIN_HEADS),
+            ("q_lora_rank", attn.q_lora_rank, geometry.q_lora_rank),
+            ("n_heads", attn.n_heads, geometry.main_heads),
             ("head_dim", attn.head_dim, HEAD_DIM),
             ("rope_head_dim", attn.rope_head_dim, ROPE_DIM),
-            ("o_groups", attn.n_groups, O_GROUPS),
+            ("o_groups", attn.n_groups, geometry.o_groups),
             ("o_lora_rank", attn.o_lora_rank, O_LORA_RANK),
         )
         problems = [
@@ -104,6 +108,7 @@ class MegaCSAAdapter:
                 )
         if problems:
             raise ValueError("DSV4 CSA mega geometry mismatch: " + "; ".join(problems))
+        return geometry
 
     def _require_runtime(self, device: torch.device) -> Any:
         if self._runtime_checked:
@@ -174,17 +179,25 @@ class MegaCSAAdapter:
                 + "; ".join(incompatible)
             )
         geometry = dsv4_mega.geometry_csa()
+        g = self._geometry
+        suffix = "" if g is PRO_GEOMETRY else "_flash"
         expected = {
-            "n_main": MAIN_HEADS * HEAD_DIM,
+            f"n_main{suffix}": g.n_main,
             "n_index": INDEX_HEADS * INDEX_HEAD_DIM,
-            "n_merged": MAIN_HEADS * HEAD_DIM + INDEX_HEADS * INDEX_HEAD_DIM,
-            "num_main_heads": MAIN_HEADS,
+            f"n_merged{suffix}": g.n_merged,
+            f"num_main_heads{suffix}": g.main_heads,
             "num_index_heads": INDEX_HEADS,
             "slot_dtype_bits": 64,
         }
-        if geometry != expected:
+        mismatched = {
+            key: geometry.get(key)
+            for key, value in expected.items()
+            if geometry.get(key) != value
+        }
+        if mismatched:
             raise RuntimeError(
-                f"rtp-kernel DSV4 geometry mismatch: got {geometry}, expected {expected}"
+                f"rtp-kernel DSV4 geometry mismatch: got {mismatched}, "
+                f"expected {expected}"
             )
         import deep_gemm
 
@@ -300,9 +313,11 @@ class MegaCSAAdapter:
         kv_cache: Optional[Any] = None,
     ) -> torch.Tensor:
         """Run the complete CSA attention sublayer; never falls back after entry."""
-        if hidden.dim() != 4 or tuple(hidden.shape[2:]) != (HC, DIM):
+        g = self._geometry
+        if hidden.dim() != 4 or tuple(hidden.shape[2:]) != (HC, g.dim):
             raise ValueError(
-                f"DSV4 mega hidden must be [B,1,{HC},{DIM}], got {tuple(hidden.shape)}"
+                f"DSV4 mega hidden must be [B,1,{HC},{g.dim}], "
+                f"got {tuple(hidden.shape)}"
             )
         m, q_len = int(hidden.shape[0]), int(hidden.shape[1])
         if q_len != 1 or not 1 <= m <= MAX_BATCH:
@@ -341,6 +356,7 @@ class MegaCSAAdapter:
         pools: MegaCSAPoolContext,
         dsv4_mega: Any,
     ) -> torch.Tensor:
+        g = self._geometry
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import tf32_hc_prenorm_gemm
         from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, SWA_KV
         from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
@@ -356,9 +372,9 @@ class MegaCSAAdapter:
         if positions_i32.dtype != torch.int32 or positions_i64.dtype != torch.int64:
             raise TypeError("DSV4 mega positions must provide int32 and int64 tensors")
         rope_cos, rope_sin = self.runtime.rope_tables(attn.freqs_cis)
-        num_split = self.runtime.num_hc_splits(m, hidden.device)
-        workspace = self.runtime.layer_workspace(m, num_split, hidden.device)
-        hidden_rows = hidden.view(m, HC, DIM)
+        num_split = self.runtime.num_hc_splits(m, hidden.device, g.dim)
+        workspace = self.runtime.layer_workspace(m, num_split, hidden.device, g)
+        hidden_rows = hidden.view(m, HC, g.dim)
 
         compressed_lengths = metadata.compressed_lens.get(COMPRESS_RATIO)
         if compressed_lengths is None or int(compressed_lengths.numel()) < m:
@@ -412,7 +428,7 @@ class MegaCSAAdapter:
         topk_workspace = _get_topk_workspace(hidden.device)
 
         tf32_hc_prenorm_gemm(
-            hidden_rows.view(m, HC * DIM),
+            hidden_rows.view(m, HC * g.dim),
             self.weights.hc_fn,
             workspace.hc_partial,
             workspace.hc_sum_sq,
@@ -483,7 +499,7 @@ class MegaCSAAdapter:
             state_ring_entries=pools.indexer_state_entries,
             win_y2=workspace.window_y,
             win_norm=self.weights.window_norm,
-            q_y=workspace.front_out[:, :Q_LORA_RANK],
+            q_y=workspace.front_out[:, : g.q_lora_rank],
             q_norm_w=self.weights.q_norm,
             q_eps=attn.eps,
             indexer_fp8=True,
@@ -501,7 +517,7 @@ class MegaCSAAdapter:
             pdl=True,
         )
         q_raw, indexer_q, folded_weights = wq_outputs[:3]
-        q_ready = q_raw.view(m, 1, MAIN_HEADS, HEAD_DIM)
+        q_ready = q_raw.view(m, 1, g.main_heads, HEAD_DIM)
 
         dsv4_mega.mqa_logits_fp8_decode_out(
             indexer_q,
@@ -550,7 +566,7 @@ class MegaCSAAdapter:
             cmp_attn_type=CSA_KV,
         )
         dsv4_mega.mla_o_inv_rope_quant(
-            attention.view(m, MAIN_HEADS, HEAD_DIM),
+            attention.view(m, g.main_heads, HEAD_DIM),
             positions_i64,
             rope_cos,
             rope_sin,
