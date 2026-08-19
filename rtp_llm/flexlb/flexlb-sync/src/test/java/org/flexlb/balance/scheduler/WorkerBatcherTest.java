@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.ScheduleBudget;
@@ -20,6 +21,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -303,6 +305,92 @@ class WorkerBatcherTest {
         assertTrue(ctx.sortedItems().isEmpty());
         assertEquals(0, offerFailures.get(),
                 "shutdown owns the drained item; callback finally must not deliver it twice");
+    }
+
+    @Test
+    void dispatchPendingItemKeepsCapacityChargedUntilCallbackResolves() throws Exception {
+        config.setFlexlbBatchQueueMaxSize(1);
+        config.setFlexlbBatchSizeMax(1);
+        config.setFlexlbBatchFixedWaitMs(0);
+        CountDownLatch callbackEntered = new CountDownLatch(1);
+        CountDownLatch callbackMayReturn = new CountDownLatch(1);
+        BatchDecisionHandler handler = new BatchDecisionHandler() {
+            @Override
+            public void onExpired(BatchItem head) {
+            }
+
+            @Override
+            public void onBatchReady(List<BatchItem> items, DispatchMeta meta) {
+                callbackEntered.countDown();
+                try {
+                    assertTrue(callbackMayReturn.await(2, TimeUnit.SECONDS));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(e);
+                }
+            }
+
+            @Override
+            public void onOfferFailure(BatchItem item, Throwable error) {
+            }
+        };
+        WorkerBatcher batcher = new WorkerBatcher(
+                "capacity-test", mock(PrefillEndpoint.class),
+                config, handler, mock(BatchSchedulerReporter.class));
+        batcher.start();
+        try {
+            assertTrue(batcher.tryOffer(item(20, 50, System.currentTimeMillis())));
+            assertTrue(callbackEntered.await(2, TimeUnit.SECONDS));
+            assertTrue(batcher.queueManager().snapshot().items().isEmpty(),
+                    "staged item is no longer a live queue member");
+            assertEquals(1, batcher.queueSize(),
+                    "staged callback ownership must retain the charged slot");
+            assertFalse(batcher.tryOffer(item(21, 50, System.currentTimeMillis())),
+                    "charged staged capacity must reject a second offer");
+
+            callbackMayReturn.countDown();
+            long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (batcher.queueSize() != 0 && System.nanoTime() < deadlineNanos) {
+                Thread.sleep(1);
+            }
+            assertEquals(0, batcher.queueSize());
+        } finally {
+            callbackMayReturn.countDown();
+            batcher.shutdown();
+        }
+    }
+
+    @Test
+    void dropHeadOnlyNotifiesExpiryWhenTheItemWasActuallyRemoved() {
+        PriorityBlockingQueue<BatchItem> queue = new PriorityBlockingQueue<>(
+                11, WorkerBatcher.AUTO_TPM_QUEUE_ORDER);
+        BatchItem queued = item(30, 50, 100);
+        queue.add(queued);
+        AtomicInteger depth = new AtomicInteger(1);
+        AtomicInteger expired = new AtomicInteger();
+        BatcherContext ctx = context(queue, depth, new BatchDecisionHandler() {
+            @Override
+            public void onExpired(BatchItem head) {
+                assertSame(queued, head);
+                expired.incrementAndGet();
+            }
+
+            @Override
+            public void onBatchReady(List<BatchItem> items, DispatchMeta meta) {
+            }
+
+            @Override
+            public void onOfferFailure(BatchItem item, Throwable error) {
+            }
+        });
+
+        ctx.dropHead(item(31, 50, 100));
+        assertEquals(0, expired.get());
+        assertEquals(1, depth.get());
+
+        ctx.dropHead(queued);
+        assertEquals(1, expired.get());
+        assertEquals(0, depth.get());
     }
 
     // ==================== helpers ====================

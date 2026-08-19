@@ -188,6 +188,34 @@ class PrefillQueueManagerTest {
                 .toList());
     }
 
+    @Test
+    void replacementFailureReturnsEveryVictimActuallyRemoved() {
+        config.setFlexlbBatchQueueMaxSize(0);
+        WorkerBatcher batcher = newBatcher();
+        long now = System.currentTimeMillis();
+        assertTrue(batcher.tryOffer(item(1, 30, now + 1_000, now, 128)));
+        assertTrue(batcher.tryOffer(item(2, 40, now + 1_000, now + 1, 128)));
+        assertTrue(batcher.tryOffer(item(3, 50, now + 1_000, now + 2, 128)));
+        long version = batcher.queueVersion();
+
+        // Simulate an operator lowering the limit below the already-charged
+        // depth. The victim is removed, but the incoming item cannot claim a
+        // slot; the caller must receive the exact victim for terminal cleanup.
+        config.setFlexlbBatchQueueMaxSize(1);
+        PrefillQueueManager.ReplaceOutcome outcome = batcher.queueManager()
+                .tryReplaceVictimsWithIncoming(
+                        List.of(1L), item(9, 70, now + 500, now + 3, 128), version);
+
+        assertTrue(outcome.isPartialFailure());
+        assertEquals(List.of(1L), outcome.removed().stream()
+                .map(BatchItem::requestId)
+                .toList());
+        assertEquals(List.of(3L, 2L), batcher.queueManager().snapshot().items().stream()
+                .map(QueuedRequestSnapshot::requestId)
+                .toList());
+        assertEquals(2, batcher.queueSize());
+    }
+
     // ==================== helpers ====================
 
     private static BatchItem item(long requestId, int priority, long deadlineMs,

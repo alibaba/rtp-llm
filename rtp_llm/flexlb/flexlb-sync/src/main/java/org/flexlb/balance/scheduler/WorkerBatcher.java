@@ -61,7 +61,6 @@ public class WorkerBatcher {
     private final String key;
     private final FlexlbConfig cfg;
     private final BatchDecisionHandler handler;
-    private final boolean autoTpm;
     private final PriorityBlockingQueue<BatchItem> queue;
     private final AtomicInteger queueDepth = new AtomicInteger();
     /**
@@ -95,8 +94,8 @@ public class WorkerBatcher {
         this.key = key;
         this.cfg = cfg;
         this.handler = handler;
-        this.autoTpm = cfg.isAutoTpmEnabled();
-        Comparator<BatchItem> queueOrder = autoTpm ? AUTO_TPM_QUEUE_ORDER : LEGACY_QUEUE_ORDER;
+        Comparator<BatchItem> queueOrder = cfg.isAutoTpmEnabled()
+                ? AUTO_TPM_QUEUE_ORDER : LEGACY_QUEUE_ORDER;
         this.queue = new PriorityBlockingQueue<>(11, queueOrder);
         this.algorithm = createAlgorithm(cfg);
         this.ctx = new BatcherContext(
@@ -127,13 +126,15 @@ public class WorkerBatcher {
             handler.onOfferFailure(item, new IllegalStateException("FlexLB batcher stopped"));
             return;
         }
-        int maxSize = cfg.getFlexlbBatchQueueMaxSize();
-        if (!reserveQueueSlot(maxSize)) {
+        prepareForOffer(item);
+        EnqueueResult result = enqueuePrepared(item, false, 0);
+        if (result == EnqueueResult.STOPPED) {
+            handler.onOfferFailure(item, new IllegalStateException("FlexLB batcher stopped"));
+        } else if (result == EnqueueResult.FULL) {
+            int maxSize = cfg.getFlexlbBatchQueueMaxSize();
             handler.onOfferFailure(item,
                     new IllegalStateException("FlexLB batcher queue full, maxSize=" + maxSize));
-            return;
         }
-        enqueue(item);
     }
 
     /**
@@ -149,30 +150,54 @@ public class WorkerBatcher {
         if (stopped) {
             return false;
         }
-        if (!reserveQueueSlot(cfg.getFlexlbBatchQueueMaxSize())) {
-            return false;
-        }
-        enqueue(item);
-        return true;
+        prepareForOffer(item);
+        return enqueuePrepared(item, false, 0) == EnqueueResult.SUCCESS;
     }
 
-    private void enqueue(BatchItem item) {
+    private void prepareForOffer(BatchItem item) {
+        item.setSortKey(algorithm.computeSortKey(ctx, item));
+    }
+
+    private EnqueueResult enqueuePrepared(BatchItem item,
+                                          boolean checkVersion,
+                                          long expectedVersion) {
+        queueLock.lock();
         try {
-            long sortKey = algorithm.computeSortKey(ctx, item);
-            item.setSortKey(sortKey);
-            algorithm.onOffer(ctx, item, System.currentTimeMillis());
-            queueLock.lock();
-            try {
-                queue.add(item);
-                queueVersion.incrementAndGet();
-            } finally {
-                queueLock.unlock();
-            }
-        } catch (RuntimeException | Error e) {
-            queueDepth.decrementAndGet();
-            throw e;
+            return enqueuePreparedLocked(item, checkVersion, expectedVersion);
+        } finally {
+            queueLock.unlock();
         }
     }
+
+    /**
+     * Final enqueue transaction. The expensive sort-key calculation is already
+     * complete; shutdown, optimistic version validation, charged capacity, and
+     * queue publication are linearized by {@link #queueLock}.
+     */
+    private EnqueueResult enqueuePreparedLocked(BatchItem item,
+                                                boolean checkVersion,
+                                                long expectedVersion) {
+        if (stopped) {
+            return EnqueueResult.STOPPED;
+        }
+        if (checkVersion && queueVersion.get() != expectedVersion) {
+            return EnqueueResult.VERSION_MISMATCH;
+        }
+        int maxSize = cfg.getFlexlbBatchQueueMaxSize();
+        // queueDepth includes live queue members and dispatch-pending members,
+        // whose slots stay charged until callback ownership is resolved.
+        if (maxSize > 0 && queueDepth.get() >= maxSize) {
+            return EnqueueResult.FULL;
+        }
+        algorithm.onOffer(ctx, item, System.currentTimeMillis());
+        queue.add(item);
+        queueDepth.incrementAndGet();
+        queueVersion.incrementAndGet();
+        ctx.signalQueueNotEmpty();
+        return EnqueueResult.SUCCESS;
+    }
+
+    private enum EnqueueResult { SUCCESS, VERSION_MISMATCH, STOPPED, FULL }
 
     public int queueSize() {
         return queueDepth.get();
@@ -265,14 +290,6 @@ public class WorkerBatcher {
 
     // ==================== Auto-TPM queue operations (called via PrefillQueueManager) ====================
 
-    /**
-     * Offer only if the queue version still matches — used by commit paths
-     * that must not apply against a mutated queue.
-     */
-    boolean tryOfferAtVersion(BatchItem item, long expectedVersion) {
-        return offerAtVersion(item, expectedVersion) == OfferAtVersionResult.SUCCESS;
-    }
-
     /** Outcome of {@link #offerAtVersion(BatchItem, long)}. */
     public enum OfferAtVersionResult {
         /** Version matched and the item was enqueued. */
@@ -294,44 +311,16 @@ public class WorkerBatcher {
         if (stopped) {
             return OfferAtVersionResult.OFFER_FAILED;
         }
-        queueLock.lock();
-        try {
-            if (queueVersion.get() != expectedVersion) {
-                return OfferAtVersionResult.VERSION_MISMATCH;
-            }
-            // Re-entrant: tryOffer -> enqueue re-acquires queueLock safely.
-            return tryOffer(item) ? OfferAtVersionResult.SUCCESS : OfferAtVersionResult.OFFER_FAILED;
-        } finally {
-            queueLock.unlock();
+        if (queueVersion.get() != expectedVersion) {
+            return OfferAtVersionResult.VERSION_MISMATCH;
         }
-    }
-
-    /**
-     * Remove the given requests only if the queue version still matches.
-     *
-     * @return removed items, or {@code null} on version mismatch
-     */
-    List<BatchItem> tryRemoveAtVersion(List<Long> requestIds, long expectedVersion, String reason) {
-        queueLock.lock();
-        try {
-            if (queueVersion.get() != expectedVersion) {
-                return null;
-            }
-            List<BatchItem> removed = new ArrayList<>(requestIds.size());
-            for (long requestId : requestIds) {
-                BatchItem item = findQueued(requestId);
-                if (item != null && ctx.remove(item)) {
-                    removed.add(item);
-                }
-            }
-            if (!removed.isEmpty()) {
-                Logger.debug("[auto-tpm] queue remove: worker={} reason={} removed={}",
-                        key, reason, removed.size());
-            }
-            return removed;
-        } finally {
-            queueLock.unlock();
-        }
+        prepareForOffer(item);
+        EnqueueResult result = enqueuePrepared(item, true, expectedVersion);
+        return switch (result) {
+            case SUCCESS -> OfferAtVersionResult.SUCCESS;
+            case VERSION_MISMATCH -> OfferAtVersionResult.VERSION_MISMATCH;
+            case STOPPED, FULL -> OfferAtVersionResult.OFFER_FAILED;
+        };
     }
 
     /**
@@ -343,12 +332,21 @@ public class WorkerBatcher {
      */
     PrefillQueueManager.ReplaceOutcome tryReplaceVictimsWithIncoming(
             List<Long> victimIds, BatchItem incoming, long expectedVersion) {
+        if (stopped || queueVersion.get() != expectedVersion) {
+            return PrefillQueueManager.ReplaceOutcome.versionMismatch();
+        }
+        List<BatchItem> removed = new ArrayList<>(victimIds.size());
+        try {
+            prepareForOffer(incoming);
+        } catch (RuntimeException | Error e) {
+            Logger.error("WorkerBatcher[{}] victim replacement prepare failed", key, e);
+            return PrefillQueueManager.ReplaceOutcome.partialFailure(removed);
+        }
         queueLock.lock();
         try {
             if (stopped || queueVersion.get() != expectedVersion) {
                 return PrefillQueueManager.ReplaceOutcome.versionMismatch();
             }
-            List<BatchItem> removed = new ArrayList<>(victimIds.size());
             for (long victimId : victimIds) {
                 BatchItem victim = findQueued(victimId);
                 if (victim == null || !ctx.remove(victim)) {
@@ -358,21 +356,20 @@ public class WorkerBatcher {
                 }
                 removed.add(victim);
             }
-            if (!tryOffer(incoming)) {
+            if (enqueuePreparedLocked(incoming, false, 0) != EnqueueResult.SUCCESS) {
                 return PrefillQueueManager.ReplaceOutcome.partialFailure(removed);
             }
             return PrefillQueueManager.ReplaceOutcome.success(removed);
         } catch (RuntimeException | Error e) {
             Logger.error("WorkerBatcher[{}] victim replace failed", key, e);
-            return PrefillQueueManager.ReplaceOutcome.partialFailure(List.of());
+            return PrefillQueueManager.ReplaceOutcome.partialFailure(removed);
         } finally {
             queueLock.unlock();
         }
     }
 
     /**
-     * Version-agnostic idempotent removal (PR-D §2.7): same as
-     * {@link #tryRemoveAtVersion} but skips the version check. Used by
+     * Version-agnostic idempotent removal (PR-D §2.7). Used by
      * {@code AdmissionLease.close()} for deadline-timeout cleanup.
      */
     List<BatchItem> tryRemoveNoVersion(List<Long> requestIds, String reason) {
@@ -384,10 +381,6 @@ public class WorkerBatcher {
                 if (item != null && ctx.remove(item)) {
                     removed.add(item);
                 }
-            }
-            if (!removed.isEmpty()) {
-                Logger.debug("[auto-tpm] queue remove (version-agnostic): worker={} reason={} removed={}",
-                        key, reason, removed.size());
             }
             return removed;
         } finally {
@@ -420,6 +413,16 @@ public class WorkerBatcher {
      */
     PrefillQueueManager.ReplaceOutcome tryReplaceVictimsPresent(
             List<Long> victimIds, BatchItem incoming) {
+        if (stopped) {
+            return PrefillQueueManager.ReplaceOutcome.victimGone(List.copyOf(victimIds));
+        }
+        List<BatchItem> removed = new ArrayList<>(victimIds.size());
+        try {
+            prepareForOffer(incoming);
+        } catch (RuntimeException | Error e) {
+            Logger.error("WorkerBatcher[{}] presence-guarded replacement prepare failed", key, e);
+            return PrefillQueueManager.ReplaceOutcome.partialFailure(removed);
+        }
         queueLock.lock();
         try {
             if (stopped) {
@@ -439,7 +442,6 @@ public class WorkerBatcher {
             if (!missing.isEmpty()) {
                 return PrefillQueueManager.ReplaceOutcome.victimGone(missing);
             }
-            List<BatchItem> removed = new ArrayList<>(present.size());
             for (BatchItem victim : present) {
                 if (!ctx.remove(victim)) {
                     // Unreachable under the lock discipline; victims already
@@ -448,13 +450,13 @@ public class WorkerBatcher {
                 }
                 removed.add(victim);
             }
-            if (!tryOffer(incoming)) {
+            if (enqueuePreparedLocked(incoming, false, 0) != EnqueueResult.SUCCESS) {
                 return PrefillQueueManager.ReplaceOutcome.partialFailure(removed);
             }
             return PrefillQueueManager.ReplaceOutcome.success(removed);
         } catch (RuntimeException | Error e) {
             Logger.error("WorkerBatcher[{}] presence-guarded victim replace failed", key, e);
-            return PrefillQueueManager.ReplaceOutcome.partialFailure(List.of());
+            return PrefillQueueManager.ReplaceOutcome.partialFailure(removed);
         } finally {
             queueLock.unlock();
         }
@@ -466,6 +468,9 @@ public class WorkerBatcher {
         while (!stopped && !Thread.currentThread().isInterrupted()) {
             try {
                 waitForNonEmpty();
+                if (stopped) {
+                    return;
+                }
                 waitForDispatchRetry();
                 algorithm.processQueue(ctx);
             } catch (InterruptedException ie) {
@@ -478,16 +483,7 @@ public class WorkerBatcher {
     }
 
     private void waitForNonEmpty() throws InterruptedException {
-        if (autoTpm) {
-            // Non-destructive wait: take()+put() transiently hides the head
-            // from concurrent snapshots and version-checked replaces.
-            while (!stopped && queue.isEmpty()) {
-                TimeUnit.MILLISECONDS.sleep(1);
-            }
-            return;
-        }
-        BatchItem item = queue.take();
-        queue.put(item);
+        ctx.awaitQueueNotEmpty();
     }
 
     private void waitForDispatchRetry() throws InterruptedException {
@@ -497,19 +493,4 @@ public class WorkerBatcher {
         }
     }
 
-    private boolean reserveQueueSlot(int maxSize) {
-        if (maxSize <= 0) {
-            queueDepth.incrementAndGet();
-            return true;
-        }
-        while (true) {
-            int current = queueDepth.get();
-            if (current >= maxSize) {
-                return false;
-            }
-            if (queueDepth.compareAndSet(current, current + 1)) {
-                return true;
-            }
-        }
-    }
 }

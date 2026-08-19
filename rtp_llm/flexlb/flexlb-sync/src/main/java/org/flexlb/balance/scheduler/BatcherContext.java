@@ -15,6 +15,7 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -38,6 +39,7 @@ public class BatcherContext {
     private final AtomicInteger queueDepth;
     private final AtomicLong queueVersion;
     private final ReentrantLock queueLock;
+    private final Condition queueNotEmpty;
     private final Comparator<BatchItem> queueOrder;
     private final BatchSchedulerReporter reporter;
 
@@ -94,6 +96,7 @@ public class BatcherContext {
         this.queueDepth = queueDepth;
         this.queueVersion = queueVersion;
         this.queueLock = queueLock;
+        this.queueNotEmpty = queueLock.newCondition();
         this.queueOrder = queueOrder;
         this.reporter = reporter;
     }
@@ -130,6 +133,23 @@ public class BatcherContext {
 
     Comparator<BatchItem> queueOrder() {
         return queueOrder;
+    }
+
+    /** Called with {@link #queueLock} held after publishing a live queue member. */
+    void signalQueueNotEmpty() {
+        queueNotEmpty.signal();
+    }
+
+    /** Non-destructive wait shared by legacy and Auto-TPM worker loops. */
+    void awaitQueueNotEmpty() throws InterruptedException {
+        queueLock.lockInterruptibly();
+        try {
+            while (!stopped && queue.isEmpty()) {
+                queueNotEmpty.await();
+            }
+        } finally {
+            queueLock.unlock();
+        }
     }
 
     // ---- queue inspection ----
@@ -443,6 +463,7 @@ public class BatcherContext {
             }
             queue.add(item);
             queueVersion.incrementAndGet();
+            queueNotEmpty.signal();
             return PendingRestoreResult.RESTORED;
         } finally {
             queueLock.unlock();
@@ -477,6 +498,7 @@ public class BatcherContext {
             if (drained > 0 || stagedDrained) {
                 queueVersion.incrementAndGet();
             }
+            queueNotEmpty.signalAll();
         } finally {
             queueLock.unlock();
         }
@@ -497,8 +519,9 @@ public class BatcherContext {
      * Caller is responsible for algorithm-specific logging and state cleanup.
      */
     void dropHead(BatchItem head) {
-        remove(head);
-        handler.onExpired(head);
+        if (remove(head)) {
+            handler.onExpired(head);
+        }
     }
 
     // ---- dispatch interval estimation (design doc 8.4) ----

@@ -18,9 +18,9 @@ import java.util.List;
  * validation — "version unchanged ⇒ queue content unchanged").
  *
  * <p>Read operations ({@link #snapshot()}, {@link #estimateWaitMs}) capture a
- * consistent view under the queue lock; version-checked mutations
- * ({@link #tryOffer}, {@link #tryRemove}, {@link #tryReplaceVictimsWithIncoming})
- * are atomic against the version captured by a prior snapshot.
+ * consistent view under the queue lock; version-checked replacement via
+ * {@link #tryReplaceVictimsWithIncoming} is atomic against the version
+ * captured by a prior snapshot.
  */
 public final class PrefillQueueManager {
 
@@ -126,23 +126,6 @@ public final class PrefillQueueManager {
             return cmp < 0;
         }
         return item.requestId() < requestId;
-    }
-
-    /**
-     * Version-checked enqueue: applies only if the queue version still equals
-     * {@code expectedVersion} (used by commit paths built on a snapshot).
-     */
-    public boolean tryOffer(BatchItem item, long expectedVersion) {
-        return batcher.tryOfferAtVersion(item, expectedVersion);
-    }
-
-    /**
-     * Version-checked removal of the given requests.
-     *
-     * @return removed items, or {@code null} on version mismatch
-     */
-    public List<BatchItem> tryRemove(List<Long> requestIds, long expectedVersion, String reason) {
-        return batcher.tryRemoveAtVersion(requestIds, expectedVersion, reason);
     }
 
     /**
