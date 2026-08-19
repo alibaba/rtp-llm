@@ -12,6 +12,7 @@ import org.flexlb.metric.FlexMonitor;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
 import org.flexlb.util.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -30,6 +31,7 @@ public class ExpirationCleaner {
     private final long workerTimeoutUs;
     private final FlexMonitor monitor;
 
+    @Autowired
     public ExpirationCleaner(FlexMonitor monitor) {
         this.monitor = monitor;
         this.taskTimeoutUs = Long.parseLong(System.getenv().getOrDefault("TASK_TIMEOUT_US", "3000000"));  // Default 3s
