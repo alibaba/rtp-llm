@@ -283,7 +283,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_InsertAutoInjectsMapper) {
 
     MallocInfo malloc_info{resource, token_ids};
     malloc_info.reuse_cache         = true;
-    malloc_info.enable_device_cache = true;
+    malloc_info.enable_cache_lookup = true;
     auto result                     = mgr->malloc(malloc_info);
     ASSERT_TRUE(result.success);
 
@@ -296,7 +296,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_InsertAutoInjectsMapper) {
     auto       resource2 = makeResource(1, config.layer_num);
     MallocInfo malloc_info2{resource2, token_ids};
     malloc_info2.reuse_cache         = true;
-    malloc_info2.enable_device_cache = true;
+    malloc_info2.enable_cache_lookup = true;
     auto result2                     = mgr->malloc(malloc_info2);
     ASSERT_TRUE(result2.success);
     // With CP sharding (cp_size=2, block_size=4), virtual_block_size=8.
