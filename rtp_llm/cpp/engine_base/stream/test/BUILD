@@ -68,11 +68,11 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = test_deps,
-    # Count the otherwise non-virtual cancellation seam without changing the
+    # Count the otherwise non-virtual pending-abort seam without changing the
     # production API. This is the Itanium ABI symbol for
-    # rtp_llm::KVCacheManager::cancelLoad(shared_ptr<AsyncContext> const&).
+    # rtp_llm::KVCacheManager::abortPendingLoad(shared_ptr<AsyncContext> const&).
     linkopts = [
-        "-Wl,--wrap=_ZN7rtp_llm14KVCacheManager10cancelLoadERKSt10shared_ptrINS_12AsyncContextEE",
+        "-Wl,--wrap=_ZN7rtp_llm14KVCacheManager16abortPendingLoadERKSt10shared_ptrINS_12AsyncContextEE",
     ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
