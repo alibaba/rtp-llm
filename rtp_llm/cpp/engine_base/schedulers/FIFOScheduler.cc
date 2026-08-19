@@ -24,6 +24,9 @@ bool asyncCachePrepareEnabled() {
     return env != nullptr && std::strcmp(env, "1") == 0;
 }
 
+constexpr auto kCachePrepareRetryInterval        = std::chrono::milliseconds(250);
+constexpr auto kCachePrepareResourcePollInterval = std::chrono::milliseconds(10);
+
 }  // namespace
 
 FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_config,
@@ -95,6 +98,57 @@ void FIFOScheduler::cancelGroups(StreamGroupQueue& group_queue) {
     group_queue.clear();
 }
 
+bool FIFOScheduler::finalizeErroredStreams(std::list<GenerateStreamPtr>& streams) {
+    bool removed = false;
+    for (auto it = streams.begin(); it != streams.end();) {
+        auto& stream = *it;
+        stream->checkTimeout();
+        if (stream == cache_prepare_inflight_stream_) {
+            // prepareCache() mutates the stream's cache resource without
+            // holding lock_. Defer state transition/resource release until the
+            // worker publishes completion.
+            ++it;
+            continue;
+        }
+        if (!stream->hasEvent(StreamEvents::Error)) {
+            ++it;
+            continue;
+        }
+        const auto state     = stream->getStatus();
+        const auto new_state = stream->moveToNext();
+        if (new_state == state) {
+            ++it;
+            continue;
+        }
+        addStreamToNewState(stream, new_state);
+        it      = streams.erase(it);
+        removed = true;
+    }
+    return removed;
+}
+
+bool FIFOScheduler::finalizeErroredGroups(StreamGroupQueue& group_queue) {
+    bool removed       = false;
+    bool changed_front = false;
+    for (auto it = group_queue.begin(); it != group_queue.end();) {
+        const bool is_front      = it == group_queue.begin();
+        const bool group_changed = finalizeErroredStreams(*it);
+        removed                  = group_changed || removed;
+        changed_front            = changed_front || (is_front && group_changed);
+        if (it->empty()) {
+            removed       = true;
+            changed_front = changed_front || is_front;
+            it            = group_queue.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    if (changed_front) {
+        waiting_group_yields_cache_prepare_ = false;
+    }
+    return removed;
+}
+
 absl::Status FIFOScheduler::stop() {
     RTP_LLM_LOG_INFO("stop FIFOScheduler");
     {
@@ -120,7 +174,7 @@ absl::Status FIFOScheduler::stop() {
         cancelStreams(running_streams_);
         cancelGroups(waiting_group_queue_);
         cancelGroups(loading_cache_group_queue_);
-        cache_prepare_blocked_stream_.reset();
+        clearCachePrepareBlocked();
     }
     return absl::OkStatus();
 }
@@ -220,6 +274,9 @@ FIFOScheduler::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
             waiting_streams_.insert(waiting_streams_.end(), valid_streams.begin(), valid_streams.end());
             pending_group_fallback_count_.fetch_add(1, std::memory_order_relaxed);
         } else {
+            if (waiting_group_queue_.empty()) {
+                waiting_group_yields_cache_prepare_ = false;
+            }
             waiting_group_queue_.emplace_back(valid_streams.begin(), valid_streams.end());
         }
         schedule_trigger_ = true;
@@ -380,6 +437,167 @@ size_t FIFOScheduler::groupQueueStreamsSize(const StreamGroupQueue& group_queue)
     return count;
 }
 
+bool FIFOScheduler::canPrepareCacheBeforeAdmission(const GenerateStreamPtr& stream) const {
+    if (!stream || max_generate_batch_size_ == 0) {
+        return false;
+    }
+    if (pd_sep_config_.role_type == RoleType::DECODE) {
+        return true;
+    }
+
+    // Evaluate the candidate against an otherwise-empty execution boundary.
+    // Async preparation must not reserve KV for a request that can never pass
+    // the scheduler's static singleton limits. The synchronous path does not
+    // allocate until after this same admission check.
+    const auto context_length = static_cast<size_t>(std::max(stream->contextLength(), 0));
+    if (context_length < max_seq_len_) {
+        return true;
+    }
+    const auto candidate_tokens = prefillTokenCostWithCache(stream);
+    if (candidate_tokens >= max_batch_tokens_size_) {
+        return false;
+    }
+    const auto sequence_count = static_cast<size_t>(stream->currentBatchSize());
+    const auto max_seq_len    = prefillSeqLenWithCache(stream);
+    return max_seq_len == 0 || sequence_count <= (max_batch_tokens_size_ - 1) / max_seq_len;
+}
+
+FIFOScheduler::AdmissionLane FIFOScheduler::cachePrepareLane() const {
+    const bool has_normal = !waiting_streams_.empty();
+    const bool has_group  = !waiting_group_queue_.empty();
+    if (!has_group) {
+        return has_normal ? AdmissionLane::NORMAL : AdmissionLane::NONE;
+    }
+    if (!has_normal) {
+        return AdmissionLane::GROUP;
+    }
+
+    // Mirror schedule()'s lane ownership. While a NORMAL batch drains, the
+    // head group owns the next boundary. While a GROUP batch runs (or loads),
+    // ordinary FIFO work may prepare for the following boundary.
+    if (!running_streams_.empty()) {
+        if (active_admission_lane_ == AdmissionLane::NORMAL) {
+            return AdmissionLane::GROUP;
+        }
+        if (active_admission_lane_ == AdmissionLane::GROUP) {
+            return AdmissionLane::NORMAL;
+        }
+    }
+    if (!loading_cache_group_queue_.empty()) {
+        return AdmissionLane::NORMAL;
+    }
+    if (!loading_cache_streams_.empty()) {
+        return AdmissionLane::GROUP;
+    }
+    if (prefer_group_next_ && !waiting_group_yields_cache_prepare_) {
+        return AdmissionLane::GROUP;
+    }
+
+    // Inspect the strict FIFO prefix. A prepared member before the first
+    // dynamic blocker can publish the NORMAL boundary. If there is no such
+    // member, a stalled load/allocation (or a queue containing only statically
+    // inadmissible requests) yields preparation to the group lane.
+    bool normal_ready_prefix = false;
+    for (const auto& stream : waiting_streams_) {
+        if (!stream || stream->hasEvent(StreamEvents::Error)) {
+            continue;
+        }
+        if (stream->hasEvent(StreamEvents::CachePrepared)) {
+            normal_ready_prefix = true;
+            continue;
+        }
+        if (!canPrepareCacheBeforeAdmission(stream) && !stream->hasEvent(StreamEvents::LoadInitiated)
+            && stream->curBlocksNum() == 0) {
+            continue;
+        }
+        if (stream == cache_prepare_inflight_stream_) {
+            return AdmissionLane::NORMAL;
+        }
+        if (isCachePrepareBlocked(stream) || stream->hasEvent(StreamEvents::LoadInitiated)
+            || stream->curBlocksNum() > 0) {
+            return normal_ready_prefix ? AdmissionLane::NORMAL : AdmissionLane::GROUP;
+        }
+        return AdmissionLane::NORMAL;
+    }
+    return normal_ready_prefix ? AdmissionLane::NORMAL : AdmissionLane::GROUP;
+}
+
+bool FIFOScheduler::isCachePrepareBlocked(const GenerateStreamPtr& stream) const {
+    return stream
+           && std::find(cache_prepare_blocked_streams_.begin(), cache_prepare_blocked_streams_.end(), stream)
+                  != cache_prepare_blocked_streams_.end();
+}
+
+bool FIFOScheduler::hasCachePrepareBlocker(const StreamGroup& streams) const {
+    return std::any_of(
+        streams.begin(), streams.end(), [this](const auto& stream) { return isCachePrepareBlocked(stream); });
+}
+
+bool FIFOScheduler::hasErroredCachePrepareBlocker() const {
+    return std::any_of(cache_prepare_blocked_streams_.begin(),
+                       cache_prepare_blocked_streams_.end(),
+                       [](const auto& stream) { return !stream || stream->hasEvent(StreamEvents::Error); });
+}
+
+void FIFOScheduler::markCachePrepareBlocked(const GenerateStreamPtr& stream) {
+    if (!stream || isCachePrepareBlocked(stream)) {
+        return;
+    }
+    const auto available_blocks = cache_manager_ ? cache_manager_->availableBlocksNumPerPool() : std::vector<size_t>{};
+    const auto inited_streams   = countInitedKVCacheStreams();
+    if (cache_prepare_blocked_streams_.empty()) {
+        cache_prepare_blocked_stream_           = stream;
+        cache_prepare_blocked_available_blocks_ = available_blocks;
+        cache_prepare_blocked_inited_streams_   = inited_streams;
+        cache_prepare_retry_at_                 = std::chrono::steady_clock::now() + kCachePrepareRetryInterval;
+    } else if (available_blocks.size() == cache_prepare_blocked_available_blocks_.size()) {
+        // A stable group scan may successfully allocate a later small member
+        // between two failures. Track the per-pool low-water mark across all
+        // blockers so releasing that member wakes a still-runnable later
+        // blocker even when availability only returns to the first blocker's
+        // original snapshot.
+        for (size_t i = 0; i < available_blocks.size(); ++i) {
+            cache_prepare_blocked_available_blocks_[i] =
+                std::min(cache_prepare_blocked_available_blocks_[i], available_blocks[i]);
+        }
+        cache_prepare_blocked_inited_streams_ = std::max(cache_prepare_blocked_inited_streams_, inited_streams);
+    } else {
+        // Allocator pool topology is expected to be stable. If it changes,
+        // force the resource comparison to observe a different shape.
+        cache_prepare_blocked_available_blocks_ = available_blocks;
+        cache_prepare_blocked_inited_streams_   = inited_streams;
+    }
+    cache_prepare_blocked_streams_.push_back(stream);
+}
+
+void FIFOScheduler::clearCachePrepareBlocked() {
+    cache_prepare_blocked_stream_.reset();
+    cache_prepare_blocked_streams_.clear();
+    cache_prepare_blocked_available_blocks_.clear();
+    cache_prepare_blocked_inited_streams_ = 0;
+    cache_prepare_retry_at_               = {};
+}
+
+bool FIFOScheduler::cachePrepareResourcesChanged() const {
+    if (cache_prepare_blocked_streams_.empty()) {
+        return false;
+    }
+    bool cache_availability_increased = false;
+    if (cache_manager_) {
+        const auto available_blocks  = cache_manager_->availableBlocksNumPerPool();
+        cache_availability_increased = available_blocks.size() != cache_prepare_blocked_available_blocks_.size();
+        for (size_t i = 0; !cache_availability_increased && i < available_blocks.size(); ++i) {
+            cache_availability_increased = available_blocks[i] > cache_prepare_blocked_available_blocks_[i];
+        }
+    }
+    const bool released_inited_slot = countInitedKVCacheStreams() < cache_prepare_blocked_inited_streams_;
+    return cache_availability_increased || released_inited_slot;
+}
+
+bool FIFOScheduler::cachePrepareRetryDue() const {
+    return !cache_prepare_blocked_streams_.empty() && std::chrono::steady_clock::now() >= cache_prepare_retry_at_;
+}
+
 void FIFOScheduler::accountBatchMetrics(const GenerateStreamPtr& new_stream) {
     for (auto& stream : running_streams_) {
         stream->incBatchWithPrefillTimes(1);
@@ -393,71 +611,134 @@ bool FIFOScheduler::waitPredicate() {
                || !running_streams_.empty() || !waiting_group_queue_.empty() || !loading_cache_group_queue_.empty();
     }
     return stop_ || schedule_trigger_ || !loading_cache_streams_.empty() || !running_streams_.empty()
-           || !waiting_group_queue_.empty() || !loading_cache_group_queue_.empty();
+           || !loading_cache_group_queue_.empty();
 }
 
 void FIFOScheduler::cachePrepareLoop() {
     cudaPreRun(static_cast<int>(getDeviceId()));
     while (!stop_.load(std::memory_order_acquire)) {
         std::vector<GenerateStreamPtr> streams;
+        bool                           normal_pass_unblocked = false;
+        bool                           group_pass_unblocked  = false;
+        bool                           scans_front_group     = false;
         {
             std::unique_lock<std::mutex> lock(lock_);
-            cond_.wait(lock, [this]() {
+            const auto                   has_prepare_work = [this]() {
                 if (stop_) {
                     return true;
                 }
-                const bool group_barrier = !waiting_group_queue_.empty() || !loading_cache_group_queue_.empty();
+                if (!cache_prepare_blocked_streams_.empty()
+                    && (hasErroredCachePrepareBlocker() || cachePrepareResourcesChanged() || cachePrepareRetryDue())) {
+                    return true;
+                }
+                const auto needs_prepare = [this](const GenerateStreamPtr& stream, bool allow_fresh_allocation) {
+                    return stream && !stream->hasEvent(StreamEvents::Error)
+                           && !stream->hasEvent(StreamEvents::CachePrepared)
+                           && (stream->hasEvent(StreamEvents::LoadInitiated) || stream->curBlocksNum() > 0
+                               || (allow_fresh_allocation && canPrepareCacheBeforeAdmission(stream)));
+                };
+                const auto lane               = cachePrepareLane();
+                const bool normal_has_blocker = hasCachePrepareBlocker(waiting_streams_);
+                const bool allow_fresh_normal = lane == AdmissionLane::NORMAL && !normal_has_blocker;
                 for (const auto& stream : waiting_streams_) {
-                    if (cache_prepare_blocked_stream_ && stream == cache_prepare_blocked_stream_) {
-                        return stream->hasEvent(StreamEvents::Error);
-                    }
-                    if (stream && !stream->hasEvent(StreamEvents::CachePrepared)
-                        && (!group_barrier || stream->hasEvent(StreamEvents::LoadInitiated)
-                            || stream->curBlocksNum() > 0)) {
+                    if (!isCachePrepareBlocked(stream) && needs_prepare(stream, allow_fresh_normal)) {
                         return true;
                     }
                 }
+                // Only prepare the head group. Preparing later groups would let
+                // them reserve KV blocks ahead of the scheduler's group order.
+                if (!waiting_group_queue_.empty()) {
+                    const auto& group             = waiting_group_queue_.front();
+                    const bool  group_has_blocker = hasCachePrepareBlocker(group);
+                    const bool  allow_fresh_group = lane == AdmissionLane::GROUP && !group_has_blocker;
+                    for (const auto& stream : group) {
+                        if (!isCachePrepareBlocked(stream) && needs_prepare(stream, allow_fresh_group)) {
+                            return true;
+                        }
+                    }
+                }
                 return false;
-            });
+            };
+            if (!cache_prepare_blocked_streams_.empty()) {
+                if (!cond_.wait_for(lock, kCachePrepareResourcePollInterval, has_prepare_work)) {
+                    continue;
+                }
+            } else {
+                cond_.wait(lock, has_prepare_work);
+            }
             if (stop_) {
                 return;
             }
-            if (cache_prepare_blocked_stream_ && cache_prepare_blocked_stream_->hasEvent(StreamEvents::Error)) {
-                cache_prepare_blocked_stream_.reset();
+            if (!cache_prepare_blocked_streams_.empty()
+                && (hasErroredCachePrepareBlocker() || cachePrepareResourcesChanged() || cachePrepareRetryDue())) {
+                clearCachePrepareBlocked();
+                waiting_group_yields_cache_prepare_ = false;
             }
+            normal_pass_unblocked = !hasCachePrepareBlocker(waiting_streams_);
+            group_pass_unblocked =
+                waiting_group_queue_.empty() || !hasCachePrepareBlocker(waiting_group_queue_.front());
             streams.assign(waiting_streams_.begin(), waiting_streams_.end());
+            if (!waiting_group_queue_.empty()) {
+                const auto& group = waiting_group_queue_.front();
+                streams.insert(streams.end(), group.begin(), group.end());
+            }
         }
 
         bool has_pending = false;
         for (const auto& stream : streams) {
+            bool is_normal_waiter      = false;
+            bool is_front_group_waiter = false;
+            bool fresh_prepare_allowed = false;
             {
                 std::lock_guard<std::mutex> lock(lock_);
                 if (stop_) {
                     return;
                 }
-                if (std::find(waiting_streams_.begin(), waiting_streams_.end(), stream) == waiting_streams_.end()) {
+                is_normal_waiter =
+                    std::find(waiting_streams_.begin(), waiting_streams_.end(), stream) != waiting_streams_.end();
+                is_front_group_waiter =
+                    !waiting_group_queue_.empty()
+                    && std::find(waiting_group_queue_.front().begin(), waiting_group_queue_.front().end(), stream)
+                           != waiting_group_queue_.front().end();
+                if (is_front_group_waiter && !scans_front_group) {
+                    // Mark only the portion of the pass that actually scans
+                    // the front group. Processing a long NORMAL prefix must
+                    // not make group evaluation look busy.
+                    scans_front_group                     = true;
+                    cache_prepare_group_scan_in_progress_ = true;
+                }
+                if (!is_normal_waiter && !is_front_group_waiter) {
                     continue;
                 }
-                if (!stream || stream->hasEvent(StreamEvents::CachePrepared)) {
+                if (!stream || stream->hasEvent(StreamEvents::Error) || stream->hasEvent(StreamEvents::CachePrepared)) {
                     continue;
                 }
-                if (cache_prepare_blocked_stream_ && stream == cache_prepare_blocked_stream_) {
-                    break;
+                if (isCachePrepareBlocked(stream)) {
+                    continue;
                 }
-                const bool group_barrier = !waiting_group_queue_.empty() || !loading_cache_group_queue_.empty();
-                if (group_barrier && !stream->hasEvent(StreamEvents::LoadInitiated) && stream->curBlocksNum() == 0) {
-                    // The group owns the next allocation boundary. Existing
-                    // ordinary loads must still be polled so they can release
-                    // their reserved slots, but do not start fresh ownership.
+                const bool owns_prepare_resource =
+                    stream->hasEvent(StreamEvents::LoadInitiated) || stream->curBlocksNum() > 0;
+                // Lane ownership may change after the worker snapshots this
+                // pass (for example, opposite-lane work can enqueue). Recheck
+                // at the allocation linearization point so a stale permit
+                // cannot reserve KV across the new boundary.
+                const auto lane = cachePrepareLane();
+                fresh_prepare_allowed =
+                    (is_normal_waiter && lane == AdmissionLane::NORMAL && normal_pass_unblocked)
+                    || (is_front_group_waiter && lane == AdmissionLane::GROUP && group_pass_unblocked);
+                if (!owns_prepare_resource && (!fresh_prepare_allowed || !canPrepareCacheBeforeAdmission(stream))) {
                     continue;
                 }
                 const bool already_inited = stream->curBlocksNum() > 0;
                 if (max_inited_kv_cache_streams_ > 0 && !already_inited
                     && countInitedKVCacheStreams() >= max_inited_kv_cache_streams_) {
-                    cache_prepare_blocked_stream_ = stream;
-                    schedule_trigger_             = true;
+                    markCachePrepareBlocked(stream);
+                    schedule_trigger_ = true;
                     cond_.notify_all();
-                    break;
+                    if (is_normal_waiter && fresh_prepare_allowed) {
+                        break;
+                    }
+                    continue;
                 }
                 cache_prepare_inflight_stream_ = stream;
             }
@@ -480,8 +761,14 @@ void FIFOScheduler::cachePrepareLoop() {
                                         "cache prepare inflight stream changed unexpectedly");
                 cache_prepare_inflight_stream_.reset();
                 if (result == CachePrepareResult::LACK_MEM) {
-                    cache_prepare_blocked_stream_ = stream;
-                    schedule_trigger_             = true;
+                    // Snapshot after prepareCache() rolls back any partial
+                    // multi-pool allocation. This prevents the request's own
+                    // rollback from looking like an external resource change.
+                    // The bounded retry closes the release-before-snapshot
+                    // lost-wakeup window without busy-spinning on a stable
+                    // shortage.
+                    markCachePrepareBlocked(stream);
+                    schedule_trigger_ = true;
                 }
                 if (result == CachePrepareResult::DONE) {
                     schedule_trigger_ = true;
@@ -489,9 +776,21 @@ void FIFOScheduler::cachePrepareLoop() {
                 cond_.notify_all();
             }
             if (result == CachePrepareResult::LACK_MEM) {
-                break;
+                // Ordinary FIFO remains strict. An explicit group uses the
+                // scheduler's existing stable-greedy semantics: continue this
+                // pass so a later smaller member can still be prepared.
+                if (is_normal_waiter && fresh_prepare_allowed) {
+                    break;
+                }
+                continue;
             }
             has_pending = has_pending || result == CachePrepareResult::WAIT;
+        }
+        if (scans_front_group) {
+            std::lock_guard<std::mutex> lock(lock_);
+            cache_prepare_group_scan_in_progress_ = false;
+            schedule_trigger_                     = true;
+            cond_.notify_all();
         }
         if (has_pending) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -550,24 +849,28 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>&       waitin
         }
     }
 
+    bool cache_prepare_admission_blocked = false;
     for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
         auto  current = it++;
         auto& stream  = *current;
 
-        if (stream->hasEvent(StreamEvents::Error)) {
-            auto state     = stream->getStatus();
-            auto new_state = stream->moveToNext();
-            if (new_state != state) {
-                addStreamToNewState(stream, new_state);
-                waiting_streams.erase(current);
-            }
-            continue;
-        }
-
         // Async preparation preserves strict FIFO admission: later streams must
-        // not pass an earlier stream whose KV allocation or cache load is pending.
-        if (async_cache_prepare_enabled_ && !stream->hasEvent(StreamEvents::CachePrepared)) {
-            break;
+        // not pass an earlier stream whose KV allocation or cache load is
+        // pending. Continue scanning only to finalize later errors/timeouts so
+        // their resources cannot deadlock the head stream. A statically
+        // inadmissible stream does not own prepare resources and preserves the
+        // synchronous scheduler's behavior of yielding to later valid work.
+        if (async_cache_prepare_enabled_) {
+            if (cache_prepare_admission_blocked) {
+                continue;
+            }
+            if (!stream->hasEvent(StreamEvents::CachePrepared)) {
+                const bool prepare_pending = stream == cache_prepare_inflight_stream_
+                                             || stream->hasEvent(StreamEvents::LoadInitiated)
+                                             || stream->curBlocksNum() > 0 || canPrepareCacheBeforeAdmission(stream);
+                cache_prepare_admission_blocked = prepare_pending;
+                continue;
+            }
         }
 
         // Stop admitting new work once this scheduling round reaches the uncached
@@ -721,23 +1024,36 @@ bool FIFOScheduler::loadingGroupReady() const {
 
 void FIFOScheduler::evaluateWaitingGroupQueue() {
     if (!running_streams_.empty() || !new_streams_.empty() || !loading_cache_group_queue_.empty()
-        || waiting_group_queue_.empty() || cache_prepare_inflight_stream_) {
+        || waiting_group_queue_.empty() || cache_prepare_inflight_stream_ || cache_prepare_group_scan_in_progress_) {
         return;
     }
 
     // Evaluate at most one waiting group per scheduling round.
-    auto&        group         = waiting_group_queue_.front();
-    const size_t original_size = group.size();
-    for (auto it = group.begin(); it != group.end();) {
-        if ((*it)->hasError()) {
-            (*it)->moveToNext();
-            it = group.erase(it);
-        } else {
-            ++it;
+    auto&        group                  = waiting_group_queue_.front();
+    const size_t original_size          = group.size();
+    const bool   blocked_by_kv_shortage = async_cache_prepare_enabled_ && hasCachePrepareBlocker(group);
+    const bool   has_unprepared_candidate =
+        async_cache_prepare_enabled_ && std::any_of(group.begin(), group.end(), [this](const auto& stream) {
+            return !stream->hasEvent(StreamEvents::CachePrepared) && !isCachePrepareBlocked(stream)
+                   && (stream->hasEvent(StreamEvents::LoadInitiated) || stream->curBlocksNum() > 0
+                       || canPrepareCacheBeforeAdmission(stream));
+        });
+    if (has_unprepared_candidate && !blocked_by_kv_shortage) {
+        // Cache preparation may overlap the current GPU round. Normally the
+        // group waits for the worker to finish its stable scan. Static-only
+        // residual members do not participate in this barrier, and a completed
+        // KV-shortage scan may dispatch its prepared subset below.
+        const bool waiting_on_owned_resource = std::any_of(group.begin(), group.end(), [](const auto& stream) {
+            return !stream->hasEvent(StreamEvents::CachePrepared)
+                   && (stream->hasEvent(StreamEvents::LoadInitiated) || stream->curBlocksNum() > 0);
+        });
+        if (waiting_on_owned_resource && !waiting_group_yields_cache_prepare_) {
+            // A group waiting on remote cache I/O has no executable batch yet.
+            // Let the other lane prepare while continuing to poll the group's
+            // already-owned resource.
+            waiting_group_yields_cache_prepare_ = true;
+            cond_.notify_all();
         }
-    }
-    if (group.empty()) {
-        waiting_group_queue_.pop_front();
         return;
     }
 
@@ -745,8 +1061,11 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
     const size_t inited_kv_streams       = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
     size_t       newly_inited_kv_streams = 0;
     for (auto it = group.begin(); it != group.end();) {
-        auto       current           = it++;
-        auto&      stream            = *current;
+        auto  current = it++;
+        auto& stream  = *current;
+        if (async_cache_prepare_enabled_ && !stream->hasEvent(StreamEvents::CachePrepared)) {
+            continue;
+        }
         const bool already_inited_kv = stream->curBlocksNum() > 0;
         if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv
             && inited_kv_streams + newly_inited_kv_streams >= max_inited_kv_cache_streams_) {
@@ -781,6 +1100,8 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
 
     if (group.empty()) {
         waiting_group_queue_.pop_front();
+        waiting_group_yields_cache_prepare_ = false;
+        cond_.notify_all();
         if (admitted_streams.empty()) {
             return;
         }
@@ -789,6 +1110,7 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
     }
 
     if (!admitted_streams.empty()) {
+        waiting_group_yields_cache_prepare_ = false;
         RTP_LLM_LOG_DEBUG("group partially admitted; keeping residual group at queue head: "
                           "original=%zu admitted=%zu deferred=%zu",
                           original_size,
@@ -796,31 +1118,86 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
                           group.size());
         dispatchPreparedGroup(admitted_streams);
         pending_group_fallback_count_.fetch_add(1, std::memory_order_relaxed);
+    } else if (async_cache_prepare_enabled_) {
+        // schedule() falls back to the other lane when the selected group made
+        // no progress. Mirror that decision in the prepare worker so ordinary
+        // FIFO work can make the next boundary ready without mixing lanes.
+        const bool yield_state_changed      = !waiting_group_yields_cache_prepare_;
+        waiting_group_yields_cache_prepare_ = true;
+        if (yield_state_changed) {
+            cond_.notify_all();
+        }
     }
 }
 
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
     const bool         async_cache_prepare = async_cache_prepare_enabled_;
-    if (need_fill_fake_stream_) {
+    const bool         needs_periodic_poll =
+        async_cache_prepare
+        && (!waiting_streams_.empty() || !waiting_group_queue_.empty() || cache_prepare_blocked_stream_);
+    if (need_fill_fake_stream_ || needs_periodic_poll) {
         cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
     } else {
         cond_.wait(lock, [this] { return waitPredicate(); });
     }
-    schedule_trigger_                 = false;
-    last_admitted_context_batch_size_ = 0;
-    last_admitted_context_token_size_ = 0;
-    last_waiting_oldest_age_us_       = 0;
+    if (stop_) {
+        // stop() joins the async prepare worker before cancelling queues. A
+        // schedule thread awakened in that window must not dispatch newly
+        // prepared work that stop() is about to cancel and release.
+        schedule_trigger_ = false;
+        return std::list<GenerateStreamPtr>{};
+    }
+    const size_t prepare_waiting_size_before     = waiting_streams_.size();
+    const size_t prepare_group_queue_size_before = waiting_group_queue_.size();
+    const size_t prepare_group_front_size_before =
+        waiting_group_queue_.empty() ? 0 : waiting_group_queue_.front().size();
+    const size_t prepare_loading_size_before             = loading_cache_streams_.size();
+    const size_t prepare_loading_group_queue_size_before = loading_cache_group_queue_.size();
+    const size_t prepare_loading_group_front_size_before =
+        loading_cache_group_queue_.empty() ? 0 : loading_cache_group_queue_.front().size();
+    const size_t prepare_running_size_before  = running_streams_.size();
+    const auto*  prepare_waiting_front_before = waiting_streams_.empty() ? nullptr : waiting_streams_.front().get();
+    const auto*  prepare_group_front_before   = waiting_group_queue_.empty() || waiting_group_queue_.front().empty() ?
+                                                    nullptr :
+                                                    waiting_group_queue_.front().front().get();
+    const auto*  prepare_loading_group_front_before =
+        loading_cache_group_queue_.empty() || loading_cache_group_queue_.front().empty() ?
+             nullptr :
+             loading_cache_group_queue_.front().front().get();
+    const auto* prepare_running_front_before = running_streams_.empty() ? nullptr : running_streams_.front().get();
+    const auto  prepare_active_lane_before   = active_admission_lane_;
+    const bool  prepare_prefer_group_before  = prefer_group_next_;
+    const bool  prepare_group_yield_before   = waiting_group_yields_cache_prepare_;
+    schedule_trigger_                        = false;
+    last_admitted_context_batch_size_        = 0;
+    last_admitted_context_token_size_        = 0;
+    last_waiting_oldest_age_us_              = 0;
 
-    const size_t running_streams_before = running_streams_.size();
+    const auto previous_active_admission_lane = active_admission_lane_;
     evaluateAndUpdateStreams(running_streams_);
-    if (async_cache_prepare && cache_prepare_blocked_stream_
-        && (running_streams_.size() < running_streams_before || running_streams_.empty())) {
-        cache_prepare_blocked_stream_.reset();
+
+    bool finalized_waiting = finalizeErroredStreams(waiting_streams_);
+    finalized_waiting      = finalizeErroredStreams(loading_cache_streams_) || finalized_waiting;
+    finalized_waiting      = finalizeErroredGroups(waiting_group_queue_) || finalized_waiting;
+    if (waiting_group_queue_.empty() && loading_cache_group_queue_.empty()) {
+        // Do not carry a turn owned by a cancelled/timed-out group across an
+        // idle boundary. A group arriving while NORMAL is still active will
+        // establish a fresh barrier below.
+        prefer_group_next_ = false;
+    }
+    if (finalized_waiting) {
         cond_.notify_all();
     }
 
     if (running_streams_.empty()) {
+        // A group that arrived while a NORMAL batch was running owns the next
+        // empty execution boundary. Preserve that barrier when the last normal
+        // stream finishes; otherwise an ordinary tail can prepare first and
+        // consume the KV blocks that the already-blocked group is waiting for.
+        if (previous_active_admission_lane == AdmissionLane::NORMAL && !waiting_group_queue_.empty()) {
+            prefer_group_next_ = true;
+        }
         active_admission_lane_ = AdmissionLane::NONE;
     }
 
@@ -875,14 +1252,21 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
         if (!new_streams_.empty()) {
             // The completed ordinary loads above own this execution boundary.
         } else if (has_waiting_group && (prefer_group_next_ || !has_normal_waiting)) {
+            const bool cache_prepare_busy = cache_prepare_inflight_stream_ || cache_prepare_group_scan_in_progress_;
             evaluateWaitingGroupQueue();
             if (!new_streams_.empty()) {
                 active_admission_lane_ = AdmissionLane::GROUP;
                 prefer_group_next_     = false;
-            } else {
+            } else if (!async_cache_prepare || (!cache_prepare_busy && waiting_group_yields_cache_prepare_)) {
                 // The attempted group produced no executable work. Ordinary
                 // loads were already polled above; admit an ordinary waiter so
-                // it can release any inited-KV slot blocking the group.
+                // it can release any inited-KV slot blocking the group. An
+                // async group may yield only after its evaluator explicitly
+                // classifies the wait as owned remote I/O, resource shortage,
+                // or static no-progress. Fresh work waiting for the worker to
+                // start, an in-flight prepare, and a stable group scan all keep
+                // the boundary empty; otherwise a prepared ordinary tail could
+                // cross the group barrier.
                 evaluateWaitingStreams(waiting_streams_, new_streams_);
                 if (!new_streams_.empty()) {
                     active_admission_lane_ = AdmissionLane::NORMAL;
@@ -897,11 +1281,13 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
             if (!new_streams_.empty()) {
                 active_admission_lane_ = AdmissionLane::NORMAL;
                 prefer_group_next_     = has_waiting_group;
-            } else if (has_waiting_group) {
+            } else if (has_waiting_group && (!async_cache_prepare || cachePrepareLane() == AdmissionLane::GROUP)) {
                 // Normal streams may all be blocked on KV or cache loading. No
-                // normal stream entered the execution batch, so trying one
-                // explicit group here preserves isolation while avoiding
-                // head-of-line deadlock between the two lanes.
+                // normal stream entered the execution batch. An async NORMAL
+                // lane with fresh or in-flight preparation still owns this
+                // boundary; only a lane that has explicitly yielded on cache
+                // I/O, KV shortage, or static rejection may fall back to the
+                // group here.
                 evaluateWaitingGroupQueue();
                 if (!new_streams_.empty()) {
                     active_admission_lane_ = AdmissionLane::GROUP;
@@ -913,8 +1299,45 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     running_streams_.insert(running_streams_.end(), new_streams_.begin(), new_streams_.end());
     new_streams_.clear();
 
-    if (async_cache_prepare && waiting_group_queue_.empty() && loading_cache_group_queue_.empty()) {
+    const bool cache_prepare_resources_changed = async_cache_prepare && cachePrepareResourcesChanged();
+    if (cache_prepare_resources_changed) {
+        clearCachePrepareBlocked();
+        waiting_group_yields_cache_prepare_ = false;
         cond_.notify_all();
+    }
+
+    if (async_cache_prepare) {
+        const auto* prepare_waiting_front_after = waiting_streams_.empty() ? nullptr : waiting_streams_.front().get();
+        const auto* prepare_group_front_after   = waiting_group_queue_.empty() || waiting_group_queue_.front().empty() ?
+                                                      nullptr :
+                                                      waiting_group_queue_.front().front().get();
+        const auto* prepare_loading_group_front_after =
+            loading_cache_group_queue_.empty() || loading_cache_group_queue_.front().empty() ?
+                nullptr :
+                loading_cache_group_queue_.front().front().get();
+        const auto* prepare_running_front_after = running_streams_.empty() ? nullptr : running_streams_.front().get();
+        const bool  prepare_state_changed =
+            prepare_waiting_size_before != waiting_streams_.size()
+            || prepare_group_queue_size_before != waiting_group_queue_.size()
+            || prepare_group_front_size_before
+                   != (waiting_group_queue_.empty() ? 0 : waiting_group_queue_.front().size())
+            || prepare_loading_size_before != loading_cache_streams_.size()
+            || prepare_loading_group_queue_size_before != loading_cache_group_queue_.size()
+            || prepare_loading_group_front_size_before
+                   != (loading_cache_group_queue_.empty() ? 0 : loading_cache_group_queue_.front().size())
+            || prepare_running_size_before != running_streams_.size()
+            || prepare_waiting_front_before != prepare_waiting_front_after
+            || prepare_group_front_before != prepare_group_front_after
+            || prepare_loading_group_front_before != prepare_loading_group_front_after
+            || prepare_running_front_before != prepare_running_front_after
+            || prepare_active_lane_before != active_admission_lane_ || prepare_prefer_group_before != prefer_group_next_
+            || prepare_group_yield_before != waiting_group_yields_cache_prepare_;
+        if (prepare_state_changed || finalized_waiting || cache_prepare_resources_changed) {
+            // Admission can expose a new queue head or change the preferred
+            // prepare lane without a new enqueue. Avoid waking the worker on
+            // steady-state decode steps where none of that state changed.
+            cond_.notify_all();
+        }
     }
 
     reportMetrics();

@@ -463,10 +463,14 @@ TEST_F(HybridPoolKVCacheAllocatorTest, RequestAndConnectorRefAggregateAcrossGrou
     auto pool1 = allocator->groupBlockPools()[1];
 
     const size_t free_total_before = allocator->freeBlocksNum();
+    auto         available_before  = allocator->availableBlocksNumPerPool();
     auto         g0_blocks         = pool0->malloc(2);
     auto         g1_blocks         = pool1->malloc(3);
     ASSERT_EQ(g0_blocks.size(), 2u);
     ASSERT_EQ(g1_blocks.size(), 3u);
+    ASSERT_EQ(available_before.size(), 2u);
+    EXPECT_EQ(allocator->availableBlocksNumPerPool(),
+              (std::vector<size_t>{available_before[0] - 2, available_before[1] - 3}));
 
     EXPECT_EQ(allocator->requestRefBlocksNum(), 5u);
     EXPECT_EQ(allocator->freeBlocksNum(), free_total_before - 5u);
@@ -491,6 +495,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, RequestAndConnectorRefAggregateAcrossGrou
     pool0->connectorFree(g0_blocks[0]);
     pool1->connectorFree(g1_blocks[0]);
     EXPECT_EQ(allocator->connectorRefBlocksNum(), 0u);
+    EXPECT_EQ(allocator->availableBlocksNumPerPool(), available_before);
     EXPECT_EQ(allocator->freeBlocksNum(), free_total_before);
     EXPECT_EQ(allocator->notInUseBlocksNum(), free_total_before);
 }
@@ -917,6 +922,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     const auto linear_block_before = batch_res->blocks(0, /*gid=*/0)[0];
     const auto full_block_before   = batch_res->blocks(0, /*gid=*/1)[0];
     const auto counters_before     = snapshotPoolCounters(allocator);
+    const auto available_before    = allocator->availableBlocksNumPerPool();
 
     // gid=0 can append one real LINEAR tail block. gid=1 has no remaining
     // free blocks and no cache to evict, so FULL allocation fails.
@@ -931,6 +937,11 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     ASSERT_EQ(batch_res->blocksNum(0, /*gid=*/1), 1u);
     EXPECT_EQ(batch_res->blocks(0, /*gid=*/0)[0], linear_block_before);
     EXPECT_EQ(batch_res->blocks(0, /*gid=*/1)[0], full_block_before);
+    // A failed incremental allocation may allocate in gid=0 before gid=1
+    // fails, then roll gid=0 back. The post-attempt resource snapshot must be
+    // identical so the scheduler does not mistake its own rollback for an
+    // external release and retry in a tight loop.
+    EXPECT_EQ(allocator->availableBlocksNumPerPool(), available_before);
     expectPoolCountersEq(allocator, counters_before);
 }
 
