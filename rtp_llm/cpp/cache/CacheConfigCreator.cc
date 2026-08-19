@@ -91,6 +91,54 @@ uint32_t maxIndependentPoolGlobalBlockNum(const CacheConfig& config, size_t budg
     return low;
 }
 
+size_t cacheLayoutBytes(const CacheConfig& config, uint32_t global_block_num, int step) {
+    if (config.use_independent_block_pools && !config.use_typed_cache_regions) {
+        size_t bytes = 0;
+        for (size_t gid = 0; gid < config.group_block_size_bytes.size(); ++gid) {
+            bytes += static_cast<size_t>(config.groupBlockNumForGlobal(gid, global_block_num))
+                     * config.group_block_size_bytes[gid];
+        }
+        return bytes;
+    }
+    return static_cast<size_t>(global_block_num) * effectivePagedBlockBytes(config, step);
+}
+
+uint32_t maxSpeculativeGlobalBlockNum(const CacheConfig& score_config,
+                                      const CacheConfig& propose_config,
+                                      int                num_mtp_modules,
+                                      int                step,
+                                      size_t             budget_bytes) {
+    auto fits = [&](uint32_t global_block_num) {
+        const size_t score_bytes   = cacheLayoutBytes(score_config, global_block_num, step);
+        const size_t propose_bytes = cacheLayoutBytes(propose_config, global_block_num, step);
+        if (propose_bytes > 0
+            && static_cast<size_t>(num_mtp_modules) > (budget_bytes - std::min(budget_bytes, score_bytes)) / propose_bytes) {
+            return false;
+        }
+        return score_bytes <= budget_bytes
+               && score_bytes + propose_bytes * static_cast<size_t>(num_mtp_modules) <= budget_bytes;
+    };
+
+    uint32_t low = 0;
+    uint32_t high = 1;
+    while (fits(high)) {
+        low = high;
+        if (high > std::numeric_limits<uint32_t>::max() / 2) {
+            return high;
+        }
+        high *= 2;
+    }
+    while (low + 1 < high) {
+        const uint32_t mid = low + (high - low) / 2;
+        if (fits(mid)) {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    return low;
+}
+
 bool hasDsv4FixedPoolBytes(const CacheConfig& config) {
     return config.state_block_size_bytes > 0 || config.swa_block_size_bytes > 0;
 }
@@ -341,7 +389,13 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
             propose_effective_bytes / 1024 / 1024,
             num_mtp_modules,
             joint_block_bytes / 1024 / 1024);
-        block_num = paged_budget / joint_block_bytes;
+        if ((score_config.use_independent_block_pools && !score_config.use_typed_cache_regions)
+            || (propose_config.use_independent_block_pools && !propose_config.use_typed_cache_regions)) {
+            block_num = maxSpeculativeGlobalBlockNum(
+                score_config, propose_config, num_mtp_modules, joint_step, paged_budget);
+        } else {
+            block_num = paged_budget / joint_block_bytes;
+        }
     }
 
     RTP_LLM_CHECK_WITH_INFO(block_num > 0, "kv cache needs at least 1 block but %zu", block_num);

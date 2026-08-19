@@ -314,6 +314,8 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     if (!model_config.attn_config.layer_compress_ratios.empty()) {
         config.dsv4_fixed_pool_blocks     = kv_cache_config.dsv4_fixed_pool_blocks;
         config.dsv4_hca_state_pool_blocks = kv_cache_config.dsv4_hca_state_pool_blocks;
+    } else {
+        config.kimi_k3_kda_pool_blocks = kv_cache_config.kimi_k3_kda_pool_blocks;
     }
     return config;
 }

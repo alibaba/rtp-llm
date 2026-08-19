@@ -449,6 +449,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
         .def_readwrite("dsv4_fixed_pool_blocks", &KVCacheConfig::dsv4_fixed_pool_blocks)
         .def_readwrite("dsv4_hca_state_pool_blocks", &KVCacheConfig::dsv4_hca_state_pool_blocks)
+        .def_readwrite("kimi_k3_kda_pool_blocks", &KVCacheConfig::kimi_k3_kda_pool_blocks)
         .def_readwrite("dsv4_fixed_pool_use_memory", &KVCacheConfig::dsv4_fixed_pool_use_memory)
         // Remote connector configuration fields
         .def_readwrite("reco_enable_vipserver", &KVCacheConfig::reco_enable_vipserver)

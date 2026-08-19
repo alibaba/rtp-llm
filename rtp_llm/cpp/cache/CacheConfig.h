@@ -35,6 +35,7 @@ struct CacheConfig {
     std::vector<uint32_t>          group_block_nums;
     uint32_t                       dsv4_fixed_pool_blocks                  = 0;
     uint32_t                       dsv4_hca_state_pool_blocks              = 0;
+    uint32_t                       kimi_k3_kda_pool_blocks                 = 0;
     bool                           use_independent_block_pools              = false;
     bool                           use_typed_cache_regions                  = false;
     bool                           use_opaque_kv_cache_store                = false;
@@ -114,6 +115,12 @@ struct CacheConfig {
         const bool use_explicit_hca_blocks   = region == KVCacheRegionName::HCA_STATE
                                              && dsv4_hca_state_pool_blocks > 0;
         const bool use_explicit_fixed_blocks = is_dsv4_fixed_region && dsv4_fixed_pool_blocks > 0;
+        const bool use_explicit_kda_blocks = use_independent_block_pools && !use_typed_cache_regions && is_linear
+                                             && kimi_k3_kda_pool_blocks > 0;
+
+        if (use_explicit_kda_blocks) {
+            return kimi_k3_kda_pool_blocks;
+        }
 
         if (use_explicit_hca_blocks) {
             return dsv4_hca_state_pool_blocks;
@@ -220,6 +227,7 @@ struct CacheConfig {
         OUTPUT_FIELD(full_group_num);
         OUTPUT_FIELD(dsv4_fixed_pool_blocks);
         OUTPUT_FIELD(dsv4_hca_state_pool_blocks);
+        OUTPUT_FIELD(kimi_k3_kda_pool_blocks);
         OUTPUT_FIELD(use_independent_block_pools);
         OUTPUT_FIELD(use_typed_cache_regions);
         OUTPUT_FIELD(use_opaque_kv_cache_store);

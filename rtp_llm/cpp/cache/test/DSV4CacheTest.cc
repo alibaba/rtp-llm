@@ -397,6 +397,20 @@ TEST(HybridPoolConfigCreatorTest, HybridAttentionIndependentPoolUsesHybridPoolCo
               std::vector<KVCacheRegionName>({KVCacheRegionName::DEFAULT, KVCacheRegionName::DEFAULT}));
 }
 
+TEST(HybridPoolConfigCreatorTest, KimiKdaPoolUsesExplicitBlockCount) {
+    ParallelismConfig pc;
+    KVCacheConfig     kv_cache_config;
+    kv_cache_config.kimi_k3_kda_pool_blocks = 17;
+    auto config = CacheConfigCreator::createBasicConfig(
+        makeHybridAttentionModelConfig(true), pc, kv_cache_config, false, 0);
+
+    config.finalizeBlockNums(101, RuntimeConfig{});
+    ASSERT_EQ(config.groupNums(), 2);
+    ASSERT_EQ(config.group_block_nums.size(), 2u);
+    EXPECT_EQ(config.group_block_nums[0], 101u);
+    EXPECT_EQ(config.group_block_nums[1], 17u);
+}
+
 TEST(HybridPoolConfigCreatorTest, HybridAttentionWithoutIndependentPoolKeepsSharedHybridConfig) {
     ParallelismConfig pc;
     auto              config =
