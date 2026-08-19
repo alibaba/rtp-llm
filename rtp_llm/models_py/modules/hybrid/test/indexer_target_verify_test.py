@@ -40,7 +40,7 @@ class IndexerTargetVerifyTest(TestCase):
         indexer_op._get_topk_paged.return_value = paged_result
         owner = SimpleNamespace(
             indexer_op=indexer_op,
-            _prefill_cp_enabled=lambda: False,
+            _is_sparse_prefill_cp=lambda _: False,
         )
         attention_inputs = SimpleNamespace(
             is_prefill=True,
@@ -74,7 +74,7 @@ class IndexerTargetVerifyTest(TestCase):
         indexer_op = mock.Mock()
         owner = SimpleNamespace(
             indexer_op=indexer_op,
-            _prefill_cp_enabled=lambda: True,
+            _is_sparse_prefill_cp=lambda _: True,
         )
         attention_inputs = SimpleNamespace(
             is_prefill=True,

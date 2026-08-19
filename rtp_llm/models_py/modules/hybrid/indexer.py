@@ -173,7 +173,7 @@ class Indexer(nn.Module):
         cp_params: Optional[Any],
     ) -> torch.Tensor:
         is_target_verify = getattr(attention_inputs, "is_target_verify", False)
-        if is_target_verify and self._prefill_cp_enabled():
+        if is_target_verify and self._is_sparse_prefill_cp(attention_inputs):
             # CP hands this rank only its slice of the query rows, while the paged
             # metadata (expanded_seq_lens, batch_indice_d) is full length. At
             # next_n + 1 == 2 the two row counts coincide for cp_size 2, 4 and 8, so
