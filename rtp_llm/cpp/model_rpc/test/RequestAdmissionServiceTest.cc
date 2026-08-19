@@ -41,21 +41,6 @@ TEST(RequestAdmissionServiceTest, RemoteGenerateEndpointsUseTheSameGate) {
     expectDraining(service.RemoteGenerate(nullptr, nullptr));
 }
 
-TEST(RequestAdmissionServiceTest, RemoteBatchGenerateRejectsPdModeBeforeLocalEnqueue) {
-    BatchGenerateInputPB   request;
-    BatchGenerateOutputsPB response;
-
-    for (const auto& server : {std::shared_ptr<LocalRpcServer>(std::make_shared<PrefillRpcServer>()),
-                               std::shared_ptr<LocalRpcServer>(std::make_shared<DecodeRpcServer>())}) {
-        RemoteRpcServiceImpl service;
-        service.local_server_ = server;
-
-        const auto status = service.BatchGenerateCall(nullptr, &request, &response);
-        EXPECT_EQ(status.error_code(), grpc::StatusCode::UNIMPLEMENTED);
-        EXPECT_EQ(status.error_message(), "BatchGenerateCall is not supported in P/D mode");
-    }
-}
-
 TEST(RequestAdmissionServiceTest, LocalBatchGenerateRemainsAvailable) {
     LocalRpcServiceImpl    service;
     BatchGenerateInputPB   request;

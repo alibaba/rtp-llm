@@ -30,16 +30,6 @@ public:
         });
     }
 
-    grpc::Status BatchGenerateCall(grpc::ServerContext*,
-                                   const BatchGenerateInputPB*,
-                                   BatchGenerateOutputsPB*) override {
-        return withRequestAdmission([&]() {
-            const auto error_msg = "BatchGenerateCall is not supported in P/D mode";
-            RTP_LLM_LOG_ERROR(error_msg);
-            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
-        });
-    }
-
     grpc::Status
     RemoteFinish(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response) override {
         if (!prefill_server_) {
