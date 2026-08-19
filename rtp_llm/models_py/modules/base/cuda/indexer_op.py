@@ -239,9 +239,11 @@ class IndexerOp(nn.Module):
         self.scale_fmt = scale_fmt
         self.is_neox_style = is_neox_style
 
-        glm5_topk_backend = os.environ.get(
-            "GLM5_INDEXER_TOPK_BACKEND", "dsv4_persistent"
-        ).strip().lower()
+        glm5_topk_backend = (
+            os.environ.get("GLM5_INDEXER_TOPK_BACKEND", "dsv4_persistent")
+            .strip()
+            .lower()
+        )
         if glm5_topk_backend not in ("dsv4_persistent", "topk_v3"):
             raise ValueError(
                 "GLM5_INDEXER_TOPK_BACKEND must be 'dsv4_persistent' or "
@@ -253,9 +255,11 @@ class IndexerOp(nn.Module):
             else rtp_llm_ops.dsv4_persistent_topk
         )
 
-        prefill_topk_backend = os.environ.get(
-            "GLM5_PREFILL_INDEXER_TOPK_BACKEND", "dsv4_per_row"
-        ).strip().lower()
+        prefill_topk_backend = (
+            os.environ.get("GLM5_PREFILL_INDEXER_TOPK_BACKEND", "dsv4_per_row")
+            .strip()
+            .lower()
+        )
         if prefill_topk_backend not in ("topk_v3_tie_break", "dsv4_per_row"):
             raise ValueError(
                 "GLM5_PREFILL_INDEXER_TOPK_BACKEND must be "
@@ -1036,6 +1040,11 @@ class IndexerOp(nn.Module):
                 copy_dst_idx=indexer_copy_dst_idx,
                 src_for_padded=indexer_src_for_padded,
             )
+            # The assembled full-K tensors are the only inputs needed by the
+            # logits loop. Drop rank-local gather storages now; same-stream
+            # allocator reuse is ordered after the assemble kernel and needs no
+            # synchronize/empty_cache on the hot path.
+            del actual_k, actual_s
         else:
             rtp_llm_ops.cp_gather_indexer_k_quant_cache(
                 self._kv_cache_blocks(kv_cache),
