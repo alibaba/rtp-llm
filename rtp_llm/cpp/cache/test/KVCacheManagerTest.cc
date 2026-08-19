@@ -1719,28 +1719,6 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
 
     const CacheKeysType keys_a = res_a->cacheKeys(0);
     ASSERT_FALSE(keys_a.empty());
-    struct FullPrefixSnapshot {
-        size_t                                 group_set_id;
-        std::vector<std::vector<BlockIdxType>> blocks_per_node;
-    };
-    std::vector<FullPrefixSnapshot> full_prefix_before_swa_pressure;
-    {
-        const auto find_a = manager->blockTreeCache()->tree()->findNode(keys_a);
-        ASSERT_EQ(find_a.size(), keys_a.size());
-        const auto& group_sets = manager->blockTreeCache()->groupSets();
-        for (size_t group_set_id = 0; group_set_id < group_sets.size(); ++group_set_id) {
-            const auto& group_set = group_sets[group_set_id];
-            if (group_set->groupType() != CacheGroupType::FULL) {
-                continue;
-            }
-            FullPrefixSnapshot snapshot{group_set_id, {}};
-            for (TreeNode* node : find_a) {
-                snapshot.blocks_per_node.push_back(node->group_set_resources[group_set_id].device_blocks);
-            }
-            full_prefix_before_swa_pressure.push_back(std::move(snapshot));
-        }
-    }
-    ASSERT_FALSE(full_prefix_before_swa_pressure.empty());
 
     auto       res_b    = makeDSV4BatchResource(manager_config);
     auto       tokens_b = makeTokens(/*offset=*/10000);
@@ -1821,29 +1799,9 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     auto result_c = manager->malloc(malloc_c);
     ASSERT_TRUE(result_c.success) << "3rd allocation must succeed via SWA eviction";
 
-    // SWA pressure selects the older request's tier leaf. Reverse cascading
-    // removes every group set on that leaf, including FULL, while preserving
-    // the older request's reachable prefix.
-    {
-        const auto find_a = manager->blockTreeCache()->tree()->findNode(keys_a);
-        ASSERT_EQ(find_a.size() + 1, keys_a.size());
-        const auto& group_sets = manager->blockTreeCache()->groupSets();
-        for (const FullPrefixSnapshot& snapshot : full_prefix_before_swa_pressure) {
-            ASSERT_LT(snapshot.group_set_id, group_sets.size());
-            const auto& group_set = group_sets[snapshot.group_set_id];
-            auto        validator = group_set->createMatchValidator();
-            ASSERT_EQ(snapshot.blocks_per_node.size(), keys_a.size());
-            for (size_t path_index = 0; path_index < find_a.size(); ++path_index) {
-                const GroupSetResource& slot = find_a[path_index]->group_set_resources[snapshot.group_set_id];
-                ASSERT_TRUE(validator->validate(slot));
-                ASSERT_EQ(slot.device_blocks, snapshot.blocks_per_node[path_index]);
-                ASSERT_EQ(slot.device_blocks.size(), group_set->devicePools().size());
-                for (size_t pool_index = 0; pool_index < slot.device_blocks.size(); ++pool_index) {
-                    EXPECT_EQ(group_set->devicePools()[pool_index]->refCount(slot.device_blocks[pool_index]), 1u);
-                }
-            }
-        }
-    }
+    // SWA pressure selects the older request's tier leaf. Its exclusive,
+    // unmatchable single-child ancestor chain is pruned upward as one cascade.
+    EXPECT_TRUE(manager->blockTreeCache()->tree()->findNode(keys_a).empty());
 
     // Direct proof of the SWA eviction itself: at least one cached SWA slot was
     // evicted, the evicted set is exactly an LRU-first prefix (every evicted
