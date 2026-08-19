@@ -21,7 +21,6 @@ from .mega_csa_weights import (
     Q_LORA_RANK,
     CSAGeometry,
 )
-from .mega_hca_weights import HCA_FRONT_OUT_DIM
 
 
 @dataclass
@@ -278,21 +277,26 @@ class MegaCSARuntime:
         return tables
 
     def hca_layer_workspace(
-        self, m: int, num_split: int, device: torch.device
+        self,
+        m: int,
+        num_split: int,
+        device: torch.device,
+        geometry: CSAGeometry = PRO_GEOMETRY,
     ) -> MegaHCALayerWorkspace:
         """HCA twin of :meth:`layer_workspace`.
 
         The HCA front op zeroes rows ``[m, physical_m)`` itself, so the three
         activation buffers it reads are allocated at the padded row count.
         """
-        key = (str(device), m, num_split)
+        g = geometry
+        key = (str(device), m, num_split, g.dim)
         workspace = self._hca_layer_workspaces.get(key)
         if workspace is None:
             physical_m = max(m, 16)
-            o_heads_per_group = MAIN_HEADS // O_GROUPS
+            o_heads_per_group = g.main_heads // g.o_groups
             o_aligned_m = ((m + 3) // 4) * 4
             o_proj_fp8 = torch.empty(
-                O_GROUPS,
+                g.o_groups,
                 m,
                 o_heads_per_group * HEAD_DIM,
                 dtype=torch.float8_e4m3fn,
@@ -300,12 +304,12 @@ class MegaCSARuntime:
             ).transpose(0, 1)
             o_proj_scale = (
                 torch.empty(
-                    O_GROUPS * o_heads_per_group * o_aligned_m,
+                    g.o_groups * o_heads_per_group * o_aligned_m,
                     dtype=torch.int32,
                     device=device,
                 )
                 .as_strided(
-                    (O_GROUPS, m, o_heads_per_group),
+                    (g.o_groups, m, o_heads_per_group),
                     (o_heads_per_group * o_aligned_m, 1, o_aligned_m),
                 )
                 .transpose(0, 1)
@@ -316,24 +320,25 @@ class MegaCSARuntime:
                 ),
                 hc_sum_sq=torch.empty(num_split, m, dtype=torch.float32, device=device),
                 collapsed=torch.empty(
-                    physical_m, DIM, dtype=torch.bfloat16, device=device
+                    physical_m, g.dim, dtype=torch.bfloat16, device=device
                 ),
                 pre=torch.empty(m, HC, dtype=torch.float32, device=device),
                 post=torch.empty(m, HC, dtype=torch.float32, device=device),
                 comb=torch.empty(m, HC, HC, dtype=torch.float32, device=device),
                 mix=torch.empty(m, HC_MIX, dtype=torch.float32, device=device),
                 hidden_fp8=torch.empty(
-                    physical_m, DIM, dtype=torch.float8_e4m3fn, device=device
+                    physical_m, g.dim, dtype=torch.float8_e4m3fn, device=device
                 ),
                 hidden_sf=torch.empty(
-                    physical_m, DIM // 128, dtype=torch.uint8, device=device
+                    physical_m, g.dim // 128, dtype=torch.uint8, device=device
                 ),
                 front_out=torch.empty(
-                    physical_m, HCA_FRONT_OUT_DIM, dtype=torch.bfloat16, device=device
+                    physical_m,
+                    g.front_fp8_rows,
+                    dtype=torch.bfloat16,
+                    device=device,
                 ),
-                q_raw=torch.empty(
-                    m, MAIN_HEADS * HEAD_DIM, dtype=torch.bfloat16, device=device
-                ),
+                q_raw=torch.empty(m, g.n_main, dtype=torch.bfloat16, device=device),
                 o_proj_fp8=o_proj_fp8,
                 o_proj_scale=o_proj_scale,
             )
