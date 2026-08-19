@@ -44,6 +44,22 @@ TEST(InferenceDataTypeTest, RawRequest_GenerateConfig_TopK) {
     ASSERT_EQ(req.generate_config.value().top_k, 1);
 }
 
+TEST(InferenceDataTypeTest, RawRequest_GenerateConfig_LegacyMemoryCacheMapsToHost) {
+    RawRequest req;
+    FromJsonString(req, R"({"request_id":1,"generate_config":{"enable_memory_cache":false}})");
+    ASSERT_TRUE(req.generate_config.has_value());
+    EXPECT_FALSE(req.generate_config.value().enable_host_cache);
+}
+
+TEST(InferenceDataTypeTest, RawRequest_GenerateConfig_CanonicalHostCacheWinsLegacy) {
+    RawRequest req;
+    FromJsonString(
+        req,
+        R"({"request_id":1,"generate_config":{"enable_memory_cache":false,"enable_host_cache":true}})");
+    ASSERT_TRUE(req.generate_config.has_value());
+    EXPECT_TRUE(req.generate_config.value().enable_host_cache);
+}
+
 TEST(InferenceDataTypeTest, RawRequest_GenerateConfig_HiddenStates_False) {
     std::string jsonStr = R"({"generate_config": {"top_k": 1}})";
     RawRequest  req;
@@ -108,7 +124,10 @@ TEST(InferenceDataTypeTest, RawRequest_Prompt) {
 
 TEST(InferenceDataTypeTest, AuxInfoAdapter) {
     AuxInfo aux_info;
-    aux_info.cost_time_us = 1000;
+    aux_info.cost_time_us           = 1000;
+    aux_info.disk_reuse_len         = 128;
+    aux_info.prefill_disk_reuse_len = 256;
+    aux_info.decode_disk_reuse_len  = 64;
     AuxInfoAdapter aux_info_adapter(aux_info);
     std::string    jsonStr = ToJsonString(aux_info_adapter, true);
     ASSERT_TRUE(jsonStr.find(R"("cost_time":1)") != std::string::npos);
@@ -118,6 +137,9 @@ TEST(InferenceDataTypeTest, AuxInfoAdapter) {
     ASSERT_TRUE(jsonStr.find(R"("output_len":0)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("pd_sep":false)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("step_output_len":0)") != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("disk_reuse_len":128)") != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("prefill_disk_reuse_len":256)") != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("decode_disk_reuse_len":64)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("beam_responses":[])") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("cum_log_probs":)") == std::string::npos);
 }

@@ -262,6 +262,7 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
         stream->fakeInitKVBlock(reserved_blocks);
     } else if (mode == preRunMode::build_system_prompt) {
         THROW_IF_STATUS_ERROR(stream->initKVBlock());
+        THROW_IF_STATUS_ERROR(stream->streamCacheResource().waitForAllocatorLoad());
     };
     std::list<GenerateStreamPtr> streams{stream};
     THROW_IF_STATUS_ERROR(executor_->process(streams));
@@ -433,8 +434,35 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
     return stream;
 }
 
+void NormalEngine::normalizeSystemPromptCacheConfig() {
+    if (kv_cache_config.multi_task_prompt_tokens.empty()) {
+        return;
+    }
+    if (!kv_cache_config.reuse_cache || !kv_cache_config.enable_device_cache) {
+        RTP_LLM_LOG_INFO("system prompt enabled; forcing reuse_cache and enable_device_cache on");
+    }
+    kv_cache_config.reuse_cache         = true;
+    kv_cache_config.enable_device_cache = true;
+}
+
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
+    normalizeSystemPromptCacheConfig();
     const bool use_cuda_malloc_block_pool = shouldUseCudaMallocKVCacheBacking(pd_sep_config, cache_store_config);
+    if (kv_cache_config.device_cache_min_free_blocks <= 0) {
+        int64_t max_prefill_tokens =
+            runtime_config.fifo_scheduler_config.max_context_batch_size * model_config_.max_seq_len;
+        if (runtime_config.fifo_scheduler_config.max_batch_tokens_size > 0) {
+            max_prefill_tokens =
+                std::min(max_prefill_tokens, runtime_config.fifo_scheduler_config.max_batch_tokens_size);
+        }
+        RTP_LLM_CHECK_WITH_INFO(kv_cache_config.seq_size_per_block > 0,
+                                "seq_size_per_block must be positive, got %d",
+                                kv_cache_config.seq_size_per_block);
+        kv_cache_config.device_cache_min_free_blocks =
+            (max_prefill_tokens + kv_cache_config.seq_size_per_block - 1) / kv_cache_config.seq_size_per_block;
+        RTP_LLM_LOG_INFO("resolved device_cache_min_free_blocks=%ld before KVCacheManager initialization",
+                         kv_cache_config.device_cache_min_free_blocks);
+    }
     if (propose_params_ && propose_params_->draftModel()) {
         auto config = CacheConfigCreator::createSpConfig(model_config_,
                                                          propose_params_->getEngineInitParams().model_config_,
@@ -456,7 +484,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       pd_sep_config,
                                                                       cache_store_config,
                                                                       use_cuda_malloc_block_pool);
-        resource_context_.role_type = pd_sep_config.role_type;
+        resource_context_.role_type     = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -481,7 +509,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       pd_sep_config,
                                                                       cache_store_config,
                                                                       use_cuda_malloc_block_pool);
-        resource_context_.role_type = pd_sep_config.role_type;
+        resource_context_.role_type     = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -491,10 +519,9 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
 }
 
 absl::Status NormalEngine::initSystemPrompt() {
-    resource_context_.initCacheConfig(kv_cache_config, runtime_config.fifo_scheduler_config, model_config_.max_seq_len);
+    resource_context_.initCacheConfig(kv_cache_config);
 
     if (!kv_cache_config.multi_task_prompt_tokens.empty()) {
-        resource_context_.reuse_cache = true;
         CHECK_AND_RETURN_REF(
             system_prompt_param,
             SystemPromptConstructor::construct(

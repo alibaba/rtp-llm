@@ -97,6 +97,9 @@ public:
         }
         json.Jsonize("local_reuse_len", local_reuse_len, local_reuse_len);
         json.Jsonize("remote_reuse_len", remote_reuse_len, remote_reuse_len);
+        json.Jsonize("disk_reuse_len", disk_reuse_len, disk_reuse_len);
+        json.Jsonize("prefill_disk_reuse_len", prefill_disk_reuse_len, prefill_disk_reuse_len);
+        json.Jsonize("decode_disk_reuse_len", decode_disk_reuse_len, decode_disk_reuse_len);
     }
     AuxInfoAdapter() {
         AuxInfo();
@@ -113,6 +116,9 @@ public:
         cum_log_probs    = base.cum_log_probs;
         local_reuse_len  = base.local_reuse_len;
         remote_reuse_len = base.remote_reuse_len;
+        disk_reuse_len         = base.disk_reuse_len;
+        prefill_disk_reuse_len = base.prefill_disk_reuse_len;
+        decode_disk_reuse_len  = base.decode_disk_reuse_len;
 
         cost_time_ms = cost_time_us / 1000.0;
     }
