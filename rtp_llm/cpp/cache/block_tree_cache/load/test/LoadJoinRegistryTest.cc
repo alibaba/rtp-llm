@@ -79,7 +79,7 @@ TEST_F(LoadJoinRegistryTest, FinishNotifiesJoinedContext) {
     EXPECT_FALSE(registry.finish(&node, 0, true));
 }
 
-TEST_F(LoadJoinRegistryTest, CancellationIsPerContext) {
+TEST_F(LoadJoinRegistryTest, FailureIsPerContext) {
     LoadJoinRegistry                        registry(tree_.get());
     TreeNode                                node;
     const std::shared_ptr<LoadAsyncContext> first_context  = makeContext(1);
@@ -87,8 +87,8 @@ TEST_F(LoadJoinRegistryTest, CancellationIsPerContext) {
 
     ASSERT_TRUE(registry.start(&node, 0, {target_blocks_[3]}, first_context));
     ASSERT_TRUE(registry.join(joined_context));
-    ASSERT_TRUE(first_context->requestCancel());
-    EXPECT_TRUE(registry.finish(&node, 0, true));
+    ASSERT_TRUE(first_context->onTaskFail());
+    EXPECT_FALSE(registry.finish(&node, 0, true));
     EXPECT_FALSE(first_context->success());
     EXPECT_TRUE(joined_context->success());
 }

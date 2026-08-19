@@ -402,8 +402,8 @@ void KVCacheManager::free(const FreeInfo& free_info) {
     reportCacheOperation(metrics_reporter_, RtpLLMCacheOperationMetricsCollector::OpType::FREE, begin_time_us, true);
 }
 
-bool KVCacheManager::cancelLoad(const std::shared_ptr<AsyncContext>& context) {
-    return allocator_ != nullptr && allocator_->cancelLoad(context);
+bool KVCacheManager::abortPendingLoad(const std::shared_ptr<AsyncContext>& context) {
+    return allocator_ != nullptr && allocator_->abortPendingLoad(context);
 }
 
 void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {

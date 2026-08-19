@@ -168,7 +168,7 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     const auto rollback = [&]() -> MallocResult {
         load_attempted = load_attempted || load_context != nullptr;
         if (load_context != nullptr) {
-            load_context->abort();
+            load_context->abortPending();
         }
         load_context.reset();
         rollbackInitMalloc(*kv_resource, prepared.referenced_blocks, prepared.original_sizes, releases);
@@ -317,14 +317,12 @@ bool HybridKVCacheAllocator::finishDeferredMalloc(const MallocInfo& malloc_info,
                                                   LoadAsyncContext& context,
                                                   size_t            matched_blocks) {
     bool success = materializeInitialBlocks(malloc_info, prepared, &context, matched_blocks);
-    if (success && !context.isRequestCanceled()) {
+    if (success) {
         const auto incr_result = incrMalloc(malloc_info);
         success                = incr_result.success;
         if (!success) {
             prepared.materialize_status = incr_result.status;
         }
-    } else {
-        success = false;
     }
     success = success && context.commit();
     if (!success) {

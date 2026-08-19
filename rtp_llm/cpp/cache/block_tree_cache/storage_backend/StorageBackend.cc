@@ -15,9 +15,7 @@ template<typename Callback>
 void invokeCallback(const StorageBackend* backend, Callback&& callback) noexcept {
     const auto* previous = completing_backend;
     completing_backend   = backend;
-    try {
-        callback();
-    } catch (...) {}
+    callback();
     completing_backend = previous;
 }
 
