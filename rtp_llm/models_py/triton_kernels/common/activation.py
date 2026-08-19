@@ -883,18 +883,45 @@ def silu_and_mul_masked_post_quant_packed_fwd(
     return
 
 
-def _heuristic_params(expert_num: int, expected_m: int) -> Tuple[int, int, int]:
+def _heuristic_params(
+    expert_num: int, expected_m: int, token_num_padded: int = 0
+) -> Tuple[int, int, int]:
     """
     Heuristic parameter selection based on actual test data.
     Rules derived from parameter search analysis of 12,978 data points.
 
     Args:
         expert_num: Number of experts
-        expected_m: Expected number of tokens
+        expected_m: Expected (average) number of tokens per expert
+        token_num_padded: Maximum token capacity of each expert buffer
 
     Returns:
         (BLOCK_NUM_PER_EXPERT, NUM_STAGES, num_warps)
     """
+    # expected_m is an average and can severely underestimate the hottest expert.
+    # This happens in beam search, where one expert can receive almost the whole
+    # padded token capacity. Split the token loop using that safe upper bound for
+    # large expert counts so a hot expert cannot serialize hundreds of tokens on
+    # one warp. Cap at 16 workers to keep empty-expert launch overhead bounded.
+    if expert_num >= 64 and token_num_padded > 0:
+        if token_num_padded <= 16:
+            block_num_per_expert = 1
+        elif token_num_padded <= 32:
+            block_num_per_expert = 2
+        elif token_num_padded <= 64:
+            block_num_per_expert = 4
+        elif token_num_padded <= 128:
+            block_num_per_expert = 8
+        else:
+            block_num_per_expert = 16
+
+        # Three to four stages hide the strided token-to-token load latency. In
+        # particular, the old two-stage choice for expected_m < 64 roughly doubled
+        # latency on H20. Three stages are slightly better once each expert buffer
+        # grows beyond 128 tokens; smaller buffers benefit from the fourth stage.
+        num_stages = 4 if token_num_padded <= 128 else 3
+        return (block_num_per_expert, num_stages, 1)
+
     # BLOCK_NUM_PER_EXPERT heuristic rules (based on actual test data)
     if expert_num < 16:
         # Small number of experts: use 32 for all expected_m ranges
@@ -902,8 +929,9 @@ def _heuristic_params(expert_num: int, expected_m: int) -> Tuple[int, int, int]:
     elif expert_num < 64:
         # Medium number of experts: 2 for small expected_m, 16 otherwise
         block_num_per_expert = 2 if expected_m < 128 else 16
-    else:  # expert_num >= 64
-        # Large number of experts: 1 for small expected_m, 8 otherwise
+    else:
+        # Preserve the original configuration for callers that do not supply the
+        # padded token capacity, such as the BF16 activation path.
         block_num_per_expert = 1 if expected_m < 128 else 8
 
     # NUM_STAGES heuristic rules (based on actual test data)
@@ -1032,6 +1060,7 @@ def silu_mul_masked_fp8_post_quant_fwd(
     BLOCK_NUM_PER_EXPERT, NUM_STAGES, num_warps = _heuristic_params(
         expert_num=expert_num,
         expected_m=expected_m,
+        token_num_padded=input.shape[1],
     )
 
     BLOCK_N = quant_group_size
