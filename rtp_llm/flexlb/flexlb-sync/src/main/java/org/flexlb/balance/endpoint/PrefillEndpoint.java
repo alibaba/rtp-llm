@@ -412,6 +412,20 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private static final long SETTLE_DEFER_WARN_RATE_MS = 60_000L;
 
     /**
+     * Minimum batch age before the all-terminal release leg may fire.
+     * Batch-mode futures complete at EnqueueBatch ACK (~100ms after batch
+     * creation), while the engine's finish report arrives ~1-2s later via
+     * the normal settlement path. Without this floor, the 60s eviction sweep
+     * preempts the normal settlement for every freshly-ACKed batch whose
+     * sweep tick lands inside the ACK→finish-report window, turning the
+     * safety net into the primary gate-release path and producing the
+     * synchronized per-minute dispatch pulse. 30s comfortably exceeds the
+     * ACK→finish window of healthy batches while still catching
+     * zombie-touched entries within one sweep cycle.
+     */
+    private static final long ALL_TERMINAL_MIN_AGE_MS = 30_000L;
+
+    /**
      * Fence-deferred settle audit: finished members whose settle was skipped
      * because the dispatch-reconciliation fence still owns them (the evidence
      * is cached in the fence state and replays when the fence closes). One
@@ -718,7 +732,18 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 // indefinitely. Terminal members cannot revive — release the
                 // gate now, regardless of observation freshness. Fenced
                 // batches stay with the fence's own settle paths.
+                // Min-age gate: batch-mode futures complete at EnqueueBatch
+                // ACK (~100ms after creation), long before the engine finishes
+                // computing (~1-2s) and the normal settlement path releases
+                // the batch via engine finished reports. Without an age floor
+                // here, every freshly-ACKed batch satisfies all-terminal and
+                // the 60s sweep preempts the normal settlement, causing the
+                // synchronized per-minute dispatch pulse. 30s comfortably
+                // exceeds the longest expected ACK→finish-report window for
+                // healthy batches while still catching zombie-touched entries
+                // within one sweep cycle.
                 if (!hasDispatchReconciliation(id)
+                        && ageMs > ALL_TERMINAL_MIN_AGE_MS
                         && !batch.requests().isEmpty()
                         && batch.requests().stream().allMatch(
                                 item -> item.future() != null && item.future().isDone())) {
