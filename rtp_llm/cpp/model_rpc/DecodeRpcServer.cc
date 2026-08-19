@@ -190,19 +190,29 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
         return;
     }
 
-    // Decode owns an explicit P->D cache transfer. Allocate its destination blocks here, but
-    // leave admission to the scheduler after the transfer and first-token handoff complete.
-    auto malloc_status = generate_stream->initKVBlock();
-    if (!malloc_status.ok()) {
-        string error_msg = "request: [" + decode_context.request_key
-                           + "] malloc kv cache block failed at decode node: " + malloc_status.ToString();
+    // Decode owns an explicit P->D cache transfer, so its destination blocks must exist before the
+    // transfer starts. Drive the state machine to do that: handleWaiting() runs initKVBlock() and
+    // asyncLoadCache(), and LoadInitiated stays the state machine's own marker for "both attempted".
+    // Admission still belongs to the scheduler, after the transfer and first-token handoff.
+    // The busy-wait is safe because the stream is not enqueued yet, so this gRPC thread is the only
+    // one driving moveToNext().
+    generate_stream->reportEvent(StreamEvents::CanRun);
+    while (!generate_stream->hasError() && generate_stream->moveToNext() == StreamState::LOADING_CACHE) {
+        this_thread::sleep_for(chrono::milliseconds(1));
+    }
+    if (generate_stream->hasError()) {
+        auto   stream_error = generate_stream->statusInfo();
+        string error_msg    = stream_error.ToString();
+        if (error_msg.empty()) {
+            error_msg = "malloc kv cache block failed at decode node";
+        }
+        error_msg = "request: [" + decode_context.request_key + "] " + error_msg;
         RTP_LLM_LOG_ERROR(error_msg);
-        finish_stream(ErrorCode::MALLOC_FAILED, error_msg);
+        generate_stream->moveToNext();
         decode_context.error_info   = ErrorInfo(ErrorCode::MALLOC_FAILED, error_msg);
         decode_context.error_status = grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, error_msg);
         return;
     }
-    generate_stream->reportEvent(StreamEvents::LoadInitiated);
 
     if (reject_stopped_request("after decode allocation")) {
         return;
