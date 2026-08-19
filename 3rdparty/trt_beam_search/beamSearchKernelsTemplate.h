@@ -29,6 +29,7 @@
 #endif
 
 #include "beamSearchKernels.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/cuda/reduce_kernel_utils.cuh"
 #include "decodingCommon.h"
 
@@ -229,11 +230,10 @@ __launch_bounds__(BLOCK_SIZE) __global__ void beamStage3Kernel(
     float const diversityRate{bh.diversityRates == nullptr ? kBeamSearchDiversity : bh.diversityRates[slot]};
     float const lengthPenalty{bh.lengthPenalties == nullptr ? kLengthPenalty : bh.lengthPenalties[slot]};
     int const earlyStopping{bh.earlyStoppings == nullptr ? kEarlyStopping : bh.earlyStoppings[slot]};
-    // Candidates consumed per step: nBMOut while the CBA path stays unwired (each selection
-    // iteration fills one next-step slot and the loop breaks at nBeamForNextStep == nBMOut,
-    // so iterations beyond nBMOut would be dead); 2*nBMOut if CBA is ever wired. Wiring CBA
-    // additionally needs V2's stage C to emit 2*nBMOut candidates again.
-    int const nSelectLimit = (bh.numBeamsCBA == nullptr) ? nBMOut : 2 * nBMOut;
+    // Candidates consumed per step. V1 keeps the upstream 2*nBMOut bound for the (never
+    // wired) CBA path; V2 is hard-rejected with CBA in the launcher, so nBMOut is the
+    // only reachable value there.
+    int const nSelectLimit = (!IS_V2 && bh.numBeamsCBA != nullptr) ? 2 * nBMOut : nBMOut;
 
     using KVPair = cub::KeyValuePair<int, T>;
     __shared__ BeamStage3KernelSmem<KVPair, PBM, IS_V2> smem;
@@ -674,6 +674,11 @@ void beamSearchKernelLauncher(
 
     if constexpr (IS_V2)
     {
+        // CBA (candidate-beam-array) is unsupported in V2: stage C emits only nBMOut
+        // candidates. Wiring it must restore 2*nBMOut emission first.
+        RTP_LLM_CHECK_WITH_INFO(
+            bh.numBeamsCBA == nullptr, "beam search V2 does not support the CBA path (numBeamsCBA != nullptr)");
+
         // currently all the mask value of logits in beam search is -inf, pass to the kernel with the mask value fixed for now
         // note the function is just a kernel launcher running on host, it's perfectly fine to have a static varible here
         const static T mask_val = T(-std::numeric_limits<float>::infinity());

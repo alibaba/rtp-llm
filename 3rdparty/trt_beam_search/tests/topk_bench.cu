@@ -58,7 +58,10 @@ char const* benchErrString(cudaError_t err)
     } while (0)
 
 // Logprob-like values in [-20, 0]; every 7919th element pinned to create
-// exact-equal ties so the tie-break path is exercised.
+// exact-equal ties so the tie-break path is exercised. The pinned value must sit
+// above the top-k threshold or the ties are never selected: for the matrix shapes
+// the threshold ranges from about -0.02 (k=50) to -1.25 (k=4096), and -0.05 is
+// inside the top-k for every shape with k >= 200.
 void fillInput(std::vector<float>& host, int batch, int len)
 {
     host.resize(static_cast<size_t>(batch) * len);
@@ -70,7 +73,7 @@ void fillInput(std::vector<float>& host, int batch, int len)
     }
     for (size_t i = 0; i < host.size(); i += 7919)
     {
-        host[i] = -1.5f;
+        host[i] = -0.05f;
     }
 }
 
@@ -174,10 +177,10 @@ void hostTopk(std::vector<float> const& in, int batch, int len, int k, bool inde
 
 // Part B: one semantic check of invokeTopkLastDim against the host reference.
 // strictOrder=true: exact match on values and index order (radix path semantics).
-// strictOrder=false: exact match on values + per-row index multiset equality
-// (WarpSort semantics: exact top-k set, unspecified order among equal values).
-// Returns true on match under the selected mode; tie-order divergence is
-// reported as informational only.
+// strictOrder=false (WarpSort): exact match on values; for indices, exact set
+// equality strictly above the k-th value and tie-count equality within the
+// boundary group (WarpSort's boundary-tie pick among equal values is
+// path-specific by design). Tie-order divergence is reported as informational.
 bool checkVsHost(int batch, int len, int k, bool sorted, std::vector<float> const& hostIn, float const* dIn,
     cudaStream_t stream, char const* label, bool strictOrder)
 {
@@ -199,17 +202,46 @@ bool checkVsHost(int batch, int len, int k, bool sorted, std::vector<float> cons
         int tieRows = 0;
         for (int b = 0; b < batch && ok; ++b)
         {
-            std::vector<int> devRow(dev.idxs.begin() + static_cast<size_t>(b) * k,
-                dev.idxs.begin() + static_cast<size_t>(b + 1) * k);
-            std::vector<int> refRow(refIdxs.begin() + static_cast<size_t>(b) * k,
-                refIdxs.begin() + static_cast<size_t>(b + 1) * k);
-            if (devRow != refRow)
+            size_t const off = static_cast<size_t>(b) * k;
+            // Boundary-tie aware comparison: elements strictly above the k-th value
+            // must have identical index sets; within the boundary tie group only the
+            // counts must match — WarpSort's pick among exactly-equal boundary values
+            // is documented as path-specific (see the gate comment in topkLastDim.cu).
+            float const thr = refVals[off + k - 1];
+            std::vector<int> devCore, refCore;
+            int devTies = 0, refTies = 0;
+            bool orderDiff = false;
+            for (int i = 0; i < k; ++i)
+            {
+                float const dv = dev.vals[off + i], rv = refVals[off + i];
+                if (dv > thr)
+                {
+                    devCore.push_back(dev.idxs[off + i]);
+                }
+                else if (dv == thr)
+                {
+                    ++devTies;
+                }
+                if (rv > thr)
+                {
+                    refCore.push_back(refIdxs[off + i]);
+                }
+                else if (rv == thr)
+                {
+                    ++refTies;
+                }
+                if (dev.idxs[off + i] != refIdxs[off + i])
+                {
+                    orderDiff = true;
+                }
+            }
+            if (orderDiff)
             {
                 ++tieRows;
             }
-            std::sort(devRow.begin(), devRow.end());
-            std::sort(refRow.begin(), refRow.end());
-            if (devRow != refRow)
+            std::sort(devCore.begin(), devCore.end());
+            std::sort(refCore.begin(), refCore.end());
+            if (devCore != refCore || devTies != refTies)
             {
                 ok = false;
             }
@@ -285,6 +317,36 @@ int runSemanticChecks()
     if (dIn)
     {
         BENCH_CHECK(cudaFree(dIn));
+        dIn = nullptr;
+    }
+
+    // Dual-path consistency: the routing change's premise is "same result on either
+    // radix path". The full matrix checks this but only runs manually; these three
+    // shapes put it under --check/CI, covering the ROCm crossover band (grid 11/16)
+    // and the grid_dim<2 clamp (batch=1024 computes to grid_dim 1).
+    struct DualCase
+    {
+        int batch;
+        int len;
+        int k;
+        char const* label;
+    };
+    DualCase const dualCases[] = {
+        {16, 65660, 1500, "dual-grid11"},
+        {8, 32000, 1500, "dual-grid16"},
+        {1024, 217303, 1024, "dual-grid1-clamp"},
+    };
+    for (auto const& c : dualCases)
+    {
+        fillInput(hostIn, c.batch, c.len);
+        float* dDual = toDevice(hostIn);
+        PathOutput multi = runPath(c.batch, c.len, c.k, /*sorted=*/true, /*forcePath=*/1, dDual, /*reps=*/3, stream);
+        PathOutput oneblk = runPath(c.batch, c.len, c.k, /*sorted=*/true, /*forcePath=*/2, dDual, /*reps=*/3, stream);
+        bool const ok = sameOutput(multi, oneblk);
+        std::printf("dual[%s]: batch=%d len=%d k=%d multi vs one-block -> %s\n", c.label, c.batch, c.len, c.k,
+            ok ? "PASS" : "FAIL");
+        failures += ok ? 0 : 1;
+        BENCH_CHECK(cudaFree(dDual));
     }
     BENCH_CHECK(cudaStreamDestroy(stream));
     return failures;
