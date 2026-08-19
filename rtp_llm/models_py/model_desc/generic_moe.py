@@ -627,23 +627,16 @@ class GenericMoeDecoderLayer(nn.Module):
         cmp = self.cmp
         if cmp is None:
             raise RuntimeError("GLM5 CMP execution was not initialized")
-        # Prepare MLA inputs with internal streams and PDL.
-        if force_reuse_topk_indices:
-            output_residual, mla_query, topk_indices = cmp.mla_prologue_reusing_topk(
-                hidden_states,
-                residual,
-                fmha_impl,
-                kv_cache,
-                prev_topk_indices,
-            )
-        else:
-            output_residual, mla_query, topk_indices = cmp.mla_prologue(
-                hidden_states,
-                residual,
-                fmha_impl,
-                kv_cache,
-                prev_topk_indices,
-            )
+        # Prepare MLA inputs with internal streams and PDL. MTP reuse layers
+        # consume the TopK indices produced by the seed model.
+        output_residual, mla_query, topk_indices = cmp.mla_prologue(
+            hidden_states,
+            residual,
+            fmha_impl,
+            kv_cache,
+            prev_topk_indices,
+            reuse_topk_indices=force_reuse_topk_indices,
+        )
 
         # Run RTP's existing FlashMLA interface explicitly.
         mla_output = cmp.sparse_mla(

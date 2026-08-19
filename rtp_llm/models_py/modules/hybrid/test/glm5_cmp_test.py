@@ -340,7 +340,7 @@ def test_decoder_forward_consumes_cmp_topk_before_flashmla() -> None:
             )
         ),
         mla_prologue=Mock(
-            side_effect=lambda *args: calls.append("pre")
+            side_effect=lambda *args, **_kwargs: calls.append("pre")
             or (residual, query, topk_indices)
         ),
         sparse_mla=Mock(

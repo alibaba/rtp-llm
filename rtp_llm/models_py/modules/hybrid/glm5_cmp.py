@@ -477,45 +477,10 @@ class Glm5Cmp:
         fmha_impl: Any,
         kv_cache: Any,
         prev_topk_indices: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Run MLA preparation Ops; RTP only supplies the stream schedule."""
-        return self._mla_prologue(
-            hidden_states,
-            residual,
-            fmha_impl,
-            kv_cache,
-            prev_topk_indices,
-            reuse_topk_indices=False,
-        )
-
-    def mla_prologue_reusing_topk(
-        self,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor,
-        fmha_impl: Any,
-        kv_cache: Any,
-        prev_topk_indices: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Run MLA preparation while reusing TopK indices from the seed model."""
-        return self._mla_prologue(
-            hidden_states,
-            residual,
-            fmha_impl,
-            kv_cache,
-            prev_topk_indices,
-            reuse_topk_indices=True,
-        )
-
-    def _mla_prologue(
-        self,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor,
-        fmha_impl: Any,
-        kv_cache: Any,
-        prev_topk_indices: torch.Tensor | None,
         *,
-        reuse_topk_indices: bool,
+        reuse_topk_indices: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Prepare MLA inputs, optionally reusing the seed model's TopK indices."""
         implementation = self._attention_impl(fmha_impl)
         ops = self.ops
         rows = int(hidden_states.size(0))
@@ -606,18 +571,61 @@ class Glm5Cmp:
         # with both main-query projections slows the critical path.
         serialize_score_after_q_path = int(block_table.size(1)) * 64 >= (1 << 19)
 
+        # Allocate side-stream outputs on the caller stream. PyTorch's expandable
+        # allocator grows one segment per allocation stream; with a large segment
+        # size, tiny first allocations on all three CMP streams can reserve several
+        # GiB. The caller-to-side event below publishes these buffers, and the final
+        # side-to-caller event joins every use before their caller-owned storage can
+        # be recycled. Only allocation ownership changes; the kernels and their
+        # execution streams remain unchanged.
+        gate_output = torch.empty(
+            (rows, 32), device=hidden_states.device, dtype=torch.float32
+        )
+        residual_out, norm_out, hidden_fp8, hidden_scale = ops.allocate_outputs(
+            hidden_states
+        )
+        projected = torch.empty(
+            (rows, 2624), device=hidden_states.device, dtype=torch.bfloat16
+        )
+        q_fp8 = torch.empty(
+            (rows, 2048), device=hidden_states.device, dtype=torch.float8_e4m3fn
+        )
+        aligned_rows = (rows + 3) // 4 * 4
+        q_scale = torch.empty(
+            aligned_rows * 4, device=hidden_states.device, dtype=torch.int32
+        ).as_strided((rows, 4), (1, aligned_rows))
+        q_nope = torch.empty(
+            (rows, 64, 192), device=hidden_states.device, dtype=torch.bfloat16
+        )
+        # q_b_proj writes the RoPE suffix and absorbed_q_nope_bmm fills the NoPE
+        # prefix. Preserve the existing zero initialization for any padding bytes.
+        q_for_sparse_mla = torch.zeros(
+            (rows, 64, 576), device=hidden_states.device, dtype=torch.bfloat16
+        )
+        indexer_q = torch.empty(
+            (rows, indexer_q_weight.size(0)),
+            device=hidden_states.device,
+            dtype=torch.bfloat16,
+        )
+        indexer_q_fp8 = torch.empty(
+            (rows, 32, 128),
+            device=hidden_states.device,
+            dtype=torch.float8_e4m3fn,
+        )
+        head_weights = torch.empty(
+            (rows, 32), device=hidden_states.device, dtype=torch.float32
+        )
+
         events.caller_to_main.record()
         with torch.cuda.stream(main_stream):
             events.caller_to_main.wait()
-            gate_output = torch.empty(
-                (rows, 32), device=hidden_states.device, dtype=torch.float32
-            )
             # Residual add + RMSNorm, then emit both BF16 normalized hidden
             # states and group-128 FP8 input for the projection branches.
             residual_out, norm_out, hidden_fp8, hidden_scale = ops.add_norm_quant(
                 hidden_states,
                 residual,
                 self.input_layernorm.weight.data,
+                out=(residual_out, norm_out, hidden_fp8, hidden_scale),
                 epsilon=float(self.input_layernorm.variance_epsilon),
                 head_gate=gate_output,
                 notify_event=events.norm_to_indexer_k,
@@ -630,6 +638,7 @@ class Glm5Cmp:
                 hidden_scale,
                 qkv_weight,
                 qkv_scale,
+                out=projected,
                 head_gate_norm=norm_out,
                 head_gate_weight=self._packed_head_gate_weight,
                 gate_output=gate_output,
@@ -643,10 +652,10 @@ class Glm5Cmp:
                 implementation._cos_sin_cache,
                 params.positions_d,
                 params.slot_mapping,
+                out=(q_fp8, q_scale, mla_cache),
                 q_epsilon=float(attention.q_a_layernorm.variance_epsilon),
                 kv_epsilon=float(attention.kv_a_layernorm.variance_epsilon),
                 notify_event=events.qkv_to_indexer_q,
-                cache=mla_cache,
             )
 
             # Project Q-LoRA into per-head [NoPE | PE], retain NoPE for the
@@ -658,6 +667,7 @@ class Glm5Cmp:
                 q_b_scale,
                 implementation._cos_sin_cache,
                 params.positions_d,
+                out=(q_nope, q_for_sparse_mla),
             )
             # Apply Q-NoPE x W_KC per head and fill the query prefix, producing
             # the complete [absorbed NoPE | RoPE] input consumed by SparseMLA.
@@ -678,6 +688,7 @@ class Glm5Cmp:
                     q_scale,
                     indexer_q_weight,
                     indexer_q_scale,
+                    out=indexer_q,
                 )
                 # Apply RoPE + Hadamard + FP8 quantization and fold the per-head
                 # Q scale into the early gate result: head_weight=gate_raw*q_scale/64.
@@ -686,6 +697,7 @@ class Glm5Cmp:
                     implementation._cos_sin_cache,
                     params.positions_d,
                     gate_output,
+                    out=(indexer_q_fp8, head_weights),
                     notify_event=events.indexer_q_to_score,
                 )
 
