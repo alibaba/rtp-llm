@@ -5,9 +5,13 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
-#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/BlockReleaseBatch.h"
+#include "rtp_llm/cpp/cache/KVCacheGroup.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
@@ -16,16 +20,16 @@ namespace rtp_llm {
 bool KVCacheAllocator::init() {
     RTP_LLM_CHECK_WITH_INFO(doInit(), "init failed");
 
-    // NOTE: the reservable block count depends on initialized block pools and must be queried after `doInit()`.
     const int64_t reserve_ratio = reserve_block_ratio_;
     if (reserve_ratio > 0) {
-        const size_t available_blocks = reservableAvailableBlocksNum();
-        const size_t reserve_blocks = static_cast<size_t>(reserve_ratio) * available_blocks / static_cast<size_t>(100);
+        const size_t reservable_blocks = reservableFreeBlocksNum();
+        const size_t reserve_blocks = static_cast<size_t>(reserve_ratio) * reservable_blocks / static_cast<size_t>(100);
         reserve_block_num_          = reserve_blocks;
-        RTP_LLM_LOG_INFO("KVCacheAllocator set reserve blocks: ratio=%ld%% reserve_blocks=%zu available_blocks=%zu",
-                         reserve_ratio,
-                         reserve_blocks,
-                         available_blocks);
+        RTP_LLM_LOG_INFO(
+            "KVCacheAllocator set reserve blocks: ratio=%ld%% reserve_blocks=%zu reservable_free_blocks=%zu",
+            reserve_ratio,
+            reserve_blocks,
+            reservable_blocks);
     } else {
         reserve_block_num_ = 0;
     }
@@ -33,23 +37,12 @@ bool KVCacheAllocator::init() {
     return true;
 }
 
-size_t KVCacheAllocator::reservableAvailableBlocksNum() const {
-    return availableBlocksNum();
-}
-
 MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
-    // Gross demand decides whether this request can ever fit. Current
-    // availability is checked after device-cache matching, when the allocator
-    // knows how many new physical blocks are actually required.
-    const auto capacity_status = evaluateInitCapacity(malloc_info, reserveBlocksNum(), InitCapacityMode::TOTAL_ONLY);
-    if (capacity_status != MallocStatus::NONE) {
-        return {false, 0, 0, capacity_status};
-    }
-
     auto finalize_init_failure = [this, &malloc_info](MallocResult result) {
-        // Classify against the failure-time snapshot. Rolling back first can
-        // make capacity look sufficient and turn a retryable race into an
-        // internal error.
+        // Cache matching can satisfy part of a request from lower tiers, so
+        // classify capacity only after materialization fails. Use the
+        // failure-time snapshot before rollback; freeing first can make a
+        // retryable shortage look like an internal error.
         if (result.status == MallocStatus::NONE || result.status == MallocStatus::INTERNAL_ERROR) {
             const auto status =
                 evaluateInitCapacity(malloc_info, reserveBlocksNum(), InitCapacityMode::TOTAL_AND_AVAILABLE);
@@ -61,36 +54,50 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
     };
 
     auto init_result = initMallocForCommonLen(malloc_info);
+    if (malloc_info.batch_kv_cache_resource != nullptr) {
+        const CacheKeysType& cache_keys        = malloc_info.batch_kv_cache_resource->cacheKeys(0);
+        init_result.block_aligned_input_length = static_cast<int64_t>(cache_keys.size()) * config_.seq_size_per_block;
+    }
     if (!init_result.success) {
         return finalize_init_failure(init_result);
     }
 
-    auto incr_result = incrMalloc(malloc_info);
-    if (!incr_result.success) {
-        return finalize_init_failure(incr_result);
+    std::shared_ptr<LoadAsyncContext> load_context =
+        std::dynamic_pointer_cast<LoadAsyncContext>(init_result.async_context);
+    if (load_context && load_context->needBackendMatch()) {
+        load_context->startBackendMatch();
     } else {
-        if (metrics_reporter_ && malloc_info.enable_device_cache) {
-            int64_t device_input_length = 0;
-            if (malloc_info.batch_kv_cache_resource) {
-                const auto& cache_keys      = malloc_info.batch_kv_cache_resource->cacheKeys(0);
-                size_t      match_keys_size = cache_keys.size();
-                device_input_length         = static_cast<int64_t>(match_keys_size) * deviceCacheMetricTokensPerBlock();
+        std::shared_ptr<AsyncContext> pending_async_context = std::move(init_result.async_context);
+        MallocResult                  incr_result           = incrMalloc(malloc_info);
+        if (!incr_result.success) {
+            if (load_context != nullptr) {
+                load_context->abort();
             }
-
-            if (device_input_length > 0) {
-                RtpLLMDeviceCacheReuseMetricsCollector collector;
-                collector.match_cost_time_us    = init_result.match_cost_time_us;
-                collector.device_input_length   = device_input_length;
-                collector.device_reuse_length   = init_result.reuse_len;
-                collector.device_cache_hit_rate = static_cast<float>(static_cast<int64_t>(collector.device_reuse_length)
-                                                                     * 100 / collector.device_input_length);
-                kmonitor::MetricsTags tags;
-                metrics_reporter_->report<RtpLLMDeviceCacheReuseMetrics, RtpLLMDeviceCacheReuseMetricsCollector>(
-                    &tags, &collector);
-            }
+            pending_async_context.reset();
+            load_context.reset();
+            incr_result.match_cost_time_us         = init_result.match_cost_time_us;
+            incr_result.match_end_time_us          = init_result.match_end_time_us;
+            incr_result.block_aligned_input_length = init_result.block_aligned_input_length;
+            incr_result.load_attempted             = init_result.load_attempted;
+            return finalize_init_failure(std::move(incr_result));
         }
-        return init_result;
+        if (pending_async_context != nullptr) {
+            load_context = std::dynamic_pointer_cast<LoadAsyncContext>(pending_async_context);
+            if (load_context == nullptr || !load_context->commit()) {
+                load_context.reset();
+                pending_async_context.reset();
+                init_result.success        = false;
+                init_result.reuse_len      = 0;
+                init_result.host_reuse_len = 0;
+                init_result.disk_reuse_len = 0;
+                init_result.async_context  = nullptr;
+                return finalize_init_failure(std::move(init_result));
+            }
+            init_result.async_context = std::move(pending_async_context);
+        }
     }
+
+    return init_result;
 }
 
 MallocStatus KVCacheAllocator::evaluateInitCapacity(const MallocInfo& malloc_info,
@@ -164,6 +171,34 @@ int KVCacheAllocator::estimateBatchPeakNeedBlocks(const BatchKVCacheResourcePtr&
     const int expanded_sequences = target_width - current_batch_size;
     const int tail_copy_blocks   = expanded_sequences > 0 && seq_len % seqSizePerBlock() != 0 ? expanded_sequences : 0;
     return target_width * per_sequence_growth + tail_copy_blocks;
+}
+
+void KVCacheAllocator::attachBlockTreeCache(BlockTreeCachePtr block_tree_cache) {
+    RTP_LLM_CHECK_WITH_INFO(block_tree_cache != nullptr, "cannot attach a null BlockTreeCache");
+    RTP_LLM_CHECK_WITH_INFO(block_tree_cache_ == nullptr, "BlockTreeCache has already been attached");
+
+    block_tree_cache_ = std::move(block_tree_cache);
+    for (const auto& group : cacheGroups()) {
+        const size_t group_id = static_cast<size_t>(group->group_id());
+        group->setEvictCallback([cache = block_tree_cache_, group_id](size_t need_blocks) {
+            const int reclaimed = cache->evictForGroup(group_id, need_blocks);
+            return reclaimed > 0 ? static_cast<size_t>(reclaimed) : 0;
+        });
+    }
+}
+
+bool KVCacheAllocator::cancelLoad(const std::shared_ptr<AsyncContext>& context) {
+    return block_tree_cache_ != nullptr && block_tree_cache_->cancelLoad(context);
+}
+
+void KVCacheAllocator::submitBlockReleases(BlockReleaseBatch& releases) {
+    std::vector<BlockReleaseReceipt> receipts = releases.finish();
+    if (receipts.empty()) {
+        return;
+    }
+    if (block_tree_cache_ != nullptr) {
+        block_tree_cache_->onBlocksReleased(receipts);
+    }
 }
 
 uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t model_id, int local_layer_id) const {
@@ -324,120 +359,24 @@ size_t KVCacheAllocator::freeBlocksNum() const {
     return block_pool_ ? block_pool_->freeBlocksNum() : 0;
 }
 
+size_t KVCacheAllocator::availableBlocksNum() const {
+    return freeBlocksNum() + activeTreeCachedBlocksNum();
+}
+
+size_t KVCacheAllocator::reservableFreeBlocksNum() const {
+    return freeBlocksNum();
+}
+
 int64_t KVCacheAllocator::getMrCostTimeMs() const {
     return block_pool_ ? block_pool_->getMrCostTimeMs() : 0;
 }
 
-size_t KVCacheAllocator::availableBlocksNum() const {
-    return block_pool_ ? block_pool_->availableBlocksNum() : 0;
-}
-
-BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_to_free) {
-    if (!shared_block_cache_ || min_blocks_to_free == 0) {
-        return nullptr;
-    }
-
-    auto evict_result = shared_block_cache_->selectAndEvict(min_blocks_to_free);
-    if (evict_result.evicted_keys.empty()) {
-        return nullptr;
-    }
-    if (metrics_reporter_) {
-        for (const auto& [cache_key, lifetime_ms] : evict_result.evicted_lifetime_ms) {
-            RtpLLMCacheEvictionMetricsCollector collector;
-            collector.lifetime_ms = lifetime_ms;
-            kmonitor::MetricsTags tags("scope", "gpu");
-            tags.AddTag("evict_policy",
-                        evict_result.evicted_independent_group.count(cache_key) ? "independent" : "chain");
-            tags.AddTag("backing", "device");
-            metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(&tags,
-                                                                                                       &collector);
-        }
-    }
-
-    auto batch_resource = std::make_shared<BatchKVCacheResource>();
-    batch_resource->resetBatchSize(1);
-    batch_resource->initGroups(config_.topologyPtr());
-    batch_resource->setLastBlockAligned(true);
-
-    for (int gid = 0; gid < config_.groupNums(); ++gid) {
-        batch_resource->mutableBlockIds(0, gid).resize(evict_result.evicted_keys.size(), NULL_BLOCK_IDX);
-    }
-
-    CacheKeysType         evicted_keys;
-    BlockDependenciesType evicted_dependencies;
-    evicted_keys.reserve(evict_result.evicted_keys.size());
-    evicted_dependencies.reserve(evict_result.evicted_keys.size());
-    for (size_t evicted_idx = 0; evicted_idx < evict_result.evicted_keys.size(); ++evicted_idx) {
-        const auto  cache_key       = evict_result.evicted_keys[evicted_idx];
-        const auto& group_block_ids = evict_result.evicted_group_block_ids.at(cache_key);
-        evicted_keys.push_back(cache_key);
-        auto dep_it = evict_result.evicted_dependencies.find(cache_key);
-        if (dep_it != evict_result.evicted_dependencies.end()) {
-            evicted_dependencies.push_back(dep_it->second);
-        } else {
-            BlockDependency dependency;
-            dependency.ordinal = static_cast<uint32_t>(evicted_idx);
-            if (evicted_idx > 0) {
-                dependency.has_parent = true;
-                dependency.parent_key = evict_result.evicted_keys[evicted_idx - 1];
-            }
-            evicted_dependencies.push_back(dependency);
-        }
-        for (int gid = 0; gid < static_cast<int>(group_block_ids.size()) && gid < config_.groupNums(); ++gid) {
-            if (!isNullBlockIdx(group_block_ids[gid])) {
-                batch_resource->mutableBlockIds(0, gid).setAt(evicted_idx, group_block_ids[gid]);
-            }
-        }
-    }
-    batch_resource->cacheResource(0).setCacheKeys(std::move(evicted_keys));
-    batch_resource->cacheResource(0).setBlockDependencies(std::move(evicted_dependencies));
-    // Evicted keys already come from the GPU cache's actual key namespace.
-    // Under CP this can be a mixed batch of canonical paged keys and logical
-    // state/SWA keys, so coordinator must not remap the whole batch again.
-    batch_resource->cacheResource(0).setCacheKeysAreCpCanonical(true);
-    return batch_resource;
-}
-
-void KVCacheAllocator::blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource) {
-    if (!block_pool_ || !batch_kv_cache_resource) {
-        return;
-    }
-
-    BlockIndicesType                 blocks_to_free;
-    std::unordered_set<BlockIdxType> seen_blocks;
-    for (int batch_id = 0; batch_id < batch_kv_cache_resource->batchSize(); ++batch_id) {
-        for (int gid = 0; gid < batch_kv_cache_resource->groupNums(); ++gid) {
-            for (const auto block_idx : batch_kv_cache_resource->blocks(batch_id, gid)) {
-                if (isNullBlockIdx(block_idx) || !seen_blocks.insert(block_idx).second) {
-                    continue;
-                }
-                blocks_to_free.push_back(block_idx);
-            }
-        }
-    }
-    if (!blocks_to_free.empty()) {
-        block_pool_->blockCacheFree(blocks_to_free);
-    }
-}
-
-size_t KVCacheAllocator::requestRefBlocksNum() const {
-    return block_pool_->requestRefBlocksNum();
-}
-
-size_t KVCacheAllocator::connectorRefBlocksNum() const {
-    return block_pool_->connectorRefBlocksNum();
-}
-
-size_t KVCacheAllocator::blockCacheRefBlocksNum() const {
-    return block_pool_ ? block_pool_->blockCacheRefBlocksNum() : 0;
-}
-
-size_t KVCacheAllocator::notInUseBlocksNum() const {
-    return block_pool_ ? block_pool_->notInUseBlocksNum() : 0;
+size_t KVCacheAllocator::activeTreeCachedBlocksNum() const {
+    return block_pool_ ? block_pool_->activeTreeCachedBlocksNum() : 0;
 }
 
 size_t KVCacheAllocator::availableTokensNum() const {
-    return block_pool_ ? (block_pool_->availableBlocksNum() * logicalSeqSizePerBlockForCapacity(/*gid=*/0)) : 0;
+    return block_pool_ ? (block_pool_->freeBlocksNum() * logicalSeqSizePerBlockForCapacity(/*gid=*/0)) : 0;
 }
 
 size_t KVCacheAllocator::totalTokensNum() const {
@@ -478,16 +417,53 @@ int KVCacheAllocator::deviceCacheMetricTokensPerBlock() const {
 
 KVCacheTokenCapacity KVCacheAllocator::tokenCapacity(size_t default_seq_size_per_block) const {
     const size_t total_blocks     = totalBlocksNum();
-    const size_t available_blocks = availableBlocksNum();
+    const size_t available_blocks = freeBlocksNum();
     return {total_blocks * default_seq_size_per_block, available_blocks * default_seq_size_per_block};
 }
 
-std::vector<KVCachePoolMetricsSnapshot> KVCacheAllocator::poolMetricsSnapshots() const {
-    return {};
+size_t KVCacheAllocator::reserveBlocksForPoolMetrics(size_t pool_index) const {
+    (void)pool_index;
+    return reserveBlocksNum();
 }
 
-std::vector<int> KVCacheAllocator::independentEvictionGroupIds() const {
-    return {};
+std::vector<KVCachePoolMetricsSnapshot> KVCacheAllocator::poolMetricsSnapshots() const {
+    const std::vector<KVCacheGroupPtr>      groups = cacheGroups();
+    std::unordered_set<const IBlockPool*>   reported_pools;
+    std::vector<KVCachePoolMetricsSnapshot> snapshots;
+    snapshots.reserve(groups.size());
+    for (const KVCacheGroupPtr& group : groups) {
+        if (group == nullptr || group->blockPool() == nullptr) {
+            continue;
+        }
+        const DeviceBlockPoolPtr                                               pool = group->blockPool();
+        const std::pair<std::unordered_set<const IBlockPool*>::iterator, bool> insert_result =
+            reported_pools.insert(pool.get());
+        if (!insert_result.second) {
+            continue;
+        }
+
+        const size_t               pool_index = static_cast<size_t>(group->group_id());
+        KVCachePoolMetricsSnapshot snapshot;
+        snapshot.pool_index                = pool_index;
+        snapshot.pool_name                 = pool->poolName();
+        snapshot.block_size_bytes          = pool->blockSizeBytes();
+        snapshot.total_blocks              = pool->totalBlocksNum();
+        snapshot.free_blocks               = pool->freeBlocksNum();
+        snapshot.used_blocks               = snapshot.total_blocks - snapshot.free_blocks;
+        snapshot.active_tree_cached_blocks = pool->activeTreeCachedBlocksNum();
+        snapshot.reserve_blocks            = reserveBlocksForPoolMetrics(pool_index);
+        snapshot.request_ref_blocks        = pool->referencedBlocksNum(BlockRefType::REQUEST);
+        snapshot.connector_ref_blocks      = pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND);
+        snapshot.block_cache_ref_blocks    = pool->referencedBlocksNum(BlockRefType::BLOCK_CACHE);
+        snapshot.eviction_ref_blocks       = pool->referencedBlocksNum(BlockRefType::EVICTION);
+        snapshot.store_ref_blocks          = pool->referencedBlocksNum(BlockRefType::STORE);
+        snapshot.used_ratio =
+            snapshot.total_blocks == 0 ?
+                0.0f :
+                static_cast<float>(100.0 * snapshot.used_blocks / static_cast<double>(snapshot.total_blocks));
+        snapshots.push_back(std::move(snapshot));
+    }
+    return snapshots;
 }
 
 void KVCacheAllocator::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
