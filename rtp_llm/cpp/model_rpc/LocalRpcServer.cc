@@ -559,6 +559,19 @@ void LocalRpcServer::installSleepHooks() {
                 }
             }
         }
+        // Rebuild cheap Python-owned caches explicitly discarded by the sleep
+        // hook (currently DSV4 RoPE/cos-sin caches). This is required for both
+        // level 1 and level 2; level 2 runs it after checkpoint weights and
+        // computed weights have been restored.
+        if (ok && !weight_manager_.is_none()) {
+            try {
+                py::gil_scoped_acquire acquire;
+                weight_manager_.attr("restore_runtime_gpu_caches")("wake");
+            } catch (const py::error_already_set& e) {
+                RTP_LLM_LOG_WARNING("wake: restore_runtime_gpu_caches failed: %s", e.what());
+                ok = false;
+            }
+        }
         if (!ok && memory_cache_restore_future_.valid()) {
             // Weight restore failed -> wake_up transitions to ERROR and
             // restoreKvMemoryBackingAndResetMetadata (which normally joins this future) will not

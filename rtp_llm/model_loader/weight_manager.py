@@ -362,6 +362,49 @@ class WeightManager:
 
         release_and_trim(self._device, reason=reason)
 
+    def restore_runtime_gpu_caches(self, reason: str = "wake") -> None:
+        """Rebuild inexpensive Python-owned caches explicitly dropped at sleep."""
+        # The TP symmetric-memory staging buffer is deliberately dropped while
+        # sleeping (the process group remains valid). Recreate it before the
+        # engine warmup so the normal TP fast path is restored on wake.
+        try:
+            from rtp_llm.models_py.distributed import collective_torch
+            from rtp_llm.models_py.distributed.collective_torch import Group
+            from rtp_llm.models_py.distributed.symm_mem import (
+                restore_symm_mem_communicator_after_wake,
+            )
+
+            parallelism_config = getattr(collective_torch, "_parallelism_config", None)
+            if parallelism_config is None or parallelism_config.tp_size <= 1:
+                raise RuntimeError(
+                    "TP symmetric-memory communicator is disabled for TP<=1"
+                )
+            tp_group = collective_torch._get_group(Group.TP)
+            restored_symm = restore_symm_mem_communicator_after_wake(tp_group)
+            logging.info(
+                "restore_runtime_gpu_caches[%s]: TP symmetric-memory communicator restored=%s",
+                reason,
+                restored_symm,
+            )
+        except Exception as e:
+            # Some deployments have TP=1 or no torch.distributed process group;
+            # those paths never had a symmetric-memory communicator to restore.
+            logging.info(
+                "restore_runtime_gpu_caches[%s]: TP symmetric-memory restore skipped: %s",
+                reason,
+                e,
+            )
+        from rtp_llm.models_py.modules.dsv4.fp8.attention import (
+            restore_rope_caches_after_wake,
+        )
+
+        restored = restore_rope_caches_after_wake()
+        logging.info(
+            "restore_runtime_gpu_caches[%s]: restored DSV4 RoPE caches for %d owner(s)",
+            reason,
+            restored,
+        )
+
     def reload_weights_from_loader(self) -> None:
         """Reload weights in place from the model loader (level-2 wake).
 

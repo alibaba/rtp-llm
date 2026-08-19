@@ -245,6 +245,40 @@ class TorchSymmMemCommunicator:
 _symm_mem_comm: Optional[TorchSymmMemCommunicator] = None
 
 
+def release_symm_mem_communicator_for_sleep() -> int:
+    """Drop the TP symmetric-memory staging buffer before entering sleep.
+
+    The process group itself remains alive, but the communicator's persistent
+    ``torch_symm_mem.empty`` buffer is not needed while the engine is quiesced.
+    Returning the byte count lets the sleep ledger report the actual reclaim;
+    the caller performs ``empty_cache`` after all Python references are gone.
+    """
+    global _symm_mem_comm
+    comm = _symm_mem_comm
+    if comm is None:
+        return 0
+    released = 0
+    try:
+        if comm.buffer is not None:
+            released = comm.buffer.numel() * comm.buffer.element_size()
+            # Break the tensor reference before dropping the communicator so
+            # CUDA can release the symmetric-memory allocation immediately.
+            comm.buffer = None
+    finally:
+        _symm_mem_comm = None
+    return released
+
+
+def restore_symm_mem_communicator_after_wake(
+    tp_group: ProcessGroup,
+) -> bool:
+    """Recreate the TP symmetric-memory communicator after sleep."""
+    global _symm_mem_comm
+    if _symm_mem_comm is not None:
+        return True
+    return init_symm_mem_communicator(tp_group) is not None
+
+
 def init_symm_mem_communicator(
     tp_group: ProcessGroup,
 ) -> Optional[TorchSymmMemCommunicator]:

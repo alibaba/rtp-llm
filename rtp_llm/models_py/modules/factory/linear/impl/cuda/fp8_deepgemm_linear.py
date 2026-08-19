@@ -1,6 +1,7 @@
 """CUDA FP8 DeepGEMM quantized Linear implementation"""
 
 import logging
+import weakref
 from typing import Optional
 
 import torch
@@ -26,6 +27,23 @@ class CudaFp8DeepGEMMLinear(LinearBase):
 
     # 全局共享的 scale cache，key = (device, K, max_len)
     _global_scale_cache: dict = {}
+    _instances: "weakref.WeakSet" = weakref.WeakSet()
+
+    @classmethod
+    def release_runtime_caches_for_sleep(cls) -> int:
+        """Drop optional per-token scale caches; they are rebuilt lazily."""
+        released = 0
+        for linear in list(cls._instances):
+            cached = getattr(linear, "cached_scales", None)
+            if isinstance(cached, torch.Tensor) and cached.is_cuda:
+                released += cached.numel() * cached.element_size()
+            linear.cached_scales = None
+            linear.cached_scales_max_len = 0
+        for cached in cls._global_scale_cache.values():
+            if isinstance(cached, torch.Tensor) and cached.is_cuda:
+                released += cached.numel() * cached.element_size()
+        cls._global_scale_cache.clear()
+        return released
 
     @classmethod
     def can_handle(
@@ -137,6 +155,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         # Initialize cached scales attributes
         self.cached_scales = None
         self.cached_scales_max_len = 0
+        self._instances.add(self)
 
     def maybe_cache_quant_scale(self, max_len: int) -> None:
         if not self.scale_ue8m0:
@@ -265,7 +284,9 @@ class CudaFp8DeepGEMMLinear(LinearBase):
     ) -> torch.Tensor:
         """Run DeepGEMM with a caller-provided FP8 input and matching scales."""
         if input_fp8.dtype != torch.float8_e4m3fn:
-            error_msg = f"Quantized input dtype must be float8_e4m3fn, got {input_fp8.dtype}"
+            error_msg = (
+                f"Quantized input dtype must be float8_e4m3fn, got {input_fp8.dtype}"
+            )
             logger.error(error_msg)
             raise ValueError(error_msg)
         M, _ = self._validate_input(input_fp8)

@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import threading
+import weakref
 from contextlib import contextmanager, suppress
 from typing import Any, Dict, NamedTuple, Optional, Tuple, Union
 
@@ -80,6 +81,53 @@ from rtp_llm.models_py.modules.dsv4.rope import precompute_freqs_cis
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.ops.compute_ops import KVCacheRegionName, rtp_llm_ops
+
+# Live attention objects own the shared GPU RoPE tensors.  Keep weak references
+# so the sleep hook can drop those caches without extending model lifetime, and
+# the level-2 wake reload can rebuild them before the engine restarts.
+_ROPE_OWNER_REGISTRY: "weakref.WeakSet" = weakref.WeakSet()
+
+
+def release_rope_caches_for_sleep() -> int:
+    """Drop DSV4 GPU RoPE caches and return the number of unique bytes released."""
+    unique: dict[int, int] = {}
+
+    def account(tensor: Any) -> None:
+        if isinstance(tensor, torch.Tensor) and tensor.is_cuda:
+            unique.setdefault(tensor.data_ptr(), tensor.numel() * tensor.element_size())
+
+    for owner in list(_ROPE_OWNER_REGISTRY):
+        account(getattr(owner, "freqs_cis", None))
+        for compressor in (
+            getattr(owner, "compressor", None),
+            getattr(getattr(owner, "indexer", None), "compressor", None),
+        ):
+            if compressor is not None:
+                account(getattr(compressor, "freqs_cis", None))
+                account(getattr(compressor, "_cos_sin_cache", None))
+        account(getattr(getattr(owner, "indexer", None), "freqs_cis", None))
+        owner._drop_rope_cache_for_sleep()
+
+    # Attention objects and their compressor/indexer children are now detached;
+    # remove the process-global memoized references as well.
+    from rtp_llm.models_py.modules.dsv4 import rope
+
+    for key, tensor in list(rope._FREQS_CIS_CACHE.items()):
+        if isinstance(tensor, torch.Tensor) and tensor.is_cuda:
+            rope._FREQS_CIS_CACHE.pop(key, None)
+    return sum(unique.values())
+
+
+def restore_rope_caches_after_wake() -> int:
+    """Rebuild every RoPE cache dropped by :func:`release_rope_caches_for_sleep`."""
+    restored = 0
+    for owner in list(_ROPE_OWNER_REGISTRY):
+        device = getattr(owner, "_sleep_rope_device", None)
+        if getattr(owner, "freqs_cis", None) is None and device is not None:
+            owner.reset_rope_cache(device=device)
+            owner._sleep_rope_device = None
+            restored += 1
+    return restored
 
 
 # int attn_type id → pybind11 ``KVCacheRegionName`` enum.  The
@@ -1124,6 +1172,8 @@ class AttentionFP8(nn.Module):
         # materialization — that's the authoritative placement path; no
         # automatic `.to(device)` semantics needed.
         self.freqs_cis = freqs_cis
+        self._sleep_rope_device = None
+        _ROPE_OWNER_REGISTRY.add(self)
 
         # Iter2: persistent FP8 sparse decode op. Carries the FlashMLA
         # ``sched_meta`` cache (per single/dual-pool flag) so the planner
@@ -1907,6 +1957,26 @@ class AttentionFP8(nn.Module):
             self.indexer.freqs_cis = freqs_cis
             if self.indexer.compressor is not None:
                 self.indexer.compressor.init_rope_cache(freqs_cis)
+
+    def _drop_rope_cache_for_sleep(self) -> None:
+        """Detach every reference to this attention's shared GPU RoPE cache."""
+        tensor = self.freqs_cis
+        if isinstance(tensor, torch.Tensor) and tensor.is_cuda:
+            self._sleep_rope_device = tensor.device
+        self.freqs_cis = None
+
+        def clear_compressor_rope_cache(compressor: Any) -> None:
+            compressor.freqs_cis = None
+            compressor._cos_sin_cache = None
+            compressor._cos_sin_cache_device = None
+            compressor._cos_sin_cache_key = None
+
+        if self.compressor is not None:
+            clear_compressor_rope_cache(self.compressor)
+        if self.indexer is not None:
+            self.indexer.freqs_cis = None
+            if self.indexer.compressor is not None:
+                clear_compressor_rope_cache(self.indexer.compressor)
 
     def _get_fp8_decode_op(self):
         """Lazy-build the persistent ``SparseAttnV4DecodeFp8Op`` so its

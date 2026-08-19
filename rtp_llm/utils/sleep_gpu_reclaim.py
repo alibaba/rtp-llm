@@ -41,6 +41,47 @@ def _clear_module_device_caches() -> list[str]:
     """
     notes: list[str] = []
     try:
+        from rtp_llm.models_py.modules.dsv4.fp8.attention import (
+            release_rope_caches_for_sleep,
+        )
+
+        rope_bytes = release_rope_caches_for_sleep()
+        notes.append(f"DSV4 RoPE caches RELEASED {rope_bytes / _MiB:.1f} MiB")
+    except Exception as e:
+        notes.append(f"DSV4 RoPE cache release skipped: {e}")
+
+    try:
+        clear_cublas = getattr(torch._C, "_cuda_clearCublasWorkspaces", None)
+        if clear_cublas is not None:
+            clear_cublas()
+            notes.append("cuBLAS workspaces RELEASED")
+        else:
+            notes.append("cuBLAS workspace clear unavailable")
+    except Exception as e:
+        notes.append(f"cuBLAS workspace release skipped: {e}")
+    try:
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
+            CudaFp8DeepGEMMLinear,
+        )
+
+        scale_bytes = CudaFp8DeepGEMMLinear.release_runtime_caches_for_sleep()
+        notes.append(
+            f"DeepGEMM runtime scale caches RELEASED {scale_bytes / _MiB:.1f} MiB"
+        )
+    except Exception as e:
+        notes.append(f"DeepGEMM runtime scale cache release skipped: {e}")
+    try:
+        from rtp_llm.models_py.distributed.symm_mem import (
+            release_symm_mem_communicator_for_sleep,
+        )
+
+        symm_bytes = release_symm_mem_communicator_for_sleep()
+        notes.append(
+            f"TP symmetric-memory communicator RELEASED {symm_bytes / _MiB:.1f} MiB"
+        )
+    except Exception as e:
+        notes.append(f"TP symmetric-memory communicator release skipped: {e}")
+    try:
         from rtp_llm.models_py.modules.dsv4.moe import mega_buf
 
         # The two Mega MoE device buffers -- the symmetric-memory dispatch buffer
