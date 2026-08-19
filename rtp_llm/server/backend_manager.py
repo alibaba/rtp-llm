@@ -2,26 +2,29 @@ import gc
 import logging
 import threading
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 from rtp_llm.access_logger.access_logger import AccessLogger
+from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.config.engine_config import EngineConfig, update_worker_addrs
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.distribute.distributed_server import DistributedServer, get_world_info
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
+from rtp_llm.models_py.distributed.collective_torch import (
+    destroy_distributed_environment,
+    distributed_environment_initialized,
+    init_distributed_environment,
+)
 from rtp_llm.utils.concurrency_controller import get_global_controller
-
-if TYPE_CHECKING:
-    from rtp_llm.async_decoder_engine.base_engine import BaseEngine
+from rtp_llm.utils.fuser import _nfs_manager
 
 USAGE_HEADER = "USAGE"
 
 
 class BackendManager(object):
-    def __init__(self, py_env_configs: PyEnvConfigs):
+    def __init__(self, py_env_configs: PyEnvConfigs, shutdown_ready_event=None):
         self.py_env_configs = py_env_configs
         self._access_logger = AccessLogger(
             get_log_path(),
@@ -35,8 +38,13 @@ class BackendManager(object):
         # just rank 0 report metric
         if py_env_configs.parallelism_config.world_rank == 0:
             kmonitor.init()
-        self.engine: Optional["BaseEngine"] = None
+        self.engine: Optional[BaseEngine] = None
         self._shutdown_requested = threading.Event()
+        self._shutdown_lock = threading.RLock()
+        self._serving = False
+        self._stopping = False
+        self._stopped = False
+        self._shutdown_ready_event = shutdown_ready_event
 
     def start(self):
         """Initialize backend server without entering service loop"""
@@ -154,38 +162,69 @@ class BackendManager(object):
         gc.collect()
         gc.freeze()
         logging.info("BackendManager entering serve_forever loop")
-        while not self._shutdown_requested.is_set():
-            time.sleep(0.1)  # Check shutdown flag more frequently
-        logging.info("Shutdown requested, stopping BackendManager...")
-        self.stop()
+        self._serving = True
+        try:
+            while not self._shutdown_requested.is_set():
+                time.sleep(0.1)  # Check shutdown flag more frequently
+            logging.info("Shutdown requested, stopping BackendManager...")
+            self.stop()
+        finally:
+            self._serving = False
         logging.info("BackendManager stopped successfully")
 
     def request_shutdown(self):
         """Request graceful shutdown of the backend manager"""
         logging.info("BackendManager shutdown requested")
         self._shutdown_requested.set()
+        if self._serving:
+            # Python signal handlers run on the interpreter's main thread. Stop
+            # synchronously while that thread owns the GIL; otherwise a busy
+            # model callback can starve the polling loop and strand a peer in
+            # destroy_process_group(). During startup, the event-only path lets
+            # initialization unwind before serve_forever performs the cleanup.
+            self.stop()
 
     def stop(self) -> None:
         """Stop the backend manager and cleanup resources"""
-        if self.engine is not None:
-            from rtp_llm.utils.fuser import _nfs_manager
-
+        with self._shutdown_lock:
+            if self._stopped or self._stopping:
+                return
+            self._stopping = True
             engine_stop_error = None
             try:
-                self.engine.stop()
-            except Exception as e:
-                engine_stop_error = e
-                logging.exception("engine stop failed during backend shutdown")
+                if isinstance(self.engine, BaseEngine):
+                    # This is the collective shutdown acknowledgement boundary:
+                    # the C++ engine has set running=false and stopped its
+                    # scheduler, but may still need a leader's final model step
+                    # to let the loop thread join.
+                    if self._shutdown_ready_event is not None:
+                        self.engine.request_stop()
+                        self._shutdown_ready_event.set()
+                    try:
+                        self.engine.stop()
+                    except Exception as e:
+                        engine_stop_error = e
+                        logging.exception("engine stop failed during backend shutdown")
+                    finally:
+                        try:
+                            _nfs_manager.unmount_all()
+                            logging.info("all nfs paths unmounted")
+                        except Exception:
+                            logging.exception("nfs unmount failed during backend shutdown")
+                            if engine_stop_error is None:
+                                raise
+                    if engine_stop_error is not None:
+                        raise engine_stop_error
             finally:
                 try:
-                    _nfs_manager.unmount_all()
-                    logging.info("all nfs paths unmounted")
-                except Exception:
-                    logging.exception("nfs unmount failed during backend shutdown")
-                    if engine_stop_error is None:
-                        raise
-            if engine_stop_error is not None:
-                raise engine_stop_error
+                    self.engine = None
+                    if distributed_environment_initialized():
+                        # Release ProcessGroups and, crucially, the Python callbacks
+                        # held by librtp_compute_ops before CPython finalizes globals.
+                        destroy_distributed_environment()
+                finally:
+                    self._stopping = False
+                    self._stopped = True
 
     def ready(self):
         if self.engine is not None:

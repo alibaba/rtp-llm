@@ -509,6 +509,10 @@ TEST_F(KVCacheManagerTest, MetricsThreadSmoke) {
     EXPECT_TRUE(cache_manager->metrics_reporter_thread_.joinable());
     std::this_thread::sleep_for(std::chrono::milliseconds(1100));
 
+    cache_manager->stopMetricsReporter();
+    EXPECT_FALSE(cache_manager->metrics_reporter_thread_.joinable());
+    cache_manager->stopMetricsReporter();
+
     cache_manager.reset();
 }
 

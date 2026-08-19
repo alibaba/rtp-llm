@@ -236,7 +236,11 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
 }
 
 KVCacheManager::~KVCacheManager() {
-    stop_.store(true, std::memory_order_relaxed);
+    stopMetricsReporter();
+}
+
+void KVCacheManager::stopMetricsReporter() {
+    stop_.store(true, std::memory_order_release);
     if (metrics_reporter_thread_.joinable()) {
         metrics_reporter_thread_.join();
     }
@@ -705,7 +709,7 @@ void KVCacheManager::reportMetricsLoop() {
     kmonitor::MetricsTags tags;
     constexpr auto        kLogInterval  = std::chrono::minutes(1);
     auto                  last_log_time = std::chrono::steady_clock::now() - kLogInterval;
-    while (!stop_.load(std::memory_order_relaxed)) {
+    while (!stop_.load(std::memory_order_acquire)) {
         if (!metrics_reporter_ || !allocator_) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             continue;
