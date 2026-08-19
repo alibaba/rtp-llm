@@ -300,7 +300,6 @@ class QwenAgentRenderer(CustomChatRenderer):
             finish_reason = FinisheReason.stop
 
         if responded_length < output_length:
-            index += 1
             yield StreamResponseObject(
                 choices=[
                     ChatCompletionResponseStreamChoice(
@@ -324,7 +323,7 @@ class QwenAgentRenderer(CustomChatRenderer):
         yield StreamResponseObject(
             choices=[
                 ChatCompletionResponseStreamChoice(
-                    index=index + 1,
+                    index=index,
                     delta=DeltaMessage(
                         content="",
                     ),
