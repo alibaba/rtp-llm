@@ -310,6 +310,11 @@ public class MetricConstant {
     public static final String KVCM_QUERY_RETRY_QPS = "app.cache.kvcm.query.retry.qps";
 
     /**
+     * KVCM cache queries that failed after all configured retries were exhausted.
+     */
+    public static final String KVCM_QUERY_FAILURE_QPS = "app.cache.kvcm.query.failure.qps";
+
+    /**
      * Cache request total count
      */
     public static final String CACHE_REQUEST_TOTAL = "app.cache.request.total";

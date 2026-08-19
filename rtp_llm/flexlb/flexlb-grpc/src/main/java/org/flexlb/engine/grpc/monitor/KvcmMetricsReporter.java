@@ -8,6 +8,7 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 
+import static org.flexlb.constant.MetricConstant.KVCM_QUERY_FAILURE_QPS;
 import static org.flexlb.constant.MetricConstant.KVCM_QUERY_RETRY_QPS;
 
 /**
@@ -25,6 +26,7 @@ public class KvcmMetricsReporter {
     @PostConstruct
     public void init() {
         monitor.register(KVCM_QUERY_RETRY_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(KVCM_QUERY_FAILURE_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
     }
 
     public void reportQueryRetry(int attempt) {
@@ -32,5 +34,12 @@ public class KvcmMetricsReporter {
                 KVCM_QUERY_RETRY_QPS,
                 FlexMetricTags.of("attempt", String.valueOf(attempt)),
                 1.0);
+    }
+
+    /**
+     * Reports a KVCM query that failed after all configured retry attempts.
+     */
+    public void reportQueryFailure() {
+        monitor.report(KVCM_QUERY_FAILURE_QPS, FlexMetricTags.of(), 1.0);
     }
 }

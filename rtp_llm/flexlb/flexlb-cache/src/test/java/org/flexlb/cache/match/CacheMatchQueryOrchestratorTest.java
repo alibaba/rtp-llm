@@ -32,6 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
@@ -97,7 +98,41 @@ class CacheMatchQueryOrchestratorTest {
         assertEquals(4096, result.blockSize());
         assertEquals(1, result.hostMatch("10.0.0.2:8080").localMatchBlocks());
         verify(comparisonService, never()).trackLocalStandbyPrediction(query);
+        verify(comparisonService).trackResolvedLocalStandbyPrediction(query, result);
         verify(cacheMetricsReporter).reportStandbyFallback("kvcm_query_failure");
+    }
+
+    @Test
+    void tracksResolvedPredictionWhenLocalStandbyIsAlreadyActive() {
+        when(failoverManager.activeSource()).thenReturn(CacheMatchSource.LOCAL_STANDBY);
+        when(localStandbyHashService.getHashResult("request-1", List.of(101L), 4096))
+                .thenReturn(CompletableFuture.completedFuture(
+                        new LocalStandbyHashResult(List.of(101L), 4096)));
+        when(localStandbyProvider.findMatchingEngines("request-1", List.of(101L), 4096, RoleType.PREFILL, "default"))
+                .thenReturn(Map.of("10.0.0.2:8080", HostCacheMatch.local(1)));
+
+        CacheMatchResult result = orchestrator().findMatchingEngines(query);
+
+        assertEquals(CacheMatchSource.LOCAL_STANDBY, result.source());
+        verify(comparisonService).trackResolvedLocalStandbyPrediction(query, result);
+        verify(kvcmProvider, never()).findMatchingEngines(any(), any(), anyLong(), any(), any());
+        verify(cacheMetricsReporter).reportStandbyFallback("active_source");
+    }
+
+    @Test
+    void keepsLocalStandbyRouteWhenResolvedComparisonSetupFails() {
+        when(failoverManager.activeSource()).thenReturn(CacheMatchSource.LOCAL_STANDBY);
+        when(localStandbyHashService.getHashResult("request-1", List.of(101L), 4096))
+                .thenReturn(CompletableFuture.completedFuture(
+                        new LocalStandbyHashResult(List.of(101L), 4096)));
+        when(localStandbyProvider.findMatchingEngines("request-1", List.of(101L), 4096, RoleType.PREFILL, "default"))
+                .thenReturn(Map.of("10.0.0.2:8080", HostCacheMatch.local(1)));
+        doThrow(new RuntimeException("Local Standby comparison unavailable"))
+                .when(comparisonService).trackResolvedLocalStandbyPrediction(any(), any());
+
+        CacheMatchResult result = orchestrator().findMatchingEngines(query);
+
+        assertEquals(CacheMatchSource.LOCAL_STANDBY, result.source());
     }
 
     @Test
@@ -114,6 +149,20 @@ class CacheMatchQueryOrchestratorTest {
         assertEquals(10, result.hostMatch("10.0.0.1:8080").p2pTotalMatchBlocks());
         verify(comparisonService).trackLocalStandbyPrediction(query);
         verify(localStandbyHashService, never()).getHashResult(any(), any(), anyLong());
+    }
+
+    @Test
+    void keepsKvcmRouteWhenComparisonSetupFails() {
+        when(failoverManager.activeSource()).thenReturn(CacheMatchSource.KVCM);
+        when(kvcmProvider.findMatchingEngines("request-1", List.of(11L, 22L), 2192, RoleType.PREFILL, "default"))
+                .thenReturn(Map.of("10.0.0.1:8080", new HostCacheMatch(2, 8, 10)));
+        doThrow(new RuntimeException("Local Standby comparison unavailable"))
+                .when(comparisonService).trackLocalStandbyPrediction(query);
+
+        CacheMatchResult result = orchestrator().findMatchingEngines(query);
+
+        assertEquals(CacheMatchSource.KVCM, result.source());
+        verify(cacheMetricsReporter, never()).reportStandbyFallback(any());
     }
 
     @Test

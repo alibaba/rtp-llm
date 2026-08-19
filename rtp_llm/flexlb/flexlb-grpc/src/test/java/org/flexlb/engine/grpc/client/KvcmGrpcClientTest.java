@@ -341,6 +341,7 @@ class KvcmGrpcClientTest {
                 any(GrpcTarget.class), any(GetHostCacheStateRequest.class), anyLong());
         Mockito.verify(metricsReporter).reportQueryRetry(1);
         Mockito.verify(metricsReporter).reportQueryRetry(2);
+        Mockito.verify(metricsReporter).reportQueryFailure();
 
         assertThrows(KvcmQueryException.class, this::queryMockClient);
         assertEquals(2, client.healthSnapshot().consecutiveQueryFailures());
@@ -349,6 +350,7 @@ class KvcmGrpcClientTest {
                 any(GrpcTarget.class), any(GetHostCacheStateRequest.class), anyLong());
         Mockito.verify(metricsReporter, Mockito.times(2)).reportQueryRetry(1);
         Mockito.verify(metricsReporter, Mockito.times(2)).reportQueryRetry(2);
+        Mockito.verify(metricsReporter, Mockito.times(2)).reportQueryFailure();
 
         querySucceeds.set(true);
         assertTrue(queryMockClient().isEmpty());

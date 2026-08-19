@@ -73,22 +73,23 @@ public class CacheMatchQueryOrchestrator {
         CacheMatchSource source = failoverManager.activeSource();
         if (source == CacheMatchSource.LOCAL_STANDBY) {
             cacheMetricsReporter.reportStandbyFallback("active_source");
-            return queryLocalStandby(query, startTimeNs);
+            return queryAndTrackLocalStandby(query, startTimeNs);
         }
         if (query.blockCacheKeys() == null || query.blockCacheKeys().isEmpty()) {
             return emptyResult(CacheMatchSource.KVCM, startTimeNs);
         }
 
+        Map<String, HostCacheMatch> kvcmMatches;
         try {
-            Map<String, HostCacheMatch> kvcmMatches = kvcmProvider.findMatchingEngines(
+            kvcmMatches = kvcmProvider.findMatchingEngines(
                     query.requestId(), query.blockCacheKeys(), query.blockSize(), query.roleType(), query.group());
-            comparisonService.trackLocalStandbyPrediction(query);
-            return new CacheMatchResult(kvcmMatches, CacheMatchSource.KVCM, elapsedUs(startTimeNs), query.blockSize());
         } catch (RuntimeException e) {
             log.warn("KVCM cache query failed; requestId={}, action=LOCAL_STANDBY", query.requestId(), e);
             cacheMetricsReporter.reportStandbyFallback("kvcm_query_failure");
-            return queryLocalStandby(query, startTimeNs);
+            return queryAndTrackLocalStandby(query, startTimeNs);
         }
+        trackComparisonBestEffort(query, () -> comparisonService.trackLocalStandbyPrediction(query));
+        return new CacheMatchResult(kvcmMatches, CacheMatchSource.KVCM, elapsedUs(startTimeNs), query.blockSize());
     }
 
     public void applyFailoverAction(CacheMatchFailoverAction action) {
@@ -154,6 +155,20 @@ public class CacheMatchQueryOrchestrator {
         Map<String, HostCacheMatch> matches = localStandbyProvider.findMatchingEngines(
                 query.requestId(), hashResult.blockCacheKeys(), hashResult.blockSize(), query.roleType(), query.group());
         return result(matches, CacheMatchSource.LOCAL_STANDBY, startTimeNs, hashResult.blockSize());
+    }
+
+    private CacheMatchResult queryAndTrackLocalStandby(CacheMatchQuery query, long startTimeNs) {
+        CacheMatchResult result = queryLocalStandby(query, startTimeNs);
+        trackComparisonBestEffort(query, () -> comparisonService.trackResolvedLocalStandbyPrediction(query, result));
+        return result;
+    }
+
+    private void trackComparisonBestEffort(CacheMatchQuery query, Runnable tracker) {
+        try {
+            tracker.run();
+        } catch (RuntimeException e) {
+            log.warn("Local Standby comparison setup failed; requestId={}", query.requestId(), e);
+        }
     }
 
     private CacheMatchResult result(Map<String, HostCacheMatch> matches, CacheMatchSource source, long startTimeNs, long blockSize) {

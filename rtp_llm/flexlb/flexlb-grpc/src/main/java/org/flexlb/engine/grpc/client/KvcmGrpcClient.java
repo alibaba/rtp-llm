@@ -170,6 +170,7 @@ public class KvcmGrpcClient {
             } catch (RuntimeException failure) {
                 if (attemptIndex == maxQueryRetryCount) {
                     recordQueryFailure();
+                    metricsReporter.reportQueryFailure();
                     throw failure;
                 }
                 metricsReporter.reportQueryRetry(attemptIndex + 1);

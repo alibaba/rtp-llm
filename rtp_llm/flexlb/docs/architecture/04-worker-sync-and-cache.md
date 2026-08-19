@@ -113,11 +113,16 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
 1. KVCM 关闭 → LOCAL_SYNC。
 2. KVCM 开启：`CacheMatchFailoverManager.activeSource()` 为 LOCAL_STANDBY → 查兜底
    （指标 `standby_fallback{active_source}`）。
-3. 否则查 KVCM；成功时同步做一次 standby 影子预测记录；**单次查询抛异常时该请求同步降级
-   查 standby**（`standby_fallback{kvcm_query_failure}`）。
+3. 否则查 KVCM；成功时同步做一次 standby 影子预测记录；**内部重试耗尽后查询抛异常时当前请求同步降级
+   查 standby，但 active source 保持 KVCM**（`standby_fallback{kvcm_query_failure}`）。KVCM gRPC client 同时报告
+   `app.cache.kvcm.query.failure.qps`。
+   每个实际走 Local Standby 的结果都会登记 resolved standby prediction，以便后续 engine feedback 产出
+   同一 `cacheMatchSource=LOCAL_STANDBY` 标签下的 cache-hit comparison 指标和 PV。Standby prediction
+   登记的异常只影响 comparison，不触发 KVCM 降级或 Local Standby 路由失败。
 
-`CacheMatchFailoverManager`：监听 KVCM 健康——不健康且 `autoSwitch` 开 → 切 LOCAL_STANDBY；
-恢复健康 → 切回 KVCM；手动 `ACTIVATE_FALLBACK` 覆盖一切，`RECOVER_PRIMARY` 要求 KVCM 已健康
+`CacheMatchFailoverManager`：监听 KVCM 健康——不健康且 `autoSwitch` 开 → 切 LOCAL_STANDBY；恢复健康 →
+切回 KVCM；手动 `ACTIVATE_FALLBACK` 覆盖一切，
+`RECOVER_PRIMARY` 要求 KVCM 已健康
 （HTTP 入口 `POST /flexlb/cache_match/failover`，非 master 会转发给 master；状态查询
 `GET /flexlb/cache_match/status`）。
 

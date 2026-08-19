@@ -6,6 +6,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.master.CacheHitFeedback;
@@ -43,15 +44,28 @@ public class LocalStandbyComparisonService {
     }
 
     public void trackLocalStandbyPrediction(CacheMatchQuery query) {
-        if (!enabled || query == null || query.localStandbyBlockSize() <= 0) {
+        if (!canTrack(query)) {
             return;
         }
         CompletableFuture<StandbyPrediction> localStandbyPredictionTask =
                 localStandbyProvider.asyncLocalStandbyMatch(query)
                         .thenApply(matchResult ->
                                 new StandbyPrediction(matchResult.hostMatches(), matchResult.blockSize()));
-        pendingLocalStandbyPredictions.put(
-                new LocalStandbyPredictionKey(query.requestId(), query.roleType()), localStandbyPredictionTask);
+        storePrediction(query, localStandbyPredictionTask);
+    }
+
+    /**
+     * Records a completed Local Standby prediction without issuing another cache match query.
+     */
+    public void trackResolvedLocalStandbyPrediction(CacheMatchQuery query, CacheMatchResult matchResult) {
+        if (!canTrack(query)
+                || matchResult == null
+                || matchResult.source() != CacheMatchSource.LOCAL_STANDBY
+                || matchResult.blockSize() <= 0) {
+            return;
+        }
+        storePrediction(query, CompletableFuture.completedFuture(
+                new StandbyPrediction(matchResult.hostMatches(), matchResult.blockSize())));
     }
 
     public CompletableFuture<CacheHitComparisonResult> buildCacheHitComparison(CacheHitFeedback feedback) {
@@ -96,6 +110,15 @@ public class LocalStandbyComparisonService {
 
     private CacheHitComparisonResult withoutLocalStandbyPrediction(CacheHitFeedback feedback) {
         return feedback == null ? null : result(feedback, null);
+    }
+
+    private boolean canTrack(CacheMatchQuery query) {
+        return enabled && query != null && query.localStandbyBlockSize() > 0;
+    }
+
+    private void storePrediction(CacheMatchQuery query, CompletableFuture<StandbyPrediction> prediction) {
+        pendingLocalStandbyPredictions.put(
+                new LocalStandbyPredictionKey(query.requestId(), query.roleType()), prediction);
     }
 
     private CacheHitComparisonResult result(CacheHitFeedback feedback,

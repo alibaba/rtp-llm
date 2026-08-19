@@ -22,6 +22,7 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -67,6 +68,40 @@ class LocalStandbyComparisonServiceTest {
         assertEquals(2000, result.kvcmDetails().local().delta());
         assertEquals(10000, result.kvcmDetails().p2pTotal().hit());
         assertEquals(-4000, result.kvcmDetails().p2pTotal().delta());
+        assertNotNull(result.localStandby());
+        assertEquals(4096, result.localStandby().hit());
+        assertEquals(1904, result.localStandby().delta());
+    }
+
+    @Test
+    void buildsUnifiedComparisonFromResolvedFallbackPrediction() throws Exception {
+        LocalStandbyCacheMatchProvider provider = mock(LocalStandbyCacheMatchProvider.class);
+        LocalStandbyComparisonService comparisonService = new LocalStandbyComparisonService(
+                new CacheMatchConfiguration(modelMetaConfig()), provider);
+        CacheMatchQuery query = new CacheMatchQuery(
+                "request-1",
+                List.of(11L),
+                2192,
+                List.of(101L),
+                4096,
+                RoleType.PREFILL,
+                "default");
+        comparisonService.trackResolvedLocalStandbyPrediction(query, new CacheMatchResult(
+                Map.of("10.0.0.1:8080", HostCacheMatch.local(1)),
+                CacheMatchSource.LOCAL_STANDBY,
+                10,
+                4096));
+        verify(provider, never()).asyncLocalStandbyMatch(query);
+
+        CacheHitFeedback feedback = new CacheHitFeedback(
+                "cache_hit_comparison", "request-1", "LOCAL_STANDBY", "PREFILL", "default",
+                "10.0.0.1", 8080, "running", 8000, 4096, 4096,
+                false, 0, 0, 0,
+                6000, 1904);
+        CacheHitComparisonResult result =
+                comparisonService.buildCacheHitComparison(feedback).get(1, TimeUnit.SECONDS);
+
+        assertEquals(6000, result.actual().hit());
         assertNotNull(result.localStandby());
         assertEquals(4096, result.localStandby().hit());
         assertEquals(1904, result.localStandby().delta());
