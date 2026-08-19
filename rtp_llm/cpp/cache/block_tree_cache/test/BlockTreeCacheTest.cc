@@ -263,7 +263,7 @@ TEST_F(BlockTreeCacheTest, ReportTransferFinishedAcceptsSuccessfulDescriptors) {
         TransferDescriptor::deviceToHost(0, {1}, 10),
         TransferDescriptor::deviceToHost(0, {2}, 11),
     };
-    kmonitor::MetricsTags tags;
+    kmonitor::MetricsTags         tags;
     BlockTreeCacheMetricsReporter reporter;
     reporter.setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", tags));
 
@@ -295,19 +295,18 @@ TEST_F(BlockTreeCacheTest, InsertPublishesAndShutdownRetiresDeviceBlockMapping) 
 
 TEST_F(BlockTreeCacheTest, DeviceBlockDebugInfoUsesCurrentTreeMapping) {
     std::vector<DeviceBlockPoolPtr> device_pools = {block_tree_cache_test::makeStructuralDevicePool(0),
-                                                     block_tree_cache_test::makeStructuralDevicePool(1)};
-    std::shared_ptr<FullGroupSet> full_group =
-        std::make_shared<FullGroupSet>(device_pools, nullptr, nullptr);
+                                                    block_tree_cache_test::makeStructuralDevicePool(1)};
+    std::shared_ptr<FullGroupSet>   full_group   = std::make_shared<FullGroupSet>(device_pools, nullptr, nullptr);
     initializeTestGroupSet(full_group, device_pools);
     cache_ = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{std::move(full_group)});
 
-    constexpr BlockIdxType first_block_id  = 42;
-    constexpr BlockIdxType second_block_id = 43;
+    constexpr BlockIdxType                     first_block_id  = 42;
+    constexpr BlockIdxType                     second_block_id = 43;
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {first_block_id, second_block_id};
     cache_->insert({100}, resources, Tier::DEVICE);
 
-    TreeNode* node = cache_->tree()->root()->children.at(100);
+    TreeNode* node                              = cache_->tree()->root()->children.at(100);
     node->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
 
     DeviceBlockDebugInfo debug_info;
@@ -721,13 +720,103 @@ TEST_F(BlockTreeCacheTest, PreciseReleaseRefreshesOnlyTheBoundTreeResource) {
     EXPECT_EQ(cache_->getStats().device_heap_total_size, 2u);
 }
 
-TEST_F(BlockTreeCacheTest, PreciseReleaseDeduplicatesMultiMemberTreeResource) {
-    const std::vector<DeviceBlockPoolPtr> pools = makeStructuralDevicePools(2, "multi_member_release_pool");
-    auto                                  full  = std::make_shared<FullGroupSet>(pools, nullptr, nullptr);
+const BlockTreePoolMetricsSnapshot* findTreePoolSnapshot(const std::vector<BlockTreePoolMetricsSnapshot>& snapshots,
+                                                         const std::string&                               pool_name,
+                                                         const std::string&                               stage) {
+    const BlockTreePoolMetricsSnapshot* found = nullptr;
+    for (const BlockTreePoolMetricsSnapshot& snapshot : snapshots) {
+        if (snapshot.pool_name != pool_name) {
+            continue;
+        }
+        if (found != nullptr) {
+            ADD_FAILURE() << "duplicate pool snapshot: " << pool_name << " stage=" << stage;
+            return nullptr;
+        }
+        found = &snapshot;
+    }
+    if (found == nullptr) {
+        ADD_FAILURE() << "missing pool snapshot: " << pool_name << " stage=" << stage;
+    }
+    return found;
+}
+
+// pool_name and block_size_bytes are intentionally excluded: member pools keep separate
+// identities, and a GroupSet does not require its members to own the same layer count.
+void expectSameJointLifecycleMetrics(const BlockTreePoolMetricsSnapshot& expected,
+                                     const BlockTreePoolMetricsSnapshot& actual,
+                                     const std::string&                  stage) {
+    const std::string context = "pool=" + actual.pool_name + " stage=" + stage;
+    EXPECT_EQ(actual.tier, expected.tier) << context;
+    EXPECT_EQ(actual.total_blocks, expected.total_blocks) << context;
+    EXPECT_EQ(actual.free_blocks, expected.free_blocks) << context;
+    EXPECT_EQ(actual.used_blocks, expected.used_blocks) << context;
+    EXPECT_EQ(actual.available_blocks, expected.available_blocks) << context;
+    EXPECT_EQ(actual.active_tree_cached_blocks, expected.active_tree_cached_blocks) << context;
+    EXPECT_EQ(actual.request_ref_blocks, expected.request_ref_blocks) << context;
+    EXPECT_EQ(actual.connector_ref_blocks, expected.connector_ref_blocks) << context;
+    EXPECT_EQ(actual.block_cache_ref_blocks, expected.block_cache_ref_blocks) << context;
+    EXPECT_EQ(actual.eviction_ref_blocks, expected.eviction_ref_blocks) << context;
+    EXPECT_EQ(actual.store_ref_blocks, expected.store_ref_blocks) << context;
+}
+
+TEST_F(BlockTreeCacheTest, MultiMemberPoolMetricsStayAlignedThroughJointEviction) {
+    const std::vector<DeviceBlockPoolPtr> pools = makeStructuralDevicePools(3, "multi_member_metrics_pool");
+    ASSERT_EQ(pools.size(), 3u);
+    auto full = std::make_shared<FullGroupSet>(pools, nullptr, nullptr);
     initializeTestGroupSet(full, pools);
     std::vector<GroupSetPtr> groups = {full};
     auto                     cache  = makeBlockTreeCacheForTest(std::move(groups));
     ASSERT_NE(cache, nullptr);
+
+    for (size_t left = 0; left < pools.size(); ++left) {
+        for (size_t right = left + 1; right < pools.size(); ++right) {
+            EXPECT_NE(pools[left]->poolName(), pools[right]->poolName());
+        }
+    }
+
+    const std::vector<BlockTreePoolMetricsSnapshot> initial_snapshots = cache->poolMetricsSnapshots();
+    ASSERT_EQ(initial_snapshots.size(), pools.size());
+    const size_t total_blocks = initial_snapshots.front().total_blocks;
+    ASSERT_GT(total_blocks, 0u);
+    for (const BlockTreePoolMetricsSnapshot& snapshot : initial_snapshots) {
+        ASSERT_EQ(snapshot.tier, Tier::DEVICE);
+        ASSERT_EQ(snapshot.total_blocks, total_blocks);
+        ASSERT_EQ(snapshot.free_blocks, total_blocks);
+    }
+
+    struct JointStage {
+        size_t used_blocks;
+        size_t available_blocks;
+        size_t request_ref_blocks;
+        size_t block_cache_ref_blocks;
+        size_t active_tree_cached_blocks;
+    };
+    auto expect_joint_stage = [&](const std::string& stage, const JointStage& expected) {
+        const std::vector<BlockTreePoolMetricsSnapshot> snapshots = cache->poolMetricsSnapshots();
+        ASSERT_EQ(snapshots.size(), pools.size()) << stage;
+        const BlockTreePoolMetricsSnapshot* first = nullptr;
+        for (const DeviceBlockPoolPtr& pool : pools) {
+            const BlockTreePoolMetricsSnapshot* snapshot = findTreePoolSnapshot(snapshots, pool->poolName(), stage);
+            ASSERT_NE(snapshot, nullptr) << pool->poolName() << " stage=" << stage;
+            const std::string context = "pool=" + pool->poolName() + " stage=" + stage;
+            EXPECT_EQ(snapshot->tier, Tier::DEVICE) << context;
+            EXPECT_EQ(snapshot->total_blocks, total_blocks) << context;
+            EXPECT_EQ(snapshot->used_blocks, expected.used_blocks) << context;
+            EXPECT_EQ(snapshot->free_blocks, total_blocks - expected.used_blocks) << context;
+            EXPECT_EQ(snapshot->available_blocks, expected.available_blocks) << context;
+            EXPECT_EQ(snapshot->request_ref_blocks, expected.request_ref_blocks) << context;
+            EXPECT_EQ(snapshot->block_cache_ref_blocks, expected.block_cache_ref_blocks) << context;
+            EXPECT_EQ(snapshot->active_tree_cached_blocks, expected.active_tree_cached_blocks) << context;
+            EXPECT_EQ(snapshot->connector_ref_blocks, 0u) << context;
+            EXPECT_EQ(snapshot->eviction_ref_blocks, 0u) << context;
+            EXPECT_EQ(snapshot->store_ref_blocks, 0u) << context;
+            if (first == nullptr) {
+                first = snapshot;
+            } else {
+                expectSameJointLifecycleMetrics(*first, *snapshot, stage);
+            }
+        }
+    };
 
     std::vector<BlockIdxType> device_blocks;
     for (const DeviceBlockPoolPtr& pool : pools) {
@@ -739,7 +828,16 @@ TEST_F(BlockTreeCacheTest, PreciseReleaseDeduplicatesMultiMemberTreeResource) {
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = device_blocks;
     cache->insert({100}, resources, Tier::DEVICE);
+
+    // Stage A: the tree and the request both hold every member block.
+    ASSERT_EQ(cache->getStats().tree_node_count, 1u);
     ASSERT_EQ(cache->getStats().device_heap_total_size, 0u);
+    expect_joint_stage("tree_and_request_held",
+                       JointStage{/*used_blocks=*/1,
+                                  /*available_blocks=*/total_blocks - 1,
+                                  /*request_ref_blocks=*/1,
+                                  /*block_cache_ref_blocks=*/1,
+                                  /*active_tree_cached_blocks=*/1});
 
     BlockReleaseBatch releases;
     for (size_t member_group_id = 0; member_group_id < pools.size(); ++member_group_id) {
@@ -749,7 +847,28 @@ TEST_F(BlockTreeCacheTest, PreciseReleaseDeduplicatesMultiMemberTreeResource) {
     }
     cache->onBlocksReleased(releases.finish());
 
+    // Stage B: three member blocks collapse into one GroupSet-level candidate, and each member
+    // pool projects that candidate as one extra available block.
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
+    expect_joint_stage("single_joint_candidate",
+                       JointStage{/*used_blocks=*/1,
+                                  /*available_blocks=*/total_blocks,
+                                  /*request_ref_blocks=*/0,
+                                  /*block_cache_ref_blocks=*/1,
+                                  /*active_tree_cached_blocks=*/0});
+
+    // Stage C: host/disk tiers are disabled and evictForGroup force-drops, so the joint eviction
+    // completes synchronously without any transfer task.
+    EXPECT_EQ(cache->evictForGroup(full->groupIds().front(), 1), 1);
+    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
+    EXPECT_EQ(cache->getStats().tree_node_count, 0u);
+    EXPECT_EQ(cache->getStats().device_heap_total_size, 0u);
+    expect_joint_stage("after_joint_eviction",
+                       JointStage{/*used_blocks=*/0,
+                                  /*available_blocks=*/total_blocks,
+                                  /*request_ref_blocks=*/0,
+                                  /*block_cache_ref_blocks=*/0,
+                                  /*active_tree_cached_blocks=*/0});
 }
 
 TEST_F(BlockTreeCacheTest, ReusedBlockIdReceiptCannotMakeReferencedBlockEvictable) {
@@ -876,11 +995,11 @@ TEST(BlockTreeCacheFinalizationTest, CopyExceptionSettlesPendingReleasesBeforeTa
     }
 
     FullSWAEnvironmentOptions options;
-    options.path_length             = 1;
-    options.usable_device_blocks    = 4;
-    options.usable_host_blocks      = 4;
-    options.enable_disk             = false;
-    auto environment                = FullSWAEnvironment::create(options);
+    options.path_length          = 1;
+    options.usable_device_blocks = 4;
+    options.usable_host_blocks   = 4;
+    options.enable_disk          = false;
+    auto environment             = FullSWAEnvironment::create(options);
     ASSERT_NE(environment, nullptr);
     ASSERT_NE(environment->cache, nullptr);
 
@@ -1051,8 +1170,7 @@ TEST_F(BlockTreeCacheTest, DuplicateInsert_KeepsExistingResourceAndCallerOwnsLos
     auto initial_find = cache->tree()->findNode({100});
     ASSERT_FALSE(initial_find.empty());
     block_tree_cache_test::releaseRequestRefsForTest(
-        *cache,
-        {makeMultiNodeResourceForTest(full->groupSetId(), Tier::DEVICE, {initial_find.back()}, existing)});
+        *cache, {makeMultiNodeResourceForTest(full->groupSetId(), Tier::DEVICE, {initial_find.back()}, existing)});
     EXPECT_EQ(pool->refCount(existing_block), 1u);
 
     std::vector<std::vector<GroupSetResource>> duplicate_resources(1, std::vector<GroupSetResource>(1));
@@ -1110,8 +1228,7 @@ TEST_F(BlockTreeCacheTest, DuplicateInsert_FillsExistingEmptyGroupAndAddsOneCach
     EXPECT_EQ(pool->refCount(block), 2u);
 
     block_tree_cache_test::releaseRequestRefsForTest(
-        *cache,
-        {makeMultiNodeResourceForTest(full->groupSetId(), Tier::DEVICE, {existing_node}, request_blocks)});
+        *cache, {makeMultiNodeResourceForTest(full->groupSetId(), Tier::DEVICE, {existing_node}, request_blocks)});
     EXPECT_EQ(pool->refCount(block), 1u);
 
     EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 1);
@@ -1740,8 +1857,8 @@ TEST_F(BlockTreeCacheTest, LoadPreparedPrefixFailureRollsBackAllSourceAndTargetH
     ASSERT_NE(first_source, NULL_BLOCK_IDX);
     ASSERT_NE(second_source, NULL_BLOCK_IDX);
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(2));
-    resources[0][0].host_block = first_source;
-    resources[0][1].host_block = second_source;
+    resources[0][0].host_block                = first_source;
+    resources[0][1].host_block                = second_source;
     const BlockTreeInsertResult insert_result = cache->tree()->insertNode({100}, resources, /*collect_path=*/false);
     ASSERT_EQ(insert_result.inserted_nodes.size(), 1u);
     releaseLowerTierSeedRefs(cache->groupSets(), resources);
@@ -1849,7 +1966,7 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackCoreHoldersAndRetainsReque
     const BlockIdxType source_block = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(source_block, NULL_BLOCK_IDX);
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
-    resources[0][0].host_block = source_block;
+    resources[0][0].host_block                = source_block;
     const BlockTreeInsertResult insert_result = cache->tree()->insertNode({100}, resources, /*collect_path=*/false);
     ASSERT_EQ(insert_result.inserted_nodes.size(), 1u);
     releaseLowerTierSeedRefs(cache->groupSets(), resources);
@@ -1934,8 +2051,8 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackMixedDeviceAndHostDescript
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(2));
-    resources[0][0].device_blocks = {resident_block};
-    resources[0][1].host_block    = host_block;
+    resources[0][0].device_blocks             = {resident_block};
+    resources[0][1].host_block                = host_block;
     const BlockTreeInsertResult insert_result = cache->tree()->insertNode({100}, resources, /*collect_path=*/false);
     ASSERT_EQ(insert_result.inserted_nodes.size(), 1u);
     releaseLowerTierSeedRefs(cache->groupSets(), resources);
