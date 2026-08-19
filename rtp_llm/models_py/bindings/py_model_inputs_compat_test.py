@@ -142,6 +142,7 @@ class PyModelInputsCompatTest(unittest.TestCase):
             "group_tags",
             "layer_count",
             "get_layer_cache",
+            "has_layer_cache",
             "get_layer_cache_groups",
             "get_seq_size_per_block",
             "get_kernel_seq_size_per_block",
@@ -193,6 +194,8 @@ class PyModelInputsCompatTest(unittest.TestCase):
         self.assertEqual(tensors[0].data_ptr(), layer.kv_cache_base.data_ptr())
         self.assertEqual(["default"], cache.group_tags)
         self.assertEqual(1, cache.layer_count)
+        self.assertTrue(cache.has_layer_cache(0, "default"))
+        self.assertFalse(cache.has_layer_cache(0, "missing"))
         self.assertEqual(8, cache.get_seq_size_per_block("default"))
         self.assertEqual(
             ["default"], [item.tag for item in cache.get_layer_cache_groups(0)]

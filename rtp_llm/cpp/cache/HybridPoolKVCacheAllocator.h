@@ -33,40 +33,31 @@ public:
 
     GroupedCacheLayerLayout allLayerCacheBase() const override;
 
-    size_t                  freeBlocksNum() const override;
-    size_t                  availableBlocksNum() const override;
-    BatchKVCacheResourcePtr popBlocksFromCache(size_t min_blocks_to_free) override;
-    void                    blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource) override;
-    size_t                  requestRefBlocksNum() const override;
-    size_t                  connectorRefBlocksNum() const override;
-    size_t                  blockCacheRefBlocksNum() const override;
-    size_t                  notInUseBlocksNum() const override;
-    size_t                  availableTokensNum() const override;
-    size_t                  totalTokensNum() const override;
-    size_t                  totalBlocksNum() const override;
-    size_t                  maxAvailableTokensNum() const override;
-    KVCacheTokenCapacity    tokenCapacity(size_t default_seq_size_per_block) const override;
-    std::vector<KVCachePoolMetricsSnapshot> poolMetricsSnapshots() const override;
+    size_t                                  freeBlocksNum() const override;
+    size_t                                  activeTreeCachedBlocksNum() const override;
+    size_t                                  availableTokensNum() const override;
+    size_t                                  totalTokensNum() const override;
+    size_t                                  totalBlocksNum() const override;
+    size_t                                  maxAvailableTokensNum() const override;
+    KVCacheTokenCapacity                    tokenCapacity(size_t default_seq_size_per_block) const override;
     void    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr) override;
     int64_t getMrCostTimeMs() const override;
 
     // Per-pool access for diagnostics / per-pool metrics reporting.
-    const std::vector<BlockPoolPtr>& groupBlockPools() const {
+    const std::vector<DeviceBlockPoolPtr>& groupBlockPools() const override {
         return group_block_pools_;
     }
 
 private:
     bool   doInit() override;
-    size_t reservableAvailableBlocksNum() const override;
+    size_t reserveBlocksForPoolMetrics(size_t pool_index) const override;
+    size_t reservableFreeBlocksNum() const override;
 
-    // Per-pool capacity classification: with one BlockPool per group, a shortfall
-    // in a single pool decides the verdict, so the aggregate base-class view is
-    // not usable here.
+    // A shortfall in any per-group pool decides the capacity verdict, so the
+    // aggregate base-class classification is not sufficient here.
     MallocStatus
     evaluateInitCapacity(const MallocInfo& malloc_info, size_t reserve_blocks, InitCapacityMode mode) const override;
 
-    void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) const override;
-    void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) override;
     bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const override;
     void logMallocFailure(const MallocInfo& malloc_info,
                           const char*       phase,
@@ -77,12 +68,12 @@ private:
 
     int    validateGroupIdForLayer(int layer_id, int group_id) const;
     int    defaultGroupIdForLayer(int layer_id) const;
-    size_t minTokenCapacity(bool use_available_blocks, bool full_groups_only) const;
-    size_t totalReservableAvailableBlocks() const;
-    size_t reserveBlocksForPool(size_t gid, size_t reserve_blocks, size_t total_reservable_available_blocks) const;
+    size_t minTokenCapacity(bool use_free_blocks, bool full_groups_only) const;
+    size_t totalReservableFreeBlocks() const;
+    size_t reserveBlocksForPool(size_t group_id) const;
 
-    std::vector<BlockPoolPtr> group_block_pools_;
-    RoleType                  role_type_{RoleType::PDFUSION};
+    std::vector<DeviceBlockPoolPtr> group_block_pools_;
+    RoleType                        role_type_{RoleType::PDFUSION};
 };
 
 using HybridPoolKVCacheAllocatorPtr = std::shared_ptr<HybridPoolKVCacheAllocator>;

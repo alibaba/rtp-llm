@@ -155,13 +155,18 @@ void populateGroupsFromLayerSpecs(CacheConfig&                 config,
                                     "hybrid-pool layer %u has duplicate tag=%s",
                                     layer,
                                     spec->tag.c_str());
-            const auto policy = SpecBuilder::groupPolicy(desc);
-            // Residency and paged-budget accounting are independent knobs, and
-            // CacheConfig::finalizeBlockNums only looks at charge_to_paged_budget.
-            // A host-resident pool that still charges the budget would silently
-            // shrink the device paged pool by bytes it never occupies.
+            const auto type   = SpecBuilder::groupType(desc);
+            auto       policy = SpecBuilder::groupPolicy(desc);
+            // Residency and paged-budget accounting are independent: a host
+            // pool must not shrink the HBM-backed paged pool.
             checkGroupResidencyBudget(policy, spec->tag);
-            const auto type              = SpecBuilder::groupType(desc);
+            if (type == CacheGroupType::SWA) {
+                RTP_LLM_CHECK_WITH_INFO(model_config.attn_config.sliding_window >= 0,
+                                        "hybrid-pool SWA tag=%s has negative sliding window=%d",
+                                        spec->tag.c_str(),
+                                        model_config.attn_config.sliding_window);
+                policy.sliding_window_size = model_config.attn_config.sliding_window;
+            }
             const auto local_kv_head_num = localKvHeadNumForDesc(desc, model_config, parallelism_config);
             auto       group_it          = group_by_tag.find(spec->tag);
             if (group_it == group_by_tag.end()) {
@@ -204,6 +209,13 @@ void populateGroupsFromLayerSpecs(CacheConfig&                 config,
         group.policy            = state.policy;
         group.layer_ids         = state.layer_ids;
         group.local_kv_head_num = state.local_kv_head_num;
+        // INDEXER_KV stores one physical owner block using multiple
+        // DeepGEMM-compatible 256-token rows. Keep owner geometry on the
+        // group while the spec describes one kernel row.
+        if (tag == "indexer_kv" && config.seq_size_per_block >= 256) {
+            group.seq_size_per_block        = config.seq_size_per_block;
+            group.kernel_seq_size_per_block = 256;
+        }
         groups.push_back(group);
         for (int layer_id : state.layer_ids) {
             auto& layer = layers[static_cast<size_t>(layer_id)];

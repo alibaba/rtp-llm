@@ -57,6 +57,7 @@ _GPU_TESTS = [
 # lifetime, and metadata contracts without loading a full DSv4 checkpoint.
 _CONTRACT_TESTS = [
     "test_cp_pool_reader_owned_lens",
+    "test_attention_indexer_pool_view",
     "test_attention_cp_prefill_paths",
     "test_attention_csa_overlap",
     "test_attention_hca_overlap",

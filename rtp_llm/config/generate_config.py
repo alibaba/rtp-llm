@@ -267,7 +267,9 @@ class GenerateConfig(BaseModel):
 
     enable_device_cache: bool = True
 
-    enable_memory_cache: bool = True
+    enable_host_cache: bool = True
+
+    enable_disk_cache: bool = True
 
     enable_remote_cache: bool = True
     group_timeout: Optional[int] = None  # ms
@@ -275,6 +277,29 @@ class GenerateConfig(BaseModel):
     unique_key: str = ""
 
     # --- validators（统一放在所有 field 声明之后） ---
+
+    @staticmethod
+    def normalize_legacy_fields(values: Dict[str, Any]) -> Dict[str, Any]:
+        """Map retired request fields to their current names.
+
+        The canonical field wins when both forms are supplied. Returning a new
+        dictionary keeps request parsing from mutating caller-owned payloads.
+        """
+        normalized = dict(values)
+        if (
+            "enable_host_cache" not in normalized
+            and "enable_memory_cache" in normalized
+        ):
+            normalized["enable_host_cache"] = normalized["enable_memory_cache"]
+        normalized.pop("enable_memory_cache", None)
+        return normalized
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_legacy_cache_fields(cls, values):
+        if isinstance(values, dict):
+            return cls.normalize_legacy_fields(values)
+        return values
 
     @staticmethod
     def _sanitize_diverge_start_combo(v: "int | str | None") -> int:
@@ -513,6 +538,7 @@ class GenerateConfig(BaseModel):
           - 若用户在同一次 update 中显式传入 enable_cross_sequence_ban，视为用户重新表态，
             自动重启用启发式不会覆盖其显式意图。
         """
+        new = self.normalize_legacy_fields(new)
         for key, value in new.items():
             if hasattr(self, key):
                 setattr(self, key, self._parse_update_value(key, value))
@@ -535,6 +561,7 @@ class GenerateConfig(BaseModel):
 
     def update_and_pop(self, new: Dict[str, Any]):
         """批量更新字段并返回未被消费的 key。校验策略同 update()。"""
+        new = self.normalize_legacy_fields(new)
         to_remove: List[str] = []
         for key, value in new.items():
             if hasattr(self, key):
