@@ -36,7 +36,7 @@ public class Logger {
     }
 
     public static void debug(String format, Object... args) {
-        log.debug(format, args);
+        // Retained for source compatibility; production DEBUG output is disabled.
     }
 
     public static void info(String format, Object... args) {

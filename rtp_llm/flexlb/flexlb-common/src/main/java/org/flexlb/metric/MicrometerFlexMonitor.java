@@ -68,8 +68,6 @@ public class MicrometerFlexMonitor implements FlexMonitor {
      */
     public MicrometerFlexMonitor(MeterRegistry meterRegistry) {
         this.meterRegistry = meterRegistry;
-        log.debug("MicrometerFlexMonitor initialized with MeterRegistry: {}",
-                meterRegistry.getClass().getSimpleName());
     }
 
     @Override
@@ -78,7 +76,6 @@ public class MicrometerFlexMonitor implements FlexMonitor {
             return;
         }
         metricTypes.put(metricName, metricType);
-        log.debug("Registered metric: {} as type {}", metricName, metricType);
     }
 
     @Override
@@ -125,8 +122,7 @@ public class MicrometerFlexMonitor implements FlexMonitor {
                     reportGauge(key, value);
                     break;
             }
-        } catch (Exception e) {
-            log.debug("Failed to report metric {}: {}", metricName, e.getMessage());
+        } catch (Exception ignored) {
         }
     }
 
@@ -152,8 +148,7 @@ public class MicrometerFlexMonitor implements FlexMonitor {
                     gaugeEntry(key);
                     break;
             }
-        } catch (Exception e) {
-            log.debug("Failed to prepare metric {}: {}", metricName, e.getMessage());
+        } catch (Exception ignored) {
         }
     }
 

@@ -1,8 +1,6 @@
 package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.scheduler.BatchItem;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -30,8 +28,6 @@ import java.util.Map;
  */
 public class FormulaPredictor implements PrefillTimePredictor {
 
-    private static final Logger logger = LoggerFactory.getLogger("syncLogger");
-
     private final PrefillTimeFormula formula;
     private final String sourceFormula;
 
@@ -52,7 +48,6 @@ public class FormulaPredictor implements PrefillTimePredictor {
     public FormulaPredictor(String formulaString) {
         this.sourceFormula = formulaString;
         this.formula = PrefillTimeFormula.parse(formulaString);
-        logger.debug("formula predictor created");
     }
 
     @Override
@@ -109,8 +104,6 @@ public class FormulaPredictor implements PrefillTimePredictor {
 
     @Override
     public void learn(PrefillBatchFeatures features, long predictedMs, long actualMs) {
-        logger.debug("learn sample: batchSize={} predictedMs={} actualMs={}",
-                features != null ? features.batchSize() : 0, predictedMs, actualMs);
     }
 
     String immutableFormulaKey() {

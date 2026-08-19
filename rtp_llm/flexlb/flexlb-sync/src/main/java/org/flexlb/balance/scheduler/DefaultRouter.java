@@ -74,7 +74,6 @@ public class DefaultRouter implements Router {
         ModelWorkerStatus workerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
         List<RoleType> roleTypeList = workerStatus.getRoleTypeList();
         if (CollectionUtils.isEmpty(roleTypeList)) {
-            Logger.debug("No worker roles registered yet (total workers: {})", workerStatus.getWorkerTotalCount());
             return Response.error(NO_AVAILABLE_WORKER);
         }
 
@@ -173,7 +172,6 @@ public class DefaultRouter implements Router {
 
             WorkerEndpoint ep = endpointRegistry.get(role, serverIpPort);
             if (ep == null) {
-                Logger.debug("DefaultRouter.rollBack: endpoint not found for ipPort={}", serverIpPort);
                 continue;
             }
 

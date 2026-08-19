@@ -7,7 +7,6 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
-import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
@@ -53,8 +52,6 @@ public class DecodeResourceMeasure implements ResourceMeasure {
         // of the 8400 storm: shadow saturation on an idle engine).
         long engineLoad = endpoint.getEngineLoad();
         if (concurrencyLimit > 0 && engineLoad >= concurrencyLimit) {
-            Logger.debug("Decode worker {} resource unavailable: engineLoad={}, totalLoad={}, limit={}",
-                    endpoint.ipPort(), engineLoad, endpoint.getTotalLoad(), concurrencyLimit);
             return false;
         }
         long used = endpoint.realKvUsed();
@@ -64,12 +61,8 @@ public class DecodeResourceMeasure implements ResourceMeasure {
             return true;
         }
         long usagePercentage = (long) ((used * 100.0) / total);
-        boolean available = endpoint.getStatus().updateResourceAvailabilityWithHysteresis(usagePercentage, availableThreshold, hysteresisBiasPercent);
-        if (!available) {
-            Logger.debug("Decode worker {} resource unavailable: kvUsage={}%, threshold={}%, used={}, total={}",
-                    endpoint.ipPort(), usagePercentage, availableThreshold, used, total);
-        }
-        return available;
+        return endpoint.getStatus().updateResourceAvailabilityWithHysteresis(
+                usagePercentage, availableThreshold, hysteresisBiasPercent);
     }
 
     @Override

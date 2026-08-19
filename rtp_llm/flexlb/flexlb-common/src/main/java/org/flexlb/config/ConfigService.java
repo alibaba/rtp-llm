@@ -118,7 +118,6 @@ public class ConfigService {
                 configs = new StrategyConfigs();
             }
         } else {
-            log.debug("STRATEGY_CONFIGS is not set, use default strategy configs");
             configs = new StrategyConfigs();
         }
 

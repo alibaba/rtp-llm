@@ -10,8 +10,6 @@ import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 import org.flexlb.enums.TaskPhase;
 import org.springframework.stereotype.Component;
 
-import org.flexlb.util.Logger;
-
 import java.util.Map;
 
 /**
@@ -47,12 +45,8 @@ public class PrefillResourceMeasure implements ResourceMeasure {
             return false;
         }
         long queueSize = endpoint.realPendingCount();
-        boolean available = endpoint.getStatus().updateResourceAvailabilityWithHysteresis(queueSize, queueSizeThreshold, hysteresisBiasPercent);
-        if (!available) {
-            Logger.debug("Prefill worker {} resource unavailable: queueSize={}, threshold={}, alive={}",
-                    endpoint.getIp(), queueSize, queueSizeThreshold, endpoint.getStatus().isAlive());
-        }
-        return available;
+        return endpoint.getStatus().updateResourceAvailabilityWithHysteresis(
+                queueSize, queueSizeThreshold, hysteresisBiasPercent);
     }
 
     @Override

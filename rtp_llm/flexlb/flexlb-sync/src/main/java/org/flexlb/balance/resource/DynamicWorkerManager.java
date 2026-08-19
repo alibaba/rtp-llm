@@ -99,14 +99,11 @@ public class DynamicWorkerManager {
             if (measure != null) {
                 double waterLevel = measure.calculateAverageWaterLevel(workerStatusMap);
                 maxWaterLevel = Math.max(maxWaterLevel, waterLevel);
-                Logger.debug("Role: {}, water level: {}%", roleType, waterLevel);
             }
         }
 
         int newAllowedWorkers = calculateAllowedWorkers(maxWaterLevel);
-        int oldAllowedWorkers = allowedWorkers;
         allowedWorkers = newAllowedWorkers;
-        Logger.debug("Final water level: {}%, allowedWorkers: {} -> {}", maxWaterLevel, oldAllowedWorkers, newAllowedWorkers);
 
         adjustPermitCapacity(allowedWorkers);
     }
@@ -128,11 +125,9 @@ public class DynamicWorkerManager {
         if (capacityDelta > 0) {
             workerPermitSemaphore.release(ADJUSTMENT_STEP);
             totalPermits.addAndGet(ADJUSTMENT_STEP);
-            Logger.debug("Released {} worker permits, current capacity: {}, target: {}", ADJUSTMENT_STEP, totalPermits.get(), desiredCapacity);
         } else {
             workerPermitSemaphore.reducePermits(ADJUSTMENT_STEP);
             totalPermits.addAndGet(-ADJUSTMENT_STEP);
-            Logger.debug("Reduced {} worker permits, current capacity: {}, target: {}", ADJUSTMENT_STEP, totalPermits.get(), desiredCapacity);
         }
     }
 

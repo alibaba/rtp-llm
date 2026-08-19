@@ -97,7 +97,6 @@ public class RequestScheduler {
                     }
 
                     // Step 3: Process request
-                    Logger.debug("Worker processing request id: {}", ctx.getRequestId());
                     processRequest(ctx);
                 } finally {
                     dynamicWorkerManager.releasePermit();

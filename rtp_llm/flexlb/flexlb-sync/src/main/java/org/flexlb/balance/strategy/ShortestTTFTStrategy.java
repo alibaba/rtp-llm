@@ -99,7 +99,6 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
 
         List<PrefillEndpoint> eligible = getAvailableEndpoints(roleType, group, config.getResourceMeasureIndicator(roleType));
         if (CollectionUtils.isEmpty(eligible)) {
-            Logger.debug("ShortestTTFT select failed: no available endpoints, request_id={}", requestId);
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
@@ -108,7 +107,6 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         // Score all eligible endpoints by TTFT
         List<ScoredEndpoint> scoredEndpoints = scoreEndpoints(eligible, cacheMatchResults, seqLen);
         if (scoredEndpoints.isEmpty()) {
-            Logger.debug("ShortestTTFT select failed: no scored endpoints, request_id={}", requestId);
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
         long candidateMaxHitTokens = scoredEndpoints.stream()
@@ -130,11 +128,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         if (selected == null) {
             // All CAS attempts failed; fall back to the lowest-TTFT candidate
             selected = candidates.getFirst();
-            Logger.debug("ShortestTTFT: all CAS failed, falling back to lowest-TTFT endpoint, ip={}", selected.ep().getIp());
         }
-
-        Logger.debug("ShortestTTFT selected endpoint - ip: {}, port: {}, ttft: {}, hitCache: {}",
-                selected.ep().getIp(), selected.ep().getHttpPort(), selected.ttft(), selected.hitCache());
 
         reportCacheHitMetrics(roleType, selected.hitCache(), seqLen);
         reportRoutingCacheMatchMetrics(
@@ -207,15 +201,12 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         for (PrefillEndpoint ep : endpoints) {
             PrefillTimePredictor predictor = ep.getPredictor();
             if (predictor == null) {
-                Logger.debug("ShortestTTFT: skipping endpoint without predictor, ip={}", ep.getIp());
                 continue;
             }
             long cacheHit = calculateCacheHit(ep, cacheMatchResults, seqLen);
             long prefillMs = predictor.estimateMs(seqLen, cacheHit);
             long queueMs = ep.realWaitTimeMs();
             long ttft = prefillMs + queueMs;
-            Logger.debug("ShortestTTFT score - ip: {}, hitCache: {}, prefillMs: {}, queueMs: {}, ttft: {}",
-                    ep.getIp(), cacheHit, prefillMs, queueMs, ttft);
             result.add(new ScoredEndpoint(ep, ttft, cacheHit));
         }
         return result;

@@ -46,8 +46,6 @@ public class RandomStrategy implements LoadBalanceStrategy {
 
     @Override
     public ServerStatus select(BalanceContext balanceContext, RoleType roleType, String group) {
-        logger.debug("Selecting worker for , role: {}, group: {}", roleType, group);
-
         Map<String, WorkerEndpoint> workerEndpointMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
 
         if (MapUtils.isEmpty(workerEndpointMap)) {
@@ -72,7 +70,6 @@ public class RandomStrategy implements LoadBalanceStrategy {
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
-        logger.debug("Selected worker ip: {}, httpPort: {}", selectedWorker.getIp(), selectedWorker.getHttpPort());
         return buildServerStatus(selectedWorker, roleType, balanceContext.getRequestId());
     }
 

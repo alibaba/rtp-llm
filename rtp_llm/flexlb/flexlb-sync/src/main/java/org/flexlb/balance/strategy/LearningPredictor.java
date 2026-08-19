@@ -1,14 +1,10 @@
 package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.scheduler.BatchItem;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Collectors;
 
 /**
  * Prefill-time predictor with linear regression and online Adam-optimizer learning.
@@ -26,8 +22,6 @@ import java.util.stream.Collectors;
 public class LearningPredictor implements PrefillTimePredictor {
     private record BatchUpdateItem(PrefillBatchFeatures features, long actualMs) {
     }
-
-    private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
     private final AtomicReference<double[]> weightsRef;
     private final int linear_param_count;
@@ -54,9 +48,6 @@ public class LearningPredictor implements PrefillTimePredictor {
         this.adamMoment1 = new double[this.total_param_count];
         this.adamMoment2 = new double[this.total_param_count];
         this.itemBatch = new ArrayList<>();
-        logger.debug(
-                "learn predictor created, t: {}, total param {}, init param: {}, beta1: {}, beta2: {}, alpha: {}, batchSize: {}",
-                this.t, this.total_param_count, formulaStringParam(this.weightsRef.get()), this.beta1, this.beta2, this.alpha, this.batchSize);
     }
 
     @Override
@@ -81,10 +72,6 @@ public class LearningPredictor implements PrefillTimePredictor {
 
     @Override
     public double predictBatchMs(List<BatchItem> items) {
-        if (logger.isDebugEnabled()) {
-            logger.debug("t: {}, learn predictor predictBatchMs: {}, items count: {}",
-                    this.t, formulaStringParam(this.weightsRef.get()), items.size());
-        }
         if (items.isEmpty()) {
             return 0;
         }
@@ -213,15 +200,6 @@ public class LearningPredictor implements PrefillTimePredictor {
         });
         this.t = this.t + 1;
         this.itemBatch.clear();
-        if (logger.isDebugEnabled()) {
-            logger.debug("t: {}, learn predictor param: {}", this.t, formulaStringParam(this.weightsRef.get()));
-        }
-    }
-
-    private String formulaStringParam(double[] weights) {
-        return Arrays.stream(weights)
-                .mapToObj(String::valueOf)
-                .collect(Collectors.joining(", "));
     }
 
 }

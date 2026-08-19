@@ -288,9 +288,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     /**
-     * Auto-TPM Phase 0 observability: per-request one-line schedule log plus
-     * {@code auto_tpm.schedule.latency_ms}. Shared by the legacy path and the
-     * priority scheduler path (both funnel through completeSchedule).
+     * Auto-TPM schedule metrics shared by the legacy path and the priority
+     * scheduler path (both funnel through completeSchedule).
      */
     private void reportAutoTpmSchedule(BalanceContext ctx,
                                        FlexlbScheduleProtocol.FlexlbScheduleResponsePB response) {
@@ -308,36 +307,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             if (ctx.getDeadlineMs() > 0 && now > ctx.getDeadlineMs()) {
                 prioritySchedulerReporter.reportDeadlineMiss(ctx.getPriority());
             }
-
-            String selectedPrefill = "";
-            String selectedDecode = "";
-            if (ctx.getResponse() != null && ctx.getResponse().getServerStatus() != null) {
-                for (ServerStatus ss : ctx.getResponse().getServerStatus()) {
-                    if (ss.getRole() == RoleType.PREFILL || ss.getRole() == RoleType.PDFUSION) {
-                        selectedPrefill = ss.getServerIp() != null ? ss.getServerIp() : "";
-                    } else if (ss.getRole() == RoleType.DECODE) {
-                        selectedDecode = ss.getServerIp() != null ? ss.getServerIp() : "";
-                    }
-                }
-            }
-            // Metrics above stay always-on; the per-request log line drops to
-            // DEBUG when Auto-TPM is disabled to avoid INFO noise on the
-            // legacy path (task10 P2-7).
-            String logFormat = "[auto-tpm] request_id={} priority={} seq_len={} max_new_tokens={} "
-                    + "request_slo_ms={} deadline_ms={} schedule_attempt={} plan_type={} plan_cost={} "
-                    + "victim_count={} selected_prefill={} selected_decode={} failure_reason={} commit_result={}";
-            Object[] logArgs = {
-                    ctx.getRequestId(), ctx.getPriority(), ctx.getRequest().getSeqLen(),
-                    ctx.getRequest().getMaxNewTokens(),
-                    ctx.getRequestSloMs(), ctx.getDeadlineMs(),
-                    ctx.getScheduleAttempt(), ctx.getPlanType(), ctx.getPlanCost(), ctx.getVictimCount(),
-                    selectedPrefill, selectedDecode,
-                    success ? "" : response.getErrorMessage(),
-                    result};
-            Logger.debug(logFormat, logArgs);
-        } catch (Exception e) {
-            Logger.debug("[auto-tpm] schedule observability report failed, request_id={}",
-                    ctx.getRequestId(), e);
+        } catch (Exception ignored) {
         }
     }
 

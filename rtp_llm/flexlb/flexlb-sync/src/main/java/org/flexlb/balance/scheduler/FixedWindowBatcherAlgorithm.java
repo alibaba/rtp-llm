@@ -2,7 +2,6 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.util.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -150,9 +149,6 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         long queueDeadlineMs = ctx.cfg().getFlexlbBatchEnqueueDeadlineMs();
         if (queueDeadlineMs > 0 && elapsedMs > queueDeadlineMs
                 && !ctx.cfg().isAutoTpmEnabled()) {
-            Logger.debug("flexlb_batch_drop request_id={} reason=queue_deadline_exceeded "
-                            + "elapsed_ms={} deadline_ms={}",
-                    head.requestId(), elapsedMs, queueDeadlineMs);
             ctx.dropHead(head);
             return;
         }
@@ -234,9 +230,6 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
     }
 
     private static void dispatch(BatcherContext ctx, List<BatchItem> picked, String reason) {
-        BatchItem head = picked.get(0);
-        long waitMs = ctx.now() - head.enqueuedAtMs();
-
         ctx.reporter().reportDispatchReason(RoleType.PREFILL.name(), ctx.prefillEp().getIp(), reason);
         ctx.reporter().reportBatchSize(RoleType.PREFILL.name(), ctx.prefillEp().getIp(), reason, picked.size());
 
@@ -249,10 +242,6 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         }
         ctx.reporter().reportBatchCacheHitMetrics(RoleType.PREFILL.name(), ctx.prefillEp().getIp(), totalHitCache, totalSeqLen);
         ctx.reporter().reportBatchTotalTokens(RoleType.PREFILL.name(), ctx.prefillEp().getIp(), reason, totalSeqLen);
-
-        Logger.debug("flexlb_batch_decision reason={} picked_size={} "
-                        + "wait_ms={} queue_before={} worker={} head_req_id={}",
-                reason, picked.size(), waitMs, ctx.size(), ctx.key(), head.requestId());
 
         ctx.dispatch(picked,
                 new DispatchMeta(reason, ctx.size() - picked.size()));

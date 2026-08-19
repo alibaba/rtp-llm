@@ -79,9 +79,6 @@ public class RecentCacheKeyWindow {
 
         }
 
-        if (log.isDebugEnabled()) {
-            logRequest(nowMs, requestOccurrences, requestHitOccurrences);
-        }
         return new Snapshot(timeWindowMs, requestOccurrences, requestHitOccurrences);
     }
 
@@ -117,10 +114,6 @@ public class RecentCacheKeyWindow {
 
     private void retainRequest(List<Long> cacheKeys, long requestOccurrences, long nowMs) {
         if (requestOccurrences > maxCacheKeys) {
-            log.debug("Recent cache-key request exceeds pool capacity; skip retaining request: "
-                            + "requestCacheKeys={}, maxCacheKeys={}",
-                    requestOccurrences,
-                    maxCacheKeys);
             return;
         }
 
@@ -246,23 +239,6 @@ public class RecentCacheKeyWindow {
         tableKeys[slot] = 0L;
         tableCounts[slot] = 0;
         uniqueSize--;
-    }
-
-    private void logRequest(long nowMs, long requestOccurrences, long requestHitOccurrences) {
-        double hitRatio = requestOccurrences > 0L ? requestHitOccurrences / (double) requestOccurrences : 0.0D;
-        log.debug("Recent cache-key request: nowMs={}, requestCacheKeys={}, hitCacheKeys={}, "
-                        + "hitRatio={}, poolCacheKeys={}, poolUniqueCacheKeys={}, poolDuplicateCacheKeys={}, "
-                        + "poolEntries={}, maxCacheKeys={}, timeWindowMs={}",
-                nowMs,
-                requestOccurrences,
-                requestHitOccurrences,
-                hitRatio,
-                keySize,
-                uniqueSize,
-                keySize - uniqueSize,
-                entrySize,
-                maxCacheKeys,
-                timeWindowMs);
     }
 
     static long resolveTimeWindowMs(ConfigService configService) {

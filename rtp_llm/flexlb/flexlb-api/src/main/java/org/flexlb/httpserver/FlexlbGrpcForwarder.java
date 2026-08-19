@@ -56,7 +56,6 @@ public class FlexlbGrpcForwarder {
 
         String masterHostIpPort = guard.masterHostIpPort();
         if (masterHostIpPort == null) {
-            Logger.debug("Master unavailable for gRPC forward");
             engineHealthReporter.reportForwardToMasterResult("LOCAL", "MASTER_NULL");
             return MasterForwardResult.noMaster();
         }
@@ -137,9 +136,7 @@ public class FlexlbGrpcForwarder {
                 request.toBuilder().setForwardHop(guard.nextHop()).build();
         try {
             return stub.getRequestState(forwardedRequest);
-        } catch (RuntimeException e) {
-            Logger.debug("Failed to forward FlexLB state query to master, request_id={}",
-                    request.getRequestId(), e);
+        } catch (RuntimeException ignored) {
             return null;
         }
     }
