@@ -94,7 +94,7 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
         MallocResult                  incr_result           = incrMalloc(malloc_info);
         if (!incr_result.success) {
             if (load_context != nullptr) {
-                load_context->abort();
+                load_context->abortPending();
             }
             pending_async_context.reset();
             load_context.reset();
@@ -251,8 +251,8 @@ void KVCacheAllocator::attachBlockTreeCache(BlockTreeCachePtr block_tree_cache) 
     }
 }
 
-bool KVCacheAllocator::cancelLoad(const std::shared_ptr<AsyncContext>& context) {
-    return block_tree_cache_ != nullptr && block_tree_cache_->cancelLoad(context);
+bool KVCacheAllocator::abortPendingLoad(const std::shared_ptr<AsyncContext>& context) {
+    return block_tree_cache_ != nullptr && block_tree_cache_->abortPendingLoad(context);
 }
 
 void KVCacheAllocator::submitBlockReleases(BlockReleaseBatch& releases) {

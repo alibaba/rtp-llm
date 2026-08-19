@@ -38,10 +38,8 @@ class LoadAsyncContext: public AsyncContext, public std::enable_shared_from_this
 public:
     enum class State : int {
         PENDING,
-        CANCEL_REQUESTED,
         SUCCEEDED,
-        FAILED,
-        CANCELLED
+        FAILED
     };
     using MatchCallback = std::function<LoadMatchResult(LoadAsyncContext&, size_t matched_blocks)>;
 
@@ -71,10 +69,8 @@ public:
     const std::vector<std::vector<StorageBlockHandle>>& backendHandles() const;
 
     bool commit();
-    void abort();
 
-    bool requestCancel();
-    bool isRequestCanceled() const;
+    bool abortPending();
     bool completeOne(bool success);
     bool onTaskFail();
     void waitDone() override;
@@ -90,7 +86,6 @@ private:
     void failBeforeCommit();
     void failCommit();
     void finishIfReadyLocked(bool& notify);
-    void finishMatchCallback();
 
     std::shared_ptr<LoadContextCoordinator> coordinator_;
     const uint64_t                          context_id_;
@@ -109,9 +104,7 @@ private:
     bool                            backend_pending_{false};
     bool                            committed_{false};
 
-    std::mutex              match_callback_mutex_;
-    std::condition_variable match_callback_cv_;
-    bool                    match_callback_running_{false};
+    std::mutex backend_match_mutex_;
 
     std::atomic<State>        state_{State::PENDING};
     std::atomic<MallocStatus> malloc_status_{MallocStatus::NONE};

@@ -134,7 +134,7 @@ public:
     BlockTreeKeySnapshot                      getKeySnapshot(size_t limit) const;
     bool getDeviceBlockDebugInfo(size_t group_id, BlockIdxType block_id, DeviceBlockDebugInfo& debug_info) const;
     void                                      onBlocksReleased(const std::vector<BlockReleaseReceipt>& receipts);
-    bool                                      cancelLoad(const std::shared_ptr<AsyncContext>& context);
+    bool                                      abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
 
     BlockIndicesType matchedBlocksForGroup(size_t                                group_id,
                                            const std::vector<MultiNodeResource>& matched_resources) const;
