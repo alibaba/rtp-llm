@@ -29,6 +29,8 @@ struct GroupBase {
     size_t   kernel_seq_size_per_block = 0;
     size_t   kv_block_stride_bytes     = 0;
     size_t   kv_scale_stride_bytes     = 0;
+
+    size_t reuseBlockCount(size_t matched_block_count) const;
 };
 
 // Order is deterministic but carries no business meaning.

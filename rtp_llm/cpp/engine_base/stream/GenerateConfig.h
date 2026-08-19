@@ -118,7 +118,8 @@ public:
     bool               ignore_eos          = false;
     bool               reuse_cache         = true;
     bool               enable_device_cache = true;
-    bool               enable_memory_cache = true;
+    bool               enable_host_cache   = true;
+    bool               enable_disk_cache   = true;
     bool               enable_remote_cache = true;
     std::string        trace_id;
     std::optional<int> group_timeout;
@@ -209,7 +210,7 @@ public:
                      << ", end_think_token_ids: " << vectorToString(end_think_token_ids)
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
                      << ", reuse_cache: " << reuse_cache << ", enable_device_cache: " << enable_device_cache
-                     << ", enable_memory_cache: " << enable_memory_cache
+                     << ", enable_host_cache: " << enable_host_cache << ", enable_disk_cache: " << enable_disk_cache
                      << ", enable_remote_cache: " << enable_remote_cache
                      << ", unique_key: " << unique_key << ", combo_token_size: " << combo_token_size
                      << ", banned_combo_token_ids_size: " << banned_combo_token_ids.size()
@@ -330,7 +331,11 @@ public:
         JSONIZE(profile_trace_name);
         JSONIZE(reuse_cache);
         JSONIZE(enable_device_cache);
-        JSONIZE(enable_memory_cache);
+        if (json.GetMode() == autil::legacy::FastJsonizableBase::Mode::FROM_JSON) {
+            json.Jsonize("enable_memory_cache", enable_host_cache, enable_host_cache);
+        }
+        JSONIZE(enable_host_cache);
+        JSONIZE(enable_disk_cache);
         JSONIZE(enable_remote_cache);
         JSONIZE(aux_info);
         JSONIZE_OPTIONAL(group_timeout);

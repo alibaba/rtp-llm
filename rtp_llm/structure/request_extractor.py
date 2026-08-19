@@ -46,6 +46,7 @@ class RequestExtractor:
     def _partition_generate_config_fields(
         values: Dict[str, Any],
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        values = GenerateConfig.normalize_legacy_fields(values)
         field_names = GenerateConfig.model_fields
         config_values = {
             key: value for key, value in values.items() if key in field_names

@@ -1,5 +1,7 @@
+import pickle
 from unittest import TestCase, main
 
+import rtp_llm.ops as ops
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models.deepseek_v2 import DeepSeekV3Mtp
 from rtp_llm.models.hybrid_kv_cache import calculate_hybrid_group_layer_num
@@ -9,7 +11,12 @@ from rtp_llm.models.qwen3_next.qwen3_next import Qwen3Next, Qwen35Moe
 from rtp_llm.models.qwen3_next.qwen3_next_mtp import Qwen3NextMTP
 from rtp_llm.models.qwen3_vl import QWen3_VL
 from rtp_llm.models.qwen_v2 import QwenV2MTP
-from rtp_llm.ops import HybridAttentionType, KVCacheSpecDesc, KVCacheSpecType
+from rtp_llm.ops import (
+    CacheReusePolicyDesc,
+    HybridAttentionType,
+    KVCacheSpecDesc,
+    KVCacheSpecType,
+)
 
 
 class HybridKVCacheSpecTest(TestCase):
@@ -357,6 +364,31 @@ class HybridKVCacheSpecTest(TestCase):
         KimiLinear._post_build_model_config(config)
 
         self.assertEqual(config.kv_cache_spec_descs[0][0].tag, "sentinel")
+
+    def test_cache_reuse_policy_desc_pickle_round_trip(self):
+        for enable_prefix_reuse in (None, True, False):
+            reuse = CacheReusePolicyDesc()
+            reuse.enable_prefix_reuse = enable_prefix_reuse
+
+            restored = pickle.loads(pickle.dumps(reuse))
+
+            self.assertEqual(restored.enable_prefix_reuse, enable_prefix_reuse)
+            self.assertFalse(hasattr(restored, "evict_policy"))
+
+    def test_kv_cache_spec_desc_nested_reuse_pickle_round_trip(self):
+        reuse = CacheReusePolicyDesc()
+        reuse.enable_prefix_reuse = False
+        desc = KVCacheSpecDesc()
+        desc.tag = "pickle_round_trip"
+        desc.reuse = reuse
+
+        restored = pickle.loads(pickle.dumps(desc))
+
+        self.assertEqual(restored.tag, desc.tag)
+        self.assertIsNotNone(restored.reuse)
+        self.assertFalse(restored.reuse.enable_prefix_reuse)
+        self.assertFalse(hasattr(ops, "CacheReusePolicy"))
+        self.assertFalse(hasattr(ops, "CacheEvictPolicy"))
 
 
 if __name__ == "__main__":
