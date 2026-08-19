@@ -14,18 +14,12 @@ from rtp_llm.utils.model_weight import W
 
 _ENABLE_ENV = "RTP_LLM_GLM5_CMP"
 _DISABLE_ATTENTION_POST_MOE_PRE_ENV = "RTP_LLM_GLM5_DISABLE_ATTENTION_POST_MOE_PRE"
-_DISABLE_DEEP_GEMM_PDL_ENV = "RTP_LLM_GLM5_DISABLE_DEEP_GEMM_PDL"
 _SUPPORTED_MODEL_TYPES = frozenset(("glm_5", "glm_5_mtp"))
 logger = logging.getLogger(__name__)
 
 
 def _load_ops() -> Any:
     return importlib.import_module("rtp_kernel.glm5")
-
-
-def _configure_deep_gemm_pdl(ops: Any) -> None:
-    deep_gemm = importlib.import_module("deep_gemm")
-    deep_gemm.set_pdl(ops.get_pdl())
 
 
 def resolve_glm5_cmp_enabled() -> bool:
@@ -44,15 +38,6 @@ def resolve_attention_post_moe_pre_disabled() -> bool:
     if value in ("0", "false", "no", "off", ""):
         return False
     raise ValueError(f"invalid {_DISABLE_ATTENTION_POST_MOE_PRE_ENV}={value!r}")
-
-
-def resolve_deep_gemm_pdl_disabled() -> bool:
-    value = os.environ.get(_DISABLE_DEEP_GEMM_PDL_ENV, "0").strip().lower()
-    if value in ("1", "true", "yes", "on"):
-        return True
-    if value in ("0", "false", "no", "off", ""):
-        return False
-    raise ValueError(f"invalid {_DISABLE_DEEP_GEMM_PDL_ENV}={value!r}")
 
 
 def _is_capturing() -> bool:
@@ -153,12 +138,11 @@ class Glm5Cmp:
         self._packed_head_gate_weight: torch.Tensor | None = None
         self._draft_prefill_clone = False
         self.disable_attention_post_moe_pre = resolve_attention_post_moe_pre_disabled()
-        self.disable_deep_gemm_pdl = resolve_deep_gemm_pdl_disabled()
         self._disabled_reason = self._static_disabled_reason()
         self._moe_prepack_disabled_reason = None
         self._moe_prepack_abi_validated = False
-        # Merely setting RTP_LLM_GLM5_CMP must not import RTP-kernel or change
-        # DeepGEMM's process-wide PDL setting. These fields are initialized only
+        # Merely setting RTP_LLM_GLM5_CMP must not import RTP-kernel. These fields
+        # are initialized only
         # after the current model call has passed the CMP capability checks.
         self.ops = None
         self._qkv_projection = None
@@ -351,7 +335,6 @@ class Glm5Cmp:
         clone._packed_head_gate_weight = self._packed_head_gate_weight
         clone._draft_prefill_clone = bool(draft_prefill)
         clone.disable_attention_post_moe_pre = self.disable_attention_post_moe_pre
-        clone.disable_deep_gemm_pdl = self.disable_deep_gemm_pdl
         clone._disabled_reason = self._disabled_reason
         clone._moe_prepack_disabled_reason = self._moe_prepack_disabled_reason
         clone._moe_prepack_abi_validated = False
@@ -422,9 +405,8 @@ class Glm5Cmp:
             return "KV cache is unavailable"
         if hidden_states.dim() != 2 or rows <= 0 or hidden_states.size(1) != 6144:
             return "unsupported hidden-state shape"
-        # RTP-kernel's GLM5 projection kernels currently support at most 256
-        # rows. Larger CUDA Graph capture batches must use RTP-LLM's regular
-        # forward instead of entering CMP and failing inside the first layer.
+        # The fused Q-B epilogue is validated only through M=256. Reject the
+        # complete CMP path before any RTP-kernel launch for larger token sets.
         if rows > 256:
             return "GLM5 CMP supports at most 256 rows"
         if is_prefill and not is_target_verify and not is_draft_prefill:
@@ -858,9 +840,10 @@ def should_enable_glm5_cmp(
     if not cmp.has_indexer or call_disabled_reason is not None:
         return False
 
-    # Initialize RTP-kernel and its DeepGEMM PDL contract only after this
-    # concrete call has been selected for CMP. CUDA Graph performs eager warmup
-    # forwards before capture, so graph clones are initialized outside capture.
+    # Initialize RTP-kernel only after this concrete call has been selected for
+    # CMP. CUDA Graph performs eager warmup forwards before capture, so graph
+    # clones are initialized outside capture. DeepGEMM PDL is engine-global and
+    # intentionally remains outside CMP's control.
     uninitialized = [layer_cmp for layer_cmp in cmps if layer_cmp.ops is None]
     if uninitialized:
         ops = next(
@@ -871,14 +854,7 @@ def should_enable_glm5_cmp(
             ops = _load_ops()
         for layer_cmp in uninitialized:
             layer_cmp._initialize_for_cmp(ops)
-        if not getattr(cmp, "disable_deep_gemm_pdl", False):
-            _configure_deep_gemm_pdl(ops)
         logger.info("GLM5 CMP activated for %d layers", layer_num)
-        if getattr(cmp, "disable_deep_gemm_pdl", False):
-            logger.info(
-                "GLM5 CMP DeepGEMM PDL disabled by %s",
-                _DISABLE_DEEP_GEMM_PDL_ENV,
-            )
         if getattr(cmp, "disable_attention_post_moe_pre", False):
             logger.info(
                 "GLM5 CMP attention_post_moe_pre disabled by %s",

@@ -97,7 +97,7 @@ def test_parallelism_ignores_prefill_cp_metadata_on_decode() -> None:
     )
 
 
-def test_cmp_constructor_does_not_load_runtime_or_set_pdl() -> None:
+def test_cmp_constructor_does_not_load_runtime() -> None:
     config = SimpleNamespace(
         model_type="glm_5",
         moe_layer_index=(0,),
@@ -108,8 +108,6 @@ def test_cmp_constructor_does_not_load_runtime_or_set_pdl() -> None:
     mlp = SimpleNamespace()
 
     with patch.object(bridge, "_load_ops") as load_ops, patch.object(
-        bridge, "_configure_deep_gemm_pdl"
-    ) as configure_pdl, patch.object(
         bridge.Glm5Cmp, "_prepare_router_weight"
     ) as prepare_router_weight:
         cmp = bridge.Glm5Cmp(
@@ -125,7 +123,6 @@ def test_cmp_constructor_does_not_load_runtime_or_set_pdl() -> None:
     assert cmp._disabled_reason is None
     assert cmp.ops is None
     load_ops.assert_not_called()
-    configure_pdl.assert_not_called()
     prepare_router_weight.assert_not_called()
 
 
@@ -165,7 +162,7 @@ def test_model_execution_is_selected_once_for_all_layers() -> None:
     )
 
 
-def test_dynamic_fallback_does_not_load_runtime_or_set_pdl() -> None:
+def test_dynamic_fallback_does_not_load_runtime() -> None:
     cmp = _selection_cmp(
         has_indexer=True,
         reuses_indexer=False,
@@ -177,20 +174,44 @@ def test_dynamic_fallback_does_not_load_runtime_or_set_pdl() -> None:
     layers = [SimpleNamespace(cmp=cmp)]
     kv_cache = SimpleNamespace(get_layer_cache=lambda _: object())
 
-    with patch.object(bridge, "_load_ops") as load_ops, patch.object(
-        bridge, "_configure_deep_gemm_pdl"
-    ) as configure_pdl:
+    with patch.object(bridge, "_load_ops") as load_ops:
         enabled = bridge.should_enable_glm5_cmp(
             layers, 1, torch.empty((16, 6144)), object(), kv_cache
         )
 
     assert not enabled
     load_ops.assert_not_called()
-    configure_pdl.assert_not_called()
     cmp._initialize_for_cmp.assert_not_called()
 
 
-def test_selected_call_initializes_all_layers_before_setting_pdl() -> None:
+def test_dynamic_fallback_rejects_rows_above_q_b_limit() -> None:
+    cmp = object.__new__(bridge.Glm5Cmp)
+    cmp.config = SimpleNamespace(model_type="glm_5")
+    cmp.self_attn = SimpleNamespace(has_indexer=True)
+    cmp._draft_prefill_clone = False
+    implementation = SimpleNamespace(
+        attn_inputs=SimpleNamespace(
+            is_prefill=False,
+            is_target_verify=True,
+            kv_cache_block_id_device=torch.zeros((64, 1), dtype=torch.int32),
+        ),
+        fmha_params=SimpleNamespace(
+            expanded_seq_lens=torch.zeros(256, dtype=torch.int32)
+        ),
+    )
+    cmp._attention_impl = Mock(return_value=implementation)
+
+    assert (
+        cmp._unsupported_call_reason(torch.empty((256, 6144)), object(), object())
+        is None
+    )
+    assert (
+        cmp._unsupported_call_reason(torch.empty((257, 6144)), object(), object())
+        == "GLM5 CMP supports at most 256 rows"
+    )
+
+
+def test_selected_call_initializes_all_layers_once() -> None:
     full = _selection_cmp(
         has_indexer=True,
         reuses_indexer=False,
@@ -218,8 +239,8 @@ def test_selected_call_initializes_all_layers_before_setting_pdl() -> None:
     kv_cache = SimpleNamespace(get_layer_cache=lambda _: object())
 
     with patch.object(bridge, "_load_ops", return_value=ops) as load_ops, patch.object(
-        bridge, "_configure_deep_gemm_pdl"
-    ) as configure_pdl, patch.object(bridge.logger, "info") as log_info:
+        bridge.logger, "info"
+    ) as log_info:
         assert bridge.should_enable_glm5_cmp(
             layers, 2, torch.empty((16, 6144)), object(), kv_cache
         )
@@ -230,7 +251,6 @@ def test_selected_call_initializes_all_layers_before_setting_pdl() -> None:
     load_ops.assert_called_once_with()
     full._initialize_for_cmp.assert_called_once_with(ops)
     main._initialize_for_cmp.assert_called_once_with(ops)
-    configure_pdl.assert_called_once_with(ops)
     log_info.assert_called_once_with("GLM5 CMP activated for %d layers", 2)
 
 
