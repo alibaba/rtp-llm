@@ -49,6 +49,7 @@ public:
                 (const, override));
     MOCK_METHOD(size_t, availableBlocksNum, (), (const, override));
     MOCK_METHOD(size_t, totalBlocksNum, (), (const, override));
+    MOCK_METHOD(size_t, maxAvailableTokensNum, (), (const, override));
 
 protected:
     MOCK_METHOD(bool, doInit, (), (override));
