@@ -6,7 +6,6 @@
 #include <string>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/BlockReleaseBatch.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
@@ -30,17 +29,6 @@ struct BlockTreeKeySnapshot {
     int64_t                   version{0};
     std::vector<CacheKeyType> keys;
 };
-struct DeviceBlockDebugInfo {
-    size_t                    group_id{0};
-    size_t                    group_set_id{0};
-    size_t                    member_group_id{0};
-    BlockIdxType              block_id{NULL_BLOCK_IDX};
-    uintptr_t                 node_address{0};
-    CacheKeyType              cache_key{0};
-    GroupSetTransferState     transfer_state{GroupSetTransferState::IDLE};
-    std::vector<BlockIdxType> device_blocks;
-};
-
 // Unified configuration for BlockTreeCache behavior and pool sizing.
 struct BlockTreeCacheConfig {
     // ---- Tier enable flags ----
@@ -132,8 +120,6 @@ public:
     std::vector<BlockTreePoolMetricsSnapshot> poolMetricsSnapshots() const;
     void                                      reportMetrics() const;
     BlockTreeKeySnapshot                      getKeySnapshot(size_t limit) const;
-    bool getDeviceBlockDebugInfo(size_t group_id, BlockIdxType block_id, DeviceBlockDebugInfo& debug_info) const;
-    void                                      onBlocksReleased(const std::vector<BlockReleaseReceipt>& receipts);
     bool                                      abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
 
     BlockIndicesType matchedBlocksForGroup(size_t                                group_id,

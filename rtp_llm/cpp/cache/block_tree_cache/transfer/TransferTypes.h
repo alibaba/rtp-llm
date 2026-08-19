@@ -149,6 +149,8 @@ struct TransferDescriptor {
                + blocksDebugString(source_blocks) + "], target_blocks=[" + blocksDebugString(target_blocks) + "]}";
     }
 
+    // Null for node-independent descriptors, including DEVICE-source reuse
+    // whose blocks may outlive eviction of the originating tree node.
     TreeNode*                 node{nullptr};
     size_t                    group_set_id{0};
     size_t                    path_index{0};
