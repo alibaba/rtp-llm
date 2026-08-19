@@ -7,6 +7,23 @@
 
 namespace rtp_llm {
 
+size_t GroupBase::reuseBlockCount(size_t matched_block_count) const {
+    switch (policy.group_type) {
+        case CacheGroupType::FULL:
+            return matched_block_count;
+        case CacheGroupType::LINEAR:
+            return matched_block_count == 0 ? 0 : 1;
+        case CacheGroupType::SWA:
+            if (policy.sliding_window_size == 0) {
+                return matched_block_count;
+            }
+            const size_t window = static_cast<size_t>(policy.sliding_window_size);
+            return std::min(matched_block_count,
+                            window / seq_size_per_block + (window % seq_size_per_block != 0));
+    }
+    return 0;
+}
+
 std::shared_ptr<const CacheTopology> CacheTopology::create(std::vector<GroupBase> groups,
                                                            std::vector<LayerBase> layers) {
     return std::shared_ptr<const CacheTopology>(new CacheTopology(std::move(groups), std::move(layers)));

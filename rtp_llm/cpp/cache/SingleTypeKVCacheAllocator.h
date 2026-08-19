@@ -6,6 +6,8 @@
 
 namespace rtp_llm {
 
+class LoadAsyncContext;
+
 // SingleTypedKVCacheAllocator is used for model with full attentions only
 class SingleTypeKVCacheAllocator:
     public KVCacheAllocator,
@@ -32,10 +34,14 @@ public:
                        bool                            copy_last_block,
                        std::vector<TaggedBlockIdPair>& block_update_mapping) override;
 
-    int seqSizePerBlock() const override;
-    int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                              int                            seq_len,
-                              int                            reserve_step) const override;
+    int                          seqSizePerBlock() const override;
+    int                          singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                       int                            seq_len,
+                                                       int                            reserve_step) const override;
+    std::vector<KVCacheGroupPtr> cacheGroups() const override {
+        return full_kv_cache_group_ ? std::vector<KVCacheGroupPtr>{full_kv_cache_group_} :
+                                      std::vector<KVCacheGroupPtr>{};
+    }
 
 protected:
     int estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,
@@ -56,6 +62,8 @@ private:
                                                     bool enable_reuse_cache,
                                                     int  target_batch_size) const override;
     void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override;
+    bool materializeInitialBlocks(const MallocInfo& malloc_info, LoadAsyncContext* context, size_t matched_blocks);
+    bool finishDeferredMalloc(const MallocInfo& malloc_info, LoadAsyncContext& context, size_t matched_blocks);
 
 private:
     std::shared_ptr<FullKVCacheGroup> full_kv_cache_group_;
