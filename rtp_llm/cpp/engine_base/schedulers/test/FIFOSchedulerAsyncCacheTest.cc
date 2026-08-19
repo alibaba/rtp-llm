@@ -498,8 +498,13 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testEmptyRunningClearsBlockedPrepareHead) {
     autil::EnvGuard enable_async_prepare("RTP_LLM_ASYNC_PREPARE_CACHE", "1");
     auto            scheduler = createScheduler();
     auto            blocked   = createStream({1, 2, 3});
+    // The prepare head is released once the running batch frees a slot in this
+    // round, so seed a running stream that this round evicts.
+    auto running = createStream({4, 5, 6});
+    running->reportError(ErrorCode::CANCELLED, "cancelled by client");
     {
         std::lock_guard<std::mutex> lock(scheduler->lock_);
+        scheduler->running_streams_.push_back(running);
         scheduler->cache_prepare_blocked_stream_ = blocked;
         scheduler->schedule_trigger_             = true;
     }
