@@ -9,6 +9,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
@@ -51,14 +52,13 @@ public class RouteService {
         CompletableFuture<Response> resultFuture;
         switch (mode) {
             case BATCH -> {
-                if (flexlbBatchScheduler == null || !hasValidGenerateInput(balanceContext)) {
-                    Logger.debug("BATCH mode cannot process this request, falling back to DIRECT");
-                    balanceContext.setScheduleMode(ScheduleModeEnum.DIRECT);
-                    try {
-                        resultFuture = CompletableFuture.completedFuture(router.route(balanceContext));
-                    } catch (Exception e) {
-                        resultFuture = CompletableFuture.failedFuture(e);
-                    }
+                if (flexlbBatchScheduler == null) {
+                    Logger.error("BATCH mode selected without a batch scheduler");
+                    resultFuture = CompletableFuture.completedFuture(
+                            Response.error(StrategyErrorType.BATCH_DISPATCH_FAILED));
+                } else if (!hasValidGenerateInput(balanceContext)) {
+                    resultFuture = CompletableFuture.completedFuture(
+                            Response.error(StrategyErrorType.INVALID_REQUEST));
                 } else {
                     resultFuture = flexlbBatchScheduler.submit(balanceContext);
                     balanceContext.setFuture(resultFuture);
