@@ -276,7 +276,7 @@ int64_t NormalEngine::getLastScheduleTime() {
 }
 
 WarmUpResult NormalEngine::warmUp(const EngineInitParams& params) {
-    if (pd_sep_config.role_type == RoleType::PDFUSION) {
+    if (propose_params_ && pd_sep_config.role_type == RoleType::PDFUSION) {
         const auto prefill_result = prefillWarmUp(params);
         const auto decode_result  = decodeWarmUp(params);
         return WarmUpResult({std::min(prefill_result.device_reserved_bytes, decode_result.device_reserved_bytes),
@@ -346,8 +346,14 @@ std::shared_ptr<KVCacheManager> NormalEngine::createWarmUpCacheManager(const Eng
                                                           isMTPEagle(),
                                                           isEagle());
     } else {
-        cache_config             = CacheConfigCreator::createBasicConfig(params.model_config_, params.parallelism_config);
-        cache_config.block_num   = 1;
+        cache_config = CacheConfigCreator::createBasicConfig(params.model_config_, params.parallelism_config);
+        // createBasicConfig leaves kernel_seq_size_per_block at its default, which would make
+        // kernelBlocksPerKvBlock() fan the warmup block table out beyond the pool.
+        const auto kernel_seq_size_per_block =
+            static_cast<size_t>(params.kv_cache_config.kernel_seq_size_per_block);
+        cache_config.kernel_seq_size_per_block =
+            kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block : cache_config.seq_size_per_block;
+        cache_config.block_num   = 5;
         cache_config.linear_step = 1;
     }
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, true);
