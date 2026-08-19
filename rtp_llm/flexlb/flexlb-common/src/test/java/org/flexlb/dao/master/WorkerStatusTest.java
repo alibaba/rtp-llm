@@ -573,6 +573,20 @@ class WorkerStatusTest {
         }
     }
 
+    @Test
+    @DisplayName("putLocalTask must not move an existing selection timestamp backwards")
+    void putLocalTask_shouldKeepSelectionTimestampMonotonic() {
+        long claimedTimestamp = System.nanoTime() / 1000 + 1_000_000;
+        workerStatus.getLastSelectedTime().set(claimedTimestamp);
+
+        TaskInfo localTask = new TaskInfo();
+        localTask.setInputLength(1);
+        localTask.setPrefixLength(0);
+        workerStatus.putLocalTask(1001L, localTask);
+
+        assertEquals(claimedTimestamp, workerStatus.getLastSelectedTime().get());
+    }
+
     private TaskInfo createTaskInfo(long requestId, long inputLength, long prefixLength) {
         TaskInfo taskInfo = new TaskInfo();
         taskInfo.setRequestId(requestId);

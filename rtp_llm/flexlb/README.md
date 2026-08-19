@@ -207,6 +207,7 @@ FlexLB supports various configuration options through environment variables and 
 
 - **Load Balancing Strategy**: Configure through `FLEXLB_CONFIG`
 - **Strategy Parameters**: Configure strategy internals through `STRATEGY_CONFIGS`; `shortestTtft.queueTimeWeight` controls how strongly worker queue time affects scheduling (range `0.0-1.0`, default `1.0`), while `shortestTtft.candidatePool` controls the candidate pool. `mode=RATIO` uses `max(minSize, floor(workerCount * ratio))`, while `mode=FIXED` uses `size`.
+- **Cache Affinity**: Set `LOAD_BALANCE_STRATEGY=CACHE_AFFINITY_FIRST` for PREFILL/PDFUSION routing. `CACHE_AFFINITY_FIRST_MAX_EXTRA_WORK_TOKENS` bounds the extra estimated prefill work accepted for the global cache leader, and `CACHE_AFFINITY_FIRST_MIN_HIT_RATE` sets the minimum effective hit percentage (default `5`). Leave DECODE on `WEIGHTED_CACHE`.
 - **Backend Services**: Configure through `MODEL_SERVICE_CONFIG`
 - **ZooKeeper Settings**: Configure through `FLEXLB_SYNC_CONSISTENCY_CONFIG`
 

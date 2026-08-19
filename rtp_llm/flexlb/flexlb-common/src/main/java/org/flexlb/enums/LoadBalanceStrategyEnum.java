@@ -9,6 +9,8 @@ public enum LoadBalanceStrategyEnum {
 
     SHORTEST_TTFT("ShortestTTFT"),  // Shortest Time-To-First-Token
 
+    CACHE_AFFINITY_FIRST("CacheAffinityFirst"),  // Cache affinity with a bounded TTFT cost
+
     WEIGHTED_CACHE("WeightedCache")  // Lowest cache usage strategy
 
     ;

@@ -22,6 +22,7 @@ import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -53,17 +54,32 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     private static final double TTFT_THRESHOLD_PERCENTAGE = 0.1;
     private static final double STDDEV_THRESHOLD_FACTOR = 0.5;
 
+    @Autowired
     public ShortestTTFTStrategy(EngineWorkerStatus engineWorkerStatus,
                                 EngineHealthReporter engineHealthReporter,
                                 CacheAwareService cacheAwareService,
                                 ResourceMeasureFactory resourceMeasureFactory,
                                 ConfigService configService) {
+        this(engineWorkerStatus,
+                engineHealthReporter,
+                cacheAwareService,
+                resourceMeasureFactory,
+                configService,
+                LoadBalanceStrategyEnum.SHORTEST_TTFT);
+    }
+
+    protected ShortestTTFTStrategy(EngineWorkerStatus engineWorkerStatus,
+                                   EngineHealthReporter engineHealthReporter,
+                                   CacheAwareService cacheAwareService,
+                                   ResourceMeasureFactory resourceMeasureFactory,
+                                   ConfigService configService,
+                                   LoadBalanceStrategyEnum strategy) {
         this.engineWorkerStatus = engineWorkerStatus;
         this.engineHealthReporter = engineHealthReporter;
         this.cacheAwareService = cacheAwareService;
         this.resourceMeasureFactory = resourceMeasureFactory;
         this.configService = configService;
-        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.SHORTEST_TTFT, this);
+        LoadBalanceStrategyFactory.register(strategy, this);
     }
 
     /**
@@ -135,7 +151,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 availableWorkers, cacheMatchResults, seqLen, shortestTtftConfig.getQueueTimeWeight());
 
         StrategyConfigs.CandidatePoolConfig candidatePoolConfig = shortestTtftConfig.getCandidatePool();
-        ScoredWorker bestWorker = selectBestWorker(scoredWorkers, candidatePoolConfig);
+        ScoredWorker bestWorker = selectBestWorker(
+                scoredWorkers, balanceContext, roleType, group, seqLen, config, candidatePoolConfig);
         if (bestWorker == null) {
             Logger.warn("Failed to find best worker for role: {}", roleType);
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
@@ -143,6 +160,20 @@ public class ShortestTTFTStrategy implements LoadBalancer {
 
         return finalizeWorkerSelection(
                 bestWorker, balanceContext, roleType, requestId, seqLen, cacheMatchResults, candidateMaxHitTokens);
+    }
+
+    /**
+     * Strategy extension point after availability filtering, cache matching, and score calculation.
+     * The default implementation deliberately preserves the original shortest-TTFT behavior.
+     */
+    protected ScoredWorker selectBestWorker(List<ScoredWorker> scoredWorkers,
+                                            BalanceContext balanceContext,
+                                            RoleType roleType,
+                                            String group,
+                                            long seqLen,
+                                            FlexlbConfig config,
+                                            StrategyConfigs.CandidatePoolConfig candidatePoolConfig) {
+        return selectBestWorker(scoredWorkers, candidatePoolConfig);
     }
 
     /**
@@ -380,7 +411,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param workers Worker list
      * @return Sorted worker list in ascending scheduling-score order
      */
-    private List<ScoredWorker> sortByTTFT(List<ScoredWorker> workers) {
+    protected List<ScoredWorker> sortByTTFT(List<ScoredWorker> workers) {
         // Two-level sorting
         // 1. Primary sort: by scheduling score in ascending order
         // 2. Secondary sort: when scores are equal, by lastSelectedTime in ascending order
@@ -460,19 +491,31 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 .sorted(Comparator.comparingLong(ScoredWorker::lastSelectedTime))
                 .toList();
 
+        return selectFirstWorkerWithoutConcurrentConflict(sorted, fallbackCandidates.getFirst());
+    }
+
+    /**
+     * Claims the first worker whose selection timestamp is unchanged since scoring. The updated
+     * timestamp is guaranteed to advance even when several selections happen in the same
+     * microsecond, so a successful CAS cannot be a no-op.
+     */
+    protected ScoredWorker selectFirstWorkerWithoutConcurrentConflict(List<ScoredWorker> selectionOrder,
+                                                                       ScoredWorker fallbackWorker) {
         long now = System.nanoTime() / 1000;
-        for (ScoredWorker candidate : sorted) {
+        for (ScoredWorker candidate : selectionOrder) {
             long expected = candidate.lastSelectedTime();
-            // CAS: claim this worker only if lastSelectedTime hasn't changed since we read it.
-            // A failed CAS means another concurrent request already claimed this worker.
-            if (candidate.worker().getLastSelectedTime().compareAndSet(expected, now)) {
+            if (expected == Long.MAX_VALUE) {
+                continue;
+            }
+            long nextSelectionTime = Math.max(now, expected + 1);
+            if (candidate.worker().getLastSelectedTime().compareAndSet(expected, nextSelectionTime)) {
                 return candidate;
             }
-            // Another request claimed this worker; try the next candidate
         }
 
-        // All candidates were claimed concurrently; fall back to the first candidate
-        return fallbackCandidates.getFirst();
+        // The scored snapshot is stale for every candidate. Preserve the deterministic fallback
+        // instead of failing an otherwise routable request.
+        return fallbackWorker;
     }
 
     /**

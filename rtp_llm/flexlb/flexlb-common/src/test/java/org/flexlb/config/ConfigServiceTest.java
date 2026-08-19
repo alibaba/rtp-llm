@@ -1,6 +1,7 @@
 package org.flexlb.config;
 
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -106,6 +107,44 @@ class ConfigServiceTest {
         assertFalse(configService.loadBalanceConfig().isCacheHitMetricReportEnabled());
         assertTrue(configService.loadBalanceConfig().isCacheHitTraceLogEnabled());
         assertFalse(configService.loadBalanceConfig().isCacheHitTheoryLogEnabled());
+    }
+
+    @Test
+    void should_load_cache_affinity_strategy_and_thresholds_from_scalar_environment() {
+        ConfigService configService = new ConfigService(Map.of(
+                "LOAD_BALANCE_STRATEGY", "CACHE_AFFINITY_FIRST",
+                "CACHE_AFFINITY_FIRST_MAX_EXTRA_WORK_TOKENS", "600",
+                "CACHE_AFFINITY_FIRST_MIN_HIT_RATE", "7.5"));
+
+        FlexlbConfig config = configService.loadBalanceConfig();
+        assertEquals(LoadBalanceStrategyEnum.CACHE_AFFINITY_FIRST, config.getLoadBalanceStrategy());
+        assertEquals(600L, config.getCacheAffinityFirstMaxExtraWorkTokens());
+        assertEquals(7.5, config.getCacheAffinityFirstMinHitRate());
+    }
+
+    @Test
+    void should_keep_cache_affinity_threshold_defaults() {
+        FlexlbConfig config = new ConfigService(Map.of()).loadBalanceConfig();
+
+        assertEquals(0L, config.getCacheAffinityFirstMaxExtraWorkTokens());
+        assertEquals(5.0, config.getCacheAffinityFirstMinHitRate());
+    }
+
+    @Test
+    void should_load_cache_affinity_strategy_from_flexlb_json() {
+        ConfigService configService = new ConfigService(Map.of(
+                "FLEXLB_CONFIG", """
+                        {
+                          "loadBalanceStrategy": "CACHE_AFFINITY_FIRST",
+                          "cacheAffinityFirstMaxExtraWorkTokens": 321,
+                          "cacheAffinityFirstMinHitRate": 6.5
+                        }
+                        """));
+
+        FlexlbConfig config = configService.loadBalanceConfig();
+        assertEquals(LoadBalanceStrategyEnum.CACHE_AFFINITY_FIRST, config.getLoadBalanceStrategy());
+        assertEquals(321L, config.getCacheAffinityFirstMaxExtraWorkTokens());
+        assertEquals(6.5, config.getCacheAffinityFirstMinHitRate());
     }
 
     @Test
