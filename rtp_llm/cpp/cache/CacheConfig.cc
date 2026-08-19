@@ -23,7 +23,7 @@ bool isFullAttentionSpec(KVCacheSpecType type) {
 std::string cacheGroupPolicySummary(const CacheGroupPolicy& policy) {
     std::ostringstream os;
     os << "{group_type=" << cacheGroupTypeName(policy.group_type) << ", prefix_reuse=" << policy.enable_prefix_reuse
-       << ", evict=" << static_cast<int>(policy.evict_policy) << ", reservable=" << policy.reservable
+       << ", reservable=" << policy.reservable
        << ", explicit_block_num=" << policy.explicit_block_num
        << ", charge_to_paged_budget=" << policy.charge_to_paged_budget
        << ", memory_placement=" << static_cast<int>(policy.memory_placement)
@@ -127,11 +127,11 @@ std::optional<size_t> resolveDefaultMTPGroupAlias(const CacheConfig& target_conf
 
 bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs) {
     return lhs.group_type == rhs.group_type && lhs.enable_prefix_reuse == rhs.enable_prefix_reuse
-           && lhs.evict_policy == rhs.evict_policy && lhs.reservable == rhs.reservable
-           && lhs.explicit_block_num == rhs.explicit_block_num
+           && lhs.reservable == rhs.reservable && lhs.explicit_block_num == rhs.explicit_block_num
            && lhs.charge_to_paged_budget == rhs.charge_to_paged_budget && lhs.memory_placement == rhs.memory_placement
            && lhs.active_tail_blocks == rhs.active_tail_blocks && lhs.validate_tail_blocks == rhs.validate_tail_blocks
-           && lhs.cp_mapping == rhs.cp_mapping && lhs.cp_slice == rhs.cp_slice;
+           && lhs.cp_mapping == rhs.cp_mapping && lhs.cp_slice == rhs.cp_slice
+           && lhs.sliding_window_size == rhs.sliding_window_size;
 }
 
 void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers) {

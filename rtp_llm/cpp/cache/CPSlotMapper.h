@@ -25,8 +25,7 @@ struct CpGroupLayout {
 ///
 /// The class keeps the historical CPSlotMapper name, but now owns all CP cache
 /// projection decisions: local allocation length, canonical key namespace,
-/// cache-store key/offset plans, connector resource projection, and optional
-/// intra-block slicing.
+/// cache-store key/offset plans, and optional intra-block slicing.
 class CPSlotMapper {
 public:
     CPSlotMapper();
@@ -61,6 +60,7 @@ public:
     int effectiveSeqLenForAlloc(const CacheConfig& config, size_t gid, int seq_len) const;
 
     size_t        logicalSeqSizePerBlock(const CacheConfig& config, size_t gid) const;
+    int           reuseBlockTokens(const CacheConfig& config) const;
     CacheKeysType canonicalCacheKeys(const CacheKeysType& full_keys) const;
     CacheKeysType localCacheKeys(const CacheConfig& config, size_t gid, const CacheKeysType& full_keys) const;
 
@@ -80,10 +80,6 @@ public:
 
     std::vector<BlockInfo>
     sliceBlockForPeer(const CacheConfig& config, size_t gid, std::vector<BlockInfo> parts, size_t peer_idx) const;
-
-    KVCacheResource projectConnectorResource(const KVCacheResource& source,
-                                             const CacheConfig&     config,
-                                             const CacheKeysType&   selected_keys) const;
 
 private:
     int cp_rank_            = 0;

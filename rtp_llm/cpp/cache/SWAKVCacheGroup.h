@@ -8,34 +8,31 @@ namespace rtp_llm {
 
 class SWAKVCacheGroup: public KVCacheGroup {
 public:
-    SWAKVCacheGroup(GroupBase                           cache_group,
-                    BlockPoolPtr                        block_pool,
-                    int                                 group_id,
-                    int                                 linear_step      = 0,
-                    SharedBlockCache*                   shared_cache     = nullptr,
-                    const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        KVCacheGroup(std::move(cache_group), std::move(block_pool), group_id, shared_cache, metrics_reporter),
+    SWAKVCacheGroup(GroupBase cache_group, DeviceBlockPoolPtr block_pool, int group_id, int linear_step = 0):
+        KVCacheGroup(std::move(cache_group), std::move(block_pool), group_id),
         linear_step_(linear_step) {}
 
     // Transition-only overload.
-    SWAKVCacheGroup(const LayerIdsType&                 layer_ids,
-                    std::shared_ptr<KVCacheSpec>        kvcache_spec,
-                    BlockPoolPtr                        block_pool,
-                    int                                 group_id,
-                    int                                 linear_step      = 0,
-                    SharedBlockCache*                   shared_cache     = nullptr,
-                    const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr,
-                    CacheGroupPolicy                    policy = defaultCacheGroupPolicy(CacheGroupType::SWA)):
-        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, policy, shared_cache, metrics_reporter),
+    SWAKVCacheGroup(const LayerIdsType&          layer_ids,
+                    std::shared_ptr<KVCacheSpec> kvcache_spec,
+                    DeviceBlockPoolPtr           block_pool,
+                    int                          group_id,
+                    int                          linear_step = 0,
+                    CacheGroupPolicy policy = defaultCacheGroupPolicy(CacheGroupType::SWA)):
+        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, policy),
         linear_step_(linear_step) {}
 
-    MatchResult matchSingleKey(CacheKeyType cache_key) const override;
-    bool        malloc(BlockIds&            block_ids,
-                       int                  seq_len,
-                       bool                 enable_reuse_cache   = false,
-                       int                  reserve_step         = 0,
-                       std::vector<size_t>* backfilled_positions = nullptr) override;
+    bool        malloc(BlockIds&                  block_ids,
+                       int                        seq_len,
+                       bool                       enable_reuse_cache   = false,
+                       int                        reserve_step         = 0,
+                       std::vector<size_t>*       backfilled_positions = nullptr,
+                       const RequiredPositions&  required_positions = {}) override;
+    std::vector<BlockRefTransition>
+    releaseSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
+    std::vector<BlockRefTransition>
+    release(const BlockIndicesType& block_indices, BlockRefType ref_type = BlockRefType::REQUEST) override;
     void free(const BlockIndicesType& block_indices) override;
     void reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) override;
     int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const override;

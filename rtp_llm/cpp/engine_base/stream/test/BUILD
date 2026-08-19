@@ -31,6 +31,8 @@ test_deps = [
     "//rtp_llm/cpp/cache/connector/p2p:connector",
     "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
     "//rtp_llm/cpp/model_rpc:tensor_pb_convert",
+    "//rtp_llm/cpp/cache/test:mock_async_context",
+    "//rtp_llm/cpp/cache/block_tree_cache:block_tree_cache",
 ] + torch_deps() + device_impl_target() + cuda13_torch_link_deps
 
 cc_test(
@@ -69,6 +71,12 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = test_deps,
+    # Count the otherwise non-virtual cancellation seam without changing the
+    # production API. This is the Itanium ABI symbol for
+    # rtp_llm::KVCacheManager::cancelLoad(shared_ptr<AsyncContext> const&).
+    linkopts = [
+        "-Wl,--wrap=_ZN7rtp_llm14KVCacheManager10cancelLoadERKSt10shared_ptrINS_12AsyncContextEE",
+    ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },

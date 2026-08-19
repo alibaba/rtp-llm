@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/KVCacheGroup.h"
+
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -32,6 +33,10 @@ bool KVCacheGroup::init() {
     return true;
 }
 
+void KVCacheGroup::setEvictCallback(EvictCallback callback) {
+    evict_callback_ = std::move(callback);
+}
+
 bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
     if (required_blocks <= 0) {
         return true;
@@ -43,70 +48,25 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
             break;
         }
 
-        if (!shared_cache_) {
-            RTP_LLM_LOG_WARNING(
-                "ensure free blocks failed, no shared cache, free blocks: %zu, need: %d", free_blocks, required_blocks);
-            return false;
-        }
-
-        const size_t                  need_evict = static_cast<size_t>(required_blocks) - free_blocks;
-        SharedBlockCache::EvictResult evict_result;
-        size_t                        freed = shared_cache_->evictAndFreeForGroup(group_id_, need_evict, &evict_result);
-
-        if (metrics_reporter_) {
-            for (const auto& [cache_key, lifetime_ms] : evict_result.evicted_lifetime_ms) {
-                RtpLLMCacheEvictionMetricsCollector collector;
-                collector.lifetime_ms = lifetime_ms;
-                kmonitor::MetricsTags tags("scope", "gpu");
-                tags.AddTag("evict_policy",
-                            evict_result.evicted_independent_group.count(cache_key) ? "independent" : "chain");
-                tags.AddTag("backing", "device");
-                metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(&tags,
-                                                                                                           &collector);
+        const size_t need_evict = static_cast<size_t>(required_blocks) - free_blocks;
+        if (evict_callback_) {
+            if (evict_callback_(need_evict) == 0) {
+                RTP_LLM_LOG_WARNING("ensure free blocks failed, BTC reclaimed no blocks for tag=%s need=%zu",
+                                    tag().c_str(),
+                                    need_evict);
+                return false;
             }
+            continue;
         }
 
-        if (freed == 0) {
-            RTP_LLM_LOG_WARNING("ensure free blocks failed, free blocks: %zu, need evict blocks: %zu",
-                                block_pool_->freeBlocksNum(),
-                                need_evict);
-            return false;
-        }
+        RTP_LLM_LOG_WARNING("ensure free blocks failed, no BlockTree eviction callback for tag=%s, free=%zu, need=%d",
+                            tag().c_str(),
+                            free_blocks,
+                            required_blocks);
+        return false;
     }
 
     return true;
-}
-
-MatchResult KVCacheGroup::match(const CacheKeysType& cache_keys) {
-    return matchPrefix(cache_keys);
-}
-
-MatchResult KVCacheGroup::matchPrefix(const CacheKeysType& /*cache_keys*/) const {
-    RTP_LLM_FAIL("KVCacheGroup tag=%s does not support prefix matching", tag().c_str());
-    return {};
-}
-
-MatchResult KVCacheGroup::matchSingleKey(CacheKeyType /*cache_key*/) const {
-    RTP_LLM_FAIL("KVCacheGroup tag=%s does not support single-key matching", tag().c_str());
-    return {};
-}
-
-void KVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
-                                   const BlockIndicesType& block_indices,
-                                   bool                    is_resident) {
-    if (!shared_cache_) {
-        return;
-    }
-
-    const size_t block_num = std::min(cache_keys.size(), block_indices.size());
-    for (size_t i = 0; i < block_num; ++i) {
-        if (isNullBlockIdx(block_indices[i])) {
-            continue;
-        }
-        std::vector<BlockIdxType> group_block_ids(static_cast<size_t>(group_id_ + 1), NULL_BLOCK_IDX);
-        group_block_ids[static_cast<size_t>(group_id_)] = block_indices[i];
-        shared_cache_->put(cache_keys[i], group_block_ids, is_resident);
-    }
 }
 
 size_t KVCacheGroup::freeBlocksNum() const {
@@ -135,10 +95,6 @@ const CacheGroupPolicy& KVCacheGroup::policy() const {
 
 bool KVCacheGroup::prefixReuseEnabled() const {
     return policy().enable_prefix_reuse;
-}
-
-CacheEvictPolicy KVCacheGroup::evictPolicy() const {
-    return policy().evict_policy;
 }
 
 uint32_t KVCacheGroup::explicitBlockNum() const {
@@ -180,7 +136,25 @@ KVCacheGroup::convertIndexToBuffer(int layer_id, int block_id, int partition_cou
 }
 
 void KVCacheGroup::reference(const BlockIndicesType& new_block_indices) {
-    block_pool_->requestReference(new_block_indices);
+    addBlockRefs(new_block_indices, BlockRefType::REQUEST);
+}
+
+void KVCacheGroup::reference(const BlockIndicesType& new_block_indices, BlockRefType ref_type) {
+    addBlockRefs(new_block_indices, ref_type);
+}
+
+void KVCacheGroup::addBlockRefs(const BlockIndicesType& blocks, BlockRefType ref_type) {
+    if (!blocks.empty()) {
+        block_pool_->incRef(blocks, ref_type);
+    }
+}
+
+std::vector<BlockRefTransition>
+KVCacheGroup::releaseBlockRefs(const BlockIndicesType& blocks, BlockRefType ref_type) {
+    if (blocks.empty()) {
+        return {};
+    }
+    return block_pool_->decRefWithResult(blocks, ref_type);
 }
 
 bool KVCacheGroup::prefixReusable() const {
