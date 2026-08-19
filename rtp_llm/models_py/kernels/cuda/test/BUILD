@@ -4,6 +4,11 @@ py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
 
+py_test(
+    name = "deepgemm_wrapper_lazy_test",
+    srcs = ["deepgemm_wrapper_lazy_test.py"],
+    deps = py_test_deps,
+)
 
 py_test (
     name = "per_token_group_quant_8bit_test",
