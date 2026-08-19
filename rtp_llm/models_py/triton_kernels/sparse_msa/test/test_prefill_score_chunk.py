@@ -80,9 +80,7 @@ class PrefillScoreChunkTest(unittest.TestCase):
                 [0, query_lens[0], total_q], dtype=torch.int32, device=device
             ),
             seq_lens=torch.tensor(seq_lens, dtype=torch.int32, device=device),
-            prefix_lens=torch.tensor(
-                prefix_lens, dtype=torch.int32, device=device
-            ),
+            prefix_lens=torch.tensor(prefix_lens, dtype=torch.int32, device=device),
             max_seqlen_q=max(query_lens),
             max_seqlen_k=max(seq_lens),
             block_size_k=block_size,
@@ -218,9 +216,7 @@ class PrefillScoreChunkTest(unittest.TestCase):
         self.assertIs(result, cached_chunks)
 
     def test_fused_cp_paged_write_clears_scratch_page_tail(self) -> None:
-        from rtp_llm.models_py.modules.hybrid.msa_attention import (
-            _fused_cp_paged_write,
-        )
+        from rtp_llm.models_py.modules.hybrid.msa_attention import _fused_cp_paged_write
 
         device = torch.device("cuda")
         page_size = 4
@@ -291,9 +287,7 @@ class PrefillScoreChunkTest(unittest.TestCase):
         torch.cuda.synchronize()
 
         expected_k = packed[:, :nk].reshape(token_count, num_kv_heads, head_dim)
-        expected_v = packed[:, nk : 2 * nk].reshape(
-            token_count, num_kv_heads, head_dim
-        )
+        expected_v = packed[:, nk : 2 * nk].reshape(token_count, num_kv_heads, head_dim)
         expected_idx = packed[:, 2 * nk :].reshape(token_count, 1, ni)
         self.assertTrue(torch.equal(scratch_k[write_slots], expected_k))
         self.assertTrue(torch.equal(scratch_v[write_slots], expected_v))
@@ -301,6 +295,113 @@ class PrefillScoreChunkTest(unittest.TestCase):
         self.assertEqual(torch.count_nonzero(scratch_k[5:8]).item(), 0)
         self.assertEqual(torch.count_nonzero(scratch_v[5:8]).item(), 0)
         self.assertEqual(torch.count_nonzero(scratch_idx[5:8]).item(), 0)
+
+    def test_fused_cp_paged_write_builds_fp8_hnd_working_pages(self) -> None:
+        from rtp_llm.models_py.modules.hybrid.msa_attention import _fused_cp_paged_write
+
+        device = torch.device("cuda")
+        page_size = 4
+        scratch_seq_len = 8
+        num_kv_heads = 2
+        head_dim = 4
+        nk = num_kv_heads * head_dim
+        ni = 4
+        kv_lens = torch.tensor([5, 8], dtype=torch.int32, device=device)
+        write_slots = torch.tensor(
+            [0, 1, 2, 3, 4, 8, 9, 10, 11, 12, 13, 14, 15],
+            dtype=torch.int64,
+            device=device,
+        )
+        token_count = write_slots.numel()
+        packed = (
+            torch.arange(
+                token_count * (2 * nk + ni), dtype=torch.float32, device=device
+            )
+            .remainder(31)
+            .sub_(15)
+            .div_(8)
+            .to(torch.bfloat16)
+            .reshape(token_count, 2 * nk + ni)
+        )
+        unpad_indices = torch.arange(token_count, dtype=torch.int64, device=device)
+        slot_mapping = write_slots.clone()
+        slot_mapping[4] = -1
+
+        page_count = 2 * scratch_seq_len // page_size
+        paged_k = torch.full(
+            (page_count, num_kv_heads, page_size, head_dim),
+            7,
+            dtype=torch.float8_e4m3fn,
+            device=device,
+        )
+        paged_v = torch.full_like(paged_k, 7)
+        scratch_idx = torch.full(
+            (2 * scratch_seq_len, 1, ni),
+            7,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        persistent_kv = torch.full(
+            (page_count, 2, num_kv_heads, page_size, head_dim),
+            7,
+            dtype=torch.float8_e4m3fn,
+            device=device,
+        )
+        persistent_idx = torch.full(
+            (2 * scratch_seq_len, ni),
+            7,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+
+        _fused_cp_paged_write(
+            packed,
+            unpad_indices,
+            write_slots,
+            slot_mapping,
+            paged_k,
+            paged_v,
+            scratch_idx,
+            persistent_kv,
+            persistent_idx,
+            kv_lens,
+            scratch_seq_len,
+            nk,
+            ni,
+            num_kv_heads,
+            head_dim,
+            page_size,
+            token_count=token_count,
+            scratch_is_paged=True,
+        )
+        torch.cuda.synchronize()
+
+        expected_k = packed[:, :nk].reshape(token_count, num_kv_heads, head_dim)
+        expected_v = packed[:, nk : 2 * nk].reshape(token_count, num_kv_heads, head_dim)
+        token_major_k = paged_k.permute(0, 2, 1, 3).reshape(-1, num_kv_heads, head_dim)
+        token_major_v = paged_v.permute(0, 2, 1, 3).reshape(-1, num_kv_heads, head_dim)
+        self.assertTrue(
+            torch.equal(
+                token_major_k[write_slots].view(torch.uint8),
+                expected_k.to(torch.float8_e4m3fn).view(torch.uint8),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                token_major_v[write_slots].view(torch.uint8),
+                expected_v.to(torch.float8_e4m3fn).view(torch.uint8),
+            )
+        )
+        self.assertEqual(torch.count_nonzero(token_major_k[5:8]).item(), 0)
+        self.assertEqual(torch.count_nonzero(token_major_v[5:8]).item(), 0)
+        self.assertEqual(torch.count_nonzero(scratch_idx[5:8]).item(), 0)
+        self.assertTrue(
+            torch.equal(
+                persistent_kv[0, 0, :, 0].view(torch.uint8),
+                expected_k[0].to(torch.float8_e4m3fn).view(torch.uint8),
+            )
+        )
+        self.assertTrue(torch.all(persistent_kv[1, 0, :, 0] == 7))
 
     def test_triton_fused_chunk_matches_full(self) -> None:
         from rtp_llm.models_py.triton_kernels.sparse_msa.prefill import score_chunk
@@ -323,7 +424,10 @@ class PrefillScoreChunkTest(unittest.TestCase):
         full_score_bytes = (
             inputs["q"].shape[0]
             * inputs["q"].shape[1]
-            * ((inputs["max_seqlen_k"] + inputs["block_size_k"] - 1) // inputs["block_size_k"])
+            * (
+                (inputs["max_seqlen_k"] + inputs["block_size_k"] - 1)
+                // inputs["block_size_k"]
+            )
             * 4
         )
         self.assertLess(workspace.numel(), full_score_bytes)
@@ -348,6 +452,156 @@ class PrefillScoreChunkTest(unittest.TestCase):
         torch.cuda.synchronize()
 
         self.assertTrue(torch.equal(chunked_topk, full_topk))
+
+    @unittest.skipUnless(_fmha_available(), "fmha_sm100 required")
+    def test_fmha_accepts_direct_fp8_hnd_pages_without_flat_conversion(self) -> None:
+        from rtp_llm.models_py.triton_kernels.sparse_msa.prefill import topk_bt_fused
+
+        device = torch.device("cuda")
+        torch.manual_seed(20260818)
+        query_len = 256
+        kv_len = 512
+        page_size = 128
+        num_q_heads = 64
+        num_kv_heads = 4
+        head_dim = 128
+        topk = 4
+        q = torch.randn(
+            query_len, num_q_heads, head_dim, dtype=torch.bfloat16, device=device
+        )
+        k_paged = (
+            torch.randn(
+                kv_len // page_size,
+                num_kv_heads,
+                page_size,
+                head_dim,
+                device=device,
+            )
+            .mul_(0.25)
+            .to(torch.float8_e4m3fn)
+        )
+        v_paged = (
+            torch.randn_like(k_paged.to(torch.bfloat16))
+            .mul_(0.25)
+            .to(torch.float8_e4m3fn)
+        )
+        k_flat = (
+            k_paged.permute(0, 2, 1, 3)
+            .reshape(kv_len, num_kv_heads, head_dim)
+            .to(torch.bfloat16)
+        )
+        v_flat = (
+            v_paged.permute(0, 2, 1, 3)
+            .reshape(kv_len, num_kv_heads, head_dim)
+            .to(torch.bfloat16)
+        )
+        idx_q = torch.randn(
+            query_len, num_kv_heads, head_dim, dtype=torch.bfloat16, device=device
+        )
+        idx_k = torch.randn(kv_len, 1, head_dim, dtype=torch.bfloat16, device=device)
+        req_to_token = torch.arange(kv_len, dtype=torch.int32, device=device)[None]
+        cu_seqlens = torch.tensor([0, query_len], dtype=torch.int32, device=device)
+        seq_lens = torch.tensor([kv_len], dtype=torch.int32, device=device)
+        prefix_lens = torch.tensor(
+            [kv_len - query_len], dtype=torch.int32, device=device
+        )
+        kv_indices = torch.arange(kv_len // page_size, dtype=torch.int32, device=device)
+        index_plan = topk_bt_fused.build_index_score_plan(
+            cu_seqlens,
+            seq_lens,
+            prefix_lens,
+            num_kv_heads,
+            1,
+            page_size,
+        )
+        common = dict(
+            q=q,
+            idx_q=idx_q,
+            idx_k_cache=idx_k,
+            req_to_token=req_to_token,
+            cu_seqlens=cu_seqlens,
+            seq_lens=seq_lens,
+            prefix_lens=prefix_lens,
+            max_seqlen_q=query_len,
+            max_seqlen_k=kv_len,
+            block_size_k=page_size,
+            topk=topk,
+            init_blocks=1,
+            local_blocks=1,
+            sm_scale=head_dim**-0.5,
+            index_score_plan=index_plan,
+            kv_indices=kv_indices,
+        )
+        bf16_plan = topk_bt_fused.build_sparse_attn_plan(
+            cu_seqlens,
+            seq_lens,
+            prefix_lens,
+            num_q_heads,
+            num_kv_heads,
+            page_size,
+            topk,
+            use_fp8_kvcache=False,
+        )
+        fp8_plan = topk_bt_fused.build_sparse_attn_plan(
+            cu_seqlens,
+            seq_lens,
+            prefix_lens,
+            num_q_heads,
+            num_kv_heads,
+            page_size,
+            topk,
+            use_fp8_kvcache=True,
+        )
+        out_bf16 = topk_bt_fused.flash_prefill_with_fmha(
+            k_cache=k_flat,
+            v_cache=v_flat,
+            sparse_attn_plan=bf16_plan,
+            **common,
+        )
+        with mock.patch.object(
+            topk_bt_fused,
+            "_kv_flat_to_paged",
+            side_effect=AssertionError("direct paged input must skip flat conversion"),
+        ):
+            out_bf16_direct = topk_bt_fused.flash_prefill_with_fmha(
+                k_cache=None,
+                v_cache=None,
+                k_paged_cache=k_paged.to(torch.bfloat16),
+                v_paged_cache=v_paged.to(torch.bfloat16),
+                sparse_attn_plan=bf16_plan,
+                **common,
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "direct paged K/V dtype does not match sparse-attention plan",
+            ):
+                topk_bt_fused.flash_prefill_with_fmha(
+                    k_cache=None,
+                    v_cache=None,
+                    k_paged_cache=k_paged.to(torch.bfloat16),
+                    v_paged_cache=v_paged.to(torch.bfloat16),
+                    sparse_attn_plan=fp8_plan,
+                    **common,
+                )
+            out_fp8 = topk_bt_fused.flash_prefill_with_fmha(
+                k_cache=None,
+                v_cache=None,
+                k_paged_cache=k_paged,
+                v_paged_cache=v_paged,
+                sparse_attn_plan=fp8_plan,
+                **common,
+            )
+        torch.cuda.synchronize()
+        self.assertTrue(torch.equal(out_bf16_direct, out_bf16))
+        self.assertFalse(torch.isnan(out_fp8).any() or torch.isinf(out_fp8).any())
+        cosine = torch.nn.functional.cosine_similarity(
+            out_fp8.float().reshape(1, -1),
+            out_bf16.float().reshape(1, -1),
+            dim=1,
+        ).item()
+        max_abs = (out_fp8.float() - out_bf16.float()).abs().max().item()
+        self.assertGreater(cosine, 0.9999)
+        self.assertLess(max_abs, 0.02)
 
     @unittest.skipUnless(_fmha_available(), "fmha_sm100 required")
     def test_fmha_chunk_matches_full(self) -> None:

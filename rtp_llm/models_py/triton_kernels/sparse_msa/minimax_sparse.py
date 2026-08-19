@@ -32,10 +32,7 @@ from .decode.topk_sparse import (
     flash_decode_with_gqa_share_sparse_paged,
 )
 from .prefill.flash_with_topk_idx import flash_prefill_with_topk_index
-from .prefill.score_chunk import (
-    m3_index_score_chunk_enabled,
-    m3_index_score_chunk_rows,
-)
+from .prefill.score_chunk import m3_index_score_chunk_enabled, m3_index_score_chunk_rows
 from .prefill.topk_bt_fused import (
     flash_decode_with_trtllm_gen,
     flash_prefill_with_fmha,
@@ -89,7 +86,7 @@ def m3_fmha_prefill_enabled(
     return (
         workspace is not None
         and sparse_attn_plan is not None
-        and num_idx_heads // num_kv_heads == 1
+        and num_idx_heads == num_kv_heads
         and disable_index_value
         and not has_idx_sink
         and not has_sink
@@ -99,8 +96,8 @@ def m3_fmha_prefill_enabled(
 
 def minimax_sparse_prefill(
     q: torch.Tensor,  # [total_extend_tokens, num_q_heads, qk_head_dim]
-    k_cache: torch.Tensor,  # [max_slots, num_kv_heads, head_dim] (paged main)
-    v_cache: torch.Tensor,  # [max_slots, num_kv_heads, head_dim] (paged main)
+    k_cache: Optional[torch.Tensor],  # [max_slots, num_kv_heads, head_dim]
+    v_cache: Optional[torch.Tensor],  # [max_slots, num_kv_heads, head_dim]
     sink: Optional[torch.Tensor],  # [num_q_heads, qk_head_dim]
     idx_q: torch.Tensor,  # [total_extend_tokens, num_idx_heads, idx_head_dim]
     idx_k_cache: torch.Tensor,  # [max_slots, 1, idx_head_dim] (paged index)
@@ -128,11 +125,20 @@ def minimax_sparse_prefill(
     index_score_plan=None,
     sparse_attn_plan=None,
     kv_indices=None,
+    k_paged_cache: Optional[torch.Tensor] = None,
+    v_paged_cache: Optional[torch.Tensor] = None,
 ):
     # All seqlen is less than topk, use full attention
     # Step 1: Flash attention with topk index (using index head)
     num_idx_heads = idx_q.shape[1]
-    num_kv_heads = k_cache.shape[1]
+    if (k_paged_cache is None) != (v_paged_cache is None):
+        raise ValueError("paged K and V caches must be provided together")
+    if k_paged_cache is not None:
+        num_kv_heads = k_paged_cache.shape[1]
+    elif k_cache is not None and v_cache is not None:
+        num_kv_heads = k_cache.shape[1]
+    else:
+        raise ValueError("either flat or paged main K/V caches must be provided")
     idx_group_size = num_idx_heads // num_kv_heads
 
     # Fastest path: mega topk-to-block-tables + trtllm-gen sparse decode.
@@ -185,8 +191,16 @@ def minimax_sparse_prefill(
             index_score_plan=index_score_plan,
             sparse_attn_plan=sparse_attn_plan,
             kv_indices=kv_indices,
+            k_paged_cache=k_paged_cache,
+            v_paged_cache=v_paged_cache,
         )
         return None, o
+
+    if k_cache is None or v_cache is None:
+        raise RuntimeError(
+            "paged main K/V requires the fmha sparse-prefill path; "
+            "the Triton fallback still requires flat K/V scratch"
+        )
 
     # Slower path: fused topk_bt_fused step 1+2 emitting topk_idx + legacy
     # triton step 3 sparse attention. Avoids the second kernel launch in the

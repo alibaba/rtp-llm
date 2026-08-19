@@ -1139,6 +1139,166 @@ def cp_gather_request_pool_blocks(
     return cp_interleave_gathered_pool_blocks(gathered, cp_size, total_logical_blocks)
 
 
+@dataclass(frozen=True)
+class CPBatchedPoolGatherPlan:
+    """Request-independent addressing reused by every layer/pool gather."""
+
+    packed_block_ids: torch.Tensor
+    restore_indices: torch.Tensor
+    logical_blocks_per_req: Tuple[int, ...]
+    total_logical_blocks: int
+    cp_size: int
+    batch_size: int
+    block_table_data_ptr: int
+
+
+def build_cp_batched_pool_gather_plan(
+    local_block_table: torch.Tensor,
+    total_logical_blocks_per_req: Tuple[int, ...],
+    cp_size: int,
+    cp_rank: int,
+) -> CPBatchedPoolGatherPlan:
+    """Build the static addressing for a batched page-RR pool gather.
+
+    Request ``b`` contributes ``L_b = ceil(P_b / cp_size)`` local rows on
+    every rank. The packed local contribution has ``S = sum(L_b)`` rows, so
+    logical page ``p`` of request ``b`` is restored from rank-major row
+    ``(p % cp_size) * S + sum(L_j, j < b) + p // cp_size``.
+
+    The result is independent of layer and pool dtype. Build it once per
+    forward, then reuse it for main K/V and idx-K on every sparse layer.
+    """
+    if local_block_table.dim() != 2:
+        raise ValueError(
+            "local_block_table must be [batch,max_local_pages], got "
+            f"{tuple(local_block_table.shape)}"
+        )
+    if len(total_logical_blocks_per_req) != int(local_block_table.shape[0]):
+        raise ValueError(
+            f"logical-page batch {len(total_logical_blocks_per_req)} != "
+            f"block-table batch {local_block_table.shape[0]}"
+        )
+    if cp_size <= 0:
+        raise ValueError(f"cp_size must be positive, got {cp_size}")
+    if not (0 <= cp_rank < cp_size):
+        raise ValueError(f"cp_rank({cp_rank}) out of range [0, {cp_size})")
+
+    local_counts = tuple(
+        (int(pages) + cp_size - 1) // cp_size for pages in total_logical_blocks_per_req
+    )
+    for batch_idx, (logical_pages, local_pages) in enumerate(
+        zip(total_logical_blocks_per_req, local_counts)
+    ):
+        if int(logical_pages) < 0:
+            raise ValueError(
+                f"request {batch_idx} has negative logical pages {logical_pages}"
+            )
+        if local_pages > int(local_block_table.shape[1]):
+            raise ValueError(
+                f"request {batch_idx} needs {local_pages} local prefix pages, "
+                f"but block table has width {local_block_table.shape[1]}"
+            )
+
+    total_local = sum(local_counts)
+    if total_local == 0:
+        empty = torch.empty(0, dtype=torch.long, device=local_block_table.device)
+        return CPBatchedPoolGatherPlan(
+            packed_block_ids=empty,
+            restore_indices=empty,
+            logical_blocks_per_req=tuple(int(x) for x in total_logical_blocks_per_req),
+            total_logical_blocks=0,
+            cp_size=cp_size,
+            batch_size=int(local_block_table.shape[0]),
+            block_table_data_ptr=int(local_block_table.data_ptr()),
+        )
+
+    packed_block_ids = torch.cat(
+        [
+            local_block_table[b, :local_pages]
+            for b, local_pages in enumerate(local_counts)
+            if local_pages > 0
+        ]
+    ).to(device=local_block_table.device, dtype=torch.long)
+
+    restore_parts = []
+    local_offset = 0
+    for logical_pages, local_pages in zip(total_logical_blocks_per_req, local_counts):
+        logical_pages = int(logical_pages)
+        if logical_pages > 0:
+            p = torch.arange(
+                logical_pages, dtype=torch.long, device=local_block_table.device
+            )
+            restore_parts.append(
+                p.remainder(cp_size) * total_local
+                + local_offset
+                + torch.div(p, cp_size, rounding_mode="floor")
+            )
+        local_offset += local_pages
+    restore = torch.cat(restore_parts)
+    return CPBatchedPoolGatherPlan(
+        packed_block_ids=packed_block_ids,
+        restore_indices=restore,
+        logical_blocks_per_req=tuple(int(x) for x in total_logical_blocks_per_req),
+        total_logical_blocks=sum(int(x) for x in total_logical_blocks_per_req),
+        cp_size=cp_size,
+        batch_size=int(local_block_table.shape[0]),
+        block_table_data_ptr=int(local_block_table.data_ptr()),
+    )
+
+
+def cp_gather_batched_request_pool_blocks(
+    local_pool: torch.Tensor,
+    local_block_table: torch.Tensor,
+    total_logical_blocks_per_req: Tuple[int, ...],
+    cp_size: int,
+    cp_rank: int,
+    *,
+    plan: Optional[CPBatchedPoolGatherPlan] = None,
+    restore_logical_order: bool = True,
+) -> torch.Tensor:
+    """Gather batched page-RR prefixes with one collective.
+
+    Addressing is static for a forward. Passing a prepared ``plan`` avoids
+    rebuilding request-wise GPU ranges and restore indices in every layer.
+    ``restore_logical_order=False`` returns the rank-major collective output
+    so a downstream fused scatter can apply ``plan.restore_indices`` directly.
+    """
+    if local_pool.dim() < 2:
+        raise ValueError(
+            f"local_pool must have rank >= 2, got shape {tuple(local_pool.shape)}"
+        )
+    if plan is None:
+        plan = build_cp_batched_pool_gather_plan(
+            local_block_table,
+            total_logical_blocks_per_req,
+            cp_size,
+            cp_rank,
+        )
+    elif (
+        plan.cp_size != cp_size
+        or plan.batch_size != int(local_block_table.shape[0])
+        or plan.block_table_data_ptr != int(local_block_table.data_ptr())
+        or plan.total_logical_blocks
+        != sum(int(x) for x in total_logical_blocks_per_req)
+    ):
+        raise ValueError("batched pool gather plan does not match live request shape")
+    if plan.total_logical_blocks == 0:
+        return local_pool[:0]
+    if (
+        plan.packed_block_ids.device != local_pool.device
+        or plan.restore_indices.device != local_pool.device
+    ):
+        raise ValueError(
+            "batched pool gather plan and local pool must be on the same device"
+        )
+
+    local_owned = local_pool.index_select(0, plan.packed_block_ids)
+    gathered = all_gather(local_owned, group=Group.TP)
+    if not restore_logical_order:
+        return gathered
+    return gathered.index_select(0, plan.restore_indices)
+
+
 # ---------------------------------------------------------------------------
 # Stage 5b — per-iteration restore-indices builder (branch
 # `_get_topk_ragged_cp_roundrobin` pattern).

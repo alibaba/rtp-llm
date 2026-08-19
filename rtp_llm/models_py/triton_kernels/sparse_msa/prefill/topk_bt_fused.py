@@ -402,7 +402,14 @@ def _attach_direct_csr(plan, kv_seg_cpu, block_size_k, device):
 
 
 def build_sparse_attn_plan(
-    cu_seqlens, seq_lens, prefix_lens, num_q_heads, num_kv_heads, block_size_k, topk
+    cu_seqlens,
+    seq_lens,
+    prefix_lens,
+    num_q_heads,
+    num_kv_heads,
+    block_size_k,
+    topk,
+    use_fp8_kvcache: bool = False,
 ):
     """Build the fmha_sm100 sparse-attention (step3) plan.
 
@@ -427,8 +434,13 @@ def build_sparse_attn_plan(
         output_maxscore=False,
         kv_block_num=topk,
         causal=True,
+        use_fp8_kvcache=use_fp8_kvcache,
         partial_dtype=_M3_SPARSE_ATTN_PARTIAL_DTYPE,
     )
+    # Keep the AOT-plan storage contract explicit at the Python boundary. The
+    # native kernels are dtype-specific; callers must not pair an FP8 plan with
+    # BF16 storage (or vice versa).
+    plan["_use_fp8_kvcache"] = bool(use_fp8_kvcache)
     if _M3_MSA_FUSED_CSR:
         _attach_direct_csr(plan, kv_seg, block_size_k, cu_seqlens.device)
     return plan
@@ -1468,8 +1480,8 @@ def _sparse_attn_chunked(
 @torch.no_grad()
 def flash_prefill_with_fmha(
     q: torch.Tensor,  # [total_q, num_q_heads, head_dim] bf16
-    k_cache: torch.Tensor,  # [max_slots, num_kv_heads, head_dim] FLAT
-    v_cache: torch.Tensor,  # [max_slots, num_kv_heads, head_dim] FLAT
+    k_cache: torch.Tensor | None,  # [max_slots, num_kv_heads, head_dim] FLAT
+    v_cache: torch.Tensor | None,  # [max_slots, num_kv_heads, head_dim] FLAT
     idx_q: torch.Tensor,  # [total_q, num_idx_heads, idx_head_dim]
     idx_k_cache: torch.Tensor,  # [max_slots, 1, idx_head_dim]
     req_to_token: torch.Tensor,
@@ -1486,6 +1498,8 @@ def flash_prefill_with_fmha(
     index_score_plan=None,
     sparse_attn_plan=None,
     kv_indices=None,
+    k_paged_cache: torch.Tensor | None = None,
+    v_paged_cache: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Fast sparse prefill: mega topk (index score + bitonic) -> fmha_sm100 sparse attn.
 
@@ -1507,7 +1521,68 @@ def flash_prefill_with_fmha(
         raise ValueError("flash_prefill_with_fmha requires a sparse_attn_plan")
 
     total_q, num_q_heads, head_dim = q.shape
-    max_slots, num_kv_heads, _ = k_cache.shape
+    if (k_paged_cache is None) != (v_paged_cache is None):
+        raise ValueError("paged K and V caches must be provided together")
+    plan_uses_fp8_kv = bool(
+        sparse_attn_plan.get("_use_fp8_kvcache", False)
+        if isinstance(sparse_attn_plan, dict)
+        else False
+    )
+    if k_paged_cache is not None:
+        if k_paged_cache.dim() != 4 or v_paged_cache.dim() != 4:
+            raise ValueError(
+                "paged K/V must be [pages,heads,page_size,head_dim], got "
+                f"K={tuple(k_paged_cache.shape)} V={tuple(v_paged_cache.shape)}"
+            )
+        if k_paged_cache.shape != v_paged_cache.shape:
+            raise ValueError(
+                f"paged K/V shape mismatch: K={tuple(k_paged_cache.shape)} "
+                f"V={tuple(v_paged_cache.shape)}"
+            )
+        if k_paged_cache.dtype != v_paged_cache.dtype or k_paged_cache.dtype not in (
+            torch.bfloat16,
+            torch.float8_e4m3fn,
+        ):
+            raise ValueError(
+                "direct paged K/V must use matching BF16 or E4M3 tensors, got "
+                f"K={k_paged_cache.dtype} V={v_paged_cache.dtype}"
+            )
+        if k_paged_cache.device != q.device or v_paged_cache.device != q.device:
+            raise ValueError(
+                "direct paged K/V and Q must be on the same device, got "
+                f"Q={q.device} K={k_paged_cache.device} V={v_paged_cache.device}"
+            )
+        if not k_paged_cache.is_contiguous() or not v_paged_cache.is_contiguous():
+            raise ValueError("direct paged K/V must be contiguous HND tensors")
+        storage_uses_fp8_kv = k_paged_cache.dtype == torch.float8_e4m3fn
+        if storage_uses_fp8_kv != plan_uses_fp8_kv:
+            raise ValueError(
+                "direct paged K/V dtype does not match sparse-attention plan: "
+                f"dtype={k_paged_cache.dtype} plan_fp8={plan_uses_fp8_kv}"
+            )
+        if not storage_uses_fp8_kv and k_paged_cache.dtype != q.dtype:
+            raise ValueError(
+                "direct BF16 paged K/V must match Q dtype, got "
+                f"Q={q.dtype} K={k_paged_cache.dtype}"
+            )
+        if int(k_paged_cache.shape[2]) != int(block_size_k):
+            raise ValueError(
+                f"paged K/V page size {k_paged_cache.shape[2]} != {block_size_k}"
+            )
+        if int(k_paged_cache.shape[3]) != int(head_dim):
+            raise ValueError(
+                f"paged K/V head dim {k_paged_cache.shape[3]} != {head_dim}"
+            )
+        num_kv_heads = int(k_paged_cache.shape[1])
+        k_paged_f, v_paged_f = k_paged_cache, v_paged_cache
+    else:
+        if k_cache is None or v_cache is None:
+            raise ValueError("flat K/V caches are required when paged K/V are absent")
+        if plan_uses_fp8_kv:
+            raise ValueError(
+                "an FP8 sparse-attention plan requires direct FP8 paged K/V"
+            )
+        max_slots, num_kv_heads, _ = k_cache.shape
     num_pages = (max_seqlen_k + block_size_k - 1) // block_size_k
 
     # Physical page table: build once here (or take the per-forward cached one) and
@@ -1536,15 +1611,15 @@ def flash_prefill_with_fmha(
         emit_block_table=False,
     )
 
-    # Step 3 (fmha): read the flat MSA scratch as paged [num_paged, nkv, page, dim] +
-    # the raw top-k block ids. Paginate the FULL gather scratch (max_slots) so multi-
-    # request page_table indices resolve; single request: max_slots // block == num_pages.
-    # One fused Triton kernel does both K and V (coalesced, ~4x faster + 1 launch vs the
-    # two aten permute+contiguous copies; bit-identical).
-    num_paged = max_slots // block_size_k
-    k_paged_f, v_paged_f = _kv_flat_to_paged(
-        k_cache, v_cache, num_paged, block_size_k, num_kv_heads, head_dim
-    )
+    # Step 3 consumes HND paged K/V. The reference path converts the flat BF16
+    # gather scratch here. A direct-paged caller may instead supply an already
+    # paged, request-local BF16 or FP8 working set and avoid both the flat main
+    # scratch and this conversion.
+    if k_paged_cache is None:
+        num_paged = max_slots // block_size_k
+        k_paged_f, v_paged_f = _kv_flat_to_paged(
+            k_cache, v_cache, num_paged, block_size_k, num_kv_heads, head_dim
+        )
     # Opt-in chunked step3 (M3_SPARSE_ATTN_CHUNK_ENABLE): route BOTH step3 paths
     # (direct CSR and adapter -- they converge on the same sparse_atten_func)
     # through the chunked implementation to bound the O_partial workspace.

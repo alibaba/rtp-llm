@@ -81,12 +81,11 @@ def _ref_nonlocal_causal(
 
 class TestGatherCpShardedPrefixPool(unittest.TestCase):
 
-    @patch("rtp_llm.models_py.modules.dsv4.cp.cp_gather_request_pool_blocks")
-    def test_per_request_local_page_slices_and_concatenates(self, gather):
-        gather.side_effect = [
-            torch.tensor([[10.0], [11.0], [12.0], [13.0]]),
-            torch.tensor([[20.0], [21.0]]),
-        ]
+    @patch("rtp_llm.models_py.modules.dsv4.cp.cp_gather_batched_request_pool_blocks")
+    def test_batches_request_page_slices_into_one_collective(self, gather):
+        gather.return_value = torch.tensor(
+            [[10.0], [11.0], [12.0], [13.0], [20.0], [21.0]]
+        )
         local_pool = torch.arange(16, dtype=torch.float32).view(8, 2)
         block_table = torch.tensor([[4, 5], [6, 7]], dtype=torch.int32)
 
@@ -104,16 +103,12 @@ class TestGatherCpShardedPrefixPool(unittest.TestCase):
                 out, torch.tensor([[10.0], [11.0], [12.0], [13.0], [20.0], [21.0]])
             )
         )
-        self.assertTrue(
-            torch.equal(gather.call_args_list[0].args[1], block_table[0, :2])
-        )
-        self.assertEqual(gather.call_args_list[0].args[4], 4)
-        self.assertTrue(
-            torch.equal(gather.call_args_list[1].args[1], block_table[1, :1])
-        )
-        self.assertEqual(gather.call_args_list[1].args[4], 2)
+        gather.assert_called_once()
+        self.assertTrue(torch.equal(gather.call_args.args[1], block_table))
+        self.assertEqual(gather.call_args.args[2], (4, 2))
+        self.assertEqual(gather.call_args.args[3:], (2, 1))
 
-    @patch("rtp_llm.models_py.modules.dsv4.cp.cp_gather_request_pool_blocks")
+    @patch("rtp_llm.models_py.modules.dsv4.cp.cp_gather_batched_request_pool_blocks")
     def test_zero_prefix_skips_collective(self, gather):
         local_pool = torch.empty(3, 2)
         out = gather_cp_sharded_prefix_pool(

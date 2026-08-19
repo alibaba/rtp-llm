@@ -10,8 +10,7 @@ logger = logging.getLogger(__name__)
 _LOGGED_SHARDED_PREFIX_LAYOUTS = set()
 
 
-def gather_cp_sharded_prefix_pool(
-    local_pool: torch.Tensor,
+def build_cp_sharded_prefix_gather_plan(
     local_block_table: torch.Tensor,
     prefix_lengths: torch.Tensor,
     *,
@@ -19,17 +18,16 @@ def gather_cp_sharded_prefix_pool(
     cp_size: int,
     cp_rank: int,
     debug_label: str = "prefix",
-) -> torch.Tensor:
-    """Reconstruct page-RR-sharded request prefixes in logical page order.
+):
+    """Build reusable addressing for page-RR-sharded request prefixes.
 
     ``local_block_table`` is the cache manager's compact, rank-local physical
     table. Logical page ``p`` belongs to rank ``p % cp_size`` and is stored at
     local table column ``p // cp_size``. Each request therefore contributes
     ``ceil(prefix_pages / cp_size)`` physical pages per rank to the collective.
 
-    The returned pool concatenates requests and has logical pages in the order
-    expected by a contiguous synthetic FlashInfer page table. The same helper
-    also works for MSA's main ``[2,H,P,D]`` blocks and idx_K ``[P,D]`` blocks.
+    The result is independent of layer and pool dtype and should be built once
+    per forward, then reused for main K/V and idx-K gathers.
     """
     if page_size <= 0:
         raise ValueError(f"page_size must be positive, got {page_size}")
@@ -55,14 +53,15 @@ def gather_cp_sharded_prefix_pool(
 
     # Keep the generic CP collective/interleave implementation in one place.
     # Import lazily to avoid pulling the full DSV4 module into non-sharded CP.
-    from rtp_llm.models_py.modules.dsv4.cp import cp_gather_request_pool_blocks
+    from rtp_llm.models_py.modules.dsv4.cp import build_cp_batched_pool_gather_plan
 
-    request_pools = []
+    logical_page_counts = []
     local_page_counts = []
     local_block_summaries = []
     debug_enabled = os.environ.get("RTP_LLM_DEBUG_CP_SHARDED_PREFIX", "0") == "1"
     for batch_idx, prefix_len in enumerate(prefix_cpu.tolist()):
         logical_pages = int(prefix_len) // page_size
+        logical_page_counts.append(logical_pages)
         if logical_pages == 0:
             local_page_counts.append(0)
             if debug_enabled:
@@ -88,15 +87,6 @@ def gather_cp_sharded_prefix_pool(
                 if len(block_ids) <= 16
                 else block_ids[:8] + ["..."] + block_ids[-8:]
             )
-        request_pools.append(
-            cp_gather_request_pool_blocks(
-                local_pool,
-                local_block_table[batch_idx, :local_pages],
-                cp_size,
-                cp_rank,
-                logical_pages,
-            )
-        )
     debug_key = (debug_label, cp_rank)
     if debug_enabled and debug_key not in _LOGGED_SHARDED_PREFIX_LAYOUTS:
         _LOGGED_SHARDED_PREFIX_LAYOUTS.add(debug_key)
@@ -111,9 +101,50 @@ def gather_cp_sharded_prefix_pool(
             local_page_counts,
             local_block_summaries,
         )
-    if not request_pools:
+    return build_cp_batched_pool_gather_plan(
+        local_block_table,
+        tuple(logical_page_counts),
+        cp_size,
+        cp_rank,
+    )
+
+
+def gather_cp_sharded_prefix_pool(
+    local_pool: torch.Tensor,
+    local_block_table: torch.Tensor,
+    prefix_lengths: torch.Tensor,
+    *,
+    page_size: int,
+    cp_size: int,
+    cp_rank: int,
+    debug_label: str = "prefix",
+    gather_plan=None,
+    restore_logical_order: bool = True,
+) -> torch.Tensor:
+    """Gather page-RR prefixes using reusable per-forward addressing."""
+    if gather_plan is None:
+        gather_plan = build_cp_sharded_prefix_gather_plan(
+            local_block_table,
+            prefix_lengths,
+            page_size=page_size,
+            cp_size=cp_size,
+            cp_rank=cp_rank,
+            debug_label=debug_label,
+        )
+    if gather_plan.total_logical_blocks == 0:
         return local_pool[:0]
-    return torch.cat(request_pools, dim=0)
+
+    from rtp_llm.models_py.modules.dsv4.cp import cp_gather_batched_request_pool_blocks
+
+    return cp_gather_batched_request_pool_blocks(
+        local_pool,
+        local_block_table,
+        gather_plan.logical_blocks_per_req,
+        cp_size,
+        cp_rank,
+        plan=gather_plan,
+        restore_logical_order=restore_logical_order,
+    )
 
 
 def cast_kv_for_cache_append(

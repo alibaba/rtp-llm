@@ -6,7 +6,8 @@ Two layers of testing:
    tested on CPU here. This is the bit that maps NCCL all_gather's
    rank-major output into logical block order.
 
-2. ``cp_gather_request_pool_blocks`` — wraps NCCL ``all_gather`` + the
+2. ``cp_gather_request_pool_blocks`` and its batched counterpart — wrap NCCL
+   ``all_gather`` + the
    interleave. We don't spin up a real distributed group here; instead we
    monkey-patch the ``all_gather`` symbol cp.py imported, then verify the
    per-rank packing + interleave + post-trim behavior end-to-end.
@@ -20,6 +21,7 @@ smoke under real CP=2/4 deployment.
 import importlib.util
 import sys
 import types
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
@@ -48,6 +50,9 @@ def _stub_distributed():
     stub.Group = _Group
     stub.all_gather = _stub_all_gather
     sys.modules[mod_name] = stub
+    profiler = types.ModuleType("rtp_llm.models_py.modules.dsv4._profiler")
+    profiler.record_function_range = lambda _name: nullcontext()
+    sys.modules[profiler.__name__] = profiler
     # Also stub the parent packages if not present.
     for p in (
         "rtp_llm",
@@ -304,6 +309,97 @@ def test_gather_request_rejects_bad_local_size():
     except ValueError:
         return
     raise AssertionError("expected ValueError for L mismatch")
+
+
+def test_gather_batched_request_pool_blocks_cp4_ragged():
+    cp_size = 4
+    cp_rank = 2
+    block_shape = (2,)
+    logical_per_req = (5, 0, 8, 3)
+    # ceil(P_b / 4) => [2, 0, 2, 1], packed contribution S=5 per rank.
+    rank_tables = [
+        torch.tensor([[1, 2], [0, 0], [3, 4], [5, 0]], dtype=torch.int32),
+        torch.tensor([[6, 7], [0, 0], [8, 9], [10, 0]], dtype=torch.int32),
+        torch.tensor([[11, 12], [0, 0], [13, 14], [15, 0]], dtype=torch.int32),
+        torch.tensor([[16, 17], [0, 0], [18, 19], [20, 0]], dtype=torch.int32),
+    ]
+    local_pool = torch.stack(
+        [torch.full(block_shape, i, dtype=torch.int32) for i in range(21)]
+    )
+    per_rank_packed = []
+    for table in rank_tables:
+        ids = torch.cat([table[0, :2], table[2, :2], table[3, :1]]).long()
+        per_rank_packed.append(local_pool.index_select(0, ids))
+    _patch_all_gather(per_rank_packed)
+
+    out = CP.cp_gather_batched_request_pool_blocks(
+        local_pool,
+        rank_tables[cp_rank],
+        logical_per_req,
+        cp_size,
+        cp_rank,
+    )
+    # Independent oracle: concatenate each request's logical page values.
+    expected_ids = []
+    for req, logical_pages in enumerate(logical_per_req):
+        for page in range(logical_pages):
+            owner = page % cp_size
+            col = page // cp_size
+            expected_ids.append(rank_tables[owner][req, col].item())
+    expected = torch.stack([local_pool[i] for i in expected_ids])
+    assert torch.equal(out, expected)
+
+
+def test_gather_batched_request_pool_blocks_uses_one_collective():
+    calls = 0
+    local_pool = torch.arange(12, dtype=torch.float32).view(6, 2)
+    table = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
+
+    def fake_all_gather(local, group=None):
+        nonlocal calls
+        calls += 1
+        return torch.cat([local, local], dim=0)
+
+    CP.all_gather = fake_all_gather
+    plan = CP.build_cp_batched_pool_gather_plan(table, (3, 4), cp_size=2, cp_rank=0)
+    CP.cp_gather_batched_request_pool_blocks(
+        local_pool,
+        table,
+        (3, 4),
+        cp_size=2,
+        cp_rank=0,
+        plan=plan,
+    )
+    assert calls == 1
+
+
+def test_gather_batched_plan_can_return_rank_major_for_fused_restore():
+    local_pool = torch.arange(12, dtype=torch.float32).view(6, 2)
+    table = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
+    plan = CP.build_cp_batched_pool_gather_plan(table, (3, 4), cp_size=2, cp_rank=0)
+    local_owned = local_pool.index_select(0, plan.packed_block_ids)
+    rank_major = torch.cat([local_owned, local_owned + 100], dim=0)
+    CP.all_gather = lambda local, group=None: rank_major
+
+    raw = CP.cp_gather_batched_request_pool_blocks(
+        local_pool,
+        table,
+        (3, 4),
+        cp_size=2,
+        cp_rank=0,
+        plan=plan,
+        restore_logical_order=False,
+    )
+    ordered = CP.cp_gather_batched_request_pool_blocks(
+        local_pool,
+        table,
+        (3, 4),
+        cp_size=2,
+        cp_rank=0,
+        plan=plan,
+    )
+    assert torch.equal(raw, rank_major)
+    assert torch.equal(ordered, rank_major.index_select(0, plan.restore_indices))
 
 
 if __name__ == "__main__":

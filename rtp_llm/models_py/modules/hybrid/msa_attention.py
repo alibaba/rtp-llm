@@ -49,6 +49,13 @@ import triton.language as tl
 # Fused CP paged write removes the unpack tensors plus mha_kv_write_cache
 # for cold/sharded v2 prefill. Set to 0 to fall back to the two-kernel path.
 _USE_FUSED_CP_PAGED_WRITE = os.environ.get("M3_MSA_FUSED_CP_PAGED_WRITE", "1") != "0"
+# Opt-in CP prompt-prefill path that builds a BF16 HND working set directly for
+# fmha_sm100 instead of materializing flat main-K/V scratch and then converting
+# it to pages. FP8_KV_CACHE controls the persistent cache dtype; this switch
+# only selects the production-safe direct-paged execution path.
+_USE_CP_DIRECT_PAGED_PREFILL = (
+    os.environ.get("M3_MSA_CP_DIRECT_PAGED_PREFILL", "0") == "1"
+)
 # Fused paged->scratch main-K/V gather (one pass instead of torch's
 # index -> cast -> index_put). Set M3_MSA_FUSED_KV_GATHER=0 for the torch path.
 _FUSED_KV_GATHER = os.environ.get("M3_MSA_FUSED_KV_GATHER", "1") != "0"
@@ -60,6 +67,7 @@ from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
+    build_cp_sharded_prefix_gather_plan,
     gather_cp_sharded_prefix_pool,
 )
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.mxfp8_linear import (
@@ -1251,6 +1259,7 @@ def _fused_cp_paged_write_kernel(
     HEAD_DIM: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     SCRATCH_SEQ_LEN: tl.constexpr,
+    SCRATCH_IS_PAGED: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_I: tl.constexpr,
 ):
@@ -1281,8 +1290,18 @@ def _fused_cp_paged_write_kernel(
                 mask=dmask,
                 other=0.0,
             )
-            tl.store(scratch_k_ptr + dst_slot * NK + h * HEAD_DIM + d, k, mask=dmask)
-            tl.store(scratch_v_ptr + dst_slot * NK + h * HEAD_DIM + d, v, mask=dmask)
+            if SCRATCH_IS_PAGED:
+                scratch_page = dst_slot // PAGE_SIZE
+                scratch_off = dst_slot - scratch_page * PAGE_SIZE
+                scratch_addr = (
+                    scratch_page * NUM_KV_HEADS * PAGE_SIZE * HEAD_DIM
+                    + h * PAGE_SIZE * HEAD_DIM
+                    + scratch_off * HEAD_DIM
+                )
+            else:
+                scratch_addr = dst_slot * NK + h * HEAD_DIM
+            tl.store(scratch_k_ptr + scratch_addr + d, k, mask=dmask)
+            tl.store(scratch_v_ptr + scratch_addr + d, v, mask=dmask)
             tl.store(
                 base_flat_ptr + paged_k + h * head_stride + d,
                 k,
@@ -1309,13 +1328,23 @@ def _fused_cp_paged_write_kernel(
         scratch_row = batch_idx * SCRATCH_SEQ_LEN + kv_len + page_offset
         clear = (page_offset < tail) & (scratch_row < (batch_idx + 1) * SCRATCH_SEQ_LEN)
         for h in tl.range(0, NUM_KV_HEADS):
+            if SCRATCH_IS_PAGED:
+                scratch_page = scratch_row // PAGE_SIZE
+                scratch_off = scratch_row - scratch_page * PAGE_SIZE
+                scratch_addr = (
+                    scratch_page * NUM_KV_HEADS * PAGE_SIZE * HEAD_DIM
+                    + h * PAGE_SIZE * HEAD_DIM
+                    + scratch_off * HEAD_DIM
+                )
+            else:
+                scratch_addr = scratch_row * NK + h * HEAD_DIM
             tl.store(
-                scratch_k_ptr + scratch_row * NK + h * HEAD_DIM + d,
+                scratch_k_ptr + scratch_addr + d,
                 0.0,
                 mask=dmask & clear,
             )
             tl.store(
-                scratch_v_ptr + scratch_row * NK + h * HEAD_DIM + d,
+                scratch_v_ptr + scratch_addr + d,
                 0.0,
                 mask=dmask & clear,
             )
@@ -1344,6 +1373,7 @@ def _fused_cp_paged_write(
     head_dim: int,
     page_size: int,
     token_count: Optional[int] = None,
+    scratch_is_paged: bool = False,
 ) -> None:
     """Unpad CP all-gather output and write scratch plus scheduler paged caches."""
     if token_count is None:
@@ -1376,9 +1406,166 @@ def _fused_cp_paged_write(
         HEAD_DIM=head_dim,
         PAGE_SIZE=page_size,
         SCRATCH_SEQ_LEN=scratch_seq_len,
+        SCRATCH_IS_PAGED=scratch_is_paged,
         BLOCK_D=triton.next_power_of_2(head_dim),
         BLOCK_I=triton.next_power_of_2(ni),
         num_warps=1,
+    )
+
+
+@triton.jit
+def _scatter_cp_prefix_pages_kernel(
+    main_pages_ptr,
+    idx_pages_ptr,
+    dst_pages_ptr,
+    src_pages_ptr,
+    k_pages_ptr,
+    v_pages_ptr,
+    idx_scratch_ptr,
+    PAGE_COUNT,
+    MAIN_PAGE_ELEMS: tl.constexpr,
+    IDX_PAGE_ELEMS: tl.constexpr,
+    COPY_BLOCK: tl.constexpr,
+    USE_SRC_PAGES: tl.constexpr,
+):
+    """Scatter gathered logical prefix pages into request-local page slots.
+
+    FP8 destinations copy uint8 payload bits exactly. BF16 destinations load
+    E4M3 values and let Triton convert them while scattering. The idx-K pages
+    remain BF16. One launch replaces K/V contiguous materialization, two
+    index_copy launches, and the per-request idx advanced-index writes.
+    """
+    logical_page = tl.program_id(0).to(tl.int64)
+    chunk = tl.program_id(1).to(tl.int64)
+    offsets = chunk * COPY_BLOCK + tl.arange(0, COPY_BLOCK).to(tl.int64)
+    page_valid = logical_page < PAGE_COUNT
+    dst_page = tl.load(dst_pages_ptr + logical_page).to(tl.int64)
+    if USE_SRC_PAGES:
+        src_page = tl.load(src_pages_ptr + logical_page).to(tl.int64)
+    else:
+        src_page = logical_page
+
+    src_main = src_page * (2 * MAIN_PAGE_ELEMS) + offsets
+    dst_main = dst_page * MAIN_PAGE_ELEMS + offsets
+    k = tl.load(main_pages_ptr + src_main)
+    v = tl.load(main_pages_ptr + src_main + MAIN_PAGE_ELEMS)
+    tl.store(k_pages_ptr + dst_main, k)
+    tl.store(v_pages_ptr + dst_main, v)
+
+    idx_valid = page_valid & (offsets < IDX_PAGE_ELEMS)
+    src_idx = src_page * IDX_PAGE_ELEMS + offsets
+    dst_idx = dst_page * IDX_PAGE_ELEMS + offsets
+    idx = tl.load(idx_pages_ptr + src_idx, mask=idx_valid, other=0.0)
+    tl.store(idx_scratch_ptr + dst_idx, idx, mask=idx_valid)
+
+
+def _scatter_cp_prefix_pages(
+    main_pages: torch.Tensor,
+    idx_pages: torch.Tensor,
+    dst_pages: torch.Tensor,
+    k_paged: torch.Tensor,
+    v_paged: torch.Tensor,
+    idx_scratch: torch.Tensor,
+    src_pages: Optional[torch.Tensor] = None,
+) -> None:
+    """Restore page-aligned FP8 storage into FP8 or BF16 HND working pages."""
+    page_count = int(dst_pages.numel())
+    if page_count == 0:
+        return
+    if main_pages.dtype != torch.float8_e4m3fn:
+        raise ValueError(f"prefix main pages must be E4M3, got {main_pages.dtype}")
+    if k_paged.dtype != v_paged.dtype or k_paged.dtype not in (
+        torch.float8_e4m3fn,
+        torch.bfloat16,
+    ):
+        raise ValueError(
+            "prefix main destination must be matching E4M3 or BF16 tensors: "
+            f"src={main_pages.dtype} K={k_paged.dtype} V={v_paged.dtype}"
+        )
+    if idx_pages.dtype != idx_scratch.dtype:
+        raise ValueError(
+            f"prefix idx dtype mismatch: src={idx_pages.dtype} dst={idx_scratch.dtype}"
+        )
+    if src_pages is None:
+        src_pages = dst_pages
+        use_src_pages = False
+    else:
+        if int(src_pages.numel()) != page_count:
+            raise ValueError(
+                f"prefix source page count {src_pages.numel()} != {page_count}"
+            )
+        use_src_pages = True
+    tensors = (
+        main_pages,
+        idx_pages,
+        dst_pages,
+        src_pages,
+        k_paged,
+        v_paged,
+        idx_scratch,
+    )
+    if not all(t.is_cuda for t in tensors):
+        raise ValueError("fused prefix-page scatter requires CUDA tensors")
+    if not all(
+        t.is_contiguous()
+        for t in (
+            main_pages,
+            idx_pages,
+            dst_pages,
+            src_pages,
+            k_paged,
+            v_paged,
+            idx_scratch,
+        )
+    ):
+        raise ValueError("fused prefix-page scatter requires contiguous page tensors")
+    if int(main_pages.shape[0]) < page_count or int(idx_pages.shape[0]) < page_count:
+        raise ValueError(
+            "prefix source has fewer pages than the logical restore: "
+            f"main={main_pages.shape[0]} idx={idx_pages.shape[0]} dst={page_count}"
+        )
+
+    main_page_elems = int(main_pages[0, 0].numel())
+    idx_page_elems = int(idx_pages[0].numel())
+    if (
+        int(k_paged[0].numel()) != main_page_elems
+        or int(v_paged[0].numel()) != main_page_elems
+    ):
+        raise ValueError("prefix main source and destination page shapes differ")
+    if int(idx_scratch.numel()) % int(k_paged.shape[0]) != 0:
+        raise ValueError("idx scratch cannot be addressed by the main page namespace")
+    if int(idx_scratch.numel()) // int(k_paged.shape[0]) != idx_page_elems:
+        raise ValueError("prefix idx source and destination page shapes differ")
+
+    copy_block = min(4096, triton.next_power_of_2(main_page_elems))
+    if main_page_elems < idx_page_elems or main_page_elems % copy_block != 0:
+        raise ValueError(
+            "fused prefix-page scatter requires the main page to cover idx and "
+            f"align to {copy_block} elements: main={main_page_elems} "
+            f"idx={idx_page_elems}"
+        )
+    grid = (
+        page_count,
+        triton.cdiv(max(main_page_elems, idx_page_elems), copy_block),
+    )
+    preserve_main_bits = k_paged.dtype == torch.float8_e4m3fn
+    main_arg = main_pages.view(torch.uint8) if preserve_main_bits else main_pages
+    k_arg = k_paged.view(torch.uint8) if preserve_main_bits else k_paged
+    v_arg = v_paged.view(torch.uint8) if preserve_main_bits else v_paged
+    _scatter_cp_prefix_pages_kernel[grid](
+        main_arg,
+        idx_pages,
+        dst_pages,
+        src_pages,
+        k_arg,
+        v_arg,
+        idx_scratch,
+        page_count,
+        MAIN_PAGE_ELEMS=main_page_elems,
+        IDX_PAGE_ELEMS=idx_page_elems,
+        COPY_BLOCK=copy_block,
+        USE_SRC_PAGES=use_src_pages,
+        num_warps=8,
     )
 
 
@@ -2166,6 +2353,7 @@ class MSAAttention(nn.Module):
         bsz: Optional[int] = None,
         max_kv: Optional[int] = None,
         max_slot: Optional[int] = None,
+        exact_cp_shape: bool = False,
     ) -> None:
         # Paged-only: main K/V and idx_K live in the cache-manager pool, so no
         # persistent side tensors are allocated here. This only tracks the
@@ -2177,13 +2365,22 @@ class MSAAttention(nn.Module):
                     "CP MSA gather scratch requires batch size and kv length"
                 )
             if (
-                self._scratch_slots > 0
+                not exact_cp_shape
+                and self._scratch_slots > 0
                 and self._scratch_batch_size >= int(bsz)
                 and self._scratch_seq_len >= int(max_kv)
             ):
                 return
-            target_bsz = max(int(bsz), self._scratch_batch_size, 1)
-            requested_seq_len = max(int(max_kv), self._scratch_seq_len, 1)
+            if exact_cp_shape:
+                # The direct-paged path owns no grow-only main-K/V scratch. Keep
+                # its logical page namespace at the current live shape so a
+                # previous high-batch request cannot cross-multiply with a
+                # later long-sequence request.
+                target_bsz = max(int(bsz), 1)
+                requested_seq_len = max(int(max_kv), 1)
+            else:
+                target_bsz = max(int(bsz), self._scratch_batch_size, 1)
+                requested_seq_len = max(int(max_kv), self._scratch_seq_len, 1)
             grow_granularity = max(int(self.page_size), 256)
             target_seq_len = (
                 (requested_seq_len + grow_granularity - 1)
@@ -2506,6 +2703,112 @@ class MSAAttention(nn.Module):
         self._scratch_v = scratch_v
         self._scratch_idx_k = idx_scratch
 
+    def _should_use_cp_direct_paged_prefill(self, kv_cache: LayerKVCache) -> bool:
+        """Return whether the production BF16 direct-paged path is supported."""
+        paged_base = self._paged_kv_base_view(kv_cache)
+        return bool(
+            _USE_CP_DIRECT_PAGED_PREFILL
+            and _USE_FUSED_CP_PAGED_WRITE
+            and self._kv_sharded
+            and paged_base is not None
+            and paged_base.dtype == torch.float8_e4m3fn
+            and self.disable_index_value
+            and self.num_idx_heads == self.kv_head_num
+            # Direct HND pages remove the BF16 main-K/V scratch, but the native
+            # sparse-attention partial workspace is still O(total_q) unless
+            # step3 chunking is enabled. Fail closed for production long context.
+            and os.environ.get("M3_SPARSE_ATTN_CHUNK_ENABLE", "0") == "1"
+        )
+
+    def _write_cp_suffix_to_bf16_working_pages(
+        self,
+        kv_cache: LayerKVCache,
+        packed: torch.Tensor,
+        unpad_indices: torch.Tensor,
+        write_slots: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        kv_lens: torch.Tensor,
+        nk: int,
+        ni: int,
+        token_count: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Write suffix K/V directly into transient BF16 HND working pages.
+
+        The same launch persists rank-owned suffix pages and fills the BF16
+        idx-K scratch. Main K/V never materialize in the process-wide BF16
+        flat scratch on this path.
+        """
+        base = self._paged_kv_base_view(kv_cache)
+        if base is None or base.dim() != 5:
+            raise RuntimeError(
+                "MSA paged main K/V requires a 5-D paged cache "
+                "[block,2,head,page,dim], got "
+                f"{None if base is None else tuple(base.shape)}"
+            )
+        if base.dtype != torch.float8_e4m3fn:
+            raise RuntimeError(
+                "MSA CP direct-paged prefill requires an E4M3 persistent KV pool, "
+                f"got {base.dtype}"
+            )
+        if packed.dtype != torch.bfloat16:
+            raise RuntimeError(
+                "MSA CP direct-paged prefill requires BF16 packed K/V/idx, "
+                f"got {packed.dtype}"
+            )
+        idx_view = self._idx_k_paged_view(kv_cache)
+        if idx_view.dtype != packed.dtype:
+            raise RuntimeError(
+                f"MSA paged idx_K dtype mismatch: paged={idx_view.dtype} vs "
+                f"act={packed.dtype}"
+            )
+        scratch_slots = int(self._scratch_slots)
+        if scratch_slots % int(self.page_size) != 0:
+            raise RuntimeError(
+                f"MSA CP scratch slots {scratch_slots} are not page-aligned "
+                f"to page_size={self.page_size}"
+            )
+        page_count = scratch_slots // int(self.page_size)
+        page_shape = (
+            page_count,
+            self.kv_head_num,
+            self.page_size,
+            self.head_dim,
+        )
+        # One allocation keeps K and V as individually contiguous HND tensors
+        # while avoiding two allocator lookups per sparse layer.  A leading
+        # pair dimension is required: base[:, 0] would be non-contiguous.
+        device = packed.device
+        kv_paged = torch.empty((2, *page_shape), dtype=torch.bfloat16, device=device)
+        k_paged = kv_paged[0]
+        v_paged = kv_paged[1]
+        idx_scratch = _IDX_K_SCRATCH.acquire(
+            scratch_slots, 1, self.idx_head_dim, packed.dtype, device
+        )
+        _fused_cp_paged_write(
+            packed,
+            unpad_indices,
+            write_slots,
+            slot_mapping,
+            k_paged,
+            v_paged,
+            idx_scratch,
+            base,
+            idx_view.reshape(-1, self.idx_head_dim),
+            kv_lens,
+            int(self._scratch_seq_len),
+            nk,
+            ni,
+            self.kv_head_num,
+            self.head_dim,
+            self.page_size,
+            token_count=token_count,
+            scratch_is_paged=True,
+        )
+        self._scratch_k = None
+        self._scratch_v = None
+        self._scratch_idx_k = idx_scratch
+        return k_paged, v_paged
+
     def _source_cp_from_gathered(
         self,
         kv_cache: LayerKVCache,
@@ -2808,6 +3111,7 @@ class MSAAttention(nn.Module):
         prefix_lengths: Any,
         req_to_token: torch.Tensor,
         attn_inputs: PyAttentionInputs,
+        gather_plan=None,
     ) -> None:
         """Restore cached prefix K/V/idx_K from page-RR owner ranks.
 
@@ -2837,6 +3141,7 @@ class MSAAttention(nn.Module):
             cp_size=self._cp_size,
             cp_rank=self._cp_rank,
             debug_label="msa-main-kv",
+            gather_plan=gather_plan,
         )
         idx_pages = gather_cp_sharded_prefix_pool(
             self._idx_k_paged_view(kv_cache),
@@ -2846,6 +3151,7 @@ class MSAAttention(nn.Module):
             cp_size=self._cp_size,
             cp_rank=self._cp_rank,
             debug_label="msa-idx-k",
+            gather_plan=gather_plan,
         )
 
         # Main pool is HND: [page,2,head,token,dim]. Convert to token-major
@@ -2871,6 +3177,111 @@ class MSAAttention(nn.Module):
             src = slice(token_offset, token_offset + prefix_len)
             self._scratch_k[dst] = prefix_k[src].to(self._scratch_k.dtype)
             self._scratch_v[dst] = prefix_v[src].to(self._scratch_v.dtype)
+            self._scratch_idx_k[dst, 0] = prefix_idx[src].to(self._scratch_idx_k.dtype)
+            token_offset += prefix_len
+
+    def _restore_cp_sharded_prefix_working_pages(
+        self,
+        kv_cache: LayerKVCache,
+        prefix_lengths: Any,
+        req_to_token: torch.Tensor,
+        attn_inputs: PyAttentionInputs,
+        k_paged: torch.Tensor,
+        v_paged: torch.Tensor,
+        dst_pages: Optional[torch.Tensor] = None,
+        gather_plan=None,
+    ) -> None:
+        """Restore cached page-RR prefixes into transient HND working pages."""
+        if not self._kv_sharded:
+            raise RuntimeError("direct prefix-page restore requires sharded CP KV")
+        if isinstance(prefix_lengths, torch.Tensor):
+            prefix_cpu = prefix_lengths.detach().cpu().to(torch.int64)
+        else:
+            prefix_cpu = torch.tensor(list(prefix_lengths), dtype=torch.int64)
+        if not bool((prefix_cpu > 0).any().item()):
+            return
+        if self._scratch_idx_k is None:
+            raise RuntimeError("MSA direct prefix restore requires idx-K scratch")
+
+        block_table = self._physical_block_table(attn_inputs)
+        main_pages = gather_cp_sharded_prefix_pool(
+            self._paged_kv_base_view(kv_cache),
+            block_table,
+            prefix_cpu,
+            page_size=self.page_size,
+            cp_size=self._cp_size,
+            cp_rank=self._cp_rank,
+            debug_label="msa-main-kv-fp8-pages",
+            gather_plan=gather_plan,
+            restore_logical_order=gather_plan is None,
+        )
+        idx_pages = gather_cp_sharded_prefix_pool(
+            self._idx_k_paged_view(kv_cache),
+            block_table,
+            prefix_cpu,
+            page_size=self.page_size,
+            cp_size=self._cp_size,
+            cp_rank=self._cp_rank,
+            debug_label="msa-idx-k-fp8-pages",
+            gather_plan=gather_plan,
+            restore_logical_order=gather_plan is None,
+        )
+
+        if dst_pages is None:
+            dst_page_parts = []
+            for batch_idx, prefix_len in enumerate(prefix_cpu.tolist()):
+                prefix_pages = int(prefix_len) // int(self.page_size)
+                if prefix_pages == 0:
+                    continue
+                dst_page_parts.append(
+                    req_to_token[batch_idx, : int(prefix_len) : self.page_size]
+                    .to(torch.long)
+                    .div(self.page_size, rounding_mode="floor")
+                )
+            dst_pages = torch.cat(dst_page_parts)
+        logical_page_count = int(dst_pages.numel())
+        expected_pages = (
+            int(main_pages.shape[0])
+            if gather_plan is None
+            else int(gather_plan.total_logical_blocks)
+        )
+        if logical_page_count != expected_pages:
+            raise RuntimeError(
+                f"MSA direct prefix page count mismatch: dst={dst_pages.numel()} "
+                f"logical={expected_pages} gathered={main_pages.shape[0]}"
+            )
+        # CUDA pages use one fused scatter for K, V, and idx-K. E4M3 destinations
+        # preserve raw bits; BF16 destinations convert the persistent E4M3 values
+        # while scattering, matching the legacy prefix dequantization contract.
+        if k_paged.is_cuda:
+            _scatter_cp_prefix_pages(
+                main_pages,
+                idx_pages,
+                dst_pages,
+                k_paged,
+                v_paged,
+                self._scratch_idx_k,
+                src_pages=(
+                    None if gather_plan is None else gather_plan.restore_indices
+                ),
+            )
+            return
+        else:
+            if gather_plan is not None:
+                restore = gather_plan.restore_indices.to(device=main_pages.device)
+                main_pages = main_pages.index_select(0, restore)
+                idx_pages = idx_pages.index_select(0, restore)
+            k_paged.index_copy_(0, dst_pages, main_pages[:, 0].to(k_paged.dtype))
+            v_paged.index_copy_(0, dst_pages, main_pages[:, 1].to(v_paged.dtype))
+
+        prefix_idx = idx_pages.reshape(-1, self.idx_head_dim)
+        token_offset = 0
+        for batch_idx, prefix_len in enumerate(prefix_cpu.tolist()):
+            prefix_len = int(prefix_len)
+            if prefix_len == 0:
+                continue
+            dst = req_to_token[batch_idx, :prefix_len].to(torch.long)
+            src = slice(token_offset, token_offset + prefix_len)
             self._scratch_idx_k[dst, 0] = prefix_idx[src].to(self._scratch_idx_k.dtype)
             token_offset += prefix_len
 
@@ -2952,6 +3363,7 @@ class MSAAttention(nn.Module):
 
         index_score_chunk_enabled = m3_index_score_chunk_enabled(local_tokens)
         index_score_host_metadata = None
+        direct_paged_candidate = self._should_use_cp_direct_paged_prefill(kv_cache)
 
         cache = MSAAttention._cp_shared_meta
         if (
@@ -2982,6 +3394,14 @@ class MSAAttention(nn.Module):
             index_score_plan = cache["index_score_plan"]
             index_score_host_metadata = cache["index_score_host_metadata"]
             sparse_attn_plan = cache["sparse_attn_plan"]
+            cached_direct_paged_candidate = cache["direct_paged_candidate"]
+            if cached_direct_paged_candidate != direct_paged_candidate:
+                raise RuntimeError(
+                    "MSA CP direct-paged capability changed across layers in one "
+                    f"forward: cached={cached_direct_paged_candidate} "
+                    f"current={direct_paged_candidate} layer={self.layer_idx}"
+                )
+            use_direct_paged = cache["use_direct_paged"]
             need_meta = False
         else:
             chunk_dev = cp_info.prefill_cp_chunk_lengths.detach().to(
@@ -3139,6 +3559,24 @@ class MSAAttention(nn.Module):
                 )
             # step3 sparse-attention plan (fmha): GQA num_q_heads/num_kv_heads,
             # kv_block_num=topk. Same per-forward reuse as index_score_plan.
+            trtllm_workspace = self._maybe_trtllm_workspace(device)
+            use_direct_paged = bool(
+                direct_paged_candidate
+                and m3_fmha_prefill_enabled(
+                    workspace=trtllm_workspace,
+                    # The plan is constructed immediately below. The helper only
+                    # tests non-None here; all other native-FMHA prerequisites are
+                    # already known and must select the plan's KV dtype up front.
+                    sparse_attn_plan=True,
+                    num_idx_heads=self.num_idx_heads,
+                    num_kv_heads=self.kv_head_num,
+                    disable_index_value=self.disable_index_value,
+                    has_idx_sink=False,
+                    has_sink=False,
+                    max_seqlen_k=max_seqlen_k,
+                    total_q=local_tokens,
+                )
+            )
             sparse_attn_plan = build_sparse_attn_plan(
                 cu_seqlens,
                 seq_lens_i32,
@@ -3147,6 +3585,7 @@ class MSAAttention(nn.Module):
                 self.kv_head_num,
                 self.block_size,
                 self.topk_blocks,
+                use_fp8_kvcache=False,
             )
 
             MSAAttention._cp_shared_meta = {
@@ -3175,9 +3614,18 @@ class MSAAttention(nn.Module):
                 "index_score_plan": index_score_plan,
                 "index_score_host_metadata": index_score_host_metadata,
                 "sparse_attn_plan": sparse_attn_plan,
+                "direct_paged_candidate": direct_paged_candidate,
+                "use_direct_paged": use_direct_paged,
             }
 
-        self._ensure_gather_scratch(kv_cache, device, qkv.dtype, bsz=bsz, max_kv=max_kv)
+        self._ensure_gather_scratch(
+            kv_cache,
+            device,
+            qkv.dtype,
+            bsz=bsz,
+            max_kv=max_kv,
+            exact_cp_shape=use_direct_paged,
+        )
         # Only reuse addressing when this layer also reused CP metadata. When a
         # new request rebuilds metadata, the entry-local ``cache`` still points
         # at the previous request, so its addr must be ignored.
@@ -3193,6 +3641,8 @@ class MSAAttention(nn.Module):
             slot_ids = addr_cache["slot_ids"]
             slot_mapping = addr_cache["slot_mapping"]
             kv_page_indices = addr_cache["kv_page_indices"]
+            prefix_dst_pages = addr_cache["prefix_dst_pages"]
+            prefix_gather_plans = addr_cache["prefix_gather_plans"]
         else:
             pos_range = torch.arange(max_kv, device=device, dtype=torch.int32)
             cache_row_offsets = torch.arange(bsz, device=device, dtype=torch.int32)[
@@ -3219,6 +3669,19 @@ class MSAAttention(nn.Module):
             kv_page_indices = build_kv_page_indices(
                 req_to_token_segments, seq_lens_i32, self.block_size
             )
+            if use_direct_paged and prefix_sum > 0:
+                prefix_dst_pages = torch.cat(
+                    [
+                        req_to_token[b, : prefix_len : self.page_size]
+                        .to(torch.long)
+                        .div(self.page_size, rounding_mode="floor")
+                        for b, prefix_len in enumerate(prefix_cpu_list)
+                        if prefix_len > 0
+                    ]
+                )
+            else:
+                prefix_dst_pages = torch.empty(0, dtype=torch.long, device=device)
+            prefix_gather_plans = {}
             if MSAAttention._cp_shared_meta is not None:
                 MSAAttention._cp_shared_meta["addr"] = {
                     "scratch_seq_len": int(self._scratch_seq_len),
@@ -3229,22 +3692,51 @@ class MSAAttention(nn.Module):
                     "slot_ids": slot_ids,
                     "slot_mapping": slot_mapping,
                     "kv_page_indices": kv_page_indices,
+                    "prefix_dst_pages": prefix_dst_pages,
+                    "prefix_gather_plans": prefix_gather_plans,
                 }
 
+        if self._kv_sharded and prefix_sum > 0:
+            prefix_block_table = self._physical_block_table(attn_inputs)
+            prefix_plan_key = (
+                prefix_block_table.device,
+                int(prefix_block_table.data_ptr()),
+                tuple(prefix_block_table.shape),
+            )
+            prefix_gather_plan = prefix_gather_plans.get(prefix_plan_key)
+            if prefix_gather_plan is None:
+                prefix_gather_plan = build_cp_sharded_prefix_gather_plan(
+                    prefix_block_table,
+                    torch.tensor(prefix_cpu_list, dtype=torch.int64),
+                    page_size=self.page_size,
+                    cp_size=self._cp_size,
+                    cp_rank=self._cp_rank,
+                    debug_label="msa-prefix",
+                )
+                prefix_gather_plans[prefix_plan_key] = prefix_gather_plan
+        else:
+            prefix_gather_plan = None
+
         trtllm_workspace = self._maybe_trtllm_workspace(device)
+        fmha_prefill_enabled = m3_fmha_prefill_enabled(
+            workspace=trtllm_workspace,
+            sparse_attn_plan=sparse_attn_plan,
+            num_idx_heads=self.num_idx_heads,
+            num_kv_heads=self.kv_head_num,
+            disable_index_value=self.disable_index_value,
+            has_idx_sink=False,
+            has_sink=False,
+            max_seqlen_k=max_seqlen_k,
+            total_q=local_tokens,
+        )
+        if use_direct_paged and not fmha_prefill_enabled:
+            raise RuntimeError(
+                "MSA CP direct-paged plan was built but native FMHA became unavailable "
+                f"before execution at layer={self.layer_idx}"
+            )
         if index_score_chunk_enabled:
             assert index_score_host_metadata is not None
-            if m3_fmha_prefill_enabled(
-                workspace=trtllm_workspace,
-                sparse_attn_plan=sparse_attn_plan,
-                num_idx_heads=self.num_idx_heads,
-                num_kv_heads=self.kv_head_num,
-                disable_index_value=self.disable_index_value,
-                has_idx_sink=False,
-                has_sink=False,
-                max_seqlen_k=max_seqlen_k,
-                total_q=local_tokens,
-            ):
+            if fmha_prefill_enabled:
                 from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.topk_bt_fused import (
                     prepare_fmha_index_score_chunks,
                 )
@@ -3321,7 +3813,19 @@ class MSAAttention(nn.Module):
             dummy_iq = torch.zeros_like(idx_q[:, :1, :])
             self._apply_rope(idx_q, dummy_iq, local_positions)
 
+        if use_direct_paged:
+            # q is now an independent contiguous tensor and the packed all-gather
+            # has already been enqueued. Drop the large fused QKV allocation before
+            # index scoring and sparse attention instead of retaining it through
+            # output projection. CUDA stream ordering keeps the queued pack safe.
+            del qkv
+            if not can_fuse:
+                del k_fb, v_fb
+
         token_count = token_count_py
+
+        working_k_pages = None
+        working_v_pages = None
 
         # Cold/sharded CP prefill has no missing prefix tokens in the gathered
         # payload. The fused paged writer unpads directly into scratch and the
@@ -3330,7 +3834,21 @@ class MSAAttention(nn.Module):
         used_fused_cp_paged_write = _USE_FUSED_CP_PAGED_WRITE and (
             self._kv_sharded or prefix_sum == 0
         )
-        if used_fused_cp_paged_write:
+        if use_direct_paged:
+            working_k_pages, working_v_pages = (
+                self._write_cp_suffix_to_bf16_working_pages(
+                    kv_cache,
+                    all_packed,
+                    unpad_indices,
+                    write_slots,
+                    slot_mapping,
+                    kv_lens_i32,
+                    nk,
+                    ni,
+                    token_count,
+                )
+            )
+        elif used_fused_cp_paged_write:
             self._source_cp_from_packed(
                 kv_cache,
                 all_packed,
@@ -3398,10 +3916,27 @@ class MSAAttention(nn.Module):
                     device,
                     slot_mapping=slot_mapping,
                 )
-        self._restore_cp_sharded_prefix_scratch(
-            kv_cache, prefix_cpu_list, req_to_token, attn_inputs
-        )
-        if not used_fused_cp_paged_write:
+        if use_direct_paged:
+            self._restore_cp_sharded_prefix_working_pages(
+                kv_cache,
+                prefix_cpu_list,
+                req_to_token,
+                attn_inputs,
+                working_k_pages,
+                working_v_pages,
+                prefix_dst_pages,
+                prefix_gather_plan,
+            )
+            del all_packed, packed_kv
+        else:
+            self._restore_cp_sharded_prefix_scratch(
+                kv_cache,
+                prefix_cpu_list,
+                req_to_token,
+                attn_inputs,
+                prefix_gather_plan,
+            )
+        if not used_fused_cp_paged_write and not use_direct_paged:
             self._zero_scratch_padding_tail(kv_lens_cpu_list, bsz)
 
         if (
@@ -3418,8 +3953,8 @@ class MSAAttention(nn.Module):
 
         _idx_o, o = minimax_sparse_prefill(
             q=q,
-            k_cache=self._scratch_k,
-            v_cache=self._scratch_v,
+            k_cache=None if use_direct_paged else self._scratch_k,
+            v_cache=None if use_direct_paged else self._scratch_v,
             sink=None,
             idx_q=idx_q,
             idx_k_cache=self._scratch_idx_k,
@@ -3443,6 +3978,8 @@ class MSAAttention(nn.Module):
             index_score_plan=index_score_plan,
             sparse_attn_plan=sparse_attn_plan,
             kv_indices=kv_page_indices,
+            k_paged_cache=working_k_pages,
+            v_paged_cache=working_v_pages,
         )
 
         return self.o_proj(o.reshape(local_tokens, -1).contiguous())
