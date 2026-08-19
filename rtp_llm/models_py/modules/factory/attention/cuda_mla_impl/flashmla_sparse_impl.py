@@ -78,6 +78,15 @@ def _is_multi_token_decode(attn_inputs: PyAttentionInputs) -> bool:
     )
 
 
+def _allocate_prefill_fused_kv(
+    total_kv_len: int,
+    width: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Allocate the layer-local BF16 gather destination after Indexer."""
+    return torch.empty((total_kv_len, width), dtype=torch.bfloat16, device=device)
+
+
 # ---------------------------------------------------------------------------
 # BF16 sparse MLA operator
 # ---------------------------------------------------------------------------
@@ -189,12 +198,13 @@ class SparseMlaFp8DecodeParams(object):
 
 @dataclass
 class _GatherWorkspace:
-    """Transient buffers for the gather + sparse_fwd prefill path.
+    """Metadata for the gather + sparse_fwd prefill path.
 
-    Allocated per-forward in plan(); reused across all layers in that forward.
+    plan() only records the layout. The large BF16 fused-KV tensor is allocated
+    in forward(), after the indexer logits have gone out of scope, so the CUDA
+    caching allocator can reuse that block instead of keeping both active.
     """
 
-    fused_kv: torch.Tensor  # [total_kv_len, kv_lora_rank + rope], bf16
     workspace_starts: torch.Tensor  # [batch_size], int32, indptr[:-1]
     seq_lens: torch.Tensor  # [batch_size], int32, indptr diff
     total_kv_len: int
@@ -277,7 +287,7 @@ class SparseMlaFp8Op(SparseMlaOp):
         self._gather = self._build_gather_workspace() if gather_enabled else None
 
     def _build_gather_workspace(self) -> Optional[_GatherWorkspace]:
-        """Slice the prefill indptr and allocate the BF16 workspace.
+        """Slice the prefill indptr and record the gather layout.
 
         prefill_ragged_kv_len_indptr_d = [0, kv_len_0, kv_len_0+kv_len_1, ...].
         The buffer can be longer than the actual batch, hence the [:batch+1] slice.
@@ -290,11 +300,6 @@ class SparseMlaFp8Op(SparseMlaOp):
         if total_kv_len == 0:
             return None
         return _GatherWorkspace(
-            fused_kv=torch.empty(
-                (total_kv_len, self.kv_lora_rank + self.qk_rope_head_dim),
-                dtype=torch.bfloat16,
-                device=self.block_table.device,
-            ),
             workspace_starts=indptr[:batch_size],
             seq_lens=indptr[1:] - indptr[:batch_size],
             total_kv_len=total_kv_len,
@@ -327,6 +332,14 @@ class SparseMlaFp8Op(SparseMlaOp):
             and self.block_table is not None
         )
 
+        # Layer-local lifetime lets the caching allocator reuse indexer logits
+        # storage. No synchronize/empty_cache is needed (or desirable).
+        fused_kv = _allocate_prefill_fused_kv(
+            ws.total_kv_len,
+            self.kv_lora_rank + self.qk_rope_head_dim,
+            self.block_table.device,
+        )
+
         # Cache as uint8, drop head dim if present → [num_blocks, block_size, 656]
         src = _as_uint8(kv_cache_fp8)
         if src.ndim == 4:
@@ -335,7 +348,7 @@ class SparseMlaFp8Op(SparseMlaOp):
         # FP8 paged → BF16 contiguous workspace
         rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache_v2(
             src,
-            ws.fused_kv,
+            fused_kv,
             self.block_table.to(torch.int32),
             ws.seq_lens,
             ws.workspace_starts,
@@ -352,7 +365,7 @@ class SparseMlaFp8Op(SparseMlaOp):
 
         out, _, _ = flash_mla_sparse_fwd(
             q,
-            ws.fused_kv.unsqueeze(1),  # [total_kv_len, 1, dim]
+            fused_kv.unsqueeze(1),  # [total_kv_len, 1, dim]
             global_indices,
             self.scale,
             d_v=self.kv_lora_rank,

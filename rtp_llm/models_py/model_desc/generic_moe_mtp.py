@@ -273,6 +273,13 @@ class GenericMoeMTPModel(GptModelBase):
         cat_hidden_states = torch.cat([e_norm, h_norm], -1)
         hidden_states = self.fc(cat_hidden_states)
 
+        # These front-end activations are not consumed by the decoder layer.
+        # Without an explicit del, Python keeps their independent storages live
+        # until the whole MTP forward returns, overlapping every Indexer/SparseMLA
+        # layer. CUDA allocator stream tracking makes this release asynchronous
+        # and safe; do not synchronize or call empty_cache on the hot path.
+        del inputs_embeds, e_norm, h_norm, cat_hidden_states
+
         residual = torch.zeros_like(hidden_states)
         reuse_topk_indices = (
             self._mtp_indexer_share_enabled
