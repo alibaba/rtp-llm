@@ -8,6 +8,7 @@ from rtp_llm.models_py.triton_kernels.kimi_kda.fused_recurrent import (
 from rtp_llm.models_py.triton_kernels.kimi_kda.short_conv import (
     kimi_kda_short_conv_decode,
     kimi_kda_short_conv_paged_decode,
+    kimi_kda_short_conv_paged_target_verify,
 )
 
 
@@ -26,6 +27,86 @@ class KimiKDAShortConvPagedDecodeTest(unittest.TestCase):
             device="cuda",
         )
         return block_ids.reshape(batch, pages)
+
+    def test_target_verify_matches_sequential_checkpoints_at_boundaries(self) -> None:
+        batch = 4
+        steps = 3
+        projection_size = 128
+        page_size = 8
+        pages = 6
+        block_map = self._block_map(batch, pages)
+        block_count = batch * pages + 1
+        lengths_plus_one = torch.tensor(
+            [2, 8, 9, 16], dtype=torch.int32, device="cuda"
+        )
+        q = torch.randn(
+            batch, steps, projection_size, dtype=torch.bfloat16, device="cuda"
+        )
+        k = torch.randn_like(q)
+        v = torch.randn_like(q)
+        weight = torch.randn(
+            3 * projection_size, 4, dtype=torch.float32, device="cuda"
+        )
+        initial_cache = torch.randn(
+            block_count,
+            3,
+            3 * projection_size,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+
+        fused_cache = initial_cache.clone()
+        fused_output = kimi_kda_short_conv_paged_target_verify(
+            q,
+            k,
+            v,
+            weight,
+            fused_cache,
+            block_map,
+            lengths_plus_one,
+            page_size,
+        )
+
+        sequential_cache = initial_cache.clone()
+        sequential_steps: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+        batch_idx = torch.arange(batch, device="cuda")
+        reserve_base = torch.div(
+            lengths_plus_one - 1, page_size, rounding_mode="floor"
+        ).to(torch.long)
+        for step in range(steps):
+            reserve_col = reserve_base + step
+            logical_col = torch.div(
+                lengths_plus_one + step - 1,
+                page_size,
+                rounding_mode="floor",
+            ).to(torch.long)
+            dest_ids = block_map[batch_idx, reserve_col].to(torch.long)
+            if step > 0:
+                src_ids = block_map[batch_idx, reserve_col - 1].to(torch.long)
+                sequential_cache[dest_ids] = sequential_cache[src_ids]
+            step_map = block_map.clone()
+            step_map[batch_idx, logical_col] = dest_ids.to(step_map.dtype)
+            sequential_steps.append(
+                kimi_kda_short_conv_paged_decode(
+                    q[:, step, :].contiguous(),
+                    k[:, step, :].contiguous(),
+                    v[:, step, :].contiguous(),
+                    weight,
+                    sequential_cache,
+                    step_map,
+                    lengths_plus_one + step,
+                    page_size,
+                )
+            )
+
+        sequential_output = tuple(
+            torch.stack([item[plane] for item in sequential_steps], dim=1)
+            for plane in range(3)
+        )
+        torch.testing.assert_close(
+            torch.stack(fused_output), torch.stack(sequential_output), rtol=0, atol=0
+        )
+        torch.testing.assert_close(fused_cache, sequential_cache, rtol=0, atol=0)
 
     @staticmethod
     def _reference(

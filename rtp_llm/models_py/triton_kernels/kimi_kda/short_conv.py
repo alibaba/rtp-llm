@@ -583,23 +583,28 @@ def _kimi_kda_short_conv_paged_target_verify_kernel(
     packed_d = i_p * D + o_d
 
     sequence_length_plus_one = tl.load(sequence_lengths_plus_one + i_b).to(tl.int64)
-    reserve_page_raw = (sequence_length_plus_one - 2) // seq_size_per_block
-    reserve_page_valid = (
+    read_page_raw = (sequence_length_plus_one - 2) // seq_size_per_block
+    read_page_valid = (
         (sequence_length_plus_one > 1)
-        & (reserve_page_raw >= 0)
-        & (reserve_page_raw < max_block_count)
+        & (read_page_raw >= 0)
+        & (read_page_raw < max_block_count)
     )
-    reserve_page = tl.where(reserve_page_valid, reserve_page_raw, 0)
+    read_page = tl.where(read_page_valid, read_page_raw, 0)
     read_block_id = tl.load(
-        block_map + i_b * stride_bm_b + reserve_page * stride_bm_page,
-        mask=reserve_page_valid,
+        block_map + i_b * stride_bm_b + read_page * stride_bm_page,
+        mask=read_page_valid,
         other=0,
     ).to(tl.int64)
     read_valid = (
-        reserve_page_valid
+        read_page_valid
         & (read_block_id > 0)
         & (read_block_id < physical_block_count)
     )
+    # Target verification reserves one physical page per speculative position,
+    # starting at the ordinary one-token write page.  Keep this distinct from
+    # the source page: they differ exactly when verification crosses a page
+    # boundary.
+    write_page_base_raw = (sequence_length_plus_one - 1) // seq_size_per_block
     b_weight = tl.load(
         weight + packed_d[:, None] * stride_w_d + o_w[None, :] * stride_w_w,
         mask=m_d[:, None] & m_w[None, :],
@@ -718,7 +723,7 @@ def _kimi_kda_short_conv_paged_target_verify_kernel(
             state_q + state_k + state_v,
         )
 
-        write_page_raw = reserve_page_raw + i_t
+        write_page_raw = write_page_base_raw + i_t
         write_page_valid = (
             (write_page_raw >= 0) & (write_page_raw < max_block_count)
         )
