@@ -33,7 +33,7 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "The user wants a description of the provided image.\n\n1.  **Identify the main subjects:** A woman and a dog.\n2.  **Identify the setting:** A sandy beach with the ocean in the background. The lighting suggests late afternoon or sunset (golden hour).\n3.  **Describe the action:** The dog is sitting and giving its paw to the woman. The woman is holding the paw. They are looking at each other and smiling.\n4.  **",
+                            "content": "The user wants a description of the provided image.\n\n1.  **Identify the main subjects:** A woman and a dog.\n2.  **Identify the setting:** A sandy beach with the ocean in the background. The lighting suggests late afternoon or sunset (golden hour).\n3.  **Describe the action:** The woman is sitting on the sand. The dog is sitting opposite her. They are interacting, specifically doing a \"high five\" or \"shake\" trick. The",
                             "partial": false
                         },
                         "finish_reason": "length"
