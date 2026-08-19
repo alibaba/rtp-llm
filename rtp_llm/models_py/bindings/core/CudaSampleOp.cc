@@ -13,7 +13,6 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/sampling.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
-#include "3rdparty/flashinfer/flashinfer.h"
 #include <cstddef>
 #include <random>
 #include <memory>
@@ -486,19 +485,6 @@ torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
     return token_ids;
 }
 
-void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
-    auto stream = at::cuda::getCurrentCUDAStream().stream();
-    chain_speculative_sampling(params.draft_probs_d,
-                               params.draft_token_ids_d,
-                               params.uniform_samples_d,
-                               params.target_probs_d,
-                               params.output_token_ids_d,
-                               params.output_accepted_token_num_d,
-                               params.output_emitted_token_num_d,
-                               true,
-                               int64_t(stream));
-}
-
 void rejectionSampling(const RejectionSamplingParams& params) {
     auto config = validateRejectionSamplingParams(params);
     auto stream = at::cuda::getCurrentCUDAStream().stream();
@@ -822,17 +808,6 @@ torch::Tensor sampleFromProbs(const torch::Tensor&) {
 
 }  // namespace rtp_llm
 
-// Forward-declare in global namespace (matches rtp_llm/models_py/bindings/rocm/speculative_sampling/sampling.cu)
-void chain_speculative_sampling(at::Tensor draft_probs,
-                                at::Tensor draft_token_ids,
-                                at::Tensor uniform_samples,
-                                at::Tensor target_probs,
-                                at::Tensor output_token_ids,
-                                at::Tensor output_accepted_token_num,
-                                at::Tensor output_emitted_draft_token_num,
-                                bool       deterministic,
-                                int64_t    hip_stream);
-
 // NOTE: intentionally at global scope (not inside namespace rtp_llm) because the
 // ROCm kernel in rtp_llm/models_py/bindings/rocm/speculative_sampling/sampling.cu
 // is also defined at global scope; the call site below uses ::invokeRejectionSampling.
@@ -853,19 +828,6 @@ hipError_t invokeRejectionSampling(DType*      draft_probs,
                                    bool        draft_probs_point_mass);
 
 namespace rtp_llm {
-
-void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
-    auto stream = at::hip::getCurrentHIPStream().stream();
-    ::chain_speculative_sampling(params.draft_probs_d,
-                                 params.draft_token_ids_d,
-                                 params.uniform_samples_d,
-                                 params.target_probs_d,
-                                 params.output_token_ids_d,
-                                 params.output_accepted_token_num_d,
-                                 params.output_emitted_token_num_d,
-                                 true,
-                                 int64_t(stream));
-}
 
 void rejectionSampling(const RejectionSamplingParams& params) {
     auto config = validateRejectionSamplingParams(params);

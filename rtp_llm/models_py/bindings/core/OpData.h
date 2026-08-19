@@ -342,16 +342,6 @@ struct AllGatherParams {
     bool                              overlapped = false;
 };
 
-struct SpeculativeSamplingParams {
-    torch::Tensor draft_probs_d;
-    torch::Tensor draft_token_ids_d;
-    torch::Tensor uniform_samples_d;
-    torch::Tensor target_probs_d;
-    torch::Tensor output_token_ids_d;
-    torch::Tensor output_accepted_token_num_d;
-    torch::Tensor output_emitted_token_num_d;
-};
-
 struct RejectionSamplingParams {
     torch::Tensor draft_probs_d;
     torch::Tensor draft_token_ids_d;

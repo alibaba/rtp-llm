@@ -42,7 +42,6 @@ namespace rtp_llm {
 GreedyOutput     sampleGreedy(const GreedyParams& params);
 torch::Tensor    sampleFromProbs(const torch::Tensor& probabilities);
 BeamSearchOutput sampleBeamSearch(BeamSearchParams params);
-void             chainSpeculativeSampling(const SpeculativeSamplingParams& params);
 void             rejectionSampling(const RejectionSamplingParams& params);
 void             mappingDraft2Target(const MappingDraft2TargetParams& params);
 void             multiMergeCopy(const MultiMergeCopyParams& params);
@@ -599,10 +598,6 @@ torch::Tensor execSampleFromProbs(const torch::Tensor& probabilities) {
 
 BeamSearchOutput execSampleBeamSearch(BeamSearchParams params) {
     return sampleBeamSearch(std::move(params));
-}
-
-void execChainSpeculativeSampling(const SpeculativeSamplingParams& params) {
-    chainSpeculativeSampling(params);
 }
 
 void execRejectionSampling(const RejectionSamplingParams& params) {

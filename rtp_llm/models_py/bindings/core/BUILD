@@ -300,7 +300,6 @@ cc_library(
         "@//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
             "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
-            "//3rdparty/flashinfer:flashinfer",
         ],
         "//conditions:default": [],
     }),
@@ -332,7 +331,6 @@ cc_library(
             "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
             "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
             "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
-            "//3rdparty/flashinfer:flashinfer",
         ],
         "//conditions:default": [],
     }),
