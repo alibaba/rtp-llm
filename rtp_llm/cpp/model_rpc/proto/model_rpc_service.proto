@@ -146,6 +146,9 @@ message MultimodalInputPB {
 
 message MultimodalInputsPB {
     repeated MultimodalInputPB multimodal_inputs = 1;
+    // Globally unique RTP-LLM request id. Propagated to the VIT worker for
+    // access logging and downstream data-inspection correlation.
+    int64 request_id = 2;
 }
 
 message MultimodalOutputPB {

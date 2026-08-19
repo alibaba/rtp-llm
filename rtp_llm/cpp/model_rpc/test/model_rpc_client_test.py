@@ -242,6 +242,17 @@ class ModelRpcClientTest(TestCase):
             asdict(output.generate_outputs[0].aux_info),
         )
 
+    def test_multimodal_rpc_request_keeps_request_id(self):
+        input_pb = GenerateInputPB(request_id=987654321)
+        input_pb.multimodal_inputs.add().multimodal_url = "image://test"
+
+        mm_inputs_pb = _make_multimodal_inputs_pb(input_pb)
+
+        self.assertEqual(mm_inputs_pb.request_id, 987654321)
+        self.assertEqual(
+            mm_inputs_pb.multimodal_inputs[0].multimodal_url, "image://test"
+        )
+
     @unittest.skip("need fix")
     def test_generate_stream(self):
         client = FakeModelRpcClient()
