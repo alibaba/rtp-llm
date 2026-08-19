@@ -20,7 +20,7 @@
 
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAEvent.h>
+#include <ATen/cuda/CUDAEvent.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
 #include "ATen/ops/cat.h"
@@ -232,7 +232,7 @@ void waitForCurrentStream(const at::cuda::CUDAStream& copy_stream) {
     if (current_stream.stream() == copy_stream.stream()) {
         return;
     }
-    c10::cuda::CUDAEvent ready;
+    at::cuda::CUDAEvent ready;
     ready.record(current_stream);
     ready.block(copy_stream);
 }
