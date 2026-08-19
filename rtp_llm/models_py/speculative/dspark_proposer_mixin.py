@@ -4,35 +4,34 @@ DSpark evaluates one runtime-fixed query block ``[anchor, noise, ...]`` per
 round and corrects the resulting base logits left-to-right with a low-rank
 Markov bias.  :class:`DSparkProposerMixin` owns everything identical across model
 families — the engine input contract, query-block geometry, committed-row
-mapping and the greedy Markov sampling tail — as an add-on base class::
+mapping and normalized proposal-hidden production — as an add-on base class::
 
     class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model): ...
 
 following the same shape as ``QWen_VL(QWen, MultiModalMixin)``.  A model
 family implements only the hooks that genuinely differ per model: feature
-projection, KV injection + non-causal query-block attention, and the logits
-head.
+projection, KV injection + non-causal query-block attention, and proposal
+hidden-state reduction/normalization.
 
 Engine input contract — two standard-slot calls per round (all token rows
 are request-major):
 
-* **Commit** (``dspark_call_phase=COMMIT``, incremental-prefill shape): ``input_ids`` = the committed
+* **Commit** (``forward_commit``, incremental-prefill shape): ``input_ids`` = the committed
   tokens, ``attention_inputs.input_lengths`` = newly committed rows per
   request, ``attention_inputs.prefix_lengths`` = where they start,
   ``input_hiddens`` = the matching target feature rows, flattenable to
   ``[rows, aux_feature_dim]`` (a zero-copy view of the shared MTP hidden
   buffer).
-* **Propose** (``dspark_call_phase=PROPOSE``, fixed-width block): ``input_ids`` = ``[B * width]`` query
+* **Propose** (``forward_propose``, fixed-width block): ``input_ids`` = ``[B * width]`` query
   block (column zero is the anchor; the remaining columns are forced to
   the configured noise token here), ``attention_inputs.prefix_lengths`` =
   committed sequence length immediately before the query block. No
   feature input — the block reads the committed feature KV.
 
-The greedy sampling tail reproduces the reference proposer numerics exactly:
-``softmax(base + bias)`` then ``argmax`` per step, the sampled token feeding
-the next step's Markov bias.  Stochastic (Gumbel) draft sampling is
-intentionally not implemented yet; it extends the tail without changing the
-hook surface.
+The Python model stops at normalized hidden-state production. The C++ model
+wrapper applies the regular lm_head, then the speculative executor applies the
+sequential Markov correction and samples with the framework's high-performance
+sampler using each request's real sampling parameters.
 """
 
 from __future__ import annotations
@@ -40,47 +39,9 @@ from __future__ import annotations
 from typing import Any, Optional, Tuple
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import primary_attention_inputs
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
-
-
-class DSparkMarkovHead(nn.Module):
-    """Low-rank Markov transition head: ``bias(prev) = w2 @ w1[prev]``.
-
-    Weights stay replicated in checkpoint dtype — the head runs a serial
-    per-step loop, so TP-sharding it would add an all-reduce per step.
-    """
-
-    def __init__(
-        self,
-        markov_w1: torch.Tensor,
-        markov_w2: torch.Tensor,
-        *,
-        vocab_size: int,
-        rank: int,
-    ):
-        super().__init__()
-        if tuple(markov_w1.shape) != (int(vocab_size), int(rank)):
-            raise ValueError(
-                f"unexpected DSpark markov_w1 shape: {tuple(markov_w1.shape)}, "
-                f"expected [{vocab_size},{rank}]"
-            )
-        if tuple(markov_w2.shape) != tuple(markov_w1.shape):
-            raise ValueError(
-                "DSpark markov_w2 shape must match markov_w1, got "
-                f"{tuple(markov_w2.shape)} vs {tuple(markov_w1.shape)}"
-            )
-        self.markov_w1 = markov_w1
-        self.markov_w2 = markov_w2
-
-    def embed(self, previous_tokens: torch.Tensor) -> torch.Tensor:
-        return F.embedding(previous_tokens, self.markov_w1)
-
-    def bias(self, previous_tokens: torch.Tensor) -> torch.Tensor:
-        return F.linear(self.embed(previous_tokens), self.markov_w2).float()
 
 
 def optional_tensor(value: Any) -> Optional[torch.Tensor]:
@@ -130,10 +91,9 @@ def map_context_rows(
 class DSparkProposerMixin:
     """Add-on base class granting a model the DSpark proposal capability.
 
-    Subclasses call :meth:`init_dspark_proposer` once during construction,
-    assign :attr:`markov_head` when weights load, and implement the three
-    model-specific hooks.  Everything else — per-round orchestration, the
-    query-block/committed-row geometry and the sampling tail — is inherited.
+    Subclasses call :meth:`init_dspark_proposer` once during construction and
+    implement the three model-specific hooks. Everything else — per-round
+    orchestration and query-block/committed-row geometry — is inherited.
     """
 
     # ------------------------------------------------------------------
@@ -147,7 +107,6 @@ class DSparkProposerMixin:
         noise_token_id: int,
         aux_feature_dim: int,
         hidden_dim: int,
-        vocab_size: int,
     ) -> None:
         if int(width) <= 0:
             raise ValueError(f"DSpark width must be positive, got {width}")
@@ -158,7 +117,6 @@ class DSparkProposerMixin:
         for name, value in (
             ("aux_feature_dim", aux_feature_dim),
             ("hidden_dim", hidden_dim),
-            ("vocab_size", vocab_size),
         ):
             if int(value) <= 0:
                 raise ValueError(f"DSpark {name} must be positive, got {value}")
@@ -167,8 +125,6 @@ class DSparkProposerMixin:
         self._dspark_noise_token_id = int(noise_token_id)
         self._dspark_aux_feature_dim = int(aux_feature_dim)
         self._dspark_hidden_dim = int(hidden_dim)
-        self._dspark_vocab_size = int(vocab_size)
-        self.markov_head: Optional[DSparkMarkovHead] = None
 
     # ------------------------------------------------------------------
     # Model-specific hooks
@@ -228,17 +184,9 @@ class DSparkProposerMixin:
         empty batches too so collective layers stay balanced."""
         raise NotImplementedError
 
-    def compute_draft_logits(
-        self, hidden: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Reduce backbone hidden states to ``(normalized [B*width, dim],
-        base_logits [B, width, vocab])``."""
+    def compute_draft_hidden_states(self, hidden: torch.Tensor) -> torch.Tensor:
+        """Reduce and normalize backbone output to ``[B*width, dim]``."""
         raise NotImplementedError
-
-    def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
-        """Translate draft-vocab token ids to target-vocab ids.  Identity by
-        default; reduced-vocabulary checkpoints override."""
-        return draft_ids
 
     # ------------------------------------------------------------------
     # Shared per-round flow
@@ -247,19 +195,15 @@ class DSparkProposerMixin:
     def dspark_empty_outputs(
         self, batch_size: int, device: torch.device
     ) -> PyModelOutputs:
-        """Zero-filled outputs with the exact serving shapes and dtypes."""
+        """Zero-filled normalized hidden states with serving geometry."""
         width = self._dspark_width
-        outputs = PyModelOutputs(
+        return PyModelOutputs(
             torch.zeros(
                 (batch_size * width, self._dspark_hidden_dim),
                 dtype=torch.bfloat16,
                 device=device,
             )
         )
-        outputs.draft_tokens = torch.zeros(
-            (batch_size, width), dtype=torch.int32, device=device
-        )
-        return outputs
 
     def run_commit_step(
         self,
@@ -349,7 +293,7 @@ class DSparkProposerMixin:
             inputs,
             commit_ctx=commit_ctx,
         )
-        # The generic prefill CUDA graph owns a row-aligned output buffer even
+        # The fixed-width commit CUDA graph owns a row-aligned output buffer even
         # though the executor only needs this call's KV-cache side effect.
         return PyModelOutputs(main_x)
 
@@ -394,10 +338,9 @@ class DSparkProposerMixin:
         raw_ids = inputs.input_ids.to(device=device, dtype=torch.int32).view(
             batch_size, width
         )
-        anchors = raw_ids[:, 0].clone()
         query_ids = torch.full_like(raw_ids, self._dspark_noise_token_id)
         if batch_size > 0:
-            query_ids[:, 0].copy_(anchors)
+            query_ids[:, 0].copy_(raw_ids[:, 0])
         query_positions = prefix_lengths.to(torch.long).view(batch_size, 1)
         query_positions = query_positions + torch.arange(
             width, device=device, dtype=torch.long
@@ -421,53 +364,4 @@ class DSparkProposerMixin:
         if batch_size == 0:
             return self.dspark_empty_outputs(0, device)
 
-        normalized, base_logits = self.compute_draft_logits(hidden)
-        draft_tokens = self._sample_sequential_markov(base_logits, anchors)
-        outputs = PyModelOutputs(normalized)
-        outputs.draft_tokens = draft_tokens
-        return outputs
-
-    def _sample_sequential_markov(
-        self,
-        base_logits: torch.Tensor,
-        anchor_ids: torch.Tensor,
-    ) -> torch.Tensor:
-        """Run the left-to-right greedy Markov correction chain.
-
-        Numerics follow the reference proposer exactly: per step the argmax
-        over ``base + bias`` (softmax is monotone, so it never changes the
-        argmax) becomes both the proposal token and the next step's Markov
-        input.  No host synchronization occurs.
-
-        The proposal is deterministic, so its q distribution is the point
-        mass on the emitted token; rejection sampling receives that one-hot
-        from the engine (built C++-side) instead of a full-vocabulary
-        softmax materialized here.
-        """
-        if self.markov_head is None:
-            raise RuntimeError("DSpark markov head is not loaded")
-        if base_logits.dim() != 3:
-            raise ValueError(
-                "DSpark base logits must be [B,width,V], got "
-                f"{tuple(base_logits.shape)}"
-            )
-        batch, width, _vocab = (int(v) for v in base_logits.shape)
-        if width != self._dspark_width:
-            raise ValueError(
-                f"DSpark base logits width {width} does not match the "
-                f"configured width {self._dspark_width}"
-            )
-        if tuple(anchor_ids.shape) != (batch,):
-            raise ValueError(
-                f"DSpark anchors must be [{batch}], got {tuple(anchor_ids.shape)}"
-            )
-
-        previous = anchor_ids
-        tokens = []
-        for step in range(width):
-            logits = base_logits[:, step] + self.markov_head.bias(previous)
-            next_token = torch.argmax(logits.float(), dim=-1)
-            tokens.append(next_token.to(torch.int32))
-            previous = self.map_draft_to_target(next_token)
-
-        return torch.stack(tokens, dim=1).contiguous()
+        return PyModelOutputs(self.compute_draft_hidden_states(hidden))

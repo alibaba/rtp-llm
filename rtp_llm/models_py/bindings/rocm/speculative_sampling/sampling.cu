@@ -334,8 +334,7 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
 
     if (tx == 0) {
         bool direct_target_fallback = false;
-        bool all_same_token = true;
-        int  pos            = num_speculative_tokens;
+        int  pos                    = num_speculative_tokens;
         for (int i = 0; i < num_speculative_tokens; ++i) {
             IdType draft_id  = draft_token_ids[row_idx * num_speculative_tokens + i];
             IdType target_id = target_token_ids[(row_idx * (num_speculative_tokens + 1) + i) * target_token_stride
@@ -348,17 +347,12 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
             DType u = uniform_samples[row_idx * (num_speculative_tokens + 1) + i];
 
             bool same_token = target_id == draft_id;
-            bool accept     = draft_probs_point_mass ?
-                                  ((do_sample[row_idx] && u * p < q) || (!do_sample[row_idx] && same_token)) :
-                                  (same_token || (do_sample[row_idx] && u * p < q));
+            bool accept     = (do_sample[row_idx] && u * p < q) || (!do_sample[row_idx] && same_token);
             if (accept) {
                 output_token_ids[row_idx * (num_speculative_tokens + 1) + i] = draft_id;
-                all_same_token                                               = all_same_token && same_token;
             } else {
-                // Keep all_same_token as-is. If every previous accepted token was an exact target/draft match,
-                // the verifier token at this rejected position is already target-distributed and can be emitted.
                 pos = i;
-                if (draft_probs_point_mass && !do_sample[row_idx]) {
+                if (!do_sample[row_idx]) {
                     output_token_ids[row_idx * (num_speculative_tokens + 1) + i] = target_id;
                     for (int next_pos = i + 1; next_pos < num_speculative_tokens + 1; ++next_pos) {
                         output_token_ids[row_idx * (num_speculative_tokens + 1) + next_pos] = -1;
@@ -371,19 +365,15 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
 
         output_accepted_token_num[row_idx] = pos + 1;
 
-        if ((draft_probs_point_mass && pos == num_speculative_tokens) || (!draft_probs_point_mass && all_same_token)) {
+        if (pos == num_speculative_tokens) {
             IdType bonus_token_id =
                 target_token_ids[(row_idx * (num_speculative_tokens + 1) + pos) * target_token_stride
                                  + target_token_stride - 1];
             output_token_ids[row_idx * (num_speculative_tokens + 1) + pos] = bonus_token_id;
-            for (int p = pos + 1; p < num_speculative_tokens + 1; ++p) {
-                output_token_ids[row_idx * (num_speculative_tokens + 1) + p] = -1;
-            }
         }
 
-        s_pos            = pos;
-        s_skip_residual_sampling =
-            draft_probs_point_mass ? (direct_target_fallback || pos == num_speculative_tokens) : all_same_token;
+        s_pos                    = pos;
+        s_skip_residual_sampling = direct_target_fallback || pos == num_speculative_tokens;
     }
     __syncthreads();
 
@@ -410,10 +400,10 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
                                                          draft_token_ids[row_idx * num_speculative_tokens + pos],
                                                          (i * BLOCK_THREADS + tx) * VEC_SIZE);
                 } else {
-                p_vec.cast_load(draft_probs + (row_idx * num_speculative_tokens + pos) * target_vocab_size
-                                + i * BLOCK_THREADS * VEC_SIZE + tx * VEC_SIZE);
+                    p_vec.cast_load(draft_probs + (row_idx * num_speculative_tokens + pos) * target_vocab_size
+                                    + i * BLOCK_THREADS * VEC_SIZE + tx * VEC_SIZE);
+                }
             }
-        }
         }
 #pragma unroll
         for (int j = 0; j < VEC_SIZE; ++j) {
@@ -448,10 +438,10 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
                                                          draft_token_ids[row_idx * num_speculative_tokens + pos],
                                                          (i * BLOCK_THREADS + tx) * VEC_SIZE);
                 } else {
-                p_vec.cast_load(draft_probs + (row_idx * num_speculative_tokens + pos) * target_vocab_size
-                                + i * BLOCK_THREADS * VEC_SIZE + tx * VEC_SIZE);
+                    p_vec.cast_load(draft_probs + (row_idx * num_speculative_tokens + pos) * target_vocab_size
+                                    + i * BLOCK_THREADS * VEC_SIZE + tx * VEC_SIZE);
+                }
             }
-        }
         }
 
         vec_t<float, VEC_SIZE> relu_q_minus_p_vec;

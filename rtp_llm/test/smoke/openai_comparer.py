@@ -593,6 +593,16 @@ class OpenaiComparer(BaseComparer):
                 "role_addrs.grpc_port",
             ]
         )
+        # Goldens recorded before the speculative counters existed have no such
+        # keys in their raw JSON; only compare once a golden records the field.
+        raw_result = self.qr_info.get("result")
+        raw_aux = raw_result.get("aux_info") if isinstance(raw_result, dict) else None
+        for spec_field in (
+            "speculative_draft_rounds",
+            "speculative_accepted_tokens_per_pos",
+        ):
+            if not isinstance(raw_aux, dict) or spec_field not in raw_aux:
+                ignore_fields.add(spec_field)
         top_level_ignore = set()
         nested_ignore: Dict[str, set] = {}
         for field in ignore_fields:

@@ -169,8 +169,6 @@ c10::impl::GenericDict snapshotPayload(const GptModelInputs&     inputs,
     payload.insert("skip_run", inputs.skip_run);
     payload.insert("is_fake_stream", inputs.is_fake_stream);
     payload.insert("is_target_verify", inputs.is_target_verify);
-    // DSpARK draft-call identity (none/propose/commit). Every other model logs "none".
-    payload.insert("dspark_call_phase", dsparkCallPhaseName(inputs.dspark_call_phase));
     return payload;
 }
 std::vector<std::shared_ptr<c10::Event>> readyEvents(const std::vector<c10::Device>& devices) {

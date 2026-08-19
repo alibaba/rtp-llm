@@ -153,13 +153,15 @@ int inferTotalTokensNoSync(const PyModelInputs& inputs) {
 // | Model Type                     | is_prefill_cuda_graph_mode_ | num_tokens_per_bs_                   | 是否已经支持   |
 // +--------------------------------+-----------------------------+--------------------------------------+--------------+
 // | Draft Model (prefill)          | true                        | gen_num_per_cycle + 1                | yes          |
-// | Target Model (score, prefill)  | false                       | gen_num_per_cycle + 1                | yes          |
+// | Target Model (verify)          | false                       | gen_num_per_cycle + 1                | yes          |
 // | Draft Model (decode)           | false                       | 1                                    | yes          |
 // | Embedding Model (prefill)      | true                        | max_seq_len                          | yes          |
 // | Normal Model (decode)          | false                       | 1                                    | yes          |
 // +--------------------------------+-----------------------------+--------------------------------------+--------------+
 // Notes:
 // - Speculative sampling: model_id == 0 (target), model_id == 1 (draft)
+// - Target verify uses context-style attention inputs but selects/replays CUDA
+//   graphs by decode batch size.
 // clang-format on
 
 // Helper function for optimized tensor copy using async operations with current CUDA stream
@@ -697,12 +699,6 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_seq_len].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state.current_seq_len);
-        // DSpARK proposal replays as a fixed-width prefill graph and publishes its
-        // draft tokens through the captured output buffer, one row per request.
-        const auto& draft_tokens = graph_instances_[state.current_real_graph_seq_len].mem_hold_.draft_tokens_;
-        if (draft_tokens.defined()) {
-            outputs.draft_tokens = draft_tokens.slice(0, 0, state.current_batch_size);
-        }
     } else {
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayDecode)");
@@ -814,10 +810,7 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs& inputs, const 
 
 bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.canRun");
-    // The DSpARK call phase is part of the graph identity: a PROPOSE graph captures a
-    // different Python dispatch (and a different input_hiddens width) than a NONE graph,
-    // so a phase mismatch must fall back to eager instead of replaying the wrong graph.
-    if (inputs.dspark_call_phase != dspark_call_phase_) {
+    if (!enable_cuda_graph_) {
         return false;
     }
     if (kv_cache_group_tags_.size() > 1) {
@@ -838,24 +831,30 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
         return false;
     }
 
-    // Check if this is speculative sampling:
-    // 1. prefix_lengths is not empty
-    // 2. all values in input_lengths are the same
-    // this is for 2.2.1
     if (is_target_verify_) {
-        if (!inputs.attention_inputs.is_target_verify) {
+        if (!inputs.attention_inputs.is_target_verify || !inputs.attention_inputs.is_prefill) {
             return false;
         }
-        if (!inputs.attention_inputs.is_prefill) {
-            RTP_LLM_LOG_WARNING("Target-verify CUDA graph requires prefill attention inputs, fallback to normal run.");
+        if (!tryGetRealGraphDecodeBatchSize(inputs, state)) {
             return false;
         }
-        // Target-verify must also respect captured decode range. Otherwise we
-        // may replay an uncaptured graph key.
-        return tryGetRealGraphDecodeBatchSize(inputs, state) && canReplaySelectedGraph(inputs, state);
+        const int expected_tokens = state.current_batch_size * num_tokens_per_bs_;
+        RTP_LLM_CHECK_WITH_INFO(state.seq_len_sum == expected_tokens,
+                                "target-verify decode graph expects %d tokens (%d batches * %d), got %d",
+                                expected_tokens,
+                                state.current_batch_size,
+                                num_tokens_per_bs_,
+                                state.seq_len_sum);
+        if (inputs.input_hiddens.defined() && inputs.input_hiddens.numel() > 0
+            && inputs.input_hiddens.size(0) != expected_tokens) {
+            RTP_LLM_FAIL("target-verify decode graph expects %d input-hidden rows, got %ld",
+                         expected_tokens,
+                         inputs.input_hiddens.size(0));
+        }
+        return canReplaySelectedGraph(inputs, state);
     }
 
-    if (!enable_cuda_graph_ || (inputs.attention_inputs.is_prefill && !is_prefill_cuda_graph_mode_)) {
+    if (inputs.attention_inputs.is_prefill && !is_prefill_cuda_graph_mode_) {
         return false;
     }
 
@@ -865,10 +864,8 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
         }
         // current_real_graph_seq_len is always *it from lower_bound within capture_range_
         RTP_LLM_LOG_DEBUG("prefill cuda graph replay seq_len key %d", state.current_real_graph_seq_len);
-    } else {
-        if (!tryGetRealGraphDecodeBatchSize(inputs, state)) {
-            return false;
-        }
+    } else if (!tryGetRealGraphDecodeBatchSize(inputs, state)) {
+        return false;
     }
     return canReplaySelectedGraph(inputs, state);
 }
@@ -897,7 +894,7 @@ int CudaGraphRunner::getCurrentRealGraphBs(const CudaGraphState& state) const {
 
 void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs) {
     inputs.attention_inputs.is_target_verify = is_target_verify_;
-    inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
+    inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || is_target_verify_;
 
     // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
     inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
@@ -932,8 +929,10 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.kv_cache_kernel_block_id =
         torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
 
-    // prefix_lengths [batch_size, int32] (for attention `prepare`)
-    if (num_tokens_per_bs_ > 1 && !is_prefill_cuda_graph_mode_) {
+    // Target verify keeps multi-token attention geometry while selecting
+    // graphs by batch.
+    // Plain one-token decode must leave prefix_lengths undefined.
+    if (is_target_verify_) {
         inputs.attention_inputs.prefix_lengths =
             torch::full({int(max_bs_)}, max_seq_len_ - num_tokens_per_bs_, options_cpu_int32_).pin_memory();
         inputs.attention_inputs.prefix_lengths_device = inputs.attention_inputs.prefix_lengths.cuda();
@@ -1071,7 +1070,6 @@ void CudaGraphRunner::initCapture() {
         }
 
         PyModelInputs inputs;
-        inputs.dspark_call_phase = dspark_call_phase_;
         // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
         inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
         // input_hidden_size_ is the width of one input_hiddens row. PyWrappedModel sets it
@@ -1147,13 +1145,7 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
     try {
-        // The first warmup run reveals whether this graph produces draft tokens
-        // (DSpARK proposal). Allocate the persistent replay output buffer from that
-        // shape so the capture below can copy into graph-owned memory.
-        auto warmup_outputs = py_forward_method_(inputs, attn_pyobj).cast<PyModelOutputs>();
-        if (warmup_outputs.draft_tokens.defined()) {
-            graph_instances_[key].mem_hold_.setDraftTokens(torch::empty_like(warmup_outputs.draft_tokens));
-        }
+        py_forward_method_(inputs, attn_pyobj);
         py_forward_method_(inputs, attn_pyobj);
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("WarmUp forward failed for %s %d: %s", key_type, key, e.what());
@@ -1190,11 +1182,6 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                 throw;
             }
             graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
-            if (outputs.draft_tokens.defined()) {
-                RTP_LLM_CHECK_WITH_INFO(graph_instances_[key].mem_hold_.draft_tokens_.defined(),
-                                        "CUDA graph produced draft_tokens without a warmup output buffer");
-                graph_instances_[key].mem_hold_.draft_tokens_.copy_(outputs.draft_tokens);
-            }
             graph.capture_end();
         }
 
@@ -1224,8 +1211,7 @@ void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
 
 void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens) {
     // Common slice operations for input_ids and padding_offset
-    inputs.dspark_call_phase                 = dspark_call_phase_;
-    inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
+    inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || is_target_verify_;
     inputs.attention_inputs.is_target_verify = is_target_verify_;
     // HC-shaped MTP draft prefill executes a fixed-capacity Python path. Other
     // MTP models must slice to the current graph key so FlashInfer's batch

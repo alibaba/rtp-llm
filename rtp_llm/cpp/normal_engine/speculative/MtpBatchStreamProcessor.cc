@@ -448,11 +448,10 @@ absl::StatusOr<GptModelInputs> MtpBatchStreamProcessor::gatherDecodeModelInput(c
 
 absl::StatusOr<SamplerInputs>
 MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
-                                                const GptModelInputs&                       model_inputs,
                                                 const GptModelOutputs&                      model_output,
-                                                const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result) const {
+                                                const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result,
+                                                const torch::Tensor&                        draft_token_ids) const {
     RTP_LLM_PROFILE_SCOPE("mtp_batch_stream_processor.gather_spec_sampler_input");
-    (void)model_inputs;
     RTP_LLM_CHECK(!stream_groups.empty());
     auto               all_streams      = stream_groups.allStreams();
     ReturnAllProbsMode return_all_probs = stream_groups.needReturnAllProbs();
@@ -475,23 +474,63 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
 
         copyScoreSamplerTokenIds(
             sampler_inputs.token_ids, complete_token_ids, batch_idx, static_cast<int64_t>(score_len), seq_len);
+        RTP_LLM_CHECK_WITH_INFO(
+            seq_len + static_cast<int64_t>(propose_step_) <= static_cast<int64_t>(sampler_inputs.step + 1),
+            "MTP verify sampler history exceeds its allocated width: seq_len=%ld gamma=%zu step=%zu",
+            seq_len,
+            propose_step_,
+            sampler_inputs.step);
         batch_idx += static_cast<int64_t>(score_len);
         RTP_LLM_LOG_DEBUG("stream [%s], sampler inputs token ids = [%s]",
                           stream->streamLogTag().c_str(),
                           tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
     }
 
-    auto vocab_size           = (size_t)model_output.logits.size(1);
-    sampler_inputs.vocab_size = vocab_size;
+    RTP_LLM_CHECK_WITH_INFO(model_output.logits.dim() == 2
+                                && model_output.logits.size(1) >= static_cast<int64_t>(vocab_size_),
+                            "MTP target logits width %ld is smaller than vocab size %zu",
+                            model_output.logits.dim() == 2 ? model_output.logits.size(1) : -1,
+                            vocab_size_);
+    sampler_inputs.vocab_size = vocab_size_;
     if (return_all_probs != ReturnAllProbsMode::NONE) {
-        sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size, (int64_t)vocab_size},
+        sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size, (int64_t)vocab_size_},
                                                 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
         if (return_all_probs == ReturnAllProbsMode::ORIGINAL) {
             sampler_inputs.return_original_all_probs = true;
         }
     }
 
-    sampler_inputs.logits = model_output.logits.clone();
+    const auto batch_size = static_cast<int64_t>(stream_groups.size());
+    const auto gamma      = static_cast<int64_t>(propose_step_);
+    const auto rows       = static_cast<int64_t>(score_len);
+    RTP_LLM_CHECK_WITH_INFO(draft_token_ids.defined() && draft_token_ids.scalar_type() == torch::kInt32
+                                && draft_token_ids.dim() == 2 && draft_token_ids.size(0) == batch_size
+                                && draft_token_ids.size(1) == gamma,
+                            "MTP verify draft tokens must be int32 [B,gamma]");
+
+    // The sampler already needs token history on device. Fill every proposal
+    // slot once for all score rows, then let each row's sequence length expose
+    // exactly proposals [0, score_position).
+    auto token_ids_gpu = sampler_inputs.token_ids.to(torch::kCUDA, /*non_blocking=*/true);
+    auto histories     = token_ids_gpu.view({batch_size, rows, static_cast<int64_t>(sampler_inputs.step + 1)});
+    auto proposals     = draft_token_ids.to(torch::kCUDA, /*non_blocking=*/true)
+                         .contiguous()
+                         .view({batch_size, 1, gamma})
+                         .expand({batch_size, rows, gamma});
+    auto base_lengths = sampler_inputs.sequence_lengths.view({batch_size, rows})
+                            .select(1, 0)
+                            .to(torch::Device(torch::kCUDA), torch::kLong, /*non_blocking=*/true)
+                            .view({batch_size, 1, 1});
+    auto proposal_offsets =
+        torch::arange(gamma, torch::TensorOptions().dtype(torch::kLong).device(torch::Device(torch::kCUDA)))
+            .view({1, 1, gamma});
+    auto proposal_columns = (base_lengths + proposal_offsets).expand({batch_size, rows, gamma});
+    histories.scatter_(2, proposal_columns, proposals);
+    sampler_inputs.token_ids = std::move(token_ids_gpu);
+
+    // lm_head shards may contain TP-alignment padding. Synthetic columns must
+    // not participate in target sampling or the rejection distribution.
+    sampler_inputs.logits = model_output.logits.narrow(1, 0, static_cast<int64_t>(vocab_size_)).clone();
     if (spec_logits_result.has_active_processor) {
         // The runner uploads packed masks on its own (worker) stream; order this
         // stream's mask application after the uploads, then apply on GPU.
@@ -507,7 +546,7 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
                       tensorDebugStringWithData<float>(sampler_inputs.logits.cpu(), 10).c_str());
 
     RTP_LLM_LOG_DEBUG("gatherSamplerInput done");
-    return std::move(sampler_inputs);
+    return sampler_inputs;
 }
 
 void MtpBatchStreamProcessor::updateProposeTokens(const StreamGroups&                stream_groups,
@@ -872,11 +911,11 @@ torch::Tensor MtpBatchStreamProcessor::dsparkDraftInputLengths(int64_t batch_siz
 }
 
 torch::Tensor MtpBatchStreamProcessor::dsparkDraftLmIndexes(int64_t batch_size) {
-    const int64_t draft_width = propose_step_;
-    if (!dspark_lm_indexes_cache_.defined() || dspark_lm_indexes_cache_.size(0) < batch_size) {
-        dspark_lm_indexes_cache_ = torch::arange(0, batch_size * draft_width, draft_width, cudaInt32Options());
+    const int64_t token_count = batch_size * propose_step_;
+    if (!dspark_lm_indexes_cache_.defined() || dspark_lm_indexes_cache_.size(0) < token_count) {
+        dspark_lm_indexes_cache_ = torch::arange(token_count, cudaInt32Options());
     }
-    return dspark_lm_indexes_cache_.narrow(0, 0, batch_size);
+    return dspark_lm_indexes_cache_.narrow(0, 0, token_count);
 }
 
 void MtpBatchStreamProcessor::validatePrefillDSparkCommitInput(const GptModelInputs& model_input) const {
@@ -908,7 +947,6 @@ void MtpBatchStreamProcessor::buildDSparkProposeInput(GptModelInputs&      model
     model_input.input_lengths      = dsparkDraftInputLengths(batch_size);
     model_input.sequence_lengths   = emptyInt32OnCuda({0});
     model_input.lm_output_indexes  = dsparkDraftLmIndexes(batch_size);
-    model_input.dspark_call_phase  = DSparkCallPhase::PROPOSE;
 }
 
 MtpBatchStreamProcessor::DSparkRoundHead MtpBatchStreamProcessor::buildDSparkRoundHead(
@@ -923,19 +961,20 @@ MtpBatchStreamProcessor::DSparkRoundHead MtpBatchStreamProcessor::buildDSparkRou
     return {std::move(anchors), std::move(committed_ends)};
 }
 
-void MtpBatchStreamProcessor::buildDSparkProposeInputFromStreams(const DSparkRoundHead& round_head,
-                                                                 GptModelInputs&        model_input,
-                                                                 TensorHolder&          host_holder) {
+MtpBatchStreamProcessor::DSparkRoundHead MtpBatchStreamProcessor::prepareDSparkDraftModelInput(
+    const StreamGroups& stream_groups, GptModelInputs& model_input, TensorHolder& host_holder) {
+    auto round_head = buildDSparkRoundHead(stream_groups, model_input, host_holder);
     if (!round_head.anchors.defined() || round_head.anchors.numel() == 0) {
-        return;
+        return round_head;
     }
     buildDSparkProposeInput(model_input, round_head.anchors, round_head.committed_ends, host_holder);
+    return round_head;
 }
 
-void MtpBatchStreamProcessor::prepareDSparkVerifyModelInput(const DSparkRoundHead& round_head,
-                                                            GptModelInputs&        model_input,
-                                                            const torch::Tensor&   proposals,
-                                                            TensorHolder&          host_holder) {
+void MtpBatchStreamProcessor::updateDSparkTargetVerifyModelInput(const DSparkRoundHead& round_head,
+                                                                 GptModelInputs&        model_input,
+                                                                 const torch::Tensor&   proposals,
+                                                                 TensorHolder&          host_holder) {
     if (!round_head.anchors.defined() || round_head.anchors.numel() == 0) {
         return;
     }
@@ -968,8 +1007,8 @@ void MtpBatchStreamProcessor::updateDecodePostDSparkCommitInput(GptModelInputs& 
     // combo_tokens remains [anchor, p1, ..., p_gamma], independent of the
     // rejection result; later rounds overwrite rows beyond the accepted
     // prefix. Only the rank-local target feature tensor is rebound here.
+    model_input.is_target_verify   = true;
     model_input.last_hidden_states = target_features;
-    model_input.dspark_call_phase  = DSparkCallPhase::COMMIT;
 }
 
 void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
@@ -979,6 +1018,7 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     const size_t                                 batch_size,
     torch::Tensor&                               hidden_states_d_t,
     TensorHolder&                                host_holder) {
+    model_input.is_target_verify = false;
     if (!useMtpDeviceState()) {
         if (speculative_sampler_output.accept_len_cpu.defined()
             && speculative_sampler_output.accept_len_cpu.is_pinned()) {
@@ -1051,7 +1091,8 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     // Keep dense accept_tokens for CUDA graph reuse; lm_output_indexes selects
     // only the last accepted position. All outputs stay on CUDA so the next
     // stream-async step can prepare without waiting for worker D2H.
-    int total_tokens = (propose_step_ + 1) * batch_size;
+    model_input.is_target_verify = false;
+    int total_tokens             = (propose_step_ + 1) * batch_size;
     model_input.combo_tokens =
         toCudaInt32(speculative_sampler_output.accept_tokens.reshape({(int64_t)total_tokens}), host_holder);
     auto accept_len_d = toCudaInt32(speculative_sampler_output.accept_len, host_holder);
@@ -1253,6 +1294,8 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
             accept_tokens.narrow(0, batch_idx_out, next_batch_size).narrow(1, 0, cur_accept_len).contiguous();
         StreamSpecUpdateInfo spec_update_info{
             accept_tokens_tensor, cur_accept_len, -1, std::move(last_hidden_states), std::move(propose_all_probs)};
+        spec_update_info.speculative_propose_step = propose_step_;
+        spec_update_info.accepted_draft_tokens    = std::max(0, cur_accept_len - 1);
         // Per-stream verify errors from SpecLogitsVerifyRunner ride the update
         // path so grammar/think mask failures reach the stream (main #1006).
         const size_t stream_idx = spec_update_infos.size();
