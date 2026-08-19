@@ -1,4 +1,4 @@
-load("@rules_python//python:pip.bzl", "pip_parse")
+load("@rules_python//python:pip.bzl", "package_annotation", "pip_parse")
 
 PIP_EXTRA_ARGS = [
     "--cache-dir=~/.cache/pip",
@@ -47,6 +47,10 @@ def pip_deps():
         extra_pip_args = PIP_EXTRA_ARGS,
         timeout = 3600,
         quiet = False,
+        # Regenerate pre-warmed CI hubs created before the grammar-admission
+        # dependencies entered this lock. The annotation only versions the
+        # xgrammar wheel repository; existing unrelated wheels stay cached.
+        annotations = {"xgrammar": package_annotation()},
     )
 
     pip_parse(
