@@ -249,6 +249,32 @@ bool execBatchedMemoryCopy(const BatchedMemoryCopyParams& params) {
     }
 
 #if CUDART_VERSION >= 12080
+    int        runtime_version       = 0;
+    const auto runtime_version_error = cudaRuntimeGetVersion(&runtime_version);
+    if (runtime_version_error != cudaSuccess) {
+        RTP_LLM_LOG_WARNING("execBatchedMemoryCopy unavailable: compile-time CUDART_VERSION=%d, failed to query "
+                            "runtime version (%s); cannot prove cudaMemcpyBatchAsync ABI compatibility",
+                            CUDART_VERSION,
+                            cudaGetErrorString(runtime_version_error));
+        return false;
+    }
+    if (runtime_version < 12080) {
+        RTP_LLM_LOG_WARNING("execBatchedMemoryCopy unavailable: compile-time CUDART_VERSION=%d, runtime version=%d "
+                            "predates cudaMemcpyBatchAsync; falling back to generic copy",
+                            CUDART_VERSION,
+                            runtime_version);
+        return false;
+    }
+    const bool compiled_with_cuda13_batch_abi = CUDART_VERSION >= 13000;
+    const bool runtime_uses_cuda13_batch_abi  = runtime_version >= 13000;
+    if (compiled_with_cuda13_batch_abi != runtime_uses_cuda13_batch_abi) {
+        RTP_LLM_LOG_WARNING("execBatchedMemoryCopy unavailable: compile-time CUDART_VERSION=%d and runtime version=%d "
+                            "use incompatible cudaMemcpyBatchAsync signatures; falling back to generic copy",
+                            CUDART_VERSION,
+                            runtime_version);
+        return false;
+    }
+
     check_cuda_value(cudaSetDevice(params.device_index));
     auto stream = getNoBlockCopyStream().stream();
 
@@ -293,7 +319,12 @@ bool execBatchedMemoryCopy(const BatchedMemoryCopyParams& params) {
         RTP_LLM_LOG_WARNING("execBatchedMemoryCopy failed: tiles=%zu, error=%s", dsts.size(), cudaGetErrorString(err));
         return false;
     }
-    check_cuda_error();
+    // cudaStreamSynchronize already reports deferred errors from this batch.
+    // Do not call check_cuda_error() here: in DEBUG mode it performs a
+    // device-wide synchronize and can wait on unrelated TP/NCCL work.
+    if (Logger::getEngineLogger().isDebugMode()) {
+        check_cuda_value(cudaGetLastError());
+    }
     return true;
 #else
     RTP_LLM_LOG_DEBUG("execBatchedMemoryCopy unavailable: CUDART_VERSION=%d", CUDART_VERSION);

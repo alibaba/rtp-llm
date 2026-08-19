@@ -61,6 +61,7 @@ _DSV4_FP8_TESTS = [
 ]
 
 _DSV4_FP8_CPU_TESTS = [
+    "test_attention_indexer_pool_view",
     "test_attention_cp_prefill_paths",
     "test_attention_csa_overlap",
     "test_attention_hca_overlap",
