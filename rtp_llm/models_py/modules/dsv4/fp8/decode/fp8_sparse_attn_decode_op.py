@@ -21,6 +21,7 @@ because all dev/CI/prod boxes carry flash_mla.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Optional
 
 import torch
@@ -152,6 +153,17 @@ class SparseAttnV4DecodeFp8Op:
         extra_topk_length: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """SM120 packed sparse MLA through FlashInfer (vLLM main parity)."""
+        if os.environ.get("DSV4_SM120_PRECISE_SPARSE_MLA", "0") == "1":
+            return self._forward_sm120_precise_tilelang(
+                q,
+                kv_cache,
+                attn_sink,
+                topk_idxs,
+                topk_length,
+                extra_k_cache,
+                extra_topk_idxs,
+                extra_topk_length,
+            )
         from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import (
             canonical_topk,
             pack_logical_workspace,
@@ -207,6 +219,111 @@ class SparseAttnV4DecodeFp8Op:
             sinks=attn_sink.float(),
         )
         return flat_out.view_as(q)
+
+    def _forward_sm120_precise_tilelang(
+        self,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_sink: torch.Tensor,
+        topk_idxs: torch.Tensor,
+        topk_length: Optional[torch.Tensor],
+        extra_k_cache: Optional[torch.Tensor],
+        extra_topk_idxs: Optional[torch.Tensor],
+        extra_topk_length: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Opt-in precise SM120 path using batched dequant + TileLang.
+
+        FlashInfer's packed SM120 kernel is the production default.  This path
+        batches all query rows on GPU, dequantizes only the selected slots and
+        launches four 16-head kernels to stay below SM120's dynamic shared
+        memory limit.  It avoids per-row host synchronization and provides a
+        numerically closer path for precision validation.
+        """
+        from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
+            dequantize_and_gather_k_cache_slots,
+        )
+        from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import token_lens
+        from rtp_llm.models_py.modules.dsv4.tilelang_kernels import sparse_attn
+
+        batch, q_len, heads, dim = q.shape
+        rows = batch * q_len
+        flat_q = q.reshape(rows, heads, dim)
+        swa_indices = topk_idxs.squeeze(2) if topk_idxs.dim() == 4 else topk_idxs
+        swa_indices = swa_indices.reshape(rows, -1).to(torch.int64).contiguous()
+        swa_lens = token_lens(
+            topk_length, rows, int(swa_indices.shape[-1]), q.device
+        )
+
+        extra_indices = extra_topk_idxs
+        if extra_indices is not None and extra_indices.dim() == 4:
+            extra_indices = extra_indices.squeeze(2)
+        if extra_indices is not None:
+            extra_indices = extra_indices.reshape(rows, -1).to(torch.int64).contiguous()
+            extra_lens = token_lens(
+                extra_topk_length, rows, int(extra_indices.shape[-1]), q.device
+            )
+        else:
+            extra_lens = None
+
+        swa_width = int(swa_indices.shape[-1])
+        swa_kv = torch.zeros(
+            (rows, swa_width, dim), dtype=torch.bfloat16, device=q.device
+        )
+        dequantize_and_gather_k_cache_slots(
+            swa_kv, kv_cache, swa_indices, swa_lens, 0
+        )
+        kv_parts = [swa_kv]
+        index_parts = [
+            torch.arange(swa_width, dtype=torch.int32, device=q.device)
+            .view(1, swa_width)
+            .expand(rows, -1)
+            .masked_fill(
+                torch.arange(swa_width, device=q.device).view(1, -1)
+                >= swa_lens.view(-1, 1),
+                -1,
+            )
+        ]
+
+        if extra_indices is not None and extra_k_cache is not None:
+            assert extra_lens is not None
+            extra_width = int(extra_indices.shape[-1])
+            extra_kv = torch.zeros(
+                (rows, extra_width, dim), dtype=torch.bfloat16, device=q.device
+            )
+            dequantize_and_gather_k_cache_slots(
+                extra_kv, extra_k_cache, extra_indices, extra_lens, 0
+            )
+            kv_parts.append(extra_kv)
+            index_parts.append(
+                (
+                    torch.arange(extra_width, dtype=torch.int32, device=q.device)
+                    + swa_width
+                )
+                .view(1, extra_width)
+                .expand(rows, -1)
+                .masked_fill(
+                    torch.arange(extra_width, device=q.device).view(1, -1)
+                    >= extra_lens.view(-1, 1),
+                    -1,
+                )
+            )
+
+        gathered_kv = torch.cat(kv_parts, dim=1)
+        local_indices = torch.cat(index_parts, dim=1).unsqueeze(1).contiguous()
+        q_rows = flat_q.unsqueeze(1)
+        return torch.cat(
+            [
+                sparse_attn(
+                    q_rows[:, :, head : head + 16].contiguous(),
+                    gathered_kv,
+                    attn_sink[head : head + 16],
+                    local_indices,
+                    self.softmax_scale,
+                )
+                for head in range(0, heads, 16)
+            ],
+            dim=2,
+        ).view_as(q)
 
     def _forward_flash_mla(
         self,
