@@ -506,6 +506,11 @@ void BlockTreeCacheTestPeer::refreshCandidateForTest(BlockTreeCache& cache,
     cache.evictor_.refreshCandidate(node, group_set_id);
 }
 
+void BlockTreeCacheTestPeer::markPathMatchedForTest(BlockTreeCache& cache, const std::vector<TreeNode*>& path) {
+    std::lock_guard<std::mutex> lock(cache.mutex_);
+    cache.evictor_.onMatched(path);
+}
+
 size_t BlockTreeCacheTestPeer::pendingEvictionReleasesForTest(const BlockTreeCache& cache) {
     std::lock_guard<std::mutex> lock(cache.evictor_.pending_release_mutex_);
     size_t                      pending = 0;
