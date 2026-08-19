@@ -33,7 +33,7 @@ LoadAsyncContext::LoadAsyncContext(std::vector<TransferDescriptor>              
 }
 
 LoadAsyncContext::~LoadAsyncContext() {
-    abort();
+    abortPending();
 }
 
 void LoadAsyncContext::rebuildMatchedBlocksByTier() {
@@ -124,20 +124,10 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
     }
     block_tree_cache_detail::ScopeRollback active_callback_guard(
         [coordinator = coordinator_] { coordinator->retireActiveCallback(); });
-    bool callback_started = false;
-    {
-        std::lock_guard<std::mutex> lock(match_callback_mutex_);
-        if (!isRequestCanceled()) {
-            match_callback_running_ = true;
-            callback_started        = true;
-        }
-    }
-    if (!callback_started) {
-        malloc_status_.store(MallocStatus::INTERNAL_ERROR, std::memory_order_release);
-        failBeforeCommit();
+    std::lock_guard<std::mutex> backend_match_lock(backend_match_mutex_);
+    if (state_.load() != State::PENDING) {
         return;
     }
-    block_tree_cache_detail::ScopeRollback match_callback_guard([this] { finishMatchCallback(); });
     if (!success) {
         malloc_status_.store(MallocStatus::INTERNAL_ERROR, std::memory_order_release);
         failBeforeCommit();
@@ -167,10 +157,7 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
                                      }),
                       handles.end());
     }
-    LoadMatchResult match_result{false};
-    try {
-        match_result = match_callback_(*this, matched_blocks_num);
-    } catch (...) {}
+    const LoadMatchResult match_result = match_callback_(*this, matched_blocks_num);
     if (!match_result.success) {
         malloc_status_.store(match_result.malloc_status, std::memory_order_release);
         failBeforeCommit();
@@ -186,14 +173,6 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
             context->onBackendRead(success);
         }
     });
-}
-
-void LoadAsyncContext::finishMatchCallback() {
-    {
-        std::lock_guard<std::mutex> lock(match_callback_mutex_);
-        match_callback_running_ = false;
-    }
-    match_callback_cv_.notify_all();
 }
 
 void LoadAsyncContext::onBackendRead(bool success) {
@@ -243,40 +222,27 @@ bool LoadAsyncContext::commit() {
     return true;
 }
 
-void LoadAsyncContext::abort() {
-    requestCancel();
-    if (coordinator_->abort(*this)) {
-        markAborted();
-    }
-}
-
 void LoadAsyncContext::markAborted() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const State                 state = state_.load();
-        if (state != State::PENDING && state != State::CANCEL_REQUESTED) {
+        if (state != State::PENDING) {
             return;
         }
         remaining_transfer_count_ = 0;
         backend_pending_          = false;
-        state_.store(State::CANCELLED);
+        state_.store(State::FAILED);
     }
     cv_.notify_all();
 }
 
-bool LoadAsyncContext::requestCancel() {
-    std::unique_lock<std::mutex> lock(match_callback_mutex_);
-    const State                  initial_state = state_.load();
-    if (initial_state == State::PENDING) {
-        state_.store(State::CANCEL_REQUESTED);
+bool LoadAsyncContext::abortPending() {
+    std::lock_guard<std::mutex> backend_match_lock(backend_match_mutex_);
+    if (!coordinator_->abort(*this)) {
+        return false;
     }
-    match_callback_cv_.wait(lock, [this] { return !match_callback_running_; });
-    return initial_state == State::PENDING || initial_state == State::CANCEL_REQUESTED;
-}
-
-bool LoadAsyncContext::isRequestCanceled() const {
-    const State state = state_.load();
-    return state == State::CANCEL_REQUESTED || state == State::CANCELLED;
+    markAborted();
+    return true;
 }
 
 bool LoadAsyncContext::completeOne(bool success) {
@@ -284,7 +250,7 @@ bool LoadAsyncContext::completeOne(bool success) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const State                 state = state_.load();
-        if ((state != State::PENDING && state != State::CANCEL_REQUESTED) || remaining_transfer_count_ == 0) {
+        if (state != State::PENDING || remaining_transfer_count_ == 0) {
             return false;
         }
         has_failure_ = has_failure_ || !success;
@@ -301,12 +267,12 @@ bool LoadAsyncContext::onTaskFail() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const State                 state = state_.load();
-        if (state != State::PENDING && state != State::CANCEL_REQUESTED) {
+        if (state != State::PENDING) {
             return false;
         }
         remaining_transfer_count_ = 0;
         backend_pending_          = false;
-        state_.store(state == State::CANCEL_REQUESTED ? State::CANCELLED : State::FAILED);
+        state_.store(State::FAILED);
     }
     cv_.notify_all();
     return true;
@@ -317,10 +283,10 @@ void LoadAsyncContext::finishIfReadyLocked(bool& notify) {
         return;
     }
     const State state = state_.load();
-    if (state != State::PENDING && state != State::CANCEL_REQUESTED) {
+    if (state != State::PENDING) {
         return;
     }
-    state_.store(state == State::CANCEL_REQUESTED ? State::CANCELLED : has_failure_ ? State::FAILED : State::SUCCEEDED);
+    state_.store(has_failure_ ? State::FAILED : State::SUCCEEDED);
     notify = true;
 }
 
@@ -331,7 +297,7 @@ void LoadAsyncContext::waitDone() {
 
 bool LoadAsyncContext::done() const {
     const State state = state_.load();
-    return state == State::SUCCEEDED || state == State::FAILED || state == State::CANCELLED;
+    return state == State::SUCCEEDED || state == State::FAILED;
 }
 
 bool LoadAsyncContext::success() const {
@@ -438,7 +404,7 @@ void LoadContextCoordinator::shutdown() {
         }
     }
     for (const auto& context : contexts) {
-        context->abort();
+        context->abortPending();
     }
 
     std::unique_lock<std::mutex> lock(mutex_);

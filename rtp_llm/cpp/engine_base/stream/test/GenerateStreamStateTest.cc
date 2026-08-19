@@ -21,27 +21,29 @@ namespace rtp_llm {
 
 namespace {
 
-thread_local const AsyncContext* tracked_cancel_context = nullptr;
-thread_local size_t              tracked_cancel_count   = 0;
+thread_local const AsyncContext* tracked_abort_context = nullptr;
+thread_local size_t              tracked_abort_count   = 0;
 
 }  // namespace
 
-// KVCacheManager::cancelLoad is intentionally non-virtual. This target-local
+// KVCacheManager::abortPendingLoad is intentionally non-virtual. This target-local
 // GNU ld --wrap seam counts only the AsyncContext selected by the current test
 // and forwards every call to the real implementation. The Itanium ABI symbol is
-// _ZN7rtp_llm14KVCacheManager10cancelLoadERKSt10shared_ptrINS_12AsyncContextEE.
-extern "C" bool realKVCacheManagerCancelLoad(KVCacheManager* manager, const std::shared_ptr<AsyncContext>& context) asm(
-    "__real__ZN7rtp_llm14KVCacheManager10cancelLoadERKSt10shared_ptrINS_12AsyncContextEE");
+// _ZN7rtp_llm14KVCacheManager16abortPendingLoadERKSt10shared_ptrINS_12AsyncContextEE.
+extern "C" bool
+realKVCacheManagerAbortPendingLoad(KVCacheManager* manager, const std::shared_ptr<AsyncContext>& context) asm(
+    "__real__ZN7rtp_llm14KVCacheManager16abortPendingLoadERKSt10shared_ptrINS_12AsyncContextEE");
 
 extern "C" bool
-wrappedKVCacheManagerCancelLoad(KVCacheManager* manager, const std::shared_ptr<AsyncContext>& context) asm(
-    "__wrap__ZN7rtp_llm14KVCacheManager10cancelLoadERKSt10shared_ptrINS_12AsyncContextEE");
+wrappedKVCacheManagerAbortPendingLoad(KVCacheManager* manager, const std::shared_ptr<AsyncContext>& context) asm(
+    "__wrap__ZN7rtp_llm14KVCacheManager16abortPendingLoadERKSt10shared_ptrINS_12AsyncContextEE");
 
-extern "C" bool wrappedKVCacheManagerCancelLoad(KVCacheManager* manager, const std::shared_ptr<AsyncContext>& context) {
-    if (context.get() == tracked_cancel_context) {
-        ++tracked_cancel_count;
+extern "C" bool wrappedKVCacheManagerAbortPendingLoad(KVCacheManager*                      manager,
+                                                      const std::shared_ptr<AsyncContext>& context) {
+    if (context.get() == tracked_abort_context) {
+        ++tracked_abort_count;
     }
-    return realKVCacheManagerCancelLoad(manager, context);
+    return realKVCacheManagerAbortPendingLoad(manager, context);
 }
 
 class GenerateStreamStateTest: public DeviceTestBase {
@@ -416,8 +418,8 @@ TEST_F(GenerateStreamStateTest, testIncrementalAsyncAllocationTerminatesBeforeMo
 
     stream->setIsContextStream(false);
     stream->setSeqLength(3);
-    tracked_cancel_context = async_context.get();
-    tracked_cancel_count   = 0;
+    tracked_abort_context = async_context.get();
+    tracked_abort_count   = 0;
 
     // A model executor may only consume RUNNING streams. The state-machine
     // caller must make the unexpected incremental async result terminal first.
@@ -434,7 +436,7 @@ TEST_F(GenerateStreamStateTest, testIncrementalAsyncAllocationTerminatesBeforeMo
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::MALLOC_FAILED);
     EXPECT_NE(stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(model_entry_count, 0u);
-    EXPECT_EQ(tracked_cancel_count, 1u);
+    EXPECT_EQ(tracked_abort_count, 1u);
     EXPECT_EQ(free_count, 1u);
     EXPECT_EQ(stream->curBlocksNum(), 0u);
     EXPECT_FALSE(device_pool->isAllocated(request_block));
@@ -445,13 +447,13 @@ TEST_F(GenerateStreamStateTest, testIncrementalAsyncAllocationTerminatesBeforeMo
     // idempotent: neither the observer nor request blocks are released twice.
     EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
     stream->releaseResource();
-    EXPECT_EQ(tracked_cancel_count, 1u);
+    EXPECT_EQ(tracked_abort_count, 1u);
     EXPECT_EQ(free_count, 1u);
     EXPECT_FALSE(device_pool->isAllocated(request_block));
     EXPECT_EQ(device_pool->freeBlocksNum(), free_after_request_alloc + 1);
 
-    tracked_cancel_context = nullptr;
-    tracked_cancel_count   = 0;
+    tracked_abort_context = nullptr;
+    tracked_abort_count   = 0;
 }
 
 TEST_F(GenerateStreamStateTest, testNormalPathTriggersAsyncLoadCache) {

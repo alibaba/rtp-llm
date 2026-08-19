@@ -79,8 +79,8 @@ void StreamCacheResource::releaseResource() {
         abort();
     }
     if (allocator_load_context_) {
-        if (!resource_context_.cache_manager->cancelLoad(allocator_load_context_)) {
-            RTP_LLM_LOG_DEBUG("allocator load was already completed before release");
+        if (!resource_context_.cache_manager->abortPendingLoad(allocator_load_context_)) {
+            RTP_LLM_LOG_DEBUG("allocator load was already committed or completed before release");
         }
         allocator_load_context_.reset();
     }
@@ -392,7 +392,10 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
         publishReuseLengths(result.reuse_len, result.host_reuse_len, result.disk_reuse_len, 0);
     }
     if (result.async_context) {
-        resource_context_.cache_manager->cancelLoad(result.async_context);
+        const bool aborted = resource_context_.cache_manager->abortPendingLoad(result.async_context);
+        if (!aborted) {
+            RTP_LLM_LOG_DEBUG("incremental allocator load was already committed before rejection");
+        }
         return absl::FailedPreconditionError("async incremental KV block allocation is unsupported");
     }
 

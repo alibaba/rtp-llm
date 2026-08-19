@@ -283,29 +283,6 @@ TEST(LoadAsyncContextTest, BackendMatchFailureAbortsWithoutRunningAllocatorCallb
     coordinator->shutdown();
 }
 
-TEST(LoadAsyncContextTest, AllocatorCallbackExceptionAbortsContext) {
-    size_t commits     = 0;
-    size_t aborts      = 0;
-    auto   coordinator = makeCoordinator(commits, aborts);
-    auto   backend     = std::make_shared<ManualBackend>();
-    auto   pool        = std::make_shared<TestBlockPool>();
-    initBackend(*backend, pool);
-    auto context = coordinator->create({}, {}, 0, backend, makeRequest(1));
-    ASSERT_TRUE(coordinator->registerContext(context));
-    context->setMatchCallback(
-        [](LoadAsyncContext&, size_t) -> bool { throw std::runtime_error("allocator callback failed"); });
-
-    context->startBackendMatch();
-    backend->completeMatch(1);
-
-    EXPECT_TRUE(context->done());
-    EXPECT_FALSE(context->success());
-    EXPECT_EQ(context->mallocStatus(), MallocStatus::INTERNAL_ERROR);
-    EXPECT_EQ(commits, 0u);
-    EXPECT_EQ(aborts, 1u);
-    coordinator->shutdown();
-}
-
 TEST(LoadAsyncContextTest, AllocatorCallbackPreservesRetryableCapacityStatus) {
     size_t commits     = 0;
     size_t aborts      = 0;
@@ -597,13 +574,15 @@ TEST(LoadAsyncContextTest, PendingContextAbortsOnDestruction) {
     coordinator->shutdown();
 }
 
-TEST(LoadAsyncContextTest, CancelWaitsForDeferredAllocatorCallback) {
+TEST(LoadAsyncContextTest, AbortWaitsForDeferredAllocatorCallbackAndLosesAfterCommit) {
     using namespace std::chrono_literals;
     size_t commits     = 0;
     size_t aborts      = 0;
     auto   coordinator = makeCoordinator(commits, aborts);
     auto   backend     = std::make_shared<ManualBackend>();
     auto   pool        = std::make_shared<TestBlockPool>();
+    auto   block       = pool->malloc().value();
+    pool->incRef(block, BlockRefType::REQUEST);
     initBackend(*backend, pool);
     auto context = coordinator->create({}, {}, 0, backend, makeRequest(1));
     ASSERT_TRUE(coordinator->registerContext(context));
@@ -617,7 +596,8 @@ TEST(LoadAsyncContextTest, CancelWaitsForDeferredAllocatorCallback) {
         entered = true;
         cv.notify_all();
         cv.wait(lock, [&] { return released; });
-        return !current.isRequestCanceled() && current.commit();
+        current.setBackendTargetBlock(0, 0, block);
+        return current.commit();
     });
     context->startBackendMatch();
     auto completion = std::async(std::launch::async, [&] { backend->completeMatch(1); });
@@ -625,17 +605,47 @@ TEST(LoadAsyncContextTest, CancelWaitsForDeferredAllocatorCallback) {
         std::unique_lock<std::mutex> lock(mutex);
         cv.wait(lock, [&] { return entered; });
     }
-    auto cancel = std::async(std::launch::async, [&] { return context->requestCancel(); });
-    EXPECT_EQ(cancel.wait_for(50ms), std::future_status::timeout);
+    std::future<bool> abort = std::async(std::launch::async, [&] { return context->abortPending(); });
+    EXPECT_EQ(abort.wait_for(50ms), std::future_status::timeout);
     {
         std::lock_guard<std::mutex> lock(mutex);
         released = true;
     }
     cv.notify_all();
     completion.get();
-    EXPECT_TRUE(cancel.get());
+    EXPECT_FALSE(abort.get());
+    ASSERT_TRUE(backend->readPending());
+    backend->completeRead();
+    EXPECT_TRUE(context->done());
+    EXPECT_TRUE(context->success());
+    EXPECT_EQ(commits, 1u);
+    EXPECT_EQ(aborts, 0u);
+    pool->decRef(block, BlockRefType::REQUEST);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, AbortBeforeDeferredAllocatorCallbackPreventsCommit) {
+    size_t                                  commits     = 0;
+    size_t                                  aborts      = 0;
+    std::shared_ptr<LoadContextCoordinator> coordinator = makeCoordinator(commits, aborts);
+    std::shared_ptr<ManualBackend>          backend     = std::make_shared<ManualBackend>();
+    std::shared_ptr<TestBlockPool>          pool        = std::make_shared<TestBlockPool>();
+    initBackend(*backend, pool);
+    std::shared_ptr<LoadAsyncContext> context = coordinator->create({}, {}, 0, backend, makeRequest(1));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    size_t callbacks = 0;
+    context->setMatchCallback([&](LoadAsyncContext& current, size_t) {
+        ++callbacks;
+        return current.commit();
+    });
+
+    context->startBackendMatch();
+    EXPECT_TRUE(context->abortPending());
+    backend->completeMatch(1);
+
     EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
+    EXPECT_EQ(callbacks, 0u);
     EXPECT_EQ(commits, 0u);
     EXPECT_EQ(aborts, 1u);
     coordinator->shutdown();

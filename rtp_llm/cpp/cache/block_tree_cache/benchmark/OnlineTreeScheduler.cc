@@ -171,11 +171,7 @@ OnlineTreeScheduler::AdmitResult OnlineTreeScheduler::admit(OnlineRequestContext
     if (ctx.load_ticket && !ctx.load_ticket->done()) {
         ctx.state = OnlineRequestState::LOADING_CACHE;
     } else if (ctx.load_ticket && !ctx.load_ticket->success()) {
-        if (ctx.load_ticket->isRequestCanceled()) {
-            ++metrics_.loads_cancelled;
-        } else {
-            ++metrics_.loads_failed;
-        }
+        ++metrics_.loads_failed;
         recordOutcome(ctx, RequestOutcome::FAILED);
         cleanupRequest(ctx);
         return AdmitResult::OK;
@@ -285,11 +281,7 @@ bool OnlineTreeScheduler::runPhase(const std::vector<OnlineRequestDescriptor>& t
                     ctx.state = OnlineRequestState::READY;
                     metrics_.match_to_ready_ns.push_back(elapsedNs(ctx.match_at, now));
                 } else {
-                    if (ctx.load_ticket->isRequestCanceled()) {
-                        ++metrics_.loads_cancelled;
-                    } else {
-                        ++metrics_.loads_failed;
-                    }
+                    ++metrics_.loads_failed;
                     recordOutcome(ctx, RequestOutcome::FAILED);
                     cleanupRequest(ctx);
                 }
@@ -304,9 +296,6 @@ bool OnlineTreeScheduler::runPhase(const std::vector<OnlineRequestDescriptor>& t
                 > static_cast<int64_t>(config_.request_lifecycle_timeout_ms) * 1'000'000) {
                 ++metrics_.lifecycle_timeouts;
                 success = false;
-                if (ctx.load_ticket && !ctx.load_ticket->requestCancel() && !ctx.load_ticket->done()) {
-                    ++metrics_.cancel_request_failed;
-                }
                 recordOutcome(ctx, RequestOutcome::FAILED);
                 cleanupRequest(ctx);
             }
