@@ -275,7 +275,7 @@ TEST_F(DeviceLinearKVCacheGroupTest, RemoveSkippedBlocksFreesNonStepBlocksButKee
     blocks.assign(allocated);
 
     const size_t free_before = block_pool->freeBlocksNum();
-    const std::vector<BlockRefTransition> transitions = group.releaseSkippedBlocks(blocks, true);
+    group.removeSkippedBlocks(blocks, true);
 
     // For step=2 and size=6:
     // keep index 1(step hit), 3(step hit), and last two (4,5). Free index 0 and 2.
@@ -288,15 +288,6 @@ TEST_F(DeviceLinearKVCacheGroupTest, RemoveSkippedBlocksFreesNonStepBlocksButKee
     EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[5]));
 
     EXPECT_EQ(block_pool->freeBlocksNum(), free_before + 2);
-    ASSERT_EQ(transitions.size(), 2u);
-    EXPECT_EQ(transitions[0].ref_type, BlockRefType::REQUEST);
-    EXPECT_EQ(transitions[0].old_total_ref_count, 1u);
-    EXPECT_EQ(transitions[0].new_total_ref_count, 0u);
-    EXPECT_TRUE(transitions[0].block_released);
-    EXPECT_EQ(transitions[1].ref_type, BlockRefType::REQUEST);
-    EXPECT_EQ(transitions[1].old_total_ref_count, 1u);
-    EXPECT_EQ(transitions[1].new_total_ref_count, 0u);
-    EXPECT_TRUE(transitions[1].block_released);
 }
 
 TEST_F(DeviceLinearKVCacheGroupTest, MallocNoNewBlocksReturnsTrueAndKeepsState) {

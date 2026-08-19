@@ -336,8 +336,8 @@ TEST_F(FullEvictionTest, MatchRefreshesLruOrder) {
     block_tree_cache_test::releaseRequestRefsForTest(*cache_, cold_match.matched_device_resources);
 }
 
-// Releasing match-protection references only restores candidate eligibility;
-// it must not count as another access or change the ordering metadata.
+// Releasing match references must not count as another access or change the
+// ordering metadata.
 TEST_F(FullEvictionTest, MatchReleaseDoesNotMutateHeat) {
     insertPath({100}, 10);
     insertPath({200}, 20);
@@ -418,9 +418,6 @@ TEST(FullPruneTest, PrunesDependentFullSubtreeAcrossTiers) {
     EXPECT_EQ(environment.disk_pool->freeBlocksNum(), disk_free_before);
     EXPECT_FALSE(environment.host_pool->isAllocated(host_block));
     EXPECT_FALSE(environment.disk_pool->isAllocated(disk_block));
-    EXPECT_EQ(environment.full->findTreeNodeByDeviceBlock(/*member_group_id=*/0, /*block_id=*/10), path.front());
-    EXPECT_EQ(environment.full->findTreeNodeByDeviceBlock(/*member_group_id=*/0, /*block_id=*/11), nullptr);
-    EXPECT_EQ(environment.full->findTreeNodeByDeviceBlock(/*member_group_id=*/0, /*block_id=*/12), nullptr);
 }
 
 TEST(FullPruneTest, PrunesBranchedFullSubtreeBottomUp) {
@@ -739,7 +736,7 @@ TEST(FullPruneTest, WatermarkSelectsAndCommitsEachClosureSequentially) {
     EXPECT_EQ(environment.cache->getStats().device_heap_total_size, 1u);
 }
 
-TEST(FullPruneTest, HostPruneRemovesDeviceDescendant) {
+TEST(FullPruneTest, HostPruneKeepsRequestReferencedDeviceDescendantUntilRelease) {
     DeviceBlockPoolPtr            device_pool = block_tree_cache_test::makeStructuralDevicePool(0);
     std::shared_ptr<HostBlockPool> host_pool   = block_tree_cache_test::makeHostPool(1, 16);
     auto full = std::make_shared<FullGroupSet>(
@@ -761,6 +758,8 @@ TEST(FullPruneTest, HostPruneRemovesDeviceDescendant) {
     resources[1][0].host_block    = host_block;
     resources[2][0].device_blocks = {11};
     ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(*cache, {100, 200, 300}, resources));
+    device_pool->incRef({11}, BlockRefType::REQUEST);
+    ASSERT_EQ(device_pool->refCount(11), 2u);
 
     const double watermark_ratio = 0.5 / static_cast<double>(host_pool->totalBlocksNum());
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, watermark_ratio);
@@ -770,9 +769,16 @@ TEST(FullPruneTest, HostPruneRemovesDeviceDescendant) {
     EXPECT_EQ(cache->getStats().tree_node_count, 1u);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
     EXPECT_EQ(cache->getStats().host_heap_total_size, 0u);
-    EXPECT_EQ(device_pool->freeBlocksNum(), device_free_before + 1);
+    EXPECT_EQ(device_pool->freeBlocksNum(), device_free_before);
+    EXPECT_TRUE(device_pool->isAllocated(11));
+    EXPECT_EQ(device_pool->refCount(11), 1u);
     EXPECT_EQ(host_pool->freeBlocksNum(), host_free_before);
     EXPECT_FALSE(host_pool->isAllocated(host_block));
+
+    block_tree_cache_test::releaseDeviceBlocks(
+        *cache, device_pool, {11}, BlockRefType::REQUEST);
+    EXPECT_FALSE(device_pool->isAllocated(11));
+    EXPECT_EQ(device_pool->freeBlocksNum(), device_free_before + 1);
 }
 
 }  // namespace

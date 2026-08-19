@@ -229,8 +229,6 @@ TEST(BlockTreeStorerTest, StorePublishesTargetTierOnlyWithoutDeviceResidency) {
 
         MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1, BlockRefType::REQUEST);
         ASSERT_EQ(request_holder.size(), 1u);
-        const BlockIdxType device_block = request_holder[0][0];
-
         env.cache->insert({100}, deviceSourceResources({request_holder[0]}), target_tier);
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
 
@@ -247,10 +245,7 @@ TEST(BlockTreeStorerTest, StorePublishesTargetTierOnlyWithoutDeviceResidency) {
         EXPECT_EQ(candidateCountForTier(*env.cache, target_tier), 1u)
             << "the accepted target must reach its eviction heap";
         EXPECT_EQ(env.storeRefCount(), 0u);
-        EXPECT_EQ(env.groups[0]->findTreeNodeByDeviceBlock(0, device_block), nullptr)
-            << "the reverse index tracks L1 residency only";
-
-        releaseDeviceBlocksAndNotify(*env.cache, env.device_pools[0], request_holder.front(), BlockRefType::REQUEST);
+        releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front(), BlockRefType::REQUEST);
     }
 }
 
@@ -281,8 +276,8 @@ TEST(BlockTreeStorerTest, DeviceInsertSubmitsAllBlocksOutsideTreeLockAndPinsUnti
     EXPECT_EQ(backend->blocks(), (std::vector<BlockIdxType>{holder[0][0], holder[1][0]}));
     EXPECT_EQ(env.device_pools[0]->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 0u);
 
-    releaseDeviceBlocksAndNotify(*env.cache, env.device_pools[0], holder[0], BlockRefType::REQUEST);
-    releaseDeviceBlocksAndNotify(*env.cache, env.device_pools[0], holder[1], BlockRefType::REQUEST);
+    releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[0], BlockRefType::REQUEST);
+    releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[1], BlockRefType::REQUEST);
 }
 
 TEST(BlockTreeStorerTest, StorageHandlesUseTopologyGroupsAndResolveGpuBuffers) {
@@ -322,8 +317,8 @@ TEST(BlockTreeStorerTest, StorageHandlesUseTopologyGroupsAndResolveGpuBuffers) {
     EXPECT_EQ(backend->addresses(),
               (std::vector<void*>{pool_z->convertIndexToBuffer(0, holder[0][0]).front().addr,
                                   pool_a->convertIndexToBuffer(0, holder[0][1]).front().addr}));
-    releaseDeviceBlocksAndNotify(*cache, pool_z, {holder[0][0]}, BlockRefType::REQUEST);
-    releaseDeviceBlocksAndNotify(*cache, pool_a, {holder[0][1]}, BlockRefType::REQUEST);
+    releaseDeviceBlocks(*cache, pool_z, {holder[0][0]}, BlockRefType::REQUEST);
+    releaseDeviceBlocks(*cache, pool_a, {holder[0][1]}, BlockRefType::REQUEST);
 }
 
 TEST(BlockTreeStorerTest, StoreToDiskStaysDiscoverableWhenDeviceCacheIsEnabled) {
@@ -360,7 +355,7 @@ TEST(BlockTreeStorerTest, StoreToDiskStaysDiscoverableWhenDeviceCacheIsEnabled) 
     EXPECT_EQ(load_context->loadDescs()[0].source_blocks, (BlockIndicesType{disk_block}));
 
     load_context.reset();
-    releaseDeviceBlocksAndNotify(*env.cache, env.device_pools[0], request_holder.front(), BlockRefType::REQUEST);
+    releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front(), BlockRefType::REQUEST);
 }
 
 TEST(BlockTreeStorerTest, StoreKeepsDeviceSourceAliveAfterRequestRelease) {
@@ -392,23 +387,35 @@ TEST(BlockTreeStorerTest, StoreKeepsDeviceSourceAliveAfterRequestRelease) {
         barrier->waitUntilEntered();
         EXPECT_EQ(env.device_pools[0]->referencedBlocksNum(BlockRefType::STORE), 1u);
 
-        releaseDeviceBlocksAndNotify(*env.cache, env.device_pools[0], request_holder.front(), BlockRefType::REQUEST);
+        releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front(), BlockRefType::REQUEST);
         EXPECT_TRUE(env.device_pools[0]->isAllocated(device_block)) << "the pending store still owns the source";
         EXPECT_EQ(env.device_pools[0]->refCount(device_block), device_cache_on ? 2u : 1u);
-        EXPECT_EQ(candidateCountForTier(*env.cache, Tier::DEVICE), 0u)
-            << "the store hold must keep the source out of the Device eviction heap";
+        EXPECT_EQ(candidateCountForTier(*env.cache, Tier::DEVICE), device_cache_on ? 1u : 0u)
+            << "a store hold must not make a cached source ineligible for eviction";
+        if (device_cache_on) {
+            EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*env.cache, 1, Tier::DEVICE), 1);
+        }
 
         barrier->release();
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
 
         EXPECT_EQ(env.storeRefCount(), 0u);
-        ASSERT_EQ(env.cache->tree()->findNode({100}).size(), 1u);
         if (device_cache_on) {
-            EXPECT_EQ(env.device_pools[0]->refCount(device_block), 1u);
-            EXPECT_EQ(candidateCountForTier(*env.cache, Tier::DEVICE), 1u)
-                << "the released source must return to the Device eviction heap";
-            EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), host_free_before);
+            EXPECT_FALSE(env.device_pools[0]->isAllocated(device_block));
+            EXPECT_EQ(env.device_pools[0]->freeBlocksNum(), device_free_before);
+            const std::vector<TreeNode*> path = env.cache->tree()->findNode({100});
+            if (path.empty()) {
+                EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), host_free_before)
+                    << "eviction settled before STORE publication";
+            } else {
+                const GroupSetResource& resource = path.back()->group_set_resources[0];
+                EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
+                EXPECT_TRUE(resource.hasTier(Tier::HOST));
+                EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), host_free_before - 1)
+                    << "STORE publication won the settlement race";
+            }
         } else {
+            ASSERT_EQ(env.cache->tree()->findNode({100}).size(), 1u);
             EXPECT_FALSE(env.device_pools[0]->isAllocated(device_block));
             EXPECT_EQ(env.device_pools[0]->freeBlocksNum(), device_free_before);
             EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), host_free_before - 1);
@@ -442,7 +449,7 @@ TEST(BlockTreeStorerTest, StoreCopyFailureLeavesTreeAndPoolsUntouched) {
             EXPECT_EQ(env.poolFor(target_tier).freeBlocksNum(), target_free_before);
             EXPECT_EQ(env.storeRefCount(), 0u);
 
-            releaseDeviceBlocksAndNotify(
+            releaseDeviceBlocks(
                 *env.cache, env.device_pools[0], request_holder.front(), BlockRefType::REQUEST);
             EXPECT_EQ(env.device_pools[0]->freeBlocksNum(), device_free_before);
         }
@@ -505,7 +512,7 @@ TEST(BlockTreeStorerTest, StoreRejectionRollsBackEveryTemporaryHolderExactlyOnce
                 env.groups[group_set_id]->releaseSingleBlock(
                     Tier::HOST, squatters[group_set_id], BlockRefType::REQUEST);
             }
-            releaseDeviceBlocksAndNotify(
+            releaseDeviceBlocks(
                 *env.cache, env.device_pools[group_set_id], holders[group_set_id].front(), BlockRefType::REQUEST);
             EXPECT_EQ(env.device_pools[group_set_id]->freeBlocksNum(), device_free_before[group_set_id]);
         }
@@ -547,8 +554,8 @@ TEST(BlockTreeStorerTest, DuplicateStoreForSameKeyReleasesLoserBlock) {
     EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), host_free_before - 1) << "the losing copy must be returned";
     EXPECT_EQ(env.storeRefCount(), 0u);
 
-    releaseDeviceBlocksAndNotify(*env.cache, env.device_pools[0], first_holder.front(), BlockRefType::REQUEST);
-    releaseDeviceBlocksAndNotify(*env.cache, env.device_pools[0], second_holder.front(), BlockRefType::REQUEST);
+    releaseDeviceBlocks(*env.cache, env.device_pools[0], first_holder.front(), BlockRefType::REQUEST);
+    releaseDeviceBlocks(*env.cache, env.device_pools[0], second_holder.front(), BlockRefType::REQUEST);
 }
 
 TEST(BlockTreeStorerTest, StoreShutdownCutoffSettlesQueuedAndInFlightTasksWithoutPublishing) {
@@ -622,7 +629,7 @@ TEST(BlockTreeStorerTest, StoreDerivedEvictionIsDrainedByWaitForPendingTasks) {
     EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), 2u);
     EXPECT_EQ(env.storeRefCount(), 0u);
 
-    releaseDeviceBlocksAndNotify(*env.cache, env.device_pools[0], request_holder.front(), BlockRefType::REQUEST);
+    releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front(), BlockRefType::REQUEST);
 }
 
 }  // namespace

@@ -154,7 +154,7 @@ TEST_F(DeviceFullKVCacheGroupTest, RequestReleaseKeepsCacheHeldBlock) {
     EXPECT_FALSE(block_pool->isAllocated(block));
 }
 
-TEST_F(DeviceFullKVCacheGroupTest, ReleaseReturnsFilteredReferenceTransitions) {
+TEST_F(DeviceFullKVCacheGroupTest, ReleaseFiltersNullBlocksAndPreservesOtherReferences) {
     auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
 
@@ -168,17 +168,13 @@ TEST_F(DeviceFullKVCacheGroupTest, ReleaseReturnsFilteredReferenceTransitions) {
     const BlockIdxType block = block_ids.blocks()[0];
     block_pool->incRef(block, BlockRefType::BLOCK_CACHE);
 
-    const auto transitions =
-        group.release(BlockIndicesType{NULL_BLOCK_IDX, block}, BlockRefType::REQUEST);
+    group.release(BlockIndicesType{NULL_BLOCK_IDX, block}, BlockRefType::REQUEST);
 
-    ASSERT_EQ(transitions.size(), 1u);
-    EXPECT_EQ(transitions[0].block_id, block);
-    EXPECT_EQ(transitions[0].ref_type, BlockRefType::REQUEST);
-    EXPECT_EQ(transitions[0].old_total_ref_count, 2u);
-    EXPECT_EQ(transitions[0].new_total_ref_count, 1u);
-    EXPECT_FALSE(transitions[0].block_released);
+    EXPECT_TRUE(block_pool->isAllocated(block));
+    EXPECT_EQ(block_pool->refCount(block), 1u);
 
     block_pool->decRef(block, BlockRefType::BLOCK_CACHE);
+    EXPECT_FALSE(block_pool->isAllocated(block));
 }
 
 }  // namespace test

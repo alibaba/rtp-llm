@@ -205,33 +205,4 @@ TEST(IBlockPoolTest, DecRefRejectsUnheldAllocatedBlock) {
     EXPECT_TRUE(pool->isAllocated(*block));
 }
 
-TEST(IBlockPoolTest, DecRefWithResultReturnsAtomicTransitionSnapshotsInInputOrder) {
-    auto pool   = makeInitializedPool(/*physical_block_count=*/4);
-    auto blocks = pool->malloc(2);
-    ASSERT_TRUE(blocks.has_value());
-    const BlockIdxType first  = (*blocks)[0];
-    const BlockIdxType second = (*blocks)[1];
-
-    pool->incRef(first, BlockRefType::BLOCK_CACHE);
-    pool->incRef(first, BlockRefType::REQUEST);
-    pool->incRef(second, BlockRefType::REQUEST);
-    const auto transitions =
-        pool->decRefWithResult(BlockIdList{second, first}, BlockRefType::REQUEST);
-
-    ASSERT_EQ(transitions.size(), 2u);
-    EXPECT_EQ(transitions[0].block_id, second);
-    EXPECT_EQ(transitions[0].ref_type, BlockRefType::REQUEST);
-    EXPECT_EQ(transitions[0].old_total_ref_count, 1u);
-    EXPECT_EQ(transitions[0].new_total_ref_count, 0u);
-    EXPECT_TRUE(transitions[0].block_released);
-    EXPECT_FALSE(pool->isAllocated(second));
-
-    EXPECT_EQ(transitions[1].block_id, first);
-    EXPECT_EQ(transitions[1].ref_type, BlockRefType::REQUEST);
-    EXPECT_EQ(transitions[1].old_total_ref_count, 2u);
-    EXPECT_EQ(transitions[1].new_total_ref_count, 1u);
-    EXPECT_FALSE(transitions[1].block_released);
-    EXPECT_TRUE(pool->isAllocated(first));
-}
-
 }  // namespace rtp_llm

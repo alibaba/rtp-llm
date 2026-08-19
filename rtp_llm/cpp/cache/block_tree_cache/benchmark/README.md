@@ -178,7 +178,7 @@ result 还记录每个 tier 的 capacity/allocated/addressable blocks、每方�
 - admission 顺序为 `match → 分配 load targets → 预分配 suffix blocks → commit load`；任一分配/commit 失败整体回滚，无残留 ref/resource。suffix blocks 在 admission 阶段准备好，insert 阶段不再发生 KV allocation。
 - load-before-forward：ticket 未完成不能进 forward；一个 ticket pending 不阻塞其他请求 admission。ticket 完成后只有 success 进 READY，failed/cancelled 走 cleanup。
 - 每个 READY batch 只 sleep 一次固定 100ms（模拟 forward），不按 batch 大小、长度或 token 缩放；sleep 期间 batch 内请求继续持有 REQUEST refs，scheduler 不发起新 match/insert。`simulated_forward_sleep_ns == forward_batches × 100ms` 是硬性 closure。
-- forward 后对 batch 串行执行一次且仅一次 full-path insert，然后释放 matched/load-target/suffix 的 request refs 并发布 `onBlocksReleased`。
+- forward 后对 batch 串行执行一次且仅一次 full-path insert，然后释放 matched/load-target/suffix 的 request refs。
 - warmup 15s 完整生命周期 → quiesce + pressure check（每个 device pool used ≥ 75%、host used > 0、device heap > 0、warmup completed ≥ 256）→ measured ≥ 60s → deadline 后停止 admission 但 drain 全部已 admission request → finalize 验证 active contexts / pending tickets / task pool / REQUEST ref 全部归零。
 - 单 request lifecycle 超过 60s 时 case 失败，进入有界 cancel/drain，仍写出失败结果与资源 snapshot。
 - 路径/RNG trace（20k 条）在 setup 前确定性生成，timed region 内不进行 RNG 或 path 生成；workload definition hash 覆盖除 task-pool size 外的固定协议配置，trace hash 覆盖完整请求元数据与 path。正式 tp4/tp8 对照按 `(seed, repetition identity)` 逐组校验唯一变量。
