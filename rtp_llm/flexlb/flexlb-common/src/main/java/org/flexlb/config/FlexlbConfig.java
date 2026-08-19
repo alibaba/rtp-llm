@@ -457,6 +457,25 @@ public class FlexlbConfig {
     /** Fixed candidate pool size (FIXED mode only). */
     private int shortestTtftCandidatePoolSize = 1;
 
+    /**
+     * Enables bounded cache affinity on top of ShortestTtft or CostBasedPrefill.
+     * Disabled by default so neither baseline strategy applies an explicit cache preference.
+     */
+    private boolean cacheAffinityEnabled = false;
+
+    /**
+     * Maximum additional predicted TTFT, in milliseconds, tolerated when preferring
+     * a worker with a longer cached prefix. Zero permits cache affinity only when it
+     * does not make the baseline score worse.
+     */
+    private long cacheAffinityMaxExtraTtftMs = 0;
+
+    /**
+     * Minimum cached-prefix hit rate, in percentage points, required for cache affinity.
+     * Values are clamped to [0, 100] by the policy; zero disables this gate.
+     */
+    private double cacheAffinityMinHitRate = 5;
+
     public int resolveShortestTtftCandidateCount(int workerCount) {
         if ("FIXED".equalsIgnoreCase(shortestTtftCandidatePoolMode)) {
             return Math.max(1, Math.min(shortestTtftCandidatePoolSize, workerCount));

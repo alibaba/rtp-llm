@@ -21,6 +21,7 @@ import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -45,16 +46,19 @@ class CostBasedPrefillStrategyTest {
     private CacheAwareService cacheAwareService;
     private ResourceMeasureFactory resourceMeasureFactory;
     private EngineHealthReporter engineHealthReporter;
+    private PrefillResourceMeasure prefillResourceMeasure;
     private FlexlbBatchScheduler batchScheduler;
     private EndpointRegistry endpointRegistry;
     private CostBasedPrefillStrategy strategy;
+    private FlexlbConfig endpointConfig;
 
     @BeforeEach
     void setUp() {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
+        endpointConfig = new FlexlbConfig();
         ConfigService configService = Mockito.mock(ConfigService.class);
-        Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        Mockito.when(configService.loadBalanceConfig()).thenReturn(endpointConfig);
         cacheAwareService = Mockito.mock(CacheAwareService.class);
         resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
@@ -65,7 +69,7 @@ class CostBasedPrefillStrategyTest {
                 Mockito.mock(BatchSchedulerReporter.class));
         engineWorkerStatus = new EngineWorkerStatus(endpointRegistry);
 
-        PrefillResourceMeasure prefillResourceMeasure = Mockito.mock(PrefillResourceMeasure.class);
+        prefillResourceMeasure = Mockito.mock(PrefillResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(any())).thenReturn(prefillResourceMeasure);
         Mockito.when(prefillResourceMeasure.isResourceAvailable(any())).thenReturn(true);
         Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any())).thenReturn(new HashMap<>());
@@ -73,6 +77,13 @@ class CostBasedPrefillStrategyTest {
         strategy = new CostBasedPrefillStrategy(
                 engineWorkerStatus, cacheAwareService, resourceMeasureFactory,
                 engineHealthReporter);
+    }
+
+    @AfterEach
+    void tearDown() {
+        endpointRegistry.close();
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
     }
 
     /** Helper: register PrefillEndpoints for all entries in the given worker map. */
@@ -156,6 +167,117 @@ class CostBasedPrefillStrategyTest {
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
+    }
+
+    @Test
+    void cacheAffinityDisabledKeepsCostBasedSelection() {
+        endpointConfig.setCostFormula("sum(computeTokens) + 2*sum(hitCacheTokens)");
+        Map<String, WorkerStatus> prefillMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+        prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
+        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any()))
+                .thenReturn(Map.of("10.0.0.2:8080", 1));
+
+        FlexlbConfig config = affinityConfig(10_000, 0);
+        config.setCacheAffinityEnabled(false);
+        ServerStatus result = strategy.select(
+                buildContext(1000, 301L, config), RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.1", result.getServerIp());
+        Mockito.verify(engineHealthReporter, Mockito.never())
+                .reportCacheAffinityDecision(any(), any(), any());
+    }
+
+    @Test
+    void cacheAffinitySelectsLongestPrefixInsideCostCap() {
+        endpointConfig.setCostFormula("sum(computeTokens) + 2*sum(hitCacheTokens)");
+        Map<String, WorkerStatus> prefillMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+        prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
+        prefillMap.put("10.0.0.3:8080", createWorker("10.0.0.3", 0));
+        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any()))
+                .thenReturn(Map.of(
+                        "10.0.0.2:8080", 1,
+                        "10.0.0.3:8080", 2));
+
+        ServerStatus result = strategy.select(
+                buildContext(1000, 302L, affinityConfig(300, 5)),
+                RoleType.PREFILL,
+                null);
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.2", result.getServerIp(),
+                "The global leader is over cap, but the one-block candidate is admissible");
+        assertEquals(256, result.getDebugInfo().getHitCacheLen());
+        assertEquals(1556, result.getPrefillTime());
+        Mockito.verify(engineHealthReporter).reportCacheAffinityDecision(
+                RoleType.PREFILL, "10.0.0.2", "CACHE_LEADER");
+    }
+
+    @Test
+    void cacheAffinityFallsBackToCostBasedWhenCacheCostIsOverCap() {
+        endpointConfig.setCostFormula("sum(computeTokens) + 2*sum(hitCacheTokens)");
+        Map<String, WorkerStatus> prefillMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+        prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
+        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any()))
+                .thenReturn(Map.of("10.0.0.2:8080", 1));
+
+        ServerStatus result = strategy.select(
+                buildContext(1000, 303L, affinityConfig(255, 5)),
+                RoleType.PREFILL,
+                null);
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.1", result.getServerIp());
+        Mockito.verify(engineHealthReporter).reportCacheAffinityDecision(
+                RoleType.PREFILL, "10.0.0.1", "OVER_CAP");
+    }
+
+    @Test
+    void costBasedCacheAffinityUsesRequestBlockSizeForPageRr() {
+        endpointConfig.setCostFormula("sum(computeTokens) + 2*sum(hitCacheTokens)");
+        Map<String, WorkerStatus> prefillMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+        prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
+        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any()))
+                .thenReturn(Map.of("10.0.0.2:8080", 1));
+        BalanceContext context = buildContext(4096, 304L, affinityConfig(1024, 20));
+        context.getRequest().setCacheKeyBlockSize(1024L);
+
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.2", result.getServerIp());
+        assertEquals(1024, result.getDebugInfo().getHitCacheLen());
+    }
+
+    @Test
+    void costBasedHardFilterDoesNotReviveUnavailableCacheLeader() {
+        Map<String, WorkerStatus> prefillMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+        prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
+        Mockito.when(prefillResourceMeasure.isResourceAvailable(any()))
+                .thenAnswer(invocation -> !"10.0.0.2".equals(
+                        ((PrefillEndpoint) invocation.getArgument(0)).getIp()));
+        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any()))
+                .thenReturn(Map.of("10.0.0.2:8080", 3));
+
+        ServerStatus result = strategy.select(
+                buildContext(1000, 305L, affinityConfig(10_000, 0)),
+                RoleType.PREFILL,
+                null);
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.1", result.getServerIp());
+        Mockito.verify(engineHealthReporter).reportCacheAffinityDecision(
+                RoleType.PREFILL, "10.0.0.1", "NO_CACHE_LEAD");
     }
 
     @Test
@@ -434,6 +556,17 @@ class CostBasedPrefillStrategyTest {
         config.setCostSloMs(50000L);
         config.setCostSloRiskMarginMs(50L);
         return buildContext(seqLen, requestId, config);
+    }
+
+    private FlexlbConfig affinityConfig(long maxExtraTtftMs, double minHitRate) {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setCostSloMs(50000L);
+        config.setCostSloRiskMarginMs(50L);
+        config.setScoreTieRandomEnabled(false);
+        config.setCacheAffinityEnabled(true);
+        config.setCacheAffinityMaxExtraTtftMs(maxExtraTtftMs);
+        config.setCacheAffinityMinHitRate(minHitRate);
+        return config;
     }
 
     private BalanceContext buildContext(long seqLen, long requestId, FlexlbConfig config) {

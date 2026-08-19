@@ -8,7 +8,7 @@ FlexLB is a high-performance, intelligent load balancer specifically designed fo
 
 ## Features
 
-- **Smart Load Balancing**: Multiple strategies including round-robin, lowest concurrency, and shortest TTFT (Time to First Token)
+- **Smart Load Balancing**: Multiple strategies including cost-based routing, shortest TTFT, and cache affinity
 - **Request Batching**: Intelligent batching of inference requests to improve throughput
 - **Advanced Caching**: KV cache management for improved performance
 - **Health Monitoring**: Real-time worker health checking and automatic failover
@@ -157,6 +157,28 @@ export MODEL_SERVICE_CONFIG='{
 ```
 
 Traffic routing is two-layered: `TRAFFIC_POLICY_CONFIG` selects the target `group`, then each role's load balancing strategy selects the final prefill/decode host inside that group. You can also set `TRAFFIC_POLICY_CONFIG_FILE` to a JSON file path. Standalone traffic policy config takes priority over `trafficPolicy` embedded in `FLEXLB_CONFIG`, and you can replace the active policy at runtime with `POST /rtp_llm/update_traffic_policy`.
+
+Cache affinity is an optional layer on both `ShortestTtft` and `CostBasedPrefill` for
+PREFILL/PDFUSION workers. Enable it and set the maximum extra predicted TTFT that a cached
+candidate may add over the baseline strategy's minimum score:
+
+```bash
+export FLEXLB_CONFIG='{
+    "loadBalanceStrategy": "CostBasedPrefill",
+    "cacheAffinityEnabled": true,
+    "cacheAffinityMaxExtraTtftMs": 100,
+    "cacheAffinityMinHitRate": 5
+}'
+```
+
+The shared policy considers only workers already admitted by the baseline strategy. It prefers
+the longest cached prompt prefix within the configured millisecond bound and minimum hit rate;
+otherwise it delegates to the baseline selection. For `ShortestTtft`, this includes the
+candidate-pool and CAS fairness behavior. For `CostBasedPrefill`, this includes its resource,
+SLO, hotspot, imbalance, and score-tie filters. Cache affinity defaults to disabled; threshold
+defaults are `0` ms and `5` percent. It does not apply to DECODE or VIT strategies. The scalar
+environment variables are `CACHE_AFFINITY_ENABLED`, `CACHE_AFFINITY_MAX_EXTRA_TTFT_MS`, and
+`CACHE_AFFINITY_MIN_HIT_RATE`.
 
 Set `decodeConcurrencyLimit` to a positive number to cap each decode worker's in-flight requests. FlexLB counts reported waiting/running tasks plus local in-transit selections, deduplicated by request id. When a decode worker reaches the limit, it is not considered serviceable; values <= 0 disable this FlexLB-side limit.
 
