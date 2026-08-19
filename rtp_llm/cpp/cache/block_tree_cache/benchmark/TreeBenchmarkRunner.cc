@@ -41,9 +41,8 @@ std::string joinSizeValues(const std::vector<size_t>& values) {
 }
 
 size_t hardFailureCount(const OnlineSchedulerMetrics& metrics) {
-    return metrics.loads_failed + metrics.loads_cancelled + metrics.load_target_allocation_failed
-           + metrics.suffix_allocation_failed + metrics.load_commit_failed + metrics.cancel_request_failed
-           + metrics.lifecycle_timeouts + metrics.dependency_failed_descendants;
+    return metrics.loads_failed + metrics.load_target_allocation_failed + metrics.suffix_allocation_failed
+           + metrics.load_commit_failed + metrics.lifecycle_timeouts + metrics.dependency_failed_descendants;
 }
 
 // Test-only injection seam: the GPU smoke suite sets this env var so the
@@ -773,8 +772,6 @@ bool TreeBenchmarkRunner::runOnlineBenchmark(const OnlineTreeWorkloadConfig& con
     writer_.addMetric("loads_committed", static_cast<double>(m.loads_committed));
     writer_.addMetric("loads_succeeded", static_cast<double>(m.loads_succeeded));
     writer_.addMetric("loads_failed", static_cast<double>(m.loads_failed));
-    writer_.addMetric("loads_cancelled", static_cast<double>(m.loads_cancelled));
-    writer_.addMetric("cancel_request_failed", static_cast<double>(m.cancel_request_failed));
     writer_.addMetric("load_target_allocation_failed", static_cast<double>(m.load_target_allocation_failed));
     writer_.addMetric("suffix_allocation_failed", static_cast<double>(m.suffix_allocation_failed));
     writer_.addMetric("load_commit_failed", static_cast<double>(m.load_commit_failed));

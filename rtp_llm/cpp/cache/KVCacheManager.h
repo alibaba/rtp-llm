@@ -47,7 +47,7 @@ public:
     // 显存管理和缓存分配
     MallocResult malloc(const MallocInfo& malloc_info);
     void         free(const FreeInfo& free_info);
-    bool         cancelLoad(const std::shared_ptr<AsyncContext>& context);
+    bool         abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
     void         insertIntoCache(const InsertInfo& insert_info);
 
     int

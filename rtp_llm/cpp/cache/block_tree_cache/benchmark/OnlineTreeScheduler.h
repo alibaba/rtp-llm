@@ -146,8 +146,6 @@ struct OnlineSchedulerMetrics {
     size_t loads_committed{0};
     size_t loads_succeeded{0};
     size_t loads_failed{0};
-    size_t loads_cancelled{0};
-    size_t cancel_request_failed{0};
     size_t load_target_allocation_failed{0};
     size_t suffix_allocation_failed{0};
     size_t load_commit_failed{0};

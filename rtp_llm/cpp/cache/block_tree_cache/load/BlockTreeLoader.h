@@ -49,7 +49,7 @@ public:
     BlockTreeMatchResult matchLocked(const CacheKeysType& cache_keys);
     BlockIndicesType     matchedBlocksForGroup(size_t                                group_id,
                                                const std::vector<MultiNodeResource>& matched_resources) const;
-    bool                 cancelLoad(const std::shared_ptr<AsyncContext>& context);
+    bool                 abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
     void                 shutdown();
 
 private:

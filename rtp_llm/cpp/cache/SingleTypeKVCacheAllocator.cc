@@ -86,7 +86,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     MallocStatus                      materialize_status = MallocStatus::NONE;
     auto rollback = [&]() -> MallocResult {
         if (load_context != nullptr) {
-            load_context->abort();
+            load_context->abortPending();
         }
         load_context.reset();
         BlockIndicesType valid_blocks;
@@ -267,7 +267,7 @@ LoadMatchResult SingleTypeKVCacheAllocator::finishDeferredMalloc(const MallocInf
                                                                  size_t            matched_blocks) {
     MallocStatus materialize_status = MallocStatus::NONE;
     bool         success = materializeInitialBlocks(malloc_info, &context, matched_blocks, materialize_status);
-    if (success && !context.isRequestCanceled()) {
+    if (success) {
         const auto incr_result = incrMalloc(malloc_info);
         success                = incr_result.success;
         if (!success) {
@@ -277,8 +277,6 @@ LoadMatchResult SingleTypeKVCacheAllocator::finishDeferredMalloc(const MallocInf
                     malloc_info, reserveBlocksNum(), InitCapacityMode::TOTAL_AND_AVAILABLE);
             }
         }
-    } else {
-        success = false;
     }
     success = success && context.commit();
     if (!success) {
