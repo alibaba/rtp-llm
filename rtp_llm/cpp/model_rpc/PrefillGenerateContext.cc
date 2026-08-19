@@ -88,7 +88,10 @@ void PrefillGenerateContext::setStream(const std::shared_ptr<GenerateStream>& st
         std::weak_ptr<GenerateStream> weak_stream = stream;
         stream->setFinishCallback([meta_holder, rid, weak_stream]() {
             if (auto finished = weak_stream.lock()) {
-                meta_holder->dequeue(rid, finished);
+                // from_finish_callback=true feeds the A2 verification log
+                // (event=finish_callback_promoted, sampled 1/s) in
+                // RpcServerRuntimeMeta::dequeue; it does not change semantics.
+                meta_holder->dequeue(rid, finished, /*from_finish_callback=*/true);
             }
         });
     }
@@ -316,6 +319,17 @@ void PrefillGenerateContext::markRequestEnd() {
         EmptyPB response;
         auto    grpc_status = stub->RemoteFinish(&client_context, finish_request, &response);
         if (!grpc_status.ok()) {
+            if (grpc_status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
+                // Leak-fix verification log: the 5s markRequestEnd deadline
+                // fired, so this worker's cache_store request-end was not
+                // delivered within the bound (low frequency, not sampled).
+                RTP_LLM_LOG_WARNING("event=mark_request_end_deadline_exceeded request_id=%ld batch_id=%ld "
+                                    "worker=%s deadline_ms=5000: markRequestEnd RemoteFinish RPC hit its "
+                                    "5s deadline; request-end not delivered to this worker",
+                                    real_id,
+                                    task_identity_.batch_id,
+                                    prefill_worker.c_str());
+            }
             RTP_LLM_LOG_WARNING("request [%d], remote finish for ip %s failed, ignore markRequestEnd for it",
                                 real_id,
                                 prefill_worker.c_str());
