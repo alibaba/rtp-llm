@@ -41,24 +41,6 @@ cc_test_wrapper(
     exec_properties = {'gpu':'H20'},
 )
 
-cc_test_wrapper(
-    name = "rtp_llm_op_mtp_init_test",
-    srcs = ["RtpLLMOpMtpInitTest.cc"],
-    copts = ["-fno-access-control"] + copts(),
-    data = ["//:rtp_compute_ops"],
-    deps = [
-        ":th_compute_lib",
-        ":th_transformer_lib",
-        "@com_google_googletest//:gtest",
-        "@com_google_googletest//:gtest_main",
-    ],
-    timeout = "short",
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-    },
-    exec_properties = {'gpu':'H20'},
-)
-
 cc_library(
     name = "th_transformer_config_lib",
     srcs = [

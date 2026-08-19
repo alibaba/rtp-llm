@@ -100,7 +100,8 @@ py_test (
         "//rtp_llm:testlib",
    ],
    env = test_envs,
-   tags = ["open_skip"],
+   tags = ["open_skip", "H20"],
+   exec_properties = {'gpu':'H20'},
 )
 
 py_test (
