@@ -1,7 +1,6 @@
 package org.flexlb.cache.core;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.cache.domain.DiffResult;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
@@ -14,6 +13,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * KV cache manager
@@ -26,6 +26,13 @@ import java.util.Set;
 @Slf4j
 @Component
 public class KvCacheManager {
+
+    /**
+     * Addresses whose last authoritative clear did not finish. The next
+     * publication retries that clear before applying a new snapshot, so a
+     * partial global removal cannot be mistaken for committed local state.
+     */
+    private final Set<String> pendingClear = ConcurrentHashMap.newKeySet();
 
     @Autowired
     private GlobalCacheIndex globalCacheIndex;
@@ -87,36 +94,49 @@ public class KvCacheManager {
             return;
         }
 
-        // Calculate diff
-        DiffResult diffResult = engineLocalView.calculateDiff(engineIPort, newCacheBlocks, role);
-        if (!diffResult.hasChanges()) {
-            return;
+        if (pendingClear.contains(engineIPort)) {
+            clearEngineCache(engineIPort);
         }
 
-        // Apply added cache blocks
-        for (Long addedBlock : diffResult.getAddedBlocks()) {
-            boolean contains = newCacheBlocks.contains(addedBlock);
-            if (contains) {
-                // Update local view
-                engineLocalView.addOrUpdateCacheBlock(engineIPort, addedBlock);
-                // Update global index
-                globalCacheIndex.addCacheBlock(addedBlock, engineIPort);
-            }
-        }
-
-        // Apply removed cache blocks
-        for (Long removedBlock : diffResult.getRemovedBlocks()) {
-            // Remove from local view
-            engineLocalView.removeCacheBlock(engineIPort, removedBlock);
-            // Remove from global index
-            globalCacheIndex.removeCacheBlock(engineIPort, removedBlock);
-        }
+        Set<Long> oldCacheBlocks = engineLocalView.getEngineCacheBlocks(engineIPort);
+        GlobalCacheIndex.CacheDiffStats diff = globalCacheIndex.applyEngineCacheSnapshot(
+                engineIPort, oldCacheBlocks, newCacheBlocks);
+        // The local view is the commit marker. Keep it unchanged until the
+        // global index update succeeds so the same version can be retried.
+        engineLocalView.commitSnapshot(engineIPort, newCacheBlocks);
+        engineLocalView.reportDiff(role, diff.added(), diff.removed());
 
         // Report metrics
-        cacheMetricsReporter.reportEngineLocalMetrics(
-                engineIPort.split(":")[0], role, engineLocalView.size(engineIPort));
-        cacheMetricsReporter.reportGlobalCacheMetrics(globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
-        cacheMetricsReporter.reportEngineViewsMapSize(engineLocalView.getEngineViewsMapSize());
+        reportIndexMetrics(engineIPort, role);
+    }
+
+    public void clearEngineCache(String engineIpPort) {
+        if (engineIpPort == null) {
+            return;
+        }
+        try {
+            Set<Long> oldCacheBlocks = engineLocalView.getEngineCacheBlocks(engineIpPort);
+            globalCacheIndex.removeEngineCacheBlocks(engineIpPort, oldCacheBlocks);
+            engineLocalView.removeAllCacheBlockOfEngine(engineIpPort);
+            pendingClear.remove(engineIpPort);
+            reportIndexMetrics(engineIpPort, "unknown");
+        } catch (RuntimeException cleanupFailure) {
+            pendingClear.add(engineIpPort);
+            throw cleanupFailure;
+        }
+    }
+
+    private void reportIndexMetrics(String engineIpPort, String role) {
+        try {
+            cacheMetricsReporter.reportEngineLocalMetrics(
+                    engineIpPort.split(":")[0], role, engineLocalView.size(engineIpPort));
+            cacheMetricsReporter.reportGlobalCacheMetrics(
+                    globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
+            cacheMetricsReporter.reportEngineViewsMapSize(engineLocalView.getEngineViewsMapSize());
+        } catch (RuntimeException metricFailure) {
+            log.warn("Failed to report cache index metrics for engine={}",
+                    engineIpPort, metricFailure);
+        }
     }
 
     /**
@@ -126,6 +146,7 @@ public class KvCacheManager {
 
         globalCacheIndex.clear();
         engineLocalView.clear();
+        pendingClear.clear();
 
         // Report
         cacheMetricsReporter.reportGlobalCacheMetrics(globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());

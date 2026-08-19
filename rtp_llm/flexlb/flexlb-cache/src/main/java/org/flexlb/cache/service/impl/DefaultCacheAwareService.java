@@ -5,7 +5,6 @@ import org.flexlb.cache.core.KvCacheManager;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -57,60 +56,69 @@ public class DefaultCacheAwareService implements CacheAwareService {
     }
 
     @Override
-    public WorkerCacheUpdateResult updateEngineBlockCache(WorkerStatus workerStatus) {
+    public WorkerCacheUpdateResult publishEngineCacheSnapshot(
+            String engineIpPort, RoleType roleType, Set<Long> cachedKeys) {
         long startTime = System.nanoTime() / 1000;
-        String engineIpPort = workerStatus.getIpPort();
-        String role = workerStatus.getRole().getCode();
+        String role = roleType.getCode();
 
         try {
-            if (workerStatus.getCacheStatus() == null) {
-                WorkerCacheUpdateResult result = buildFailureResult(engineIpPort, "Worker Cache Status is null");
-                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "0");
-                return result;
-            }
-
-            String ipPort = workerStatus.getIpPort();
-            CacheStatus cacheStatus = workerStatus.getCacheStatus();
-            if (cacheStatus.getCachedKeys() == null) {
+            if (engineIpPort == null || cachedKeys == null) {
                 WorkerCacheUpdateResult result = buildFailureResult(engineIpPort, "Worker Cached Keys is null");
-                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "0");
+                reportUpdateLatency(role, startTime, "0");
                 return result;
             }
 
-            Set<Long> cachedKeys = cacheStatus.getCachedKeys();
+            kvCacheManager.updateEngineCache(engineIpPort, role, cachedKeys);
 
-            // Update cache
-            kvCacheManager.updateEngineCache(ipPort, role, cachedKeys);
+            WorkerCacheUpdateResult result = WorkerCacheUpdateResult.builder()
+                    .success(true)
+                    .engineIpPort(engineIpPort)
+                    .cacheBlockCount(cachedKeys.size())
+                    .build();
 
-            WorkerCacheUpdateResult result = buildSuccessResult(workerStatus, cacheStatus);
-
-            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "1");
+            reportUpdateLatency(role, startTime, "1");
 
             return result;
 
         } catch (Throwable e) {
             log.error("Error updating worker cache for: {}", engineIpPort, e);
 
-            WorkerCacheUpdateResult result = buildFailureResult(engineIpPort, e.getMessage());
+            String message = e.getMessage() == null
+                    ? e.getClass().getSimpleName() : e.getMessage();
+            WorkerCacheUpdateResult result = buildFailureResult(engineIpPort, message);
 
-            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "0");
+            reportUpdateLatency(role, startTime, "0");
 
             return result;
         }
     }
 
-    /**
-     * Build success result
-     */
-    private WorkerCacheUpdateResult buildSuccessResult(WorkerStatus workerStatus, CacheStatus cacheStatus) {
-        return WorkerCacheUpdateResult.builder()
-            .success(true)
-            .engineIpPort(workerStatus.getIpPort())
-            .cacheBlockCount(cacheStatus.getCachedKeys() != null ? cacheStatus.getCachedKeys().size() : 0)
-            .availableKvCache(cacheStatus.getAvailableKvCache())
-            .totalKvCache(cacheStatus.getTotalKvCache())
-            .cacheVersion(cacheStatus.getVersion())
-            .build();
+    @Override
+    @Deprecated
+    public WorkerCacheUpdateResult updateEngineBlockCache(WorkerStatus workerStatus) {
+        if (workerStatus == null || workerStatus.getCacheStatus() == null) {
+            return buildFailureResult(
+                    workerStatus == null ? null : workerStatus.getIpPort(),
+                    "Worker Cache Status is null");
+        }
+        return publishEngineCacheSnapshot(
+                workerStatus.getIpPort(),
+                workerStatus.getRole(),
+                workerStatus.getCacheStatus().getCachedKeys());
+    }
+
+    @Override
+    public void clearEngineCache(String engineIpPort) {
+        kvCacheManager.clearEngineCache(engineIpPort);
+    }
+
+    private void reportUpdateLatency(String role, long startTime, String success) {
+        try {
+            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, success);
+        } catch (RuntimeException metricFailure) {
+            log.warn("Failed to report cache publication latency for role={}",
+                    role, metricFailure);
+        }
     }
 
     /**

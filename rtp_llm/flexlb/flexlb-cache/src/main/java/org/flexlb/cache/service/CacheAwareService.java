@@ -6,6 +6,7 @@ import org.flexlb.dao.route.RoleType;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Cache-aware service interface
@@ -26,10 +27,30 @@ public interface CacheAwareService {
     Map<String/*engineIpPort*/, Integer/*prefixMatchLength*/> findMatchingEngines(List<Long> blockCacheKeys, RoleType roleType, String group);
     
     /**
-     * Update engine block KV cache status
+     * Synchronously publish one engine's complete cache-key snapshot.
      *
-     * @param workerStatus Worker status information
-     * @return Update result
+     * <p>The caller retains ownership of {@code cachedKeys}; implementations
+     * must consume the set before returning and must not retain the reference.
+     * Cache lookup is advisory and may observe an update in progress; writers
+     * are serialized per engine address, while readers remain lock-free.
      */
+    default WorkerCacheUpdateResult publishEngineCacheSnapshot(
+            String engineIpPort, RoleType roleType, Set<Long> cachedKeys) {
+        throw new UnsupportedOperationException("cache snapshot publication is not implemented");
+    }
+
+    /**
+     * Compatibility bridge for status publishers that have not migrated to
+     * the explicit snapshot API yet. Removed once the generation-fenced
+     * status runner is committed.
+     */
+    @Deprecated
     WorkerCacheUpdateResult updateEngineBlockCache(WorkerStatus workerStatus);
+
+    /** Remove all cache-locality state for an engine address. */
+    default void clearEngineCache(String engineIpPort) {
+        // Compatibility for implementations that only support the legacy
+        // WorkerStatus-based update API. The generation-aware migration
+        // removes this default once all implementations are updated.
+    }
 }

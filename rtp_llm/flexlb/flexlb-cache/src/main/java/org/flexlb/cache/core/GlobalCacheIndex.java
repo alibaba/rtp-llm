@@ -12,7 +12,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
-import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Global cache index (large hash table)
@@ -30,11 +29,6 @@ public class GlobalCacheIndex {
     private final ConcurrentHashMap<Long, Set<String>> blockToEnginesMap = new ConcurrentHashMap<>();
 
     /**
-     * Read-write lock for data consistency
-     */
-    private final ReentrantLock lock = new ReentrantLock();
-
-    /**
      * Statistics
      */
     private final LongAdder totalBlocks = new LongAdder();
@@ -46,26 +40,23 @@ public class GlobalCacheIndex {
      * @param blockCacheKey Cache block hash value
      * @param engineIpPort  Engine IP:Port
      */
-    public void addCacheBlock(Long blockCacheKey, String engineIpPort) {
+    void addCacheBlock(Long blockCacheKey, String engineIpPort) {
         if (blockCacheKey == null || engineIpPort == null) {
             log.warn("Invalid parameters: blockCacheKey={}, engineIpPort={}", blockCacheKey, engineIpPort);
             return;
         }
 
-        lock.lock();
-        try {
-            Set<String> engines = blockToEnginesMap.computeIfAbsent(blockCacheKey, k -> {
+        blockToEnginesMap.compute(blockCacheKey, (ignored, existing) -> {
+            Set<String> engines = existing;
+            if (engines == null) {
                 totalBlocks.increment();
-                return Sets.newConcurrentHashSet();
-            });
-
-            boolean added = engines.add(engineIpPort);
-            if (added) {
+                engines = Sets.newConcurrentHashSet();
+            }
+            if (engines.add(engineIpPort)) {
                 totalMappings.increment();
             }
-        } finally {
-            lock.unlock();
-        }
+            return engines;
+        });
     }
 
     /**
@@ -79,55 +70,62 @@ public class GlobalCacheIndex {
             return;
         }
 
-        lock.lock();
-        try {
-            Set<String> engines = blockToEnginesMap.get(blockCacheKey);
-            if (engines == null) {
-                return;
-            }
-
-            boolean removed = engines.remove(engineIp);
-            if (removed) {
+        blockToEnginesMap.computeIfPresent(blockCacheKey, (ignored, engines) -> {
+            if (engines.remove(engineIp)) {
                 totalMappings.decrement();
-
-                // Remove entire entry if no engine owns this cache block
                 if (engines.isEmpty()) {
-                    blockToEnginesMap.remove(blockCacheKey);
                     totalBlocks.decrement();
+                    return null;
                 }
             }
-        } finally {
-            lock.unlock();
-        }
+            return engines;
+        });
     }
 
     /**
-     * Remove an engine
-     *
-     * @param engineIp Engine IP
+     * Apply one address snapshot while the caller's old local view remains the
+     * commit marker. Replaying the method after a partial failure is safe.
      */
-    public void removeAllCacheBlockOfEngine(String engineIp) {
-        if (engineIp == null) {
-            return;
+    CacheDiffStats applyEngineCacheSnapshot(String engineIpPort,
+                                            Set<Long> oldCacheBlocks,
+                                            Set<Long> newCacheBlocks) {
+        int added = 0;
+        int removed = 0;
+        for (Long block : newCacheBlocks) {
+            if (!oldCacheBlocks.contains(block)) {
+                added++;
+                // The local view advances only after every global mutation
+                // succeeds. Therefore old members are already committed and
+                // only the logical delta needs a global CHM write.
+                addCacheBlock(block, engineIpPort);
+            }
         }
-
-        lock.lock();
-        try {
-            blockToEnginesMap.forEach((blockCacheKey, engines) -> {
-                boolean removed = engines.remove(engineIp);
-                if (removed) {
-                    totalMappings.decrement();
-
-                    // Remove entire entry if no engine owns this cache block
-                    if (engines.isEmpty()) {
-                        blockToEnginesMap.remove(blockCacheKey);
-                        totalBlocks.decrement();
-                    }
-                }
-            });
-        } finally {
-            lock.unlock();
+        for (Long block : oldCacheBlocks) {
+            if (!newCacheBlocks.contains(block)) {
+                removed++;
+                removeCacheBlock(engineIpPort, block);
+            }
         }
+        return new CacheDiffStats(added, removed);
+    }
+
+    void removeEngineCacheBlocks(String engineIpPort, Set<Long> cacheBlocks) {
+        for (Long block : cacheBlocks) {
+            removeCacheBlock(engineIpPort, block);
+        }
+    }
+
+    /** Compatibility cleanup for the legacy gRPC channel owner. */
+    @Deprecated
+    public void removeAllCacheBlockOfEngine(String engineIpPort) {
+        for (Map.Entry<Long, Set<String>> entry : blockToEnginesMap.entrySet()) {
+            if (entry.getValue().contains(engineIpPort)) {
+                removeCacheBlock(engineIpPort, entry.getKey());
+            }
+        }
+    }
+
+    record CacheDiffStats(int added, int removed) {
     }
 
     /**
