@@ -563,12 +563,6 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     // RUNNING -> DONE: error / finished
     const size_t running_streams_before  = running_streams_.size();
     bool         running_streams_changed = evaluateAndUpdateStreams(running_streams_);
-    if (async_cache_prepare && cache_prepare_blocked_stream_) {
-        if (running_streams_.size() < running_streams_before) {
-            cache_prepare_blocked_stream_.reset();
-            cond_.notify_all();
-        }
-    }
 
     // WAITING -> RUNNING: can run
     // WAITING -> LOADING_CACHE: load cache ok
@@ -581,6 +575,19 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     running_streams_changed = running_streams_changed || !new_streams_.empty();
     running_streams_.insert(running_streams_.end(), new_streams_.begin(), new_streams_.end());
     new_streams_.clear();
+
+    if (async_cache_prepare && cache_prepare_blocked_stream_) {
+        // A round that ends with nothing running must also release the prepare head: no later round
+        // can shrink an already empty list, and the blocked stream is neither re-prepared
+        // (cachePrepareLoop breaks on it) nor advanced (evaluateWaitingStreams breaks on the
+        // unprepared head), so it would never even reach checkTimeout and the queue would stall for
+        // good. Checked after admission so a round that is merely about to fill the batch does not
+        // count as idle.
+        if (running_streams_.empty() || running_streams_.size() < running_streams_before) {
+            cache_prepare_blocked_stream_.reset();
+            cond_.notify_all();
+        }
+    }
 
     // If streams were scheduled, trigger next scheduling round
     if (waiting_streams_.size() < prev_waiting_size) {
