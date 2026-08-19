@@ -35,6 +35,7 @@ public:
                                             EmbeddingProfileConfig          profile_config = {});
 
     // absl::Status update_streams(std::list<EmbeddingStreamPtr>& streams);
+    absl::Status requestStop();
     absl::Status stop();
 
     absl::Status step();

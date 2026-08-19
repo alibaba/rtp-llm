@@ -70,6 +70,14 @@ bool TcpServer::registerService(RPCService* rpc_service) {
 }
 
 void TcpServer::stop() {
+    const bool initialized = rpc_server_ || rpc_server_transport_ || rpc_worker_threadpool_;
+    if (rpc_server_) {
+        // The reporter owns an ANet loop thread and references the transport.
+        // Detach it first so its destructor stops and joins that thread before
+        // the transport and kmonitor objects begin shutting down.
+        rpc_server_->SetMetricReporter(nullptr);
+    }
+
     if (rpc_server_transport_) {
         rpc_server_transport_->stop();
         rpc_server_transport_->wait();
@@ -86,6 +94,9 @@ void TcpServer::stop() {
     }
 
     rpc_server_transport_.reset();
+    if (initialized) {
+        RTP_LLM_LOG_INFO("tcp server stopped");
+    }
 }
 
 }  // namespace rtp_llm

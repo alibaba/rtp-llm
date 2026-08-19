@@ -62,3 +62,11 @@ cc_test(
     },
     exec_properties = {'gpu':'A10'},
 )
+
+cc_test(
+    name = "batch_decode_scheduler_stop_test",
+    srcs = ["BatchDecodeSchedulerStopTest.cc"],
+    copts = copts(),
+    deps = test_deps,
+    exec_properties = {'gpu':'H20'},
+)
