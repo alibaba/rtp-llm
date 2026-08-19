@@ -1,6 +1,7 @@
 """CUDA FP8 quant helpers without grouped-GEMM package initialization."""
 
 import importlib
+import os
 from functools import lru_cache
 from typing import List, Optional, Tuple, Union
 
@@ -208,8 +209,38 @@ def sgl_per_token_group_quant_fp8(
         scale_ue8m0=scale_ue8m0,
     )
     if x.numel() > 0:
-        if masked_m is not None:
-            with torch.cuda.device(x.device):
+        quant_kernel = (
+            os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
+        )
+
+        def can_use_v2() -> bool:
+            if group_size not in (16, 32, 64, 128):
+                return False
+            if masked_m is not None and not fuse_silu_and_mul:
+                return False
+            return True
+
+        def should_auto_use_v2() -> bool:
+            if not can_use_v2():
+                return False
+            if masked_m is not None or fuse_silu_and_mul:
+                return True
+            # Microbench on the target 16..64K token sweep shows v2 wins
+            # consistently once the quantized matrix has at least ~4M elements.
+            return x.numel() >= 4 * 1024 * 1024
+
+        if quant_kernel not in ("auto", "legacy", "v2"):
+            raise ValueError(
+                "DSV4_FP8_QUANT_KERNEL must be one of auto, legacy, v2; "
+                f"got {quant_kernel!r}"
+            )
+
+        use_v2 = quant_kernel == "v2" or (
+            quant_kernel == "auto"
+            and (should_auto_use_v2() or masked_m is not None)
+        )
+        with torch.cuda.device(x.device):
+            if use_v2:
                 _resolve_compute_op("per_token_group_quant_fp8_v2")(
                     x,
                     x_q,
@@ -222,8 +253,7 @@ def sgl_per_token_group_quant_fp8(
                     fuse_silu_and_mul,
                     masked_m,
                 )
-        else:
-            with torch.cuda.device(x.device):
+            else:
                 _resolve_compute_op("per_token_group_quant_fp8")(
                     x, x_q, x_s, group_size, eps, fp8_min, fp8_max, scale_ue8m0
                 )
