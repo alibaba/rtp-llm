@@ -26,8 +26,7 @@ enum class CpPrefillSliceLayout : int8_t {
 };
 
 struct CacheReusePolicyDesc {
-    std::optional<bool>             enable_prefix_reuse;
-    std::optional<CacheEvictPolicy> evict_policy;
+    std::optional<bool> enable_prefix_reuse;
 };
 
 struct CacheCapacityPolicyDesc {

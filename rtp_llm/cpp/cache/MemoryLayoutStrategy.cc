@@ -76,7 +76,7 @@ void MemoryLayoutStrategy::processKVTensor(torch::Tensor& kv_cache_tensor) {
                               torch::str(layer_kv_tensors_[layer_id].sizes()).c_str());
         }
     } else {
-        // MHA and linear/SSM cache storage are exposed at physical BlockPool block granularity.
+        // MHA and linear/SSM cache storage are exposed at physical device-pool block granularity.
         // Full-attention layer views are reshaped to kernel-block granularity at LayerKVCache boundaries.
         torch::Tensor reshaped_tensor = kv_cache_typed.reshape({static_cast<int64_t>(config_.layer_num),
                                                                 static_cast<int64_t>(config_.block_num),

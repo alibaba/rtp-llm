@@ -1,22 +1,26 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <vector>
 #include <cstdint>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include <torch/torch.h>
 
-#include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/cache/BlockPool.h"
-#include "rtp_llm/cpp/cache/SharedBlockCache.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 
 namespace rtp_llm {
+
+class KVCacheAllocator;
+
+using RequiredPositions = std::unordered_set<size_t>;
 
 struct NeedBlocksInfo {
     int common_blocks = 0;  // shared blocks across batches
@@ -25,46 +29,33 @@ struct NeedBlocksInfo {
 
 class KVCacheGroup {
 public:
-    KVCacheGroup(GroupBase                           cache_group,
-                 BlockPoolPtr                        block_pool,
-                 int                                 group_id,
-                 SharedBlockCache*                   shared_cache     = nullptr,
-                 const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        cache_group_(std::move(cache_group)),
-        block_pool_(std::move(block_pool)),
-        shared_cache_(shared_cache),
-        metrics_reporter_(metrics_reporter),
-        group_id_(group_id) {}
+    KVCacheGroup(GroupBase cache_group, DeviceBlockPoolPtr block_pool, int group_id):
+        cache_group_(std::move(cache_group)), block_pool_(std::move(block_pool)), group_id_(group_id) {}
 
     // Transition-only constructor for HybridPool and existing focused tests.
-    KVCacheGroup(const LayerIdsType&                 layer_ids,
-                 KVCacheSpecPtr                      kvcache_spec,
-                 BlockPoolPtr                        block_pool,
-                 int                                 group_id,
-                 CacheGroupPolicy                    policy           = CacheGroupPolicy{},
-                 SharedBlockCache*                   shared_cache     = nullptr,
-                 const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        KVCacheGroup(makeLegacyCacheGroup(layer_ids, std::move(kvcache_spec), policy),
-                     std::move(block_pool),
-                     group_id,
-                     shared_cache,
-                     metrics_reporter) {}
+    KVCacheGroup(const LayerIdsType& layer_ids,
+                 KVCacheSpecPtr      kvcache_spec,
+                 DeviceBlockPoolPtr  block_pool,
+                 int                 group_id,
+                 CacheGroupPolicy    policy = CacheGroupPolicy{}):
+        KVCacheGroup(makeLegacyCacheGroup(layer_ids, std::move(kvcache_spec), policy), std::move(block_pool), group_id) {}
 
     virtual ~KVCacheGroup() = default;
 
     bool                init();
-    virtual bool        malloc(BlockIds&            block_ids,
-                               int                  seq_len,
-                               bool                 enable_reuse_cache   = false,
-                               int                  reserve_step         = 0,
-                               std::vector<size_t>* backfilled_positions = nullptr) = 0;
-    virtual MatchResult match(const CacheKeysType& cache_keys);
-    virtual MatchResult matchPrefix(const CacheKeysType& cache_keys) const;
-    virtual MatchResult matchSingleKey(CacheKeyType cache_key) const;
+    virtual bool        malloc(BlockIds&                  block_ids,
+                               int                        seq_len,
+                               bool                       enable_reuse_cache   = false,
+                               int                        reserve_step         = 0,
+                               std::vector<size_t>*       backfilled_positions = nullptr,
+                               const RequiredPositions&  required_positions = {}) = 0;
+    virtual std::vector<BlockRefTransition>
+    release(const BlockIndicesType& block_indices, BlockRefType ref_type = BlockRefType::REQUEST) = 0;
+    virtual void free(const BlockIndicesType& block_indices)                                      = 0;
+    virtual std::vector<BlockRefTransition>
+    releaseSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
     virtual void
-    insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident);
-    virtual void free(const BlockIndicesType& block_indices)                                                     = 0;
-    virtual void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
+    removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
     virtual int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const                      = 0;
     // Estimate peak additional blocks needed when generating remaining_tokens more tokens.
     virtual int estimatePeakNeedBlocks(int                     seq_len,
@@ -85,6 +76,8 @@ public:
     virtual void reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices)                         = 0;
 
     void                                   reference(const BlockIndicesType& new_block_indices);
+    void                                   reference(const BlockIndicesType& new_block_indices,
+                                                     BlockRefType            ref_type);
     std::unordered_map<int, torch::Tensor> allLayerCacheBase() const;
     std::unordered_map<int, torch::Tensor> allLayerScaleCacheBase() const;
     BlockAddrInfo                          convertIndexToAddr(int layer_id, int block_id) const;
@@ -92,17 +85,20 @@ public:
     std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const;
 
-    size_t                  freeBlocksNum() const;
-    bool                    ensureFreeBlocks(int need_blocks);
+    size_t freeBlocksNum() const;
+    bool   ensureFreeBlocks(int need_blocks);
+    using EvictCallback = std::function<size_t(size_t)>;
     int                     seqSizePerBlock() const;
     const std::string&      tag() const;
     const GroupBase&        config() const;
     int                     group_id() const;
     const CacheGroupPolicy& policy() const;
     bool                    prefixReuseEnabled() const;
-    CacheEvictPolicy        evictPolicy() const;
-    uint32_t                explicitBlockNum() const;
-    size_t                  activeTailBlocks() const;
+    DeviceBlockPoolPtr      blockPool() const {
+        return block_pool_;
+    }
+    uint32_t explicitBlockNum() const;
+    size_t   activeTailBlocks() const;
 
     virtual bool                 prefixReusable() const;
     virtual bool                 hasSparseSlots() const;
@@ -126,15 +122,21 @@ protected:
         return group;
     }
 
-    GroupBase                    cache_group_;
-    BlockPoolPtr                 block_pool_;
-    SharedBlockCache*            shared_cache_     = nullptr;
-    kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
-    int                          group_id_         = -1;
+    void                            addBlockRefs(const BlockIndicesType& blocks, BlockRefType ref_type);
+    std::vector<BlockRefTransition> releaseBlockRefs(const BlockIndicesType& blocks, BlockRefType ref_type);
+
+    GroupBase          cache_group_;
+    DeviceBlockPoolPtr block_pool_;
+    int                group_id_ = -1;
+    EvictCallback      evict_callback_;
 
     std::unordered_map<int, torch::Tensor> global_layer_to_kv_tensors;
     std::unordered_map<int, torch::Tensor> global_layer_to_kv_scale_tensors;
     std::unordered_map<int, int>           global_layer_to_local_layer;
+
+private:
+    friend class KVCacheAllocator;
+    void setEvictCallback(EvictCallback callback);
 };
 
 using KVCacheGroupPtr = std::shared_ptr<KVCacheGroup>;

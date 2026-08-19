@@ -109,16 +109,19 @@ class AuxInfo:
     local_reuse_len: int = 0
     remote_reuse_len: int = 0
     memory_reuse_len: int = 0
+    disk_reuse_len: int = 0
 
     prefill_total_reuse_len: int = 0
     prefill_local_reuse_len: int = 0
     prefill_remote_reuse_len: int = 0
     prefill_memory_reuse_len: int = 0
+    prefill_disk_reuse_len: int = 0
 
     decode_total_reuse_len: int = 0
     decode_local_reuse_len: int = 0
     decode_remote_reuse_len: int = 0
     decode_memory_reuse_len: int = 0
+    decode_disk_reuse_len: int = 0
 
     multimodal_lengths: Dict[int, int] = field(default_factory=dict)
     speculative_draft_rounds: int = 0

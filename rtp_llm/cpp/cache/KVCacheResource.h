@@ -156,14 +156,14 @@ public:
     size_t memoryReuseBlockNum() const;
     void   setMemoryReuseBlockNum(size_t memory_reuse_blocks_num);
 
-    size_t remoteReuseBlockNum() const;
-    void   setRemoteReuseBlockNum(size_t remote_reuse_blocks_num);
+    size_t diskReuseBlockNum() const;
+    void   setDiskReuseBlockNum(size_t disk_reuse_blocks_num);
+
+    size_t storageBackendReuseBlockNum() const;
+    void   setStorageBackendReuseBlockNum(size_t storage_backend_reuse_blocks_num);
 
     bool lastBlockAligned() const;
     void setLastBlockAligned(bool last_block_aligned);
-
-    size_t remoteReuseBlocksNum() const;
-    void   setRemoteReuseBlocksNum(size_t remote_reuse_blocks_num);
 
     void swapBlocks(size_t group_id, size_t rhs, size_t lhs);
 
@@ -186,7 +186,8 @@ private:
 
     size_t device_reuse_block_num_{0};
     size_t memory_reuse_block_num_{0};
-    size_t remote_reuse_block_num_{0};
+    size_t disk_reuse_block_num_{0};
+    size_t storage_backend_reuse_block_num_{0};
     bool   last_block_aligned_{false};
 };
 
