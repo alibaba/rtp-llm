@@ -227,6 +227,10 @@ py_library(
         "//rtp_llm:torch",
         "//rtp_llm:utils",
     ] + select({
+        # CUDA 13 locks intentionally omit flash-attn; the ARM config also
+        # matches using_cuda12_arm, so keep the stricter branches explicit.
+        "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_arm": [],
         "@//:using_cuda12_9_x86": flashattn,
         "@//:using_cuda12_arm": flashattn,
         "//conditions:default": [],
@@ -246,6 +250,10 @@ py_library(
         "//rtp_llm:torch",
         "//rtp_llm:utils",
     ] + select({
+        # CUDA 13 locks intentionally omit flash-attn; the ARM config also
+        # matches using_cuda12_arm, so keep the stricter branches explicit.
+        "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_arm": [],
         "@//:using_cuda12_9_x86": flashattn,
         "@//:using_cuda12_arm": flashattn,
         "//conditions:default": [],
