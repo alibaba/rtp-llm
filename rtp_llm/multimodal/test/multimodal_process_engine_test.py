@@ -1169,6 +1169,89 @@ class MiniMaxM3VLPreprocessTest(TestCase):
             ),
         )
 
+    def test_minimax_long_side_resize_rules(self):
+        from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl.image_processor import (
+            IMAGE_MAX_TOTAL_PIXELS,
+            MIN_SHORT_SIDE_PIXEL,
+            smart_resize,
+        )
+
+        self.assertEqual(
+            smart_resize(
+                2048,
+                1024,
+                factor=28,
+                max_long_side_pixel=1008,
+                max_total_pixels=IMAGE_MAX_TOTAL_PIXELS,
+            ),
+            (1008, 504),
+        )
+        resized = smart_resize(
+            200,
+            40,
+            factor=28,
+            max_long_side_pixel=1008,
+            max_total_pixels=IMAGE_MAX_TOTAL_PIXELS,
+        )
+        self.assertEqual(min(resized), MIN_SHORT_SIDE_PIXEL)
+
+        with self.assertRaises(FtRuntimeException) as context:
+            smart_resize(
+                4000,
+                4000,
+                factor=28,
+                max_long_side_pixel=4000,
+                max_total_pixels=IMAGE_MAX_TOTAL_PIXELS,
+            )
+        self.assertIn("exceeds max_total_pixels", context.exception.message)
+
+        with self.assertRaises(FtRuntimeException) as context:
+            smart_resize(
+                4000,
+                4000,
+                factor=28,
+                max_pixels=20_000_000,
+                max_total_pixels=IMAGE_MAX_TOTAL_PIXELS,
+            )
+        self.assertIn("exceeds max_total_pixels", context.exception.message)
+
+    def test_minimax_request_media_limits_and_fps_range(self):
+        from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl.minimax_m3_vl_mixin import (
+            MiniMaxM3VLImageEmbedding,
+        )
+
+        embedding = object.__new__(MiniMaxM3VLImageEmbedding)
+
+        def make_input(mm_type, fps=-1.0):
+            return SimpleNamespace(
+                mm_type=mm_type,
+                mm_preprocess_config=SimpleNamespace(fps=fps),
+            )
+
+        embedding.validate_inputs(
+            [make_input(MMUrlType.IMAGE) for _ in range(200)]
+            + [make_input(MMUrlType.VIDEO, 0.2) for _ in range(10)]
+            + [make_input(MMUrlType.VIDEO, 5.0) for _ in range(10)]
+        )
+
+        for inputs, expected in (
+            (
+                [make_input(MMUrlType.IMAGE) for _ in range(201)],
+                "at most 200 images",
+            ),
+            (
+                [make_input(MMUrlType.VIDEO) for _ in range(21)],
+                "at most 20 videos",
+            ),
+            ([make_input(MMUrlType.VIDEO, 0.19)], "fps must be in [0.2, 5.0]"),
+            ([make_input(MMUrlType.VIDEO, 5.01)], "fps must be in [0.2, 5.0]"),
+        ):
+            with self.subTest(expected=expected), self.assertRaises(
+                FtRuntimeException
+            ) as context:
+                embedding.validate_inputs(inputs)
+            self.assertIn(expected, context.exception.message)
+
     def _run_video_preprocess(
         self,
         *,
@@ -1177,6 +1260,9 @@ class MiniMaxM3VLPreprocessTest(TestCase):
         requested_fps=0,
         video_reader_error=None,
         configured_max_frames=64,
+        source_height=28,
+        source_width=28,
+        max_long_side_pixel=-1,
     ):
         from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl.minimax_m3_vl_mixin import (
             MiniMaxM3VLImageEmbedding,
@@ -1185,9 +1271,11 @@ class MiniMaxM3VLPreprocessTest(TestCase):
         captured = {}
 
         class _VideoReader:
-            def __init__(self, _data):
+            def __init__(self, _data, width=None, height=None, **_kwargs):
                 if video_reader_error is not None:
                     raise video_reader_error
+                self.width = width or source_width
+                self.height = height or source_height
 
             def __len__(self):
                 return total_frames
@@ -1195,10 +1283,13 @@ class MiniMaxM3VLPreprocessTest(TestCase):
             def get_avg_fps(self):
                 return video_fps
 
+            def __getitem__(self, _index):
+                return SimpleNamespace(shape=(source_height, source_width, 3))
+
             def get_batch(self, indices):
-                captured["indices"] = list(indices)
+                captured.setdefault("indices", []).extend(indices)
                 return torch.zeros(
-                    (len(indices), 28, 28, 3),
+                    (len(indices), self.height, self.width, 3),
                     dtype=torch.uint8,
                 )
 
@@ -1211,6 +1302,7 @@ class MiniMaxM3VLPreprocessTest(TestCase):
             mm_preprocess_config=SimpleNamespace(
                 fps=requested_fps,
                 max_frames=0,
+                max_long_side_pixel=max_long_side_pixel,
             ),
         )
         config = VitConfig()
@@ -1259,7 +1351,7 @@ class MiniMaxM3VLPreprocessTest(TestCase):
         result, captured = self._run_video_preprocess(
             total_frames=1200,
             video_fps=30,
-            requested_fps=30,
+            requested_fps=5,
         )
         frames, _, timestamps = result
         self.assertEqual(len(captured["indices"]), 64)
@@ -1270,10 +1362,30 @@ class MiniMaxM3VLPreprocessTest(TestCase):
         _, captured = self._run_video_preprocess(
             total_frames=1200,
             video_fps=30,
-            requested_fps=30,
+            requested_fps=5,
             configured_max_frames=1,
         )
         self.assertEqual(captured["indices"], [0])
+
+    def test_video_sampling_supports_fractional_fps(self):
+        _, captured = self._run_video_preprocess(
+            total_frames=300,
+            video_fps=30,
+            requested_fps=0.2,
+        )
+        self.assertEqual(captured["indices"], [0, 150, 299])
+
+    def test_video_total_pixels_are_rejected_before_batch_decode(self):
+        with self.assertRaises(FtRuntimeException) as context:
+            self._run_video_preprocess(
+                total_frames=1200,
+                video_fps=30,
+                requested_fps=5,
+                source_height=3584,
+                source_width=3584,
+                max_long_side_pixel=3584,
+            )
+        self.assertIn("exceeds max_total_pixels", context.exception.message)
 
 
 if __name__ == "__main__":

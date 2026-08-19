@@ -366,6 +366,11 @@ def trans_config(mm_process_config_pb: MMPreprocessConfigPB):
         max_frames=mm_process_config_pb.max_frames,
         crop_positions=list(mm_process_config_pb.crop_positions),
         mm_timeout_ms=mm_process_config_pb.mm_timeout_ms,
+        max_long_side_pixel=(
+            mm_process_config_pb.max_long_side_pixel
+            if mm_process_config_pb.max_long_side_pixel > 0
+            else -1
+        ),
     )
 
 

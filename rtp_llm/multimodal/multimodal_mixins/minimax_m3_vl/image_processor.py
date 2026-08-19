@@ -20,6 +20,10 @@ from transformers.utils import TensorType
 
 from rtp_llm.multimodal.mm_error_messages import MMErr, raise_mm
 
+MIN_SHORT_SIDE_PIXEL = 112
+IMAGE_MAX_TOTAL_PIXELS = 12_845_056
+VIDEO_MAX_TOTAL_PIXELS = 301_056_000
+
 
 def round_by_factor(number: int, factor: int) -> int:
     return round(number / factor) * factor
@@ -33,6 +37,46 @@ def floor_by_factor(number: int, factor: int) -> int:
     return math.floor(number / factor) * factor
 
 
+def _smart_resize_by_long_side(
+    height: int,
+    width: int,
+    factor: int,
+    max_long_side_pixel: int,
+    min_short_side_pixel: int,
+    max_total_pixels: Optional[int],
+) -> tuple[int, int]:
+    if max_long_side_pixel <= 0:
+        raise_mm(
+            MMErr.IMG_HW.format(
+                f"max_long_side_pixel must be positive, got {max_long_side_pixel}"
+            )
+        )
+
+    long_side = max(height, width)
+    short_side = min(height, width)
+    scaled_height: float = height
+    scaled_width: float = width
+    if long_side > max_long_side_pixel:
+        scale = max_long_side_pixel / long_side
+        scaled_height = height * scale
+        scaled_width = width * scale
+    elif short_side < min_short_side_pixel:
+        scale = min_short_side_pixel / short_side
+        scaled_height = height * scale
+        scaled_width = width * scale
+
+    h_bar = max(factor, round_by_factor(scaled_height, factor))
+    w_bar = max(factor, round_by_factor(scaled_width, factor))
+    if max_total_pixels is not None and h_bar * w_bar > max_total_pixels:
+        raise_mm(
+            MMErr.IMG_HW.format(
+                f"image area {h_bar * w_bar} exceeds max_total_pixels "
+                f"{max_total_pixels} after resizing"
+            )
+        )
+    return h_bar, w_bar
+
+
 def smart_resize(
     height: int,
     width: int,
@@ -41,6 +85,9 @@ def smart_resize(
     max_pixels: int = 451584,
     min_image_dimension: int = 10,
     max_image_aspect_ratio: float = 200.0,
+    max_long_side_pixel: Optional[int] = None,
+    min_short_side_pixel: int = MIN_SHORT_SIDE_PIXEL,
+    max_total_pixels: Optional[int] = None,
 ) -> tuple[int, int]:
     if min_image_dimension > 0 and (
         height < min_image_dimension or width < min_image_dimension
@@ -61,6 +108,15 @@ def smart_resize(
                 f"got {height} / {width}"
             )
         )
+    if max_long_side_pixel is not None:
+        return _smart_resize_by_long_side(
+            height,
+            width,
+            factor=factor,
+            max_long_side_pixel=max_long_side_pixel,
+            min_short_side_pixel=min_short_side_pixel,
+            max_total_pixels=max_total_pixels,
+        )
     h_bar = max(factor, round_by_factor(height, factor))
     w_bar = max(factor, round_by_factor(width, factor))
     if h_bar * w_bar > max_pixels:
@@ -73,6 +129,13 @@ def smart_resize(
         w_bar = ceil_by_factor(width * beta, factor)
     if h_bar <= 0 or w_bar <= 0:
         raise_mm(MMErr.IMG_TOO_SMALL)
+    if max_total_pixels is not None and h_bar * w_bar > max_total_pixels:
+        raise_mm(
+            MMErr.IMG_HW.format(
+                f"image area {h_bar * w_bar} exceeds max_total_pixels "
+                f"{max_total_pixels} after resizing"
+            )
+        )
     return h_bar, w_bar
 
 
@@ -200,6 +263,7 @@ class MiniMaxM3VLImageProcessorKwargs(ImagesKwargs, total=False):
     merge_size: int
     min_pixels: int
     max_pixels: int
+    max_long_side_pixel: int
 
 
 class MiniMaxM3VLImageProcessor(BaseImageProcessorFast):
@@ -221,6 +285,9 @@ class MiniMaxM3VLImageProcessor(BaseImageProcessorFast):
     merge_size = 2
     min_pixels = 4 * 28 * 28  # 3136, matches smart_resize default lower bound
     max_pixels = 451584  # 672*672
+    max_long_side_pixel = None
+    min_short_side_pixel = MIN_SHORT_SIDE_PIXEL
+    max_total_pixels = IMAGE_MAX_TOTAL_PIXELS
     valid_kwargs = MiniMaxM3VLImageProcessorKwargs
     model_input_names = ["pixel_values", "image_grid_thw"]
 
@@ -247,6 +314,7 @@ class MiniMaxM3VLImageProcessor(BaseImageProcessorFast):
         temporal_patch_size: int,
         merge_size: int,
         max_pixels: int,
+        max_long_side_pixel: Optional[int],
         disable_grouping: bool | None,
         return_tensors: str | TensorType | None,
         min_pixels: int = 4 * 28 * 28,
@@ -266,6 +334,9 @@ class MiniMaxM3VLImageProcessor(BaseImageProcessorFast):
                     factor=factor,
                     min_pixels=min_pixels,
                     max_pixels=max_pixels,
+                    max_long_side_pixel=max_long_side_pixel,
+                    min_short_side_pixel=self.min_short_side_pixel,
+                    max_total_pixels=self.max_total_pixels,
                 )
                 stacked_images = self.resize(
                     stacked_images,
@@ -351,12 +422,18 @@ class MiniMaxM3VLImageProcessor(BaseImageProcessorFast):
         patch_size = images_kwargs.get("patch_size", self.patch_size)
         merge_size = images_kwargs.get("merge_size", self.merge_size)
         max_pixels = images_kwargs.get("max_pixels", self.max_pixels)
+        max_long_side_pixel = images_kwargs.get(
+            "max_long_side_pixel", self.max_long_side_pixel
+        )
 
         resized_height, resized_width = smart_resize(
             height,
             width,
             factor=patch_size * merge_size,
             max_pixels=max_pixels,
+            max_long_side_pixel=max_long_side_pixel,
+            min_short_side_pixel=self.min_short_side_pixel,
+            max_total_pixels=self.max_total_pixels,
         )
         grid_h, grid_w = resized_height // patch_size, resized_width // patch_size
         return grid_h * grid_w

@@ -9,6 +9,7 @@ from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
     ContentPartTypeEnum,
+    MMPreprocessConfigPart,
 )
 from rtp_llm.openai.renderer_factory_register import register_renderer
 from rtp_llm.openai.renderers.basic_renderer import PromptWithMMInput
@@ -73,10 +74,11 @@ class MiniMaxM3VLRenderer(MiniMaxM3Renderer):
                         url = content_part.image_url.url
                         urls.append(url)
                         types.append(MMUrlType.IMAGE)
-                        if content_part.preprocess_config:
-                            preprocess_configs.append(
-                                get_preprocess_config(content_part.preprocess_config)
+                        preprocess_configs.append(
+                            self._get_preprocess_config(
+                                content_part, content_part.image_url
                             )
+                        )
                         # The template visible_text() macro detects type=="image"
                         # and emits the ]<]image[>[ marker, replacing the URL.
                         rebuilt_content.append({"type": "image", "image": url})
@@ -85,10 +87,11 @@ class MiniMaxM3VLRenderer(MiniMaxM3Renderer):
                         url = content_part.video_url.url
                         urls.append(url)
                         types.append(MMUrlType.VIDEO)
-                        if content_part.preprocess_config:
-                            preprocess_configs.append(
-                                get_preprocess_config(content_part.preprocess_config)
+                        preprocess_configs.append(
+                            self._get_preprocess_config(
+                                content_part, content_part.video_url
                             )
+                        )
                         rebuilt_content.append({"type": "video", "video": url})
                 msg_dict["content"] = rebuilt_content
             else:
@@ -154,6 +157,22 @@ class MiniMaxM3VLRenderer(MiniMaxM3Renderer):
             mm_types=types,
             preprocess_configs=preprocess_configs,
         )
+
+    @staticmethod
+    def _get_preprocess_config(content_part, media_url):
+        config = (
+            content_part.preprocess_config.model_copy()
+            if content_part.preprocess_config is not None
+            else MMPreprocessConfigPart()
+        )
+        for field in ("max_long_side_pixel", "fps"):
+            media_value = getattr(media_url, field, None)
+            part_value = getattr(content_part, field, None)
+            if media_value is not None:
+                setattr(config, field, media_value)
+            if part_value is not None:
+                setattr(config, field, part_value)
+        return get_preprocess_config(config)
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         request = copy.deepcopy(request)

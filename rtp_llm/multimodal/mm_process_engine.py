@@ -842,6 +842,7 @@ class MMProcessEngine:
         logging.debug(f"{self.server_id} request [{request_id}] received")
         work_items: List[MMWorkItem] = []
         try:
+            self.mm_part.validate_inputs(mm_inputs)
             with self.profiler.profile_request():
                 with torch.profiler.record_function("mm_embedding_impl"):
                     if not self.is_proxy_mode:
@@ -988,6 +989,7 @@ class MMProcessEngine:
         Returns the list of cache keys. Inputs already in-progress or complete
         are not recomputed.
         """
+        self.mm_part.validate_inputs(mm_inputs)
         cache_keys = []
         for mm_input in mm_inputs:
             if mm_input.url == "":
@@ -1021,6 +1023,7 @@ class MMProcessEngine:
         If in-progress, blocks until the computing thread finishes.
         If complete, returns immediately.
         """
+        self.mm_part.validate_inputs(mm_inputs)
         results = []
         for mm_input in mm_inputs:
             if mm_input.url == "":

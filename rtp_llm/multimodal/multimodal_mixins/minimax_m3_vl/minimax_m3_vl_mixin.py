@@ -55,6 +55,9 @@ from rtp_llm.utils.base_model_datatypes import MMUrlType, VitParameters
 from rtp_llm.utils.model_weight import CkptWeightInfo, concat_0, identity, sp_id
 
 from .image_processor import (
+    IMAGE_MAX_TOTAL_PIXELS,
+    MIN_SHORT_SIDE_PIXEL,
+    VIDEO_MAX_TOTAL_PIXELS,
     MiniMaxM3VLImageProcessor,
     compute_sampled_frame_indices,
     get_hw_multiple_of,
@@ -285,6 +288,46 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
     # Token IDs for fixed bracket tokens (single-token special tokens).
     START_IMAGE_TOKEN_ID = 200029  # ]<]start of image[>[
     END_IMAGE_TOKEN_ID = 200030  # ]<]end of image[>[
+    MAX_IMAGES_PER_REQUEST = 200
+    MAX_VIDEOS_PER_REQUEST = 20
+    MIN_VIDEO_FPS = 0.2
+    MAX_VIDEO_FPS = 5.0
+
+    def validate_inputs(self, mm_inputs: List[MultimodalInput]) -> None:
+        image_count = sum(
+            mm_input.mm_type in (MMUrlType.DEFAULT, MMUrlType.IMAGE)
+            for mm_input in mm_inputs
+        )
+        video_count = sum(mm_input.mm_type == MMUrlType.VIDEO for mm_input in mm_inputs)
+        if image_count > self.MAX_IMAGES_PER_REQUEST:
+            raise_mm(
+                MMErr.IMAGE_REQ.format(
+                    f"at most {self.MAX_IMAGES_PER_REQUEST} images are allowed, "
+                    f"got {image_count}"
+                )
+            )
+        if video_count > self.MAX_VIDEOS_PER_REQUEST:
+            raise_mm(
+                MMErr.VIDEO_REQ.format(
+                    f"at most {self.MAX_VIDEOS_PER_REQUEST} videos are allowed, "
+                    f"got {video_count}"
+                )
+            )
+        for mm_input in mm_inputs:
+            if mm_input.mm_type != MMUrlType.VIDEO:
+                continue
+            fps = float(getattr(mm_input.mm_preprocess_config, "fps", -1))
+            if fps > 0 and (
+                not math.isfinite(fps)
+                or fps < self.MIN_VIDEO_FPS
+                or fps > self.MAX_VIDEO_FPS
+            ):
+                raise_mm(
+                    MMErr.VIDEO_REQ.format(
+                        f"fps must be in [{self.MIN_VIDEO_FPS}, "
+                        f"{self.MAX_VIDEO_FPS}], got {fps}"
+                    )
+                )
 
     def __init__(self, mm_related_params: VitParameters):
         ckpt_path = mm_related_params.config["ckpt_path"]
@@ -541,6 +584,9 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
             max_pixels = int(pre_cfg.max_pixels)
         if getattr(pre_cfg, "min_pixels", -1) > 0:
             min_pixels = int(pre_cfg.min_pixels)
+        max_long_side_pixel = getattr(pre_cfg, "max_long_side_pixel", -1)
+        if max_long_side_pixel <= 0:
+            max_long_side_pixel = getattr(processor, "max_long_side_pixel", None)
 
         target_h, target_w = smart_resize(
             height,
@@ -550,6 +596,9 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
             max_pixels=max_pixels,
             min_image_dimension=vit_config.mm_image_min_dimension,
             max_image_aspect_ratio=vit_config.mm_image_max_aspect_ratio,
+            max_long_side_pixel=max_long_side_pixel,
+            min_short_side_pixel=MIN_SHORT_SIDE_PIXEL,
+            max_total_pixels=IMAGE_MAX_TOTAL_PIXELS,
         )
         return raw, (target_h, target_w), None
 
@@ -575,9 +624,21 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
             raise_mm(MMErr.VIDEO_INVALID)
 
         pre_cfg = mm_input.mm_preprocess_config
-        target_fps = getattr(pre_cfg, "fps", 0)
+        target_fps = float(getattr(pre_cfg, "fps", 0))
         if not target_fps or target_fps <= 0:
-            target_fps = kwargs.get("video_fps", 1.0)
+            target_fps = float(kwargs.get("video_fps", 1.0))
+        if (
+            not math.isfinite(target_fps)
+            or target_fps < MiniMaxM3VLImageEmbedding.MIN_VIDEO_FPS
+            or target_fps > MiniMaxM3VLImageEmbedding.MAX_VIDEO_FPS
+        ):
+            raise_mm(
+                MMErr.VIDEO_REQ.format(
+                    f"fps must be in "
+                    f"[{MiniMaxM3VLImageEmbedding.MIN_VIDEO_FPS}, "
+                    f"{MiniMaxM3VLImageEmbedding.MAX_VIDEO_FPS}], got {target_fps}"
+                )
+            )
         max_frames = getattr(pre_cfg, "max_frames", 0)
         if not max_frames or max_frames <= 0:
             max_frames = kwargs.get("video_max_frames", 768)
@@ -591,6 +652,7 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
         )
         if not indices:
             raise_mm(MMErr.VIDEO_REQ.format("no video frames can be sampled"))
+        num_frames = len(indices)
 
         # Probe one sampled frame before batch decode so source-resolution frames
         # are never materialized for every sample at once.
@@ -605,15 +667,37 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
         temporal_patch_size = kwargs.get("temporal_patch_size", 2)
         factor = patch_size * merge_size
 
-        # sglang uses get_hw_multiple_of with frame_max_size (longest-edge cap)
-        frame_max_size = getattr(processor, "max_pixels", None)
-        if frame_max_size and isinstance(frame_max_size, int):
-            # Convert pixel budget to longest-edge estimate for
-            # get_hw_multiple_of.  Fall back to ceil-align only.
-            edge = int(math.sqrt(frame_max_size))
-            target_w, target_h = get_hw_multiple_of((src_w, src_h), factor, edge)
+        max_long_side_pixel = getattr(pre_cfg, "max_long_side_pixel", -1)
+        if max_long_side_pixel > 0:
+            target_h, target_w = smart_resize(
+                src_h,
+                src_w,
+                factor=factor,
+                min_image_dimension=vit_config.mm_image_min_dimension,
+                max_image_aspect_ratio=vit_config.mm_image_max_aspect_ratio,
+                max_long_side_pixel=int(max_long_side_pixel),
+                min_short_side_pixel=MIN_SHORT_SIDE_PIXEL,
+                max_total_pixels=None,
+            )
         else:
-            target_w, target_h = get_hw_multiple_of((src_w, src_h), factor, None)
+            # Preserve the released processor's legacy per-frame area behavior
+            # when the new long-side control is not requested.
+            frame_max_size = getattr(processor, "max_pixels", None)
+            if frame_max_size and isinstance(frame_max_size, int):
+                edge = int(math.sqrt(frame_max_size))
+                target_w, target_h = get_hw_multiple_of((src_w, src_h), factor, edge)
+            else:
+                target_w, target_h = get_hw_multiple_of((src_w, src_h), factor, None)
+
+        total_pixels = target_h * target_w * num_frames
+        if total_pixels > VIDEO_MAX_TOTAL_PIXELS:
+            raise_mm(
+                MMErr.VIDEO_REQ.format(
+                    f"video area {total_pixels} (width * height * frames) "
+                    f"exceeds max_total_pixels {VIDEO_MAX_TOTAL_PIXELS} "
+                    "after resizing"
+                )
+            )
 
         # Let Decord scale during decode so the sampled-frame tensor is bounded by
         # the model target size. Small sequential batches bound result-buffer
@@ -632,7 +716,6 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
                     num_threads=0,
                 )
 
-            num_frames = len(indices)
             frames_tensor = torch.empty(
                 (num_frames, target_h, target_w, 3), dtype=torch.uint8
             )

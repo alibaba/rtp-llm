@@ -159,6 +159,9 @@ class MultiModalEmbeddingInterface:
     def get_preprocess_params(self):
         return {}
 
+    def validate_inputs(self, mm_inputs: List[MultimodalInput]) -> None:
+        """Validate request-level constraints before preprocessing starts."""
+
     def estimate_work(
         self, data: Any, mm_type: Optional[MMUrlType] = None
     ) -> Optional[MMWorkEstimate]:
