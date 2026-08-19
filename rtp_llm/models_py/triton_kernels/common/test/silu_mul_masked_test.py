@@ -8,6 +8,7 @@ from typing import Callable, Optional
 
 import matplotlib.pyplot as plt
 import torch
+import triton
 
 from rtp_llm.models_py.triton_kernels.common.activation import (
     silu_mul_bf16_deep_gemm_masked,
@@ -37,6 +38,11 @@ class SiluMulMaskedTest(unittest.TestCase):
     NUM_LOCAL_EXPERTS = 4
     EXPECTED_M = 256
     MOE_INTERMEDIATE_SIZE = 2560
+
+    BEAM_SEARCH_NUM_LOCAL_EXPERTS = 96
+    BEAM_SEARCH_TOKEN_NUM_PADDED = 512
+    BEAM_SEARCH_MOE_INTERMEDIATE_SIZE = 1024
+    BEAM_SEARCH_EXPECTED_M = 43
 
     # @classmethod
     # def setUpClass(cls) -> None:
@@ -335,6 +341,108 @@ class SiluMulMaskedTest(unittest.TestCase):
                 )
                 self.assertLess(diff, 0.001)
                 self._clean_test_data_cache(i)
+
+    def test_silu_mul_masked_fp8_beam_search_skew_correctness(self):
+        """Cover the 96-expert, 512-token skew seen in beam-search serving."""
+        num_local_experts = self.BEAM_SEARCH_NUM_LOCAL_EXPERTS
+        token_num_padded = self.BEAM_SEARCH_TOKEN_NUM_PADDED
+        moe_intermediate_size = self.BEAM_SEARCH_MOE_INTERMEDIATE_SIZE
+        masked_m = torch.tensor(
+            [448] + [80] * 45 + [48] + [0] * 49,
+            device="cuda",
+            dtype=torch.int32,
+        )
+        up_gate_output = torch.randn(
+            (num_local_experts, token_num_padded, moe_intermediate_size * 2),
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        for expert_id, token_count in enumerate(masked_m.cpu().tolist()):
+            up_gate_output[expert_id, token_count:, :] = 0
+        output = torch.zeros(
+            (num_local_experts, token_num_padded, moe_intermediate_size),
+            device="cuda",
+            dtype=torch.float8_e4m3fn,
+        )
+        output_scale = torch.zeros(
+            (
+                num_local_experts,
+                token_num_padded,
+                moe_intermediate_size // 128,
+            ),
+            device="cuda",
+            dtype=torch.float32,
+        )
+
+        diff = self._compare_output_diff(
+            up_gate_output=up_gate_output,
+            fn=lambda: silu_mul_masked_fp8_post_quant_fwd(
+                input=up_gate_output,
+                output=output,
+                output_scale=output_scale,
+                quant_group_size=128,
+                masked_m=masked_m,
+                expected_m=self.BEAM_SEARCH_EXPECTED_M,
+                scale_ue8m0=False,
+            ),
+            test_new_output=output,
+            test_new_output_scale=output_scale,
+        )
+        self.assertLess(diff, 0.001)
+
+    @unittest.skipUnless(
+        os.environ.get("RUN_KERNEL_BENCHMARK") == "1",
+        "Set RUN_KERNEL_BENCHMARK=1 to run the H20 latency guard",
+    )
+    def test_silu_mul_masked_fp8_beam_search_skew_performance(self):
+        num_local_experts = self.BEAM_SEARCH_NUM_LOCAL_EXPERTS
+        token_num_padded = self.BEAM_SEARCH_TOKEN_NUM_PADDED
+        moe_intermediate_size = self.BEAM_SEARCH_MOE_INTERMEDIATE_SIZE
+        masked_m = torch.tensor(
+            [448] + [80] * 45 + [48] + [0] * 49,
+            device="cuda",
+            dtype=torch.int32,
+        )
+        up_gate_output = torch.randn(
+            (num_local_experts, token_num_padded, moe_intermediate_size * 2),
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        output = torch.empty(
+            (num_local_experts, token_num_padded, moe_intermediate_size),
+            device="cuda",
+            dtype=torch.float8_e4m3fn,
+        )
+        output_scale = torch.empty(
+            (
+                num_local_experts,
+                token_num_padded,
+                moe_intermediate_size // 128,
+            ),
+            device="cuda",
+            dtype=torch.float32,
+        )
+        fn = lambda: silu_mul_masked_fp8_post_quant_fwd(
+            input=up_gate_output,
+            output=output,
+            output_scale=output_scale,
+            quant_group_size=128,
+            masked_m=masked_m,
+            expected_m=self.BEAM_SEARCH_EXPECTED_M,
+            scale_ue8m0=False,
+        )
+
+        latency_us = triton.testing.do_bench(fn, warmup=100, rep=500) * 1000
+        valid_tokens = int(masked_m.sum().item())
+        # Per output element: two BF16 reads + one FP8 write. Each 128-value
+        # quantization group additionally writes one FP32 scale.
+        io_bytes = valid_tokens * moe_intermediate_size * (2 + 2 + 1 + 4 / 128)
+        effective_bandwidth_gbps = io_bytes / latency_us / 1e3
+        print(
+            f"beam-search skew latency: {latency_us:.2f} us, "
+            f"effective bandwidth: {effective_bandwidth_gbps:.1f} GB/s"
+        )
+        self.assertLess(latency_us, 60.0)
 
     def test_silu_mul_masked_bf16_iterative_num_local_experts_correctness(self):
         for i, num_local_experts in enumerate(
