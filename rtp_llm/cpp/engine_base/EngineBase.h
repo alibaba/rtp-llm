@@ -61,6 +61,13 @@ public:
 
     virtual absl::Status stop() = 0;
 
+    // Request that the engine scheduler stop accepting/starting work without
+    // waiting for the loop thread to join. Multi-rank process owners use this
+    // as the deterministic shutdown-ready boundary before stopping TP rank 0.
+    virtual absl::Status requestStop() {
+        return absl::UnimplementedError("engine does not implement nonblocking stop");
+    }
+
     virtual absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                                      preRunMode                            mode) = 0;
 

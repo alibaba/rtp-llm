@@ -18,16 +18,26 @@ constexpr int    kDevicePinRetryBackoffMs         = 1000;
 }  // namespace
 
 NormalCacheStore::~NormalCacheStore() {
-    if (thread_pool_) {
-        thread_pool_close_ = true;
-        thread_pool_->stop();
-        thread_pool_.reset();
-    }
+    stop();
+}
 
-    request_block_buffer_store_->stop();
-    messager_.reset();
-    request_block_buffer_store_.reset();
-    RTP_LLM_LOG_INFO("destory cache store done");
+void NormalCacheStore::stop() {
+    std::call_once(stop_once_, [this]() {
+        if (thread_pool_) {
+            thread_pool_close_.store(true, std::memory_order_release);
+            thread_pool_->stop();
+            thread_pool_.reset();
+        }
+
+        // Quiesce ANet before stopping or releasing the request store used by
+        // the raw-registered RPC service.
+        messager_.reset();
+        if (request_block_buffer_store_) {
+            request_block_buffer_store_->stop();
+        }
+        request_block_buffer_store_.reset();
+        RTP_LLM_LOG_INFO("cache store stopped");
+    });
 }
 
 std::shared_ptr<NormalCacheStore> NormalCacheStore::createNormalCacheStore(const CacheStoreInitParams& params) {
@@ -81,7 +91,7 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
     auto check_task_readiness = [this]() {
         bool   device_pinned       = false;
         size_t device_pin_failures = 0;
-        while (!thread_pool_close_) {
+        while (!thread_pool_close_.load(std::memory_order_acquire)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             if (!device_pinned) {
                 device_pinned = tryPinThreadDevice(this->device_id_, "normal cache store check task");

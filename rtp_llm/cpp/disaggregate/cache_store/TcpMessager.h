@@ -12,7 +12,7 @@ public:
                 const std::shared_ptr<RequestBlockBufferStore>& request_block_buffer_store,
                 const kmonitor::MetricsReporterPtr&             metrics_reporter):
         Messager(memory_util, request_block_buffer_store, metrics_reporter) {}
-    virtual ~TcpMessager() = default;
+    ~TcpMessager() override;
 
 public:
     bool init(MessagerInitParams params) override;
