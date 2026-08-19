@@ -63,19 +63,6 @@ def rdma_transport_deps():
         actual = "@rtp_llm//rtp_llm/cpp/rdma_transport:rdma_transport_no_impl",
         visibility = ["//visibility:public"],
     )
-
-def transfer_rdma_deps():
-    native.alias(
-        name = "transfer_rdma_impl",
-        actual = "@rtp_llm//rtp_llm/cpp/cache/connector/p2p/transfer:no_rdma_impl",
-    )
-
-def transfer_backend_deps():
-    native.alias(
-        name = "transfer_backend_arch_select_impl",
-        actual = "@rtp_llm//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_backend_base_impl",
-    )
-
 def embedding_arpc_deps():
     native.alias(
         name = "embedding_arpc_deps",
