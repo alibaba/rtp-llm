@@ -1,12 +1,9 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.strategy.PrefillTimePredictor;
-import org.flexlb.util.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -22,7 +19,6 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
 
     private volatile long lastOfferMs;
     private volatile double interArrivalEmaMs;
-    private final Map<Long, ParkTrace> lastParkByRequest = new ConcurrentHashMap<>();
 
     // ==================== BatcherAlgorithm implementation ====================
 
@@ -66,7 +62,7 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
         //    fall through to the deadline_guard dispatch below.
         if (budgetMs < 0) {
             if (!ctx.cfg().isAutoTpmEnabled()) {
-                dropHead(ctx, head, now, budgetMs, "deadline_expired");
+                dropHead(ctx, head);
                 return;
             }
             long remainingBudgetMs = head.deadlineMs() > 0
@@ -74,14 +70,13 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
             long estimatedPrefillMs = Math.max(1,
                     (long) predictor.estimateMs(head.seqLen(), head.hitCache()));
             if (remainingBudgetMs < estimatedPrefillMs) {
-                dropHead(ctx, head, now, budgetMs, "deadline_expired_failfast");
+                dropHead(ctx, head);
                 return;
             }
             // Still has enough coarse budget — fall through to dispatch.
         }
 
         if (!BatchShape.empty().add(head).fitsCompute(batchMaxTokens)) {
-            lastParkByRequest.remove(head.requestId());
             ctx.rejectForBatchTokenCapacity(head, batchMaxTokens);
             return;
         }
@@ -93,10 +88,9 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
             // keep parking them until the engine backpressure clears.
             // When Auto-TPM is off, the legacy drop stays.
             if (budgetMs <= inflightGuardMs && !ctx.cfg().isAutoTpmEnabled()) {
-                dropHead(ctx, head, now, budgetMs, "inflight_full_guard");
+                dropHead(ctx, head);
                 return;
             }
-            recordPark(ctx, head, "inflight_full", budgetMs, now);
             parkBriefly();
             return;
         }
@@ -112,36 +106,24 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
         int targetBatchSize = insideWindow
                 ? targetBatchSize(ctx, minBatchSize, batchMaxCount, budgetMs, latestDispatchBudgetMs, now)
                 : batchMaxCount;
-        double fillRatio = targetBatchSize > 0 ? (double) picked.size() / targetBatchSize : 1.0;
         boolean reachesMaxSize = picked.size() >= batchMaxCount;
         boolean reachesTarget = picked.size() >= targetBatchSize;
         boolean mustDispatch = budgetMs <= latestDispatchBudgetMs;
         boolean shouldWaitForMore = shouldWaitForMore(ctx,
                 picked.size(), minBatchSize, batchMaxCount, targetBatchSize, budgetMs, latestDispatchBudgetMs, now);
-        DecisionTrace trace = new DecisionTrace(
-                targetBatchSize,
-                budgetMs,
-                latestDispatchBudgetMs,
-                Math.max(0, budgetMs - latestDispatchBudgetMs),
-                estimatedInterArrivalMs(ctx),
-                estimatedTimeToNextArrivalMs(ctx, now),
-                arrivalWaitGuardMs(ctx),
-                ctx.prefillEp().getInflightBatchCount(),
-                now);
 
         // 2. Dispatch decision. Predictor is used for admission and deadline
         // protection; request count and arrival rate decide whether to keep
         // waiting for a more efficient batch.
         if (reachesMaxSize) {
-            dispatchBatch(ctx, picked, "batch_size_max", fillRatio, trace);
+            dispatchBatch(ctx, picked, "batch_size_max");
         } else if (mustDispatch) {
-            dispatchBatch(ctx, picked, "deadline_guard", fillRatio, trace);
+            dispatchBatch(ctx, picked, "deadline_guard");
         } else if (insideWindow && reachesTarget && !shouldWaitForMore) {
-            dispatchBatch(ctx, picked, "target_batch_size", fillRatio, trace);
+            dispatchBatch(ctx, picked, "target_batch_size");
         } else if (insideWindow && !shouldWaitForMore) {
-            dispatchBatch(ctx, picked, "arrival_guard", fillRatio, trace);
+            dispatchBatch(ctx, picked, "arrival_guard");
         } else {
-            recordPark(ctx, head, parkReason(insideWindow, picked.size(), minBatchSize, batchMaxCount), budgetMs, now);
             parkBriefly();
         }
     }
@@ -149,11 +131,6 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
     @Override
     public void onOffer(BatcherContext ctx, BatchItem item, long nowMs) {
         recordArrival(ctx, nowMs);
-    }
-
-    @Override
-    public void onShutdown(BatcherContext ctx) {
-        lastParkByRequest.clear();
     }
 
     // ==================== Batch pick ====================
@@ -311,48 +288,9 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
 
     // ==================== Park tracking ====================
 
-    private static String parkReason(boolean insideWindow,
-                                     int pickedSize,
-                                     int minBatchSize,
-                                     int batchMaxCount) {
-        if (!insideWindow) {
-            return "outside_window";
-        }
-        int minTarget = minTargetBatchSize(minBatchSize, batchMaxCount);
-        if (pickedSize < minTarget) {
-            return "wait_for_min_batch";
-        }
-        return "wait_for_target_batch";
-    }
-
-    private void recordPark(BatcherContext ctx, BatchItem head, String reason, long budgetMs, long nowMs) {
-        lastParkByRequest.put(head.requestId(), new ParkTrace(
-                reason,
-                budgetMs,
-                nowMs - head.enqueuedAtMs(),
-                ctx.size(),
-                ctx.prefillEp().getInflightBatchCount()));
-    }
-
     // ==================== Drop ====================
 
-    private void dropHead(BatcherContext ctx, BatchItem head, long nowMs, long budgetMs, String dropReason) {
-        int queueBefore = ctx.size();
-        int inflightBatches = ctx.prefillEp().getInflightBatchCount();
-        long waitMs = nowMs - head.enqueuedAtMs();
-        long initialBudgetMs = head.sortKey() - head.enqueuedAtMs();
-        ParkTrace parkTrace = lastParkByRequest.remove(head.requestId());
-        if (parkTrace == null) {
-            parkTrace = ParkTrace.EMPTY;
-        }
-        Logger.debug("flexlb_batch_drop req_id={} seq_len={} wait_ms={} budget_ms={} worker={} "
-                        + "drop_reason={} initial_budget_ms={} deadline_ms={} enqueued_at_ms={} queue_size={} "
-                        + "inflight_batches={} last_park_reason={} last_park_budget_ms={} "
-                        + "last_park_wait_ms={} last_park_queue_size={} last_park_inflight_batches={}",
-                head.requestId(), head.seqLen(), waitMs, budgetMs, ctx.key(),
-                dropReason, initialBudgetMs, head.sortKey(), head.enqueuedAtMs(), queueBefore,
-                inflightBatches, parkTrace.reason(), parkTrace.budgetMs(),
-                parkTrace.waitMs(), parkTrace.queueSize(), parkTrace.inflightBatches());
+    private void dropHead(BatcherContext ctx, BatchItem head) {
         ctx.dropHead(head);
     }
 
@@ -360,22 +298,7 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
 
     private void dispatchBatch(BatcherContext ctx,
                                List<BatchItem> picked,
-                               String reason,
-                               double fillRatio,
-                               DecisionTrace trace) {
-        BatchItem head = picked.get(0);
-        Logger.debug("flexlb_batch_decision reason={} picked_size={} target_batch_size={} "
-                        + "fill_ratio={} wait_ms={} budget_ms={} slack_ms={} latest_dispatch_budget_ms={} "
-                        + "arrival_ema_ms={} next_arrival_ms={} arrival_wait_guard_ms={} "
-                        + "inflight_batches={} queue_before={} worker={} head_req_id={}",
-                reason, picked.size(), trace.targetBatchSize(), fillRatio,
-                trace.nowMs() - head.enqueuedAtMs(), trace.budgetMs(), trace.slackMs(),
-                trace.latestDispatchBudgetMs(), trace.arrivalEmaMs(), trace.nextArrivalMs(),
-                trace.arrivalWaitGuardMs(), trace.inflightBatches(), ctx.size(), ctx.key(),
-                head.requestId());
-        for (BatchItem item : picked) {
-            lastParkByRequest.remove(item.requestId());
-        }
+                               String reason) {
         ctx.dispatch(picked,
                 new DispatchMeta(reason, ctx.size() - picked.size()));
     }
@@ -391,22 +314,4 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
     private record BatchPick(List<BatchItem> items, long headPredMs, long predMs) {
     }
 
-    private record DecisionTrace(int targetBatchSize,
-                                 long budgetMs,
-                                 long latestDispatchBudgetMs,
-                                 long slackMs,
-                                 long arrivalEmaMs,
-                                 long nextArrivalMs,
-                                 long arrivalWaitGuardMs,
-                                 int inflightBatches,
-                                 long nowMs) {
-    }
-
-    private record ParkTrace(String reason,
-                             long budgetMs,
-                             long waitMs,
-                             int queueSize,
-                             int inflightBatches) {
-        private static final ParkTrace EMPTY = new ParkTrace("none", -1, -1, -1, -1);
-    }
 }

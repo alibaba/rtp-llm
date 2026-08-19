@@ -10,9 +10,7 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
-import java.lang.reflect.Field;
 import java.util.Comparator;
-import java.util.Map;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -161,30 +159,6 @@ class SloBudgetBatcherAlgorithmTest {
         assertEquals(0, ctx.size());
     }
 
-    // ---- park trace lifecycle on the drop path (F1 connected verification) ----
-
-    @Test
-    void dropPathRemovesParkTraceRecordedWhileParked() throws Exception {
-        FlexlbConfig config = autoTpmOffConfig();
-        config.setFlexlbBatchSloMaxInflightBatches(1);
-        PrefillEndpoint endpoint = endpoint(1);
-        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
-        BatchItem head = item(1L, System.currentTimeMillis() - 100, 100, 0);
-        head.setSortKey(System.currentTimeMillis() + 200); // budget > guard(40) → park
-        BatcherContext ctx = context(endpoint, config, handler, queueWith(head));
-        SloBudgetBatcherAlgorithm algorithm = new SloBudgetBatcherAlgorithm();
-
-        algorithm.processQueue(ctx);
-        assertFalse(parkTraces(algorithm).isEmpty(), "park must record a trace for the head");
-
-        head.setSortKey(System.currentTimeMillis() - 10); // now expired → drop
-        algorithm.processQueue(ctx);
-
-        verify(handler).onExpired(head);
-        assertTrue(parkTraces(algorithm).isEmpty(), "drop must remove the head's park trace");
-        assertEquals(0, ctx.size());
-    }
-
     // ---- fail-fast overestimate drop (P1-4, PR-D) ----
 
     /**
@@ -305,12 +279,5 @@ class SloBudgetBatcherAlgorithmTest {
                                           PriorityBlockingQueue<BatchItem> queue) {
         return new BatcherContext("test", endpoint, config, handler, queue,
                 new AtomicInteger(queue.size()), mock(BatchSchedulerReporter.class));
-    }
-
-    @SuppressWarnings("unchecked")
-    private static Map<Long, ?> parkTraces(SloBudgetBatcherAlgorithm algorithm) throws Exception {
-        Field field = SloBudgetBatcherAlgorithm.class.getDeclaredField("lastParkByRequest");
-        field.setAccessible(true);
-        return (Map<Long, ?>) field.get(algorithm);
     }
 }
