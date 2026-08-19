@@ -6,8 +6,6 @@
 #include <cstring>
 #include <limits>
 #include <numeric>
-#include <unordered_map>
-#include <unordered_set>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
@@ -19,6 +17,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
+#include "rtp_llm/cpp/cache/KVCacheMetrics.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
@@ -30,24 +29,6 @@
 namespace rtp_llm {
 
 namespace {
-
-struct CachePoolMetricsSnapshot {
-    size_t      total_blocks              = 0;
-    size_t      free_blocks               = 0;
-    size_t      used_blocks               = 0;
-    size_t      active_tree_cached_blocks = 0;
-    std::string tier;
-    std::string pool_name;
-    size_t      block_size_bytes      = 0;
-    size_t      available_blocks      = 0;
-    size_t      reserve_blocks        = 0;
-    size_t      request_ref_blocks     = 0;
-    size_t      connector_ref_blocks   = 0;
-    size_t      block_cache_ref_blocks = 0;
-    size_t      eviction_ref_blocks    = 0;
-    size_t      store_ref_blocks       = 0;
-    float       used_ratio            = 0.0f;
-};
 
 RtpLLMCacheMetricsCollector collectGlobalCacheMetrics(const KVCacheAllocatorPtr& allocator) {
     RtpLLMCacheMetricsCollector collector;
@@ -92,19 +73,19 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
     }
 
     RtpLLMCachePoolMetricsCollector pool_collector;
-    pool_collector.block_size_bytes      = static_cast<int64_t>(pool_snapshot.block_size_bytes);
-    pool_collector.free_blocks           = static_cast<int64_t>(pool_snapshot.free_blocks);
+    pool_collector.block_size_bytes       = static_cast<int64_t>(pool_snapshot.block_size_bytes);
+    pool_collector.free_blocks            = static_cast<int64_t>(pool_snapshot.free_blocks);
     pool_collector.used_blocks            = static_cast<int64_t>(pool_snapshot.used_blocks);
-    pool_collector.available_blocks      = static_cast<int64_t>(pool_snapshot.available_blocks);
-    pool_collector.active_blocks         = static_cast<int64_t>(pool_snapshot.active_tree_cached_blocks);
-    pool_collector.total_blocks          = static_cast<int64_t>(pool_snapshot.total_blocks);
-    pool_collector.reserve_blocks        = static_cast<int64_t>(pool_snapshot.reserve_blocks);
+    pool_collector.available_blocks       = static_cast<int64_t>(pool_snapshot.available_blocks);
+    pool_collector.active_blocks          = static_cast<int64_t>(pool_snapshot.active_tree_cached_blocks);
+    pool_collector.total_blocks           = static_cast<int64_t>(pool_snapshot.total_blocks);
+    pool_collector.reserve_blocks         = static_cast<int64_t>(pool_snapshot.reserve_blocks);
     pool_collector.request_ref_blocks     = static_cast<int64_t>(pool_snapshot.request_ref_blocks);
     pool_collector.connector_ref_blocks   = static_cast<int64_t>(pool_snapshot.connector_ref_blocks);
     pool_collector.block_cache_ref_blocks = static_cast<int64_t>(pool_snapshot.block_cache_ref_blocks);
     pool_collector.eviction_ref_blocks    = static_cast<int64_t>(pool_snapshot.eviction_ref_blocks);
     pool_collector.store_ref_blocks       = static_cast<int64_t>(pool_snapshot.store_ref_blocks);
-    pool_collector.used_ratio            = pool_snapshot.used_ratio;
+    pool_collector.used_ratio             = pool_snapshot.used_ratio;
 
     kmonitor::MetricsTags pool_tags("pool_name", pool_snapshot.pool_name);
     pool_tags.AddTag("tier", pool_snapshot.tier);
@@ -169,7 +150,7 @@ bool cacheStatusSnapshotEnabled() {
 }
 
 void reportCacheOperation(const kmonitor::MetricsReporterPtr&          metrics_reporter,
-                                 RtpLLMCacheOperationMetricsCollector::OpType operation_type,
+                          RtpLLMCacheOperationMetricsCollector::OpType operation_type,
                           int64_t                                      begin_time_us,
                           bool                                         success) {
     if (metrics_reporter == nullptr) {
@@ -365,17 +346,14 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     }
     reportPrefillCacheHitMetrics(malloc_info, keys_initialized_now);
 
-    MallocResult result = allocator_->malloc(malloc_info);
+    MallocResult  result             = allocator_->malloc(malloc_info);
     const int64_t malloc_end_time_us = currentTimeUs();
     result.malloc_begin_time_us      = malloc_begin_time_us;
     if (result.load_attempted) {
-        result.load_prepare_latency_us =
-            std::max<int64_t>(malloc_end_time_us - result.match_end_time_us, 0);
+        result.load_prepare_latency_us = std::max<int64_t>(malloc_end_time_us - result.match_end_time_us, 0);
     }
-    reportCacheOperation(metrics_reporter_,
-                         RtpLLMCacheOperationMetricsCollector::OpType::MALLOC,
-                         malloc_begin_time_us,
-                         result.success);
+    reportCacheOperation(
+        metrics_reporter_, RtpLLMCacheOperationMetricsCollector::OpType::MALLOC, malloc_begin_time_us, result.success);
     return result;
 }
 
@@ -727,70 +705,10 @@ void KVCacheManager::reportMetricsLoop() {
 
         block_tree_cache_->reportMetrics();
         const std::vector<BlockTreePoolMetricsSnapshot> tree_pool_snapshots = block_tree_cache_->poolMetricsSnapshots();
-        std::unordered_map<std::string, BlockTreePoolMetricsSnapshot> device_tree_snapshots;
-        for (const BlockTreePoolMetricsSnapshot& snapshot : tree_pool_snapshots) {
-            if (snapshot.tier == Tier::DEVICE) {
-                const bool inserted = device_tree_snapshots.emplace(snapshot.pool_name, snapshot).second;
-                if (!inserted) {
-                    RTP_LLM_LOG_WARNING("duplicate device pool name in metrics: %s", snapshot.pool_name.c_str());
-                }
-            }
-        }
-
-        std::unordered_set<std::string>               reported_device_pools;
-        const std::vector<KVCachePoolMetricsSnapshot> device_pool_snapshots = allocator_->poolMetricsSnapshots();
-        for (const KVCachePoolMetricsSnapshot& snapshot : device_pool_snapshots) {
-            const bool inserted = reported_device_pools.insert(snapshot.pool_name).second;
-            if (!inserted) {
-                RTP_LLM_LOG_WARNING("duplicate allocator pool name in metrics: %s", snapshot.pool_name.c_str());
-                continue;
-            }
-            CachePoolMetricsSnapshot report_snapshot;
-            report_snapshot.tier                      = tierName(Tier::DEVICE);
-            report_snapshot.pool_name                 = snapshot.pool_name;
-            report_snapshot.block_size_bytes          = snapshot.block_size_bytes;
-            report_snapshot.total_blocks              = snapshot.total_blocks;
-            report_snapshot.free_blocks               = snapshot.free_blocks;
-            report_snapshot.used_blocks               = snapshot.used_blocks;
-            report_snapshot.available_blocks          = snapshot.free_blocks;
-            report_snapshot.active_tree_cached_blocks = snapshot.active_tree_cached_blocks;
-            report_snapshot.reserve_blocks            = snapshot.reserve_blocks;
-            report_snapshot.request_ref_blocks        = snapshot.request_ref_blocks;
-            report_snapshot.connector_ref_blocks      = snapshot.connector_ref_blocks;
-            report_snapshot.block_cache_ref_blocks    = snapshot.block_cache_ref_blocks;
-            report_snapshot.eviction_ref_blocks       = snapshot.eviction_ref_blocks;
-            report_snapshot.store_ref_blocks          = snapshot.store_ref_blocks;
-            report_snapshot.used_ratio                = snapshot.used_ratio;
-            const std::unordered_map<std::string, BlockTreePoolMetricsSnapshot>::const_iterator tree_it =
-                device_tree_snapshots.find(snapshot.pool_name);
-            if (tree_it != device_tree_snapshots.end()) {
-                report_snapshot.available_blocks = tree_it->second.available_blocks;
-            }
-            reportPoolCacheMetrics(metrics_reporter_, report_snapshot, should_log);
-        }
-
-        for (const BlockTreePoolMetricsSnapshot& snapshot : tree_pool_snapshots) {
-            if (snapshot.tier == Tier::DEVICE && reported_device_pools.count(snapshot.pool_name) > 0) {
-                continue;
-            }
-            CachePoolMetricsSnapshot report_snapshot;
-            report_snapshot.tier                      = tierName(snapshot.tier);
-            report_snapshot.pool_name                 = snapshot.pool_name;
-            report_snapshot.block_size_bytes          = snapshot.block_size_bytes;
-            report_snapshot.total_blocks              = snapshot.total_blocks;
-            report_snapshot.free_blocks               = snapshot.free_blocks;
-            report_snapshot.used_blocks               = snapshot.used_blocks;
-            report_snapshot.available_blocks          = snapshot.available_blocks;
-            report_snapshot.request_ref_blocks        = snapshot.request_ref_blocks;
-            report_snapshot.connector_ref_blocks      = snapshot.connector_ref_blocks;
-            report_snapshot.block_cache_ref_blocks    = snapshot.block_cache_ref_blocks;
-            report_snapshot.eviction_ref_blocks       = snapshot.eviction_ref_blocks;
-            report_snapshot.store_ref_blocks          = snapshot.store_ref_blocks;
-            report_snapshot.active_tree_cached_blocks = snapshot.active_tree_cached_blocks;
-            report_snapshot.used_ratio                = snapshot.total_blocks == 0 ?
-                                                            0.0f :
-                                                            static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.free_blocks)
-                                                                / static_cast<double>(snapshot.total_blocks));
+        const std::vector<KVCachePoolMetricsSnapshot>   device_pool_snapshots = allocator_->poolMetricsSnapshots();
+        const std::vector<CachePoolMetricsSnapshot>     report_snapshots =
+            mergeCachePoolMetricsSnapshots(device_pool_snapshots, tree_pool_snapshots);
+        for (const CachePoolMetricsSnapshot& report_snapshot : report_snapshots) {
             reportPoolCacheMetrics(metrics_reporter_, report_snapshot, should_log);
         }
 
