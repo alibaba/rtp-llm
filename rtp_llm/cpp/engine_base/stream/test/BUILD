@@ -87,7 +87,7 @@ cc_test(
         "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/cpp/model_rpc:model_rpc_server",
         "//rtp_llm/models_py/bindings/common:common",
-        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "//rtp_llm/models_py/bindings/core:runtime_ops_test_impls",
         "@havenask//aios/autil:base64",
         "@havenask//aios/autil:zlib",
     ],

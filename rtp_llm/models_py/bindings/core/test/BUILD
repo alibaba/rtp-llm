@@ -5,6 +5,18 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
+cc_import(
+    name = "cuda13_torch_nvshmem",
+    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+)
+
+cuda13_torch_link_deps = select({
+    "@//:using_cuda13_x86": [
+        ":cuda13_torch_nvshmem",
+    ],
+    "//conditions:default": [],
+})
+
 runtime_ops_test_deps = [
     "//rtp_llm/cpp/cache:cache_config",
     "//rtp_llm/cpp/cache:cache_store_writer_hdrs",
@@ -18,7 +30,7 @@ runtime_ops_test_deps = [
     "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
     "//rtp_llm/cpp/testing:test_log_capture",
     "@com_google_googletest//:gtest_main",
-] + torch_deps()
+] + torch_deps() + cuda13_torch_link_deps
 
 cache_store_test_filter = "RuntimeOpsTest.testWriteCacheStore*:RuntimeOpsTest.testLoadContextFailureDebugInfo*"
 packed_mask_logits_test_filter = "RuntimeOpsTest.testRuntimeApplyPackedMaskLogits*"

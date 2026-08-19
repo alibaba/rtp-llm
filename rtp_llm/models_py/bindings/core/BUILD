@@ -131,6 +131,7 @@ cc_library(
         "//rtp_llm/cpp/cache/connector/test:__pkg__",
         "//rtp_llm/cpp/cache/test:__pkg__",
         "//rtp_llm/cpp/disaggregate/cache_store/test:__pkg__",
+        "//rtp_llm/cpp/engine_base/stream/test:__pkg__",
         "//rtp_llm/cpp/models/logits_processor/test:__pkg__",
         "//rtp_llm/cpp/models/test:__pkg__",
         "//rtp_llm/cpp/testing:__pkg__",

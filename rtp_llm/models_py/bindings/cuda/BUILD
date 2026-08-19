@@ -117,8 +117,6 @@ cc_library(
     ], exclude = [
         "Bf16GemmOp.cc",
         "RegisterCudaOps.cc",
-        "SplitKvCacheCopy.cc",
-        "NoBlockCopy.cc",
         "cuda_host_utils.cc",
         "launch_utils.cc",
     ]),
@@ -126,7 +124,6 @@ cc_library(
         "*.h",
     ], exclude = [
         "Bf16GemmOp.h",
-        "SplitKvCacheCopy.h",
         "cuda_host_utils.h",
         "launch_utils.h",
         "cuda_fp8_utils.h",

@@ -34,7 +34,7 @@ test_deps = [
     "//rtp_llm/cpp/testing:device_test_utils",
     "//rtp_llm/cpp/testing:base_tests",
     ":cuda_test_util",
-] + device_impl_target() + torch_deps()
+] + device_impl_target() + torch_deps() + cuda13_torch_link_deps
 
 
 cc_test(
@@ -75,7 +75,7 @@ cc_test(
     copts = copts(),
     deps = [
         "//rtp_llm/cpp/testing:rejection_sampling_test_utils",
-    ] + torch_deps(),
+    ] + torch_deps() + cuda13_torch_link_deps,
     exec_properties = {'gpu':'H20'},
 )
 
@@ -89,7 +89,7 @@ cc_test(
     deps = test_deps + [
         "//3rdparty/flashinfer:flashinfer",
         "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
-    ] + cuda13_torch_link_deps,
+    ],
     exec_properties = {'gpu':'H20'},
 )
 
