@@ -459,7 +459,6 @@ TEST(BlockTreeTest, InsertHardStopsAtExistingHostFullNode) {
 
     GroupSetResource& host_resource = host_node->group_set_resources[0];
     const MultiNodeResource device_resource{0, Tier::DEVICE, {{host_node, host_resource.device_blocks}}};
-    tree.groupSets()[0]->unmapDeviceBlocksFromTreeNode(device_resource);
     tree.groupSets()[0]->unreferenceBlocks(device_resource, BlockRefType::BLOCK_CACHE);
     host_resource.evictFromTier(Tier::DEVICE);
     host_resource.host_block = 7;
@@ -484,7 +483,6 @@ TEST(BlockTreeTest, InsertAdoptsIdleEmptyFullNodeBeforeAddingSuffix) {
 
     GroupSetResource& empty_resource = empty_node->group_set_resources[0];
     const MultiNodeResource device_resource{0, Tier::DEVICE, {{empty_node, empty_resource.device_blocks}}};
-    tree.groupSets()[0]->unmapDeviceBlocksFromTreeNode(device_resource);
     tree.groupSets()[0]->unreferenceBlocks(device_resource, BlockRefType::BLOCK_CACHE);
     empty_resource.evictFromTier(Tier::DEVICE);
 

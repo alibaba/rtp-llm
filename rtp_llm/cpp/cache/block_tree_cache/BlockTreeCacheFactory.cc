@@ -564,9 +564,6 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
                                     [storage_topology, resolver_pools](int layer_id, int group_id, int block_id) {
                                         return resolveStorageBuffers(
                                             *storage_topology, resolver_pools, layer_id, group_id, block_id);
-                                    },
-                                    [cache = result.get()](const std::vector<BlockReleaseReceipt>& receipts) {
-                                        cache->onBlocksReleased(receipts);
                                     }),
                                 "StorageBackend init failed");
     }

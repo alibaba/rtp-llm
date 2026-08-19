@@ -7,7 +7,6 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
-#include "rtp_llm/cpp/cache/BlockReleaseBatch.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/IBlockPool.h"
@@ -48,7 +47,6 @@ struct StorageRequest {
 };
 
 namespace storage_backend_detail {
-struct ReleaseGate;
 struct StorageTaskState;
 }  // namespace storage_backend_detail
 
@@ -78,7 +76,6 @@ public:
     using MatchDone       = std::function<void(
         size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success)>;
     using Done            = std::function<void(bool success)>;
-    using ReleaseCallback = std::function<void(const std::vector<BlockReleaseReceipt>&)>;
     using BufferResolver  = std::function<std::vector<BlockInfo>(int layer_id, int group_id, int block_id)>;
 
     explicit StorageBackend(std::shared_ptr<StorageBackendExecutor> executor = nullptr);
@@ -86,13 +83,12 @@ public:
 
     bool             init(std::shared_ptr<const CacheTopology>     topology,
                           std::vector<std::shared_ptr<IBlockPool>> device_pools,
-                          BufferResolver                           buffer_resolver,
-                          ReleaseCallback                          release_callback);
+                          BufferResolver                           buffer_resolver);
     void             match(StorageRequest request, MatchDone done);
     void             read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done);
     StorageWriteTask prepareWrite(StorageRequest request);
     void             write(StorageWriteTask task);
-    // Must not be called from backend I/O, release, or completion callbacks.
+    // Must not be called from backend I/O or completion callbacks.
     void shutdown();
 
 protected:
@@ -125,7 +121,6 @@ private:
     std::shared_ptr<const CacheTopology>                      topology_;
     std::vector<std::shared_ptr<IBlockPool>>                  device_pools_;
     BufferResolver                                            buffer_resolver_;
-    std::shared_ptr<storage_backend_detail::ReleaseGate>      release_gate_;
     std::shared_ptr<StorageBackendExecutor>                   executor_;
     bool                                                      initialized_{false};
 

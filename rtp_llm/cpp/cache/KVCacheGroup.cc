@@ -149,12 +149,11 @@ void KVCacheGroup::addBlockRefs(const BlockIndicesType& blocks, BlockRefType ref
     }
 }
 
-std::vector<BlockRefTransition>
-KVCacheGroup::releaseBlockRefs(const BlockIndicesType& blocks, BlockRefType ref_type) {
+void KVCacheGroup::releaseBlockRefs(const BlockIndicesType& blocks, BlockRefType ref_type) {
     if (blocks.empty()) {
-        return {};
+        return;
     }
-    return block_pool_->decRefWithResult(blocks, ref_type);
+    block_pool_->decRef(blocks, ref_type);
 }
 
 bool KVCacheGroup::prefixReusable() const {

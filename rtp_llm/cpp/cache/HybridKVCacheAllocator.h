@@ -79,8 +79,7 @@ protected:
                                                            LoadAsyncContext& context,
                                                            size_t            matched_blocks);
 
-    std::vector<BlockRefTransition>
-    freeBlocksInGroup(int group_id, const BlockIndicesType& blocks, BlockRefType ref_type);
+    void freeBlocksInGroup(int group_id, const BlockIndicesType& blocks, BlockRefType ref_type);
     virtual MallocStatus evaluatePreparedInitCapacity(const MallocInfo&       malloc_info,
                                                       size_t                  reserve_blocks,
                                                       const PreparedKVCache& prepared,
@@ -100,8 +99,7 @@ protected:
     void         rollbackBlockIdsToSize(int group_id, BlockIds& block_ids, size_t original_size);
     void         rollbackInitMalloc(BatchKVCacheResource&                kv_resource,
                                     const std::vector<BlockIndicesType>& referenced_blocks,
-                                    const std::vector<size_t>&           original_sizes,
-                                    BlockReleaseBatch&                   releases);
+                                    const std::vector<size_t>&           original_sizes);
     virtual void copyBlockMappingForGroup(int group_id, const std::vector<BlockIdPair>& block_update_mapping) const;
     virtual MemoryType memoryTypeForGroup(int group_id) const;
 

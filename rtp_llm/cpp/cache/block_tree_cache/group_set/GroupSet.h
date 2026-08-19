@@ -2,7 +2,6 @@
 
 #include <cstdint>
 #include <memory>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -75,11 +74,6 @@ public:
 
     bool hasAllocatedDeviceBlocks(const std::vector<BlockIdxType>& blocks) const;
 
-    void      mapDeviceBlocksToTreeNode(const MultiNodeResource& resource);
-    void      unmapDeviceBlocksFromTreeNode(const MultiNodeResource& resource);
-    TreeNode* findTreeNodeByDeviceBlock(size_t member_group_id, BlockIdxType block_id) const;
-    bool      areBlockToNodeMapsEmpty() const;
-
     void referenceBlocks(const MultiNodeResource& resource, BlockRefType ref_type) const;
     void unreferenceBlocks(const MultiNodeResource& resource, BlockRefType ref_type) const;
 
@@ -87,12 +81,9 @@ public:
     void         releaseSingleBlock(Tier tier, BlockIdxType block, BlockRefType ref_type) const;
 
 private:
-    using DeviceBlockToTreeNodeMap = std::unordered_map<BlockIdxType, TreeNode*>;
-
     std::vector<DeviceBlockPoolPtr>         device_pools_;
     std::shared_ptr<HostBlockPool>          host_pool_;
     std::shared_ptr<BlockTreeDiskBlockPool> disk_pool_;
-    std::vector<DeviceBlockToTreeNodeMap>   block_to_node_maps_;
     size_t                                  group_set_id_{0};
     std::shared_ptr<const CacheTopology>    topology_;
     std::vector<size_t>                     group_ids_;

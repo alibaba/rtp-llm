@@ -1,7 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 
 #include <algorithm>
-#include <unordered_set>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
@@ -238,79 +237,6 @@ BlockTreeKeySnapshot BlockTreeCache::getKeySnapshot(size_t limit) const {
         }
     }
     return snapshot;
-}
-
-bool BlockTreeCache::getDeviceBlockDebugInfo(size_t                group_id,
-                                             BlockIdxType          block_id,
-                                             DeviceBlockDebugInfo& debug_info) const {
-    std::lock_guard<std::mutex>  lock(mutex_);
-    const ReusableGroupLocation* location = tree_->reusableGroupLocation(group_id);
-    if (location == nullptr) {
-        return false;
-    }
-
-    const GroupSetPtr& group_set = tree_->groupSets()[location->group_set_id];
-    TreeNode*          node      = group_set->findTreeNodeByDeviceBlock(location->member_group_id, block_id);
-    if (node == nullptr) {
-        return false;
-    }
-
-    const GroupSetResource& resource = node->group_set_resources[location->group_set_id];
-    DeviceBlockDebugInfo    result;
-    result.group_id        = group_id;
-    result.group_set_id    = location->group_set_id;
-    result.member_group_id = location->member_group_id;
-    result.block_id        = block_id;
-    result.node_address    = reinterpret_cast<uintptr_t>(node);
-    result.cache_key       = node->cache_key;
-    result.transfer_state  = resource.transfer_state;
-    result.device_blocks   = resource.device_blocks;
-    debug_info             = std::move(result);
-    return true;
-}
-
-void BlockTreeCache::onBlocksReleased(const std::vector<BlockReleaseReceipt>& receipts) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    struct DirtyResource {
-        TreeNode* node;
-        size_t    group_set_id;
-
-        bool operator==(const DirtyResource& other) const {
-            return node == other.node && group_set_id == other.group_set_id;
-        }
-    };
-    struct DirtyResourceHash {
-        size_t operator()(const DirtyResource& resource) const {
-            const size_t node_hash      = std::hash<TreeNode*>{}(resource.node);
-            const size_t group_set_hash = std::hash<size_t>{}(resource.group_set_id);
-            return node_hash ^ (group_set_hash << 1);
-        }
-    };
-
-    std::unordered_set<DirtyResource, DirtyResourceHash> dirty_resources;
-    dirty_resources.reserve(receipts.size());
-    for (const BlockReleaseReceipt& receipt : receipts) {
-        if (receipt.new_total_ref_count > 1) {
-            continue;
-        }
-        const ReusableGroupLocation* location = tree_->reusableGroupLocation(receipt.group_id);
-        if (location == nullptr) {
-            continue;
-        }
-
-        const GroupSetPtr& group_set = tree_->groupSets()[location->group_set_id];
-
-        TreeNode* node = group_set->findTreeNodeByDeviceBlock(location->member_group_id, receipt.block_id);
-        if (node == nullptr) {
-            continue;
-        }
-        dirty_resources.emplace(DirtyResource{node, location->group_set_id});
-    }
-
-    for (const DirtyResource& dirty_resource : dirty_resources) {
-        evictor_.refreshCandidate(dirty_resource.node, dirty_resource.group_set_id);
-    }
-    checkWatermark();
 }
 
 bool BlockTreeCache::abortPendingLoad(const std::shared_ptr<AsyncContext>& context) {

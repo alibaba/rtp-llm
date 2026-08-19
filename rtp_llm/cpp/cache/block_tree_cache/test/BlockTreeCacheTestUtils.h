@@ -67,10 +67,10 @@ MultiNodeResource makeMultiNodeResourceForTest(size_t                        gro
 size_t             unreferencedBlocksNum(const IBlockPool& pool);
 size_t             treeCachedBlocksNum(const IBlockPool& pool);
 DeviceBlockPoolPtr makeStructuralDevicePool(size_t group_set_id);
-void               releaseDeviceBlocksAndNotify(BlockTreeCache&           cache,
-                                                const DeviceBlockPoolPtr& pool,
-                                                const BlockIdList&        blocks,
-                                                BlockRefType              ref_type);
+void               releaseDeviceBlocks(BlockTreeCache&           cache,
+                                       const DeviceBlockPoolPtr& pool,
+                                       const BlockIdList&        blocks,
+                                       BlockRefType              ref_type);
 void releaseRequestRefsForTest(BlockTreeCache& cache, const std::vector<MultiNodeResource>& resources);
 
 void prepareGroupSetsForTest(std::vector<GroupSetPtr>& group_sets);
@@ -149,6 +149,7 @@ public:
     static void setPerRankBlockTransferEngineForTest(BlockTreeCache&               cache,
                                                      PerRankBlockTransferEnginePtr per_rank_transfer_engine);
     static void   setTierWatermarkForTest(BlockTreeCache& cache, Tier tier, double ratio);
+    static void   refreshCandidateForTest(BlockTreeCache& cache, TreeNode* node, size_t group_set_id);
     static size_t pendingEvictionReleasesForTest(const BlockTreeCache& cache);
     static void runMaintenanceForTest(BlockTreeCache& cache);
     static void beginStoreShutdownForTest(BlockTreeCache& cache);
