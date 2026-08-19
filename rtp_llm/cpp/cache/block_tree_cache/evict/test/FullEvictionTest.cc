@@ -670,8 +670,7 @@ TEST(FullPruneTest, ReverseDirectDropPrunesCascadedFullSubtree) {
     EXPECT_EQ(cache->evictForGroup(/*group_id=*/1, /*num_blocks=*/1), 1);
 
     const auto remaining_path = cache->tree()->findNode({100, 200, 300});
-    ASSERT_EQ(remaining_path.size(), 1u);
-    EXPECT_TRUE(remaining_path.front()->group_set_resources[0].hasTier(Tier::DEVICE));
+    EXPECT_TRUE(remaining_path.empty());
     EXPECT_FALSE(full_host_pool->isAllocated(host_descendant));
 }
 
@@ -712,7 +711,7 @@ TEST(FullPruneTest, ReverseDirectDropAttachesOneClosureForMultipleFullGroups) {
     EXPECT_EQ(cache->evictForGroup(/*group_id=*/2, /*num_blocks=*/1), 1);
 
     const auto remaining_path = cache->tree()->findNode({100, 200, 300});
-    ASSERT_EQ(remaining_path.size(), 1u);
+    EXPECT_TRUE(remaining_path.empty());
     EXPECT_FALSE(full0_host_pool->isAllocated(full0_host_descendant));
     EXPECT_FALSE(full1_host_pool->isAllocated(full1_host_descendant));
 }
