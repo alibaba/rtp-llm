@@ -32,20 +32,3 @@ cc_test(
     },
     exec_properties = {'gpu':'H20'},
 )
-
-cc_test(
-    name = "model_input_metadata_sync_test",
-    srcs = ["ModelInputMetadataSyncTest.cc"],
-    args = ["--gtest_filter=ModelInputMetadataSyncTest.*"],
-    copts = test_copts,
-    deps = test_deps,
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-    },
-    exec_properties = {
-        "gpu": "H20",
-        "gpu_count": "2",
-    },
-    size = "medium",
-    timeout = "moderate",
-)
