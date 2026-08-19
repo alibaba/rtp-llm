@@ -1857,8 +1857,8 @@ protected:
         EXPECT_EQ(first_result.host_reuse_len, 0);
         EXPECT_EQ(first_result.disk_reuse_len, 0);
         ASSERT_NE(first_result.async_context, nullptr);
-        const bool entered =
-            engine->waitUntilEnteredFor(std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout));
+        const bool entered = engine->waitUntilEnteredCountFor(
+            cache->groupSets().size(), std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout));
         if (!entered) {
             engine->release();
         }

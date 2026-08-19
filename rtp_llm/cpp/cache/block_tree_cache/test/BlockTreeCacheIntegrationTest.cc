@@ -1637,7 +1637,7 @@ TEST_P(BlockTreeCacheLowerTierTest, SettlementStateMismatchRollsBackWholeBatch) 
     environment->expectFullyReclaimed();
 }
 
-TEST_P(BlockTreeCacheLowerTierTest, CancelPausedLoadStillInstallsTransferredTargets) {
+TEST_P(BlockTreeCacheLowerTierTest, AbortCommittedLoadReturnsFalseAndTransferCompletes) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -1694,13 +1694,13 @@ TEST_P(BlockTreeCacheLowerTierTest, CancelPausedLoadStillInstallsTransferredTarg
     ASSERT_TRUE(context->commit());
     pausable_per_rank_transfer_engine->waitUntilEntered();
     EXPECT_FALSE(context->done());
-    EXPECT_TRUE(environment->cache->cancelLoad(context));
+    EXPECT_FALSE(environment->cache->abortPendingLoad(context));
     pausable_per_rank_transfer_engine->release();
     context->waitDone();
 
     EXPECT_TRUE(context->done());
-    EXPECT_FALSE(context->success());
-    EXPECT_FALSE(environment->cache->cancelLoad(context));
+    EXPECT_TRUE(context->success());
+    EXPECT_FALSE(environment->cache->abortPendingLoad(context));
     const auto snapshot_after = environment->cache->getKeySnapshot(/*limit=*/32);
     EXPECT_GT(snapshot_after.version, snapshot_before.version);
     EXPECT_EQ(snapshot_after.keys, snapshot_before.keys);
@@ -1731,7 +1731,7 @@ TEST_P(BlockTreeCacheLowerTierTest, CancelPausedLoadStillInstallsTransferredTarg
     environment->expectFullyReclaimed();
 }
 
-TEST_P(BlockTreeCacheLowerTierTest, CancelCompletionRaceSettlesExactlyOnce) {
+TEST_P(BlockTreeCacheLowerTierTest, AbortCompletionRaceDoesNotChangeCommittedResult) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -1782,21 +1782,22 @@ TEST_P(BlockTreeCacheLowerTierTest, CancelCompletionRaceSettlesExactlyOnce) {
     pausable_per_rank_transfer_engine->waitUntilEntered();
 
     ThreadCompletion race_start;
-    bool             cancellation_won = false;
-    std::thread      cancel_thread([&] {
+    bool             abort_succeeded = false;
+    std::thread      abort_thread([&] {
         race_start.waitUntilEntered();
-        cancellation_won = environment->cache->cancelLoad(context);
+        abort_succeeded = environment->cache->abortPendingLoad(context);
     });
     race_start.markEntered();
     pausable_per_rank_transfer_engine->release();
 
     context->waitDone();
-    cancel_thread.join();
+    abort_thread.join();
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
 
     ASSERT_TRUE(context->done());
-    EXPECT_EQ(cancellation_won, !context->success());
-    EXPECT_FALSE(environment->cache->cancelLoad(context));
+    EXPECT_TRUE(context->success());
+    EXPECT_FALSE(abort_succeeded);
+    EXPECT_FALSE(environment->cache->abortPendingLoad(context));
     EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
     for (const SourceRef& source : source_refs) {
         EXPECT_FALSE(source.pool->isAllocated(source.block));
@@ -1915,8 +1916,8 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesLoadAndRestoresCandi
     EXPECT_FALSE(context->success());
     ASSERT_TRUE(joined_context->done());
     EXPECT_FALSE(joined_context->success());
-    EXPECT_FALSE(environment->cache->cancelLoad(context));
-    EXPECT_FALSE(environment->cache->cancelLoad(joined_context));
+    EXPECT_FALSE(environment->cache->abortPendingLoad(context));
+    EXPECT_FALSE(environment->cache->abortPendingLoad(joined_context));
     EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(), submits_before_join);
     EXPECT_EQ(environment->host_pools[0]->freeBlocksNum(), host_free_before[0]);
     EXPECT_EQ(environment->host_pools[1]->freeBlocksNum(), host_free_before[1]);
@@ -2380,7 +2381,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadAsyncCompletionKeepsRequestSourc
     context->waitDone();
     ASSERT_TRUE(context->done());
     EXPECT_TRUE(context->success());
-    EXPECT_FALSE(environment->cache->cancelLoad(context));
+    EXPECT_FALSE(environment->cache->abortPendingLoad(context));
     EXPECT_EQ(environment->cache->getStats().tree_node_count, tree_nodes_before);
     EXPECT_EQ(environment->cache->getStats().device_heap_total_size, device_candidates_before);
     for (const auto& [pool, block] : device_sources) {
