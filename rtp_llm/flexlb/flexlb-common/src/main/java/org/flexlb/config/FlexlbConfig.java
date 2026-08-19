@@ -43,6 +43,18 @@ public class FlexlbConfig {
     private double weightedCacheDecayFactor = 0.001;
 
     /**
+     * Maximum additional estimated prefill work that CACHE_AFFINITY_FIRST may accept in order to
+     * route a request to the worker with the best cache match.
+     */
+    private long cacheAffinityFirstMaxExtraWorkTokens = 0;
+
+    /**
+     * Minimum effective cache-hit percentage required before CACHE_AFFINITY_FIRST may prefer the
+     * cache leader. A value of 0 disables this gate; 5 means 5%.
+     */
+    private double cacheAffinityFirstMinHitRate = 5;
+
+    /**
      * Time window for recent cache-key hit ratio metrics in milliseconds.
      * Default is 30 minutes. Environment override: CACHE_HIT_TIME_WINDOW_MS.
      */
