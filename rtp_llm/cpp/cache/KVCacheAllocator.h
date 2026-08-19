@@ -106,6 +106,9 @@ public:
     virtual size_t                  totalTokensNum() const;
     virtual size_t                  totalBlocksNum() const;
     virtual size_t                  maxAvailableTokensNum() const;
+    virtual std::vector<size_t>     availableBlocksNumPerPool() const {
+        return {availableBlocksNum()};
+    }
     /// Returns global layer id; std::numeric_limits<uint32_t>::max() indicates invalid (caller must check).
     uint32_t convertToGlobalLayerId(size_t model_id, int local_layer_id) const;
 

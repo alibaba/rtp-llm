@@ -599,6 +599,10 @@ size_t KVCacheManager::availableBlocksNum() const {
     return allocator_->availableBlocksNum();
 }
 
+std::vector<size_t> KVCacheManager::availableBlocksNumPerPool() const {
+    return allocator_->availableBlocksNumPerPool();
+}
+
 size_t KVCacheManager::notInUseBlocksNum() const {
     return allocator_->notInUseBlocksNum();
 }

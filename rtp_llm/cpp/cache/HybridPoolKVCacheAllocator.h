@@ -34,6 +34,7 @@ public:
 
     size_t                  freeBlocksNum() const override;
     size_t                  availableBlocksNum() const override;
+    std::vector<size_t>     availableBlocksNumPerPool() const override;
     BatchKVCacheResourcePtr popBlocksFromCache(size_t min_blocks_to_free) override;
     void                    blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource) override;
     size_t                  requestRefBlocksNum() const override;

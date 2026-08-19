@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <list>
 #include <string>
 #include <thread>
@@ -76,57 +77,74 @@ private:
     size_t prefillTokenCostWithCache(const GenerateStreamPtr& stream) const;
     size_t countInitedKVCacheStreams() const;
     size_t groupQueueStreamsSize(const StreamGroupQueue& group_queue) const;
-    void   accountBatchMetrics(const GenerateStreamPtr& new_stream);
-    bool   waitPredicate();
-    void   cachePrepareLoop();
-    void   addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
-    bool   checkInputLength(const GenerateStreamPtr& stream);
-    void   evaluateWaitingStreams(std::list<GenerateStreamPtr>&       streams,
-                                  const std::list<GenerateStreamPtr>& already_admitted_streams);
-    void   evaluateWaitingGroupQueue();
-    void   evaluateLoadingCacheGroupQueue();
-    bool   loadingGroupReady() const;
-    void   advanceLoadingGroup(StreamGroup& group);
-    void   moveGroupToNewStreams(StreamGroup& group);
-    void   moveGroupToAllocatingGroup(StreamGroup& group);
-    void   dispatchPreparedGroup(StreamGroup& group);
-    void   cancelStreams(std::list<GenerateStreamPtr>& streams);
-    void   cancelGroups(StreamGroupQueue& group_queue);
+    bool   canPrepareCacheBeforeAdmission(const GenerateStreamPtr& stream) const;
+    AdmissionLane cachePrepareLane() const;
+    bool          isCachePrepareBlocked(const GenerateStreamPtr& stream) const;
+    bool          hasCachePrepareBlocker(const StreamGroup& streams) const;
+    bool          hasErroredCachePrepareBlocker() const;
+    void          markCachePrepareBlocked(const GenerateStreamPtr& stream);
+    void          clearCachePrepareBlocked();
+    bool          cachePrepareResourcesChanged() const;
+    bool          cachePrepareRetryDue() const;
+    void          accountBatchMetrics(const GenerateStreamPtr& new_stream);
+    bool          waitPredicate();
+    void          cachePrepareLoop();
+    void          addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
+    bool          checkInputLength(const GenerateStreamPtr& stream);
+    void          evaluateWaitingStreams(std::list<GenerateStreamPtr>&       streams,
+                                         const std::list<GenerateStreamPtr>& already_admitted_streams);
+    void          evaluateWaitingGroupQueue();
+    void          evaluateLoadingCacheGroupQueue();
+    bool          loadingGroupReady() const;
+    void          advanceLoadingGroup(StreamGroup& group);
+    void          moveGroupToNewStreams(StreamGroup& group);
+    void          moveGroupToAllocatingGroup(StreamGroup& group);
+    void          dispatchPreparedGroup(StreamGroup& group);
+    bool          finalizeErroredStreams(std::list<GenerateStreamPtr>& streams);
+    bool          finalizeErroredGroups(StreamGroupQueue& group_queue);
+    void          cancelStreams(std::list<GenerateStreamPtr>& streams);
+    void          cancelGroups(StreamGroupQueue& group_queue);
 
 protected:
-    void                            evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
-    PDSepConfig                     pd_sep_config_;
-    ModelSpecificConfig             model_specific_config_;
-    std::list<GenerateStreamPtr>    waiting_streams_;
-    std::list<GenerateStreamPtr>    loading_cache_streams_;
-    std::list<GenerateStreamPtr>    running_streams_;
-    std::list<GenerateStreamPtr>    new_streams_;
-    StreamGroupQueue                waiting_group_queue_;
-    StreamGroupQueue                loading_cache_group_queue_;
-    std::shared_ptr<KVCacheManager> cache_manager_;
-    std::atomic<int64_t>            last_schedule_time_             = autil::TimeUtility::currentTimeInMilliSeconds();
-    size_t                          max_seq_len_                    = 0;
-    size_t                          max_batch_tokens_size_          = 0;
-    size_t                          max_batch_tokens_without_cache_ = 0;
-    size_t                          max_generate_batch_size_        = 1;
-    size_t                          max_inited_kv_cache_streams_    = 0;
-    const bool                      need_fill_fake_stream_          = false;
-    const size_t                    prefill_cp_size_                = 1;
-    std::atomic<bool>               stop_                           = false;
-    bool                            schedule_trigger_               = false;
-    bool                            async_cache_prepare_enabled_    = false;
-    std::thread                     cache_prepare_thread_;
-    GenerateStreamPtr               cache_prepare_inflight_stream_;
-    GenerateStreamPtr               cache_prepare_blocked_stream_;
-    std::mutex                      lock_;
-    std::condition_variable         cond_;
-    kmonitor::MetricsReporterPtr    metrics_reporter_                 = nullptr;
-    int64_t                         last_admitted_context_batch_size_ = 0;
-    int64_t                         last_admitted_context_token_size_ = 0;
-    int64_t                         last_waiting_oldest_age_us_       = 0;
-    std::atomic<int64_t>            pending_group_fallback_count_     = 0;
-    AdmissionLane                   active_admission_lane_            = AdmissionLane::NONE;
-    bool                            prefer_group_next_                = false;
+    void                                  evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
+    PDSepConfig                           pd_sep_config_;
+    ModelSpecificConfig                   model_specific_config_;
+    std::list<GenerateStreamPtr>          waiting_streams_;
+    std::list<GenerateStreamPtr>          loading_cache_streams_;
+    std::list<GenerateStreamPtr>          running_streams_;
+    std::list<GenerateStreamPtr>          new_streams_;
+    StreamGroupQueue                      waiting_group_queue_;
+    StreamGroupQueue                      loading_cache_group_queue_;
+    std::shared_ptr<KVCacheManager>       cache_manager_;
+    std::atomic<int64_t>                  last_schedule_time_    = autil::TimeUtility::currentTimeInMilliSeconds();
+    size_t                                max_seq_len_           = 0;
+    size_t                                max_batch_tokens_size_ = 0;
+    size_t                                max_batch_tokens_without_cache_ = 0;
+    size_t                                max_generate_batch_size_        = 1;
+    size_t                                max_inited_kv_cache_streams_    = 0;
+    const bool                            need_fill_fake_stream_          = false;
+    const size_t                          prefill_cp_size_                = 1;
+    std::atomic<bool>                     stop_                           = false;
+    bool                                  schedule_trigger_               = false;
+    bool                                  async_cache_prepare_enabled_    = false;
+    std::thread                           cache_prepare_thread_;
+    GenerateStreamPtr                     cache_prepare_inflight_stream_;
+    GenerateStreamPtr                     cache_prepare_blocked_stream_;
+    std::vector<GenerateStreamPtr>        cache_prepare_blocked_streams_;
+    std::vector<size_t>                   cache_prepare_blocked_available_blocks_;
+    size_t                                cache_prepare_blocked_inited_streams_ = 0;
+    std::chrono::steady_clock::time_point cache_prepare_retry_at_;
+    bool                                  cache_prepare_group_scan_in_progress_ = false;
+    std::mutex                            lock_;
+    std::condition_variable               cond_;
+    kmonitor::MetricsReporterPtr          metrics_reporter_                   = nullptr;
+    int64_t                               last_admitted_context_batch_size_   = 0;
+    int64_t                               last_admitted_context_token_size_   = 0;
+    int64_t                               last_waiting_oldest_age_us_         = 0;
+    std::atomic<int64_t>                  pending_group_fallback_count_       = 0;
+    AdmissionLane                         active_admission_lane_              = AdmissionLane::NONE;
+    bool                                  prefer_group_next_                  = false;
+    bool                                  waiting_group_yields_cache_prepare_ = false;
 
     std::vector<EngineScheduleInfo::TaskInfo> waiting_task_list_;
     std::vector<EngineScheduleInfo::TaskInfo> running_task_list_;
