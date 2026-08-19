@@ -15,6 +15,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -26,9 +27,11 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
@@ -155,6 +158,39 @@ class ShortestTTFTStrategyTest {
         strategy.rollBack(mockEp, requestId);
 
         Mockito.verify(mockEp).releaseBatch(requestId);
+    }
+
+    @Test
+    void casClaimAlwaysAdvancesSelectionTimestamp() {
+        PrefillEndpoint endpoint = Mockito.mock(PrefillEndpoint.class);
+        long snapshot = System.nanoTime() / 1000 + 1_000_000L;
+        AtomicLong lastSelectedTime = new AtomicLong(snapshot);
+        Mockito.when(endpoint.getLastSelectedTime()).thenReturn(lastSelectedTime);
+        ShortestTTFTStrategy.ScoredEndpoint scored =
+                new ShortestTTFTStrategy.ScoredEndpoint(endpoint, 0L, 0L, 0L, snapshot);
+
+        ShortestTTFTStrategy.ScoredEndpoint selected =
+                strategy.selectFirstWithoutConcurrentConflict(List.of(scored));
+
+        assertSame(scored, selected);
+        assertEquals(snapshot + 1L, lastSelectedTime.get());
+    }
+
+    @Test
+    void directPathCommitsOnlyMarginalPrefillTime() {
+        FlexlbConfig config = new FlexlbConfig();
+        Map<String, WorkerStatus> prefillMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 1000));
+        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
+        BalanceContext context = buildContext(500, 43L, config);
+        context.setScheduleMode(ScheduleModeEnum.DIRECT);
+
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals(2, endpoint.getInflightBatchCount());
+        assertTrue(endpoint.realWaitTimeMs() < 2000L);
     }
 
     @Test
@@ -311,6 +347,7 @@ class ShortestTTFTStrategyTest {
         BalanceContext ctx = new BalanceContext();
         ctx.setRequest(req);
         ctx.setConfig(config);
+        ctx.setScheduleMode(config.getDefaultScheduleModeEnum());
         return ctx;
     }
 }

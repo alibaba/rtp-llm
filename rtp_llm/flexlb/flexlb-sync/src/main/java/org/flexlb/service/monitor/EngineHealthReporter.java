@@ -378,6 +378,12 @@ public class EngineHealthReporter {
         cacheMetricsReporter.reportRoutingCandidateMaxCacheMatchMetrics(roleType, hitTokens);
     }
 
+    public void reportCacheAffinityDecision(RoleType roleType,
+                                            String engineIp,
+                                            String decision) {
+        cacheMetricsReporter.reportCacheAffinityDecision(roleType, engineIp, decision);
+    }
+
     public void reportArriveDelayTime(BalanceContext ctx) {
         if (ctx.getRequest().getRequestTimeMs() == 0) {
             return;
