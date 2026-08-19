@@ -7,7 +7,6 @@ import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.match.CacheAwareService;
-import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.cache.HostCacheMatch;
@@ -40,17 +39,13 @@ import java.util.concurrent.ThreadLocalRandom;
 public class WeightedCacheLoadBalancer implements LoadBalancer {
 
     private final EngineWorkerStatus engineWorkerStatus;
-    private final double decayFactor;
     private final ResourceMeasureFactory resourceMeasureFactory;
     private final CacheAwareService cacheAwareService;
 
-    public WeightedCacheLoadBalancer(ConfigService configService,
-                                     EngineWorkerStatus engineWorkerStatus,
+    public WeightedCacheLoadBalancer(EngineWorkerStatus engineWorkerStatus,
                                      ResourceMeasureFactory resourceMeasureFactory,
                                      CacheAwareService cacheAwareService) {
         this.engineWorkerStatus = engineWorkerStatus;
-        FlexlbConfig config = configService.loadBalanceConfig();
-        this.decayFactor = config.getWeightedCacheDecayFactor();
         this.resourceMeasureFactory = resourceMeasureFactory;
         this.cacheAwareService = cacheAwareService;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.WEIGHTED_CACHE, this);
@@ -85,7 +80,7 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
         }
 
         // Implement weighted random selection algorithm
-        WorkerStatus selectedWorker = weightedRandomSelection(workerStatusList);
+        WorkerStatus selectedWorker = weightedRandomSelection(workerStatusList, config.getWeightedCacheDecayFactor());
 
         if (selectedWorker != null) {
             CacheMatchResult cacheMatchResult = cacheAwareService.findMatchingEngines(
@@ -161,9 +156,10 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
      * Weighted random selection algorithm: performs weighted random selection based on normalized cache usage
      *
      * @param candidateWorkers Candidate worker list
+     * @param decayFactor Decay factor applied to normalized cache usage when computing weights
      * @return Selected WorkerStatus, or null if no suitable worker found
      */
-    private WorkerStatus weightedRandomSelection(List<WorkerStatus> candidateWorkers) {
+    private WorkerStatus weightedRandomSelection(List<WorkerStatus> candidateWorkers, double decayFactor) {
         int workerCount = candidateWorkers.size();
         if (workerCount == 0) {
             return null;

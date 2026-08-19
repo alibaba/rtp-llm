@@ -18,17 +18,10 @@ import java.util.Map;
  */
 @Component
 public class DecodeResourceMeasure implements ResourceMeasure {
-    private final long availableThreshold;
-    private final long hysteresisBiasPercent;
-    private final long fullSpeedThreshold;
-    private final long stopThreshold;
+    private final ConfigService configService;
 
     public DecodeResourceMeasure(ConfigService configService) {
-        FlexlbConfig config = configService.loadBalanceConfig();
-        this.availableThreshold = config.getDecodeAvailableMemoryThreshold();
-        this.hysteresisBiasPercent = config.getHysteresisBiasPercent();
-        this.fullSpeedThreshold = config.getDecodeFullSpeedThreshold();
-        this.stopThreshold = config.getDecodeStopThreshold();
+        this.configService = configService;
     }
 
     @Override
@@ -46,8 +39,10 @@ public class DecodeResourceMeasure implements ResourceMeasure {
             return true;
         }
 
+        FlexlbConfig config = configService.loadBalanceConfig();
         long usagePercentage = (long) ((used * 100.0) / total);
-        return workerStatus.updateResourceAvailabilityWithHysteresis(usagePercentage, availableThreshold, hysteresisBiasPercent);
+        return workerStatus.updateResourceAvailabilityWithHysteresis(
+                usagePercentage, config.getDecodeAvailableMemoryThreshold(), config.getHysteresisBiasPercent());
     }
 
     @Override
@@ -88,6 +83,10 @@ public class DecodeResourceMeasure implements ResourceMeasure {
         }
 
         double usedPercentage = (used * 100.0) / total;
+
+        FlexlbConfig config = configService.loadBalanceConfig();
+        long fullSpeedThreshold = config.getDecodeFullSpeedThreshold();
+        long stopThreshold = config.getDecodeStopThreshold();
 
         if (usedPercentage <= fullSpeedThreshold) {
             return 0.0;

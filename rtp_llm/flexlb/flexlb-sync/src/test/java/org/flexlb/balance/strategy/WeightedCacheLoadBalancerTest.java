@@ -65,7 +65,7 @@ class WeightedCacheLoadBalancerTest {
         DecodeResourceMeasure decodeResourceMeasure = new DecodeResourceMeasure(configService);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
         WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(
-                configService, engineWorkerStatus, resourceMeasureFactory, cacheAwareService);
+                engineWorkerStatus, resourceMeasureFactory, cacheAwareService);
 
         Request req = new Request();
         req.setSeqLen(1000);
@@ -105,7 +105,7 @@ class WeightedCacheLoadBalancerTest {
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
         Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
         WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(
-                configService, engineWorkerStatus, resourceMeasureFactory, cacheAwareService);
+                engineWorkerStatus, resourceMeasureFactory, cacheAwareService);
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -148,7 +148,7 @@ class WeightedCacheLoadBalancerTest {
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
         Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
         WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(
-                configService, engineWorkerStatus, resourceMeasureFactory, cacheAwareService);
+                engineWorkerStatus, resourceMeasureFactory, cacheAwareService);
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -181,7 +181,7 @@ class WeightedCacheLoadBalancerTest {
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
         Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
         WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(
-                configService, engineWorkerStatus, resourceMeasureFactory, cacheAwareService);
+                engineWorkerStatus, resourceMeasureFactory, cacheAwareService);
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -212,7 +212,7 @@ class WeightedCacheLoadBalancerTest {
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
         Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
         WeightedCacheLoadBalancer loadBalancer = new WeightedCacheLoadBalancer(
-                configService, engineWorkerStatus, resourceMeasureFactory, cacheAwareService);
+                engineWorkerStatus, resourceMeasureFactory, cacheAwareService);
 
         Request request = new Request();
         request.setRequestId("request-kvcm");
@@ -262,7 +262,7 @@ class WeightedCacheLoadBalancerTest {
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
         Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
         WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(
-                configService, engineWorkerStatus, resourceMeasureFactory, cacheAwareService);
+                engineWorkerStatus, resourceMeasureFactory, cacheAwareService);
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);

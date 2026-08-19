@@ -82,6 +82,22 @@ class ExpirationCleanerTest {
         assertFalse(workerStatus.getLocalTaskMap().containsKey("request-1"));
     }
 
+    @Test
+    void reflectsConfirmationTimeoutChangedAfterConstruction() {
+        WorkerStatus workerStatus = workerStatusWithLocalTask();
+        workerStatus.getLocalTaskMap().get("request-1")
+                .setLastActiveTimeUs(System.nanoTime() / 1000 - TimeUnit.SECONDS.toMicros(11));
+        FlexlbConfig config = new FlexlbConfig();
+        ExpirationCleaner cleaner = expirationCleaner(config);
+
+        cleaner.doClean(workerStatusMap(workerStatus), RoleType.PREFILL);
+        assertTrue(workerStatus.getLocalTaskMap().containsKey("request-1"));
+
+        config.setTaskConfirmTimeoutMs(10_000);
+        cleaner.doClean(workerStatusMap(workerStatus), RoleType.PREFILL);
+        assertFalse(workerStatus.getLocalTaskMap().containsKey("request-1"));
+    }
+
     private ExpirationCleaner expirationCleaner(FlexlbConfig config) {
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);

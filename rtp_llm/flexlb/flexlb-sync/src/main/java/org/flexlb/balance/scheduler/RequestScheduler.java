@@ -31,7 +31,6 @@ public class RequestScheduler {
     private final QueueManager queueManager;
     private final DynamicWorkerManager dynamicWorkerManager;
     private final RoutingQueueReporter metrics;
-    private final long routingRetryIntervalMs;
 
     // Worker thread pool
     private ExecutorService workerExecutor;
@@ -47,7 +46,6 @@ public class RequestScheduler {
         this.queueManager = queueManager;
         this.dynamicWorkerManager = dynamicWorkerManager;
         this.metrics = metrics;
-        this.routingRetryIntervalMs = configService.loadBalanceConfig().getRoutingRetryIntervalMs();
     }
 
     @PostConstruct
@@ -179,6 +177,7 @@ public class RequestScheduler {
     }
 
     private void waitBeforeRetry() throws InterruptedException {
+        long routingRetryIntervalMs = configService.loadBalanceConfig().getRoutingRetryIntervalMs();
         if (routingRetryIntervalMs > 0) {
             Thread.sleep(routingRetryIntervalMs);
         }

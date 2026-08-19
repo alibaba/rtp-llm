@@ -142,6 +142,32 @@ class RequestSchedulerTest {
         assertTrue(ctx.getFuture().isCompletedExceptionally());
     }
 
+    @Test
+    void processRequest_shouldUseRetryIntervalFromConfigChangedAfterConstruction() throws Exception {
+        FlexlbConfig hotConfig = new FlexlbConfig();
+        hotConfig.setMaxRetryCount(3);
+        hotConfig.setRoutingRetryIntervalMs(0);
+        when(configService.loadBalanceConfig()).thenReturn(hotConfig);
+        RequestScheduler hotScheduler = new RequestScheduler(router, configService, queueManager, dynamicWorkerManager, metrics);
+        hotConfig.setRoutingRetryIntervalMs(120);
+
+        BalanceContext ctx = createContext("request-1");
+        Response errorResponse = Response.error(StrategyErrorType.NO_AVAILABLE_WORKER);
+        Response successResponse = new Response();
+        successResponse.setSuccess(true);
+        when(router.route(ctx)).thenReturn(errorResponse, successResponse);
+
+        var method = RequestScheduler.class.getDeclaredMethod("processRequest", BalanceContext.class);
+        method.setAccessible(true);
+        long startNs = System.nanoTime();
+        method.invoke(hotScheduler, ctx);
+        long elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs);
+
+        assertTrue(ctx.getFuture().get().isSuccess());
+        assertTrue(elapsedMs >= 100,
+                "retry wait should use the hot-updated interval, elapsed: " + elapsedMs + "ms");
+    }
+
     private BalanceContext createContext(String requestId) {
         BalanceContext ctx = new BalanceContext();
         Request request = new Request();

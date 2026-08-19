@@ -151,6 +151,60 @@ class ResourceWaterLevelTest {
         assertEquals(50.0, measure.calculateWorkerWaterLevel(workerStatus));
     }
 
+    @Test
+    void prefillResourceReflectsThresholdChangeAfterConstruction() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setPrefillQueueSizeThreshold(3);
+        PrefillResourceMeasure measure = new PrefillResourceMeasure(configService(config));
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setAlive(true);
+        addLocalTasks(workerStatus, 3);
+
+        assertFalse(measure.isResourceAvailable(workerStatus));
+        assertEquals(100.0, measure.calculateWorkerWaterLevel(workerStatus));
+
+        config.setPrefillQueueSizeThreshold(10);
+
+        assertTrue(measure.isResourceAvailable(workerStatus));
+        assertEquals(30.0, measure.calculateWorkerWaterLevel(workerStatus));
+    }
+
+    @Test
+    void decodeWaterLevelReflectsThresholdChangeAfterConstruction() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setDecodeFullSpeedThreshold(40);
+        config.setDecodeStopThreshold(80);
+        DecodeResourceMeasure measure = new DecodeResourceMeasure(configService(config));
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setUsedKvCacheTokens(new AtomicLong(60));
+        workerStatus.setAvailableKvCacheTokens(new AtomicLong(40));
+
+        assertEquals(50.0, measure.calculateWorkerWaterLevel(workerStatus));
+
+        config.setDecodeFullSpeedThreshold(0);
+        config.setDecodeStopThreshold(100);
+
+        assertEquals(60.0, measure.calculateWorkerWaterLevel(workerStatus));
+    }
+
+    @Test
+    void decodeAvailabilityReflectsThresholdChangeAfterConstruction() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setDecodeAvailableMemoryThreshold(90);
+        config.setHysteresisBiasPercent(0);
+        DecodeResourceMeasure measure = new DecodeResourceMeasure(configService(config));
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setAlive(true);
+        workerStatus.setUsedKvCacheTokens(new AtomicLong(95));
+        workerStatus.setAvailableKvCacheTokens(new AtomicLong(5));
+
+        assertFalse(measure.isResourceAvailable(workerStatus));
+
+        config.setDecodeAvailableMemoryThreshold(99);
+
+        assertTrue(measure.isResourceAvailable(workerStatus));
+    }
+
     private static ConfigService configService(FlexlbConfig config) {
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);

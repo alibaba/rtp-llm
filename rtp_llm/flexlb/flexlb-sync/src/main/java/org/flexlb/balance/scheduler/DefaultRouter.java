@@ -4,7 +4,6 @@ import org.apache.commons.collections4.CollectionUtils;
 import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
 import org.flexlb.balance.strategy.LoadBalancer;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.RoutingResult;
@@ -20,9 +19,7 @@ import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
-import java.util.EnumMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
@@ -31,18 +28,12 @@ import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
 @DependsOn({"randomStrategy", "weightedCacheStrategy", "shortestTTFTStrategy", "cacheAffinityFirstStrategy"})
 public class DefaultRouter implements Router {
 
-    private final Map<RoleType, LoadBalancer> loadBalancerMap;
+    private final ConfigService configService;
     private final RoutingQueueReporter routingQueueReporter;
 
     public DefaultRouter(ConfigService configService, RoutingQueueReporter routingQueueReporter) {
+        this.configService = configService;
         this.routingQueueReporter = routingQueueReporter;
-        FlexlbConfig config = configService.loadBalanceConfig();
-        this.loadBalancerMap = new EnumMap<>(RoleType.class);
-
-        for (RoleType roleType : RoleType.values()) {
-            LoadBalanceStrategyEnum strategy = config.getStrategyForRoleType(roleType);
-            loadBalancerMap.put(roleType, LoadBalanceStrategyFactory.getLoadBalancer(strategy));
-        }
     }
 
     /**
@@ -145,7 +136,8 @@ public class DefaultRouter implements Router {
      * Get LoadBalancer based on role type
      */
     private LoadBalancer getLoadBalancer(RoleType roleType) {
-        return loadBalancerMap.get(roleType);
+        LoadBalanceStrategyEnum strategy = configService.loadBalanceConfig().getStrategyForRoleType(roleType);
+        return LoadBalanceStrategyFactory.getLoadBalancer(strategy);
     }
 
     /**

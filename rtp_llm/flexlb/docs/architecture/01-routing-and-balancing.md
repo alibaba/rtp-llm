@@ -14,8 +14,9 @@ worker 选择契约，两者组合完成多角色多阶段路由。
 - 类上标注 `@DependsOn({"randomStrategy", "weightedCacheStrategy", "shortestTTFTStrategy",
   "cacheAffinityFirstStrategy"})`——4 个策略 bean 都在**各自构造函数里**调用
   `LoadBalanceStrategyFactory.register()` 自注册，`@DependsOn` 保证注册先于 DefaultRouter 构造。
-- 构造时按 `FlexlbConfig.getStrategyForRoleType(roleType)` 为每个 `RoleType` 解析一个
-  `LoadBalancer`，存入 `EnumMap<RoleType, LoadBalancer>`；策略未注册则启动即抛异常。
+- 每次路由时按 `FlexlbConfig.getStrategyForRoleType(roleType)` 从当前配置快照解析角色策略，
+  再经 `LoadBalanceStrategyFactory` 取对应 `LoadBalancer`——策略配置支持 Nacos 运行时热更新；
+  策略未注册则在路由时抛异常。
 
 ### route() 流程
 

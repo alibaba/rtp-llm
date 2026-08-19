@@ -2,7 +2,6 @@ package org.flexlb.balance.resource;
 
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 import org.springframework.stereotype.Component;
@@ -18,11 +17,10 @@ import java.util.Map;
  */
 @Component
 public class PrefillResourceMeasure implements ResourceMeasure {
-    private final long queueSizeThreshold;
+    private final ConfigService configService;
 
     public PrefillResourceMeasure(ConfigService configService) {
-        FlexlbConfig config = configService.loadBalanceConfig();
-        this.queueSizeThreshold = config.getPrefillQueueSizeThreshold();
+        this.configService = configService;
     }
 
     @Override
@@ -31,7 +29,11 @@ public class PrefillResourceMeasure implements ResourceMeasure {
             return false;
         }
 
-        return workerStatus.getInTransitAndWaitingTaskCount() < queueSizeThreshold;
+        return workerStatus.getInTransitAndWaitingTaskCount() < currentThreshold();
+    }
+
+    private long currentThreshold() {
+        return configService.loadBalanceConfig().getPrefillQueueSizeThreshold();
     }
 
     @Override
@@ -63,7 +65,7 @@ public class PrefillResourceMeasure implements ResourceMeasure {
             return 0.0;
         }
 
-        return waterLevel(workerStatus.getInTransitAndWaitingTaskCount(), queueSizeThreshold);
+        return waterLevel(workerStatus.getInTransitAndWaitingTaskCount(), currentThreshold());
     }
 
     private double waterLevel(long value, long threshold) {

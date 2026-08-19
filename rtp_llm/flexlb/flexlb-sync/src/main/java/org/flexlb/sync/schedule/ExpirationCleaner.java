@@ -32,13 +32,13 @@ public class ExpirationCleaner {
     private static final String TASK_REMOVED = "task.removed";
     private static final org.slf4j.Logger pvLogger = LoggerFactory.getLogger("pvLogger");
 
-    private final long taskConfirmTimeoutUs;
+    private final ConfigService configService;
     private final long workerTimeoutUs;
     private final FlexMonitor monitor;
 
     public ExpirationCleaner(FlexMonitor monitor, ConfigService configService) {
         this.monitor = monitor;
-        this.taskConfirmTimeoutUs = TimeUnit.MILLISECONDS.toMicros(configService.loadBalanceConfig().getTaskConfirmTimeoutMs());
+        this.configService = configService;
         this.workerTimeoutUs = Long.parseLong(System.getenv().getOrDefault("WORKER_TIMEOUT_US", "3000000"));
     }
 
@@ -60,6 +60,9 @@ public class ExpirationCleaner {
         if (MapUtils.isEmpty(workerStatusMap)) {
             return;
         }
+
+        long taskConfirmTimeoutUs = TimeUnit.MILLISECONDS.toMicros(
+                configService.loadBalanceConfig().getTaskConfirmTimeoutMs());
 
         for (Iterator<Map.Entry<String, WorkerStatus>> it = workerStatusMap.entrySet().iterator(); it.hasNext(); ) {
             Map.Entry<String, WorkerStatus> item = it.next();
@@ -93,7 +96,7 @@ public class ExpirationCleaner {
                 }
                 // Keep the local prediction until WorkerStatus confirms the task or this window expires.
                 else if (task.getTaskState() == TaskStateEnum.IN_TRANSIT && task.isTimeout(currentTime, taskConfirmTimeoutUs)) {
-                    reportTaskConfirmationTimeout(requestId, task, workerStatus, role, currentTime);
+                    reportTaskConfirmationTimeout(requestId, task, workerStatus, role, currentTime, taskConfirmTimeoutUs);
                     reportTaskRemoved(workerStatus.getRole(), workerStatus.getIp(), "timeout");
                     task.updateTaskState(TaskStateEnum.CLEANED);
                     shouldRemove = true;
@@ -112,7 +115,7 @@ public class ExpirationCleaner {
     }
 
     private void reportTaskConfirmationTimeout(String requestId, TaskInfo task, WorkerStatus workerStatus,
-                                               RoleType role, long currentTimeUs) {
+                                               RoleType role, long currentTimeUs, long taskConfirmTimeoutUs) {
         TaskConfirmationTimeoutPvLog event = new TaskConfirmationTimeoutPvLog(
                 TaskConfirmationTimeoutPvLog.EVENT_TYPE,
                 requestId,
