@@ -134,6 +134,7 @@
 
     <logger name="pvLogger" level="INFO" additivity="false">
         <appender-ref ref="PV-async"/>
+        <appender-ref ref="CONSOLE-async"/>
     </logger>
 
     <logger name="syncLogger" level="INFO" additivity="false">
@@ -153,20 +154,13 @@
     </logger>
 
 
+    <root level="INFO">
+        <appender-ref ref="APPLICATION-async" />
+        <appender-ref ref="CONSOLE-async" />
+    </root>
+
     <springProfile name="pre,test">
-        <!-- 开发/测试环境：同时输出到控制台和文件 -->
         <!-- 降低 gRPC 客户端日志级别，避免测试环境中打印大量连接超时错误 -->
         <logger name="org.flexlb.engine.grpc.client.EngineGrpcClient" level="OFF"/>
-        <root level="INFO">
-            <appender-ref ref="APPLICATION-async" />
-            <appender-ref ref="CONSOLE-async" />
-        </root>
-    </springProfile>
-
-    <springProfile name="!pre,!test">
-        <!-- 生产环境：只输出到文件 -->
-        <root level="INFO">
-            <appender-ref ref="APPLICATION-async" />
-        </root>
     </springProfile>
 </configuration>

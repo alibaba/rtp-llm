@@ -142,10 +142,12 @@ zookeeperConfig{zkHost, zkTimeoutMs}}`。环境变量
   AsyncAppender（`neverBlock=true`，队列 `flexlb.log.async-queue-size` 默认 16384）。
 - 命名 logger（additivity=false）：`pvLogger`→pv.log（每请求 JSON 记录）、`syncLogger`→
   sync.log、`syncConsistencyLogger`→sync_consistency.log、`flexlbLogger`→flexlb.log。
-- Spring profile 行为：`pre,test` → root 到文件+控制台；生产（`!pre,!test`）→ 只写文件。
+- root 和 `pvLogger` 的文件输出始终保留；`enableStdoutLog` 控制二者是否同时挂载
+  `CONSOLE-async`，支持通过 Nacos 热更新。Java 进程输出固定连接容器 stdout。
   application.log 和 pv.log 的路径可通过 `FLEXLB_APP_LOG_PATH` 独立配置。
 - 运行时调级：logger group `flexlb` = `org.flexlb,flexlbLogger,syncLogger,
-  syncConsistencyLogger`（application.yml），经 `/flexlb/update_log_level` 修改。
+  syncConsistencyLogger`（application.yml）；`flexlbLogLevel` 支持 Nacos 热更新，也可经
+  `/flexlb/update_log_level` 修改。
 
 ## 指标体系
 

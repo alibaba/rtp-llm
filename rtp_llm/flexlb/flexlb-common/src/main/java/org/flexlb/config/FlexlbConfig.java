@@ -35,6 +35,11 @@ public class FlexlbConfig {
     private LogLevel flexlbLogLevel = LogLevel.INFO;
 
     /**
+     * Whether root and PV logs are also written to container stdout.
+     */
+    private boolean enableStdoutLog = false;
+
+    /**
      * Load balancer status consistency and master election configuration.
      */
     private LBConsistencyConfig flexlbSyncConsistencyConfig = new LBConsistencyConfig();

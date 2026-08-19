@@ -7,7 +7,7 @@ import org.flexlb.cache.match.CacheMatchQueryOrchestrator;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.LogLevelUpdateRequest;
 import org.flexlb.enums.LogLevel;
-import org.flexlb.service.monitor.FlexlbLogLevelManager;
+import org.flexlb.service.monitor.FlexlbLogManager;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.flexlb.util.Logger;
 import org.springframework.context.annotation.Bean;
@@ -37,17 +37,17 @@ public class FlexlbControlServer {
     private final GeneralHttpNettyService generalHttpNettyService;
     private final LBStatusConsistencyService lbStatusConsistencyService;
     private final CacheMatchQueryOrchestrator cacheMatchQueryOrchestrator;
-    private final FlexlbLogLevelManager logLevelManager;
+    private final FlexlbLogManager logManager;
 
     public FlexlbControlServer(
             GeneralHttpNettyService generalHttpNettyService,
             LBStatusConsistencyService lbStatusConsistencyService,
             CacheMatchQueryOrchestrator cacheMatchQueryOrchestrator,
-            FlexlbLogLevelManager logLevelManager) {
+            FlexlbLogManager logManager) {
         this.generalHttpNettyService = generalHttpNettyService;
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.cacheMatchQueryOrchestrator = cacheMatchQueryOrchestrator;
-        this.logLevelManager = logLevelManager;
+        this.logManager = logManager;
     }
 
     @Bean
@@ -66,7 +66,7 @@ public class FlexlbControlServer {
         return request.bodyToMono(LogLevelUpdateRequest.class)
                 .flatMap(updateRequest -> {
                     LogLevel updatedLogLevel =
-                            logLevelManager.setLogLevel(updateRequest.getLogLevel());
+                            logManager.setLogLevel(updateRequest.getLogLevel());
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
                             .body(

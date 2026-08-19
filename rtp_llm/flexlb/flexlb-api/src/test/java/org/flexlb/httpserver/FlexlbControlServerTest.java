@@ -9,7 +9,7 @@ import org.flexlb.config.CacheMatchMode;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.kvcm.KvcmHealthState;
 import org.flexlb.enums.LogLevel;
-import org.flexlb.service.monitor.FlexlbLogLevelManager;
+import org.flexlb.service.monitor.FlexlbLogManager;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -40,7 +40,7 @@ class FlexlbControlServerTest {
     @Mock
     private CacheMatchQueryOrchestrator cacheMatchQueryOrchestrator;
     @Mock
-    private FlexlbLogLevelManager logLevelManager;
+    private FlexlbLogManager logManager;
 
     private WebTestClient webTestClient;
 
@@ -50,14 +50,14 @@ class FlexlbControlServerTest {
                 generalHttpNettyService,
                 lbStatusConsistencyService,
                 cacheMatchQueryOrchestrator,
-                logLevelManager);
+                logManager);
         webTestClient = WebTestClient.bindToRouterFunction(
                 server.flexlbControlRoutes()).build();
     }
 
     @Test
     void updatesFlexlbLogGroupThroughFlexlbEndpoint() {
-        when(logLevelManager.setLogLevel(LogLevel.DEBUG)).thenReturn(LogLevel.DEBUG);
+        when(logManager.setLogLevel(LogLevel.DEBUG)).thenReturn(LogLevel.DEBUG);
 
         webTestClient.post()
                 .uri("/flexlb/update_log_level")
@@ -67,7 +67,7 @@ class FlexlbControlServerTest {
                 .expectStatus().isOk()
                 .expectBody(String.class).isEqualTo("Success! logLevel=DEBUG");
 
-        verify(logLevelManager).setLogLevel(LogLevel.DEBUG);
+        verify(logManager).setLogLevel(LogLevel.DEBUG);
     }
 
     @Test

@@ -182,23 +182,8 @@ update_target() {
 }
 
 start_spring_boot() {
-    # SERVICE_OUT_TO_STDOUT=1 时 java 输出直通容器 stdout，否则落 SERVICE_OUT 文件并轮转
-    local REDIRECT_OUT="$SERVICE_OUT"
-    if [ "${SERVICE_OUT_TO_STDOUT:-0}" = "1" ]; then
-        REDIRECT_OUT=/proc/1/fd/1
-        echo "INFO: SERVICE_OUT_TO_STDOUT=1, spring boot output redirected to container stdout"
-    else
-        # prepare_service_out
-        # delete old SERVICE_OUT, keep last 20 logs
-        ls -t "$SERVICE_OUT".* 2>/dev/null | tail -n +$((20 + 1)) | xargs --no-run-if-empty rm -f
-        if [ -e "$SERVICE_OUT" ]; then
-            mv "$SERVICE_OUT" "$SERVICE_OUT.$(date '+%Y%m%d%H%M%S')" || exit1
-        fi
-        mkdir -p "$(dirname "${SERVICE_OUT}")" || exit1
-        touch "$SERVICE_OUT" || exit1
-
-        echo "INFO: spring boot service log: $SERVICE_OUT"
-    fi
+    local REDIRECT_OUT=/proc/1/fd/1
+    echo "INFO: spring boot output redirected to container stdout"
 
     if [ ! -z "$SERVICE_PID" ]; then
         if [ -f "$SERVICE_PID" ]; then
