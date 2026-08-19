@@ -20,6 +20,7 @@
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
+#include "rtp_llm/cpp/cache/KVCacheMetrics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
@@ -940,6 +941,335 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PoolMetricsSnapshotsReportReserveBlocks) 
     const size_t total_blocks = snapshots[0].total_blocks + snapshots[1].total_blocks;
     EXPECT_EQ(allocator->reserveBlocksNum() * snapshots[0].total_blocks / total_blocks, snapshots[0].reserve_blocks);
     EXPECT_EQ(allocator->reserveBlocksNum() * snapshots[1].total_blocks / total_blocks, snapshots[1].reserve_blocks);
+}
+
+static const CachePoolMetricsSnapshot* findFinalPoolSnapshot(const std::vector<CachePoolMetricsSnapshot>& snapshots,
+                                                             const std::string&                           pool_name) {
+    const CachePoolMetricsSnapshot* found = nullptr;
+    for (const CachePoolMetricsSnapshot& snapshot : snapshots) {
+        if (snapshot.pool_name != pool_name) {
+            continue;
+        }
+        if (found != nullptr) {
+            ADD_FAILURE() << "duplicate final pool snapshot: " << pool_name;
+            return nullptr;
+        }
+        found = &snapshot;
+    }
+    if (found == nullptr) {
+        ADD_FAILURE() << "missing final pool snapshot: " << pool_name;
+    }
+    return found;
+}
+
+static size_t distinctValidBlockCount(const BlockIndicesType& blocks) {
+    std::unordered_set<BlockIdxType> distinct;
+    for (BlockIdxType block : blocks) {
+        if (!isNullBlockIdx(block)) {
+            distinct.insert(block);
+        }
+    }
+    return distinct.size();
+}
+
+static void expectSameFinalPoolMetrics(const CachePoolMetricsSnapshot& expected,
+                                       const CachePoolMetricsSnapshot& actual,
+                                       const std::string&              stage) {
+    const std::string context = "pool=" + actual.pool_name + " stage=" + stage;
+    EXPECT_EQ(actual.tier, expected.tier) << context;
+    EXPECT_EQ(actual.block_size_bytes, expected.block_size_bytes) << context;
+    EXPECT_EQ(actual.total_blocks, expected.total_blocks) << context;
+    EXPECT_EQ(actual.reserve_blocks, expected.reserve_blocks) << context;
+    EXPECT_EQ(actual.free_blocks, expected.free_blocks) << context;
+    EXPECT_EQ(actual.used_blocks, expected.used_blocks) << context;
+    EXPECT_EQ(actual.available_blocks, expected.available_blocks) << context;
+    EXPECT_EQ(actual.active_tree_cached_blocks, expected.active_tree_cached_blocks) << context;
+    EXPECT_EQ(actual.request_ref_blocks, expected.request_ref_blocks) << context;
+    EXPECT_EQ(actual.connector_ref_blocks, expected.connector_ref_blocks) << context;
+    EXPECT_EQ(actual.block_cache_ref_blocks, expected.block_cache_ref_blocks) << context;
+    EXPECT_EQ(actual.eviction_ref_blocks, expected.eviction_ref_blocks) << context;
+    EXPECT_EQ(actual.store_ref_blocks, expected.store_ref_blocks) << context;
+    EXPECT_FLOAT_EQ(actual.used_ratio, expected.used_ratio) << context;
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, AllPrefixReuseDisabledPoolMetricsFollowAllocatorLifecycle) {
+    auto config   = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/4);
+    auto policies = config.groupPoliciesSnapshot();
+    ASSERT_EQ(policies.size(), 2u);
+    for (CacheGroupPolicy& policy : policies) {
+        policy.enable_prefix_reuse = false;
+    }
+    config.setGroupPolicies(policies);
+
+    auto allocator = makeAllocator(config, RoleType::PDFUSION, /*reserve_block_ratio=*/50);
+    ASSERT_TRUE(allocator->init());
+    const BlockTreeCachePtr& cache = allocator->blockTreeCacheOwner();
+    ASSERT_NE(cache, nullptr);
+
+    auto collect_final = [&]() {
+        const std::vector<BlockTreePoolMetricsSnapshot> tree   = cache->poolMetricsSnapshots();
+        const std::vector<KVCachePoolMetricsSnapshot>   device = allocator->poolMetricsSnapshots();
+        return mergeCachePoolMetricsSnapshots(device, tree);
+    };
+    auto expect_empty_tree_state = [&](const std::string& stage) {
+        EXPECT_TRUE(cache->groupSets().empty()) << stage;
+        EXPECT_TRUE(cache->poolMetricsSnapshots().empty()) << stage;
+        const CacheStats stats = cache->getStats();
+        EXPECT_EQ(stats.tree_node_count, 0u) << stage;
+        EXPECT_EQ(stats.device_heap_total_size, 0u) << stage;
+        EXPECT_EQ(stats.host_heap_total_size, 0u) << stage;
+        EXPECT_EQ(stats.disk_heap_total_size, 0u) << stage;
+    };
+
+    // State A: initialized, nothing allocated.
+    expect_empty_tree_state("init");
+    const std::vector<KVCachePoolMetricsSnapshot> allocator_init = allocator->poolMetricsSnapshots();
+    ASSERT_EQ(allocator_init.size(), 2u);
+    const std::vector<CachePoolMetricsSnapshot> init_final = collect_final();
+    ASSERT_EQ(init_final.size(), allocator_init.size());
+
+    size_t init_reserve_blocks = 0;
+    for (const KVCachePoolMetricsSnapshot& source : allocator_init) {
+        const CachePoolMetricsSnapshot* snapshot = findFinalPoolSnapshot(init_final, source.pool_name);
+        ASSERT_NE(snapshot, nullptr) << source.pool_name;
+        EXPECT_EQ(snapshot->tier, tierName(Tier::DEVICE)) << source.pool_name;
+        EXPECT_EQ(snapshot->block_size_bytes, source.block_size_bytes) << source.pool_name;
+        EXPECT_EQ(snapshot->total_blocks, source.total_blocks) << source.pool_name;
+        EXPECT_EQ(snapshot->reserve_blocks, source.reserve_blocks) << source.pool_name;
+        EXPECT_GT(snapshot->total_blocks, 0u) << source.pool_name;
+        EXPECT_EQ(snapshot->free_blocks, snapshot->total_blocks) << source.pool_name;
+        EXPECT_EQ(snapshot->used_blocks, 0u) << source.pool_name;
+        EXPECT_EQ(snapshot->available_blocks, snapshot->free_blocks) << source.pool_name;
+        EXPECT_EQ(snapshot->active_tree_cached_blocks, 0u) << source.pool_name;
+        EXPECT_EQ(snapshot->request_ref_blocks, 0u) << source.pool_name;
+        EXPECT_EQ(snapshot->connector_ref_blocks, 0u) << source.pool_name;
+        EXPECT_EQ(snapshot->block_cache_ref_blocks, 0u) << source.pool_name;
+        EXPECT_EQ(snapshot->eviction_ref_blocks, 0u) << source.pool_name;
+        EXPECT_EQ(snapshot->store_ref_blocks, 0u) << source.pool_name;
+        EXPECT_FLOAT_EQ(snapshot->used_ratio, 0.0f) << source.pool_name;
+        init_reserve_blocks += snapshot->reserve_blocks;
+    }
+    // A zero quota would silently pass the reserve assertions below.
+    EXPECT_GT(init_reserve_blocks, 0u);
+
+    // State B: one real block per pool held by a REQUEST reference.
+    auto batch_res = makeBatchResource(/*batch_size=*/1, config);
+    batch_res->setBatchCacheKeys(0, CacheKeysType{100});
+    auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+    MallocInfo malloc_info{batch_res, token_ids};
+    malloc_info.enable_cache_lookup = false;
+    malloc_info.reuse_cache         = false;
+    ASSERT_TRUE(allocator->malloc(malloc_info).success);
+
+    expect_empty_tree_state("after_malloc");
+    const std::vector<KVCachePoolMetricsSnapshot> allocator_malloc = allocator->poolMetricsSnapshots();
+    const std::vector<CachePoolMetricsSnapshot>   malloc_final     = collect_final();
+    ASSERT_EQ(allocator_malloc.size(), allocator_init.size());
+    ASSERT_EQ(malloc_final.size(), allocator_malloc.size());
+
+    for (const KVCachePoolMetricsSnapshot& source : allocator_malloc) {
+        const CachePoolMetricsSnapshot* snapshot = findFinalPoolSnapshot(malloc_final, source.pool_name);
+        ASSERT_NE(snapshot, nullptr) << source.pool_name;
+        const CachePoolMetricsSnapshot* init_snapshot = findFinalPoolSnapshot(init_final, source.pool_name);
+        ASSERT_NE(init_snapshot, nullptr) << source.pool_name;
+
+        const size_t expected_request_blocks =
+            distinctValidBlockCount(batch_res->blocks(0, static_cast<int>(source.pool_index)));
+        ASSERT_EQ(expected_request_blocks, 1u) << source.pool_name;
+
+        EXPECT_EQ(snapshot->block_size_bytes, init_snapshot->block_size_bytes) << source.pool_name;
+        EXPECT_EQ(snapshot->total_blocks, init_snapshot->total_blocks) << source.pool_name;
+        EXPECT_EQ(snapshot->reserve_blocks, init_snapshot->reserve_blocks) << source.pool_name;
+        EXPECT_EQ(snapshot->used_blocks, snapshot->total_blocks - snapshot->free_blocks) << source.pool_name;
+        EXPECT_EQ(snapshot->used_blocks, expected_request_blocks) << source.pool_name;
+        EXPECT_EQ(snapshot->request_ref_blocks, expected_request_blocks) << source.pool_name;
+        // No GroupSet means no candidate-aware override, so available falls back to free.
+        EXPECT_EQ(snapshot->available_blocks, snapshot->free_blocks) << source.pool_name;
+        EXPECT_EQ(snapshot->active_tree_cached_blocks, 0u) << source.pool_name;
+        EXPECT_EQ(snapshot->connector_ref_blocks, 0u) << source.pool_name;
+        EXPECT_EQ(snapshot->block_cache_ref_blocks, 0u) << source.pool_name;
+        EXPECT_EQ(snapshot->eviction_ref_blocks, 0u) << source.pool_name;
+        EXPECT_EQ(snapshot->store_ref_blocks, 0u) << source.pool_name;
+        EXPECT_FLOAT_EQ(snapshot->used_ratio,
+                        static_cast<float>(100.0 * snapshot->used_blocks / static_cast<double>(snapshot->total_blocks)))
+            << source.pool_name;
+    }
+
+    // State C: freeing must restore every field of state A.
+    FreeInfo free_info{batch_res, token_ids};
+    allocator->free(free_info);
+
+    expect_empty_tree_state("after_free");
+    const std::vector<CachePoolMetricsSnapshot> free_final = collect_final();
+    ASSERT_EQ(free_final.size(), init_final.size());
+    for (const CachePoolMetricsSnapshot& expected : init_final) {
+        const CachePoolMetricsSnapshot* actual = findFinalPoolSnapshot(free_final, expected.pool_name);
+        ASSERT_NE(actual, nullptr) << expected.pool_name;
+        expectSameFinalPoolMetrics(expected, *actual, "after_free");
+        EXPECT_EQ(actual->free_blocks, actual->total_blocks) << expected.pool_name;
+        EXPECT_EQ(actual->available_blocks, actual->total_blocks) << expected.pool_name;
+    }
+}
+
+// Distinct per-field values keep a wrong field source visible instead of coincidentally equal.
+static KVCachePoolMetricsSnapshot
+makeMergeAllocatorInput(const std::string& pool_name, size_t seed, size_t total_blocks, size_t free_blocks) {
+    KVCachePoolMetricsSnapshot snapshot;
+    snapshot.pool_index                = seed;
+    snapshot.pool_name                 = pool_name;
+    snapshot.block_size_bytes          = 1000 + seed;
+    snapshot.total_blocks              = total_blocks;
+    snapshot.free_blocks               = free_blocks;
+    snapshot.used_blocks               = total_blocks - free_blocks;
+    snapshot.active_tree_cached_blocks = 7 + seed;
+    snapshot.reserve_blocks            = 5 + seed;
+    snapshot.request_ref_blocks        = 11 + seed;
+    snapshot.connector_ref_blocks      = 12 + seed;
+    snapshot.block_cache_ref_blocks    = 13 + seed;
+    snapshot.eviction_ref_blocks       = 14 + seed;
+    snapshot.store_ref_blocks          = 15 + seed;
+    snapshot.used_ratio = static_cast<float>(100.0 * snapshot.used_blocks / static_cast<double>(snapshot.total_blocks));
+    return snapshot;
+}
+
+static BlockTreePoolMetricsSnapshot makeMergeTreeInput(Tier               tier,
+                                                       const std::string& pool_name,
+                                                       size_t             seed,
+                                                       size_t             total_blocks,
+                                                       size_t             free_blocks,
+                                                       size_t             available_blocks) {
+    BlockTreePoolMetricsSnapshot snapshot;
+    snapshot.tier                      = tier;
+    snapshot.pool_name                 = pool_name;
+    snapshot.block_size_bytes          = 2000 + seed;
+    snapshot.total_blocks              = total_blocks;
+    snapshot.free_blocks               = free_blocks;
+    snapshot.used_blocks               = total_blocks - free_blocks;
+    snapshot.available_blocks          = available_blocks;
+    snapshot.active_tree_cached_blocks = 21 + seed;
+    snapshot.request_ref_blocks        = 31 + seed;
+    snapshot.connector_ref_blocks      = 32 + seed;
+    snapshot.block_cache_ref_blocks    = 33 + seed;
+    snapshot.eviction_ref_blocks       = 34 + seed;
+    snapshot.store_ref_blocks          = 35 + seed;
+    return snapshot;
+}
+
+static void expectMergedRowFromAllocator(const KVCachePoolMetricsSnapshot& source,
+                                         size_t                            expected_available,
+                                         const CachePoolMetricsSnapshot&   actual,
+                                         const std::string&                context) {
+    EXPECT_EQ(actual.tier, tierName(Tier::DEVICE)) << context;
+    EXPECT_EQ(actual.pool_name, source.pool_name) << context;
+    EXPECT_EQ(actual.block_size_bytes, source.block_size_bytes) << context;
+    EXPECT_EQ(actual.total_blocks, source.total_blocks) << context;
+    EXPECT_EQ(actual.free_blocks, source.free_blocks) << context;
+    EXPECT_EQ(actual.used_blocks, source.used_blocks) << context;
+    EXPECT_EQ(actual.reserve_blocks, source.reserve_blocks) << context;
+    EXPECT_EQ(actual.active_tree_cached_blocks, source.active_tree_cached_blocks) << context;
+    EXPECT_EQ(actual.request_ref_blocks, source.request_ref_blocks) << context;
+    EXPECT_EQ(actual.connector_ref_blocks, source.connector_ref_blocks) << context;
+    EXPECT_EQ(actual.block_cache_ref_blocks, source.block_cache_ref_blocks) << context;
+    EXPECT_EQ(actual.eviction_ref_blocks, source.eviction_ref_blocks) << context;
+    EXPECT_EQ(actual.store_ref_blocks, source.store_ref_blocks) << context;
+    EXPECT_FLOAT_EQ(actual.used_ratio, source.used_ratio) << context;
+    EXPECT_EQ(actual.available_blocks, expected_available) << context;
+}
+
+static void expectMergedRowFromTree(const BlockTreePoolMetricsSnapshot& source,
+                                    size_t                              expected_available,
+                                    const CachePoolMetricsSnapshot&     actual,
+                                    const std::string&                  context) {
+    EXPECT_EQ(actual.tier, tierName(source.tier)) << context;
+    EXPECT_EQ(actual.pool_name, source.pool_name) << context;
+    EXPECT_EQ(actual.block_size_bytes, source.block_size_bytes) << context;
+    EXPECT_EQ(actual.total_blocks, source.total_blocks) << context;
+    EXPECT_EQ(actual.free_blocks, source.free_blocks) << context;
+    EXPECT_EQ(actual.used_blocks, source.used_blocks) << context;
+    // Reserve is an allocator quota, so tree-only pools keep the default.
+    EXPECT_EQ(actual.reserve_blocks, 0u) << context;
+    EXPECT_EQ(actual.active_tree_cached_blocks, source.active_tree_cached_blocks) << context;
+    EXPECT_EQ(actual.request_ref_blocks, source.request_ref_blocks) << context;
+    EXPECT_EQ(actual.connector_ref_blocks, source.connector_ref_blocks) << context;
+    EXPECT_EQ(actual.block_cache_ref_blocks, source.block_cache_ref_blocks) << context;
+    EXPECT_EQ(actual.eviction_ref_blocks, source.eviction_ref_blocks) << context;
+    EXPECT_EQ(actual.store_ref_blocks, source.store_ref_blocks) << context;
+    EXPECT_FLOAT_EQ(actual.used_ratio,
+                    static_cast<float>(100.0 * (source.total_blocks - source.free_blocks)
+                                       / static_cast<double>(source.total_blocks)))
+        << context;
+    EXPECT_EQ(actual.available_blocks, expected_available) << context;
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, MergeCachePoolMetricsSnapshotsPreservesReportContract) {
+    struct ExpectedRow {
+        bool   from_allocator;
+        size_t input_index;
+        size_t available_blocks;
+    };
+    struct MergeCase {
+        std::string                               name;
+        std::vector<KVCachePoolMetricsSnapshot>   allocator_snapshots;
+        std::vector<BlockTreePoolMetricsSnapshot> tree_snapshots;
+        std::vector<ExpectedRow>                  expected_rows;
+    };
+
+    const std::vector<MergeCase> cases = {
+        {"device_override_then_tree_only_append",
+         {makeMergeAllocatorInput("linear", 1, /*total=*/100, /*free=*/40),
+          makeMergeAllocatorInput("full", 2, /*total=*/80, /*free=*/80)},
+         {makeMergeTreeInput(Tier::DEVICE, "linear", 3, /*total=*/111, /*free=*/44, /*available=*/70),
+          makeMergeTreeInput(Tier::DEVICE, "tree_only_device", 4, /*total=*/50, /*free=*/20, /*available=*/35),
+          makeMergeTreeInput(Tier::HOST, "host_pool", 5, /*total=*/200, /*free=*/150, /*available=*/180),
+          makeMergeTreeInput(Tier::DISK, "disk_pool", 6, /*total=*/300, /*free=*/300, /*available=*/300)},
+         {// Only available_blocks is taken from the same-named tree snapshot.
+          {true, 0, 70},
+          // No tree snapshot for this pool, so available falls back to free.
+          {true, 1, 80},
+          // Tree-only pools follow every allocator pool, in tree input order.
+          {false, 1, 35},
+          {false, 2, 180},
+          {false, 3, 300}}},
+        {"allocator_duplicate_keeps_first_and_skips_rest",
+         {makeMergeAllocatorInput("dup_pool", 1, /*total=*/100, /*free=*/40),
+          makeMergeAllocatorInput("dup_pool", 9, /*total=*/500, /*free=*/5)},
+         {},
+         {{true, 0, 40}}},
+        {"tree_device_duplicate_overrides_with_first_entry",
+         {makeMergeAllocatorInput("dup_tree_pool", 1, /*total=*/100, /*free=*/40)},
+         {makeMergeTreeInput(Tier::DEVICE, "dup_tree_pool", 3, /*total=*/100, /*free=*/40, /*available=*/70),
+          makeMergeTreeInput(Tier::DEVICE, "dup_tree_pool", 4, /*total=*/100, /*free=*/40, /*available=*/25)},
+         {{true, 0, 70}}},
+        // Asymmetry with the allocator loop: tree-only duplicates are all emitted.
+        {"tree_only_duplicates_are_not_deduplicated",
+         {},
+         {makeMergeTreeInput(Tier::DEVICE, "orphan_device", 3, /*total=*/100, /*free=*/40, /*available=*/70),
+          makeMergeTreeInput(Tier::DEVICE, "orphan_device", 4, /*total=*/100, /*free=*/30, /*available=*/65),
+          makeMergeTreeInput(Tier::HOST, "host_dup", 5, /*total=*/200, /*free=*/150, /*available=*/180),
+          makeMergeTreeInput(Tier::HOST, "host_dup", 6, /*total=*/200, /*free=*/100, /*available=*/170)},
+         {{false, 0, 70}, {false, 1, 65}, {false, 2, 180}, {false, 3, 170}}},
+    };
+
+    for (const MergeCase& merge_case : cases) {
+        const std::vector<CachePoolMetricsSnapshot> merged =
+            mergeCachePoolMetricsSnapshots(merge_case.allocator_snapshots, merge_case.tree_snapshots);
+        ASSERT_EQ(merged.size(), merge_case.expected_rows.size()) << "case=" << merge_case.name;
+        for (size_t row = 0; row < merge_case.expected_rows.size(); ++row) {
+            const ExpectedRow& expected = merge_case.expected_rows[row];
+            const std::string  context  = "case=" + merge_case.name + " row=" + std::to_string(row);
+            if (expected.from_allocator) {
+                ASSERT_LT(expected.input_index, merge_case.allocator_snapshots.size()) << context;
+                expectMergedRowFromAllocator(merge_case.allocator_snapshots[expected.input_index],
+                                             expected.available_blocks,
+                                             merged[row],
+                                             context);
+            } else {
+                ASSERT_LT(expected.input_index, merge_case.tree_snapshots.size()) << context;
+                expectMergedRowFromTree(
+                    merge_case.tree_snapshots[expected.input_index], expected.available_blocks, merged[row], context);
+            }
+        }
+    }
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DeviceCacheMinFreeBlocksAreDistributedByPoolCapacity) {
