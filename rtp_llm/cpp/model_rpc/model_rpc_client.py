@@ -1,7 +1,7 @@
 import functools
 import json
 import logging
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator, Optional, Union
 
 import grpc
 from grpc import StatusCode
@@ -246,7 +246,9 @@ def _make_multimodal_inputs_pb(input_pb: GenerateInputPB) -> MultimodalInputsPB:
     return mm_inputs_pb
 
 
-def get_multimodal_preprocess_value(value: Optional[int], default: int):
+def get_multimodal_preprocess_value(
+    value: Optional[Union[int, float]], default: Union[int, float]
+) -> Union[int, float]:
     if value is not None and value != -1:
         return value
     else:
@@ -281,9 +283,10 @@ def trans_multimodal_input(
         mm_preprocess_config_pb.max_pixels = get_multimodal_preprocess_value(
             generate_config.max_pixels, mm_input.mm_preprocess_config.max_pixels
         )
-        mm_preprocess_config_pb.fps = get_multimodal_preprocess_value(
+        fps = get_multimodal_preprocess_value(
             generate_config.fps, mm_input.mm_preprocess_config.fps
         )
+        mm_preprocess_config_pb.fps = float(fps)
         mm_preprocess_config_pb.min_frames = get_multimodal_preprocess_value(
             generate_config.min_frames, mm_input.mm_preprocess_config.min_frames
         )
@@ -297,6 +300,12 @@ def trans_multimodal_input(
         )
         mm_preprocess_config_pb.mm_timeout_ms = get_multimodal_preprocess_value(
             generate_config.mm_timeout_ms, mm_input.mm_preprocess_config.mm_timeout_ms
+        )
+        mm_preprocess_config_pb.max_long_side_pixel = int(
+            get_multimodal_preprocess_value(
+                generate_config.max_long_side_pixel,
+                getattr(mm_input.mm_preprocess_config, "max_long_side_pixel", -1),
+            )
         )
         input_pb.multimodal_inputs.append(mm_input_pb)
 

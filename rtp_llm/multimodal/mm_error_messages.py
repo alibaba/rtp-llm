@@ -18,6 +18,7 @@ class MMErr:
     )
     IMG_OPEN = "The image format is illegal and cannot be opened"
     IMG_HW = "The image length and width do not meet the model restrictions. [{}]"
+    IMAGE_REQ = "The image modality input does not meet the requirements because: {}"
     VIDEO_INVALID = "Invalid video file."
     VIDEO_REQ = "The video modality input does not meet the requirements because: {}"
 

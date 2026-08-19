@@ -559,6 +559,53 @@ class MiniMaxM3VLRendererTest(TestCase):
         )
         self.assertEqual(self.tokenizer.applied_kwargs["thinking_mode"], "adaptive")
 
+    def test_multimodal_preprocess_config_is_aligned_and_supports_inline_fields(self):
+        data_url = "data:image/png;base64,AA=="
+        request = ChatCompletionRequest(
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": data_url},
+                            "preprocess_config": {"max_long_side_pixel": 1008},
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://example.com/image.webp"},
+                        },
+                        {
+                            "type": "video_url",
+                            "video_url": {
+                                "url": "https://example.com/video.mp4",
+                                "max_long_side_pixel": 896,
+                                "fps": 0.2,
+                            },
+                            "max_long_side_pixel": 784,
+                            "fps": 0.5,
+                        },
+                    ],
+                }
+            ]
+        )
+
+        rendered = self.renderer.render_chat(request)
+
+        self.assertEqual(
+            [item.url for item in rendered.multimodal_inputs],
+            [
+                data_url,
+                "https://example.com/image.webp",
+                "https://example.com/video.mp4",
+            ],
+        )
+        configs = [item.mm_preprocess_config for item in rendered.multimodal_inputs]
+        self.assertEqual(configs[0].max_long_side_pixel, 1008)
+        self.assertEqual(configs[1].max_long_side_pixel, -1)
+        self.assertEqual(configs[2].max_long_side_pixel, 784)
+        self.assertAlmostEqual(configs[2].fps, 0.5)
+
 
 @skipUnless(_HAS_MODEL, f"MiniMax-M3 tokenizer not found at {MINIMAX_M3_PATH}")
 class MiniMaxM3RealTokenizerTest(TestCase):

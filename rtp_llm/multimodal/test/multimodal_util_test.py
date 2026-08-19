@@ -9,8 +9,9 @@ import requests
 from PIL import Image
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MMPreprocessConfigPB
 from rtp_llm.multimodal.mm_error_messages import MMErr
-from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
+from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url, trans_config
 
 
 class _FakeResponse:
@@ -52,6 +53,12 @@ class TestMultiModalUtil(unittest.TestCase):
             self.assertTrue(
                 Image.open(get_bytes_io_from_url(temp_path)).size == image.size
             )
+
+    def test_trans_config_preserves_fractional_fps(self):
+        config = trans_config(MMPreprocessConfigPB(fps=0.2, max_long_side_pixel=1008))
+
+        self.assertAlmostEqual(config.fps, 0.2)
+        self.assertEqual(config.max_long_side_pixel, 1008)
 
     def test_base64(self):
         buffer = io.BytesIO()

@@ -114,6 +114,7 @@ def _build_mm_inputs_from_request(request: Any) -> list:
                 part.max_frames,
                 [],  # crop_positions (no upstream control today)
                 -1,  # use VitConfig.mm_timeout_ms
+                part.max_long_side_pixel,
             ),
         )
         for part in mm_parts

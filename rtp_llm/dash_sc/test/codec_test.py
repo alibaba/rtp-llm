@@ -1263,6 +1263,7 @@ class DashScGrpcRequestTest(TestCase):
                                     "image": "http://ocr.jpg",
                                     "min_pixels": 3136,
                                     "max_pixels": 6422528,
+                                    "max_long_side_pixel": 1008,
                                     "enable_rotate": False,
                                 },
                                 {"text": "describe"},
@@ -1281,6 +1282,7 @@ class DashScGrpcRequestTest(TestCase):
                     mm_type=MMUrlType.IMAGE,
                     min_pixels=3136,
                     max_pixels=6422528,
+                    max_long_side_pixel=1008,
                 )
             ],
         )
@@ -1303,7 +1305,8 @@ class DashScGrpcRequestTest(TestCase):
                                         "http://f2.jpg",
                                         "http://f3.jpg",
                                     ],
-                                    "fps": 2,
+                                    "fps": 0.2,
+                                    "max_long_side_pixel": 896,
                                     "max_frames": 32,
                                 },
                             ],
@@ -1319,19 +1322,22 @@ class DashScGrpcRequestTest(TestCase):
                 MultimodalPart(
                     url="http://f1.jpg",
                     mm_type=MMUrlType.VIDEO,
-                    fps=2,
+                    max_long_side_pixel=896,
+                    fps=0.2,
                     max_frames=32,
                 ),
                 MultimodalPart(
                     url="http://f2.jpg",
                     mm_type=MMUrlType.VIDEO,
-                    fps=2,
+                    max_long_side_pixel=896,
+                    fps=0.2,
                     max_frames=32,
                 ),
                 MultimodalPart(
                     url="http://f3.jpg",
                     mm_type=MMUrlType.VIDEO,
-                    fps=2,
+                    max_long_side_pixel=896,
+                    fps=0.2,
                     max_frames=32,
                 ),
             ],
@@ -1444,6 +1450,8 @@ class DashScGrpcRequestTest(TestCase):
                                     "preprocess_config": {
                                         "min_pixels": 100,
                                         "max_pixels": 200,
+                                        "max_long_side_pixel": 1008,
+                                        "fps": 0.2,
                                     },
                                 }
                             ],
@@ -1461,6 +1469,8 @@ class DashScGrpcRequestTest(TestCase):
                     mm_type=MMUrlType.IMAGE,
                     min_pixels=100,
                     max_pixels=200,
+                    max_long_side_pixel=1008,
+                    fps=0.2,
                 )
             ],
         )

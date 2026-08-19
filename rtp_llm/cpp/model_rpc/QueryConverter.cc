@@ -165,18 +165,20 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
             for (const auto& crop_position : mm_preprocess_config->crop_positions()) {
                 crop_positions.push_back(crop_position);
             }
-            mm_inputs.emplace_back(mm_input->multimodal_url(),
-                                   torch::empty(1),
-                                   mm_input->multimodal_type(),
-                                   mm_preprocess_config->width(),
-                                   mm_preprocess_config->height(),
-                                   mm_preprocess_config->min_pixels(),
-                                   mm_preprocess_config->max_pixels(),
-                                   mm_preprocess_config->fps(),
-                                   mm_preprocess_config->min_frames(),
-                                   mm_preprocess_config->max_frames(),
-                                   crop_positions,
-                                   mm_preprocess_config->mm_timeout_ms());
+            mm_inputs.emplace_back(
+                mm_input->multimodal_url(),
+                torch::empty(1),
+                mm_input->multimodal_type(),
+                mm_preprocess_config->width(),
+                mm_preprocess_config->height(),
+                mm_preprocess_config->min_pixels(),
+                mm_preprocess_config->max_pixels(),
+                mm_preprocess_config->fps(),
+                mm_preprocess_config->min_frames(),
+                mm_preprocess_config->max_frames(),
+                crop_positions,
+                mm_preprocess_config->mm_timeout_ms(),
+                mm_preprocess_config->max_long_side_pixel() > 0 ? mm_preprocess_config->max_long_side_pixel() : -1);
         }
         generate_input->multimodal_inputs = std::move(mm_inputs);
     }
@@ -210,18 +212,20 @@ std::vector<MultimodalInput> QueryConverter::transMMInput(const MultimodalInputs
 
         // tensor should also converted from input pb, however it is only used in some embedding model, so just empty
         // for now
-        inputs_vec.emplace_back(mm_input->multimodal_url(),
-                                torch::empty(1),
-                                mm_input->multimodal_type(),
-                                mm_preprocess_config->width(),
-                                mm_preprocess_config->height(),
-                                mm_preprocess_config->min_pixels(),
-                                mm_preprocess_config->max_pixels(),
-                                mm_preprocess_config->fps(),
-                                mm_preprocess_config->min_frames(),
-                                mm_preprocess_config->max_frames(),
-                                crop_positions,
-                                mm_preprocess_config->mm_timeout_ms());
+        inputs_vec.emplace_back(
+            mm_input->multimodal_url(),
+            torch::empty(1),
+            mm_input->multimodal_type(),
+            mm_preprocess_config->width(),
+            mm_preprocess_config->height(),
+            mm_preprocess_config->min_pixels(),
+            mm_preprocess_config->max_pixels(),
+            mm_preprocess_config->fps(),
+            mm_preprocess_config->min_frames(),
+            mm_preprocess_config->max_frames(),
+            crop_positions,
+            mm_preprocess_config->mm_timeout_ms(),
+            mm_preprocess_config->max_long_side_pixel() > 0 ? mm_preprocess_config->max_long_side_pixel() : -1);
     }
     return inputs_vec;
 }
@@ -248,6 +252,7 @@ void QueryConverter::transMMPreprocessConfig(MMPreprocessConfigPB* config_pb, co
     config_pb->set_min_frames(config.min_frames);
     config_pb->set_max_frames(config.max_frames);
     config_pb->set_mm_timeout_ms(config.mm_timeout_ms);
+    config_pb->set_max_long_side_pixel(config.max_long_side_pixel);
     for (const float& crop_position : config.crop_positions) {
         config_pb->add_crop_positions(crop_position);
     }

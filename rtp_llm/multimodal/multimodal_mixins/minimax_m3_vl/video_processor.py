@@ -20,6 +20,8 @@ from transformers.video_utils import group_videos_by_shape, reorder_videos
 from rtp_llm.multimodal.mm_error_messages import MMErr, raise_mm
 
 MAX_RATIO = 200
+MIN_SHORT_SIDE_PIXEL = 112
+VIDEO_MAX_TOTAL_PIXELS = 301_056_000
 
 
 def round_by_factor(number: int, factor: int) -> int:
@@ -34,12 +36,47 @@ def floor_by_factor(number: int, factor: int) -> int:
     return math.floor(number / factor) * factor
 
 
+def _smart_resize_by_long_side(
+    height: int,
+    width: int,
+    factor: int,
+    max_long_side_pixel: int,
+    min_short_side_pixel: int,
+) -> tuple[int, int]:
+    if max_long_side_pixel <= 0:
+        raise_mm(
+            MMErr.IMG_HW.format(
+                f"max_long_side_pixel must be positive, got {max_long_side_pixel}"
+            )
+        )
+
+    long_side = max(height, width)
+    short_side = min(height, width)
+    scaled_height: float = height
+    scaled_width: float = width
+    if long_side > max_long_side_pixel:
+        scale = max_long_side_pixel / long_side
+        scaled_height = height * scale
+        scaled_width = width * scale
+    elif short_side < min_short_side_pixel:
+        scale = min_short_side_pixel / short_side
+        scaled_height = height * scale
+        scaled_width = width * scale
+
+    return (
+        max(factor, round_by_factor(scaled_height, factor)),
+        max(factor, round_by_factor(scaled_width, factor)),
+    )
+
+
 def smart_resize(
     height: int,
     width: int,
     factor: int = 28,
     min_pixels: int = 4 * 28 * 28,
     max_pixels: int = 451584,
+    max_long_side_pixel: Optional[int] = None,
+    min_short_side_pixel: int = MIN_SHORT_SIDE_PIXEL,
 ) -> tuple[int, int]:
     if height < 10 or width < 10:
         raise_mm(
@@ -52,6 +89,14 @@ def smart_resize(
             MMErr.IMG_HW.format(
                 f"absolute aspect ratio must be smaller than {MAX_RATIO}, got {height} / {width}"
             )
+        )
+    if max_long_side_pixel is not None:
+        return _smart_resize_by_long_side(
+            height,
+            width,
+            factor=factor,
+            max_long_side_pixel=max_long_side_pixel,
+            min_short_side_pixel=min_short_side_pixel,
         )
     h_bar = max(factor, round_by_factor(height, factor))
     w_bar = max(factor, round_by_factor(width, factor))
@@ -74,6 +119,7 @@ class MiniMaxM3VLVideoProcessorKwargs(VideosKwargs, total=False):
     merge_size: int
     min_pixels: int
     max_pixels: int
+    max_long_side_pixel: int
     total_pixels: int
     min_frames: int
     max_frames: int
@@ -98,6 +144,9 @@ class MiniMaxM3VLVideoProcessor(BaseVideoProcessor):
     min_pixels = 4 * 28 * 28
     max_pixels = 768 * 28 * 28  # 602,112
     total_pixels = int(64000 * 28 * 28 * 0.9)  # ~45M, ~64k tokens budget
+    max_long_side_pixel = None
+    min_short_side_pixel = MIN_SHORT_SIDE_PIXEL
+    max_total_pixels = VIDEO_MAX_TOTAL_PIXELS
     fps = 1.0
     min_frames = 4
     max_frames = 768
@@ -124,6 +173,7 @@ class MiniMaxM3VLVideoProcessor(BaseVideoProcessor):
         merge_size: int,
         min_pixels: int,
         max_pixels: int,
+        max_long_side_pixel: Optional[int] = None,
         return_tensors: str | TensorType | None = None,
         **kwargs,
     ) -> BatchFeature:
@@ -140,7 +190,17 @@ class MiniMaxM3VLVideoProcessor(BaseVideoProcessor):
                     factor=factor,
                     min_pixels=min_pixels,
                     max_pixels=max_pixels,
+                    max_long_side_pixel=max_long_side_pixel,
+                    min_short_side_pixel=self.min_short_side_pixel,
                 )
+                if resized_height * resized_width * num_frames > self.max_total_pixels:
+                    raise_mm(
+                        MMErr.VIDEO_REQ.format(
+                            f"video area {resized_height * resized_width * num_frames} "
+                            f"(width * height * frames) exceeds max_total_pixels "
+                            f"{self.max_total_pixels} after resizing"
+                        )
+                    )
                 stacked_videos = stacked_videos.view(
                     batch_size * num_frames, channels, height, width
                 )

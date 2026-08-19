@@ -126,11 +126,12 @@ message MMPreprocessConfigPB {
     int32 height = 2;
     int32 min_pixels = 3;
     int32 max_pixels = 4;
-    int32 fps = 5;
+    float fps = 5;
     int32 min_frames = 6;
     int32 max_frames = 7;
     repeated float crop_positions = 8;
     int32 mm_timeout_ms = 9;
+    int32 max_long_side_pixel = 11;
 }
 
 message MultimodalInputPB {

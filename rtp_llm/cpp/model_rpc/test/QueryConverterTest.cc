@@ -89,6 +89,22 @@ TEST_F(QueryConverterTest, testTransMMInputsPBRequestId) {
     EXPECT_EQ(output.request_id(), request_id);
 }
 
+TEST_F(QueryConverterTest, testTransMMPreprocessConfigFractionalFps) {
+    MMPreprocessConfig config(-1, -1, -1, -1, 0.2f, -1, 64, {}, -1, 1008);
+    MultimodalInput    input("https://example.com/video.mp4", 2, torch::empty({0}), config);
+
+    auto output = QueryConverter::transMMInputsPB({input});
+    ASSERT_EQ(output.multimodal_inputs_size(), 1);
+    const auto& config_pb = output.multimodal_inputs(0).mm_preprocess_config();
+    EXPECT_FLOAT_EQ(config_pb.fps(), 0.2f);
+    EXPECT_EQ(config_pb.max_long_side_pixel(), 1008);
+
+    auto round_trip = QueryConverter::transMMInput(&output);
+    ASSERT_EQ(round_trip.size(), 1);
+    EXPECT_FLOAT_EQ(round_trip[0].mm_preprocess_config.fps, 0.2f);
+    EXPECT_EQ(round_trip[0].mm_preprocess_config.max_long_side_pixel, 1008);
+}
+
 TEST_F(QueryConverterTest, testTransOutput) {
     auto output_token_ids = torch::empty({1, 3}, torch::kInt32);
     auto data             = output_token_ids.data_ptr<int>();

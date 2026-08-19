@@ -20,6 +20,7 @@ sys.modules["rtp_llm.ops.comm.nccl_op"] = mock_nccl_op
 import logging
 import os
 import unittest
+from types import SimpleNamespace
 from typing import AsyncGenerator
 from unittest import TestCase, main
 
@@ -132,6 +133,49 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(
             mm_inputs_pb.multimodal_inputs[0].multimodal_url, "image://test"
         )
+
+    def test_trans_input_keeps_fractional_fps_and_max_long_side(self):
+        preprocess_config = SimpleNamespace(
+            width=-1,
+            height=-1,
+            min_pixels=-1,
+            max_pixels=-1,
+            fps=0.2,
+            min_frames=-1,
+            max_frames=-1,
+            crop_positions=[],
+            mm_timeout_ms=-1,
+            max_long_side_pixel=1008,
+        )
+        mm_input = SimpleNamespace(
+            url="https://example.com/video.mp4",
+            mm_type=2,
+            mm_preprocess_config=preprocess_config,
+        )
+
+        input_pb = trans_input(
+            GenerateInput(
+                token_ids=torch.tensor([1]),
+                generate_config=GenerateConfig(),
+                request_id=1,
+                mm_inputs=[mm_input],
+            )
+        )
+        config_pb = input_pb.multimodal_inputs[0].mm_preprocess_config
+        self.assertAlmostEqual(config_pb.fps, 0.2)
+        self.assertEqual(config_pb.max_long_side_pixel, 1008)
+
+        input_pb = trans_input(
+            GenerateInput(
+                token_ids=torch.tensor([1]),
+                generate_config=GenerateConfig(fps=1, max_long_side_pixel=784),
+                request_id=2,
+                mm_inputs=[mm_input],
+            )
+        )
+        config_pb = input_pb.multimodal_inputs[0].mm_preprocess_config
+        self.assertAlmostEqual(config_pb.fps, 1.0)
+        self.assertEqual(config_pb.max_long_side_pixel, 784)
 
     @unittest.skip("need fix")
     def test_generate_stream(self):

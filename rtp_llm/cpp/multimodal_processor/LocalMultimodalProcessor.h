@@ -42,6 +42,7 @@ private:
                     }
                     mm_preprocess_config.append(crop_positions);
                     mm_preprocess_config.append(mm_input.mm_preprocess_config.mm_timeout_ms);
+                    mm_preprocess_config.append(mm_input.mm_preprocess_config.max_long_side_pixel);
                     mm_preprocess_configs.push_back(mm_preprocess_config);
                 }
 

@@ -963,10 +963,11 @@ _MULTIMODAL_PARAMETER_KEYS: tuple[str, ...] = ("payload", "__messages__")
 _PER_PART_CONFIG_INT_KEYS: tuple[str, ...] = (
     "min_pixels",
     "max_pixels",
-    "fps",
+    "max_long_side_pixel",
     "max_frames",
     "min_frames",
 )
+_PER_PART_CONFIG_FLOAT_KEYS: tuple[str, ...] = ("fps",)
 
 
 @dataclass(frozen=True)
@@ -986,7 +987,8 @@ class MultimodalPart:
     mm_type: Any
     min_pixels: int = -1
     max_pixels: int = -1
-    fps: int = -1
+    max_long_side_pixel: int = -1
+    fps: float = -1.0
     max_frames: int = -1
     min_frames: int = -1
 
@@ -1008,7 +1010,7 @@ def _extract_openai_url(part: dict, inner_field: str) -> str | None:
     return None
 
 
-def _extract_per_part_config(part: dict) -> dict[str, int]:
+def _extract_per_part_config(part: dict) -> dict[str, int | float]:
     """Pull per-part numeric overrides (min_pixels, max_pixels, fps, ...).
 
     Supports two layouts in one pass:
@@ -1027,10 +1029,18 @@ def _extract_per_part_config(part: dict) -> dict[str, int]:
             value = nested.get(key)
             if isinstance(value, (int, float)) and value > 0:
                 out[key] = int(value)
+        for key in _PER_PART_CONFIG_FLOAT_KEYS:
+            value = nested.get(key)
+            if isinstance(value, (int, float)) and value > 0:
+                out[key] = float(value)
     for key in _PER_PART_CONFIG_INT_KEYS:
         value = part.get(key)
         if isinstance(value, (int, float)) and value > 0:
             out[key] = int(value)
+    for key in _PER_PART_CONFIG_FLOAT_KEYS:
+        value = part.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            out[key] = float(value)
     return out
 
 
