@@ -19,6 +19,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.context.annotation.DependsOn;
 
 import java.lang.reflect.Field;
 import java.util.List;
@@ -68,6 +69,14 @@ class DefaultRouterTest {
     private Request request;
 
     private DefaultRouter defaultRouter;
+
+    @Test
+    void should_initialize_after_cache_affinity_strategy_bean() {
+        DependsOn dependsOn = DefaultRouter.class.getAnnotation(DependsOn.class);
+
+        assertNotNull(dependsOn);
+        assertTrue(List.of(dependsOn.value()).contains("cacheAffinityFirstStrategy"));
+    }
 
     @BeforeEach
     void setUp() {

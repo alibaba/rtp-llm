@@ -166,10 +166,11 @@ The `DefaultRouter` orchestrates routing across these stages. If a later stage f
 
 ### Load Balancing Strategies
 
-Three strategies are available (registered with `LoadBalanceStrategyFactory`):
+Four strategies are available (registered with `LoadBalanceStrategyFactory`):
 
 - **RANDOM**: Random worker selection
 - **SHORTEST_TTFT**: Select worker with shortest Time-To-First-Token
+- **CACHE_AFFINITY_FIRST**: Prefer the global cache leader within a bounded additional prefill-work budget; otherwise preserve the ShortestTTFT baseline
 - **WEIGHTED_CACHE**: Cache-aware selection prioritizing workers with matching KV cache blocks
 
 Each `RoleType` can use a different strategy. See `LoadBalanceStrategyEnum` in flexlb-common.

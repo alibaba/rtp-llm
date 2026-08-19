@@ -51,6 +51,11 @@ public class MetricConstant {
     public static final String ENGINE_BALANCING_MASTER_SELECT_DETAIL = "app.engine.balancing.master.select.detail";
 
     /**
+     * Cache-affinity routing decisions, partitioned by decision outcome and selected engine.
+     */
+    public static final String CACHE_AFFINITY_DECISION_QPS = "app.cache.affinity.decision.qps";
+
+    /**
      * Engine queue wait time
      */
     public static final String ENGINE_RUNNING_QUEUE_TIME = "app.engine.health.check.running.queue.time";

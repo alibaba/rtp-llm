@@ -85,6 +85,7 @@ flexlb-sync/
 │       ├── LoadBalancer.java        # Load balancing interface
 │       ├── RandomStrategy.java      # Random selection strategy
 │       ├── ShortestTTFTStrategy.java   # TTFT-based strategy
+│       ├── CacheAffinityFirstStrategy.java # Bounded cache-affinity strategy
 │       └── WeightedCacheLoadBalancer.java  # Cache-aware strategy
 ├── consistency/
 │   ├── MasterElectService.java      # Master election interface

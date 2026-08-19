@@ -67,7 +67,10 @@ public class WorkerStatus {
         this.decKvCacheFree(needNewKvCacheLen);
         this.addKvCacheUsed(needNewKvCacheLen);
 
-        lastSelectedTime.set(System.nanoTime() / 1000);
+        // A routing strategy may have already advanced this timestamp with CAS to claim this
+        // worker. Never move it backwards here, otherwise another request holding the old scoring
+        // snapshot could claim the same worker again.
+        lastSelectedTime.accumulateAndGet(System.nanoTime() / 1000, Math::max);
         Logger.debug("Task {} added to local queue with state: {}", requestId, TaskStateEnum.IN_TRANSIT);
     }
 
