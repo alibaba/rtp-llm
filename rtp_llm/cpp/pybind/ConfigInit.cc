@@ -532,7 +532,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_prefix_tree_memory_cache,
                                       self.enable_legacy_memory_connector_fallback,
                                       self.prefix_tree_memory_state_swa_pool_ratio,
-                                      self.enable_dsv4_state_block_independent_eviction);
+                                      self.enable_dsv4_state_block_independent_eviction,
+                                      self.kimi_k3_kda_pool_blocks);
             },
             [](py::tuple t) {
                 const bool   has_disk_fields = t.size() >= 50 && py::isinstance<py::str>(t[9]);
@@ -617,6 +618,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                 c.prefix_tree_memory_state_swa_pool_ratio      = t[extra_start + 4].cast<int64_t>();
                                 c.enable_dsv4_state_block_independent_eviction = t[extra_start + 5].cast<bool>();
                             }
+                            c.kimi_k3_kda_pool_blocks = t[extra_start + 6].cast<uint32_t>();
                         }
                     }
                 } catch (const std::exception& e) {
