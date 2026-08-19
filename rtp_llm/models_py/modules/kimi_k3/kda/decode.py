@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Dict
 
@@ -13,6 +14,7 @@ from rtp_llm.models_py.triton_kernels.kimi_kda import (
     fused_recurrent_kda,
     is_kimi_kda_short_conv_paged_decode_supported,
     kimi_kda_short_conv_paged_decode,
+    kimi_kda_short_conv_paged_target_verify,
 )
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
@@ -25,6 +27,11 @@ class _PagedDecodeCache:
     block_map: torch.Tensor
     sequence_lengths_plus_one: torch.Tensor
     page_size: int
+
+
+def _fused_target_verify_enabled() -> bool:
+    value = os.environ.get("KIMI_K3_FUSED_TARGET_VERIFY", "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
 
 
 class KimiK3KDADecode(nn.Module):
@@ -221,6 +228,30 @@ class KimiK3KDADecode(nn.Module):
         q_steps = q_projected.reshape(batch, sequence_length, -1)
         k_steps = k_projected.reshape(batch, sequence_length, -1)
         v_steps = v_projected.reshape(batch, sequence_length, -1)
+        if _fused_target_verify_enabled():
+            q, k, v = kimi_kda_short_conv_paged_target_verify(
+                q_steps,
+                k_steps,
+                v_steps,
+                self.fused_conv,
+                cache.conv,
+                cache.block_map,
+                cache.sequence_lengths_plus_one,
+                cache.page_size,
+            )
+            return self._recurrent(
+                q.reshape(token_count, self.projection_size),
+                k.reshape(token_count, self.projection_size),
+                v.reshape(token_count, self.projection_size),
+                raw_gate,
+                raw_beta,
+                cu_seqlens,
+                cache.ssm,
+                cache.block_map,
+                cache.sequence_lengths_plus_one,
+                cache.page_size,
+            )
+
         conv_steps: list[torch.Tensor] = []
         for step in range(sequence_length):
             reserve_base = torch.div(
