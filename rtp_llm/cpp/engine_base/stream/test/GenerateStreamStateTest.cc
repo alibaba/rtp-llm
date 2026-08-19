@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/test/MockAsyncContext.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
@@ -17,6 +18,31 @@
 using namespace std;
 
 namespace rtp_llm {
+
+namespace {
+
+thread_local const AsyncContext* tracked_cancel_context = nullptr;
+thread_local size_t              tracked_cancel_count   = 0;
+
+}  // namespace
+
+// KVCacheManager::cancelLoad is intentionally non-virtual. This target-local
+// GNU ld --wrap seam counts only the AsyncContext selected by the current test
+// and forwards every call to the real implementation. The Itanium ABI symbol is
+// _ZN7rtp_llm14KVCacheManager10cancelLoadERKSt10shared_ptrINS_12AsyncContextEE.
+extern "C" bool realKVCacheManagerCancelLoad(KVCacheManager* manager, const std::shared_ptr<AsyncContext>& context) asm(
+    "__real__ZN7rtp_llm14KVCacheManager10cancelLoadERKSt10shared_ptrINS_12AsyncContextEE");
+
+extern "C" bool
+wrappedKVCacheManagerCancelLoad(KVCacheManager* manager, const std::shared_ptr<AsyncContext>& context) asm(
+    "__wrap__ZN7rtp_llm14KVCacheManager10cancelLoadERKSt10shared_ptrINS_12AsyncContextEE");
+
+extern "C" bool wrappedKVCacheManagerCancelLoad(KVCacheManager* manager, const std::shared_ptr<AsyncContext>& context) {
+    if (context.get() == tracked_cancel_context) {
+        ++tracked_cancel_count;
+    }
+    return realKVCacheManagerCancelLoad(manager, context);
+}
 
 class GenerateStreamStateTest: public DeviceTestBase {
 protected:
@@ -327,16 +353,16 @@ TEST_F(GenerateStreamStateTest, testLoadInitiatedSkipsAsyncLoadCache) {
     ASSERT_TRUE(resource.initKVBlock().ok());
     stream->reportEvent(StreamEvents::LoadInitiated);
 
-    // Verify load_cache_context_ is null (no asyncLoadCache was called)
-    ASSERT_FALSE(resource.load_cache_context_);
+    // No allocator-owned load is in flight.
+    ASSERT_FALSE(resource.allocator_load_context_);
 
     // moveToNext should not trigger asyncLoadCache because LoadInitiated is set
     stream->reportEvent(StreamEvents::CanRun);
     auto new_state = stream->moveToNext();
     ASSERT_EQ(new_state, StreamState::RUNNING);
 
-    // Still no asyncLoadCache context
-    ASSERT_FALSE(resource.load_cache_context_);
+    // Still no allocator load context.
+    ASSERT_FALSE(resource.allocator_load_context_);
 }
 
 TEST_F(GenerateStreamStateTest, testPrefillFallbackDecodeGrowsBlocksAfterContext) {
@@ -356,38 +382,76 @@ TEST_F(GenerateStreamStateTest, testPrefillFallbackDecodeGrowsBlocksAfterContext
     EXPECT_EQ(stream->curBlocksNum(), 2u);
 }
 
-TEST_F(GenerateStreamStateTest, testRetryableInitMallocKeepsPrefillWaiting) {
+TEST_F(GenerateStreamStateTest, testIncrementalAsyncAllocationTerminatesBeforeModelAndReleasesOnce) {
+    using ::testing::_;
+    using ::testing::Return;
+
     auto stream = createStream({1, 2}, /*reuse_cache=*/false, RoleType::PREFILL);
-    installRetryableInitMalloc();
-
     stream->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+    ASSERT_EQ(stream->curBlocksNum(), 1u);
 
-    EXPECT_EQ(stream->moveToNext(), StreamState::WAITING);
-    EXPECT_FALSE(stream->hasError());
-    EXPECT_FALSE(stream->hasEvent(StreamEvents::LoadInitiated));
-    EXPECT_EQ(stream->curBlocksNum(), 0u);
+    const auto real_allocator = cache_manager_->allocator_;
+    const auto device_pool    = real_allocator->getDeviceBlockPool();
+    ASSERT_NE(device_pool, nullptr);
+    const auto& request_blocks = stream->streamCacheResource().kvCache().blocks(/*batch_id=*/0, /*group_id=*/0);
+    ASSERT_EQ(request_blocks.size(), 1u);
+    const BlockIdxType request_block = request_blocks.front();
+    ASSERT_EQ(device_pool->refCount(request_block), 1u);
+    const size_t free_after_request_alloc = device_pool->freeBlocksNum();
 
-    auto& cache_resource = stream->kvCacheMutable();
-    ASSERT_TRUE(cache_resource.cacheKeysInitialized());
-    ASSERT_FALSE(cache_resource.cacheKeys().empty());
-    constexpr CacheKeyType sentinel_key                = 0x12345678;
-    cache_resource.cacheResource().cacheKeys().front() = sentinel_key;
+    auto   async_context  = std::make_shared<MockAsyncContext>();
+    auto   mock_allocator = std::make_shared<MockKVCacheAllocator>(init_config());
+    size_t free_count     = 0;
+    EXPECT_CALL(*mock_allocator, incrMalloc(_))
+        .WillOnce(Return(MallocResult{/*success=*/true,
+                                      /*reuse_len=*/0,
+                                      /*match_cost_time_us=*/0,
+                                      async_context}));
+    EXPECT_CALL(*mock_allocator, free(_)).WillOnce([&](const FreeInfo& free_info) {
+        ++free_count;
+        real_allocator->free(free_info);
+    });
+    cache_manager_->allocator_ = mock_allocator;
 
-    EXPECT_EQ(stream->moveToNext(), StreamState::WAITING);
-    EXPECT_EQ(stream->curBlocksNum(), 0u);
-    EXPECT_EQ(cache_resource.cacheKeys().front(), sentinel_key);
-}
+    stream->setIsContextStream(false);
+    stream->setSeqLength(3);
+    tracked_cancel_context = async_context.get();
+    tracked_cancel_count   = 0;
 
-TEST_F(GenerateStreamStateTest, testRetryableInitMallocFinishesDecode) {
-    auto stream = createStream({1, 2}, /*reuse_cache=*/false, RoleType::DECODE);
-    installRetryableInitMalloc();
-
-    stream->reportEvent(StreamEvents::CanRun);
+    // A model executor may only consume RUNNING streams. The state-machine
+    // caller must make the unexpected incremental async result terminal first.
+    size_t     model_entry_count     = 0;
+    const auto run_model_if_eligible = [&]() {
+        if (stream->getStatus() == StreamState::RUNNING) {
+            ++model_entry_count;
+        }
+    };
 
     EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
-    EXPECT_TRUE(stream->hasError());
+    run_model_if_eligible();
+    EXPECT_TRUE(stream->isFinished());
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+    EXPECT_NE(stream->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(model_entry_count, 0u);
+    EXPECT_EQ(tracked_cancel_count, 1u);
+    EXPECT_EQ(free_count, 1u);
     EXPECT_EQ(stream->curBlocksNum(), 0u);
+    EXPECT_FALSE(device_pool->isAllocated(request_block));
+    EXPECT_EQ(device_pool->freeBlocksNum(), free_after_request_alloc + 1);
+    EXPECT_TRUE(stream->streamCacheResource().isResourceReleased());
+
+    // Re-entering the terminal state and an explicit stream release are both
+    // idempotent: neither the observer nor request blocks are released twice.
+    EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+    stream->releaseResource();
+    EXPECT_EQ(tracked_cancel_count, 1u);
+    EXPECT_EQ(free_count, 1u);
+    EXPECT_FALSE(device_pool->isAllocated(request_block));
+    EXPECT_EQ(device_pool->freeBlocksNum(), free_after_request_alloc + 1);
+
+    tracked_cancel_context = nullptr;
+    tracked_cancel_count   = 0;
 }
 
 TEST_F(GenerateStreamStateTest, testNormalPathTriggersAsyncLoadCache) {

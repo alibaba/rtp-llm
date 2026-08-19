@@ -41,8 +41,9 @@ public:
         return finished_count_.load() == static_cast<int>(worker_contexts_.size());
     }
 
-    /// Polls completion queues until all workers finish or `timeout_ms` elapses (0 = no limit).
-    /// This is what advances completion state observed by `done()`.
+    /// Polls completion queues until every client RPC has a terminal Finish event or
+    /// `timeout_ms` elapses (0 = no limit). A terminal client event does not by itself
+    /// prove that a server handler has physically stopped when its gRPC status is non-OK.
     bool waitDone(int timeout_ms) {
         if (already_done_.load()) {
             return true;
@@ -79,8 +80,12 @@ public:
                 if (next_status == grpc::CompletionQueue::NextStatus::TIMEOUT) {
                     continue;
                 }
-                if (!ok) {
-                    RTP_LLM_FAIL("broadcast rpc cq failed, rank=%d status=%d", rank, static_cast<int>(next_status));
+                if (next_status != grpc::CompletionQueue::NextStatus::GOT_EVENT || !ok) {
+                    RTP_LLM_FAIL("broadcast rpc cq failed, rank=%d status=%d ok=%d addr=%s",
+                                 rank,
+                                 static_cast<int>(next_status),
+                                 static_cast<int>(ok),
+                                 ctx->server_addr.c_str());
                 }
                 ++finished_count_;
                 finished_[rank] = true;
@@ -105,7 +110,7 @@ public:
             }
         }
 
-        // Match pre-refactor semantics: finalize once all ranks are finished (same as local bool + single store).
+        // Finalize after every rank's client-side Finish event has been observed.
         all_request_success_.store(!grpc_status_failure_seen_);
         already_done_.store(true);
         return true;
@@ -116,6 +121,9 @@ public:
         (void)waitDone(/*timeout_ms=*/0);
     }
 
+    /// Aggregated client-side gRPC result. It is meaningful only after `waitDone(int)`
+    /// returns true or `waitDone()` returns normally. True means every observed gRPC
+    /// status is OK; false does not prove that the server handlers have physically stopped.
     bool success() const {
         return all_request_success_.load();
     }
