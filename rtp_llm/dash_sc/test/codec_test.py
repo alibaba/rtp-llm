@@ -34,7 +34,12 @@ from rtp_llm.dash_sc.codec import (
 )
 from rtp_llm.dash_sc.inference.servicer import stream_log_tag
 from rtp_llm.dash_sc.proto import predict_v2_pb2
-from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
+from rtp_llm.utils.base_model_datatypes import (
+    AuxInfo,
+    GenerateOutput,
+    GenerateOutputs,
+    MMUrlType,
+)
 
 
 def _unpack_int32_le(raw: bytes) -> list[int]:
@@ -1211,6 +1216,31 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             4,
         )
         self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 10)
+
+    def test_multimodal_token_usage_is_returned_in_parameters(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([7], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(
+                input_len=100,
+                multimodal_lengths={
+                    MMUrlType.IMAGE: 64,
+                    MMUrlType.VIDEO: 32,
+                    MMUrlType.AUDIO: 16,
+                },
+            ),
+        )
+        resp = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="req-mm",
+            model_name="mdl",
+            go=GenerateOutputs(generate_outputs=[out]),
+            request_log_tag=stream_log_tag(request_id_numeric=100, trace_id="req-mm"),
+        )
+        infer = resp.infer_response
+
+        self.assertEqual(infer.parameters["image_tokens"].int64_param, 64)
+        self.assertEqual(infer.parameters["video_tokens"].int64_param, 32)
+        self.assertEqual(infer.parameters["audio_tokens"].int64_param, 16)
 
     def test_serializes_compact_logprob_tensors(self) -> None:
         out = GenerateOutput(

@@ -27,12 +27,17 @@ from rtp_llm.dash_sc.structural_tag import (
     structural_tag_from_response_format,
     validate_structural_tag_shape,
 )
-from rtp_llm.utils.base_model_datatypes import GenerateOutputs
+from rtp_llm.utils.base_model_datatypes import GenerateOutputs, MMUrlType
 
 _DEFAULT_MAX_THINKING_TOKENS = 131072
 _DEFAULT_MAX_NEW_TOKENS = 131072
 _PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV = "DASH_SC_PACK_EOS_FOR_EMPTY_GENERATED_IDS"
 _TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+_MULTIMODAL_USAGE_FIELDS = (
+    (MMUrlType.IMAGE, "image_tokens"),
+    (MMUrlType.VIDEO, "video_tokens"),
+    (MMUrlType.AUDIO, "audio_tokens"),
+)
 
 
 def _pack_eos_for_empty_generated_ids() -> bool:
@@ -1792,18 +1797,35 @@ def _append_prompt_cache_usage_parameters(
     infer.parameters["prompt_cached_token_num"].int64_param = cached_tokens
 
 
+def _append_multimodal_usage(
+    infer: predict_v2_pb2.ModelInferResponse,
+    multimodal_lengths: dict[int, int] | None,
+) -> None:
+    if not multimodal_lengths:
+        return
+
+    for mm_type, field_name in _MULTIMODAL_USAGE_FIELDS:
+        token_count = int(multimodal_lengths.get(mm_type, 0) or 0)
+        if token_count > 0:
+            infer.parameters[field_name].int64_param = token_count
+
+
 def _append_aux_info_metrics_outputs(
     infer: predict_v2_pb2.ModelInferResponse,
     out_py: Any,
     prompt_token_fallback: int = 0,
 ) -> None:
-    """``prompt_token_num`` = AuxInfo.input_len; ``prompt_cached_token_num`` = AuxInfo.reuse_len."""
+    """Append prompt, cache, and per-media token usage from ``AuxInfo``."""
     ax = getattr(out_py, "aux_info", None)
     input_len = int(ax.input_len) if ax is not None else int(prompt_token_fallback)
     reuse_len = int(ax.reuse_len) if ax is not None else 0
     _append_int32_scalar_output(infer, "prompt_token_num", input_len)
     _append_int32_scalar_output(infer, "prompt_cached_token_num", reuse_len)
     _append_prompt_cache_usage_parameters(infer, input_len, reuse_len)
+    _append_multimodal_usage(
+        infer,
+        ax.multimodal_lengths if ax is not None else None,
+    )
 
 
 def _normalize_token_logprobs_tensor(
