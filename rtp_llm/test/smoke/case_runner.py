@@ -151,6 +151,8 @@ class CaseRunner(object):
 
     def _run_impl(self):
         self._dmesg_baseline = snapshot_dmesg()
+        keepalive_before_curl = self._keepalive_enabled()
+        keepalive_after_curl = self._keepalive_enabled(after_curl=True)
         env_dict = self.create_env_from_args(self.env_args)
         enable_remote_cache = self._extract_bool_arg(
             self.smoke_args_str, "--enable_remote_cache"
@@ -170,12 +172,17 @@ class CaseRunner(object):
         if server_manager is None:
             task_states.ret = False
             return task_states
-        if str_to_bool(os.environ.get("SMOKE_KEEP_SERVER_ALIVE", "False")):
+        if keepalive_before_curl:
             return self._keep_server_alive(server_manager, enable_remote_cache)
         task_states = self.curl_server(server_manager)
         if task_states.ret != True:
+            server_manager.stop_server()
+            if enable_remote_cache and self.remote_kvcm_server is not None:
+                self.remote_kvcm_server.stop_server()
+                self.remote_kvcm_server.copy_logs()
             return task_states
-        assert server_manager is not None, "server manager should not be None"
+        if keepalive_after_curl:
+            return self._keep_server_alive(server_manager, enable_remote_cache)
         server_manager.stop_server()
         if enable_remote_cache and self.remote_kvcm_server is not None:
             self.remote_kvcm_server.stop_server()
@@ -189,22 +196,30 @@ class CaseRunner(object):
             {"main": server_manager}, enable_remote_cache=enable_remote_cache
         )
 
+    @staticmethod
+    def _keepalive_enabled(after_curl: bool = False) -> bool:
+        before = str_to_bool(
+            os.environ.get("SMOKE_KEEP_SERVER_ALIVE", "False")
+        )
+        after = str_to_bool(
+            os.environ.get("SMOKE_KEEP_SERVER_ALIVE_AFTER_CURL", "False")
+        )
+        if before and after:
+            raise ValueError(
+                "SMOKE_KEEP_SERVER_ALIVE and "
+                "SMOKE_KEEP_SERVER_ALIVE_AFTER_CURL are mutually exclusive"
+            )
+        return after if after_curl else before
+
     def _keep_servers_alive(
         self,
         servers: Dict[str, MagaServerManager],
         enable_remote_cache: bool = False,
     ) -> TaskStates:
-        """Park N server managers in keep-alive mode for external benchmarking.
+        """Publish live endpoints and wait for an explicit stop request."""
+        if not servers:
+            raise ValueError("keepalive requires at least one server")
 
-        ``servers`` maps role name (e.g. ``"prefill"`` / ``"decode"`` /
-        ``"frontend"``) to its ``MagaServerManager``. Per-role port + pid +
-        log file path is published to ``smoke_live_info.json`` so an external
-        runner can hit each role directly. Stop semantics are unchanged from
-        the single-server path: SIGTERM/SIGINT or the existence of
-        ``smoke_stop`` triggers shutdown of every registered server.
-        """
-        assert servers, "_keep_servers_alive requires at least one server"
-        stop_event = threading.Event()
         output_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
         live_info_path = os.environ.get(
             "SMOKE_LIVE_INFO", os.path.join(output_dir, "smoke_live_info.json")
@@ -212,69 +227,113 @@ class CaseRunner(object):
         stop_file = os.environ.get(
             "SMOKE_STOP_FILE", os.path.join(output_dir, "smoke_stop")
         )
+        stop_event = threading.Event()
+        shutdown_errors = []
 
-        def _signal_handler(signum, frame):
+        def signal_handler(signum, _frame):
             logging.info("keep-alive smoke received signal %s", signum)
             stop_event.set()
 
         old_handlers = {}
-        for signum in (signal.SIGTERM, signal.SIGINT):
-            old_handlers[signum] = signal.getsignal(signum)
-            signal.signal(signum, _signal_handler)
-
-        servers_info = {
-            role: {
-                "port": mgr.port,
-                "server_pid": mgr.server_pid,
-                "log_file": mgr.log_file_path,
-            }
-            for role, mgr in servers.items()
-        }
-        live_info = {
-            "servers": servers_info,
-            "stop_file": stop_file,
-            "task_info": self.task_info.taskinfo_rel_path,
-            "smoke_args": (
-                self.smoke_args
-                if isinstance(self.smoke_args, dict) and self.smoke_args
-                else self.smoke_args_str
-            ),
-        }
-        # Backward-compat: single-server callers still expect top-level "port".
-        if len(servers) == 1:
-            only = next(iter(servers.values()))
-            live_info["port"] = only.port
-            live_info["server_pid"] = only.server_pid
-            live_info["log_file"] = only.log_file_path
-        os.makedirs(os.path.dirname(live_info_path), exist_ok=True)
-        with open(live_info_path, "w") as f:
-            json.dump(live_info, f, indent=2, sort_keys=True)
-        logging.info("SMOKE_KEEP_SERVER_ALIVE active; live info: %s", live_info)
-
+        tmp_live_info = f"{live_info_path}.tmp.{os.getpid()}"
         try:
+            if threading.current_thread() is threading.main_thread():
+                for signum in (signal.SIGTERM, signal.SIGINT):
+                    old_handlers[signum] = signal.getsignal(signum)
+                    signal.signal(signum, signal_handler)
+
+            servers_info = {
+                role: {
+                    "port": manager.port,
+                    "server_pid": manager.server_pid,
+                    "log_file": manager.log_file_path,
+                }
+                for role, manager in servers.items()
+            }
+            live_info = {
+                "servers": servers_info,
+                "stop_file": stop_file,
+                "task_info": self.task_info.taskinfo_rel_path,
+                "smoke_args": (
+                    self.smoke_args
+                    if isinstance(self.smoke_args, dict) and self.smoke_args
+                    else self.smoke_args_str
+                ),
+            }
+            if len(servers) == 1:
+                only = next(iter(servers.values()))
+                live_info.update(
+                    {
+                        "port": only.port,
+                        "server_pid": only.server_pid,
+                        "log_file": only.log_file_path,
+                    }
+                )
+
+            live_info_dir = os.path.dirname(os.path.abspath(live_info_path))
+            os.makedirs(live_info_dir, exist_ok=True)
+            with open(tmp_live_info, "w", encoding="utf-8") as output:
+                json.dump(live_info, output, indent=2, sort_keys=True)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(tmp_live_info, live_info_path)
+            logging.info(
+                "SMOKE_KEEP_SERVER_ALIVE active; live info: %s", live_info
+            )
+
             while not stop_event.is_set():
                 if os.path.exists(stop_file):
                     logging.info("keep-alive smoke stop file found: %s", stop_file)
                     break
-                for role, mgr in servers.items():
-                    if mgr.server_pid is not None and not os.path.exists(
-                        f"/proc/{mgr.server_pid}"
-                    ):
+                for role, manager in servers.items():
+                    pid = manager.server_pid
+                    if pid is None or not os.path.exists(f"/proc/{pid}"):
                         raise RuntimeError(
-                            f"{role} server pid {mgr.server_pid} disappeared"
+                            f"{role} server pid {pid} disappeared during keepalive"
                         )
-                time.sleep(1)
+                stop_event.wait(1)
         finally:
+            try:
+                if os.path.exists(tmp_live_info):
+                    os.unlink(tmp_live_info)
+            except Exception as exc:  # noqa: BLE001
+                logging.warning("keepalive temp-file cleanup failed: %s", exc)
             for signum, handler in old_handlers.items():
-                signal.signal(signum, handler)
-            for mgr in servers.values():
                 try:
-                    mgr.stop_server()
+                    signal.signal(signum, handler)
                 except Exception as exc:  # noqa: BLE001
-                    logging.warning("keep-alive stop_server failed: %s", exc)
-            if enable_remote_cache and self.remote_kvcm_server is not None:
-                self.remote_kvcm_server.stop_server()
-                self.remote_kvcm_server.copy_logs()
+                    logging.warning(
+                        "keepalive signal-handler restore failed for signal=%s: %s",
+                        signum,
+                        exc,
+                    )
+            for role, manager in reversed(list(servers.items())):
+                try:
+                    logging.info("stopping keepalive server role=%s", role)
+                    manager.stop_server()
+                except Exception as exc:  # noqa: BLE001
+                    logging.warning(
+                        "keepalive stop_server failed for role=%s: %s", role, exc
+                    )
+                    shutdown_errors.append(f"role={role}: {exc}")
+            if (
+                enable_remote_cache
+                and getattr(self, "remote_kvcm_server", None) is not None
+            ):
+                try:
+                    self.remote_kvcm_server.stop_server()
+                except Exception as exc:  # noqa: BLE001
+                    logging.warning("keepalive remote KVCM stop failed: %s", exc)
+                    shutdown_errors.append(f"remote_kvcm: {exc}")
+                try:
+                    self.remote_kvcm_server.copy_logs()
+                except Exception as exc:  # noqa: BLE001
+                    logging.warning("keepalive remote KVCM log copy failed: %s", exc)
+
+        if shutdown_errors:
+            raise RuntimeError(
+                "keepalive server shutdown failed: " + "; ".join(shutdown_errors)
+            )
 
         return TaskStates()
 

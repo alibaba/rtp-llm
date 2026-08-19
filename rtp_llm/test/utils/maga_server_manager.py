@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import random
+import re
 import shlex
 import signal as signal_mod
 import socket
@@ -25,6 +26,16 @@ PTUNING_PATH = "PTUNING_PATH"
 LOG_PATH = "LOG_PATH"
 
 long_live_port_locks = []
+
+_FATAL_SHUTDOWN_PATTERNS = (
+    re.compile(r"Fatal Python error:"),
+    re.compile(r"malloc_consolidate\(\):"),
+    re.compile(r"double free or corruption"),
+    re.compile(r"corrupted double-linked list"),
+    re.compile(r"free\(\): invalid"),
+    re.compile(r"\*\*\* SIGABRT"),
+    re.compile(r"Segmentation fault"),
+)
 
 
 class MagaServerManager(object):
@@ -56,7 +67,11 @@ class MagaServerManager(object):
             self._port = MagaServerManager.get_free_port()
 
     def __del__(self):
-        self.stop_server()
+        try:
+            self.stop_server(raise_on_error=False)
+        except Exception:
+            # Destructors must not mask an exception already being propagated.
+            pass
 
     @staticmethod
     def get_free_port() -> str:
@@ -257,47 +272,147 @@ class MagaServerManager(object):
 
         return self.wait_sever_done(timeout)
 
-    def stop_server(self):
+    @staticmethod
+    def _alive_processes(processes: List[psutil.Process]) -> List[psutil.Process]:
+        alive = []
+        seen_pids = set()
+        for process in processes:
+            try:
+                if process.pid in seen_pids:
+                    continue
+                seen_pids.add(process.pid)
+                if process.is_running() and process.status() != psutil.STATUS_ZOMBIE:
+                    alive.append(process)
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                pass
+        return alive
+
+    @staticmethod
+    def _terminate_descendants(processes: List[psutil.Process]) -> List[int]:
+        """Best-effort fallback cleanup after parent-owned shutdown has failed."""
+        alive = MagaServerManager._alive_processes(processes)
+        for process in alive:
+            try:
+                process.terminate()
+            except psutil.NoSuchProcess:
+                pass
+        _, alive = psutil.wait_procs(alive, timeout=5)
+        for process in alive:
+            try:
+                process.kill()
+            except psutil.NoSuchProcess:
+                pass
+        psutil.wait_procs(alive, timeout=5)
+        return [process.pid for process in alive]
+
+    def _shutdown_fatal_log_lines(self) -> List[str]:
+        if self._log_file is None or not os.path.exists(self._log_file):
+            return []
+        matches = []
+        try:
+            with open(self._log_file, "r", errors="replace") as log_file:
+                for line_number, line in enumerate(log_file, start=1):
+                    if any(pattern.search(line) for pattern in _FATAL_SHUTDOWN_PATTERNS):
+                        matches.append(f"{line_number}: {line.rstrip()}")
+        except OSError as error:
+            logging.warning("failed to scan process log %s: %s", self._log_file, error)
+        return matches
+
+    def stop_server(self, raise_on_error: bool = True):
+        """Stop the server through its owning process manager and verify clean exit.
+
+        ``start_server`` owns a hierarchy of multiprocessing children and already
+        installs an ordered SIGTERM handler. Killing all descendants before that
+        owner races Python/C++ global destruction (notably ANet/KMonitor reporter
+        threads), so recursive termination is reserved for timeout cleanup only.
+        """
+        errors = []
         with self._state_lock:
             self._stop_requested = True
             server_process = self._server_process
+        descendants: List[psutil.Process] = []
 
         if server_process is not None and server_process.pid is not None:
+            pid = server_process.pid
             try:
-                # 如果只kill start_server，会残留 backend/frontend 占用显存。
-                # 部署时容器整体会回收，但测试时需要自己递归 kill
-                # 不适用 setsid/killpg 是因为 setsid 可能会在 test 父进程意外退出的情况遗留 start_server 占用测试资源
-                logging.info("stop server and children: %d", server_process.pid)
-                parent = psutil.Process(server_process.pid)
-                children = list(
-                    parent.children(recursive=True)
-                )  # 获取所有子进程（递归）
-                for child in children:
-                    child.terminate()  # 先尝试优雅终止
-                _, alive = psutil.wait_procs(children, timeout=5)
-                for child in alive:
-                    child.kill()  # 强制终止未退出的进程
-                parent.terminate()
-                # 添加超时机制，避免永久阻塞
+                parent = psutil.Process(pid)
+                descendants = list(parent.children(recursive=True))
+            except psutil.NoSuchProcess:
+                parent = None
+            except psutil.Error as error:
+                parent = None
+                logging.warning(
+                    "failed to snapshot descendants for pid=%d: %s", pid, error
+                )
+
+            exit_code = server_process.poll()
+            if exit_code is None:
+                shutdown_timeout = int(
+                    os.environ.get("MAGA_SERVER_SHUTDOWN_TIMEOUT", "70")
+                )
+                logging.info(
+                    "requesting parent-owned server shutdown: pid=%d timeout=%ds",
+                    pid,
+                    shutdown_timeout,
+                )
+                server_process.terminate()
                 try:
-                    parent.wait(timeout=10)
-                except psutil.TimeoutExpired:
-                    logging.warning(
-                        "Parent process did not exit gracefully, force killing"
+                    exit_code = server_process.wait(timeout=shutdown_timeout)
+                except subprocess.TimeoutExpired:
+                    errors.append(
+                        f"server pid={pid} did not exit within {shutdown_timeout}s"
                     )
-                    parent.kill()
-                    parent.wait(timeout=5)
-                with self._state_lock:
-                    if self._server_process is server_process:
-                        self._server_process = None
-            except Exception as e:
-                logging.warning("failed to get process with: " + str(e))
-                with self._state_lock:
-                    if self._server_process is server_process:
-                        self._server_process = None
-        if self._file_stream is not None:
+                    if parent is not None:
+                        try:
+                            descendants.extend(parent.children(recursive=True))
+                        except psutil.Error:
+                            pass
+                    fallback_pids = self._terminate_descendants(descendants)
+                    logging.warning(
+                        "parent-owned shutdown timed out; force-cleaned descendants: %s",
+                        fallback_pids,
+                    )
+                    server_process.kill()
+                    try:
+                        exit_code = server_process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        errors.append(f"server pid={pid} survived SIGKILL")
+                        exit_code = server_process.poll()
+
+            self._exit_code = exit_code
+            if exit_code != 0:
+                errors.append(f"server pid={pid} exited with code {exit_code}")
+
+            leftover = self._alive_processes(descendants)
+            if leftover:
+                leftover_pids = [process.pid for process in leftover]
+                self._terminate_descendants(leftover)
+                errors.append(
+                    f"server pid={pid} left descendant processes alive: {leftover_pids}"
+                )
+
+            with self._state_lock:
+                if self._server_process is server_process:
+                    self._server_process = None
+
+        # When stop wins the race before Popen registration, start_server sees
+        # _stop_requested and calls us again for the newly registered process.
+        if server_process is not None and self._file_stream is not None:
             self._file_stream.close()
             self._file_stream = None
+
+        fatal_lines = self._shutdown_fatal_log_lines()
+        if fatal_lines:
+            errors.append(
+                "fatal process-log markers detected:\n" + "\n".join(fatal_lines[:20])
+            )
+
+        if errors:
+            message = "unclean server shutdown: " + "; ".join(errors)
+            if raise_on_error:
+                raise RuntimeError(message)
+            logging.warning(message)
+            return False
         return True
 
     def visit(

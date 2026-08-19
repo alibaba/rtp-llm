@@ -60,6 +60,7 @@ def local_rank_start(
     py_env_configs: PyEnvConfigs,
     world_rank: int = 0,
     pipe_writer=None,
+    shutdown_ready_event=None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     _install_hot_hook_runtime(f"backend_rank_{world_rank}")
@@ -70,10 +71,10 @@ def local_rank_start(
         logging.info(
             f"Local rank received signal {signum}, shutting down gracefully..."
         )
-        try:
+        if backend_manager is not None:
+            # Let teardown failures reach the outer BaseException handler so
+            # this rank exits nonzero and its owning manager reports failure.
             backend_manager.request_shutdown()
-        except Exception as e:
-            logging.error(f"Error during backend manager shutdown: {e}")
 
     copy_gemm_config()
 
@@ -94,7 +95,9 @@ def local_rank_start(
         install_oom_dump()
         from rtp_llm.server.backend_manager import BackendManager
 
-        backend_manager = BackendManager(py_env_configs)
+        backend_manager = BackendManager(
+            py_env_configs, shutdown_ready_event=shutdown_ready_event
+        )
         backend_manager.start()
         # Defer these handlers until model loading completes.
         signal.signal(signal.SIGTERM, signal_handler)
@@ -156,12 +159,38 @@ def _validate_dp_configuration(py_env_configs: PyEnvConfigs):
         assert pc.world_rank % pc.tp_size == 0
 
 
+def _shutdown_order_indices(
+    local_world_size: int, first_world_rank: int, tp_size: int
+):
+    """Return local follower/leader indices for two-phase engine shutdown."""
+    if local_world_size <= 0:
+        return [], []
+    if tp_size > 1:
+        follower_indices = [
+            index
+            for index in range(local_world_size)
+            if (first_world_rank + index) % tp_size != 0
+        ]
+        leader_indices = [
+            index
+            for index in range(local_world_size)
+            if (first_world_rank + index) % tp_size == 0
+        ]
+        return follower_indices, leader_indices
+    if local_world_size > 1:
+        # TP1 ranks can still share DP/EP collectives. Keep the first local rank
+        # alive until every other local rank has stopped its scheduler.
+        return list(range(1, local_world_size)), [0]
+    return [], [0]
+
+
 def _create_rank_processes(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     ctx,
     processes: List[BaseProcess],
     rank_pipe_readers: List[Connection],
+    shutdown_ready_events: List,
 ):
     """Create and start rank processes. Each proc is appended before start() so a
     mid-loop abort still leaves every spawned object in the caller's list; teardown
@@ -171,14 +200,31 @@ def _create_rank_processes(
     cuda_device_list = _get_cuda_device_list()
     _validate_dp_configuration(py_env_configs)
 
-    for world_rank in range(pc.world_rank, pc.world_rank + local_world_size):
+    follower_indices, _ = _shutdown_order_indices(
+        local_world_size, pc.world_rank, pc.tp_size
+    )
+    follower_index_set = set(follower_indices)
+
+    for local_index, world_rank in enumerate(
+        range(pc.world_rank, pc.world_rank + local_world_size)
+    ):
         reader, writer = ctx.Pipe(duplex=False)
         rank_pipe_readers.append(reader)
+        shutdown_ready_event = (
+            ctx.Event() if local_index in follower_index_set else None
+        )
+        shutdown_ready_events.append(shutdown_ready_event)
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
         os.environ["WORLD_RANK"] = str(world_rank)
         proc = ctx.Process(
             target=local_rank_start,
-            args=(global_controller, py_env_configs, world_rank, writer),
+            args=(
+                global_controller,
+                py_env_configs,
+                world_rank,
+                writer,
+                shutdown_ready_event,
+            ),
             name=f"rank-{world_rank}",
         )
         processes.append(proc)
@@ -287,10 +333,15 @@ def multi_rank_start(
 ):
     """Start multi-rank backend server with proper process management"""
     ctx = multiprocessing.get_context("spawn")
-    processes, rank_pipe_readers = [], []
+    processes, rank_pipe_readers, shutdown_ready_events = [], [], []
     try:
         _create_rank_processes(
-            global_controller, py_env_configs, ctx, processes, rank_pipe_readers
+            global_controller,
+            py_env_configs,
+            ctx,
+            processes,
+            rank_pipe_readers,
+            shutdown_ready_events,
         )
         local_world_size = len(processes)
 
@@ -308,8 +359,24 @@ def multi_rank_start(
             monitor_interval=py_env_configs.server_config.monitor_interval,
             allow_defer_first_sigterm=True,
             pre_exit_cleanup=cleanup,
+            termination_ack_timeout=10.0,
         )
-        manager.set_processes(processes, shutdown_group="backend")
+        follower_indices, leader_indices = _shutdown_order_indices(
+            len(processes),
+            py_env_configs.parallelism_config.world_rank,
+            py_env_configs.parallelism_config.tp_size,
+        )
+        shutdown_order = follower_indices + leader_indices
+        manager.set_processes(
+            [processes[index] for index in shutdown_order],
+            [
+                shutdown_ready_events[index]
+                if index in follower_indices
+                else None
+                for index in shutdown_order
+            ],
+            shutdown_group="backend",
+        )
         _send_pipe_status(
             pipe_writer,
             "success",
@@ -356,7 +423,8 @@ def multi_rank_start(
         raise
 
     # After successful startup, monitor processes
-    manager.monitor_and_release_processes()
+    if not manager.monitor_and_release_processes():
+        raise RuntimeError("one or more backend ranks exited abnormally")
 
     return processes
 

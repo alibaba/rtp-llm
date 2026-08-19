@@ -109,6 +109,7 @@ public:
 
     // 系统资源管理
     void regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
+    void stopMetricsReporter();
 
     // CacheStore ownership (set by RemoteRpcServer, read during model forward)
     void                        setCacheStore(std::shared_ptr<CacheStore> cache_store);
