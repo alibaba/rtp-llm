@@ -87,25 +87,25 @@ private:
     EvictionHeap* heapFor(size_t group_set_id, Tier tier) const;
     std::optional<TransferDescriptor> chooseVictim(size_t group_set_id, Tier tier, bool force_drop = false);
     std::optional<EvictionTask>       prepareEvictionLocked(TransferDescriptor eviction_desc);
-    void                              runEvictionTask(const EvictionTask& task);
+    void                              runEvictionTask(const EvictionTask& task) noexcept;
+    void finalizeEvictionLocked(const EvictionTask& task, const EvictionTaskResult& task_result) noexcept;
     void settleEvictionLocked(const EvictionTask& task, const EvictionTaskResult& task_result);
     void abortEvictionLocked(const EvictionTask& task);
     // The single candidate-eligibility gate (design section 4.3). Upserts the
     // node when ready, erases it otherwise. Idempotent.
     void refreshCandidate(GroupSet& group_set, TreeNode* node, Tier tier);
+    bool isResourceReleasable(const GroupSet& group_set, const TreeNode* node, Tier tier) const;
     bool isEvictable(const GroupSet& group_set, const TreeNode* node, Tier tier) const;
 
-    std::vector<std::pair<size_t, bool>>
-                        selectCascades(const TreeNode* node, size_t source_group_set_id, Tier tier) const;
-    bool                collectFullPrune(const TransferDescriptor&                  eviction_desc,
+    void                selectCascades(EvictionTask&                              task,
+                                       std::vector<std::pair<TreeNode*, size_t>>& detached_resources);
+    void                selectUpwardCascades(EvictionTask& task);
+    void                collectFullPrune(const TransferDescriptor&                  eviction_desc,
                                          EvictionTask&                              task,
                                          std::vector<std::pair<TreeNode*, size_t>>& detached_resources) const;
-    bool                allocateTargets(EvictionTask& task, std::vector<std::pair<size_t, bool>>& cascades);
+    bool                allocateTargets(EvictionTask& task);
     void                activateTaskLocked(const EvictionTask&                              task,
-                                           const std::vector<std::pair<TreeNode*, size_t>>& detached_resources,
-                                           const std::vector<size_t>&                       preexisting_root_transfer_ids,
-                                           const std::vector<std::pair<size_t, bool>>&      cascades,
-                                           size_t                                           full_prune_group_set_id);
+                                           const std::vector<std::pair<TreeNode*, size_t>>& detached_resources);
     void                reserveSource(const TransferDescriptor& eviction_desc);
     void                restoreSource(const TransferDescriptor& eviction_desc);
     void                releaseTargetBlocks(const TransferDescriptor& eviction_desc);

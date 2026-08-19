@@ -383,6 +383,13 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
         requestReusesExpectedPath(*cache, cache_config_, seed.cache_keys, heat_resource, /*logical_reuse_blocks=*/2));
     manager_->free(FreeInfo{heat_resource, heat_tokens});
 
+    // Keep the first logical block hotter than the loaded block in every group
+    // set. SWA matching may not touch this block, and request refs intentionally
+    // no longer pin it against eviction.
+    const auto matched_path = cache->tree()->findNode(seed.cache_keys);
+    ASSERT_GE(matched_path.size(), 2u);
+    BlockTreeCacheTestPeer::markPathMatchedForTest(*cache, {matched_path[0]});
+
     const auto return_path_one_ratio = blockExcessWatermarkRatio(device_pools, /*excess_blocks=*/1);
     ASSERT_TRUE(return_path_one_ratio.has_value());
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *return_path_one_ratio);
