@@ -43,9 +43,11 @@ class OpenaiComparer(BaseComparer):
             choices = []
             usage = None
             for response in responses:
-                response_json = json.loads(
-                    response.decode("utf-8")[6:]
-                )  # remove `data: `
+                payload = response.decode("utf-8").removeprefix("data:").strip()
+                # An OpenAI stream ends with a [DONE] sentinel that carries no chunk.
+                if payload == "[DONE]":
+                    break
+                response_json = json.loads(payload)
                 res_choices = response_json.get("choices")
                 if choices == []:
                     choices = res_choices
