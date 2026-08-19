@@ -28,6 +28,7 @@ from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
 from rtp_llm.openai.api_datatype import ChatCompletionRequest, GenerateConfig
 from rtp_llm.openai.api_datatype import ResponseFormat as OpenAIResponseFormat
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
+from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer
 from rtp_llm.ops import SpecialTokens
 from rtp_llm.pipeline.pipeline import Pipeline
 
@@ -267,6 +268,84 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(generate_config.in_think_mode, True)
         self.assertEqual(generate_config.end_think_token_ids, [151649, 271])
 
+    def test_add_thinking_params_does_not_check_tokenizer_length(self):
+        class Tokenizer:
+            def __len__(self):
+                raise AssertionError("tokenizer length should not be checked")
+
+            def encode(self, text, add_special_tokens=False):
+                return [123]
+
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        generate_env_config.think_end_token_id = -1
+        generate_env_config.think_end_tag = "</think>"
+
+        generate_config = GenerateConfig()
+        generate_config.add_thinking_params(Tokenizer(), generate_env_config)
+
+        self.assertEqual(generate_config.end_think_token_ids, [123])
+
+    def test_tool_choice_dict_is_validated_at_request_parse(self):
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get current weather",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ]
+
+        request = ChatCompletionRequest(
+            messages=[],
+            tools=tools,
+            tool_choice={"type": "function", "function": {"name": "get_weather"}},
+        )
+        self.assertEqual(request.tool_choice["function"]["name"], "get_weather")
+
+        cases = [
+            (
+                {"type": "bad"},
+                tools,
+                "tool_choice.type must be 'function'",
+            ),
+            (
+                {"type": "function"},
+                tools,
+                "tool_choice.function must be an object",
+            ),
+            (
+                {"type": "function", "function": {}},
+                tools,
+                "tool_choice.function.name must be a non-empty string",
+            ),
+            (
+                {"type": "function", "function": {"name": "missing"}},
+                tools,
+                "tool_choice function .* is not in tools",
+            ),
+            (
+                {"type": "function", "function": {"name": "get_weather"}},
+                None,
+                "tool_choice function requires non-empty tools",
+            ),
+            (
+                "required",
+                None,
+                "tool_choice='required' requires non-empty tools",
+            ),
+        ]
+        for tool_choice, case_tools, message in cases:
+            with self.subTest(tool_choice=tool_choice):
+                with self.assertRaisesRegex(ValueError, message):
+                    ChatCompletionRequest(
+                        messages=[],
+                        tools=case_tools,
+                        tool_choice=tool_choice,
+                    )
+
 
 class OpenaiGenerateConfigTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):
@@ -278,6 +357,43 @@ class OpenaiGenerateConfigTest(TestCase):
             os.path.join(self.test_data_path, "qwen_7b/tokenizer/qwen.tiktoken"),
             *args,
             **kwargs,
+        )
+
+    def _extract_openai_generation_config(
+        self,
+        request: ChatCompletionRequest,
+        generate_env_config: Optional[GenerateEnvConfig] = None,
+    ):
+        model_config = ModelConfig()
+        model_config.generate_env_config = generate_env_config or GenerateEnvConfig()
+        model_config.render_config = RenderConfig()
+        model_config.special_tokens = SpecialTokens()
+        model_config.max_seq_len = 1024
+        model_config.template_type = None
+        model_config.model_name = ""
+        model_config.ckpt_path = ""
+
+        openai_endpoint = OpenaiEndpoint(
+            model_config=model_config,
+            misc_config=PyMiscellaneousConfig(),
+            vit_config=VitConfig(),
+            tokenizer=self.tokenizer,
+            backend_rpc_server_visitor=None,
+        )
+        return openai_endpoint._extract_generation_config(request)
+
+    def _assert_reasoning_envelope_wraps_json_object(self, config: GenerateConfig):
+        """in_think_mode moves the final constraint inside the reasoning tag."""
+        self.assertIsNone(config.json_schema)
+        structural_tag = config.structural_tag
+        self.assertEqual(structural_tag["type"], "structural_tag")
+        elements = structural_tag["format"]["elements"]
+        self.assertEqual(elements[0]["type"], "tag")
+        self.assertEqual(elements[0]["end"], "</think>\n\n")
+        self.assertEqual(elements[1]["type"], "json_schema")
+        self.assertEqual(
+            elements[1]["json_schema"],
+            {"anyOf": [{"type": "object"}, {"type": "array"}]},
         )
 
     def _generate_config_with_stop_word(
@@ -359,11 +475,267 @@ class OpenaiGenerateConfigTest(TestCase):
             response_format='{"type":"json_object"}'
         )
         self.assertIsNone(config.response_format)
-        self.assertEqual(config.json_schema, {"type": "object"})
+        json_object_schema = {"anyOf": [{"type": "object"}, {"type": "array"}]}
+        self.assertEqual(config.json_schema, json_object_schema)
 
         legacy_config = self._generate_config_with_stop_word(json_format=True)
         self.assertIsNone(legacy_config.response_format)
-        self.assertEqual(legacy_config.json_schema, {"type": "object"})
+        self.assertEqual(legacy_config.json_schema, json_object_schema)
+
+    def test_extra_configs_may_not_carry_structured_output(self):
+        request = ChatCompletionRequest(
+            messages=[],
+            extra_configs=GenerateConfig(
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {"schema": {"type": "object"}},
+                }
+            ),
+        )
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._extract_openai_generation_config(request)
+        self.assertEqual(
+            ctx.exception.exception_type, ExceptionType.ERROR_INPUT_FORMAT_ERROR
+        )
+        self.assertIn("top-level response_format", ctx.exception.message)
+
+        request = ChatCompletionRequest(
+            messages=[],
+            extra_configs=GenerateConfig(json_schema='{"type": "object"}'),
+        )
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._extract_openai_generation_config(request)
+        self.assertEqual(
+            ctx.exception.exception_type, ExceptionType.ERROR_INPUT_FORMAT_ERROR
+        )
+
+    def test_extra_configs_max_thinking_tokens_zero_disables_thinking(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        generate_env_config.think_end_token_id = 102
+        request = ChatCompletionRequest(
+            messages=[],
+            extra_configs=GenerateConfig(max_thinking_tokens=0),
+            enable_thinking=True,
+        )
+
+        self.assertTrue(request.disable_thinking())
+        config = self._extract_openai_generation_config(request, generate_env_config)
+
+        self.assertFalse(config.in_think_mode)
+        self.assertEqual(config.max_thinking_tokens, 0)
+        self.assertEqual(config.end_think_token_ids, [102])
+
+    def test_disable_thinking_zeroes_backend_thinking_budget(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        generate_env_config.think_end_token_id = 102
+        request = ChatCompletionRequest(
+            messages=[],
+            extra_configs=GenerateConfig(max_thinking_tokens=16),
+            enable_thinking=False,
+        )
+
+        config = self._extract_openai_generation_config(request, generate_env_config)
+
+        self.assertFalse(config.in_think_mode)
+        self.assertEqual(config.max_thinking_tokens, 0)
+        self.assertEqual(config.end_think_token_ids, [102])
+
+    def test_openai_max_completion_tokens_thinking_budget_keeps_backend_limit(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        generate_env_config.think_end_token_id = 102
+        request = ChatCompletionRequest(
+            messages=[],
+            max_tokens=200,
+            max_completion_tokens=100,
+            thinking_budget=10,
+            enable_thinking=True,
+        )
+
+        config = self._extract_openai_generation_config(request, generate_env_config)
+
+        self.assertEqual(config.max_new_tokens, 100)
+        self.assertEqual(config.max_thinking_tokens, 10)
+        self.assertTrue(config.in_think_mode)
+
+    def test_openai_max_completion_tokens_respects_max_tokens_total_cap(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        generate_env_config.think_end_token_id = 102
+        request = ChatCompletionRequest(
+            messages=[],
+            max_tokens=105,
+            max_completion_tokens=100,
+            thinking_budget=10,
+            enable_thinking=True,
+        )
+
+        config = self._extract_openai_generation_config(request, generate_env_config)
+
+        self.assertEqual(config.max_new_tokens, 100)
+        self.assertEqual(config.max_thinking_tokens, 10)
+
+    def test_openai_max_completion_tokens_does_not_add_default_thinking_budget(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        generate_env_config.think_end_token_id = 102
+        request = ChatCompletionRequest(
+            messages=[],
+            max_completion_tokens=100,
+            enable_thinking=True,
+        )
+
+        config = self._extract_openai_generation_config(request, generate_env_config)
+
+        self.assertEqual(config.max_new_tokens, 100)
+        self.assertEqual(config.max_thinking_tokens, 32000)
+        self.assertTrue(config.in_think_mode)
+
+    def test_openai_max_completion_tokens_non_positive_is_unset(self):
+        request = ChatCompletionRequest(
+            messages=[],
+            max_tokens=64,
+            max_completion_tokens=0,
+        )
+        config = self._extract_openai_generation_config(request)
+        self.assertEqual(config.max_new_tokens, 64)
+
+        request = ChatCompletionRequest(messages=[], max_completion_tokens=-1)
+        config = self._extract_openai_generation_config(request)
+        self.assertEqual(config.max_new_tokens, 32000)
+
+    def test_request_level_thinking_adds_think_end_tokens_when_env_mode_off(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 0
+        generate_env_config.think_end_token_id = -1
+        generate_env_config.think_end_tag = "</think>\n\n"
+        request = ChatCompletionRequest(
+            messages=[], thinking_budget=10, enable_thinking=True
+        )
+
+        config = self._extract_openai_generation_config(request, generate_env_config)
+
+        self.assertTrue(config.in_think_mode)
+        self.assertEqual(config.max_thinking_tokens, 10)
+        self.assertEqual(
+            config.end_think_token_ids,
+            self.tokenizer.encode("</think>\n\n", add_special_tokens=False),
+        )
+
+    def test_top_level_enable_thinking_enables_backend_for_json_object(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 0
+        generate_env_config.think_end_token_id = -1
+        generate_env_config.think_end_tag = "</think>\n\n"
+        request = ChatCompletionRequest(
+            messages=[],
+            response_format={"type": "json_object"},
+            enable_thinking=True,
+        )
+
+        config = self._extract_openai_generation_config(request, generate_env_config)
+
+        self.assertTrue(config.in_think_mode)
+        self._assert_reasoning_envelope_wraps_json_object(config)
+        self.assertEqual(
+            config.end_think_token_ids,
+            self.tokenizer.encode("</think>\n\n", add_special_tokens=False),
+        )
+
+    def test_chat_template_enable_thinking_enables_backend_for_json_object(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 0
+        generate_env_config.think_end_token_id = -1
+        generate_env_config.think_end_tag = "</think>\n\n"
+        request = ChatCompletionRequest(
+            messages=[],
+            response_format={"type": "json_object"},
+            chat_template_kwargs={"enable_thinking": True},
+        )
+
+        config = self._extract_openai_generation_config(request, generate_env_config)
+
+        self.assertTrue(config.in_think_mode)
+        self._assert_reasoning_envelope_wraps_json_object(config)
+        self.assertEqual(
+            config.end_think_token_ids,
+            self.tokenizer.encode("</think>\n\n", add_special_tokens=False),
+        )
+
+    def test_extra_config_chat_template_enable_thinking_enables_backend(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 0
+        generate_env_config.think_end_token_id = -1
+        generate_env_config.think_end_tag = "</think>\n\n"
+        request = ChatCompletionRequest(
+            messages=[],
+            response_format={"type": "json_object"},
+            extra_configs=GenerateConfig(
+                chat_template_kwargs={"enable_thinking": True}
+            ),
+        )
+
+        config = self._extract_openai_generation_config(request, generate_env_config)
+
+        self.assertTrue(config.in_think_mode)
+        self._assert_reasoning_envelope_wraps_json_object(config)
+        self.assertEqual(
+            config.end_think_token_ids,
+            self.tokenizer.encode("</think>\n\n", add_special_tokens=False),
+        )
+
+    def test_renderer_chat_constraints_are_applied_to_generate_config(self):
+        class Renderer:
+            def apply_chat_completion_constraints(self, request, config):
+                config.structural_tag = '{"type":"test"}'
+
+        config = GenerateConfig()
+
+        OpenaiEndpoint._apply_renderer_chat_constraints(
+            Renderer(),
+            ChatCompletionRequest(messages=[]),
+            config,
+        )
+
+        self.assertEqual(config.structural_tag, '{"type":"test"}')
+
+    def test_default_renderer_chat_constraints_allow_non_forcing_tool_choice(self):
+        renderer = CustomChatRenderer.__new__(CustomChatRenderer)
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get current weather",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ]
+
+        for tool_choice in (None, "auto", "none"):
+            with self.subTest(tool_choice=tool_choice):
+                OpenaiEndpoint._apply_renderer_chat_constraints(
+                    renderer,
+                    ChatCompletionRequest(
+                        messages=[],
+                        tools=tools,
+                        tool_choice=tool_choice,
+                    ),
+                    GenerateConfig(),
+                )
+
+        with self.assertRaisesRegex(Exception, "is not supported"):
+            OpenaiEndpoint._apply_renderer_chat_constraints(
+                renderer,
+                ChatCompletionRequest(
+                    messages=[],
+                    tools=tools,
+                    tool_choice="required",
+                ),
+                GenerateConfig(),
+            )
 
     def test_text_response_format_is_finalized_before_generation(self):
         config = self._generate_config_with_stop_word(response_format={"type": "text"})
@@ -391,7 +763,10 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertIsNone(config.structural_tag)
         self.assertEqual(config.begin_think_token_ids, [])
         self.assertEqual(config.end_think_token_ids, [])
-        self.assertEqual(config.json_schema, {"type": "object"})
+        self.assertEqual(
+            config.json_schema,
+            {"anyOf": [{"type": "object"}, {"type": "array"}]},
+        )
 
     def test_unspecified_openai_thinking_inherits_env_mode(self):
         cases = {
@@ -906,7 +1281,7 @@ class ResponseFormatProjectionTest(TestCase):
             (
                 GenerateConfig(response_format={"type": "json_object"}),
                 "json_schema",
-                {"type": "object"},
+                {"anyOf": [{"type": "object"}, {"type": "array"}]},
             ),
             (
                 GenerateConfig(response_format={"type": "regex", "pattern": r"\d+"}),

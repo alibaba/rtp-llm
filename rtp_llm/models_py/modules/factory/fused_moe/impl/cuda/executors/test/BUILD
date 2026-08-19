@@ -12,8 +12,6 @@ py_test (
     srcs = ["deepgemm_masked_executor_test.py"],
     deps = [
         ":fused_moe_executor_test_util",
-        "//rtp_llm/models_py:modules",
-        "//rtp_llm:config",
         "//rtp_llm:testlib",
     ],
     env = {"GPU_COUNT": "1"},

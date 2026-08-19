@@ -266,6 +266,13 @@ bool RtpEmbeddingGlobalMetrics::init(kmonitor::MetricsGroupManager* manager) {
 
 void RtpEmbeddingGlobalMetrics::report(const kmonitor::MetricsTags*        tags,
                                        RtpEmbeddingGlobalMetricsCollector* collector) {
+    // Embedding path has no qos priority semantics; tag all reports with priority="0".
+    kmonitor::MetricsTags priority_tags;
+    if (tags) {
+        priority_tags = *tags;
+    }
+    priority_tags.AddTag("priority", "0");
+    tags = &priority_tags;
     REPORT_MUTABLE_QPS(qps_metric);
     if (collector->error) {
         REPORT_MUTABLE_QPS(error_qps_metric);
@@ -301,6 +308,8 @@ bool RtpLLMSchedulerMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(admitted_context_token_size_metric,
                                   "rtp_llm_scheduler_admitted_context_token_size");
     REGISTER_GAUGE_MUTABLE_METRIC(waiting_oldest_age_us_metric, "rtp_llm_scheduler_waiting_oldest_age_us");
+    REGISTER_MUTABLE_METRIC_BASE(
+        group_fallback_acc_metric, "rtp_llm_scheduler_group_fallback_acc", kmonitor::COUNTER, kmonitor::NORMAL);
     return true;
 }
 
@@ -314,6 +323,9 @@ void RtpLLMSchedulerMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMSch
     REPORT_MUTABLE_METRIC(admitted_context_batch_size_metric, collector->admitted_context_batch_size);
     REPORT_MUTABLE_METRIC(admitted_context_token_size_metric, collector->admitted_context_token_size);
     REPORT_MUTABLE_METRIC(waiting_oldest_age_us_metric, collector->waiting_oldest_age_us);
+    if (collector->group_fallback_count > 0) {
+        REPORT_MUTABLE_METRIC(group_fallback_acc_metric, collector->group_fallback_count);
+    }
 }
 
 bool RtpLLMEngineMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -377,6 +389,9 @@ bool RtpLLMSpeculativeEngineMetrics::init(kmonitor::MetricsGroupManager* manager
     REGISTER_GAUGE_MUTABLE_METRIC(total_propose_token_num_metric, "rtp_llm_sp_total_propose_token_num");
     REGISTER_GAUGE_MUTABLE_METRIC(total_accepted_token_num_metric, "rtp_llm_sp_total_accepted_token_num");
     REGISTER_GAUGE_MUTABLE_METRIC(sp_avg_accept_token_num_metric, "rtp_llm_sp_avg_accept_token_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(sp_avg_accept_rate_metric, "rtp_llm_sp_avg_accept_rate");
+    REGISTER_GAUGE_MUTABLE_METRIC(sp_avg_fix_accept_rate_metric, "rtp_llm_sp_avg_fix_accept_rate");
+    REGISTER_GAUGE_MUTABLE_METRIC(sp_estimate_tpot_us_metric, "rtp_llm_sp_estimate_tpot_us");
     return true;
 }
 
@@ -387,11 +402,18 @@ void RtpLLMSpeculativeEngineMetrics::report(const kmonitor::MetricsTags*        
     REPORT_MUTABLE_METRIC(score_step_latency_us_metric, collector->score_step_latency_us);
     REPORT_MUTABLE_METRIC(speculative_sampler_latency_us_metric, collector->speculative_sampler_latency_us);
 
-    if (collector->total_propose_token_num > 0) {
+    if (collector->total_propose_token_num > 0 && collector->total_stream_num > 0) {
         REPORT_MUTABLE_METRIC(total_propose_token_num_metric, collector->total_propose_token_num);
         REPORT_MUTABLE_METRIC(total_accepted_token_num_metric, collector->total_accepted_token_num);
-        REPORT_MUTABLE_METRIC(sp_avg_accept_token_num_metric,
-                              (double)collector->total_accepted_token_num / collector->total_stream_num);
+        double avg_accept_num = (double)collector->total_accepted_token_num / collector->total_stream_num;
+        REPORT_MUTABLE_METRIC(sp_avg_accept_token_num_metric, avg_accept_num);
+        REPORT_MUTABLE_METRIC(sp_avg_accept_rate_metric, avg_accept_num / (collector->spec_steps + 1));
+        if (collector->spec_steps > 0) {
+            REPORT_MUTABLE_METRIC(sp_avg_fix_accept_rate_metric, (avg_accept_num - 1) / collector->spec_steps);
+        }
+        if (avg_accept_num > 0) {
+            REPORT_MUTABLE_METRIC(sp_estimate_tpot_us_metric, (double)collector->step_latency_us / avg_accept_num);
+        }
     }
 }
 
@@ -875,6 +897,8 @@ bool RtpLLMMemoryCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
                                   "rtp_llm_kv_cache_memory_cache_status_allocated_block_num");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_status_available_block_num_metric,
                                   "rtp_llm_kv_cache_memory_cache_status_available_block_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_status_used_ratio_metric,
+                                  "rtp_llm_kv_cache_memory_cache_status_used_ratio");
 
     return true;
 }
@@ -967,6 +991,7 @@ void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*             t
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_status_total_block_num_metric, collector->total_block_num);
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_status_allocated_block_num_metric, collector->allocated_block_num);
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_status_available_block_num_metric, collector->available_block_num);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_cache_status_used_ratio_metric, collector->used_ratio);
 }
 
 bool RtpLLMDiskCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {

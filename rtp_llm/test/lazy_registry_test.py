@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from typing import Iterable, Set
 
-from rtp_llm.model_factory_register import _model_type_to_module
+from rtp_llm.model_factory_register import ModelDict, _model_type_to_module
 from rtp_llm.openai.renderer_factory_register import _renderer_type_to_module
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -63,6 +63,20 @@ class LazyRegistryTest(unittest.TestCase):
         }
 
         self.assertEqual(source_names, registered_names)
+
+    def test_dsv4_architecture_inference_is_available_without_model_import(self):
+        self.assertEqual(
+            "deepseek_v4",
+            ModelDict.get_ft_model_type_by_config(
+                {"architectures": ["DeepseekV4ForCausalLM"]}
+            ),
+        )
+        self.assertEqual(
+            "deepseek_v4_mtp",
+            ModelDict.get_ft_model_type_by_config(
+                {"architectures": ["DeepseekV4ForCausalLMNextN"]}
+            ),
+        )
 
 
 if __name__ == "__main__":

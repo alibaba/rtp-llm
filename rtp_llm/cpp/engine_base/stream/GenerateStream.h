@@ -464,12 +464,17 @@ public:
         contain_propose_token_ = contain_propose_token;
     }
 
-    bool getContainProposeToken() {
-        return contain_propose_token_;
-    }
-
     void setMtpTokenIndex(int mtp_token_index) {
         mtp_token_index_ = mtp_token_index;
+    }
+
+    // Prompt-tail positions of a PD handoff: the target cache loaded from
+    // prefill covers seqLength() - 1 tokens for every speculative mode.
+    // DSpARK handoffs carry no proposal; MTP/Eagle set theirs afterwards.
+    void initSpeculativeHandoffPositions() {
+        setReuseLength(seqLength() - 1);
+        setSpEditRun(false);
+        setMtpTokenIndex(seqLength() - 1);
     }
 
     size_t getMtpTokenIndex() {
@@ -494,19 +499,25 @@ public:
         return generate_input_->generate_config->trace_id;
     }
 
-    int batchGroupSize() const {
-        return generate_input_->batch_group_size;
+    int groupSize() const {
+        return generate_input_->group_size;
     }
 
-    int batchGroupTimeout() const {
-        return generate_input_->generate_config->batch_group_timeout.value_or(100);
+    // Auto-TPM QoS priority (task40): 0 = not set; TPS metrics tagging only.
+    int32_t priority() const {
+        return generate_input_->priority;
     }
 
-    bool forceBatch() const {
-        return generate_input_->generate_config->force_batch;
+    int groupTimeout() const {
+        return generate_input_->generate_config->group_timeout.value_or(100);
     }
-    int64_t batchGroupId() const {
-        return generate_input_->batch_group_id;
+
+    bool isGroup() const {
+        return generate_input_->group_id != -1;
+    }
+
+    int64_t groupId() const {
+        return generate_input_->group_id;
     }
 
     int64_t enqueueTime() const {
@@ -522,13 +533,6 @@ public:
 
     at::Generator getGenerator() {
         return generator_;
-    }
-
-    torch::Tensor getProposeTokens() const {
-        if (propose_stream_ && propose_stream_->sp_output_buffer_->tokens.defined()) {
-            return propose_stream_->sp_output_buffer_->tokens;
-        }
-        return torch::Tensor();
     }
 
     void setSPOutputBuffer(SpeculativeExecutorStreamOutputPtr sp_output_buffer) {

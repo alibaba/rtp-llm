@@ -17,9 +17,25 @@ def copy_all_so():
 # kernels instead, so these requirements resolve to nothing on cuda13 configs.
 _CUDA13_DEFERRED = ["flash_attn", "flash-attn-3"]
 
+# xgrammar's wheel metadata pulls apache-tvm-ffi (and triton on x86), which only
+# the cuda12_9/cuda13 locks carry; dash_sc imports it optionally and degrades
+# gracefully, so the other platforms resolve it to nothing.
+_DSV4_PLATFORM_ONLY = ["xgrammar"]
+
 def requirement(names):
     for name in names:
         cuda13_x86_deps = [] if name in _CUDA13_DEFERRED else [requirement_gpu_cuda13(name)]
+        if name in _DSV4_PLATFORM_ONLY:
+            native.py_library(
+                name = name,
+                deps = select({
+                    "@rtp_llm//:using_cuda13_x86": cuda13_x86_deps,
+                    "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
+                    "//conditions:default": [],
+                }),
+                visibility = ["//visibility:public"],
+            )
+            continue
         native.py_library(
             name = name,
             deps = select({

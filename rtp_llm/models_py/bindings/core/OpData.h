@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
+#include "rtp_llm/models_py/bindings/core/DSparkCallPhase.h"
 #include <cstddef>
 #include <optional>
 #include <string>
@@ -81,7 +82,10 @@ struct GptModelInputs {
     bool   decode_entrance           = false;
     bool   use_opaque_kv_cache_store = false;
 
-    bool need_all_logits        = false;
+    bool need_all_logits = false;
+    // Set when any stream requests return_all_hidden_states. Gates whether the
+    // CP prefill exit must materialize the full [seq, hidden] all_hidden_states
+    // (true) or may gather only the last-token rows lm_head needs (false).
     bool need_all_hidden_states = false;
     bool need_moe_gating        = false;
     bool warmup                 = false;
@@ -93,6 +97,9 @@ struct GptModelInputs {
     // So, the model has different inference logic for target verify and normal inference.
     // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
+
+    // Only interpreted by a DSpARK draft model. All other models leave NONE.
+    DSparkCallPhase dspark_call_phase = DSparkCallPhase::NONE;
 
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
@@ -107,6 +114,11 @@ struct GptModelOutputs {
     torch::Tensor all_hidden_states;
     torch::Tensor all_logits;
     torch::Tensor softmax_result;
+
+    // Optional in-model DSpARK proposal: [batch, gamma] tokens. Rejection
+    // sampling consumes these as an implicit point mass, so no per-vocab
+    // draft probabilities cross this boundary.
+    torch::Tensor draft_tokens;
 
     std::vector<torch::Tensor> moe_gating;
 };
@@ -357,6 +369,10 @@ struct RejectionSamplingParams {
     torch::Tensor output_token_ids_d;
     torch::Tensor output_accepted_token_num_d;
     torch::Tensor do_sample_d;
+    // True when draft_probs_d is a degenerate point mass on draft_token_ids_d
+    // (in-model proposers such as DSpARK emit tokens, not per-vocab probs).
+    // The kernel then treats q(draft) == 1 instead of reading draft_probs_d.
+    bool draft_probs_point_mass = false;
 };
 
 struct MappingDraft2TargetParams {

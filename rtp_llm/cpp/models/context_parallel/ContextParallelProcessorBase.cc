@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/context_parallel/ContextParallelProcessorBase.h"
+#include "rtp_llm/cpp/models/context_parallel/ZigzagTokenLayout.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputUtils.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
@@ -251,25 +252,21 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     RTP_LLM_CHECK_WITH_INFO(!has_multimodal_input || model_input.mm_features_locs.defined(),
                             "mm_features_locs is required when multimodal_features is non-empty");
 
-    int cp_align_size = prefill_cp_size * 2;
-
     static const auto pinned_i32 = torch::TensorOptions(torch::kInt32).pinned_memory(true);
 
-    // CP planning is CPU-vector based. PyWrappedModel expects token and length
-    // metadata on pinned host memory and stages it to CUDA itself.
-    RTP_LLM_CHECK_WITH_INFO(!model_input.combo_tokens.is_cuda(), "CP combo_tokens must be a host tensor");
-    RTP_LLM_CHECK_WITH_INFO(!model_input.input_lengths.is_cuda(), "CP input_lengths must be a host tensor");
-    RTP_LLM_CHECK_WITH_INFO(!model_input.sequence_lengths.is_cuda(), "CP sequence_lengths must be a host tensor");
-    auto  total_input_tokens = model_input.combo_tokens;
-    auto& input_lengths      = model_input.input_lengths;
-    auto& sequence_lengths   = model_input.sequence_lengths;
-    RTP_LLM_CHECK_WITH_INFO(sequence_lengths.numel() == 0, "Context parallel supports pure-prefill batches only");
-    RTP_LLM_CHECK_WITH_INFO(!model_input.last_hidden_states.defined() || model_input.last_hidden_states.numel() == 0,
-                            "Context parallel does not support MTP/speculative hidden states");
+    // TODO(async): CP planning is CPU-vector based today. Keep explicit host
+    // mirrors here, then publish mutated model inputs back to CUDA.
+    auto total_input_tokens =
+        model_input.combo_tokens.is_cuda() ? model_input.combo_tokens.cpu().pin_memory() : model_input.combo_tokens;
+    auto& total_hidden_states = model_input.last_hidden_states;
+    auto  input_lengths =
+        model_input.input_lengths.is_cuda() ? model_input.input_lengths.cpu().pin_memory() : model_input.input_lengths;
+    auto& sequence_lengths = model_input.sequence_lengths;
     // Preserve global lengths before updating input_lengths in place for this CP rank.
     auto input_lengths_cpu_tensor = input_lengths.clone().pin_memory();
 
-    size_t num_prefill_stream = input_lengths.size(0);
+    size_t num_decode_stream  = sequence_lengths.size(0);
+    size_t num_prefill_stream = input_lengths.size(0) - num_decode_stream;
 
     const bool has_prefix_lengths = model_input.prefix_lengths.defined() && model_input.prefix_lengths.numel() > 0;
     RTP_LLM_CHECK_WITH_INFO(!has_prefix_lengths || !model_input.prefix_lengths.is_cuda(),
@@ -291,18 +288,17 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
 
     size_t prefill_cp_split_tokens_size = 0;
     for (size_t p = 0; p < num_prefill_stream; ++p) {
-        int num_prefill_token = input_lengths.data_ptr<int32_t>()[p];
+        int num_prefill_token = input_lengths.data_ptr<int32_t>()[num_decode_stream + p];
 
-        int padded_seq_len = ((num_prefill_token + cp_align_size - 1) / cp_align_size) * cp_align_size;
-        int padding_size   = padded_seq_len - num_prefill_token;
-        int chunk_size     = padded_seq_len / prefill_cp_size;
+        const auto token_layout = makeZigzagTokenLayout(num_prefill_token, prefill_cp_size);
 
-        prefill_cp_split_tokens_size += chunk_size;
-        padding_lengths[p] = padding_size;
-        chunk_lengths[p]   = chunk_size;
+        prefill_cp_split_tokens_size += token_layout.token_count_per_rank;
+        padding_lengths[p] = token_layout.padding_token_count;
+        chunk_lengths[p]   = token_layout.token_count_per_rank;
     }
 
-    auto          cp_split_input_tokens   = torch::empty({(int64_t)prefill_cp_split_tokens_size}, pinned_i32);
+    auto cp_split_input_tokens =
+        torch::empty({(int64_t)(num_decode_stream + prefill_cp_split_tokens_size)}, pinned_i32);
     auto          prefill_shuffle_indices = torch::empty({(int64_t)prefill_cp_split_tokens_size}, pinned_i32);
     const int64_t global_token_num        = total_input_tokens.numel();
     const int64_t local_token_num         = cp_split_input_tokens.numel();
@@ -320,9 +316,30 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     const bool           need_source_map = need_token_remap || has_prefix_reuse;
     std::vector<int64_t> cp_select_indices;
     std::vector<uint8_t> cp_valid_mask;
+    RTP_LLM_CHECK_WITH_INFO(!need_source_map || num_decode_stream == 0,
+                            "Context parallel supports pure-prefill batches only when multimodal or prefix-reuse remap is required");
     if (need_source_map) {
         cp_select_indices.reserve(cp_split_input_tokens.numel());
         cp_valid_mask.reserve(cp_split_input_tokens.numel());
+    }
+
+    const bool has_hidden_states          = total_hidden_states.defined() && total_hidden_states.numel() > 0;
+    const bool should_split_hidden_states = has_hidden_states && split_hidden_states_;
+    if (has_hidden_states) {
+        RTP_LLM_CHECK_WITH_INFO(
+            total_hidden_states.dim() == 2, "CP MTP hidden states must be 2-D, got dim=%ld", total_hidden_states.dim());
+        const int64_t expected_token_num = split_hidden_states_ ? global_token_num : local_token_num;
+        RTP_LLM_CHECK_WITH_INFO(total_hidden_states.size(0) == expected_token_num,
+                                "CP MTP hidden states row count mismatch: rows=%ld, expected=%ld, layout=%s",
+                                total_hidden_states.size(0),
+                                expected_token_num,
+                                split_hidden_states_ ? "global" : "local");
+    }
+    std::vector<int64_t> hidden_select_indices;
+    std::vector<uint8_t> hidden_valid_mask;
+    if (should_split_hidden_states) {
+        hidden_select_indices.reserve(cp_split_input_tokens.numel());
+        hidden_valid_mask.reserve(cp_split_input_tokens.numel());
     }
 
     int* input_token_ptr             = cp_split_input_tokens.data_ptr<int>();
@@ -332,10 +349,24 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     int input_token_idx       = 0;
     int total_input_token_idx = 0;
 
+    if (num_decode_stream > 0) {
+        std::memcpy(input_token_ptr,
+                    total_input_tokens.data_ptr<int32_t>() + total_input_token_idx,
+                    num_decode_stream * sizeof(int));
+        if (should_split_hidden_states) {
+            for (size_t i = 0; i < num_decode_stream; ++i) {
+                hidden_select_indices.push_back(static_cast<int64_t>(i));
+                hidden_valid_mask.push_back(1);
+            }
+        }
+        input_token_idx += num_decode_stream;
+        total_input_token_idx += num_decode_stream;
+    }
+
     for (size_t p = 0; p < num_prefill_stream; ++p) {
         int input_chunk_length   = prefill_cp_chunk_lengths.data_ptr<int>()[p];
         int input_padding_length = prefill_cp_padding_lengths.data_ptr<int>()[p];
-        int input_length         = input_lengths.data_ptr<int32_t>()[p];
+        int input_length         = input_lengths.data_ptr<int32_t>()[num_decode_stream + p];
         int source_offset        = total_input_token_idx;
 
         int*             src_tokens = total_input_tokens.data_ptr<int32_t>() + total_input_token_idx;
@@ -353,23 +384,26 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         RTP_LLM_CHECK_WITH_INFO(success, "Context parallel planning failed for prefill stream %zu", p);
 
         std::memcpy(input_token_ptr + input_token_idx, chunk_input_token.data(), input_chunk_length * sizeof(int));
-        std::memcpy(
-            prefill_shuffle_indices_ptr + input_token_idx, shuffle_index.data(), input_chunk_length * sizeof(int));
-        if (need_source_map) {
+        std::memcpy(prefill_shuffle_indices_ptr + input_token_idx - num_decode_stream,
+                    shuffle_index.data(),
+                    input_chunk_length * sizeof(int));
+        if (need_source_map || should_split_hidden_states) {
             for (int i = 0; i < input_chunk_length; ++i) {
-                const int src_idx = shuffle_index[i];
-                if (src_idx >= 0 && src_idx < input_length) {
-                    cp_select_indices.push_back(static_cast<int64_t>(source_offset + src_idx));
-                    cp_valid_mask.push_back(1);
-                } else {
-                    cp_select_indices.push_back(0);
-                    cp_valid_mask.push_back(0);
+                const int  src_idx = shuffle_index[i];
+                const bool valid   = src_idx >= 0 && src_idx < input_length;
+                if (need_source_map) {
+                    cp_select_indices.push_back(valid ? static_cast<int64_t>(source_offset + src_idx) : 0);
+                    cp_valid_mask.push_back(valid ? 1 : 0);
+                }
+                if (should_split_hidden_states) {
+                    hidden_select_indices.push_back(valid ? static_cast<int64_t>(source_offset + src_idx) : 0);
+                    hidden_valid_mask.push_back(valid ? 1 : 0);
                 }
             }
         }
         input_token_idx += input_chunk_length;
         total_input_token_idx += input_length;
-        input_length_ptr[p] = input_chunk_length;
+        input_length_ptr[num_decode_stream + p] = input_chunk_length;
     }
 
     if (need_token_remap) {
@@ -406,7 +440,29 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         model_input.combo_position_ids = std::move(absolute_position_ids);
     }
 
-    model_input.combo_tokens = cp_split_input_tokens;
+    if (should_split_hidden_states) {
+        auto select_indices = torch::from_blob(hidden_select_indices.data(),
+                                               {(int64_t)hidden_select_indices.size()},
+                                               torch::TensorOptions(torch::kInt64))
+                                  .clone();
+        auto valid_mask = torch::from_blob(hidden_valid_mask.data(),
+                                           {(int64_t)hidden_valid_mask.size()},
+                                           torch::TensorOptions(torch::kUInt8))
+                              .clone()
+                              .to(torch::kBool);
+        if (total_hidden_states.is_cuda()) {
+            select_indices = select_indices.to(total_hidden_states.device(), true);
+            valid_mask     = valid_mask.to(total_hidden_states.device(), true);
+        }
+        auto split_hidden = total_hidden_states.index_select(0, select_indices);
+        split_hidden.masked_fill_(valid_mask.logical_not().unsqueeze(1), 0);
+        model_input.last_hidden_states = split_hidden;
+    }
+
+    model_input.combo_tokens  = cp_split_input_tokens.to(torch::kCUDA, /*non_blocking=*/true);
+    model_input.input_lengths = input_lengths.to(torch::kCUDA, /*non_blocking=*/true);
+    model_input.sequence_lengths =
+        sequence_lengths.is_cuda() ? sequence_lengths : sequence_lengths.to(torch::kCUDA, /*non_blocking=*/true);
 
     auto cp_padding_lengths = prefill_cp_padding_lengths;
     auto cp_chunk_lengths   = prefill_cp_chunk_lengths;

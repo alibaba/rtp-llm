@@ -309,9 +309,11 @@ TEST_F(ChatServiceTest, ChatCompletions) {
 
     EXPECT_CALL(*mock_writer_, WriteDone).WillOnce(Return(true));
 
-    EXPECT_CALL(*mock_metric_reporter_, reportSuccessQpsMetric).WillOnce(Invoke([](const std::string& source) {
-        EXPECT_EQ(source, "test_source");
-    }));
+    EXPECT_CALL(*mock_metric_reporter_, reportSuccessQpsMetric)
+        .WillOnce(Invoke([](const std::string& source, int priority) {
+            EXPECT_EQ(source, "test_source");
+            EXPECT_EQ(priority, 0);
+        }));
     EXPECT_CALL(*mock_metric_reporter_, reportResponseIterateCountMetric).WillOnce(Invoke([](int32_t val) {
         EXPECT_EQ(val, 1);
     }));
@@ -421,7 +423,7 @@ TEST_F(ChatServiceTest, StreamingStreamErrorsUseSseErrorPath) {
         const HttpApiServerException expected_error(expected_type, message);
         EXPECT_CALL(*mock_metric_reporter_, reportResponseFirstTokenLatencyMs).Times(1);
         EXPECT_CALL(*mock_metric_reporter_, reportResponseIterateLatencyMs).Times(1);
-        EXPECT_CALL(*mock_metric_reporter_, reportErrorQpsMetric("test_source", expected_type)).Times(1);
+        EXPECT_CALL(*mock_metric_reporter_, reportErrorQpsMetric("test_source", expected_type, _)).Times(1);
         {
             InSequence sequence;
             EXPECT_CALL(*mock_writer_, Write(ChatService::sseResponse(first_response))).WillOnce(Return(true));

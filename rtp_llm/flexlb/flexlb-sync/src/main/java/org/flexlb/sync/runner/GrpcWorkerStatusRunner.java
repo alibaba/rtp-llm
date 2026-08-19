@@ -1,10 +1,11 @@
 package org.flexlb.sync.runner;
 
-import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.domain.worker.WorkerStatusResponse;
-import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
@@ -18,33 +19,46 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.Executor;
 
 public class GrpcWorkerStatusRunner implements Runnable {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
+
     private final String ipPort;
     private final String modelName;
     private final String site;
     private final RoleType roleType;
     private final String group;
     private final WorkerStatus workerStatus;
+    private final Map<String, WorkerStatus> workerStatusMap;
     private final EngineHealthReporter engineHealthReporter;
     private final EngineGrpcService engineGrpcService;
+    private final FlexlbBatchScheduler batchScheduler;
     private final String ip;
     private final int grpcPort;
     private final long createTimeUs = System.nanoTime() / 1000;
     private final String id = IdUtils.fastUuid();
     private final long syncRequestTimeoutMs;
     private final boolean retainVitAliveOnTimeout;
+    private static final int MAX_CONSECUTIVE_FAILURES = 3;
+    private final EndpointRegistry endpointRegistry;
+    private final Executor callbackExecutor;
 
     public GrpcWorkerStatusRunner(String modelName, String ipPort, String site, RoleType roleType, String group,
                                   WorkerStatus workerStatus,
+                                  Map<String, WorkerStatus> workerStatusMap,
                                   EngineHealthReporter engineHealthReporter,
                                   EngineGrpcService engineGrpcService,
-                                  long syncRequestTimeoutMs) {
-        this(modelName, ipPort, site, roleType, group, workerStatus, engineHealthReporter,
-                engineGrpcService, syncRequestTimeoutMs, VitStatusConfig.SYNC_REQUEST_TIMEOUT_MS,
-                VitStatusConfig.RETAIN_ALIVE_ON_TIMEOUT);
+                                  long syncRequestTimeoutMs,
+                                  FlexlbBatchScheduler batchScheduler,
+                                  EndpointRegistry endpointRegistry,
+                                  Executor callbackExecutor) {
+        this(modelName, ipPort, site, roleType, group, workerStatus, workerStatusMap,
+                engineHealthReporter, engineGrpcService, syncRequestTimeoutMs,
+                batchScheduler, endpointRegistry, callbackExecutor,
+                VitStatusConfig.SYNC_REQUEST_TIMEOUT_MS, VitStatusConfig.RETAIN_ALIVE_ON_TIMEOUT);
         if (roleType == RoleType.VIT) {
             VitStatusConfig.warnIfRetentionWindowAtRisk(this.syncRequestTimeoutMs);
         }
@@ -52,9 +66,13 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
     GrpcWorkerStatusRunner(String modelName, String ipPort, String site, RoleType roleType, String group,
                            WorkerStatus workerStatus,
+                           Map<String, WorkerStatus> workerStatusMap,
                            EngineHealthReporter engineHealthReporter,
                            EngineGrpcService engineGrpcService,
                            long syncRequestTimeoutMs,
+                           FlexlbBatchScheduler batchScheduler,
+                           EndpointRegistry endpointRegistry,
+                           Executor callbackExecutor,
                            long vitSyncRequestTimeoutMs,
                            boolean retainVitAliveOnTimeout) {
         this.ipPort = ipPort;
@@ -63,6 +81,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.grpcPort = CommonUtils.toGrpcPort(Integer.parseInt(split[1]));
         this.modelName = modelName;
         this.workerStatus = workerStatus;
+        this.workerStatusMap = workerStatusMap;
         this.site = site;
         this.roleType = roleType;
         this.group = group;
@@ -74,143 +93,140 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 ? Math.max(syncRequestTimeoutMs, vitSyncRequestTimeoutMs)
                 : syncRequestTimeoutMs;
         this.retainVitAliveOnTimeout = retainVitAliveOnTimeout;
+        this.batchScheduler = batchScheduler;
+        this.endpointRegistry = endpointRegistry;
+        this.callbackExecutor = callbackExecutor;
     }
 
     @Override
     public void run() {
+        boolean asyncInitiated = false;
         try {
-            logger.info("GrpcWorkerStatusRunner run for {}", ipPort);
+            logger.debug("GrpcWorkerStatusRunner run for {}", ipPort);
             long startTime = System.nanoTime() / 1000;
 
             long latestFinishedTaskVersion = workerStatus.getLatestFinishedTaskVersion().get();
 
-            StatusCheckResult result = launchGrpcStatusCheck(ip, grpcPort, latestFinishedTaskVersion);
-            handleStatusResponse(result, startTime);
+            engineGrpcService.getWorkerStatusAsync(ip, grpcPort, latestFinishedTaskVersion,
+                            syncRequestTimeoutMs, roleType)
+                    .thenApply(EngineStatusConverter::convertToWorkerStatusResponse)
+                    .whenCompleteAsync((response, ex) -> {
+                        try {
+                            if (ex != null) {
+                                Throwable throwable = ex instanceof CompletionException ? ex.getCause() : ex;
+                                boolean deadlineExceeded = GrpcStatusUtils.isDeadlineExceeded(throwable);
+                                handleException(throwable, deadlineExceeded);
+                                long failures = workerStatus.getConsecutiveFailures().incrementAndGet();
+                                logger.debug("gRPC status check failed, consecutiveFailures={}/{}, msg={}",
+                                        failures, MAX_CONSECUTIVE_FAILURES, throwable.getMessage());
+                                // The proxy owns immediate health for its concrete child workers. FlexLB
+                                // tracks the aggregate proxy endpoint, so a transient VIT deadline keeps
+                                // the last state; ExpirationCleaner removes the endpoint after the
+                                // VIT-specific stale-status window if no later heartbeat succeeds.
+                                boolean retainLastAliveStatus = shouldRetainVitAlive(deadlineExceeded);
+                                if (failures >= MAX_CONSECUTIVE_FAILURES && !retainLastAliveStatus) {
+                                    workerStatus.setAlive(false);
+                                    if (endpointRegistry != null) {
+                                        endpointRegistry.remove(roleType, ipPort, workerStatus);
+                                    }
+                                    if (failures == MAX_CONSECUTIVE_FAILURES) {
+                                        logger.error("worker {} marked dead after {} consecutive gRPC failures", ipPort, failures);
+                                    }
+                                }
+                            } else {
+                                handleStatusResponse(response, startTime);
+                            }
+                        } finally {
+                            workerStatus.getStatusCheckInProgress().set(false);
+                        }
+                    }, callbackExecutor);
+            asyncInitiated = true;
         } finally {
-            workerStatus.getStatusCheckInProgress().set(false);
+            if (!asyncInitiated) {
+                workerStatus.getStatusCheckInProgress().set(false);
+            }
         }
     }
 
-    private StatusCheckResult launchGrpcStatusCheck(String ip, int grpcPort, long latestFinishedTaskVersion) {
-        try {
-            EngineRpcService.WorkerStatusPB workerStatusPB = engineGrpcService.getWorkerStatus(ip, grpcPort, latestFinishedTaskVersion, syncRequestTimeoutMs, roleType);
-            return new StatusCheckResult(EngineStatusConverter.convertToWorkerStatusResponse(workerStatusPB), false);
-        } catch (Throwable throwable) {
-            boolean deadlineExceeded = GrpcStatusUtils.isDeadlineExceeded(throwable);
-            handleException(throwable, deadlineExceeded);
-            WorkerStatusResponse errorResponse = new WorkerStatusResponse();
-            errorResponse.setMessage("Worker status gRPC call failed: " + throwable.getMessage());
-            return new StatusCheckResult(errorResponse, deadlineExceeded);
-        }
-    }
-
-    private void handleStatusResponse(StatusCheckResult result, long startTime) {
-        WorkerStatusResponse newWorkerStatus = result.response;
+    private void handleStatusResponse(WorkerStatusResponse newWorkerStatus, long startTime) {
         try {
             if (newWorkerStatus == null) {
-                logger.info("query engine worker status via gRPC, response body is null");
+                logger.debug("query engine worker status via gRPC, response body is null");
                 engineHealthReporter.reportStatusCheckerFail(
                         modelName, BalanceStatusEnum.RESPONSE_NULL, roleType);
                 return;
             }
-
-            String errorMessage = newWorkerStatus.getMessage();
-            if (errorMessage != null) {
-                // The proxy owns immediate health for its concrete child workers. FlexLB
-                // tracks the aggregate proxy endpoint, so a transient VIT deadline keeps
-                // the last state; ExpirationCleaner removes the endpoint after the
-                // VIT-specific stale-status window if no later heartbeat succeeds.
-                boolean retainLastAliveStatus = shouldRetainVitAlive(result.deadlineExceeded);
-                if (!retainLastAliveStatus) {
-                    workerStatus.setAlive(false);
-                }
-                logger.error("query engine worker status via gRPC, msg={}, retainLastAliveStatus={}",
-                        errorMessage, retainLastAliveStatus);
+            if (workerStatusMap != null && workerStatusMap.get(ipPort) != workerStatus) {
+                logger.debug("Ignore stale worker status callback for {}, role: {}", ipPort, roleType);
                 return;
             }
-
             // Only report success worker status check info
             engineHealthReporter.reportStatusCheckRemoteInfo(
-                    modelName, newWorkerStatus.getRole(), startTime);
+                    modelName, newWorkerStatus.getRole().name(), startTime);
 
             Long responseVersion = newWorkerStatus.getStatusVersion();
             if (responseVersion == 0L) {
-                logger.info("workerStatuses.get(ip) is null for gRPC call");
+                logger.debug("workerStatuses.get(ip) is null for gRPC call");
                 return;
             }
+            workerStatus.getConsecutiveFailures().set(0);
 
             workerStatus.setSite(site);
             workerStatus.setGroup(group);
-            workerStatus.setRole(newWorkerStatus.getRole());
 
             long currentVersion = workerStatus.getStatusVersion().get();
-            if (currentVersion >= responseVersion) {
-                logger.info("query engine worker status via gRPC, version is not updated, currentVersion: {}, responseVersion: {}",
-                        currentVersion, responseVersion);
-                // Update basic worker status even when version is not updated
-                workerStatus.setAlive(newWorkerStatus.isAlive());
-                workerStatus.setDpSize(newWorkerStatus.getDpSize());
-                workerStatus.setTpSize(newWorkerStatus.getTpSize());
+            WorkerEndpoint ep = endpointRegistry != null ? endpointRegistry.get(roleType, ipPort) : null;
+            boolean versionAdvanced = currentVersion < responseVersion;
 
-                // Update status timestamp and record actual sync interval
-                long nowUs = System.nanoTime() / 1000;
-                long prevUpdateTime = workerStatus.getStatusLastUpdateTime().get();
-                if (prevUpdateTime > 0) {
-                    workerStatus.getStatusUpdateIntervalUs().set(nowUs - prevUpdateTime);
+            if (versionAdvanced) {
+                // 1. WorkerStatusResponse directly updates WorkerStatus
+                workerStatus.updateFromResponse(newWorkerStatus);
+
+                if (endpointRegistry != null) {
+                    if (workerStatus.isAlive()) {
+                        ep = endpointRegistry.ensureEndpoint(roleType, ipPort, workerStatus);
+                    } else {
+                        endpointRegistry.remove(roleType, ipPort, workerStatus);
+                        ep = null;
+                    }
                 }
-                workerStatus.getStatusLastUpdateTime().set(nowUs);
 
-                // Update task state
-                Map<String, TaskInfo> waitingTaskInfo = newWorkerStatus.getWaitingTaskInfo();
-                Map<String, TaskInfo> runningTaskInfo = newWorkerStatus.getRunningTaskInfo();
-                Map<String, TaskInfo> finishedTaskInfo = newWorkerStatus.getFinishedTaskInfo();
-                workerStatus.setWaitingTaskList(waitingTaskInfo);
-                workerStatus.setRunningTaskList(runningTaskInfo);
-                workerStatus.updateTaskStates(waitingTaskInfo, runningTaskInfo, finishedTaskInfo);
-                workerStatus.updateRunningQueueTime();
+                // 2. Notify EP (calibration) — passes both updated status and raw response
+                if (ep != null) {
+                    ep.onWorkerStatusUpdate(workerStatus, newWorkerStatus);
+                }
 
-                // Report success even when version is not updated
-                engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus,
-                    Optional.ofNullable(runningTaskInfo).map(Map::size).orElse(0),
-                    Optional.ofNullable(finishedTaskInfo).map(Map::size).orElse(0));
+                // 3. Notify scheduler (cleanup finished requests)
+                if (batchScheduler != null) {
+                    batchScheduler.onWorkerStatusUpdate(newWorkerStatus);
+                }
 
-                logWorkerStatusUpdate(startTime, workerStatus);
-                return;
+                Long latestFinishedVersion = newWorkerStatus.getLatestFinishedVersion();
+
+                // 4. Advance latestFinishedVersion only after calibrate has processed finished tasks.
+                // If this is done outside the version guard, a skipped calibrate (version not
+                // advanced) would still consume the incremental version, causing the engine to
+                // filter out those finished tasks on the next poll — leaking inflight entries.
+                if (latestFinishedVersion != null
+                        && latestFinishedVersion > workerStatus.getLatestFinishedTaskVersion().get()) {
+                    workerStatus.getLatestFinishedTaskVersion().set(latestFinishedVersion);
+                }
+            } else {
+                workerStatus.refreshStatusHeartbeat(newWorkerStatus.isAlive());
+                if (endpointRegistry != null) {
+                    if (workerStatus.isAlive()) {
+                        ep = endpointRegistry.ensureEndpoint(roleType, ipPort, workerStatus);
+                    } else {
+                        endpointRegistry.remove(roleType, ipPort, workerStatus);
+                        ep = null;
+                    }
+                }
             }
 
-            // Update worker status from gRPC response
-            workerStatus.setAvailableConcurrency(newWorkerStatus.getAvailableConcurrency());
-            workerStatus.setStepLatencyMs(newWorkerStatus.getStepLatencyMs());
-            workerStatus.setIterateCount(newWorkerStatus.getIterateCount());
-            workerStatus.setDpSize(newWorkerStatus.getDpSize());
-            workerStatus.setTpSize(newWorkerStatus.getTpSize());
-            workerStatus.setAlive(newWorkerStatus.isAlive());
-            workerStatus.getStatusVersion().set(responseVersion != null ? responseVersion : -1L);
-            workerStatus.getLatestFinishedTaskVersion().set(newWorkerStatus.getLatestFinishedVersion() != null ? newWorkerStatus.getLatestFinishedVersion() : -1L);
+            engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus, ep,
+                    Optional.ofNullable(newWorkerStatus.getRunningTaskInfo()).map(Map::size).orElse(0),
+                    Optional.ofNullable(newWorkerStatus.getFinishedTaskInfo()).map(Map::size).orElse(0));
 
-            Map<String, TaskInfo> waitingTaskInfo = newWorkerStatus.getWaitingTaskInfo();
-            Map<String, TaskInfo> runningTaskInfo = newWorkerStatus.getRunningTaskInfo();
-            Map<String, TaskInfo> finishedTaskInfo = newWorkerStatus.getFinishedTaskInfo();
-            workerStatus.setWaitingTaskList(waitingTaskInfo);
-            workerStatus.setRunningTaskList(runningTaskInfo);
-
-            // Update local task state (including checking lost, updating running, and cleaning completed)
-            workerStatus.updateTaskStates(waitingTaskInfo, runningTaskInfo, finishedTaskInfo);
-
-            // Correct running queue total wait time
-            workerStatus.updateRunningQueueTime();
-
-            engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus,
-                    Optional.ofNullable(runningTaskInfo).map(Map::size).orElse(0),
-                    Optional.ofNullable(finishedTaskInfo).map(Map::size).orElse(0));
-
-            // Update status timestamp and record actual sync interval
-            long nowUs = System.nanoTime() / 1000;
-            long prevUpdateTime = workerStatus.getStatusLastUpdateTime().get();
-            if (prevUpdateTime > 0) {
-                workerStatus.getStatusUpdateIntervalUs().set(nowUs - prevUpdateTime);
-            }
-            workerStatus.getStatusLastUpdateTime().set(nowUs);
             logWorkerStatusUpdate(startTime, workerStatus);
 
         } catch (Throwable e) {
@@ -221,10 +237,26 @@ public class GrpcWorkerStatusRunner implements Runnable {
     }
 
     private void logWorkerStatusUpdate(long startTime, WorkerStatus workerStatus) {
-        logger.info("gRPC Worker Status - {}, role:{}, running_queue_tokens:{}, cost:{}",
+        logger.debug("gRPC Worker Status - {}, role:{}, alive:{}, concurrency:{}, "
+                        + "step_latency_ms:{}, iterate_count:{}, "
+                        + "dp_rank:{}, dp_size:{}, tp_size:{}, "
+                        + "avail_kv_tokens:{}, used_kv_tokens:{}, "
+                        + "waiting_tasks:{}, running_tasks:{}, "
+                        + "version:{}, sync_cost_us:{}",
                 ipPort,
                 workerStatus.getRole(),
-                workerStatus.getRunningQueueTime(),
+                workerStatus.isAlive(),
+                workerStatus.getAvailableConcurrency(),
+                workerStatus.getStepLatencyMs(),
+                workerStatus.getIterateCount(),
+                workerStatus.getDpRank(),
+                workerStatus.getDpSize(),
+                workerStatus.getTpSize(),
+                workerStatus.getAvailableKvCacheTokens(),
+                workerStatus.getTotalKvCacheTokens().get() - workerStatus.getAvailableKvCacheTokens().get(),
+                workerStatus.getRunningTaskList() != null ? workerStatus.getRunningTaskList().values().stream().filter(t -> t.getPhase() != org.flexlb.enums.TaskPhase.RUNNING).count() : 0,
+                workerStatus.getRunningTaskList() != null ? workerStatus.getRunningTaskList().size() : 0,
+                workerStatus.getStatusVersion(),
                 System.nanoTime() / 1000 - startTime);
     }
 
@@ -236,31 +268,28 @@ public class GrpcWorkerStatusRunner implements Runnable {
         log("gRPC worker status check failed, msg=" + ex.getMessage());
         // Report specific error based on exception type
         if (deadlineExceeded) {
-            logger.info("gRPC worker status check timeout, msg={}, ipPort: {}, rt: {}", ex.getMessage(), ipPort, System.nanoTime() / 1000 - createTimeUs);
+            logger.debug("gRPC worker status check timeout, msg={}, ipPort: {}, rt: {}", ex.getMessage(), ipPort, System.nanoTime() / 1000 - createTimeUs);
             engineHealthReporter.reportStatusCheckerFail(
                     modelName, BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, roleType);
         } else {
             engineHealthReporter.reportStatusCheckerFail(
                     modelName, BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE, roleType);
         }
+        // Do not refresh the heartbeat for a retained VIT timeout: ExpirationCleaner
+        // must still evict the endpoint after the VIT-specific stale-status window
+        // if no later status check succeeds.
+        if (!shouldRetainVitAlive(deadlineExceeded)) {
+            workerStatus.refreshStatusHeartbeat(workerStatus.isAlive());
+        }
     }
 
     private void log(String msg) {
-        logger.info("[gRPC][{}][{}][{}][{}][{}μs]: {}",
+        logger.debug("[gRPC][{}][{}][{}][{}][{}μs]: {}",
                 id,
                 site,
                 ipPort,
                 modelName,
                 System.nanoTime() / 1000 - createTimeUs,
                 msg);
-    }
-    private static class StatusCheckResult {
-        private final WorkerStatusResponse response;
-        private final boolean deadlineExceeded;
-
-        private StatusCheckResult(WorkerStatusResponse response, boolean deadlineExceeded) {
-            this.response = response;
-            this.deadlineExceeded = deadlineExceeded;
-        }
     }
 }

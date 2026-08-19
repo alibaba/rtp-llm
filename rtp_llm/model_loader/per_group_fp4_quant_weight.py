@@ -31,7 +31,8 @@ from rtp_llm.utils.model_weight import (
     stack_,
     stack_moe_w1,
     max_scalar,
-    stack_moe_w1_s2
+    stack_moe_w1_s2,
+    is_v4_weight,
 )
 from rtp_llm.utils.util import check_with_info
 
@@ -133,7 +134,13 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
         ):
             return False
         name = src_weight_info.name
-        return name in cls.w4a4_weight_list and not quant_config.mixed_attention
+        if name not in cls.w4a4_weight_list or quant_config.mixed_attention:
+            return False
+        # V4 names dispatch to V4-specific subclass (V4PerGroupFp4Weight) —
+        # exclude from base so the registry "exactly one match" check passes.
+        if is_v4_weight(src_weight_info):
+            return False
+        return True
 
     def __init__(
         self,
@@ -530,3 +537,126 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
             processed_res[self.scale.name] = scale_weight
 
         return processed_res
+
+
+# ---------------------------------------------------------------------------
+# DSv4 specialization (FP4 routed experts: e2m1 packed int8 + UE8M0 group=32 scale)
+# ---------------------------------------------------------------------------
+#
+# V4 ckpt format differs from ModelOpt-style FP4:
+#   * scale suffix is ``.scale`` (V4) not ``.weight_scale`` (ModelOpt).
+#   * NO ``weight_scale_2`` (per-tensor outer scale) — single-level FP4.
+#   * NO ``input_scale``     — activation_scheme='dynamic' in V4 quant config.
+#   * scale dtype is float8_e8m0fnu  shape ``[N, K/32]`` (rather than fp8e4m3 wrapped).
+#   * weight dtype is int8 packed (2 nibbles per byte) shape ``[N, K/2]``.
+#
+# DeepGEMM's ``fp8_fp4_gemm_nt`` consumes these natively, so we deliberately
+# bypass ``PerGroupFp4Weight._postprocess`` (which calls
+# ``convert_fp4_gemm_weight_params`` + ``maybe_prepare_static_weights_for_fp4_moe``
+# — those transform layouts for ModelOpt-style FP4 + static activation scaling).
+
+# V4 routed-expert MoE keys → scale keys.
+_V4_FP4_WEIGHT_LIST: Dict[str, str] = {
+    W.v4_routed_w1_w: W.v4_routed_w1_s,
+    W.v4_routed_w2_w: W.v4_routed_w2_s,
+    W.v4_routed_w3_w: W.v4_routed_w3_s,
+}
+
+PerGroupFp4Weight.w4a4_weight_list.update(_V4_FP4_WEIGHT_LIST)
+
+
+class V4PerGroupFp4Weight(PerGroupFp4Weight):
+    """V4 FP4 (e2m1 packed) per-group routed-expert weight.
+
+    Differences vs. base ``PerGroupFp4Weight``:
+      - ckpt scale suffix is ``.scale`` (V4) instead of ``.weight_scale``.
+      - no ``weight_scale_2`` (per-tensor outer scale absent).
+      - no ``input_scale``     (activation scheme is dynamic in V4).
+      - ``_postprocess`` is a no-op (only device move) — V4 ckpt weight + scale
+        layouts are directly consumed by DeepGEMM's ``fp8_fp4_gemm_nt``.
+      - ``support()`` is restricted to V4 namespace.
+    """
+
+    V4_W_SUFFIX = ".weight"
+    V4_S_SUFFIX = ".scale"
+
+    @classmethod
+    def support(
+        cls, quant_config: QuantizationConfig, src_weight_info: WeightModule
+    ) -> bool:
+        if not quant_config.is_quanted() or not isinstance(
+            quant_config, ModelOptFp4Config
+        ):
+            return False
+        if not is_v4_weight(src_weight_info):
+            return False
+        return src_weight_info.name in _V4_FP4_WEIGHT_LIST
+
+    def __init__(
+        self,
+        src_weight_info: WeightModule,
+        quant_config: QuantizationConfig,
+        *args: Any,
+        **kwargs: Any,
+    ):
+        scale_name = _V4_FP4_WEIGHT_LIST[src_weight_info.name]
+        kernel, scale = self._v4_build_pair(
+            src_weight_info, src_weight_info.name, scale_name
+        )
+
+        sub_weights = {kernel.name: kernel, scale.name: scale}
+        CompositeWeight.__init__(
+            self, sub_weights, quant_config=quant_config, *args, **kwargs
+        )
+        self.kernel = sub_weights[kernel.name]
+        self.scale = sub_weights[scale.name]
+        self.scale_2 = None
+        self.input_scale = None
+
+    def _v4_build_pair(
+        self,
+        src_weight_info: WeightModule,
+        weight_key: str,
+        scale_key: str,
+    ):
+        """Build kernel + scale pair for V4 routed experts.  ``src_weight_info``
+        is a ``MoeAtomicWeight`` with per-expert ckpt key templates; we keep
+        its merge_fun and just retarget ckpt names to ``.weight`` / ``.scale``.
+        """
+        kernel = create_w4a4_fp4_per_group_weight(
+            src_weight_info,
+            weight_key,
+            [
+                CkptWeightInfo(
+                    w.name[: -len(self.V4_W_SUFFIX)] + self.V4_W_SUFFIX, w.merge_fun
+                )
+                for w in src_weight_info.weights
+            ],
+            src_weight_info.process_fun,
+            data_type=torch.int8,
+            config=getattr(src_weight_info, "config", None),
+        )
+        scale = create_w4a4_fp4_per_group_weight(
+            src_weight_info,
+            scale_key,
+            [
+                CkptWeightInfo(
+                    w.name[: -len(self.V4_W_SUFFIX)] + self.V4_S_SUFFIX, w.merge_fun
+                )
+                for w in src_weight_info.weights
+            ],
+            src_weight_info.process_fun,
+            data_type=torch.float8_e8m0fnu,
+            config=getattr(src_weight_info, "config", None),
+        )
+        return [kernel, scale]
+
+    def _postprocess(
+        self,
+        tensor: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        device: str,
+        load_config: LoadConfig,
+    ):
+        # V4 ckpt weight + UE8M0 scale layout is directly consumed by
+        # DeepGEMM's fp8_fp4_gemm_nt; skip ModelOpt-style transforms.
+        return CompositeWeight._postprocess(self, tensor, device, load_config)

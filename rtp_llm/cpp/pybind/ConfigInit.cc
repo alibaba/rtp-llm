@@ -494,6 +494,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("prefix_tree_memory_state_swa_pool_ratio",
                        &KVCacheConfig::prefix_tree_memory_state_swa_pool_ratio)
         .def_readwrite("enable_independent_group_eviction", &KVCacheConfig::enable_independent_group_eviction)
+        .def_readwrite("dsv4_fixed_pool_blocks", &KVCacheConfig::dsv4_fixed_pool_blocks)
+        .def_readwrite("dsv4_hca_state_pool_blocks", &KVCacheConfig::dsv4_hca_state_pool_blocks)
+        .def_readwrite("dsv4_fixed_pool_use_memory", &KVCacheConfig::dsv4_fixed_pool_use_memory)
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
         // Remote connector configuration fields
@@ -574,10 +577,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_legacy_memory_connector_fallback,
                                       self.prefix_tree_memory_state_swa_pool_ratio,
                                       self.enable_independent_group_eviction,
-                                      self.load_cache_retry_times);
+                                      self.load_cache_retry_times,
+                                      self.dsv4_fixed_pool_blocks,
+                                      self.dsv4_hca_state_pool_blocks,
+                                      self.dsv4_fixed_pool_use_memory);
             },
             [](py::tuple t) {
-                if (t.size() != 43 && t.size() != 54)
+                if (t.size() != 43 && t.size() != 54 && t.size() != 57)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -636,6 +642,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.prefix_tree_memory_state_swa_pool_ratio = t[51].cast<int64_t>();
                         c.enable_independent_group_eviction       = t[52].cast<bool>();
                         c.load_cache_retry_times                  = t[53].cast<int>();
+                    }
+                    if (t.size() >= 57) {
+                        // DSV4 fixed-pool knobs.
+                        c.dsv4_fixed_pool_blocks     = t[54].cast<uint32_t>();
+                        c.dsv4_hca_state_pool_blocks = t[55].cast<uint32_t>();
+                        c.dsv4_fixed_pool_use_memory = t[56].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
@@ -907,7 +919,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("MTP", SP_TYPE_MTP)
         .value("EAGLE3", SP_TYPE_EAGLE3)
         .value("EAGLE", SP_TYPE_EAGLE)
-        .value("DETERMINISTIC", SP_TYPE_DETERMINISTIC);
+        .value("DETERMINISTIC", SP_TYPE_DETERMINISTIC)
+        .value("DSPARK", SP_TYPE_DSPARK);
 
     // Register SpeculativeExecutionConfig
     py::class_<SpeculativeExecutionConfig>(m, "SpeculativeExecutionConfig")
@@ -933,6 +946,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("force_score_context_attention", &SpeculativeExecutionConfig::force_score_context_attention)
         .def_readwrite("quantization", &SpeculativeExecutionConfig::quantization)
         .def_readwrite("checkpoint_path", &SpeculativeExecutionConfig::checkpoint_path)
+        .def_readwrite("sp_dspark_mask_token_id", &SpeculativeExecutionConfig::sp_dspark_mask_token_id)
         .def("to_string", [](const SpeculativeExecutionConfig& self) { return self.to_string(); })
         .def(py::pickle(
             [](const SpeculativeExecutionConfig& self) {
@@ -945,10 +959,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.force_stream_sample,
                                       self.force_score_context_attention,
                                       self.quantization,
-                                      self.checkpoint_path);
+                                      self.checkpoint_path,
+                                      self.sp_dspark_mask_token_id);
             },
             [](py::tuple t) {
-                if (t.size() != 10)
+                if (t.size() != 10 && t.size() != 11)
                     throw std::runtime_error("Invalid state!");
                 SpeculativeExecutionConfig c;
                 try {
@@ -962,6 +977,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.force_score_context_attention = t[7].cast<bool>();
                     c.quantization                  = t[8].cast<std::string>();
                     c.checkpoint_path               = t[9].cast<std::string>();
+                    if (t.size() == 11) {
+                        c.sp_dspark_mask_token_id = t[10].cast<int64_t>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("SpeculativeExecutionConfig unpickle error: ") + e.what());
                 }
@@ -1303,6 +1321,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("decode_prefill_ratio", &FIFOSchedulerConfig::decode_prefill_ratio)
         .def_readwrite("cp_force_single_prefill", &FIFOSchedulerConfig::cp_force_single_prefill)
         .def_readwrite("max_inited_kv_cache_streams", &FIFOSchedulerConfig::max_inited_kv_cache_streams)
+        .def_readwrite("max_batch_tokens_without_cache", &FIFOSchedulerConfig::max_batch_tokens_without_cache)
         .def("to_string", &FIFOSchedulerConfig::to_string)
         .def(py::pickle(
             [](const FIFOSchedulerConfig& self) {
@@ -1311,10 +1330,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.pdfusion_scheduler_mode,
                                       self.decode_prefill_ratio,
                                       self.cp_force_single_prefill,
-                                      self.max_inited_kv_cache_streams);
+                                      self.max_inited_kv_cache_streams,
+                                      self.max_batch_tokens_without_cache);
             },
             [](py::tuple t) {
-                if (t.size() != 2 && t.size() != 4 && t.size() != 6)
+                if (t.size() != 2 && t.size() != 4 && t.size() != 6 && t.size() != 7)
                     throw std::runtime_error("Invalid state!");
                 FIFOSchedulerConfig c;
                 try {
@@ -1324,9 +1344,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.pdfusion_scheduler_mode = t[2].cast<std::string>();
                         c.decode_prefill_ratio    = t[3].cast<std::string>();
                     }
-                    if (t.size() == 6) {
+                    if (t.size() >= 6) {
                         c.cp_force_single_prefill     = t[4].cast<bool>();
                         c.max_inited_kv_cache_streams = t[5].cast<int64_t>();
+                    }
+                    if (t.size() >= 7) {
+                        c.max_batch_tokens_without_cache = t[6].cast<int64_t>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FIFOSchedulerConfig unpickle error: ") + e.what());
@@ -1415,6 +1438,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("reserve_runtime_mem_mb", &RuntimeConfig::reserve_runtime_mem_mb)
         .def_readwrite("warm_up", &RuntimeConfig::warm_up)
         .def_readwrite("warm_up_with_loss", &RuntimeConfig::warm_up_with_loss)
+        .def_readwrite("model_warm_up", &RuntimeConfig::model_warm_up)
         .def_readwrite("use_batch_decode_scheduler", &RuntimeConfig::use_batch_decode_scheduler)
         .def_readwrite("model_name", &RuntimeConfig::model_name)
         .def_readwrite("worker_grpc_addrs", &RuntimeConfig::worker_grpc_addrs)
@@ -1444,10 +1468,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.model_name,
                                       self.worker_grpc_addrs,
                                       self.worker_addrs,
-                                      self.specify_gpu_arch);
+                                      self.specify_gpu_arch,
+                                      self.model_warm_up);
             },
             [](py::tuple t) {
-                if (t.size() != 12)
+                if (t.size() != 12 && t.size() != 13)
                     throw std::runtime_error("Invalid state!");
                 RuntimeConfig c;
                 try {
@@ -1463,6 +1488,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.worker_grpc_addrs             = t[9].cast<std::vector<std::string>>();
                     c.worker_addrs                  = t[10].cast<std::vector<std::string>>();
                     c.specify_gpu_arch              = t[11].cast<std::string>();
+                    if (t.size() >= 13) {
+                        c.model_warm_up = t[12].cast<bool>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("RuntimeConfig unpickle error: ") + e.what());
                 }
@@ -1631,7 +1659,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("indexer_topk", &AttentionConfigs::indexer_topk)
         .def_readwrite("dtype", &AttentionConfigs::dtype)
         .def_readwrite("max_seq_len", &AttentionConfigs::max_seq_len)
-        .def_readwrite("gen_num_per_cycle", &AttentionConfigs::gen_num_per_cycle);
+        .def_readwrite("gen_num_per_cycle", &AttentionConfigs::gen_num_per_cycle)
+        // DeepSeek-V4 fields
+        .def_readwrite("layer_compress_ratios", &AttentionConfigs::layer_compress_ratios)
+        .def_readwrite("o_groups", &AttentionConfigs::o_groups)
+        .def_readwrite("o_lora_rank", &AttentionConfigs::o_lora_rank)
+        .def_readwrite("sliding_window", &AttentionConfigs::sliding_window)
+        .def_readwrite("compress_rope_theta", &AttentionConfigs::compress_rope_theta);
 
     py::class_<EPLBConfig>(m, "EPLBConfig")
         .def(py::init<>())
@@ -2016,6 +2050,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("max_rpc_timeout_ms", &PDSepConfig::max_rpc_timeout_ms)
         .def_readwrite("worker_port_offset", &PDSepConfig::worker_port_offset)
         .def_readwrite("decode_entrance", &PDSepConfig::decode_entrance)
+        .def_readwrite("prefill_prepare_resource_pool_size", &PDSepConfig::prefill_prepare_resource_pool_size)
+        .def_readwrite("prefill_stop_stream_wait_timeout_ms", &PDSepConfig::prefill_stop_stream_wait_timeout_ms)
         .def("to_string", &PDSepConfig::to_string)
         .def(py::pickle(
             [](const PDSepConfig& self) {
@@ -2038,33 +2074,38 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.load_cache_timeout_ms,
                                       self.max_rpc_timeout_ms,
                                       self.worker_port_offset,
-                                      self.decode_entrance);
+                                      self.decode_entrance,
+                                      self.prefill_stop_stream_wait_timeout_ms,
+                                      self.prefill_prepare_resource_pool_size);
             },
             [](py::tuple t) {
-                if (t.size() != 20)
-                    throw std::runtime_error("Invalid state!");
+                if (t.size() != 22)
+                    throw std::runtime_error("Invalid PDSepConfig state: expected 22 fields, got "
+                                             + std::to_string(t.size()));
                 PDSepConfig c;
                 try {
-                    c.role_type                       = t[0].cast<RoleType>();
-                    c.cache_store_rdma_mode           = t[1].cast<bool>();
-                    c.cache_store_listen_port         = t[2].cast<int64_t>();
-                    c.cache_store_connect_port        = t[3].cast<int64_t>();
-                    c.cache_store_rdma_listen_port    = t[4].cast<int64_t>();
-                    c.cache_store_rdma_connect_port   = t[5].cast<int64_t>();
-                    c.remote_rpc_server_port          = t[6].cast<int64_t>();
-                    c.prefill_retry_times             = t[7].cast<int64_t>();
-                    c.prefill_retry_timeout_ms        = t[8].cast<int64_t>();
-                    c.prefill_max_wait_timeout_ms     = t[9].cast<int64_t>();
-                    c.decode_retry_times              = t[10].cast<int64_t>();
-                    c.decode_retry_timeout_ms         = t[11].cast<int64_t>();
-                    c.decode_retry_interval_ms        = t[12].cast<int64_t>();
-                    c.decode_polling_kv_cache_step_ms = t[13].cast<int64_t>();
-                    c.decode_polling_call_prefill_ms  = t[14].cast<int64_t>();
-                    c.rdma_connect_retry_times        = t[15].cast<int64_t>();
-                    c.load_cache_timeout_ms           = t[16].cast<int64_t>();
-                    c.max_rpc_timeout_ms              = t[17].cast<int64_t>();
-                    c.worker_port_offset              = t[18].cast<int64_t>();
-                    c.decode_entrance                 = t[19].cast<bool>();
+                    c.role_type                           = t[0].cast<RoleType>();
+                    c.cache_store_rdma_mode               = t[1].cast<bool>();
+                    c.cache_store_listen_port             = t[2].cast<int64_t>();
+                    c.cache_store_connect_port            = t[3].cast<int64_t>();
+                    c.cache_store_rdma_listen_port        = t[4].cast<int64_t>();
+                    c.cache_store_rdma_connect_port       = t[5].cast<int64_t>();
+                    c.remote_rpc_server_port              = t[6].cast<int64_t>();
+                    c.prefill_retry_times                 = t[7].cast<int64_t>();
+                    c.prefill_retry_timeout_ms            = t[8].cast<int64_t>();
+                    c.prefill_max_wait_timeout_ms         = t[9].cast<int64_t>();
+                    c.decode_retry_times                  = t[10].cast<int64_t>();
+                    c.decode_retry_timeout_ms             = t[11].cast<int64_t>();
+                    c.decode_retry_interval_ms            = t[12].cast<int64_t>();
+                    c.decode_polling_kv_cache_step_ms     = t[13].cast<int64_t>();
+                    c.decode_polling_call_prefill_ms      = t[14].cast<int64_t>();
+                    c.rdma_connect_retry_times            = t[15].cast<int64_t>();
+                    c.load_cache_timeout_ms               = t[16].cast<int64_t>();
+                    c.max_rpc_timeout_ms                  = t[17].cast<int64_t>();
+                    c.worker_port_offset                  = t[18].cast<int64_t>();
+                    c.decode_entrance                     = t[19].cast<bool>();
+                    c.prefill_stop_stream_wait_timeout_ms = t[20].cast<int64_t>();
+                    c.prefill_prepare_resource_pool_size  = t[21].cast<int64_t>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("PDSepConfig unpickle error: ") + e.what());
                 }

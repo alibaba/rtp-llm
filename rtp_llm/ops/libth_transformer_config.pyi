@@ -397,6 +397,7 @@ class FIFOSchedulerConfig:
     cp_force_single_prefill: bool
     decode_prefill_ratio: str
     max_batch_tokens_size: int
+    max_batch_tokens_without_cache: int
     max_context_batch_size: int
     max_inited_kv_cache_streams: int
     pdfusion_scheduler_mode: str
@@ -682,7 +683,14 @@ class KVCacheConfig:
     enable_device_cache: bool
     enable_memory_cache: bool
     enable_memory_cache_sm_copy: bool
+    enable_prefix_tree_memory_cache: bool
+    enable_legacy_memory_connector_fallback: bool
+    enable_gpu_prefix_tree: bool
+    prefix_tree_memory_state_swa_pool_ratio: int
     enable_remote_cache: bool
+    dsv4_fixed_pool_blocks: int
+    dsv4_hca_state_pool_blocks: int
+    dsv4_fixed_pool_use_memory: bool
     fp8_kv_cache: int
     kv_cache_mem_mb: int
     linear_step: int
@@ -1240,8 +1248,10 @@ class PDSepConfig:
     load_cache_timeout_ms: int
     max_rpc_timeout_ms: int
     prefill_max_wait_timeout_ms: int
+    prefill_prepare_resource_pool_size: int
     prefill_retry_timeout_ms: int
     prefill_retry_times: int
+    prefill_stop_stream_wait_timeout_ms: int
     rdma_connect_retry_times: int
     remote_rpc_server_port: int
     role_type: RoleType
@@ -1595,6 +1605,7 @@ class RuntimeConfig:
     use_batch_decode_scheduler: bool
     warm_up: bool
     warm_up_with_loss: bool
+    model_warm_up: bool
     worker_addrs: list[str]
     worker_grpc_addrs: list[str]
     def __getstate__(self) -> tuple:

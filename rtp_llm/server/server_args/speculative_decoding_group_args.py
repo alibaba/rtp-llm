@@ -21,7 +21,7 @@ def init_speculative_decoding_group_args(parser, sp_config):
         bind_to=(sp_config, "type"),
         type=str,
         default="",
-        help='控制是否启用 speculative decoding 。"vanilla" 不启用，"mtp" 启用 ',
+        help='控制 speculative decoding 类型，例如 "mtp"、"eagle" 或 "dspark"。',
     )
 
     speculative_decoding_group.add_argument(

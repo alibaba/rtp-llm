@@ -78,11 +78,36 @@ struct MallocInfo {
     int incrSeqLen() const;
 };
 
-struct MallocResult {
-    bool success;
-    int  reuse_len;
+// Separates "the pools are momentarily full, retry later" from "this request can never fit".
+// A RETRYABLE failure keeps the stream WAITING instead of erroring it out under cache pressure.
+enum class MallocStatus : uint8_t {
+    NONE = 0,
+    RETRYABLE_RESOURCE_EXHAUSTED,
+    PERMANENT_RESOURCE_EXHAUSTED,
+    INTERNAL_ERROR,
+};
 
-    int64_t match_cost_time_us = 0;
+struct MallocResult {
+    MallocResult() = default;
+
+    constexpr MallocResult(bool         success,
+                           int          reuse_len,
+                           int64_t      match_cost_time_us = 0,
+                           MallocStatus status             = MallocStatus::NONE):
+        success(success),
+        reuse_len(reuse_len),
+        match_cost_time_us(match_cost_time_us),
+        // A success never carries a failure status, and a failure that forgot to
+        // classify itself is surfaced as an internal error rather than NONE.
+        status(success                      ? MallocStatus::NONE :
+               status == MallocStatus::NONE ? MallocStatus::INTERNAL_ERROR :
+                                              status) {}
+
+    bool success   = false;
+    int  reuse_len = 0;
+
+    int64_t      match_cost_time_us = 0;
+    MallocStatus status             = MallocStatus::INTERNAL_ERROR;
 };
 
 struct FreeInfo {

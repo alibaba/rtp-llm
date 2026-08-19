@@ -517,6 +517,10 @@ int GenerateStream::memoryReuseLength() const {
 }
 
 void GenerateStream::setInitialReuseLength(int initial_reuse_length) {
+    // NOTE: no upper-bound check against seqLength() here. Under CP sharding the
+    // connector reuse lengths are accounted in canonical block tokens
+    // (seq_size_per_block * cp_size), which can legitimately exceed the
+    // rank-local sequence length.
     initial_reuse_length_ = initial_reuse_length;
 }
 
@@ -942,7 +946,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     // already covers stop/EOS/max-token boundaries.
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
-    RTP_LLM_LOG_DEBUG("stream [%ld] spec update", streamId());
+    RTP_LLM_LOG_DEBUG("stream [%s] spec update", streamLogTag().c_str());
     *is_context_stream_ = false;
     if (reportUpdateErrorWithoutLock(update_info.error_info)) {
         return;
@@ -996,8 +1000,18 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     int  target_last_token = new_tokens.data_ptr<int>()[num_new_tokens - 1];
     int* spec_tokens       = sp_output_buffer_->tokens.data_ptr<int>();
     spec_tokens[0]         = target_last_token;
-    spec_tokens[1]         = update_info.draft_token;
-    propose_token_         = {target_last_token, update_info.draft_token};
+    if (update_info.draft_token >= 0) {
+        RTP_LLM_CHECK_WITH_INFO(sp_output_buffer_->tokens.numel() >= 2,
+                                "speculative token buffer must contain target and draft slots");
+        spec_tokens[1]  = update_info.draft_token;
+        propose_token_ = {target_last_token, update_info.draft_token};
+    } else {
+        // Commit-only speculative steps (DSpARK prefill/decode tail) publish
+        // only accepted target tokens. Their next proposal is produced at the
+        // following decode round head and must not become persistent stream
+        // or PD side-channel state.
+        propose_token_.clear();
+    }
 
     sp_output_buffer_->hidden_states = update_info.draft_hidden_states;
     sp_output_buffer_->all_probs     = update_info.draft_token_probs;
@@ -1020,8 +1034,8 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
             getFinalTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
         stream_cache_resource_->swapLinearBlocks(0, src_block_idx, des_block_idx);
 
-        RTP_LLM_LOG_DEBUG("[stream %d (%d -> %d)] swap cache blocks: %d -> %d, %d -> %d",
-                          streamId(),
+        RTP_LLM_LOG_DEBUG("[stream %s (%d -> %d)] swap cache blocks: %d -> %d, %d -> %d",
+                          streamLogTag().c_str(),
                           cur_cached_len + 1,
                           nxt_cached_len + 1,
                           cached_src_block_idx,
@@ -1029,8 +1043,10 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                           src_block_idx,
                           des_block_idx);
     } else {
-        RTP_LLM_LOG_DEBUG(
-            "[stream %d (%d -> %d)] no swap cache blocks", streamId(), cur_cached_len + 1, nxt_cached_len + 1);
+        RTP_LLM_LOG_DEBUG("[stream %s (%d -> %d)] no swap cache blocks",
+                          streamLogTag().c_str(),
+                          cur_cached_len + 1,
+                          nxt_cached_len + 1);
     }
 
     // update normal output buffer
@@ -1051,7 +1067,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
 void GenerateStream::update(const StreamUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
-    RTP_LLM_LOG_DEBUG("stream [%ld] update", streamId());
+    RTP_LLM_LOG_DEBUG("stream [%s] update", streamLogTag().c_str());
     *is_context_stream_ = false;
     if (reportUpdateErrorWithoutLock(update_info.error_info)) {
         return;
@@ -1266,8 +1282,8 @@ void GenerateStream::reportStreamMetrics() {
         collector.is_streaming_qps  = generate_input_->generate_config->is_streaming;
         collector.not_streaming_qps = !generate_input_->generate_config->is_streaming;
         if (getStatus() == StreamState::FINISHED || cancelled || timeout) {
-            collector.reuse_length       = initial_reuse_length_;
-            collector.input_token_length = inputLength();
+            collector.reuse_length           = initial_reuse_length_;
+            collector.input_token_length     = inputLength();
             collector.effective_context_length =
                 std::max<int64_t>(0, collector.input_token_length - initial_reuse_length_);
             collector.output_token_length    = outputTokenLen();
@@ -1276,7 +1292,7 @@ void GenerateStream::reportStreamMetrics() {
             collector.total_latency_us       = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
             collector.first_token_latency_us = complete_token_ids_->firstTokenLatencyUs();
             RTP_LLM_LOG_DEBUG(
-                "stream [%ld] report first latency us = %ld", streamId(), collector.first_token_latency_us);
+                "stream [%s] report first latency us = %ld", streamLogTag().c_str(), collector.first_token_latency_us);
             collector.wait_latency_us = wait_time_us_;
             if (scheduler_enqueue_time_us_ > 0 && can_run_time_us_ > scheduler_enqueue_time_us_) {
                 collector.enqueue_to_canrun_us = can_run_time_us_ - scheduler_enqueue_time_us_;

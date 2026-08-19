@@ -12,10 +12,13 @@ from __future__ import annotations
 import json
 import logging
 import struct
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import IntEnum
 from functools import cache
 from typing import TYPE_CHECKING, Any, Iterator, NamedTuple
+
+import torch
 
 from rtp_llm.config.response_format import parse_response_format
 from rtp_llm.dash_sc.proto import predict_v2_pb2
@@ -31,6 +34,7 @@ if TYPE_CHECKING:
     from rtp_llm.config.generate_config import GenerateConfig
     from rtp_llm.utils.base_model_datatypes import MMUrlType
 
+_INT32_MIN = -2_147_483_648
 _INT32_MAX = 2_147_483_647
 _DEFAULT_MAX_NEW_TOKENS = 32000
 
@@ -70,7 +74,10 @@ DASHSERVING_INNER_ENGINE_ERROR_NO = 19
 
 DASH_ERROR_BAD_REQUEST = DashErrorSpec(
     error_no=LLMFinishReason.STOP_ENGINE_PARAM,
-    finish_reason=LLMFinishReason.STOP_ENGINE_PARAM,
+    # USE_PARAMETER_STATUS tells DashScope api-server to use the explicit
+    # status_* response parameters instead of mapping STOP_ENGINE_PARAM to a
+    # generic 500 EngineAbort. Keep error_no=8 for compatibility and metrics.
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
     status_code=400,
     status_name="InvalidParameter",
 )
@@ -86,15 +93,50 @@ DASH_ERROR_UNSUPPORTED = DashErrorSpec(
     status_code=422,
     status_name="InvalidParameter",
 )
+# NOTE: finish_reason must be USE_PARAMETER_STATUS for any spec whose
+# status_code differs from what the DashScope api-server would derive via
+# LlmFinishReasonUtils.finishReasonToStatusCode().  The api-server only
+# passes the explicit status_code (from the error_msg JSON) through verbatim
+# when finish_reason == USE_PARAMETER_STATUS (1000); otherwise it re-derives
+# HTTP from the finish_reason code, which maps most non-trivial codes to
+# InternalError.EngineAbort/500.  error_no is kept at the semantic value for
+# downstream metric/labelling; only finish_reason is remapped.
+# Mirrors the STOP_ENGINE_PARAM→USE_PARAMETER_STATUS translation that
+# dashllm's processor.py (L1438-1442) applies at the wire boundary.
 DASH_ERROR_CAPACITY = DashErrorSpec(
     error_no=LLMFinishReason.TASK_LIST_FULL,
-    finish_reason=LLMFinishReason.TASK_LIST_FULL,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
     status_code=503,
     status_name="ServiceUnavailable",
 )
+# Auto-TPM victim preemption (Master 8429 PRIORITY_PREEMPTED): the request was
+# already dispatched and then cancelled as a victim of a strictly
+# higher-priority request.  Distinct from generic capacity backpressure
+# (DASH_ERROR_CAPACITY): error_no carries ABORT(10) for downstream
+# metric/labelling, status_name is Throttling.Aborted, and finish_reason is
+# USE_PARAMETER_STATUS so the api-server passes the explicit 429 through
+# verbatim (same wire convention as the specs above).
+DASH_ERROR_AUTO_TPM_PREEMPTED = DashErrorSpec(
+    error_no=LLMFinishReason.ABORT,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
+    status_code=429,
+    status_name="Throttling.Aborted",
+)
+DASH_ERROR_ADMISSION_OVERLOADED = DashErrorSpec(
+    error_no=LLMFinishReason.TASK_LIST_FULL,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
+    status_code=429,
+    status_name="Throttling.ServiceOverloaded",
+)
+DASH_ERROR_RESOURCE_EXHAUSTED = DashErrorSpec(
+    error_no=LLMFinishReason.TASK_LIST_FULL,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
+    status_code=429,
+    status_name="Throttling.ResourceExhausted",
+)
 DASH_ERROR_TIMEOUT = DashErrorSpec(
     error_no=LLMFinishReason.STOP_TIMEOUT,
-    finish_reason=LLMFinishReason.STOP_TIMEOUT,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
     status_code=504,
     status_name="GatewayTimeout",
 )
@@ -106,7 +148,7 @@ DASH_ERROR_INVALID_OUTPUT = DashErrorSpec(
 )
 DASH_ERROR_ABORT = DashErrorSpec(
     error_no=LLMFinishReason.ABORT,
-    finish_reason=LLMFinishReason.ABORT,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
     status_code=499,
     status_name="ClientClosedRequest",
 )
@@ -120,6 +162,10 @@ DASH_ERROR_INTERNAL = DashErrorSpec(
 
 class DashScParameterError(ValueError):
     """Explicit user-parameter parse/validation error for dash-sc gRPC."""
+
+
+class DashScInputIdsError(RuntimeError):
+    """Input IDs cannot be represented by the engine's INT32 tensor."""
 
 
 # ----------------------------------------------------------------------------
@@ -762,6 +808,12 @@ class SamplingParams:
 # ----------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class ParsedInputIds:
+    values: list[int]
+    tensor: torch.Tensor
+
+
 def parse_input_ids_from_request(
     request: predict_v2_pb2.ModelInferRequest,
 ) -> list[int] | None:
@@ -773,6 +825,27 @@ def parse_input_ids_from_request(
     if inp is None or raw is None:
         return None
     return _parse_int_tensor_flat(inp, raw)
+
+
+def _parse_input_ids_for_inference(request) -> ParsedInputIds | None:
+    inp, raw = _find_input_raw(request, "input_ids")
+    if inp is None or raw is None:
+        return None
+    values = _parse_int_tensor_flat(inp, raw)
+    if values is None:
+        return None
+    if inp.datatype == "INT32":
+        tensor = torch.frombuffer(bytearray(raw), dtype=torch.int32)
+    elif inp.datatype == "INT64":
+        tensor = torch.frombuffer(bytearray(raw), dtype=torch.int64)
+        if tensor.numel():
+            min_value, max_value = torch.aminmax(tensor)
+            if min_value.item() < _INT32_MIN or max_value.item() > _INT32_MAX:
+                raise DashScInputIdsError("input_ids value is outside the INT32 range")
+        tensor = tensor.to(torch.int32)
+    else:
+        return None
+    return ParsedInputIds(values=values, tensor=tensor)
 
 
 def parse_sampling_params(
@@ -956,7 +1029,11 @@ def parse_request_controls(
         )
 
     request_headers: dict[str, str] = {}
-    for header_name in ("user_id", "x-dashscope-apikeyid"):
+    for header_name in (
+        "user_id",
+        "x-dashscope-apikeyid",
+        "x-dashscope-inner-qos-level",
+    ):
         value = _normalize_non_empty_str(ds_attrs.get(header_name))
         if value is not None:
             request_headers[header_name] = value
@@ -974,9 +1051,13 @@ def parse_request_controls(
 
 def parse_dash_sc_grpc_request(
     request: predict_v2_pb2.ModelInferRequest,
-) -> tuple[list[int] | None, SamplingParams | None, DashScRequestControls | None]:
-    """Parse one ``ModelInferRequest`` into ids, sampling, and request controls."""
-    ids = parse_input_ids_from_request(request)
+) -> tuple[ParsedInputIds | None, SamplingParams | None, DashScRequestControls | None]:
+    """Parse one ``ModelInferRequest`` into ids, sampling, and request controls.
+
+    ``input_ids`` are returned as a :class:`ParsedInputIds` so the engine can take the
+    zero-copy INT32 tensor directly instead of re-materializing it from the list.
+    """
+    ids = _parse_input_ids_for_inference(request)
     if ids is None:
         return None, None, None
     ds_attrs = parse_ds_header_attributes(request)
@@ -1438,6 +1519,232 @@ def build_stream_response_from_generate_outputs(
     return stream_resp
 
 
+class StreamResponseBuilder:
+    """Request-scoped protobuf builder with a cached static response template.
+
+    A streaming response repeats the same tensor descriptors, request identity,
+    generation limits, and most parameters for every chunk. Construct them once,
+    then clone the protobuf and patch only values that can change per frame.
+    """
+
+    __slots__ = (
+        "_dash_sc_request_id",
+        "_model_name",
+        "_request_log_tag",
+        "_request_input_ids",
+        "_return_input_ids",
+        "_is_streaming",
+        "_generate_config",
+        "_eos_token_id",
+        "_max_token_id",
+        "_template",
+        "_generated_index",
+        "_finish_index",
+        "_finished_index",
+        "_prompt_index",
+        "_cached_index",
+        "_template_finish_reason",
+        "_template_finished",
+        "_template_prompt_tokens",
+        "_template_cached_tokens",
+        "_template_think_token_num",
+    )
+
+    def __init__(
+        self,
+        *,
+        dash_sc_request_id: str,
+        model_name: str,
+        request_log_tag: str,
+        request_input_ids: list[int] | None = None,
+        return_input_ids: bool = False,
+        is_streaming: bool = True,
+        generate_config: Any = None,
+        eos_token_id: int | None = None,
+        max_token_id: int | None = None,
+    ) -> None:
+        self._dash_sc_request_id = dash_sc_request_id
+        self._model_name = model_name
+        self._request_log_tag = request_log_tag
+        self._request_input_ids = request_input_ids
+        self._return_input_ids = return_input_ids
+        self._is_streaming = is_streaming
+        self._generate_config = generate_config
+        self._eos_token_id = eos_token_id
+        self._max_token_id = max_token_id
+        self._template: predict_v2_pb2.ModelStreamInferResponse | None = None
+        self._generated_index = -1
+        self._finish_index = -1
+        self._finished_index = -1
+        self._prompt_index = -1
+        self._cached_index = -1
+        self._template_finish_reason: int | None = None
+        self._template_finished: bool | None = None
+        self._template_prompt_tokens: int | None = None
+        self._template_cached_tokens: int | None = None
+        self._template_think_token_num: int | None = None
+
+    def build(
+        self,
+        go: GenerateOutputs,
+        *,
+        generate_think_token_num: int | None = None,
+        finish_reason_override: int | None = None,
+        stream_finished: bool | None = None,
+        token_ids: list[int] | None = None,
+    ) -> predict_v2_pb2.ModelStreamInferResponse:
+        if not go.generate_outputs:
+            raise ValueError("StreamResponseBuilder.build expects non-empty outputs")
+        out_py = go.generate_outputs[0]
+        generated_ids = (
+            token_ids
+            if token_ids is not None
+            else _token_ids_list_from_generate_output(out_py)
+        )
+        finished = stream_finished if stream_finished is not None else out_py.finished
+        finish_reason = (
+            finish_reason_override
+            if finish_reason_override is not None
+            else LLMFinishReason.STOP if finished else LLMFinishReason.STREAMING
+        )
+        aux_info = getattr(out_py, "aux_info", None)
+        prompt_tokens = (
+            int(aux_info.input_len)
+            if aux_info is not None
+            else len(self._request_input_ids or [])
+        )
+        cached_tokens = int(aux_info.reuse_len) if aux_info is not None else 0
+
+        if self._template is None:
+            response = predict_v2_pb2.ModelStreamInferResponse()
+            infer = response.infer_response
+            infer.id = self._dash_sc_request_id
+            infer.model_name = self._model_name
+            if self._return_input_ids and self._request_input_ids is not None:
+                _append_prompt_token_ids_output(infer, self._request_input_ids)
+            _append_generated_ids_output(infer, generated_ids)
+            _append_finish_reason_output(infer, finished, finish_reason_override)
+            _append_finished_output(infer, finished)
+            _append_aux_info_metrics_outputs(
+                infer,
+                out_py,
+                prompt_token_fallback=len(self._request_input_ids or []),
+            )
+            infer.parameters["incremental_output"].int64_param = (
+                1 if self._is_streaming else 0
+            )
+            _append_dashllm_limit_parameters(
+                infer,
+                generate_config=self._generate_config,
+                eos_token_id=self._eos_token_id,
+                max_token_id=self._max_token_id,
+                generate_think_token_num=generate_think_token_num,
+            )
+            self._template = predict_v2_pb2.ModelStreamInferResponse()
+            self._template.CopyFrom(response)
+            output_indexes = {
+                output.name: index
+                for index, output in enumerate(response.infer_response.outputs)
+            }
+            self._generated_index = output_indexes["generated_ids"]
+            self._finish_index = output_indexes["finish_reason"]
+            self._finished_index = output_indexes["finished"]
+            self._prompt_index = output_indexes["prompt_token_num"]
+            self._cached_index = output_indexes["prompt_cached_token_num"]
+            self._template_finish_reason = int(finish_reason)
+            self._template_finished = bool(finished)
+            self._template_prompt_tokens = prompt_tokens
+            self._template_cached_tokens = cached_tokens
+            self._template_think_token_num = generate_think_token_num
+            logging.debug(
+                "[DashScGrpc] [%s] generated_ids: %s",
+                self._request_log_tag,
+                generated_ids,
+            )
+            logging.debug(
+                "[DashScGrpc] [%s] return_input_ids=%s prompt_len=%s is_streaming=%s",
+                self._request_log_tag,
+                self._return_input_ids,
+                len(self._request_input_ids or []),
+                self._is_streaming,
+            )
+            return response
+
+        response = predict_v2_pb2.ModelStreamInferResponse()
+        response.CopyFrom(self._template)
+        infer = response.infer_response
+
+        generated_raw = (
+            struct.pack("<%di" % len(generated_ids), *generated_ids)
+            if generated_ids
+            else struct.pack("<i", 0)
+        )
+        infer.raw_output_contents[self._generated_index] = generated_raw
+        infer.outputs[self._generated_index].shape[:] = [1, len(generated_ids)]
+
+        if int(finish_reason) != self._template_finish_reason:
+            infer.raw_output_contents[self._finish_index] = struct.pack(
+                "<q", int(finish_reason)
+            )
+        if bool(finished) != self._template_finished:
+            infer.raw_output_contents[self._finished_index] = (
+                b"\x01" if finished else b"\x00"
+            )
+        if prompt_tokens != self._template_prompt_tokens:
+            infer.raw_output_contents[self._prompt_index] = struct.pack(
+                "<i", prompt_tokens
+            )
+            infer.parameters["prompt_token_num"].int64_param = prompt_tokens
+        if cached_tokens != self._template_cached_tokens:
+            infer.raw_output_contents[self._cached_index] = struct.pack(
+                "<i", cached_tokens
+            )
+            infer.parameters["prompt_cached_token_num"].int64_param = cached_tokens
+
+        if generate_think_token_num != self._template_think_token_num:
+            if generate_think_token_num is None:
+                if "generate_think_token_num" in infer.parameters:
+                    del infer.parameters["generate_think_token_num"]
+            else:
+                infer.parameters["generate_think_token_num"].int64_param = int(
+                    generate_think_token_num
+                )
+
+        logging.debug(
+            "[DashScGrpc] [%s] generated_ids: %s",
+            self._request_log_tag,
+            generated_ids,
+        )
+        logging.debug(
+            "[DashScGrpc] [%s] return_input_ids=%s prompt_len=%s is_streaming=%s",
+            self._request_log_tag,
+            self._return_input_ids,
+            len(self._request_input_ids or []),
+            self._is_streaming,
+        )
+        return response
+
+
+def iter_fake_model_stream_infer(
+    request,
+    input_ids_list: list[int],
+    top_k: int,
+) -> Iterator[predict_v2_pb2.ModelStreamInferResponse]:
+    """Mock: ``generated_ids = input_ids + 100``; single finished chunk."""
+    del top_k  # unused in fake path
+    out_ids = [x + 100 for x in input_ids_list]
+    stream_resp = predict_v2_pb2.ModelStreamInferResponse()
+    infer = stream_resp.infer_response
+    infer.id = request.id
+    infer.model_name = request.model_name
+    _append_generated_ids_output(infer, out_ids)
+    logging.debug("[DashScGrpc] fake out_gen.shape: %s", list(infer.outputs[0].shape))
+    _append_finish_reason_output(infer, finished=True)
+    _append_finished_output(infer, finished=True)
+    infer.parameters["incremental_output"].int64_param = 1
+    yield stream_resp
+
+
 def build_dash_error_response(
     request_id: str,
     model_name: str,
@@ -1473,4 +1780,10 @@ def build_dash_error_response(
     infer.parameters["incremental_output"].int64_param = 1
     infer.parameters["error_no"].int64_param = int(error_spec.error_no)
     infer.parameters["error_msg"].string_param = error_msg
+    # DashScope api-server reads status_* as standalone parameters; without
+    # status_name it degrades every error to 500 "missing status name".
+    # error_no/error_msg above are kept for backward compatibility.
+    infer.parameters["status_code"].int64_param = int(error_spec.status_code)
+    infer.parameters["status_name"].string_param = error_spec.status_name
+    infer.parameters["status_message"].string_param = status_message
     return resp

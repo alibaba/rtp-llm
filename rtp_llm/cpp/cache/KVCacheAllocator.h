@@ -145,9 +145,23 @@ public:
     uint32_t convertToGlobalLayerId(size_t model_id, int local_layer_id) const;
 
 protected:
+    // Which capacity snapshots evaluateInitCapacity() is allowed to consult.
+    // TOTAL_ONLY answers "can this request ever fit"; TOTAL_AND_AVAILABLE also
+    // answers "can it fit right now".
+    enum class InitCapacityMode {
+        TOTAL_ONLY,
+        TOTAL_AND_AVAILABLE,
+    };
+
     virtual bool         doInit() = 0;
     virtual size_t       reservableAvailableBlocksNum() const;
     MallocResult         initMalloc(const MallocInfo& malloc_info);
+    // Classifies an init-malloc shortfall: a total-capacity shortfall is
+    // PERMANENT (the request can never fit), an available-capacity shortfall is
+    // RETRYABLE (the pools are momentarily full) so the stream stays WAITING
+    // instead of being errored out under cache pressure.
+    virtual MallocStatus
+    evaluateInitCapacity(const MallocInfo& malloc_info, size_t reserve_blocks, InitCapacityMode mode) const;
     virtual MallocResult incrMalloc(const MallocInfo& malloc_info)             = 0;
     virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) = 0;
     virtual int          getNeedBlocks(const MallocInfo& malloc_info) const    = 0;

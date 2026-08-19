@@ -68,7 +68,7 @@ class VIPServerProxy:
         jmenv_url = f"http://{self.jmenv}/vipserver/serverlist?nofix=1&{query_string}"
 
         try:
-            resp = requests.get(jmenv_url).text
+            resp = requests.get(jmenv_url, timeout=3).text
             srv_lst = []
             for srv in resp.split("\n"):
                 if srv.strip() == "":
@@ -104,15 +104,16 @@ class VIPServerProxy:
             for srv in self.srv_hosts:
                 try:
                     resp = requests.get(
-                        f"http://{srv}:80/vipserver/api/{api}?{get_query_string(req_params)}"
+                        f"http://{srv}:80/vipserver/api/{api}?{get_query_string(req_params)}",
+                        timeout=3,
                     )
                     resp_json = resp.json()
                     return resp_json
                 except Exception as e:
-                    logging.info(
+                    logging.debug(
                         f"req api from vipserver fail, api:{api}, srv:{srv}, params:{params}, {str(e)}"
                     )
-                    raise e
+                    continue
             raise Exception("all vip srv is fail.")
         except Exception as e:
             logging.error("failed to req api: %s", str(e))

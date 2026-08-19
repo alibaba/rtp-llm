@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import torch
 
@@ -95,7 +95,11 @@ class WeightManager:
     """
 
     def __init__(
-        self, device, weight: ModelWeights, model_weights_loader: ModelLoader
+        self,
+        device,
+        weight: ModelWeights,
+        model_weights_loader: ModelLoader,
+        non_owned_global_weights: Sequence[str] = (),
     ) -> None:
         """
         Initializes the WeightManager with a model's weights, device information, and weight loader.
@@ -112,6 +116,7 @@ class WeightManager:
         self._weights: ModelWeights = weight
         self._weights_loader: ModelLoader = model_weights_loader
         self._weight_module = self._weights_loader._model_weights_info
+        self._non_owned_global_weights = frozenset(non_owned_global_weights)
         self._working_stream: torch.cuda.Stream = torch.cuda.Stream(
             device=self._device,
         )
@@ -255,6 +260,10 @@ class WeightManager:
                 # weight is global weight
 
                 name: str = rename_function(name)
+                if name in self._non_owned_global_weights:
+                    raise PermissionError(
+                        f"global weight {name!r} is a non-owning alias; update its owner instead"
+                    )
                 fail: bool = True
                 for weight in self._weight_module.weights:
                     if weight.name == name:

@@ -54,6 +54,22 @@ cc_library(
 )
 
 cc_library(
+    name = "tensor_holder",
+    hdrs = [
+        "TensorHolder.h",
+    ],
+    deps = torch_deps(),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "dspark_call_phase",
+    hdrs = ["DSparkCallPhase.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "op_data",
     hdrs = [
         "OpData.h",
@@ -64,6 +80,8 @@ cc_library(
     deps = [
         ":type_convert",
         ":common_defines",
+        ":dspark_call_phase",
+        ":tensor_holder",
         "//rtp_llm/cpp/models/models_weight:weights_define",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/models:stats",

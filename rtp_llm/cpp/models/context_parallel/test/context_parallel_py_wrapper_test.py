@@ -502,23 +502,6 @@ class TestContextParallelProcessor(unittest.TestCase):
                 2,
             )
 
-    def test_mtp_hidden_states_are_rejected_before_cp_remap(self):
-        combo_tokens = torch.arange(6, dtype=torch.int32)
-        hidden_states = torch.arange(8, dtype=torch.float32).reshape(4, 2)
-
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "Context parallel does not support MTP/speculative hidden states",
-        ):
-            cp_test.reject_mtp_hidden_states(
-                combo_tokens,
-                torch.tensor([6], dtype=torch.int32),
-                torch.empty(0, dtype=torch.int32),
-                hidden_states,
-                0,
-                2,
-            )
-
     def test_multiple_ranks(self):
         """Test load balance split across multiple ranks"""
         total_tokens = self.fake_input_tokens[:32]
@@ -554,6 +537,119 @@ class TestContextParallelProcessor(unittest.TestCase):
                 self.assertTrue(result)
                 self.assertEqual(input_tokens, expect_input_tokens[cp_rank])
                 self.assertEqual(shuffle_indices, expect_shuffle_indices[cp_rank])
+
+
+class TestHandleInputsWithHidden(unittest.TestCase):
+    def test_hidden_states_split_with_input_tokens(self):
+        total_tokens = torch.tensor([10, 11, 12, 13, 14, 15], dtype=torch.int32)
+        input_lengths = torch.tensor([6], dtype=torch.int32)
+        sequence_lengths = torch.empty((0,), dtype=torch.int32)
+        hidden_states = torch.tensor(
+            [
+                [0.0, 0.5],
+                [1.0, 1.5],
+                [2.0, 2.5],
+                [3.0, 3.5],
+                [4.0, 4.5],
+                [5.0, 5.5],
+            ],
+            dtype=torch.float32,
+        )
+
+        tokens0, lengths0, hidden0, shuffle0 = cp_test.handle_inputs_with_hidden(
+            total_tokens, input_lengths, sequence_lengths, hidden_states, 0, 2
+        )
+        self.assertTrue(
+            torch.equal(tokens0, torch.tensor([10, 11, 0, 0], dtype=torch.int32))
+        )
+        self.assertTrue(torch.equal(lengths0, torch.tensor([4], dtype=torch.int32)))
+        self.assertTrue(
+            torch.equal(shuffle0, torch.tensor([0, 1, 6, 7], dtype=torch.int32))
+        )
+        self.assertTrue(
+            torch.equal(
+                hidden0,
+                torch.tensor(
+                    [[0.0, 0.5], [1.0, 1.5], [0.0, 0.0], [0.0, 0.0]],
+                    dtype=torch.float32,
+                ),
+            )
+        )
+
+        tokens1, lengths1, hidden1, shuffle1 = cp_test.handle_inputs_with_hidden(
+            total_tokens, input_lengths, sequence_lengths, hidden_states, 1, 2
+        )
+        self.assertTrue(
+            torch.equal(tokens1, torch.tensor([12, 13, 14, 15], dtype=torch.int32))
+        )
+        self.assertTrue(torch.equal(lengths1, torch.tensor([4], dtype=torch.int32)))
+        self.assertTrue(
+            torch.equal(shuffle1, torch.tensor([2, 3, 4, 5], dtype=torch.int32))
+        )
+        self.assertTrue(
+            torch.equal(
+                hidden1,
+                torch.tensor(
+                    [[2.0, 2.5], [3.0, 3.5], [4.0, 4.5], [5.0, 5.5]],
+                    dtype=torch.float32,
+                ),
+            )
+        )
+
+    def test_rank_local_hidden_states_pass_through_standard_split(self):
+        """MTP/DSpARK draft commit may re-enter CP with local feature rows."""
+        total_tokens = torch.tensor([10, 11, 12, 13, 14, 15], dtype=torch.int32)
+        input_lengths = torch.tensor([6], dtype=torch.int32)
+        sequence_lengths = torch.empty((0,), dtype=torch.int32)
+        rank_local_hidden = torch.tensor(
+            [[20.0, 20.5], [21.0, 21.5], [22.0, 22.5], [23.0, 23.5]],
+            dtype=torch.float32,
+        )
+
+        tokens, lengths, hidden, shuffle = cp_test.handle_inputs_with_hidden(
+            total_tokens,
+            input_lengths,
+            sequence_lengths,
+            rank_local_hidden,
+            0,
+            2,
+            split_hidden_states=False,
+        )
+
+        self.assertTrue(
+            torch.equal(tokens, torch.tensor([10, 11, 0, 0], dtype=torch.int32))
+        )
+        self.assertTrue(torch.equal(lengths, torch.tensor([4], dtype=torch.int32)))
+        self.assertTrue(
+            torch.equal(shuffle, torch.tensor([0, 1, 6, 7], dtype=torch.int32))
+        )
+        # The features already follow this rank's target-prefill layout. The
+        # ordinary CP input processor must not apply the shuffle a second time.
+        self.assertTrue(torch.equal(hidden, rank_local_hidden))
+
+    def test_configured_local_hidden_is_not_split_when_row_counts_are_ambiguous(self):
+        # The processor layout policy is fixed at construction. Even when
+        # global_tokens == local_padded_tokens, rank-local hidden states must
+        # not be split again.
+        total_tokens = torch.tensor([10, 11], dtype=torch.int32)
+        input_lengths = torch.tensor([2], dtype=torch.int32)
+        sequence_lengths = torch.empty((0,), dtype=torch.int32)
+        local_hidden = torch.tensor([[11.0, 11.5], [99.0, 99.5]], dtype=torch.float32)
+
+        tokens, lengths, hidden, shuffle = cp_test.handle_inputs_with_hidden(
+            total_tokens,
+            input_lengths,
+            sequence_lengths,
+            local_hidden,
+            1,
+            2,
+            split_hidden_states=False,
+        )
+
+        self.assertTrue(torch.equal(tokens, torch.tensor([11, 0], dtype=torch.int32)))
+        self.assertTrue(torch.equal(lengths, torch.tensor([2], dtype=torch.int32)))
+        self.assertTrue(torch.equal(shuffle, torch.tensor([1, 2], dtype=torch.int32)))
+        self.assertTrue(torch.equal(hidden, local_hidden))
 
 
 class TestGenerateQKVRestoreIndices(unittest.TestCase):
@@ -723,6 +819,115 @@ class TestGenerateQKVPaddingMask(unittest.TestCase):
             cp_size * torch.sum(prefill_cp_chunk_lengths), dtype=torch.bool
         )
         self.assertTrue(torch.equal(expect_padding_mask, padding_mask))
+
+
+class TestComputeLocalLastHidden(unittest.TestCase):
+    """Validate the CP gather-last-hidden path (handleOutputsLastHidden).
+
+    handleOutputsLastHidden = computeLocalLastHidden (per rank, no comm) +
+    all-reduce-sum across ranks. Here we drive computeLocalLastHidden for every
+    rank in-process and sum the results to simulate the all-reduce, then check it
+    reconstructs exactly the rows the legacy full-gather path would index_select.
+    """
+
+    @staticmethod
+    def _pad_to(value: int, multiple: int) -> int:
+        return ((value + multiple - 1) // multiple) * multiple
+
+    def _run_case(self, stream_lens, cp_size, hidden_dim=3):
+        # Per-stream padded length must be divisible by 2 * cp_size (see plan()).
+        padded_lens = [self._pad_to(s, 2 * cp_size) for s in stream_lens]
+        chunk_lens = [p // cp_size for p in padded_lens]
+        padding_lens = [p - s for p, s in zip(padded_lens, stream_lens)]
+
+        chunk_lengths = torch.tensor(chunk_lens, dtype=torch.int32)
+        padding_lengths = torch.tensor(padding_lens, dtype=torch.int32)
+
+        restore_indice = cp_test.generate_qkv_restore_indices(chunk_lengths, cp_size)
+        padding_mask = cp_test.generate_qkv_padding_mask(
+            chunk_lengths, padding_lengths, cp_size
+        )
+
+        total_token_size = int(chunk_lengths.sum().item())  # per-rank chunk length
+        p_total = cp_size * total_token_size
+        self.assertEqual(restore_indice.numel(), p_total)
+        self.assertEqual(padding_mask.numel(), p_total)
+
+        # Deterministic, all-nonzero per-position hidden in original padded order.
+        # Padding rows are never an lm_output position and never gathered, so any
+        # leak of a padding/wrong row would show up as a value mismatch.
+        base = torch.arange(1, p_total + 1, dtype=torch.float32).unsqueeze(1)
+        scale = torch.tensor([[1.0, 10.0, 100.0][:hidden_dim]], dtype=torch.float32)
+        orig_hidden_padded = base * scale  # [p_total, hidden_dim]
+
+        # Lay the original rows out in chunk-concat (flat) order: all_hidden_flat is
+        # what the all-gather would produce; rank r owns rows [r*tts, (r+1)*tts).
+        all_hidden_flat = torch.zeros((p_total, hidden_dim), dtype=torch.float32)
+        all_hidden_flat.index_copy_(
+            0, restore_indice.to(torch.long), orig_hidden_padded
+        )
+        rank_chunks = all_hidden_flat.reshape(cp_size, total_token_size, hidden_dim)
+
+        # Reference restored hidden (original valid-seq order), like handleOutputs.
+        valid_indices = torch.nonzero(padding_mask).squeeze(-1)
+        restored = orig_hidden_padded.index_select(0, valid_indices.to(torch.long))
+
+        # Pick last valid token of each stream (positions into valid-seq order).
+        ends = []
+        acc = 0
+        for s in stream_lens:
+            acc += s
+            ends.append(acc - 1)
+        lm_output_indexes = torch.tensor(ends, dtype=torch.int32)
+        num_lm = lm_output_indexes.numel()
+
+        expected = restored.index_select(0, lm_output_indexes.to(torch.long))
+
+        # Per-rank contribution + simulated all-reduce-sum, plus an ownership count.
+        summed = torch.zeros((num_lm, hidden_dim), dtype=torch.float32)
+        contributors = torch.zeros(num_lm, dtype=torch.long)
+        for r in range(cp_size):
+            local_buf = cp_test.compute_local_last_hidden(
+                rank_chunks[r].contiguous(),
+                restore_indice,
+                padding_mask,
+                lm_output_indexes,
+                r,
+                cp_size,
+            )
+            self.assertEqual(list(local_buf.shape), [num_lm, hidden_dim])
+            summed += local_buf
+            contributors += (local_buf.abs().sum(dim=1) > 0).to(torch.long)
+
+        # 1) Summing the per-rank buffers reconstructs exactly the gathered rows.
+        self.assertTrue(
+            torch.equal(summed, expected),
+            f"summed != expected\nsummed={summed}\nexpected={expected}",
+        )
+        # 2) Each output row is contributed by exactly one rank (zigzag bijection).
+        self.assertTrue(
+            torch.equal(contributors, torch.ones(num_lm, dtype=torch.long)),
+            f"each row must have exactly one owner, got {contributors.tolist()}",
+        )
+
+    def test_single_stream_no_padding(self):
+        # 16 tokens, cp=2 -> 16 % 4 == 0, no padding.
+        self._run_case(stream_lens=[16], cp_size=2)
+
+    def test_single_stream_with_padding(self):
+        # 14 tokens, cp=2 -> padded to 16, 2 padding tokens.
+        self._run_case(stream_lens=[14], cp_size=2)
+
+    def test_single_stream_cp4(self):
+        # 32 tokens, cp=4 -> 32 % 8 == 0, no padding.
+        self._run_case(stream_lens=[32], cp_size=4)
+
+    def test_multi_stream_with_padding(self):
+        # Two streams, both need padding under cp=2.
+        self._run_case(stream_lens=[6, 10], cp_size=2)
+
+    def test_multi_stream_cp4_with_padding(self):
+        self._run_case(stream_lens=[10, 20, 7], cp_size=4)
 
 
 if __name__ == "__main__":

@@ -11,7 +11,10 @@ from typing import Any, Optional
 import torch
 
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
-from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
+from rtp_llm.models_py.modules.base.common.kvcache_store import (
+    create_write_cache_store_impl as _create_write_cache_store_impl,
+)
+from rtp_llm.ops.compute_ops import KVCache, LayerKVCache, PyAttentionInputs
 
 
 def reshape_paged_kv_cache(
@@ -44,24 +47,26 @@ def reshape_paged_kv_cache(
 
 def create_write_cache_store_impl(
     attn_inputs: PyAttentionInputs,
+    kv_cache: Optional[KVCache] = None,
 ) -> Optional[WriteCacheStoreOp]:
     """Create write cache store implementation if needed.
 
+    The op class is passed explicitly as this module's ``WriteCacheStoreOp``
+    global, resolved on every call. That keeps this module the single seam for
+    every attention backend: rebinding (or patching) ``WriteCacheStoreOp`` here
+    changes what the shared factory instantiates, instead of being silently
+    bypassed by the delegation.
+
     Args:
         attn_inputs: Attention calculation input parameters
+        kv_cache: Whole-model KV cache handle, for multi-group (DSv4) callers
 
     Returns:
         WriteCacheStoreOp instance if cache store is needed, None otherwise
     """
-    cache_store_inputs = attn_inputs.cache_store_inputs
-    cache_store_writer = attn_inputs.cache_store_writer
-    if (
-        attn_inputs.is_prefill
-        and cache_store_inputs is not None
-        and cache_store_writer is not None
-    ):
-        return WriteCacheStoreOp(cache_store_writer, cache_store_inputs)
-    return None
+    return _create_write_cache_store_impl(
+        attn_inputs, kv_cache, op_cls=WriteCacheStoreOp
+    )
 
 
 def apply_write_cache_store(

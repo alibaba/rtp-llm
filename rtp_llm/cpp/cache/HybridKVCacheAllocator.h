@@ -60,6 +60,12 @@ protected:
     virtual void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) const = 0;
     virtual void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false)            = 0;
     virtual bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const;
+    virtual void logMallocFailure(const MallocInfo& malloc_info,
+                                  const char*       phase,
+                                  int               failed_batch,
+                                  int               failed_group,
+                                  bool              incremental,
+                                  int               failed_need_blocks) const;
     bool         skipReuseCacheGroup(int gid) const;
     bool         cpCompactSwaGroup(int gid, const std::shared_ptr<CPSlotMapper>& mapper) const;
     void         rollbackBlockIdsToSize(int gid, BlockIds& block_ids, size_t original_size);

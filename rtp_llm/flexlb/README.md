@@ -114,6 +114,7 @@ export TRAFFIC_POLICY_CONFIG='{
 
 export STRATEGY_CONFIGS='{
     "shortestTtft": {
+        "queueTimeWeight": 0.3,
         "candidatePool": {
             "mode": "FIXED",
             "size": 1
@@ -205,7 +206,7 @@ Authorization: Bearer <token>
 FlexLB supports various configuration options through environment variables and Spring Boot properties:
 
 - **Load Balancing Strategy**: Configure through `FLEXLB_CONFIG`
-- **Strategy Parameters**: Configure strategy internals through `STRATEGY_CONFIGS`; for example `shortestTtft.candidatePool` controls the ShortestTTFT candidate pool. `mode=RATIO` uses `max(minSize, floor(workerCount * ratio))`, while `mode=FIXED` uses `size`.
+- **Strategy Parameters**: Configure strategy internals through `STRATEGY_CONFIGS`; `shortestTtft.queueTimeWeight` controls how strongly worker queue time affects scheduling (range `0.0-1.0`, default `1.0`), while `shortestTtft.candidatePool` controls the candidate pool. `mode=RATIO` uses `max(minSize, floor(workerCount * ratio))`, while `mode=FIXED` uses `size`.
 - **Backend Services**: Configure through `MODEL_SERVICE_CONFIG`
 - **ZooKeeper Settings**: Configure through `FLEXLB_SYNC_CONSISTENCY_CONFIG`
 

@@ -1,10 +1,10 @@
 """kmonitor fan-out for the dash_sc gRPC path.
 
 Stateless leaf functions called from each servicer's ``ModelStreamInfer`` —
-``report_arrival`` at RPC entry, ``report_chunk`` per response frame, and
-``report_frontend_rpc_done`` / ``report_forwarder_rpc_done`` at the finally tail
-(after the access log line is emitted). They mirror the metric family the HTTP
-frontend reports in
+``report_arrival_priority`` at RPC entry, ``report_chunk`` per response frame,
+and ``report_frontend_rpc_done`` / ``report_forwarder_rpc_done`` at the finally
+tail (after the access log line is emitted). They mirror the metric family the
+HTTP frontend reports in
 :class:`rtp_llm.frontend.frontend_server.FrontendServer` (``py_rtp_framework_qps``
 / ``py_rtp_framework_rt`` / ``py_rtp_response_first_token_rt`` / …) so the two
 protocols share metric names and dashboards can slice by the ``protocol`` tag.
@@ -25,7 +25,7 @@ import time
 from typing import Optional
 
 from rtp_llm.dash_sc.access_record import DASH_SC_GRPC_PROTOCOL, GrpcAccessRecord
-from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
+from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor, qos_priority_tag
 
 # The single RPC method both servicers implement — a constant kmonitor dimension.
 _METRIC_METHOD = "ModelStreamInfer"
@@ -50,16 +50,41 @@ def _metric_tags(rank_id: Optional[int], server_id: Optional[int]) -> dict[str, 
     }
 
 
-def report_arrival(*, rank_id: Optional[int], server_id: Optional[int]) -> None:
-    """Mirror ``FrontendServer.embedding`` entry-point QPS_METRIC.
+def _priority_tag(record: GrpcAccessRecord) -> str:
+    """The kmonitor ``priority`` tag value for this RPC.
 
-    Emitted once per RPC at handler entry — symmetric with the done metric
-    function in the finally tail — so frame-less RPCs (peer closed before sending,
-    client-iterator failure, immediate cancel) still count toward
-    ``py_rtp_framework_qps`` and ``success+error+cancel`` stays balanced
-    against the arrival curve.
+    Reads the qos priority the record captured from the
+    ``x-dashscope-inner-qos-level`` chain on the first frame parse
+    (``capture_structured_request``); ``"0"`` when the RPC never reached that
+    parse (frame-less, parse error) or carried no qos value. Per-request, so it
+    is merged into the memoized base tags at report time (``{**tags, ...}``)
+    instead of widening the ``_metric_tags`` cache key.
     """
-    kmonitor.report(AccMetrics.QPS_METRIC, 1, _metric_tags(rank_id, server_id))
+    cfg = record.generate_config
+    return qos_priority_tag(cfg.get("qos_priority") if cfg else None)
+
+
+def report_arrival_priority(
+    record: GrpcAccessRecord,
+    *,
+    rank_id: Optional[int],
+    server_id: Optional[int],
+) -> None:
+    """Emit the priority-tagged arrival QPS, once per RPC.
+
+    Deferred to the first frame parse so it reports the true qos priority.
+    RPCs that never reach that parse (frame-less, parse error) are covered by
+    the fallback call in :func:`_report_rpc_done_common`, which reports the
+    "0" bucket. The ``priority_arrival_reported`` flag ensures exactly one
+    tagged arrival per RPC.
+    """
+    if record.priority_arrival_reported:
+        return
+    record.priority_arrival_reported = True
+    tags = _metric_tags(rank_id, server_id)
+    kmonitor.report(
+        AccMetrics.QPS_METRIC, 1, {**tags, "priority": _priority_tag(record)}
+    )
 
 
 def report_chunk(
@@ -97,19 +122,29 @@ def _report_rpc_done_common(
     server_id: Optional[int],
     status: str,
 ) -> None:
-    """Common RPC tail metrics for both dash-sc frontend and forwarder."""
+    """Common RPC tail metrics for both dash-sc frontend and forwarder.
+
+    The success / cancel / error QPS counters carry the per-request
+    ``priority`` tag (``"0"`` when the RPC had no qos context).
+    """
     tags = _metric_tags(rank_id, server_id)
+    # Fallback for RPCs that never reached the first frame parse (frame-less /
+    # parse error) — no-op when the servicer already reported the true value.
+    report_arrival_priority(record, rank_id=rank_id, server_id=server_id)
+    priority_tags = {**tags, "priority": _priority_tag(record)}
     total_ms = (time.time() - record.start_ts) * 1000.0
     kmonitor.report(GaugeMetrics.LANTENCY_METRIC, total_ms, tags)
     kmonitor.report(GaugeMetrics.RESPONSE_ITERATE_COUNT, record.resp_count, tags)
     if status == "OK":
-        kmonitor.report(AccMetrics.SUCCESS_QPS_METRIC, 1, tags)
+        kmonitor.report(AccMetrics.SUCCESS_QPS_METRIC, 1, priority_tags)
     elif status == "CANCELLED":
-        kmonitor.report(AccMetrics.CANCEL_QPS_METRIC, 1, tags)
+        kmonitor.report(AccMetrics.CANCEL_QPS_METRIC, 1, priority_tags)
     else:
         error_code = record.backend_error_code or status
         kmonitor.report(
-            AccMetrics.ERROR_QPS_METRIC, 1, {**tags, "error_code": error_code}
+            AccMetrics.ERROR_QPS_METRIC,
+            1,
+            {**priority_tags, "error_code": error_code},
         )
 
 

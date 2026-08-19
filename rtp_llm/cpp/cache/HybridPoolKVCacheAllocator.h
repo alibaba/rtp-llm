@@ -59,9 +59,21 @@ private:
     bool   doInit() override;
     size_t reservableAvailableBlocksNum() const override;
 
+    // Per-pool capacity classification: with one BlockPool per group, a shortfall
+    // in a single pool decides the verdict, so the aggregate base-class view is
+    // not usable here.
+    MallocStatus
+    evaluateInitCapacity(const MallocInfo& malloc_info, size_t reserve_blocks, InitCapacityMode mode) const override;
+
     void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) const override;
     void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) override;
     bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const override;
+    void logMallocFailure(const MallocInfo& malloc_info,
+                          const char*       phase,
+                          int               failed_batch,
+                          int               failed_group,
+                          bool              incremental,
+                          int               failed_need_blocks) const override;
 
     int    validateGroupIdForLayer(int layer_id, int group_id) const;
     int    defaultGroupIdForLayer(int layer_id) const;

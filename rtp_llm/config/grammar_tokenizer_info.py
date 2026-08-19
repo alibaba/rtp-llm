@@ -193,3 +193,48 @@ def build_grammar_tokenizer_info_json(
         )
 
     raise ValueError(f"Unsupported tokenizer type: {type(tokenizer)}")
+
+
+def collect_special_tokens_stop_token_ids(special_tokens: Any) -> List[int]:
+    """Derive the xgrammar ``stop_token_ids`` from a model's special-token config.
+
+    Single source of truth for both consumers: the engine (``BaseModel``) and the
+    dash-sc admission validator. They MUST agree — a validator built on a different
+    stop-token set would accept grammars the engine's matcher then rejects mid-stream.
+    """
+    ids: List[int] = []
+
+    def add_id(token_id: int) -> None:
+        if token_id < 0:
+            return
+        if token_id not in ids:
+            ids.append(token_id)
+
+    add_id(int(special_tokens.eos_token_id))
+    for token_ids in special_tokens.stop_words_id_list:
+        if len(token_ids) == 1:
+            add_id(int(token_ids[0]))
+    ids.sort()
+    return ids
+
+
+def build_model_grammar_tokenizer_info_json(
+    tokenizer: Any,
+    model_config: Any,
+) -> str:
+    """Build admission metadata from a tokenizer loaded outside the engine process.
+
+    The dash-sc gRPC frontend has a tokenizer and a ``ModelConfig`` but no
+    ``BaseModel``, so it cannot go through ``BaseModel.grammar_tokenizer_info_json``.
+    Returns "" when the real tokenizer is unavailable (validator then stays disabled).
+    """
+    real_tokenizer = tokenizer.get_real_tokenizer()
+    if real_tokenizer is None:
+        return ""
+    return build_grammar_tokenizer_info_json(
+        real_tokenizer,
+        model_vocab_size=int(model_config.vocab_size or 0),
+        stop_token_ids=collect_special_tokens_stop_token_ids(
+            model_config.special_tokens
+        ),
+    )
