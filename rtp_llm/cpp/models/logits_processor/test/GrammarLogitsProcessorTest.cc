@@ -118,6 +118,43 @@ TEST(GrammarLogitsProcessorTest, TerminateWithoutStopTokenForcesEosAndAcceptsCom
     EXPECT_EQ(processor.acceptedTokenLen(), 2);
 }
 
+TEST(GrammarLogitsProcessorTest, CreateMatcherMergesRequestStopTokens) {
+    auto backend  = makeBackend();
+    auto compiled = backend.compileNow({"regex", "[ab]c"}).compiled;
+    ASSERT_TRUE(compiled);
+
+    // 'b' is grammar-allowed at the first step; adding it to the request stop
+    // set must mask it until the grammar completes, without dropping the base
+    // stop token 0 from the TokenizerInfo.
+    auto matcher = backend.createMatcher(compiled,
+                                         /*require_reasoning=*/false,
+                                         std::nullopt,
+                                         /*terminate_without_stop_token=*/false,
+                                         std::vector<int>{static_cast<int>('b')});
+    GrammarLogitsProcessor processor(matcher, /*eos_token_id=*/0);
+
+    SamplerInputs inputs;
+    inputs.logits        = torch::zeros({1, 128}, torch::kFloat32);
+    inputs.finished_mask = torch::zeros({1}, torch::kBool);
+
+    processor.process(inputs, 0, 1);
+    EXPECT_GT(inputs.logits[0][static_cast<int>('a')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0][static_cast<int>('b')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0][0].item<float>(), BaseLogitsProcessor::neg_inf);
+
+    processor.updateStatus(torch::tensor({{static_cast<int32_t>('a')}}, torch::kInt32), 1);
+    processor.updateStatus(torch::tensor({{static_cast<int32_t>('c')}}, torch::kInt32), 1);
+
+    inputs.logits = torch::zeros({1, 128}, torch::kFloat32);
+    processor.process(inputs, 0, 1);
+    EXPECT_GT(inputs.logits[0][0].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_GT(inputs.logits[0][static_cast<int>('b')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0][static_cast<int>('d')].item<float>(), BaseLogitsProcessor::neg_inf);
+
+    processor.updateStatus(torch::tensor({{static_cast<int32_t>('b')}}, torch::kInt32), 1);
+    EXPECT_TRUE(matcher->isTerminated());
+}
+
 TEST(GrammarLogitsProcessorTest, ReasoningModeWaitsForFullThinkEndSequence) {
     auto backend  = makeBackend();
     auto compiled = backend.compileNow({"regex", "a"}).compiled;

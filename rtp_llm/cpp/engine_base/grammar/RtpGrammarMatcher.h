@@ -57,6 +57,7 @@ private:
 
     const std::vector<int> think_end_token_ids_;
     const bool             require_reasoning_;
+    const bool             terminate_without_stop_token_ = false;
     std::vector<size_t>    think_end_lps_;
 
     // < 0: inside thinking body, parser frozen. >= 0: grammar is active.
