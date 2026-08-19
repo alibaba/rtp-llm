@@ -75,6 +75,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, CompressorMeta
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
+from rtp_llm.models_py.modules.dsv4.kv_cache_utils import INDEXER_KV
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv4.rope import precompute_freqs_cis
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
@@ -1192,14 +1193,12 @@ class AttentionFP8(nn.Module):
         spec = self._pool_spec.get(attn_type)
         if spec is None:
             return None
-        # Polymorphic probe: build_paged_pool_specs sweeps every cache tag
-        # across every layer.  C++ raises "layer=X does not own tag=Y" for
-        # layers that don't own this group — catching it tells the caller to
-        # skip.  Not defensive bloat.
-        try:
-            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type)
-        except RuntimeError:
+        # build_paged_pool_specs sweeps every attention type across every
+        # layer. Missing regions are expected, so probe without triggering
+        # the fatal assertion reserved for invalid get_layer_cache calls.
+        if not self._kv_cache.has_layer_cache(self.layer_id, attn_type):
             return None
+        layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type)
         base = layer_kv.kv_cache_base
         if base is None or base.numel() == 0 or base.dim() != 2:
             return None
@@ -1210,7 +1209,9 @@ class AttentionFP8(nn.Module):
         bytes_per_entry = vec_dim * vec_dtype.itemsize
         if bytes_per_entry <= 0 or stride_bytes < bytes_per_entry:
             return None
-        eb = stride_bytes // bytes_per_entry
+        eb = self._pool_entries_per_block(attn_type)
+        if eb <= 0 or eb * bytes_per_entry > stride_bytes:
+            return None
         useful_bytes = eb * bytes_per_entry
         # Reinterpret as uint8 [num_blocks, stride_bytes] so we can slice
         # exact useful-byte span, then cast to vec_dtype + flatten to
@@ -1237,10 +1238,9 @@ class AttentionFP8(nn.Module):
         spec = self._pool_spec.get(attn_type)
         if spec is None:
             return None
-        try:
-            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type)
-        except RuntimeError:
+        if not self._kv_cache.has_layer_cache(self.layer_id, attn_type):
             return None
+        layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type)
         base = layer_kv.kv_cache_base
         if base is None or base.numel() == 0 or base.dim() != 2:
             return None
@@ -1251,7 +1251,9 @@ class AttentionFP8(nn.Module):
         bytes_per_entry = vec_dim
         if bytes_per_entry <= 0 or stride_bytes < bytes_per_entry:
             return None
-        eb = stride_bytes // bytes_per_entry
+        eb = self._pool_entries_per_block(attn_type)
+        if eb <= 0 or eb * bytes_per_entry > stride_bytes:
+            return None
         raw_u8 = base.view(torch.uint8)
         num_blocks = int(raw_u8.shape[0])
         # as_strided: dim-0 stride = stride_bytes (jump over per-block
@@ -1264,10 +1266,9 @@ class AttentionFP8(nn.Module):
     def _pool_raw_u8(self, attn_type: str) -> Optional[torch.Tensor]:
         if self._kv_cache is None:
             return None
-        try:
-            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type)
-        except RuntimeError:
+        if not self._kv_cache.has_layer_cache(self.layer_id, attn_type):
             return None
+        layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type)
         base = layer_kv.kv_cache_base
         if base is None or base.numel() == 0 or base.dim() != 2:
             return None
@@ -1337,11 +1338,9 @@ class AttentionFP8(nn.Module):
         spec = self._pool_spec.get(attn_type)
         if spec is None:
             return 0
-        # Polymorphic probe — see _pool_view for rationale.
-        try:
-            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type)
-        except RuntimeError:
+        if not self._kv_cache.has_layer_cache(self.layer_id, attn_type):
             return 0
+        layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type)
         base = layer_kv.kv_cache_base
         if base is None or base.numel() == 0 or base.dim() != 2:
             return 0
@@ -1350,7 +1349,25 @@ class AttentionFP8(nn.Module):
         bytes_per_entry = vec_dim * vec_dtype.itemsize
         if bytes_per_entry <= 0:
             return 0
-        return stride_bytes // bytes_per_entry
+        stride_entries = stride_bytes // bytes_per_entry
+        # Opaque INDEXER_KV rows can carry trailing bytes from the shared
+        # physical-pool stride.  Those bytes are padding, not packed indexer
+        # entries.  The cache topology exposes the useful kernel-row width in
+        # raw tokens; divide it by the indexer's compression ratio and retain
+        # ``stride_bytes`` only as the dim-0 address step in
+        # ``_pool_view_3d_fp8``.
+        if attn_type == INDEXER_KV and self.indexer is not None:
+            kernel_tokens = int(layer_kv.seq_size_per_block)
+            compress_ratio = int(self.indexer.compress_ratio)
+            if (
+                kernel_tokens > 0
+                and compress_ratio > 0
+                and kernel_tokens % compress_ratio == 0
+            ):
+                useful_entries = kernel_tokens // compress_ratio
+                if useful_entries <= stride_entries:
+                    return useful_entries
+        return stride_entries
 
     def _prefill_paged_write_kv(
         self,
