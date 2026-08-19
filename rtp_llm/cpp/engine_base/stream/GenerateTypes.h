@@ -119,14 +119,17 @@ struct AuxInfo {
     int32_t                      local_reuse_len          = 0;
     int32_t                      remote_reuse_len         = 0;
     int32_t                      memory_reuse_len         = 0;
+    int32_t                      disk_reuse_len           = 0;
     int32_t                      prefill_total_reuse_len  = 0;
     int32_t                      prefill_local_reuse_len  = 0;
     int32_t                      prefill_remote_reuse_len = 0;
     int32_t                      prefill_memory_reuse_len = 0;
+    int32_t                      prefill_disk_reuse_len   = 0;
     int32_t                      decode_total_reuse_len   = 0;
     int32_t                      decode_local_reuse_len   = 0;
     int32_t                      decode_remote_reuse_len  = 0;
     int32_t                      decode_memory_reuse_len  = 0;
+    int32_t                      decode_disk_reuse_len    = 0;
     int32_t                      speculative_draft_rounds = 0;
     std::vector<int32_t>         speculative_accepted_tokens_per_pos;
     std::optional<torch::Tensor> cum_log_probs;
@@ -187,7 +190,7 @@ inline std::string StreamStateToString(StreamState state) {
 
 // 事件集合：外部通过 reportEvent() 投递事件，生命周期方法中统一消费。
 // 内部使用 bit flag 组合多个并发事件。
-// 所有事件均为永久事件：一旦设置即保留，不会被自动清除。
+// 生命周期和终止事件一旦设置即保留；CanRun 是一次性调度准入，由调度器在需要重新准入时显式清除。
 class StreamEvents {
 public:
     enum EventType : uint32_t {
@@ -205,6 +208,10 @@ public:
 
     bool has(EventType event) const {
         return (flags_ & event) != 0;
+    }
+
+    void clearCanRun() {
+        flags_ = static_cast<EventType>(static_cast<uint32_t>(flags_) & ~static_cast<uint32_t>(EventType::CanRun));
     }
 
 private:

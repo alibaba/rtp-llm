@@ -1,7 +1,10 @@
-
-#include <algorithm>
+#include <chrono>
+#include <functional>
+#include <future>
 #include <memory>
-#include <unistd.h>
+#include <thread>
+#include <unordered_map>
+
 #include "torch/all.h"
 #include "gmock/gmock-actions.h"
 #include "gmock/gmock-function-mocker.h"
@@ -14,62 +17,63 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
-#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
-#include "rtp_llm/cpp/cache/connector/AsyncContext.h"
-#include "rtp_llm/cpp/cache/connector/test/mock/MockAsyncContext.h"
-#include "rtp_llm/cpp/cache/connector/test/mock/MockKVCacheConnectorCoordinator.h"
-#include "rtp_llm/models_py/bindings/core/Types.h"
-#include "rtp_llm/cpp/testing/TestBase.h"
+#include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/testing/TestBase.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
 
 using namespace std;
-using testing::Return;
-using testing::NiceMock;
-using testing::_;
 
 namespace rtp_llm {
 
-namespace {
-
-bool enqueueIndividually(FIFOScheduler& scheduler, const vector<GenerateStreamPtr>& streams) {
-    return std::all_of(streams.begin(), streams.end(), [&scheduler](const auto& stream) {
-        return scheduler.enqueue(stream).ok();
-    });
+std::shared_ptr<LoadAsyncContext> makeControlledAllocatorContext() {
+    auto coordinator = std::make_shared<LoadContextCoordinator>(
+        [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
+    std::vector<TransferDescriptor> descriptors{TransferDescriptor{nullptr,
+                                                                   /*group_set_id=*/0,
+                                                                   /*path_index=*/0,
+                                                                   Tier::HOST,
+                                                                   Tier::DEVICE,
+                                                                   BlockIndicesType{1}}};
+    auto context = coordinator->create(std::move(descriptors), {false}, /*matched_blocks=*/1);
+    EXPECT_TRUE(coordinator->registerContext(context));
+    return context;
 }
-
-}  // namespace
 
 class FIFOSchedulerAsyncCacheTest: public DeviceTestBase {
 protected:
+    using ContextSelector = std::function<std::shared_ptr<AsyncContext>(const MallocInfo&)>;
+
     FIFOSchedulerAsyncCacheTest(): perf_scope("PERF_TEST", "1") {}
 
     void SetUp() override {
         DeviceTestBase::SetUp();
-        // Default: enough blocks for testing
         cache_config_ = test::makeSimpleMhaCacheConfig(
             /*layer_num=*/1, /*block_num=*/21, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
         cache_manager_ = std::make_shared<KVCacheManager>(cache_config_);
         ASSERT_TRUE(cache_manager_->init());
     }
 
-    void setupMockCoordinator() {
-        mock_coord_ = std::make_shared<NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
-                                                                                  cache_manager_->kv_cache_config_,
-                                                                                  cache_manager_->runtime_config_,
-                                                                                  cache_manager_->allocator_,
-                                                                                  nullptr);
-        ON_CALL(*mock_coord_, hasActiveConnectors()).WillByDefault(Return(true));
-        cache_manager_->coordinator_ = mock_coord_;
+    void TearDown() override {
+        if (real_allocator_) {
+            cache_manager_->allocator_ = real_allocator_;
+        }
+        DeviceTestBase::TearDown();
     }
 
-    std::shared_ptr<FIFOScheduler> createScheduler() {
+    std::shared_ptr<FIFOScheduler> createScheduler(size_t max_generate_batch_size    = 100,
+                                                   size_t max_inited_kv_cache_streams = 0) {
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
         RuntimeConfig runtime_config;
-        runtime_config.max_generate_batch_size                     = 100;
+        runtime_config.max_generate_batch_size                     = max_generate_batch_size;
         runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+        runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams = max_inited_kv_cache_streams;
         PDSepConfig         pd_sep_config;
         ParallelismConfig   parallelism_config;
         ModelSpecificConfig model_specific_config;
@@ -77,11 +81,11 @@ protected:
             runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
     }
 
-    std::shared_ptr<PDFusionRatioScheduler> createPDFusionRatioScheduler() {
+    std::shared_ptr<PDFusionRatioScheduler> createPDFusionRatioScheduler(size_t max_generate_batch_size = 100) {
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
         RuntimeConfig runtime_config;
-        runtime_config.max_generate_batch_size                     = 100;
+        runtime_config.max_generate_batch_size                     = max_generate_batch_size;
         runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
         PDSepConfig pd_sep_config;
         pd_sep_config.role_type = RoleType::PDFUSION;
@@ -91,38 +95,27 @@ protected:
             runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
     }
 
-    std::shared_ptr<FIFOScheduler> createSchedulerWithInitedLimit(size_t max_inited_kv_cache_streams) {
-        ModelConfig model_config;
-        model_config.max_seq_len = 8192;
-        RuntimeConfig runtime_config;
-        runtime_config.max_generate_batch_size                           = 100;
-        runtime_config.fifo_scheduler_config.max_batch_tokens_size       = 8192;
-        runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams = max_inited_kv_cache_streams;
-        PDSepConfig         pd_sep_config;
-        ParallelismConfig   parallelism_config;
-        ModelSpecificConfig model_specific_config;
-        return std::make_shared<FIFOScheduler>(
-            runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
-    }
-
-    GenerateStreamPtr createStream(const std::vector<int>& input_tokens        = {1, 2, 3},
-                                   bool                    reuse_cache         = false,
-                                   bool                    enable_memory_cache = false,
-                                   int                     max_new_tokens      = 1,
-                                   const std::vector<int>& variable_num_beams  = {}) {
+    GenerateStreamPtr createStream(const std::vector<int>& input_tokens       = {1, 2, 3},
+                                   bool                    reuse_cache        = false,
+                                   bool                    enable_host_cache  = false,
+                                   int                     max_new_tokens     = 1,
+                                   const std::vector<int>& variable_num_beams = {},
+                                   RoleType                role_type          = RoleType::PDFUSION) {
         ResourceContext resource_context;
         resource_context.cache_manager       = cache_manager_;
         resource_context.reuse_cache         = reuse_cache;
-        resource_context.enable_memory_cache = enable_memory_cache;
+        resource_context.enable_host_cache   = enable_host_cache;
+        resource_context.role_type           = role_type;
 
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
         RuntimeConfig runtime_config;
 
-        std::shared_ptr<GenerateInput>  query(new GenerateInput());
-        std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
+        auto query                           = std::make_shared<GenerateInput>();
+        auto generate_config                 = std::make_shared<GenerateConfig>();
+        query->request_id                    = next_request_id_++;
         generate_config->reuse_cache         = reuse_cache;
-        generate_config->enable_memory_cache = enable_memory_cache;
+        generate_config->enable_host_cache   = enable_host_cache;
         generate_config->max_new_tokens      = max_new_tokens;
         generate_config->variable_num_beams  = variable_num_beams;
         query->input_ids                     = torch::tensor(input_tokens, torch::kInt32);
@@ -130,522 +123,374 @@ protected:
         return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     }
 
-    // Create a mock FusedAsyncReadContext that is NOT done yet
-    std::shared_ptr<MockAsyncContext> createPendingAsyncContext() {
-        auto ctx = std::make_shared<NiceMock<MockAsyncContext>>();
-        ON_CALL(*ctx, done()).WillByDefault(Return(false));
-        ON_CALL(*ctx, success()).WillByDefault(Return(false));
-        return ctx;
-    }
+    void installReadinessAllocator(ContextSelector selector) {
+        real_allocator_       = cache_manager_->allocator_;
+        mock_allocator_       = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
+        initial_malloc_calls_ = 0;
+        free_calls_           = 0;
+        insert_calls_         = 0;
 
-    // Create a mock FusedAsyncReadContext that is immediately done
-    std::shared_ptr<MockAsyncContext> createDoneAsyncContext() {
-        auto ctx = std::make_shared<NiceMock<MockAsyncContext>>();
-        ON_CALL(*ctx, done()).WillByDefault(Return(true));
-        ON_CALL(*ctx, success()).WillByDefault(Return(true));
-        return ctx;
+        ON_CALL(*mock_allocator_, initMallocForCommonLen(testing::_))
+            .WillByDefault(testing::Invoke([this, selector](const MallocInfo& info) {
+                ++initial_malloc_calls_;
+                auto result = real_allocator_->initMallocForCommonLen(info);
+                if (result.success) {
+                    result.async_context = selector(info);
+                }
+                return result;
+            }));
+        ON_CALL(*mock_allocator_, incrMalloc(testing::_)).WillByDefault(testing::Invoke([this](const MallocInfo& info) {
+            return real_allocator_->incrMalloc(info);
+        }));
+        ON_CALL(*mock_allocator_, free(testing::_)).WillByDefault(testing::Invoke([this](const FreeInfo& info) {
+            ++free_calls_;
+            real_allocator_->free(info);
+        }));
+        ON_CALL(*mock_allocator_, insertIntoCache(testing::_))
+            .WillByDefault(testing::Invoke([this](const InsertInfo& info) {
+                ++insert_calls_;
+                real_allocator_->insertIntoCache(info);
+            }));
+        ON_CALL(*mock_allocator_, singleBatchNeedBlocks(testing::_, testing::_, testing::_))
+            .WillByDefault(
+                testing::Invoke([this](const BatchKVCacheResourcePtr& resource, int seq_len, int reserve_step) {
+                    return real_allocator_->singleBatchNeedBlocks(resource, seq_len, reserve_step);
+                }));
+        ON_CALL(*mock_allocator_, seqSizePerBlock()).WillByDefault(testing::Invoke([this]() {
+            return real_allocator_->seqSizePerBlock();
+        }));
+        ON_CALL(*mock_allocator_, maxAvailableTokensNum()).WillByDefault(testing::Invoke([this]() {
+            return real_allocator_->maxAvailableTokensNum();
+        }));
+
+        cache_manager_->allocator_ = mock_allocator_;
     }
 
 protected:
-    autil::EnvGuard                                            perf_scope;
-    CacheConfig                                                cache_config_;
-    std::shared_ptr<KVCacheManager>                            cache_manager_;
-    std::shared_ptr<NiceMock<MockKVCacheConnectorCoordinator>> mock_coord_;
+    autil::EnvGuard                                          perf_scope;
+    CacheConfig                                              cache_config_;
+    std::shared_ptr<KVCacheManager>                          cache_manager_;
+    int64_t                                                  next_request_id_{1};
+    KVCacheAllocatorPtr                                      real_allocator_;
+    std::shared_ptr<testing::NiceMock<MockKVCacheAllocator>> mock_allocator_;
+    size_t                                                   initial_malloc_calls_{0};
+    size_t                                                   free_calls_{0};
+    size_t                                                   insert_calls_{0};
 };
-
-// ============================================================================
-// 1. scheduleNew: stream without reuse_cache goes directly to RUNNING
-// ============================================================================
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_NoReuseCache_DirectlyRunning) {
     auto scheduler = createScheduler();
     auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/false);
 
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
-
-    // Single schedule: stream transitions directly to RUNNING (no cache loading needed)
     auto result = scheduler->schedule();
+
     ASSERT_TRUE(result.ok());
     ASSERT_EQ(result.value().size(), 1);
-    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 0u);
-    ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
-    ASSERT_EQ(scheduler->runningStreamsSize(), 1);
+    EXPECT_EQ(result.value().front(), stream);
+    EXPECT_EQ(scheduler->loading_cache_streams_.size(), 0);
+    EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
+    EXPECT_EQ(scheduler->runningStreamsSize(), 1);
 }
 
-// ============================================================================
-// 2. scheduleNew: stream with reuse_cache and connector enters loading_ queue
-// ============================================================================
-
-TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_WithReuseCache_EntersLoadingQueue) {
-    setupMockCoordinator();
-    auto pending_ctx = createPendingAsyncContext();
-    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(pending_ctx)));
-
+TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_WithAllocatorReadiness_EntersLoadingCache) {
     auto scheduler = createScheduler();
-    auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
-
+    auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true);
+    auto context   = makeControlledAllocatorContext();
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
-    auto result = scheduler->schedule();
-    ASSERT_TRUE(result.ok());
-    // Stream is in loading_ queue, not in running
-    ASSERT_EQ(result.value().size(), 0);
-    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 1u);
-    ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
-    ASSERT_EQ(scheduler->runningStreamsSize(), 0);
-}
-
-// ============================================================================
-// 3. loading check: stream load done -> moves to waiting -> then running
-// ============================================================================
-
-TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCheck_LoadDone_MovesToRunning) {
-    setupMockCoordinator();
-
-    // Mock context: done() returns true when checked (load completes immediately)
-    auto mock_ctx = std::make_shared<NiceMock<MockAsyncContext>>();
-    ON_CALL(*mock_ctx, done()).WillByDefault(Return(true));
-    ON_CALL(*mock_ctx, success()).WillByDefault(Return(true));
-    ON_CALL(*mock_ctx, waitDone()).WillByDefault(Return());
-
-    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(mock_ctx)));
-
-    auto scheduler = createScheduler();
-    auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
-
-    ASSERT_TRUE(scheduler->enqueue(stream).ok());
-
-    // First schedule: stream enters loading_ queue
-    // (loading check runs before scheduleNew, so loading_ is empty at that point)
-    auto result1 = scheduler->schedule();
-    ASSERT_TRUE(result1.ok());
-    ASSERT_EQ(result1.value().size(), 0);
-    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 1u);
-
-    // Second schedule: loading check -> loadCacheDone()=true -> WAITING -> scheduleNew -> RUNNING
-    auto result2 = scheduler->schedule();
-    ASSERT_TRUE(result2.ok());
-    ASSERT_EQ(result2.value().size(), 1);
-    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 0u);
-    ASSERT_EQ(scheduler->runningStreamsSize(), 1);
-}
-
-// ============================================================================
-// 4. loading check: stream with error during loading -> evicted
-// ============================================================================
-
-TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCheck_ErrorDuringLoading_Evicted) {
-    setupMockCoordinator();
-
-    // Mock context: done() returns true so loading check proceeds to error check
-    auto mock_ctx = std::make_shared<NiceMock<MockAsyncContext>>();
-    ON_CALL(*mock_ctx, done()).WillByDefault(Return(true));
-    ON_CALL(*mock_ctx, success()).WillByDefault(Return(true));
-    ON_CALL(*mock_ctx, waitDone()).WillByDefault(Return());
-
-    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(mock_ctx)));
-
-    auto scheduler = createScheduler();
-    auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
-
-    ASSERT_TRUE(scheduler->enqueue(stream).ok());
-
-    // First schedule: enters loading_ queue
-    auto result1 = scheduler->schedule();
-    ASSERT_TRUE(result1.ok());
-    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 1u);
-
-    // Simulate external error (e.g., cancel from gRPC)
-    stream->reportError(ErrorCode::CANCELLED, "cancelled by client");
-
-    // Second schedule: loadCacheDone()=true, hasError()=true -> stream evicted and finished
-    auto result2 = scheduler->schedule();
-    ASSERT_TRUE(result2.ok());
-    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 0u);
-    ASSERT_EQ(result2.value().size(), 0);
-    ASSERT_TRUE(stream->isFinished());
-}
-
-TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCheck_LoadFailureReportsErrorWithoutDeadlock) {
-    setupMockCoordinator();
-
-    auto mock_ctx = std::make_shared<NiceMock<MockAsyncContext>>();
-    ON_CALL(*mock_ctx, done()).WillByDefault(Return(true));
-    ON_CALL(*mock_ctx, success()).WillByDefault(Return(false));
-    ON_CALL(*mock_ctx, waitDone()).WillByDefault(Return());
-    ON_CALL(*mock_ctx, errorInfo())
-        .WillByDefault(Return(ErrorInfo(ErrorCode::LOAD_CACHE_TIMEOUT, "cache transfer failed")));
-    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(mock_ctx)));
-
-    auto scheduler = createScheduler();
-    auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
-
-    ASSERT_TRUE(scheduler->enqueue(stream).ok());
-    ASSERT_TRUE(scheduler->schedule().ok());
-    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 1u);
+    installReadinessAllocator([context](const MallocInfo&) { return context; });
 
     auto result = scheduler->schedule();
+
     ASSERT_TRUE(result.ok());
-    EXPECT_TRUE(result->empty());
+    EXPECT_TRUE(result.value().empty());
+    EXPECT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
+    EXPECT_EQ(stream->streamCacheResource().allocator_load_context_, context);
+    EXPECT_EQ(scheduler->loading_cache_streams_.size(), 1);
+    EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
+    EXPECT_EQ(scheduler->runningStreamsSize(), 0);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_AllocatorSuccess_MovesToRunning) {
+    auto scheduler = createScheduler();
+    auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true);
+    auto context   = makeControlledAllocatorContext();
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    installReadinessAllocator([context](const MallocInfo&) { return context; });
+
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
+    EXPECT_TRUE(context->completeOne(true));
+
+    auto second = scheduler->schedule();
+    ASSERT_TRUE(second.ok());
+    ASSERT_EQ(second.value().size(), 1);
+    EXPECT_EQ(second.value().front(), stream);
+    EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(stream->streamCacheResource().allocator_load_context_, nullptr);
+    EXPECT_EQ(scheduler->loading_cache_streams_.size(), 0);
+    EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
+    EXPECT_EQ(scheduler->runningStreamsSize(), 1);
+    EXPECT_FALSE(stream->hasError());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_AllocatorFailure_Evicted) {
+    auto scheduler = createScheduler();
+    auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true);
+    auto context   = makeControlledAllocatorContext();
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    installReadinessAllocator([context](const MallocInfo&) { return context; });
+
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_GT(stream->curBlocksNum(), 0);
+    EXPECT_TRUE(context->completeOne(false));
+
+    auto second = scheduler->schedule();
+    ASSERT_TRUE(second.ok());
+    EXPECT_TRUE(second.value().empty());
     EXPECT_TRUE(stream->isFinished());
-    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::LOAD_CACHE_TIMEOUT);
+    EXPECT_TRUE(stream->hasError());
+    EXPECT_TRUE(stream->streamCacheResource().isResourceReleased());
+    EXPECT_EQ(stream->curBlocksNum(), 0);
+    EXPECT_EQ(stream->streamCacheResource().allocator_load_context_, nullptr);
+    EXPECT_EQ(scheduler->loading_cache_streams_.size(), 0);
+    EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
+    EXPECT_EQ(scheduler->runningStreamsSize(), 0);
+    EXPECT_EQ(insert_calls_, 0);
+    EXPECT_EQ(free_calls_, 1);
 }
 
-// ============================================================================
-// 5. LOADING_CACHE only consumes initialized-KV quota, not runtime batch quota
-// ============================================================================
+TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_PrefillAllocatorFailure_MovesToRunning) {
+    auto scheduler = createScheduler();
+    auto stream    = createStream({1, 2, 3},
+                               /*reuse_cache=*/true,
+                               /*enable_host_cache=*/false,
+                               /*max_new_tokens=*/1,
+                               /*variable_num_beams=*/{},
+                               RoleType::PREFILL);
+    auto context = makeControlledAllocatorContext();
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    installReadinessAllocator([context](const MallocInfo&) { return context; });
 
-TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCacheStreams_DoNotConsumeRuntimeBatchQuota) {
-    setupMockCoordinator();
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
+    EXPECT_TRUE(context->completeOne(false));
 
-    ModelConfig model_config;
-    model_config.max_seq_len = 8192;
-    RuntimeConfig runtime_config;
-    runtime_config.max_generate_batch_size                     = 1;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 1;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    ModelSpecificConfig model_specific_config;
-    auto                scheduler = std::make_shared<FIFOScheduler>(
-        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
+    auto second = scheduler->schedule();
+    ASSERT_TRUE(second.ok());
+    ASSERT_EQ(second.value().size(), 1);
+    EXPECT_EQ(second.value().front(), stream);
+    EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
+    EXPECT_FALSE(stream->hasError());
+    EXPECT_FALSE(stream->streamCacheResource().isResourceReleased());
+    EXPECT_GT(stream->curBlocksNum(), 0);
+    EXPECT_EQ(stream->streamCacheResource().allocator_load_context_, nullptr);
+    EXPECT_EQ(scheduler->loading_cache_streams_.size(), 0);
+    EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
+    EXPECT_EQ(scheduler->runningStreamsSize(), 1);
+    EXPECT_EQ(free_calls_, 0);
+}
 
-    auto pending_ctx = createPendingAsyncContext();
-    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillRepeatedly(Return(std::static_pointer_cast<AsyncContext>(pending_ctx)));
-
-    // Enqueue 3 streams with reuse_cache
-    auto stream1 = createStream({1}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
-    auto stream2 = createStream({2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
-    auto stream3 = createStream({3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
-
+TEST_F(FIFOSchedulerAsyncCacheTest, testPendingAllocatorLoads_RespectAdmissionBatchLimit) {
+    auto scheduler = createScheduler(/*max_generate_batch_size=*/2);
+    auto stream1   = createStream({1}, /*reuse_cache=*/true);
+    auto stream2   = createStream({2}, /*reuse_cache=*/true);
+    auto stream3   = createStream({3}, /*reuse_cache=*/true);
+    auto context1  = makeControlledAllocatorContext();
+    auto context2  = makeControlledAllocatorContext();
+    auto context3  = makeControlledAllocatorContext();
     ASSERT_TRUE(scheduler->enqueue(stream1).ok());
     ASSERT_TRUE(scheduler->enqueue(stream2).ok());
     ASSERT_TRUE(scheduler->enqueue(stream3).ok());
+    const std::unordered_map<int64_t, std::shared_ptr<AsyncContext>> contexts{
+        {stream1->streamId(), context1}, {stream2->streamId(), context2}, {stream3->streamId(), context3}};
+    installReadinessAllocator([contexts](const MallocInfo& info) { return contexts.at(info.request_id); });
 
     auto result = scheduler->schedule();
+
     ASSERT_TRUE(result.ok());
-    EXPECT_TRUE(result->empty());
-    EXPECT_EQ(scheduler->loading_cache_streams_.size(), 3u);
-    EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
-}
-
-TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCacheStreamsSupportBatchedCpPrefill) {
-    setupMockCoordinator();
-
-    ModelConfig model_config;
-    model_config.max_seq_len = 8192;
-    RuntimeConfig runtime_config;
-    runtime_config.max_generate_batch_size                     = 100;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    ModelSpecificConfig model_specific_config;
-    parallelism_config.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
-    auto scheduler                              = std::make_shared<FIFOScheduler>(
-        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
-
-    auto pending_ctx = createPendingAsyncContext();
-    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillRepeatedly(Return(std::static_pointer_cast<AsyncContext>(pending_ctx)));
-
-    ASSERT_TRUE(scheduler->enqueue(createStream({1}, /*reuse_cache=*/true, /*enable_memory_cache=*/true)).ok());
-    ASSERT_TRUE(scheduler->enqueue(createStream({2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true)).ok());
-
-    auto result = scheduler->schedule();
-    ASSERT_TRUE(result.ok());
-    EXPECT_TRUE(result->empty());
-    EXPECT_EQ(scheduler->loading_cache_streams_.size(), 2u);
-    EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
-}
-
-TEST_F(FIFOSchedulerAsyncCacheTest, testWithoutCacheQuotaBoundsEachLoadingAdmissionRound) {
-    setupMockCoordinator();
-
-    ModelConfig model_config;
-    model_config.max_seq_len = 8192;
-    RuntimeConfig runtime_config;
-    runtime_config.max_generate_batch_size                              = 100;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_size          = 8192;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache = 1;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    ModelSpecificConfig model_specific_config;
-    auto                scheduler = std::make_shared<FIFOScheduler>(
-        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
-
-    auto pending_ctx = createPendingAsyncContext();
-    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillRepeatedly(Return(std::static_pointer_cast<AsyncContext>(pending_ctx)));
-
-    auto stream1 = createStream({1}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
-    auto stream2 = createStream({2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
-    auto stream3 = createStream({3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
-    ASSERT_TRUE(enqueueIndividually(*scheduler, {stream1, stream2, stream3}));
-
-    auto result = scheduler->schedule();
-    ASSERT_TRUE(result.ok());
-    EXPECT_TRUE(result->empty());
-    EXPECT_EQ(scheduler->loading_cache_streams_.size(), 1u);
-    EXPECT_EQ(scheduler->waitingStreamsSize(), 2);
-    EXPECT_EQ(stream2->getStatus(), StreamState::WAITING);
-    EXPECT_EQ(stream2->curBlocksNum(), 0);
-
-    auto next_result = scheduler->schedule();
-    ASSERT_TRUE(next_result.ok());
-    EXPECT_TRUE(next_result->empty());
-    // The quota is per schedule round: existing LOADING_CACHE streams are not
-    // carried into a new round's uncached admission accounting, so one more
-    // stream can make progress on each pass without exceeding that round's cap.
-    EXPECT_EQ(scheduler->loading_cache_streams_.size(), 2u);
+    EXPECT_TRUE(result.value().empty());
+    EXPECT_EQ(scheduler->loading_cache_streams_.size(), 2);
     EXPECT_EQ(scheduler->waitingStreamsSize(), 1);
+    EXPECT_EQ(scheduler->runningStreamsSize(), 0);
+    EXPECT_EQ(stream1->getStatus(), StreamState::LOADING_CACHE);
     EXPECT_EQ(stream2->getStatus(), StreamState::LOADING_CACHE);
-    EXPECT_GT(stream2->curBlocksNum(), 0);
     EXPECT_EQ(stream3->getStatus(), StreamState::WAITING);
-    EXPECT_EQ(stream3->curBlocksNum(), 0);
+    EXPECT_EQ(initial_malloc_calls_, 2);
+}
 
-    auto third_result = scheduler->schedule();
-    ASSERT_TRUE(third_result.ok());
-    EXPECT_TRUE(third_result->empty());
-    EXPECT_EQ(scheduler->loading_cache_streams_.size(), 3u);
+TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_ReturningFromLoadingCache_SkipsDuplicateInitialReadiness) {
+    auto scheduler = createScheduler();
+    auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true);
+    auto context   = makeControlledAllocatorContext();
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    installReadinessAllocator([context](const MallocInfo&) { return context; });
+
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
+    EXPECT_EQ(initial_malloc_calls_, 1);
+    EXPECT_TRUE(context->completeOne(true));
+
+    auto second = scheduler->schedule();
+    ASSERT_TRUE(second.ok());
+    ASSERT_EQ(second.value().size(), 1);
+    EXPECT_EQ(second.value().front(), stream);
+    EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(initial_malloc_calls_, 1);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCacheStreams_IncludedInEmptyAndOnflight) {
+    auto scheduler = createScheduler();
+    auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true);
+    auto context   = makeControlledAllocatorContext();
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    installReadinessAllocator([context](const MallocInfo&) { return context; });
+
+    auto result = scheduler->schedule();
+
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 1);
+    EXPECT_FALSE(scheduler->empty());
+    EXPECT_EQ(scheduler->onflightStreams(), 1);
     EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
-    EXPECT_EQ(stream3->getStatus(), StreamState::LOADING_CACHE);
-    EXPECT_GT(stream3->curBlocksNum(), 0);
+    EXPECT_EQ(scheduler->runningStreamsSize(), 0);
+    EXPECT_EQ(stream->streamCacheResource().allocator_load_context_, context);
+    EXPECT_FALSE(context->done());
 }
 
-TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCacheStreams_RespectInitializedKVCacheQuota) {
-    setupMockCoordinator();
-
-    ModelConfig model_config;
-    model_config.max_seq_len = 8192;
-    RuntimeConfig runtime_config;
-    runtime_config.max_generate_batch_size                           = 1;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_size       = 1;
-    runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams = 2;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    ModelSpecificConfig model_specific_config;
-    auto                scheduler = std::make_shared<FIFOScheduler>(
-        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
-
-    auto pending_ctx = createPendingAsyncContext();
-    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillRepeatedly(Return(std::static_pointer_cast<AsyncContext>(pending_ctx)));
-
-    ASSERT_TRUE(scheduler->enqueue(createStream({1}, /*reuse_cache=*/true, /*enable_memory_cache=*/true)).ok());
-    ASSERT_TRUE(scheduler->enqueue(createStream({2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true)).ok());
-    ASSERT_TRUE(scheduler->enqueue(createStream({3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true)).ok());
-
-    auto result = scheduler->schedule();
-    ASSERT_TRUE(result.ok());
-    EXPECT_TRUE(result->empty());
-    EXPECT_EQ(scheduler->loading_cache_streams_.size(), 2u);
-    EXPECT_EQ(scheduler->waitingStreamsSize(), 1);
-}
-
-// ============================================================================
-// 6. scheduleNew: stream returning from loading_ queue (already has blocks) skips asyncLoadCache
-// ============================================================================
-
-TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_ReturningFromLoadingQueue_SkipsAsyncLoad) {
-    setupMockCoordinator();
-
-    // Mock context: done() returns true when checked in loading check
-    auto mock_ctx = std::make_shared<NiceMock<MockAsyncContext>>();
-    ON_CALL(*mock_ctx, done()).WillByDefault(Return(true));
-    ON_CALL(*mock_ctx, success()).WillByDefault(Return(true));
-    ON_CALL(*mock_ctx, waitDone()).WillByDefault(Return());
-
-    // asyncRead should only be called ONCE (for the first time entering loading_ queue)
-    EXPECT_CALL(*mock_coord_, asyncRead(_)).Times(1).WillOnce(Return(std::static_pointer_cast<AsyncContext>(mock_ctx)));
-
+TEST_F(FIFOSchedulerAsyncCacheTest, testWaitPredicate_DoesNotSpinForLoadingCacheStreams) {
     auto scheduler = createScheduler();
-    auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
-
+    auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true);
+    auto context   = makeControlledAllocatorContext();
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    installReadinessAllocator([context](const MallocInfo&) { return context; });
 
-    // First schedule: stream -> loading_ queue
-    auto result1 = scheduler->schedule();
-    ASSERT_TRUE(result1.ok());
-    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 1u);
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
 
-    // Second schedule: load done -> back to WAITING -> scheduleNew -> RUNNING (skips asyncLoadCache)
-    auto result2 = scheduler->schedule();
-    ASSERT_TRUE(result2.ok());
-    ASSERT_EQ(result2.value().size(), 1);
-    // asyncRead was called exactly once - the second scheduleNew sees had_blocks > 0 and skips asyncLoadCache
+    // Consume the admission-triggered round while the allocator context remains pending.
+    auto second = scheduler->schedule();
+    ASSERT_TRUE(second.ok());
+    ASSERT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
+    EXPECT_FALSE(scheduler->waitPredicate());
 }
-
-// ============================================================================
-// 7. loading_ queue included in empty() and onflightStreams()
-// ============================================================================
-
-TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingQueue_IncludedInEmptyAndOnflight) {
-    setupMockCoordinator();
-
-    auto pending_ctx = createPendingAsyncContext();
-    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(pending_ctx)));
-
-    auto scheduler = createScheduler();
-    auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
-
-    ASSERT_TRUE(scheduler->enqueue(stream).ok());
-    auto result = scheduler->schedule();
-    ASSERT_TRUE(result.ok());
-    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 1u);
-
-    // Scheduler should NOT be empty when there are streams in loading_ queue
-    ASSERT_FALSE(scheduler->empty());
-    // onflightStreams should include loading_ queue
-    ASSERT_EQ(scheduler->onflightStreams(), 1);
-}
-
-// ============================================================================
-// 8. loading_ queue included in waitPredicate()
-// ============================================================================
-
-TEST_F(FIFOSchedulerAsyncCacheTest, testWaitPredicate_IncludesLoadingQueue) {
-    auto scheduler = createScheduler();
-    // Empty scheduler -> waitPredicate should be false
-    ASSERT_FALSE(scheduler->waitPredicate());
-
-    // Add a fake stream to the loading queue.
-    auto stream = createStream({1, 2, 3});
-    scheduler->loading_cache_streams_.push_back(stream);
-    ASSERT_TRUE(scheduler->waitPredicate());
-}
-
-// ============================================================================
-// 9. evictDoneStreams handles external errors (hasError -> consumeError -> setFinishedWithoutLock)
-// ============================================================================
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testEvictDoneStreams_HandlesExternalError) {
     auto scheduler = createScheduler();
     auto stream    = createStream({1, 2, 3});
 
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(first.value().size(), 1);
 
-    // Single schedule: stream transitions directly to RUNNING (no cache loading needed)
+    stream->reportError(ErrorCode::CANCELLED, "cancelled by RPC");
+    auto second = scheduler->schedule();
+
+    ASSERT_TRUE(second.ok());
+    EXPECT_TRUE(second.value().empty());
+    EXPECT_TRUE(stream->isFinished());
+    EXPECT_EQ(scheduler->runningStreamsSize(), 0);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testMixedAllocatorReadinessAndDirectStreams) {
+    auto scheduler      = createScheduler();
+    auto loading_stream = createStream({1, 2}, /*reuse_cache=*/true);
+    auto direct_stream  = createStream({3, 4}, /*reuse_cache=*/false);
+    auto context        = makeControlledAllocatorContext();
+    ASSERT_TRUE(scheduler->enqueue(loading_stream).ok());
+    ASSERT_TRUE(scheduler->enqueue(direct_stream).ok());
+    installReadinessAllocator([context, loading_stream](const MallocInfo& info) -> std::shared_ptr<AsyncContext> {
+        return info.request_id == loading_stream->streamId() ? context : nullptr;
+    });
+
     auto result = scheduler->schedule();
+
     ASSERT_TRUE(result.ok());
     ASSERT_EQ(result.value().size(), 1);
-    ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
-    ASSERT_EQ(scheduler->runningStreamsSize(), 1);
-
-    // Simulate external error
-    stream->reportError(ErrorCode::CANCELLED, "cancelled by RPC");
-
-    // Next schedule: evictDoneStreams should detect the error, finish the stream, and release resources
-    auto result2 = scheduler->schedule();
-    ASSERT_TRUE(result2.ok());
-    ASSERT_EQ(result2.value().size(), 0);
-    ASSERT_TRUE(stream->isFinished());
-    ASSERT_EQ(scheduler->runningStreamsSize(), 0);
+    EXPECT_EQ(result.value().front(), direct_stream);
+    EXPECT_EQ(loading_stream->getStatus(), StreamState::LOADING_CACHE);
+    EXPECT_EQ(direct_stream->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(scheduler->loading_cache_streams_.size(), 1);
+    EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
+    EXPECT_EQ(scheduler->runningStreamsSize(), 1);
+    EXPECT_EQ(scheduler->onflightStreams(), 2);
 }
 
-// ============================================================================
-// 10. Multiple streams: mix of async-loading and direct-running
-// ============================================================================
-
-TEST_F(FIFOSchedulerAsyncCacheTest, testMixedAsyncAndDirectStreams) {
-    setupMockCoordinator();
-
-    auto pending_ctx = createPendingAsyncContext();
-    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(pending_ctx)));
-
+TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_AllocatorPending_StaysInQueue) {
     auto scheduler = createScheduler();
-
-    // Stream1: needs async cache load
-    auto stream1 = createStream({1, 2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
-    // Stream2: no reuse cache
-    auto stream2 = createStream({3, 4}, /*reuse_cache=*/false);
-
-    ASSERT_TRUE(scheduler->enqueue(stream1).ok());
-    ASSERT_TRUE(scheduler->enqueue(stream2).ok());
-
-    // Single schedule: stream1 -> loading_ queue (async load), stream2 -> RUNNING (directly)
-    auto result = scheduler->schedule();
-    ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result.value().size(), 1);  // Only stream2 is running
-    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 1u);
-    ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
-    ASSERT_EQ(scheduler->runningStreamsSize(), 1);
-}
-
-// ============================================================================
-// 11. loading check: stream still loading -> stays in queue
-// ============================================================================
-
-TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCheck_StillLoading_StaysInQueue) {
-    setupMockCoordinator();
-
-    auto pending_ctx = createPendingAsyncContext();
-    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(pending_ctx)));
-
-    auto scheduler = createScheduler();
-    auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
-
+    auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true);
+    auto context   = makeControlledAllocatorContext();
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    installReadinessAllocator([context](const MallocInfo&) { return context; });
 
-    // First schedule: enters loading_ queue
-    auto result1 = scheduler->schedule();
-    ASSERT_TRUE(result1.ok());
-    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 1u);
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
+    auto second = scheduler->schedule();
 
-    // Second schedule: still pending (done() returns false)
-    auto result2 = scheduler->schedule();
-    ASSERT_TRUE(result2.ok());
-    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 1u);
-    ASSERT_EQ(result2.value().size(), 0);
+    ASSERT_TRUE(second.ok());
+    EXPECT_TRUE(second.value().empty());
+    EXPECT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
+    EXPECT_EQ(stream->streamCacheResource().allocator_load_context_, context);
+    EXPECT_EQ(scheduler->loading_cache_streams_.size(), 1);
+    EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
+    EXPECT_EQ(scheduler->runningStreamsSize(), 0);
+    EXPECT_FALSE(stream->hasError());
+    EXPECT_EQ(free_calls_, 0);
 }
 
-// ============================================================================
-// 12. schedule() ordering: load_done_streams inserted at head of waiting_
-// ============================================================================
+TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleOrdering_LoadDoneRejoinsWaitingTail) {
+    auto scheduler        = createScheduler(/*max_generate_batch_size=*/1);
+    auto completed_stream = createStream({1, 2}, /*reuse_cache=*/true);
+    auto older_waiter     = createStream({3, 4}, /*reuse_cache=*/false);
+    auto context          = makeControlledAllocatorContext();
+    ASSERT_TRUE(scheduler->enqueue(completed_stream).ok());
+    ASSERT_TRUE(scheduler->enqueue(older_waiter).ok());
+    installReadinessAllocator([context, completed_stream](const MallocInfo& info) {
+        return info.request_id == completed_stream->streamId() ? context : nullptr;
+    });
 
-TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleOrdering_LoadDoneStreamsAtWaitingHead) {
-    setupMockCoordinator();
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(completed_stream->getStatus(), StreamState::LOADING_CACHE);
+    EXPECT_TRUE(context->completeOne(true));
 
-    // Mock context: done() returns true when checked in loading check
-    auto mock_ctx = std::make_shared<NiceMock<MockAsyncContext>>();
-    ON_CALL(*mock_ctx, done()).WillByDefault(Return(true));
-    ON_CALL(*mock_ctx, success()).WillByDefault(Return(true));
-    ON_CALL(*mock_ctx, waitDone()).WillByDefault(Return());
-
-    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(mock_ctx)));
-
-    auto scheduler = createScheduler();
-
-    // Stream1: will enter loading_ queue first
-    auto stream1 = createStream({1, 2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
-    ASSERT_TRUE(scheduler->enqueue(stream1).ok());
-    auto result1 = scheduler->schedule();
-    ASSERT_TRUE(result1.ok());
-    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 1u);
-
-    // Stream2: enqueued later while stream1 is loading
-    auto stream2 = createStream({3, 4}, /*reuse_cache=*/false);
-    ASSERT_TRUE(scheduler->enqueue(stream2).ok());
-
-    // Second schedule: stream1 load done -> moves to waiting_ head -> should be scheduled before stream2
-    auto result2 = scheduler->schedule();
-    ASSERT_TRUE(result2.ok());
-    // Both streams should be running now
-    ASSERT_GE(result2.value().size(), 1);
+    auto second = scheduler->schedule();
+    ASSERT_TRUE(second.ok());
+    ASSERT_EQ(second.value().size(), 1);
+    EXPECT_EQ(second.value().front(), older_waiter);
+    EXPECT_EQ(older_waiter->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(completed_stream->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(completed_stream->streamCacheResource().allocator_load_context_, nullptr);
+    ASSERT_EQ(scheduler->waiting_streams_.size(), 1);
+    EXPECT_EQ(scheduler->waiting_streams_.front(), completed_stream);
+    EXPECT_EQ(scheduler->loading_cache_streams_.size(), 0);
+    EXPECT_EQ(scheduler->runningStreamsSize(), 1);
 }
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingGroupDoesNotBlockOrdinaryWaitingStreams) {
-    setupMockCoordinator();
-
-    auto pending_ctx = createPendingAsyncContext();
-    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(pending_ctx)));
-
     auto scheduler      = createScheduler();
     auto direct_stream  = createStream({1, 2}, /*reuse_cache=*/false);
-    auto loading_stream = createStream({3, 4}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+    auto loading_stream = createStream({3, 4}, /*reuse_cache=*/true);
     auto waiting_stream = createStream({5, 6}, /*reuse_cache=*/false);
+    auto context        = makeControlledAllocatorContext();
 
     auto [enqueue_successes, streams] = scheduler->enqueueGroup({direct_stream, loading_stream});
     ASSERT_EQ(enqueue_successes, std::vector<bool>({true, true}));
     ASSERT_EQ(streams.size(), 2);
+    installReadinessAllocator([context, loading_stream](const MallocInfo& info) {
+        return info.request_id == loading_stream->streamId() ? context : nullptr;
+    });
 
     auto group_result = scheduler->schedule();
     ASSERT_TRUE(group_result.ok());
-    ASSERT_TRUE(group_result.value().empty());
+    EXPECT_TRUE(group_result.value().empty());
     EXPECT_EQ(direct_stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(loading_stream->getStatus(), StreamState::LOADING_CACHE);
     ASSERT_EQ(scheduler->loading_cache_group_queue_.size(), 1);
@@ -661,14 +506,14 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingGroupDoesNotBlockOrdinaryWaitingS
 }
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testOrdinaryCacheLoadDoesNotStarveWaitingGroup) {
-    setupMockCoordinator();
-
-    auto pending_ctx = createPendingAsyncContext();
-    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(pending_ctx)));
-
     auto scheduler      = createScheduler();
-    auto loading_stream = createStream({1, 2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+    auto loading_stream = createStream({1, 2}, /*reuse_cache=*/true);
+    auto context        = makeControlledAllocatorContext();
+
     ASSERT_TRUE(scheduler->enqueue(loading_stream).ok());
+    installReadinessAllocator([context, loading_stream](const MallocInfo& info) {
+        return info.request_id == loading_stream->streamId() ? context : nullptr;
+    });
     ASSERT_TRUE(scheduler->schedule().ok());
     ASSERT_EQ(scheduler->loading_cache_streams_.size(), 1);
 
@@ -676,8 +521,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testOrdinaryCacheLoadDoesNotStarveWaitingGro
     auto group_stream_2 = createStream({5, 6}, /*reuse_cache=*/false);
     ASSERT_EQ(scheduler->enqueueGroup({group_stream_1, group_stream_2}).first, std::vector<bool>({true, true}));
 
-    ON_CALL(*pending_ctx, done()).WillByDefault(Return(true));
-    ON_CALL(*pending_ctx, success()).WillByDefault(Return(true));
+    ASSERT_TRUE(context->completeOne(true));
     auto result = scheduler->schedule();
     ASSERT_TRUE(result.ok());
     ASSERT_EQ(result.value().size(), 1);
@@ -697,30 +541,25 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testOrdinaryCacheLoadDoesNotStarveWaitingGro
 }
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testPreparedGroupFinishesLoadingInOneRound) {
-    setupMockCoordinator();
-
-    auto done_ctx = createDoneAsyncContext();
-    ON_CALL(*done_ctx, waitDone()).WillByDefault(Return());
-    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(done_ctx)));
-
     auto scheduler      = createScheduler();
     auto direct_stream  = createStream({1, 2}, /*reuse_cache=*/false);
-    auto loading_stream = createStream({3, 4}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+    auto loading_stream = createStream({3, 4}, /*reuse_cache=*/true);
     auto waiting_stream = createStream({5, 6}, /*reuse_cache=*/false);
+    auto context        = makeControlledAllocatorContext();
+    ASSERT_TRUE(context->completeOne(true));
 
     ASSERT_EQ(scheduler->enqueueGroup({direct_stream, loading_stream}).first, std::vector<bool>({true, true}));
-
+    installReadinessAllocator([context, loading_stream](const MallocInfo& info) {
+        return info.request_id == loading_stream->streamId() ? context : nullptr;
+    });
     auto first_result = scheduler->schedule();
     ASSERT_TRUE(first_result.ok());
     EXPECT_TRUE(first_result.value().empty());
     EXPECT_EQ(scheduler->loading_cache_group_queue_.size(), 1);
 
     ASSERT_TRUE(scheduler->enqueue(waiting_stream).ok());
-
     auto second_result = scheduler->schedule();
     ASSERT_TRUE(second_result.ok());
-    // The ready explicit group owns this execution boundary. The ordinary
-    // stream remains queued instead of being mixed into the group batch.
     EXPECT_EQ(second_result.value().size(), 2);
     EXPECT_EQ(direct_stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(loading_stream->getStatus(), StreamState::RUNNING);
@@ -738,18 +577,17 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPreparedGroupFinishesLoadingInOneRound) 
 }
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testReadyLoadingGroupDrainsNormalLaneBeforeDispatch) {
-    setupMockCoordinator();
-
-    auto pending_ctx = createPendingAsyncContext();
-    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(pending_ctx)));
-
     auto scheduler      = createScheduler();
     auto direct_stream  = createStream({1, 2}, /*reuse_cache=*/false);
-    auto loading_stream = createStream({3, 4}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+    auto loading_stream = createStream({3, 4}, /*reuse_cache=*/true);
     auto normal_stream  = createStream({5, 6}, /*reuse_cache=*/false);
     auto normal_tail    = createStream({7, 8}, /*reuse_cache=*/false);
+    auto context        = makeControlledAllocatorContext();
 
     ASSERT_EQ(scheduler->enqueueGroup({direct_stream, loading_stream}).first, std::vector<bool>({true, true}));
+    installReadinessAllocator([context, loading_stream](const MallocInfo& info) {
+        return info.request_id == loading_stream->streamId() ? context : nullptr;
+    });
     ASSERT_TRUE(scheduler->schedule().ok());
     ASSERT_EQ(scheduler->loading_cache_group_queue_.size(), 1);
 
@@ -759,11 +597,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testReadyLoadingGroupDrainsNormalLaneBeforeD
     ASSERT_EQ(normal_result.value().size(), 1);
     EXPECT_EQ(normal_stream->getStatus(), StreamState::RUNNING);
 
-    // Cache completion makes the group ready while an ordinary batch is still
-    // executing. A continuously arriving normal tail must not be admitted into
-    // that batch; otherwise the group can never reach an isolated boundary.
-    ON_CALL(*pending_ctx, done()).WillByDefault(Return(true));
-    ON_CALL(*pending_ctx, success()).WillByDefault(Return(true));
+    ASSERT_TRUE(context->completeOne(true));
     ASSERT_TRUE(scheduler->enqueue(normal_tail).ok());
     auto drain_result = scheduler->schedule();
     ASSERT_TRUE(drain_result.ok());
@@ -781,14 +615,14 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testReadyLoadingGroupDrainsNormalLaneBeforeD
 }
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testOrdinaryCacheCompletionDoesNotMixIntoRunningGroup) {
-    setupMockCoordinator();
-
-    auto pending_ctx = createPendingAsyncContext();
-    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(pending_ctx)));
-
     auto scheduler        = createScheduler();
-    auto ordinary_loading = createStream({1, 2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+    auto ordinary_loading = createStream({1, 2}, /*reuse_cache=*/true);
+    auto context          = makeControlledAllocatorContext();
+
     ASSERT_TRUE(scheduler->enqueue(ordinary_loading).ok());
+    installReadinessAllocator([context, ordinary_loading](const MallocInfo& info) {
+        return info.request_id == ordinary_loading->streamId() ? context : nullptr;
+    });
     ASSERT_TRUE(scheduler->schedule().ok());
     ASSERT_EQ(ordinary_loading->getStatus(), StreamState::LOADING_CACHE);
 
@@ -797,13 +631,12 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testOrdinaryCacheCompletionDoesNotMixIntoRun
     ASSERT_EQ(scheduler->enqueueGroup({group_stream_1, group_stream_2}).first, std::vector<bool>({true, true}));
     auto group_result = scheduler->schedule();
     ASSERT_TRUE(group_result.ok());
-    ASSERT_EQ(group_result->size(), 2);
+    ASSERT_EQ(group_result.value().size(), 2);
 
-    ON_CALL(*pending_ctx, done()).WillByDefault(Return(true));
-    ON_CALL(*pending_ctx, success()).WillByDefault(Return(true));
+    ASSERT_TRUE(context->completeOne(true));
     auto isolated_result = scheduler->schedule();
     ASSERT_TRUE(isolated_result.ok());
-    ASSERT_EQ(isolated_result->size(), 2);
+    ASSERT_EQ(isolated_result.value().size(), 2);
     EXPECT_EQ(ordinary_loading->getStatus(), StreamState::LOADING_CACHE);
     EXPECT_EQ(scheduler->loading_cache_streams_.size(), 1);
 
@@ -811,19 +644,19 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testOrdinaryCacheCompletionDoesNotMixIntoRun
     group_stream_2->reportEvent(StreamEvents::GenerateDone);
     auto ordinary_result = scheduler->schedule();
     ASSERT_TRUE(ordinary_result.ok());
-    ASSERT_EQ(ordinary_result->size(), 1);
+    ASSERT_EQ(ordinary_result.value().size(), 1);
     EXPECT_EQ(ordinary_loading->getStatus(), StreamState::RUNNING);
 }
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testOrdinaryLoadingReleasesInitedLimitBeforeWaitingGroup) {
-    setupMockCoordinator();
+    auto scheduler        = createScheduler(/*max_generate_batch_size=*/100, /*max_inited_kv_cache_streams=*/1);
+    auto ordinary_loading = createStream({1, 2}, /*reuse_cache=*/true);
+    auto context          = makeControlledAllocatorContext();
 
-    auto pending_ctx = createPendingAsyncContext();
-    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(pending_ctx)));
-
-    auto scheduler        = createSchedulerWithInitedLimit(1);
-    auto ordinary_loading = createStream({1, 2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
     ASSERT_TRUE(scheduler->enqueue(ordinary_loading).ok());
+    installReadinessAllocator([context, ordinary_loading](const MallocInfo& info) {
+        return info.request_id == ordinary_loading->streamId() ? context : nullptr;
+    });
     ASSERT_TRUE(scheduler->schedule().ok());
     ASSERT_EQ(ordinary_loading->getStatus(), StreamState::LOADING_CACHE);
     ASSERT_EQ(scheduler->countInitedKVCacheStreams(), 1);
@@ -831,49 +664,45 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testOrdinaryLoadingReleasesInitedLimitBefore
     auto group_stream = createStream({3, 4}, /*reuse_cache=*/false);
     ASSERT_EQ(scheduler->enqueueGroup({group_stream}).first, std::vector<bool>({true}));
 
-    // The group cannot initialize while the ordinary load owns the sole slot.
-    // Advancing that load must still be allowed; otherwise both queues deadlock.
-    ON_CALL(*pending_ctx, done()).WillByDefault(Return(true));
-    ON_CALL(*pending_ctx, success()).WillByDefault(Return(true));
+    ASSERT_TRUE(context->completeOne(true));
     auto ordinary_result = scheduler->schedule();
     ASSERT_TRUE(ordinary_result.ok());
-    ASSERT_EQ(ordinary_result->size(), 1);
+    ASSERT_EQ(ordinary_result.value().size(), 1);
     EXPECT_EQ(ordinary_loading->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(group_stream->getStatus(), StreamState::WAITING);
 
     ordinary_loading->reportEvent(StreamEvents::GenerateDone);
     auto group_result = scheduler->schedule();
     ASSERT_TRUE(group_result.ok());
-    ASSERT_EQ(group_result->size(), 1);
+    ASSERT_EQ(group_result.value().size(), 1);
     EXPECT_EQ(group_stream->getStatus(), StreamState::RUNNING);
 }
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testGroupedSurvivorContinuesLoadingAfterPeerTimeout) {
-    setupMockCoordinator();
-
-    auto pending_ctx = createPendingAsyncContext();
-    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(pending_ctx)));
-
     auto scheduler      = createScheduler();
     auto direct_stream  = createStream({1, 2}, /*reuse_cache=*/false);
-    auto loading_stream = createStream({3, 4}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+    auto loading_stream = createStream({3, 4}, /*reuse_cache=*/true);
+    auto context        = makeControlledAllocatorContext();
     direct_stream->generateConfig()->timeout_ms = 1;
     direct_stream->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds());
 
     auto [enqueue_successes, streams] = scheduler->enqueueGroup({direct_stream, loading_stream});
     ASSERT_EQ(enqueue_successes, std::vector<bool>({true, true}));
     ASSERT_EQ(streams.size(), 2);
+    installReadinessAllocator([context, loading_stream](const MallocInfo& info) {
+        return info.request_id == loading_stream->streamId() ? context : nullptr;
+    });
 
     auto first_result = scheduler->schedule();
     ASSERT_TRUE(first_result.ok());
-    ASSERT_TRUE(first_result.value().empty());
+    EXPECT_TRUE(first_result.value().empty());
     ASSERT_EQ(direct_stream->getStatus(), StreamState::RUNNING);
     ASSERT_EQ(loading_stream->getStatus(), StreamState::LOADING_CACHE);
 
-    usleep(3000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(3));
     auto second_result = scheduler->schedule();
     ASSERT_TRUE(second_result.ok());
-    ASSERT_TRUE(second_result.value().empty());
+    EXPECT_TRUE(second_result.value().empty());
     ASSERT_EQ(direct_stream->getStatus(), StreamState::FINISHED);
     ASSERT_EQ(direct_stream->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
     ASSERT_EQ(loading_stream->getStatus(), StreamState::LOADING_CACHE);
@@ -882,8 +711,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testGroupedSurvivorContinuesLoadingAfterPeer
     ASSERT_TRUE(scheduler->loading_cache_streams_.empty());
     ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
 
-    ON_CALL(*pending_ctx, done()).WillByDefault(Return(true));
-    ON_CALL(*pending_ctx, success()).WillByDefault(Return(true));
+    ASSERT_TRUE(context->completeOne(true));
     auto final_result = scheduler->schedule();
     ASSERT_TRUE(final_result.ok());
     ASSERT_EQ(final_result.value().size(), 1);
@@ -891,207 +719,115 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testGroupedSurvivorContinuesLoadingAfterPeer
     EXPECT_TRUE(scheduler->loading_cache_group_queue_.empty());
 }
 
-TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCacheStreams_CountedInBatchLimit) {
-    setupMockCoordinator();
+TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingGroupCompletionIsPolledWithoutExternalWakeup) {
+    auto scheduler = createScheduler();
+    auto stream    = createStream({1, 2}, /*reuse_cache=*/true);
+    auto context   = makeControlledAllocatorContext();
 
-    // Set max batch size to 2
-    ModelConfig model_config;
-    model_config.max_seq_len = 8192;
-    RuntimeConfig runtime_config;
-    runtime_config.max_generate_batch_size                     = 2;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    ModelSpecificConfig model_specific_config;
-    auto                scheduler = std::make_shared<FIFOScheduler>(
-        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
+    ASSERT_EQ(scheduler->enqueueGroup({stream}).first, std::vector<bool>({true}));
+    installReadinessAllocator([context, stream](const MallocInfo& info) {
+        return info.request_id == stream->streamId() ? context : nullptr;
+    });
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    EXPECT_TRUE(first.value().empty());
+    ASSERT_EQ(scheduler->loading_cache_group_queue_.size(), 1);
+    EXPECT_TRUE(scheduler->loading_cache_streams_.empty());
+    EXPECT_EQ(scheduler->runningStreamsSize(), 0);
+    EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
+    EXPECT_FALSE(scheduler->waitPredicate());
 
-    auto pending_ctx = createPendingAsyncContext();
-    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillRepeatedly(Return(std::static_pointer_cast<AsyncContext>(pending_ctx)));
+    ASSERT_TRUE(context->completeOne(true));
+    std::promise<absl::StatusOr<std::list<GenerateStreamPtr>>> promise;
+    auto                                                       future = promise.get_future();
+    std::thread schedule_thread([&] { promise.set_value(scheduler->schedule()); });
 
-    // Enqueue 3 streams with reuse_cache
-    auto stream1 = createStream({1}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
-    auto stream2 = createStream({2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
-    auto stream3 = createStream({3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
-
-    ASSERT_TRUE(scheduler->enqueue(stream1).ok());
-    ASSERT_TRUE(scheduler->enqueue(stream2).ok());
-    ASSERT_TRUE(scheduler->enqueue(stream3).ok());
-
-    auto result = scheduler->schedule();
+    const auto wait_status = future.wait_for(std::chrono::milliseconds(250));
+    if (wait_status != std::future_status::ready) {
+        scheduler->stop();
+    }
+    schedule_thread.join();
+    ASSERT_EQ(wait_status, std::future_status::ready);
+    auto result = future.get();
     ASSERT_TRUE(result.ok());
-    // loading_cache_streams_ should count toward max_generate_batch_size
-    // With max=2, only 2 streams should be scheduled (into LOADING_CACHE)
-    // The 3rd stream should remain in waiting
-    ASSERT_LE(result.value().size(), 2);
+    ASSERT_EQ(result.value().size(), 1);
+    EXPECT_EQ(result.value().front(), stream);
+    EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
 }
 
-TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionCompletedAsyncLoadStaysInAdmissionPeak) {
-    cache_config_ = test::makeSimpleMhaCacheConfig(
-        /*layer_num=*/1, /*block_num=*/3, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
-    cache_manager_ = std::make_shared<KVCacheManager>(cache_config_);
-    ASSERT_TRUE(cache_manager_->init());
-    ASSERT_EQ(cache_manager_->freeBlocksNum(), 2);
-
-    setupMockCoordinator();
-    auto done_ctx = createDoneAsyncContext();
-    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(done_ctx)));
-
+TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionAllocatorLoadingLifecyclePromotesToDecode) {
     auto scheduler = createPDFusionRatioScheduler();
-    auto loaded    = createStream({1, 2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
-    loaded->generateConfig()->max_new_tokens = 2;
-    ASSERT_TRUE(scheduler->enqueue(loaded).ok());
+    auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true);
+    auto context   = makeControlledAllocatorContext();
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    installReadinessAllocator([context](const MallocInfo&) { return context; });
 
     auto loading = scheduler->schedule();
     ASSERT_TRUE(loading.ok());
     ASSERT_TRUE(loading.value().empty());
-    ASSERT_EQ(loaded->getStatus(), StreamState::LOADING_CACHE);
-    ASSERT_EQ(cache_manager_->freeBlocksNum(), 1);
-    ASSERT_EQ(loaded->estimatePeakNeedBlocks(/*remaining_tokens=*/1), 1);
-
-    auto candidate = createStream({3});
-    candidate->generateConfig()->max_new_tokens = 2;
-    ASSERT_EQ(candidate->estimatePeakNeedBlocks(/*remaining_tokens=*/1), 1);
-    ASSERT_TRUE(scheduler->enqueue(candidate).ok());
-
-    // The completed load returns to WAITING after the candidate was enqueued. Their combined
-    // one-block future peaks exceed the one remaining block, so only the pre-admitted load may run.
-    auto prefill = scheduler->schedule();
-    ASSERT_TRUE(prefill.ok());
-    ASSERT_EQ(prefill.value().size(), 1);
-    ASSERT_EQ(prefill.value().front().get(), loaded.get());
-    ASSERT_EQ(scheduler->pendingDecodeStreamsSize(), 1);
-    ASSERT_EQ(scheduler->waitingStreamsSize(), 1);
-    ASSERT_EQ(scheduler->waiting_streams_.front().get(), candidate.get());
-    ASSERT_FALSE(candidate->hasEvent(StreamEvents::CanRun));
-}
-
-TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionLoadingCacheLifecyclePromotesToDecode) {
-    setupMockCoordinator();
-
-    auto mock_ctx = std::make_shared<NiceMock<MockAsyncContext>>();
-    ON_CALL(*mock_ctx, done()).WillByDefault(Return(true));
-    ON_CALL(*mock_ctx, success()).WillByDefault(Return(true));
-    ON_CALL(*mock_ctx, waitDone()).WillByDefault(Return());
-    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(mock_ctx)));
-
-    auto scheduler = createPDFusionRatioScheduler();
-    auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
-
-    ASSERT_TRUE(scheduler->enqueue(stream).ok());
-
-    auto loading = scheduler->schedule();
-    ASSERT_TRUE(loading.ok());
-    ASSERT_EQ(loading.value().size(), 0);
     ASSERT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
+    ASSERT_EQ(stream->streamCacheResource().allocator_load_context_, context);
     ASSERT_EQ(scheduler->loading_cache_streams_.size(), 1);
     ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler->pendingDecodeStreamsSize(), 0);
+    ASSERT_EQ(initial_malloc_calls_, 1);
 
+    EXPECT_TRUE(context->completeOne(true));
     auto prefill = scheduler->schedule();
     ASSERT_TRUE(prefill.ok());
     ASSERT_EQ(prefill.value().size(), 1);
-    ASSERT_EQ(prefill.value().front().get(), stream.get());
+    ASSERT_EQ(prefill.value().front(), stream);
     ASSERT_EQ(stream->getStatus(), StreamState::RUNNING);
+    ASSERT_EQ(stream->streamCacheResource().allocator_load_context_, nullptr);
     ASSERT_EQ(scheduler->loading_cache_streams_.size(), 0);
     ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler->runningStreamsSize(), 0);
     ASSERT_EQ(scheduler->pendingDecodeStreamsSize(), 1);
+    ASSERT_EQ(initial_malloc_calls_, 1);
 
     stream->setSeqLength(stream->seqLength() + 1);
     auto decode = scheduler->schedule();
     ASSERT_TRUE(decode.ok());
     ASSERT_EQ(decode.value().size(), 1);
-    ASSERT_EQ(decode.value().front().get(), stream.get());
+    ASSERT_EQ(decode.value().front(), stream);
     ASSERT_EQ(scheduler->runningStreamsSize(), 1);
     ASSERT_EQ(scheduler->pendingDecodeStreamsSize(), 0);
+    ASSERT_EQ(initial_malloc_calls_, 1);
 }
 
-TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionLoadingCacheReservesDelayedBeamTailCopies) {
-    cache_config_ = test::makeSimpleMhaCacheConfig(
-        /*layer_num=*/1, /*block_num=*/6, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_INT8);
-    cache_manager_ = std::make_shared<KVCacheManager>(cache_config_);
-    ASSERT_TRUE(cache_manager_->init());
-    ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
-
-    setupMockCoordinator();
-    auto done_ctx = createDoneAsyncContext();
-    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(done_ctx)));
-
-    auto scheduler = createPDFusionRatioScheduler();
-    auto loaded    = createStream({1, 2, 3, 4, 5},
-                                  /*reuse_cache=*/true,
-                                  /*enable_memory_cache=*/true,
-                                  /*max_new_tokens=*/3,
-                                  /*variable_num_beams=*/{1, 4});
-    ASSERT_EQ(loaded->currentBatchSize(), 1);
-    ASSERT_EQ(loaded->maxBatchSize(), 4);
-    ASSERT_TRUE(scheduler->enqueue(loaded).ok());
-
-    auto loading = scheduler->schedule();
-    ASSERT_TRUE(loading.ok());
-    ASSERT_TRUE(loading.value().empty());
-    ASSERT_EQ(loaded->getStatus(), StreamState::LOADING_CACHE);
-    ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
-    ASSERT_EQ(loaded->estimatePeakNeedBlocks(/*remaining_tokens=*/2), 3);
-
-    auto candidate = createStream({6},
-                                  /*reuse_cache=*/false,
-                                  /*enable_memory_cache=*/false,
-                                  /*max_new_tokens=*/3);
-    ASSERT_EQ(candidate->estimatePeakNeedBlocks(/*remaining_tokens=*/2), 1);
-    ASSERT_TRUE(scheduler->enqueue(candidate).ok());
-
-    // The three free blocks exactly cover the loaded stream's delayed 1-to-4 partial-tail fork. The concurrent
-    // candidate must remain waiting so the later beam expansion cannot fail after admission.
-    auto prefill = scheduler->schedule();
-    ASSERT_TRUE(prefill.ok());
-    ASSERT_EQ(prefill.value().size(), 1);
-    ASSERT_EQ(prefill.value().front().get(), loaded.get());
-    ASSERT_EQ(scheduler->pendingDecodeStreamsSize(), 1);
-    ASSERT_EQ(scheduler->waitingStreamsSize(), 1);
-    ASSERT_EQ(scheduler->waiting_streams_.front().get(), candidate.get());
-    ASSERT_FALSE(candidate->hasEvent(StreamEvents::CanRun));
-    ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
-}
-
-TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionLoadingCacheStreamsCountTowardBatchLimit) {
-    setupMockCoordinator();
-
-    ModelConfig model_config;
-    model_config.max_seq_len = 8192;
-    RuntimeConfig runtime_config;
-    runtime_config.max_generate_batch_size                     = 2;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig pd_sep_config;
-    pd_sep_config.role_type = RoleType::PDFUSION;
-    ParallelismConfig   parallelism_config;
-    ModelSpecificConfig model_specific_config;
-    auto                scheduler = std::make_shared<PDFusionRatioScheduler>(
-        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
-
-    auto pending_ctx = createPendingAsyncContext();
-    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillRepeatedly(Return(std::static_pointer_cast<AsyncContext>(pending_ctx)));
-
-    auto stream1 = createStream({1}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
-    auto stream2 = createStream({2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
-    auto stream3 = createStream({3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
-
+TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionPendingAllocatorLoadsCountTowardInflightLimit) {
+    auto scheduler = createPDFusionRatioScheduler(/*max_generate_batch_size=*/2);
+    auto stream1   = createStream({1}, /*reuse_cache=*/true);
+    auto stream2   = createStream({2}, /*reuse_cache=*/true);
+    auto stream3   = createStream({3}, /*reuse_cache=*/true);
+    auto context1  = makeControlledAllocatorContext();
+    auto context2  = makeControlledAllocatorContext();
+    auto context3  = makeControlledAllocatorContext();
     ASSERT_TRUE(scheduler->enqueue(stream1).ok());
     ASSERT_TRUE(scheduler->enqueue(stream2).ok());
     ASSERT_TRUE(scheduler->enqueue(stream3).ok());
+    const std::unordered_map<int64_t, std::shared_ptr<AsyncContext>> contexts{
+        {stream1->streamId(), context1}, {stream2->streamId(), context2}, {stream3->streamId(), context3}};
+    installReadinessAllocator([contexts](const MallocInfo& info) { return contexts.at(info.request_id); });
 
     auto first = scheduler->schedule();
     ASSERT_TRUE(first.ok());
-    ASSERT_EQ(first.value().size(), 0);
+    ASSERT_TRUE(first.value().empty());
     ASSERT_EQ(scheduler->loading_cache_streams_.size(), 2);
     ASSERT_EQ(scheduler->waitingStreamsSize(), 1);
+    ASSERT_EQ(scheduler->pendingDecodeStreamsSize(), 0);
+    ASSERT_EQ(initial_malloc_calls_, 2);
+    EXPECT_EQ(stream1->streamCacheResource().allocator_load_context_, context1);
+    EXPECT_EQ(stream2->streamCacheResource().allocator_load_context_, context2);
+    EXPECT_EQ(stream3->streamCacheResource().allocator_load_context_, nullptr);
 
     auto second = scheduler->schedule();
     ASSERT_TRUE(second.ok());
-    ASSERT_EQ(second.value().size(), 0);
+    ASSERT_TRUE(second.value().empty());
     ASSERT_EQ(scheduler->loading_cache_streams_.size(), 2);
     ASSERT_EQ(scheduler->waitingStreamsSize(), 1);
+    ASSERT_EQ(scheduler->pendingDecodeStreamsSize(), 0);
+    ASSERT_EQ(initial_malloc_calls_, 2);
 }
 
 }  // namespace rtp_llm

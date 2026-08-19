@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include <algorithm>
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
@@ -396,9 +397,24 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
                             "physical kv_cache_block_id must be 3-D for tagged inputs");
 
     torch_ext::AttentionInputsByTag by_tag;
+    const auto group_blocks_per_owner = cache_manager_->cacheConfig().groupKernelBlocksPerKvBlockSnapshot();
+    RTP_LLM_CHECK_WITH_INFO(group_blocks_per_owner.size() == group_count,
+                            "KV kernel subdivision count=%zu does not match group count=%zu",
+                            group_blocks_per_owner.size(),
+                            group_count);
+    const auto max_blocks_per_owner =
+        *std::max_element(group_blocks_per_owner.begin(), group_blocks_per_owner.end());
+    RTP_LLM_CHECK_WITH_INFO(max_blocks_per_owner > 0
+                                && inputs.kv_cache_kernel_block_id.size(2) % max_blocks_per_owner == 0,
+                            "rectangular KV kernel table width=%ld is not divisible by max subdivision=%zu",
+                            inputs.kv_cache_kernel_block_id.size(2),
+                            max_blocks_per_owner);
+    const auto max_physical_blocks = inputs.kv_cache_kernel_block_id.size(2) / max_blocks_per_owner;
     for (size_t group_id = 0; group_id < group_count; ++group_id) {
         auto group_inputs                            = py_attn_inputs;
-        group_inputs.kv_cache_kernel_block_id        = inputs.kv_cache_kernel_block_id[group_id];
+        const auto group_width = max_physical_blocks * group_blocks_per_owner[group_id];
+        group_inputs.kv_cache_kernel_block_id =
+            inputs.kv_cache_kernel_block_id[group_id].narrow(1, 0, group_width);
         group_inputs.kv_cache_kernel_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_kernel_block_id);
         if (inputs.kv_cache_block_id.defined()) {
             group_inputs.kv_cache_block_id        = inputs.kv_cache_block_id[group_id];

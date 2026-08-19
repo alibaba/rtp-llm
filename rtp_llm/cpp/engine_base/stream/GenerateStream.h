@@ -235,8 +235,10 @@ public:
     int     localReuseLength() const;
     int     deviceReuseLength() const;
     int     remoteReuseLength() const;
-    void    setMemoryReuseLength(int length);
-    int     memoryReuseLength() const;
+    void    setHostReuseLength(int length);
+    int     hostReuseLength() const;
+    void    setDiskReuseLength(int length);
+    int     diskReuseLength() const;
     void    setInitialReuseLength(int initial_reuse_length);
     void    incLastOutputPos();
     void    setPrefillReuseLength(int64_t total, int64_t local, int64_t remote, int64_t memory);
@@ -318,6 +320,7 @@ public:
         reportEventWithoutLock(StreamEvents::Error, error_code, error_msg);
     }
     bool         hasEvent(StreamEvents::EventType event) const;
+    void         clearCanRun();
     virtual bool hasError() const;
     ErrorInfo    statusInfo();
     std::string  stopReason();
@@ -731,12 +734,12 @@ public:
         return generate_input_->generate_config->enable_device_cache;
     }
 
-    bool enableMemoryCache() const {
-        return generate_input_->generate_config->enable_memory_cache;
+    bool enableHostCache() const {
+        return generate_input_->generate_config->enable_host_cache;
     }
 
-    bool enableRemoteCache() const {
-        return generate_input_->generate_config->enable_remote_cache;
+    bool enableDiskCache() const {
+        return generate_input_->generate_config->enable_disk_cache;
     }
 
     int64_t deadlineMs() const {
@@ -792,7 +795,6 @@ protected:
     void                     resizeSubGenerateStatus(size_t new_size);
 
     void reportStreamMetrics();
-    void reportCacheReuseMetrics() const;
     void reportMetricOnce();
 
 protected:
@@ -829,7 +831,8 @@ protected:
     int                                   local_reuse_length_   = 0;
     int                                   device_reuse_length_  = 0;
     int                                   remote_reuse_length_  = 0;
-    int                                   memory_reuse_length_  = 0;
+    int                                   host_reuse_length_    = 0;
+    int                                   disk_reuse_length_    = 0;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     int64_t prefill_total_reuse_len_  = 0;
     int64_t prefill_local_reuse_len_  = 0;

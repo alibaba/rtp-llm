@@ -20,6 +20,8 @@ namespace rtp_llm {
 class QueryConverterTest: public DeviceTestBase {};
 
 TEST_F(QueryConverterTest, testTransInput) {
+    ASSERT_TRUE(GenerateConfig().enable_disk_cache);
+
     GenerateInputPB input;
     input.mutable_request_info()->set_frontend_ip("10.0.0.1");
     input.mutable_request_info()->set_dash_ip("10.0.0.2");
@@ -90,6 +92,16 @@ TEST_F(QueryConverterTest, testTransInput) {
     vector<int> stop_words_2{3, 4, 5};
     ASSERT_EQ(generate_config->stop_words_list[0], stop_words_1);
     ASSERT_EQ(generate_config->stop_words_list[1], stop_words_2);
+    ASSERT_FALSE(generate_config->enable_disk_cache);
+}
+
+TEST_F(QueryConverterTest, EnableDiskCacheIsPreservedWhenExplicitlyEnabled) {
+    GenerateInputPB input;
+    input.mutable_generate_config()->set_enable_disk_cache(true);
+
+    auto generate_input = QueryConverter::transQuery(&input);
+
+    ASSERT_TRUE(generate_input->generate_config->enable_disk_cache);
 }
 
 TEST_F(QueryConverterTest, TransGenerateConfigResolvesThinkingState) {

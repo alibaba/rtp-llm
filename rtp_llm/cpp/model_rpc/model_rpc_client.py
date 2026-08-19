@@ -571,8 +571,8 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.global_request_id = input_py.generate_config.global_request_id
     generate_config_pb.ignore_eos = input_py.generate_config.ignore_eos
     generate_config_pb.reuse_cache = input_py.generate_config.reuse_cache
-    generate_config_pb.enable_memory_cache = (
-        input_py.generate_config.enable_memory_cache
+    generate_config_pb.enable_host_cache = (
+        input_py.generate_config.enable_host_cache
     )
     generate_config_pb.enable_device_cache = (
         input_py.generate_config.enable_device_cache
@@ -580,6 +580,7 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.enable_remote_cache = (
         input_py.generate_config.enable_remote_cache
     )
+    generate_config_pb.enable_disk_cache = input_py.generate_config.enable_disk_cache
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "trace_id", functools.partial(str)
     )
@@ -772,14 +773,17 @@ def trans_output(
                 local_reuse_len=aux_info_pb.local_reuse_len,
                 remote_reuse_len=aux_info_pb.remote_reuse_len,
                 memory_reuse_len=aux_info_pb.memory_reuse_len,
+                disk_reuse_len=aux_info_pb.disk_reuse_len,
                 prefill_total_reuse_len=aux_info_pb.prefill_total_reuse_len,
                 prefill_local_reuse_len=aux_info_pb.prefill_local_reuse_len,
                 prefill_remote_reuse_len=aux_info_pb.prefill_remote_reuse_len,
                 prefill_memory_reuse_len=aux_info_pb.prefill_memory_reuse_len,
+                prefill_disk_reuse_len=aux_info_pb.prefill_disk_reuse_len,
                 decode_total_reuse_len=aux_info_pb.decode_total_reuse_len,
                 decode_local_reuse_len=aux_info_pb.decode_local_reuse_len,
                 decode_remote_reuse_len=aux_info_pb.decode_remote_reuse_len,
                 decode_memory_reuse_len=aux_info_pb.decode_memory_reuse_len,
+                decode_disk_reuse_len=aux_info_pb.decode_disk_reuse_len,
                 speculative_draft_rounds=aux_info_pb.speculative_draft_rounds,
                 speculative_accepted_tokens_per_pos=list(
                     aux_info_pb.speculative_accepted_tokens_per_pos
