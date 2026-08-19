@@ -260,13 +260,13 @@ StorageRequest BlockTreeLoader::makeStorageRequest(const CacheKeysType& cache_ke
     return request;
 }
 
-bool BlockTreeLoader::cancelLoad(const std::shared_ptr<AsyncContext>& context) {
+bool BlockTreeLoader::abortPendingLoad(const std::shared_ptr<AsyncContext>& context) {
     std::shared_ptr<LoadAsyncContext> load_context = std::dynamic_pointer_cast<LoadAsyncContext>(context);
     if (load_context == nullptr) {
         RTP_LLM_LOG_WARNING("context is not owned by BlockTreeCache");
         return false;
     }
-    return !load_context->done() && load_context->requestCancel();
+    return load_context->abortPending();
 }
 
 void BlockTreeLoader::shutdown() {
