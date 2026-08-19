@@ -57,13 +57,10 @@ cc_library(
         "//rtp_llm/cpp/models:logits_processor",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/cache:cp_slot_mapper",
-        "//rtp_llm/cpp/utils:hash_util",
-        "//rtp_llm/cpp/utils:error_code",
         "//rtp_llm/cpp/models:dfa_utils",
         "@havenask//aios/autil:synchronized_queue",
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/utils:linear_blocks_util",
-        "//rtp_llm/cpp/model_rpc:tensor_pb_convert",
     ],
     visibility = ["//visibility:public"],
 )

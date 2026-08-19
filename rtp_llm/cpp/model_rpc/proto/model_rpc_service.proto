@@ -27,14 +27,13 @@ message IntMatrix {
 
 // KV-cache protocol compatibility contract:
 // Grouped topology and independent block pools change block addressing and
-// payload structures. Prefill, decode, P2P, remote-cache, and memory-cache
+// payload structures. Prefill, decode, P2P, remote-cache, and host-cache
 // peers that exchange KV-cache RPCs must run the same build. Mixed-version
 // rollout across this protocol change is intentionally unsupported; no legacy
 // dual-read/write fallback is provided.
-message TaggedBlockPB {
-    string tag = 1;
+message GroupBlockPB {
+    int32 group_id = 1;
     int32 block_id = 2;
-    int32 layer_id = 3;
 }
 
 message TaggedBlockIdsPB {
@@ -125,7 +124,7 @@ message GenerateConfigPB {
     repeated int32 variable_num_beams = 48;
     google.protobuf.StringValue trace_id = 49;
     bool return_all_hidden_states = 50;
-    bool enable_memory_cache = 51;
+    bool enable_host_cache = 51;
     bool enable_device_cache = 52;
     bool enable_remote_cache = 53;
     string unique_key = 54;
@@ -152,7 +151,8 @@ message GenerateConfigPB {
     google.protobuf.StringValue ebnf = 71;
     google.protobuf.StringValue structural_tag = 72;
     ThinkingModePB thinking_mode = 73;
-    reserved 74;
+    // 请求级 L3 写入开关；RPC 缺失时为 false。
+    bool enable_disk_cache = 74;
 }
 
 message MMPreprocessConfigPB {
@@ -238,6 +238,9 @@ message AuxInfoPB {
     map<int32, int32> multimodal_lengths = 27;
     int32 speculative_draft_rounds = 28;
     repeated int32 speculative_accepted_tokens_per_pos = 29;
+    int32 disk_reuse_len = 30;
+    int32 prefill_disk_reuse_len = 31;
+    int32 decode_disk_reuse_len = 32;
 }
 
 message PromptLogitsOutputPB {
@@ -564,43 +567,32 @@ service EmbeddingRpcService {
 message MemoryOperationRequestPB {
     message CopyItem {
         int32 mem_block = 1;
-        reserved 2;
-        bool is_complete = 3;
-        BackingType backing_type = 4;
-        oneof disk_slot_presence {
-            int32 disk_slot = 5;
-        }
-        CacheBlockKind cache_block_kind = 6;
-        oneof src_mem_block_presence {
-            int32 src_mem_block = 7;
-        }
-        repeated uint32 slot_valid_mask = 8;
-        BackingType src_backing_type = 9;
-        oneof src_disk_slot_presence {
-            int32 src_disk_slot = 10;
-        }
-        repeated TaggedBlockPB tagged_gpu_blocks = 11;
+        int32 disk_block = 2;
+        repeated GroupBlockPB group_blocks = 3;
+        uint64 group_set_id = 4;
     }
     enum CopyDirection {
         H2D = 0;
         D2H = 1;
-    }
-    enum BackingType {
-        MEMORY = 0;
-        DISK = 1;
-    }
-    enum CacheBlockKind {
-        COMPLETE_KV = 0;
-        INCOMPLETE_KV = 1;
-        COMPRESSED_KV = 2;
-        STATE_SWA_KV = 3;
+        H2DISK = 2;
+        DISK2H = 3;
+        D2DISK = 4;
+        DISK2D = 5;
     }
     repeated CopyItem copy_items = 1;
     CopyDirection copy_direction = 2;
 }
 
 message MemoryOperationResponsePB {
-    bool success = 1;
+    // gRPC status reports the RPC/transport outcome; this code reports the transfer
+    // business outcome of a handler that ran to completion. CODE_UNSPECIFIED is the
+    // protobuf default and means the handler never filled in a result.
+    enum Code {
+        CODE_UNSPECIFIED = 0;
+        OK = 1;
+        FAILED = 2;
+    }
+    Code code = 1;
 }
 
 message TPWorkerInfoPB {

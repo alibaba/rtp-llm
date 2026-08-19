@@ -165,10 +165,6 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     TRANS_OPTIONAL(ebnf);
     TRANS_OPTIONAL(structural_tag);
     TRANS_OPTIONAL(task_id);
-    TRANS_OPTIONAL(json_schema);
-    TRANS_OPTIONAL(regex);
-    TRANS_OPTIONAL(ebnf);
-    TRANS_OPTIONAL(structural_tag);
     TRANS_OPTIONAL(adapter_name);
     const bool legacy_in_think_mode = config_proto->in_think_mode();
     const int  thinking_mode        = static_cast<int>(config_proto->thinking_mode());
@@ -201,8 +197,9 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
 
     generate_config->reuse_cache         = config_proto->reuse_cache();
     generate_config->enable_device_cache = config_proto->enable_device_cache();
-    generate_config->enable_memory_cache = config_proto->enable_memory_cache();
+    generate_config->enable_host_cache   = config_proto->enable_host_cache();
     generate_config->enable_remote_cache = config_proto->enable_remote_cache();
+    generate_config->enable_disk_cache   = config_proto->enable_disk_cache();
     TRANS_OPTIONAL(trace_id);
     TRANS_OPTIONAL(group_timeout);
 
@@ -499,14 +496,17 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
             aux_info->set_local_reuse_len(response.aux_info.local_reuse_len);
             aux_info->set_remote_reuse_len(response.aux_info.remote_reuse_len);
             aux_info->set_memory_reuse_len(response.aux_info.memory_reuse_len);
+            aux_info->set_disk_reuse_len(response.aux_info.disk_reuse_len);
             aux_info->set_prefill_total_reuse_len(response.aux_info.prefill_total_reuse_len);
             aux_info->set_prefill_local_reuse_len(response.aux_info.prefill_local_reuse_len);
             aux_info->set_prefill_remote_reuse_len(response.aux_info.prefill_remote_reuse_len);
             aux_info->set_prefill_memory_reuse_len(response.aux_info.prefill_memory_reuse_len);
+            aux_info->set_prefill_disk_reuse_len(response.aux_info.prefill_disk_reuse_len);
             aux_info->set_decode_total_reuse_len(response.aux_info.decode_total_reuse_len);
             aux_info->set_decode_local_reuse_len(response.aux_info.decode_local_reuse_len);
             aux_info->set_decode_remote_reuse_len(response.aux_info.decode_remote_reuse_len);
             aux_info->set_decode_memory_reuse_len(response.aux_info.decode_memory_reuse_len);
+            aux_info->set_decode_disk_reuse_len(response.aux_info.decode_disk_reuse_len);
             aux_info->set_speculative_draft_rounds(response.aux_info.speculative_draft_rounds);
             for (const auto accepted_tokens : response.aux_info.speculative_accepted_tokens_per_pos) {
                 aux_info->add_speculative_accepted_tokens_per_pos(accepted_tokens);
