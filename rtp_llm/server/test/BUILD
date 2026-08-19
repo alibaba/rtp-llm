@@ -64,3 +64,21 @@ py_test(
     ],
     tags = ["manual"],
 )
+
+py_test(
+    name = "backend_manager_shutdown_test",
+    srcs = ["backend_manager_shutdown_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/server:server",
+    ],
+)
+
+py_test(
+    name = "start_backend_server_shutdown_test",
+    srcs = ["start_backend_server_shutdown_test.py"],
+    deps = [
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib",
+    ],
+)
