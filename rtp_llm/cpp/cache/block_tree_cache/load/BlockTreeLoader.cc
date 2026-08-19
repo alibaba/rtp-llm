@@ -190,7 +190,7 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
         MultiNodeResource matched_device_resource{group_set_id, Tier::DEVICE};
         for (size_t i = result.matched_device_blocks - ready_reuse_count; i < result.matched_device_blocks; ++i) {
             const GroupSetResource& resource = path[i]->group_set_resources[group_set_id];
-            matched_device_resource.node_blocks.emplace_back(path[i], resource.getBlocks(Tier::DEVICE));
+            matched_device_resource.node_blocks.emplace_back(nullptr, resource.getBlocks(Tier::DEVICE));
         }
         if (!matched_device_resource.node_blocks.empty()) {
             group_set->referenceBlocks(matched_device_resource, BlockRefType::REQUEST);
@@ -202,12 +202,13 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
              ++i) {
             GroupSetResource&  resource    = path[i]->group_set_resources[group_set_id];
             const Tier         source_tier = resource.getTopTier();
+            TreeNode* const    source_node = source_tier == Tier::DEVICE ? nullptr : path[i];
             TransferDescriptor desc{
-                path[i], group_set_id, i, source_tier, Tier::DEVICE, resource.getBlocks(source_tier)};
+                source_node, group_set_id, i, source_tier, Tier::DEVICE, resource.getBlocks(source_tier)};
             const bool         is_joined = resource.transfer_state == GroupSetTransferState::LOADING;
             if (!is_joined) {
                 group_set->referenceBlocks(
-                    MultiNodeResource{group_set_id, source_tier, {{path[i], desc.source_blocks}}},
+                    MultiNodeResource{group_set_id, source_tier, {{source_node, desc.source_blocks}}},
                     BlockRefType::REQUEST);
                 if (source_tier != Tier::DEVICE) {
                     resource.transfer_state = GroupSetTransferState::LOAD_PENDING;
@@ -348,30 +349,30 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
         }
 
         MultiNodeResource resource{desc.group_set_id, desc.source_tier, {{desc.node, desc.source_blocks}}};
-        if (desc.source_tier != Tier::DEVICE || release_transferred_refs) {
-            tree_->groupSets()[desc.group_set_id]->unreferenceBlocks(resource, BlockRefType::REQUEST);
+        if (desc.source_tier == Tier::DEVICE) {
+            if (release_transferred_refs) {
+                tree_->groupSets()[desc.group_set_id]->unreferenceBlocks(resource, BlockRefType::REQUEST);
+                device_refs_released = true;
+            }
+            continue;
         }
+        tree_->groupSets()[desc.group_set_id]->unreferenceBlocks(resource, BlockRefType::REQUEST);
         if (desc.node->group_set_resources[desc.group_set_id].transfer_detached) {
             evictor_.discardDetachedTransfer(desc);
             tree_data_mutated = true;
             continue;
         }
-        if (desc.source_tier != Tier::DEVICE) {
-            const GroupSetTransferState expected_state =
-                fully_prepared ? GroupSetTransferState::LOADING : GroupSetTransferState::LOAD_PENDING;
-            if (!changeTransferState(desc.node, desc.group_set_id, expected_state, GroupSetTransferState::IDLE)) {
-                RTP_LLM_LOG_WARNING("load rollback state mismatch, group_set=%zu source=%s",
-                                    desc.group_set_id,
-                                    tierName(desc.source_tier));
-            } else if (fully_prepared) {
-                evictor_.refreshCandidate(desc.node, desc.group_set_id);
-            }
-            if (!fully_prepared) {
-                evictor_.refreshCandidatesAfterRelease(resource);
-            }
-        } else if (release_transferred_refs) {
-            evictor_.refreshCandidatesAfterRelease(resource);
-            device_refs_released = true;
+        const GroupSetTransferState expected_state =
+            fully_prepared ? GroupSetTransferState::LOADING : GroupSetTransferState::LOAD_PENDING;
+        if (!changeTransferState(desc.node, desc.group_set_id, expected_state, GroupSetTransferState::IDLE)) {
+            RTP_LLM_LOG_WARNING("load rollback state mismatch, group_set=%zu source=%s",
+                                desc.group_set_id,
+                                tierName(desc.source_tier));
+        } else if (fully_prepared) {
+            evictor_.refreshCandidate(desc.node, desc.group_set_id);
+        }
+        if (!fully_prepared) {
+            evictor_.refreshCandidate(desc.node, desc.group_set_id);
         }
     }
     if (tree_data_mutated || device_refs_released) {
@@ -435,7 +436,6 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task& task, bool copy_suc
             if (enable_device_cache_) {
                 MultiNodeResource target_holder{desc.group_set_id, Tier::DEVICE, {{desc.node, desc.target_blocks}}};
                 resource.setBlocks(Tier::DEVICE, desc.target_blocks);
-                group_set->mapDeviceBlocksToTreeNode(target_holder);
                 group_set->referenceBlocks(target_holder, BlockRefType::BLOCK_CACHE);
                 group_set->unreferenceBlocks(target_holder, BlockRefType::REQUEST);
                 group_set->unreferenceBlocks(source_protection, BlockRefType::BLOCK_CACHE);

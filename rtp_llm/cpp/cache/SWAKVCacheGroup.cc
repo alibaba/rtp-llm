@@ -236,12 +236,11 @@ bool SWAKVCacheGroup::malloc(BlockIds&                 block_ids,
     return true;
 }
 
-std::vector<BlockRefTransition>
-SWAKVCacheGroup::releaseSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
+void SWAKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
     const auto& block_indices = block_ids.blocks();
     if (block_indices.empty()) {
         checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::removeSkippedBlocks");
-        return {};
+        return;
     }
     const int  step                    = std::max(1, linear_step_);
     const bool effective_reuse_enabled = effectiveReuseCacheForAllocation(enable_reuse_cache);
@@ -261,31 +260,24 @@ SWAKVCacheGroup::releaseSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cac
         pos_to_remove.push_back(static_cast<size_t>(i));
     }
     if (!blocks_to_free.empty()) {
-        auto transitions = releaseBlockRefs(blocks_to_free, BlockRefType::REQUEST);
+        releaseBlockRefs(blocks_to_free, BlockRefType::REQUEST);
         block_ids.remove(pos_to_remove);
         checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::removeSkippedBlocks");
-        return transitions;
     }
     checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::removeSkippedBlocks");
-    return {};
 }
 
-void SWAKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
-    (void)releaseSkippedBlocks(block_ids, enable_reuse_cache, reserve_step);
-}
-
-std::vector<BlockRefTransition>
-SWAKVCacheGroup::release(const BlockIndicesType& block_indices, BlockRefType ref_type) {
+void SWAKVCacheGroup::release(const BlockIndicesType& block_indices, BlockRefType ref_type) {
     if (block_indices.empty()) {
-        return {};
+        return;
     }
     BlockIndicesType valid;
     filterValidBlocks(block_indices, valid);
-    return releaseBlockRefs(valid, ref_type);
+    releaseBlockRefs(valid, ref_type);
 }
 
 void SWAKVCacheGroup::free(const BlockIndicesType& block_indices) {
-    (void)release(block_indices, BlockRefType::REQUEST);
+    release(block_indices, BlockRefType::REQUEST);
 }
 
 void SWAKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {

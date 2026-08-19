@@ -1194,13 +1194,8 @@ TEST_F(HybridTypeKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly
     seed_resource->cacheResource(0).setBlockDependencies(
         {BlockDependency{true, 9999, 41}, BlockDependency{false, 0, 7}});
     allocator->insertIntoCache(InsertInfo{seed_resource, nullptr, /*is_resident=*/false});
-    BlockReleaseBatch releases;
     for (size_t group_id = 0; group_id < cache_groups.size(); ++group_id) {
-        releases.append(group_id, cache_groups[group_id]->release(seeded_blocks[group_id], BlockRefType::REQUEST));
-    }
-    const std::vector<BlockReleaseReceipt> receipts = releases.finish();
-    if (!receipts.empty()) {
-        allocator->blockTreeCacheOwner()->onBlocksReleased(receipts);
+        cache_groups[group_id]->release(seeded_blocks[group_id], BlockRefType::REQUEST);
     }
 
     const auto tree_path = allocator->blockTreeCacheOwner()->tree()->findNode(seed_keys);
