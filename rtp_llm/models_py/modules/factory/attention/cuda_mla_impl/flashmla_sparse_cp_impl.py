@@ -47,6 +47,7 @@ from .flashmla_sparse_impl import (
     SparseMlaFp8DecodeParams,
     SparseMlaFp8Op,
     SparseMlaImpl,
+    _allocate_prefill_fused_kv,
     _as_uint8,
     _GatherWorkspace,
     _topk_2d,
@@ -723,7 +724,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self._gather = self._build_gather_workspace() if gather_enabled else None
 
     def _build_gather_workspace(self) -> Optional[_GatherWorkspace]:
-        """Allocate the BF16 workspace from prefill_ragged_kv_len_indptr_d.
+        """Record the gather layout from prefill_ragged_kv_len_indptr_d.
 
         CP's prepare() sets input_lengths = prefill_actual_input_lengths, so the
         indptr reflects per-request full KV length (same as non-CP impl)."""
@@ -734,11 +735,6 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         if total_kv_len == 0:
             return None
         return _GatherWorkspace(
-            fused_kv=torch.empty(
-                (total_kv_len, self.kv_lora_rank + self.qk_rope_head_dim),
-                dtype=torch.bfloat16,
-                device=self.block_table.device,
-            ),
             workspace_starts=indptr[:batch_size],
             seq_lens=indptr[1:] - indptr[:batch_size],
             total_kv_len=total_kv_len,
@@ -820,7 +816,8 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         )
         if no_q_work:
             if self.kv_cache_sharded and self._gather is not None:
-                self._gather_sharded_kv_cache(kv_cache)
+                fused_kv = self._allocate_fused_kv()
+                self._gather_sharded_kv_cache(kv_cache, fused_kv)
             return None
 
         assert q is not None and q.size(0) > 0
@@ -844,7 +841,17 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         out = triton_kv_scatter(out0, self.total_local_ids, q.size(0))
         return out
 
-    def _gather_sharded_kv_cache(self, kv_cache) -> None:
+    def _allocate_fused_kv(self) -> torch.Tensor:
+        """Allocate the layer-local BF16 gather destination after Indexer."""
+        ws = self._gather
+        assert ws is not None and self.block_table is not None
+        return _allocate_prefill_fused_kv(
+            ws.total_kv_len,
+            self.kv_lora_rank + self.qk_rope_head_dim,
+            self.block_table.device,
+        )
+
+    def _gather_sharded_kv_cache(self, kv_cache, fused_kv: torch.Tensor) -> None:
         """Mirror indexer's sharded gather flow (indexer_op.py:1017-1078):
 
           1) Drive the GPU gather kernel with *actual* owned lengths so
@@ -884,18 +891,18 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         # restore_indices value that lands on a padding row (multi-request
         # batches with differing per-req actual/padded, last-block-partial,
         # or workspace reuse across layers) propagates uninitialized memory
-        # into ws.fused_kv → garbled attention output.
+        # into fused_kv → garbled attention output.
         local_fused = torch.zeros(
-            (self.sharded_total_local_kv_len, ws.fused_kv.size(1)),
-            dtype=ws.fused_kv.dtype,
-            device=ws.fused_kv.device,
+            (self.sharded_total_local_kv_len, fused_kv.size(1)),
+            dtype=fused_kv.dtype,
+            device=fused_kv.device,
         )
 
         if self.sharded_actual_total_local_kv_len > 0:
             actual_fused = torch.empty(
-                (self.sharded_actual_total_local_kv_len, ws.fused_kv.size(1)),
-                dtype=ws.fused_kv.dtype,
-                device=ws.fused_kv.device,
+                (self.sharded_actual_total_local_kv_len, fused_kv.size(1)),
+                dtype=fused_kv.dtype,
+                device=fused_kv.device,
             )
             rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache_v2(
                 src,
@@ -916,7 +923,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         gathered = all_gather(
             local_fused.contiguous(), group=Group.TP, role="mla_history"
         ).reshape(-1, local_fused.size(-1))
-        ws.fused_kv.copy_(gathered[self.sharded_kv_restore_indices])
+        fused_kv.copy_(gathered[self.sharded_kv_restore_indices])
 
     def _attend_with_kvcache(
         self,
@@ -960,15 +967,16 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         precomputed_req_ids (req id per global q token) for the offset lookup."""
         ws = self._gather
         assert ws is not None and self.precomputed_req_ids is not None
+        fused_kv = self._allocate_fused_kv()
         if self.kv_cache_sharded:
-            self._gather_sharded_kv_cache(kv_cache)
+            self._gather_sharded_kv_cache(kv_cache, fused_kv)
         else:
             src = _as_uint8(kv_cache.kv_cache_base)
             if src.ndim == 4:
                 src = src.squeeze(2)
             rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache_v2(
                 src,
-                ws.fused_kv,
+                fused_kv,
                 self.block_table.to(torch.int32),
                 ws.seq_lens,
                 ws.workspace_starts,
@@ -987,7 +995,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         global_indices = raw_global.masked_fill(padding_mask, -1).unsqueeze(1)
         out, _, _ = flash_mla_sparse_fwd(
             q0,
-            ws.fused_kv.unsqueeze(1),
+            fused_kv.unsqueeze(1),
             global_indices,
             self.scale,
             d_v=self.kv_lora_rank,

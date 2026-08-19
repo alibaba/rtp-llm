@@ -301,9 +301,17 @@ class MlaAttention(nn.Module):
             prev_topk_indices,
             force_reuse_topk_indices,
         )
+        # q_c and its quantized representation are Indexer-only. Releasing
+        # the local references here lets SparseMLA reuse their blocks;
+        # q_view, compressed_kv and k_pe must stay live through attention.
+        del q_c, q_c_fp8, q_c_scale
         attn_output = fmha_impl.forward(
             q_view, compressed_kv, k_pe, kv_cache, self.layer_idx, topk_indices
         )
+
+        # The sparse-attention launch has consumed these projections. PyTorch's
+        # stream-aware allocator delays physical reuse until the launch is safe.
+        del q_view, compressed_kv, k_pe, fused_qkv, q
 
         if attn_output is not None:
             attn_output = attn_output.reshape(*input_shape, -1).contiguous()

@@ -283,6 +283,13 @@ class SparseMlaFp8CPOpTest(TestCase):
     def tearDown(self):
         torch.cuda.empty_cache()
 
+    def test_gather_plan_metadata_has_no_large_fused_kv_tensor(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
+            _GatherWorkspace,
+        )
+
+        self.assertNotIn("fused_kv", _GatherWorkspace.__dataclass_fields__)
+
     def test_sharded_empty_q_rank_still_joins_kv_all_gather(self):
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
             SparseMlaFp8CPOp,
@@ -296,13 +303,22 @@ class SparseMlaFp8CPOpTest(TestCase):
         op.attn_inputs = None
         op.kv_cache_sharded = True
         op._gather = SimpleNamespace(
-            fused_kv=torch.empty((2, 576), dtype=torch.bfloat16, device=device),
+            total_kv_len=2,
             batch_size=1,
         )
+        op.kv_lora_rank = 512
+        op.qk_rope_head_dim = 64
         op.sharded_local_kv_lens = torch.tensor([64], dtype=torch.int32, device=device)
         op.sharded_workspace_starts = torch.tensor(
             [0], dtype=torch.int32, device=device
         )
+        op.sharded_actual_local_kv_lens = torch.tensor(
+            [64], dtype=torch.int32, device=device
+        )
+        op.sharded_actual_workspace_starts = torch.tensor(
+            [0], dtype=torch.int32, device=device
+        )
+        op.sharded_actual_total_local_kv_len = 64
         op.sharded_kv_restore_indices = torch.arange(2, dtype=torch.long, device=device)
         op.sharded_total_local_kv_len = 64
         op.sharded_slot_mapping = None
