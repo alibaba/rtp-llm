@@ -678,7 +678,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCacheAsResident) {
     allocator_->insertIntoCache(insert_info);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, OrdinaryAllocationEvictsOnlyAfterTreeEntryLosesRequestHold) {
+TEST_F(SingleTypeKVCacheAllocatorTest, OrdinaryAllocationEvictsTreeEntryWhileRequestStillHoldsBlock) {
     const auto config = createSingleTypeTestConfig(/*layer_num=*/2, /*block_num=*/4, /*seq_size_per_block=*/4);
     allocator_        = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
@@ -703,17 +703,17 @@ TEST_F(SingleTypeKVCacheAllocatorTest, OrdinaryAllocationEvictsOnlyAfterTreeEntr
     MallocInfo pressure_malloc{pressure, pressure_tokens};
     pressure_malloc.enable_cache_lookup = false;
     EXPECT_FALSE(allocator_->malloc(pressure_malloc).success);
+    EXPECT_TRUE(allocator_->blockTreeCacheOwner()->tree()->findNode(CacheKeysType{100}).empty());
     EXPECT_TRUE(device_pool->isAllocated(seed_block));
+    EXPECT_EQ(device_pool->refCount(seed_block), 1u);
     EXPECT_EQ(pressure->curBlocksNum(), 0);
 
     allocator_->free(FreeInfo{seed, seed_tokens});
-    EXPECT_EQ(device_pool->refCount(seed_block), 1u);
-    EXPECT_EQ(allocator_->blockTreeCacheOwner()->getStats().device_heap_total_size, 1u);
+    EXPECT_FALSE(device_pool->isAllocated(seed_block));
     EXPECT_TRUE(allocator_->malloc(pressure_malloc).success);
-    EXPECT_TRUE(allocator_->blockTreeCacheOwner()->tree()->findNode(CacheKeysType{100}).empty());
     EXPECT_NE(std::find(pressure->blocks(0, 0).begin(), pressure->blocks(0, 0).end(), seed_block),
               pressure->blocks(0, 0).end())
-        << "the freed numeric id may be immediately reused by the pressure request";
+        << "the released numeric id may be immediately reused by the pressure request";
 
     allocator_->free(FreeInfo{pressure, pressure_tokens});
 }
@@ -1017,13 +1017,18 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SuccessfulOuterAllocationCommitsLoadExact
     EXPECT_EQ(resource->blocks(1, 0).front(), published_target);
     // Two request holders (one per batch) plus the published tree holder.
     EXPECT_EQ(device_pool->refCount(published_target), 3u);
-    EXPECT_EQ(cache->getStats().device_heap_total_size, 0u);
+    EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
     const auto before_watermark_retry = cache->getKeySnapshot(/*limit=*/16);
+    // Logical eviction succeeds, but the API reports newly freed blocks. The
+    // two request holders keep the block allocated, so the reclaimed count is 0.
     EXPECT_EQ(cache->evictForGroup(0, 1), 0);
-    EXPECT_EQ(cache->getKeySnapshot(/*limit=*/16).version, before_watermark_retry.version);
-    EXPECT_EQ(find.back()->group_set_resources.front().device_blocks, (BlockIndicesType{published_target}));
+    EXPECT_EQ(cache->getKeySnapshot(/*limit=*/16).version, before_watermark_retry.version + 1);
+    EXPECT_TRUE(cache->tree()->findNode(CacheKeysType{100}).empty());
+    EXPECT_TRUE(device_pool->isAllocated(published_target));
+    EXPECT_EQ(device_pool->refCount(published_target), 2u);
 
     allocator_->free(FreeInfo{resource, token_ids});
+    EXPECT_FALSE(device_pool->isAllocated(published_target));
     coordinator->commit_callback_ = std::move(original_commit);
 }
 

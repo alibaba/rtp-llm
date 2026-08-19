@@ -129,7 +129,6 @@ cc_library(
     deps = [
         ":block_tree_task_pool",
         ":device_block_pool",
-        "//rtp_llm/cpp/cache:block_release_batch",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/cache:cache_types",

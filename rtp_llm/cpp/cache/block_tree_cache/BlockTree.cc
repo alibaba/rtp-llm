@@ -32,9 +32,6 @@ BlockTree::~BlockTree() {
     for (const std::unique_ptr<TreeNode>& node : node_pool_) {
         releaseNode(node.get());
     }
-    for (const GroupSetPtr& group_set : group_sets_) {
-        RTP_LLM_CHECK(group_set->areBlockToNodeMapsEmpty());
-    }
     for (auto& node : node_pool_) {
         node->children.clear();
         node->parent = nullptr;
@@ -49,7 +46,6 @@ void BlockTree::releaseNode(TreeNode* node) {
         if (resource.hasTier(Tier::DEVICE)) {
             const std::vector<BlockIdxType> device_blocks = resource.device_blocks;
             const MultiNodeResource         device_resource{group_set_id, Tier::DEVICE, {{node, device_blocks}}};
-            group_set->unmapDeviceBlocksFromTreeNode(device_resource);
             resource.evictFromTier(Tier::DEVICE);
             group_set->unreferenceBlocks(device_resource, BlockRefType::BLOCK_CACHE);
         }
@@ -155,12 +151,9 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
     TreeNode* current                = root_.get();
     size_t    inserted_prefix_length = 0;
 
-    // All published tiers take BLOCK_CACHE refs; only Device blocks enter the reverse index.
+    // All published tiers take BLOCK_CACHE refs.
     auto publishTier = [this](TreeNode* node, size_t group_set_id, const GroupSetResource& resource, Tier tier) {
         const MultiNodeResource published{group_set_id, tier, {{node, resource.getBlocks(tier)}}};
-        if (tier == Tier::DEVICE) {
-            group_sets_[group_set_id]->mapDeviceBlocksToTreeNode(published);
-        }
         group_sets_[group_set_id]->referenceBlocks(published, BlockRefType::BLOCK_CACHE);
     };
 

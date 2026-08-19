@@ -1,10 +1,9 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 
 #include <mutex>
-#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
-#include "rtp_llm/cpp/cache/BlockReleaseBatch.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm::storage_backend_detail {
@@ -19,62 +18,22 @@ void invokeCallback(const StorageBackend* backend, Callback&& callback) noexcept
     completing_backend = previous;
 }
 
-struct ReleaseGate {
-    std::mutex                                       mutex;
-    std::condition_variable                          cv;
-    std::shared_ptr<StorageBackend::ReleaseCallback> callback;
-    size_t                                           active_callbacks{0};
-};
-
 struct StorageTaskState {
     struct Pin {
         std::shared_ptr<IBlockPool> pool;
         BlockIdxType                block;
     };
 
-    struct Target {
-        size_t pin_index{0};
-        size_t group_id{0};
-    };
+    StorageRequest   request;
+    std::vector<Pin> pins;
+    std::once_flag   finish_once;
 
-    StorageRequest               request;
-    std::vector<Pin>             pins;
-    std::vector<Target>          targets;
-    std::shared_ptr<ReleaseGate> release;
-    const StorageBackend*        backend{nullptr};
-    std::once_flag               finish_once;
-
-    void finish(bool notify_owner = true) {
-        std::call_once(finish_once, [this, notify_owner] {
-            BlockReleaseBatch                            releases;
-            std::vector<std::vector<BlockRefTransition>> transitions;
-            transitions.reserve(pins.size());
+    void finish() {
+        std::call_once(finish_once, [this] {
             for (const Pin& pin : pins) {
-                transitions.push_back(pin.pool->decRefWithResult({pin.block}, BlockRefType::STORAGE_BACKEND));
-            }
-            for (const Target& target : targets) {
-                releases.append(target.group_id, transitions[target.pin_index]);
+                pin.pool->decRef(pin.block, BlockRefType::STORAGE_BACKEND);
             }
             pins.clear();
-            targets.clear();
-            auto receipts = releases.finish();
-            if (notify_owner && release && !receipts.empty()) {
-                std::shared_ptr<StorageBackend::ReleaseCallback> callback;
-                {
-                    std::lock_guard<std::mutex> lock(release->mutex);
-                    callback = release->callback;
-                    if (callback) {
-                        ++release->active_callbacks;
-                    }
-                }
-                if (callback) {
-                    invokeCallback(backend, [&] { (*callback)(receipts); });
-                    std::lock_guard<std::mutex> lock(release->mutex);
-                    if (--release->active_callbacks == 0) {
-                        release->cv.notify_all();
-                    }
-                }
-            }
         });
     }
 
@@ -108,7 +67,7 @@ StorageWriteTask::StorageWriteTask(std::shared_ptr<storage_backend_detail::Stora
     state_(std::move(state)) {}
 
 StorageBackend::StorageBackend(std::shared_ptr<StorageBackendExecutor> executor):
-    release_gate_(std::make_shared<storage_backend_detail::ReleaseGate>()), executor_(std::move(executor)) {}
+    executor_(std::move(executor)) {}
 
 StorageBackend::~StorageBackend() {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
@@ -118,17 +77,15 @@ StorageBackend::~StorageBackend() {
 
 bool StorageBackend::init(std::shared_ptr<const CacheTopology>     topology,
                           std::vector<std::shared_ptr<IBlockPool>> device_pools,
-                          BufferResolver                           buffer_resolver,
-                          ReleaseCallback                          release_callback) {
+                          BufferResolver                           buffer_resolver) {
     RTP_LLM_CHECK_WITH_INFO(!topology_, "StorageBackend is already initialized");
-    RTP_LLM_CHECK(topology && device_pools.size() == topology->groups().size() && buffer_resolver && release_callback);
+    RTP_LLM_CHECK(topology && device_pools.size() == topology->groups().size() && buffer_resolver);
     for (const auto& pool : device_pools) {
         RTP_LLM_CHECK(pool != nullptr);
     }
     topology_               = std::move(topology);
     device_pools_           = std::move(device_pools);
     buffer_resolver_        = std::move(buffer_resolver);
-    release_gate_->callback = std::make_shared<ReleaseCallback>(std::move(release_callback));
     if (!initImpl()) {
         return false;
     }
@@ -219,11 +176,6 @@ void StorageBackend::shutdown() {
         lifecycle_ = Lifecycle::FINALIZING;
     }
     {
-        std::unique_lock<std::mutex> lock(release_gate_->mutex);
-        release_gate_->callback.reset();
-        release_gate_->cv.wait(lock, [this] { return release_gate_->active_callbacks == 0; });
-    }
-    {
         std::lock_guard<std::mutex> lock(lifecycle_mutex_);
         lifecycle_ = Lifecycle::STOPPED;
     }
@@ -233,22 +185,18 @@ void StorageBackend::shutdown() {
 std::shared_ptr<storage_backend_detail::StorageTaskState> StorageBackend::prepare(StorageRequest request) {
     auto state     = std::make_shared<storage_backend_detail::StorageTaskState>();
     state->request = std::move(request);
-    state->release = release_gate_;
-    state->backend = this;
     RTP_LLM_CHECK(initialized_);
 
-    std::unordered_map<BlockKey, size_t, BlockKeyHash> pin_indexes;
+    std::unordered_set<BlockKey, BlockKeyHash> pinned;
     for (const auto& key_handles : state->request.handles) {
         for (const StorageBlockHandle& handle : key_handles) {
             RTP_LLM_CHECK(handle.group_id < device_pools_.size() && !isNullBlockIdx(handle.block));
             const auto&    pool = device_pools_[handle.group_id];
             const BlockKey key{pool.get(), handle.block};
-            const auto [pin, inserted] = pin_indexes.emplace(key, state->pins.size());
-            if (inserted) {
+            if (pinned.insert(key).second) {
                 pool->incRef(handle.block, BlockRefType::STORAGE_BACKEND);
                 state->pins.push_back({pool, handle.block});
             }
-            state->targets.push_back({pin->second, handle.group_id});
         }
     }
     return state;
@@ -300,7 +248,7 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                 success = false;
             }
         }
-        state->finish(outcome != Lifecycle::STOPPED);
+        state->finish();
         if (done) {
             done(success);
         }
@@ -325,7 +273,7 @@ void StorageBackend::write(StorageWriteTask task) {
                 writeImpl(state->request);
             } catch (...) {}
         }
-        state->finish(outcome != Lifecycle::STOPPED);
+        state->finish();
     });
 }
 

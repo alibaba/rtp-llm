@@ -284,11 +284,10 @@ bool LinearKVCacheGroup::malloc(BlockIds&                  block_ids,
     return true;
 }
 
-std::vector<BlockRefTransition>
-LinearKVCacheGroup::releaseSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
+void LinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
     const auto& block_indices = block_ids.blocks();
     if (block_indices.empty()) {
-        return {};
+        return;
     }
     const int step                 = std::max(1, linear_step_);
     const int retained_tail_blocks = retainedTailBlockCount();
@@ -307,32 +306,25 @@ LinearKVCacheGroup::releaseSkippedBlocks(BlockIds& block_ids, bool enable_reuse_
         pos_to_remove.push_back(static_cast<size_t>(i));
     }
     if (!blocks_to_free.empty()) {
-        auto transitions = releaseBlockRefs(blocks_to_free, BlockRefType::REQUEST);
+        releaseBlockRefs(blocks_to_free, BlockRefType::REQUEST);
         block_ids.remove(pos_to_remove);
-        return transitions;
     }
-    return {};
 }
 
-void LinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
-    (void)releaseSkippedBlocks(block_ids, enable_reuse_cache, reserve_step);
-}
-
-std::vector<BlockRefTransition>
-LinearKVCacheGroup::release(const BlockIndicesType& block_indices, BlockRefType ref_type) {
+void LinearKVCacheGroup::release(const BlockIndicesType& block_indices, BlockRefType ref_type) {
     if (block_indices.empty()) {
-        return {};
+        return;
     }
     BlockIndicesType valid;
     filterValidBlocks(block_indices, valid);
     if (valid.empty()) {
-        return {};
+        return;
     }
-    return releaseBlockRefs(valid, ref_type);
+    releaseBlockRefs(valid, ref_type);
 }
 
 void LinearKVCacheGroup::free(const BlockIndicesType& block_indices) {
-    (void)release(block_indices, BlockRefType::REQUEST);
+    release(block_indices, BlockRefType::REQUEST);
 }
 
 void LinearKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {

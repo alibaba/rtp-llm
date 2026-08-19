@@ -18,7 +18,6 @@ namespace rtp_llm {
 class CPSlotMapper;
 class BlockTreeCache;
 using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;
-class BlockReleaseBatch;
 class KVCacheGroup;
 using KVCacheGroupPtr = std::shared_ptr<KVCacheGroup>;
 struct KVCacheTokenCapacity {
@@ -209,8 +208,6 @@ protected:
     size_t       logicalSeqSizePerBlockForCapacity(size_t gid) const;
     int          cpEffectiveSeqLenForAlloc(size_t gid, int seq_len) const;
     int          deviceCacheMetricTokensPerBlock() const;
-    void         submitBlockReleases(BlockReleaseBatch& releases);
-
     static size_t maxReusableMatchKeys(int seq_len, int reuse_unit_tokens) {
         if (seq_len <= 1 || reuse_unit_tokens <= 0) {
             return 0;
