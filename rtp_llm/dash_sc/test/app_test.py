@@ -69,32 +69,32 @@ class DeriveEchoPrefixIdsTest(TestCase):
 class CreateProxyServicerOnLoopTest(TestCase):
     def test_constructs_inside_running_loop(self) -> None:
         created_loops = []
+        received_configs = []
         sentinel = object()
+        sentinel_config = object()
 
-        def fake_servicer():
+        def fake_servicer(*, dash_sc_grpc_config=None):
             created_loops.append(asyncio.get_running_loop())
+            received_configs.append(dash_sc_grpc_config)
             return sentinel
 
         async def run():
             with patch.object(bg_app, "DashScProxyServicer", side_effect=fake_servicer):
                 loop = asyncio.get_running_loop()
-                servicer = await _create_proxy_servicer_on_loop()
+                servicer = await _create_proxy_servicer_on_loop(sentinel_config)
             return loop, servicer
 
         loop, servicer = asyncio.run(run())
         self.assertIs(servicer, sentinel)
         self.assertEqual(created_loops, [loop])
+        self.assertEqual(received_configs, [sentinel_config])
 
 
 class ProxyModeEnvTest(TestCase):
     def test_service_route_alone_does_not_enable_proxy_mode(self) -> None:
         with patch.dict(
             os.environ,
-            {
-                "SERVICE_ROUTE": (
-                    '{"type": "ip_port_list", "address": "127.0.0.1:1"}'
-                )
-            },
+            {"SERVICE_ROUTE": ('{"type": "ip_port_list", "address": "127.0.0.1:1"}')},
             clear=True,
         ):
             self.assertFalse(_is_proxy_mode_enabled())

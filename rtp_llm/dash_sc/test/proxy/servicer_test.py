@@ -26,6 +26,9 @@ from rtp_llm.dash_sc.proxy.service_route_config import (
     parse_service_route_config,
 )
 from rtp_llm.dash_sc.proxy.servicer import DashScProxyServicer
+from rtp_llm.server.server_args.grpc_group_args import (
+    DEFAULT_DASH_SC_GRPC_MAX_MESSAGE_BYTES,
+)
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 
 
@@ -118,6 +121,7 @@ def _servicer_pool(servicer):
 
 def _make_servicer(
     forward_addrs: list[str],
+    dash_sc_grpc_config=None,
 ) -> DashScProxyServicer:
     address = ";".join(forward_addrs)
     saved_route = os.environ.get(SERVICE_ROUTE_ENV_KEY)
@@ -125,7 +129,7 @@ def _make_servicer(
         os.environ[SERVICE_ROUTE_ENV_KEY] = json.dumps(
             {"type": "ip_port_list", "address": address}
         )
-        return DashScProxyServicer()
+        return DashScProxyServicer(dash_sc_grpc_config=dash_sc_grpc_config)
     finally:
         if saved_route is None:
             os.environ.pop(SERVICE_ROUTE_ENV_KEY, None)
@@ -248,6 +252,35 @@ class ServiceRouteConfigTest(unittest.TestCase):
         self.assertEqual(
             [addr.grpc_target for addr in servicer._discovery._addrs],
             ["10.0.0.1:8104", "10.0.0.2:8104"],
+        )
+
+
+class GrpcMessageLimitTest(unittest.TestCase):
+    def test_proxy_channels_allow_large_messages_by_default(self) -> None:
+        servicer = _make_servicer(["127.0.0.1:1"])
+        options = dict(servicer._channel_pool._options)
+
+        self.assertEqual(
+            options["grpc.max_send_message_length"],
+            DEFAULT_DASH_SC_GRPC_MAX_MESSAGE_BYTES,
+        )
+        self.assertEqual(
+            options["grpc.max_receive_message_length"],
+            DEFAULT_DASH_SC_GRPC_MAX_MESSAGE_BYTES,
+        )
+
+    def test_explicit_client_config_overrides_proxy_default(self) -> None:
+        config = MagicMock()
+        config.get_client_config.return_value = {
+            "grpc.max_receive_message_length": 16 * 1024 * 1024
+        }
+        servicer = _make_servicer(["127.0.0.1:1"], dash_sc_grpc_config=config)
+        options = dict(servicer._channel_pool._options)
+
+        self.assertEqual(options["grpc.max_receive_message_length"], 16 * 1024 * 1024)
+        self.assertEqual(
+            options["grpc.max_send_message_length"],
+            DEFAULT_DASH_SC_GRPC_MAX_MESSAGE_BYTES,
         )
 
 

@@ -25,6 +25,9 @@ from rtp_llm.dash_sc.access_log import (
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2_grpc
 from rtp_llm.dash_sc.proxy.servicer import DashScProxyServicer
+from rtp_llm.server.server_args.grpc_group_args import (
+    DEFAULT_DASH_SC_GRPC_MAX_MESSAGE_BYTES,
+)
 
 
 def _resolve_dash_sc_grpc_config(dash_sc_grpc_config):
@@ -44,7 +47,11 @@ def dash_sc_grpc_server_channel_options(dash_sc_grpc_config) -> list[tuple[str, 
 # Max time for grpc.aio.Server.start() + bind before start_on_loop returns.
 _DEFAULT_DASH_SC_GRPC_STARTUP_TIMEOUT_S = 30.0
 
-# HTTP/2 keepalive permissions for the dash_sc gRPC server side. The upstream
+# Message-size and HTTP/2 keepalive defaults for the dash_sc gRPC server side.
+# DashSc requests can carry long token arrays or inline multimodal payloads, so
+# gRPC's 4 MiB receive default is too small for the supported request surface.
+#
+# The upstream
 # (whoever calls us: dash_sc forwarder, client SDK, …) needs to be able to
 # send keepalive PINGs every ~30s to defeat the 100s LBS idle timeout — but
 # grpcio's server default is to GOAWAY any client that exceeds 2 PINGs in
@@ -60,7 +67,9 @@ _DEFAULT_DASH_SC_GRPC_STARTUP_TIMEOUT_S = 30.0
 # Merged via ``setdefault`` — anything explicitly set by
 # ``DashScGrpcConfig.get_server_config()`` wins, so operators can still
 # override per-deployment.
-_SERVER_KEEPALIVE_OPTS: list[tuple[str, int]] = [
+_SERVER_DEFAULT_OPTS: list[tuple[str, int]] = [
+    ("grpc.max_send_message_length", DEFAULT_DASH_SC_GRPC_MAX_MESSAGE_BYTES),
+    ("grpc.max_receive_message_length", DEFAULT_DASH_SC_GRPC_MAX_MESSAGE_BYTES),
     ("grpc.keepalive_time_ms", 30000),
     ("grpc.keepalive_timeout_ms", 10000),
     ("grpc.keepalive_permit_without_calls", 0),
@@ -69,12 +78,12 @@ _SERVER_KEEPALIVE_OPTS: list[tuple[str, int]] = [
 ]
 
 
-def _merge_server_keepalive(
+def _merge_server_options(
     opts: list[tuple[str, int]],
 ) -> list[tuple[str, int]]:
-    """Add keepalive defaults to ``opts`` without overriding explicit config."""
+    """Add DashSc server defaults without overriding explicit config."""
     merged = dict(opts)
-    for k, v in _SERVER_KEEPALIVE_OPTS:
+    for k, v in _SERVER_DEFAULT_OPTS:
         merged.setdefault(k, v)
     return sorted(merged.items())
 
@@ -139,7 +148,7 @@ class DashScGrpcServer:
             logging.warning("[DashScGrpc] server already started")
             return self._server
         cfg = _resolve_dash_sc_grpc_config(self._config)
-        opts = _merge_server_keepalive(dash_sc_grpc_server_channel_options(cfg))
+        opts = _merge_server_options(dash_sc_grpc_server_channel_options(cfg))
 
         server_id_int: Optional[int]
         try:
