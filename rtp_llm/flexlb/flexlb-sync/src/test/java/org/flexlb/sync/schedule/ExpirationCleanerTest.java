@@ -5,6 +5,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.metric.FlexMonitor;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -16,6 +17,18 @@ class ExpirationCleanerTest {
 
     private static final long WORKER_TIMEOUT_US = 3_000_000L;
     private static final long VIT_WORKER_TIMEOUT_US = 10_000_000L;
+
+    @Test
+    void should_createBeanThroughSpringConstructorInjection() {
+        try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
+            context.registerBean(FlexMonitor.class, () -> Mockito.mock(FlexMonitor.class));
+            context.register(ExpirationCleaner.class);
+
+            context.refresh();
+
+            assertTrue(context.containsBean("expirationCleaner"));
+        }
+    }
 
     @Test
     void should_useLongerExpirationWindowForVitWorkers() {
