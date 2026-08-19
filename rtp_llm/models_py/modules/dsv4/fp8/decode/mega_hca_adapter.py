@@ -9,22 +9,16 @@ import torch
 
 from .mega_csa_runtime import MegaCSARuntime, MegaHCASlotMappings
 from .mega_csa_weights import (
-    DIM,
+    GEOMETRY_BY_DIM,
     HC,
     HEAD_DIM,
-    MAIN_HEADS,
     MAX_BATCH,
-    O_GROUPS,
     O_LORA_RANK,
-    Q_LORA_RANK,
+    PRO_GEOMETRY,
     ROPE_DIM,
+    CSAGeometry,
 )
-from .mega_hca_weights import (
-    HCA_COMPRESS_RATIO,
-    HCA_FRONT_OUT_DIM,
-    HCA_STATE_WIDTH,
-    MegaHCAWeights,
-)
+from .mega_hca_weights import HCA_COMPRESS_RATIO, HCA_STATE_WIDTH, MegaHCAWeights
 
 if TYPE_CHECKING:
     from rtp_llm.models_py.modules.dsv4.block import Block
@@ -57,8 +51,8 @@ class MegaHCAAdapter:
         layer_weights: Dict[str, torch.Tensor],
         runtime: MegaCSARuntime,
     ) -> None:
-        self._validate_geometry(block)
-        self.weights = MegaHCAWeights.from_layer_weights(layer_weights)
+        self._geometry = self._validate_geometry(block)
+        self.weights = MegaHCAWeights.from_layer_weights(layer_weights, self._geometry)
         self.runtime = runtime
         self._runtime_checked = False
 
@@ -72,18 +66,23 @@ class MegaHCAAdapter:
         )
 
     @staticmethod
-    def _validate_geometry(block: "Block") -> None:
+    def _validate_geometry(block: "Block") -> CSAGeometry:
         attn = block.attn
+        geometry = GEOMETRY_BY_DIM.get(int(attn.dim))
+        if geometry is None:
+            raise ValueError(
+                f"DSV4 HCA mega geometry mismatch: dim={attn.dim} "
+                f"(compiled: {sorted(GEOMETRY_BY_DIM)})"
+            )
         expected = (
             ("tp_size", attn.tp_size, 1),
             ("tp_rank", attn.tp_rank, 0),
             ("compress_ratio", attn.compress_ratio, HCA_COMPRESS_RATIO),
-            ("dim", attn.dim, DIM),
-            ("q_lora_rank", attn.q_lora_rank, Q_LORA_RANK),
-            ("n_heads", attn.n_heads, MAIN_HEADS),
+            ("q_lora_rank", attn.q_lora_rank, geometry.q_lora_rank),
+            ("n_heads", attn.n_heads, geometry.main_heads),
             ("head_dim", attn.head_dim, HEAD_DIM),
             ("rope_head_dim", attn.rope_head_dim, ROPE_DIM),
-            ("o_groups", attn.n_groups, O_GROUPS),
+            ("o_groups", attn.n_groups, geometry.o_groups),
             ("o_lora_rank", attn.o_lora_rank, O_LORA_RANK),
         )
         problems = [
@@ -95,6 +94,7 @@ class MegaHCAAdapter:
             problems.append("HCA layer must not have an indexer")
         if problems:
             raise ValueError("DSV4 HCA mega geometry mismatch: " + "; ".join(problems))
+        return geometry
 
     def _require_runtime(self, device: torch.device) -> Any:
         if self._runtime_checked:
@@ -162,9 +162,11 @@ class MegaHCAAdapter:
                 + "; ".join(incompatible)
             )
         geometry = dsv4_mega.geometry_hca()
+        g = self._geometry
+        suffix = "_pro" if g is PRO_GEOMETRY else "_flash"
         expected = {
-            "n_q_pro": MAIN_HEADS * HEAD_DIM,
-            "front_n_fp8_pro": HCA_FRONT_OUT_DIM,
+            f"n_q{suffix}": g.n_main,
+            f"front_n_fp8{suffix}": g.front_fp8_rows,
             "compress_ratio": HCA_COMPRESS_RATIO,
             "state_width": HCA_STATE_WIDTH,
             "slot_dtype_bits": 64,
@@ -257,9 +259,11 @@ class MegaHCAAdapter:
         kv_cache: Any = None,
     ) -> torch.Tensor:
         """Run the complete HCA attention sublayer; never falls back after entry."""
-        if hidden.dim() != 4 or tuple(hidden.shape[2:]) != (HC, DIM):
+        g = self._geometry
+        if hidden.dim() != 4 or tuple(hidden.shape[2:]) != (HC, g.dim):
             raise ValueError(
-                f"DSV4 mega hidden must be [B,1,{HC},{DIM}], got {tuple(hidden.shape)}"
+                f"DSV4 mega hidden must be [B,1,{HC},{g.dim}], "
+                f"got {tuple(hidden.shape)}"
             )
         m, q_len = int(hidden.shape[0]), int(hidden.shape[1])
         if q_len != 1 or not 1 <= m <= MAX_BATCH:
@@ -298,6 +302,7 @@ class MegaHCAAdapter:
         pools: MegaHCAPoolContext,
         dsv4_mega: Any,
     ) -> torch.Tensor:
+        g = self._geometry
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import tf32_hc_prenorm_gemm
         from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import (
             fused_rmsnorm_rope,
@@ -313,9 +318,9 @@ class MegaHCAAdapter:
         if positions_i64.dtype != torch.int64:
             raise TypeError("DSV4 mega positions must provide an int64 tensor")
         rope_cos, rope_sin = self.runtime.rope_tables(attn.freqs_cis)
-        num_split = self.runtime.num_hc_splits(m, hidden.device)
-        workspace = self.runtime.hca_layer_workspace(m, num_split, hidden.device)
-        hidden_rows = hidden.view(m, HC, DIM)
+        num_split = self.runtime.num_hc_splits(m, hidden.device, g.dim)
+        workspace = self.runtime.hca_layer_workspace(m, num_split, hidden.device, g)
+        hidden_rows = hidden.view(m, HC, g.dim)
 
         # Dense compressed index — built once per step for every HCA layer.
         window = int(attn.window_size)
@@ -349,7 +354,7 @@ class MegaHCAAdapter:
         )
 
         tf32_hc_prenorm_gemm(
-            hidden_rows.view(m, HC * DIM),
+            hidden_rows.view(m, HC * g.dim),
             self.weights.hc_fn,
             workspace.hc_partial,
             workspace.hc_sum_sq,
@@ -427,7 +432,7 @@ class MegaHCAAdapter:
         # stay on the same framework Triton pass the original path uses.
         freqs_cis = attn.freqs_cis.index_select(0, positions_i64).contiguous()
         q_ready = fused_rmsnorm_rope(
-            q_raw.view(m, 1, MAIN_HEADS, HEAD_DIM),
+            q_raw.view(m, 1, g.main_heads, HEAD_DIM),
             None,
             freqs_cis,
             ROPE_DIM,
@@ -443,7 +448,7 @@ class MegaHCAAdapter:
             cmp_attn_type=HCA_KV,
         )
         dsv4_mega.mla_o_inv_rope_quant(
-            attention.view(m, MAIN_HEADS, HEAD_DIM),
+            attention.view(m, g.main_heads, HEAD_DIM),
             positions_i64,
             rope_cos,
             rope_sin,
