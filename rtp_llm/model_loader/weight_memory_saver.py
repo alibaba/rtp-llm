@@ -112,7 +112,18 @@ _expandable_active: bool = False
 # assert_pausable_alloc_safe() reads it to catch a sleep-persistent allocation
 # about to happen while expandable is on.
 _expandable_live: bool = False
+# The user's PYTORCH_CUDA_ALLOC_CONF minus expandable_segments, replayed on every
+# live-config write (see _capture_base_alloc_conf).
 _expandable_base_conf: str = ""
+_base_conf_captured: bool = False
+
+# Init-phase segment-split cap (see limit_init_segment_splitting).
+_SPLIT_CAP_KEY: str = "max_split_size_mb"
+# Above torch's 20 MiB kLargeBuffer floor (smaller values are rejected) and below
+# the loader's ~1 GiB staging buffers, which is the point: cap only the blocks big
+# enough to strand hundreds of MiB when a resident weight splits one.
+_INIT_SPLIT_CAP_MB: int = 256
+_split_cap_live: bool = False
 
 
 @contextmanager
@@ -305,23 +316,52 @@ def _alloc_conf_without_expandable(conf: str) -> str:
     return ",".join(kept)
 
 
-def _set_expandable_segments(enabled: bool) -> None:
-    """Flip the *live* torch caching-allocator ``expandable_segments`` setting,
-    keeping any other allocator settings intact.
+def _capture_base_alloc_conf() -> None:
+    """Snapshot the user's ``PYTORCH_CUDA_ALLOC_CONF`` (minus expandable_segments) once.
 
-    Applies to future segments only; existing segments keep their nature.
-    Prefers the current ``torch._C._accelerator_setAllocatorSettings`` and falls
-    back to the deprecated ``torch.cuda.memory._set_allocator_settings``.
+    The live setter *replaces* the whole allocator config rather than merging into
+    it, so anything the user asked for in the env var has to be replayed on every
+    write or it would be silently reverted to the torch default.
+    """
+    global _base_conf_captured, _expandable_base_conf
+    if _base_conf_captured:
+        return
+    _base_conf_captured = True
+    _expandable_base_conf = _alloc_conf_without_expandable(
+        os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+    )
+
+
+def _apply_live_alloc_conf(expandable: bool, split_cap: bool) -> None:
+    """Push the composed caching-allocator config to the live allocator.
+
+    Both knobs we flip at runtime -- ``expandable_segments`` and the init-phase
+    ``max_split_size_mb`` cap -- share one setter that replaces the entire config,
+    so each call restates both plus the captured env base.
+
+    Applies to future segments/allocations only; existing segments keep their
+    nature. Prefers the current ``torch._C._accelerator_setAllocatorSettings`` and
+    falls back to the deprecated ``torch.cuda.memory._set_allocator_settings``.
     """
     import torch
 
-    setting = f"{_EXPANDABLE_KEY}:{'True' if enabled else 'False'}"
-    full = f"{_expandable_base_conf},{setting}" if _expandable_base_conf else setting
+    _capture_base_alloc_conf()
+    parts = [_expandable_base_conf] if _expandable_base_conf else []
+    parts.append(f"{_EXPANDABLE_KEY}:{'True' if expandable else 'False'}")
+    if split_cap:
+        parts.append(f"{_SPLIT_CAP_KEY}:{_INIT_SPLIT_CAP_MB}")
+    full = ",".join(parts)
     setter = getattr(torch._C, "_accelerator_setAllocatorSettings", None)
     if setter is not None:
         setter(full)
     else:
         torch.cuda.memory._set_allocator_settings(full)
+
+
+def _set_expandable_segments(enabled: bool) -> None:
+    """Flip the *live* torch caching-allocator ``expandable_segments`` setting,
+    keeping the init-phase split cap and any other allocator settings intact."""
+    _apply_live_alloc_conf(enabled, _split_cap_live)
     # Mirror the applied setting so assert_pausable_alloc_safe() has a reliable
     # live view (only reached on setter success; a raising setter leaves the
     # previous value, which matches the un-applied reality).
@@ -359,16 +399,16 @@ def _prepare_expandable_coexistence() -> None:
     (pytorch/pytorch#147851), the deferral can be dropped and expandable applied
     live from here.
     """
-    global _expandable_prepared, _expandable_requested, _expandable_base_conf
+    global _expandable_prepared, _expandable_requested
     if _expandable_prepared:
         return
     _expandable_prepared = True
 
     conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+    _capture_base_alloc_conf()
     if f"{_EXPANDABLE_KEY}:True" not in conf:
         return
 
-    _expandable_base_conf = _alloc_conf_without_expandable(conf)
     # Remove it from the env so torch_memory_saver._sanity_checks() (which reads
     # the env var, not the live setting) does not refuse to initialize, and so
     # torch does not pick it up when the caching allocator initializes.
@@ -439,6 +479,85 @@ def enable_runtime_expandable() -> None:
             "continuing with expandable_segments disabled",
             exc_info=True,
         )
+
+
+def limit_init_segment_splitting() -> None:
+    """Stop init-phase transients from becoming permanently-stranded segments.
+
+    THE PROBLEM. Weight loading allocates and frees ~1 GiB GPU staging buffers
+    (fastsafetensors batch copy on the loader's producer/consumer threads); torch
+    keeps each freed buffer as a cached ~1 GiB *segment*. A later request that is
+    smaller than the segment is then served by *splitting* it. When the request is
+    a resident tensor -- a 512 MiB weight shard from ``WeightModule._split``, or one
+    of the small permanently-live tensors built afterwards (packed FP8 scales,
+    stacked wo_a, rope cos/sin cache, the graph-baked capture input) -- the segment
+    is pinned by a live block for the process lifetime and the rest of it is free
+    forever. ``empty_cache()`` cannot help: it only returns 100%-free segments, so
+    one live block in a 1010 MiB segment costs the other 498 MiB. Measured on DSV4
+    L2 sleep, this stranded ~1.5 GiB/rank -- roughly half the entire sleeping
+    residual that was not CUDA context or NCCL.
+
+    THE FIX. Cap ``max_split_size_mb`` for the init window only. Blocks above the
+    cap are never split, so the big staging carcasses stay 100% free and the
+    ``empty_cache()`` the loader already runs actually returns them, while resident
+    tensors get their own right-sized segments. Restored by
+    :func:`release_init_segment_splitting` once the engine is ready, so per-forward
+    and KV allocations keep torch's default splitting behaviour -- which is why this
+    is scoped rather than set through the env var: as a process-global setting it
+    would trade permanent serving-time fragmentation for a sleep-only gain.
+
+    Call before any weight allocation. No-op unless sleep mode is on (the gain only
+    exists at sleep, and the non-sleep load path stays byte-for-byte unchanged).
+    """
+    global _split_cap_live
+    if not is_enabled() or _split_cap_live:
+        return
+    try:
+        _apply_live_alloc_conf(_expandable_live, True)
+    except Exception:
+        # Setter unavailable: keep torch's default splitting. Costs the sleeping
+        # residual gain, breaks nothing.
+        logging.warning(
+            "WeightMemorySaver: could not cap max_split_size_mb for init; "
+            "sleeping residual will keep the stranded load-time segments",
+            exc_info=True,
+        )
+        return
+    _split_cap_live = True
+    logging.info(
+        "WeightMemorySaver: capped max_split_size_mb=%d for the init phase so "
+        "load-time staging segments are not split by resident weights",
+        _INIT_SPLIT_CAP_MB,
+    )
+
+
+def release_init_segment_splitting() -> None:
+    """Restore torch's default segment splitting once the engine is ready.
+
+    Pairs with :func:`limit_init_segment_splitting`; call after weights, KV arena
+    and graph capture are done, alongside :func:`enable_runtime_expandable`. The
+    cap applies to future allocations only, so the init-phase segments keep their
+    unsplit shape while runtime allocations go back to default behaviour.
+    """
+    global _split_cap_live
+    if not _split_cap_live:
+        return
+    try:
+        _apply_live_alloc_conf(_expandable_live, False)
+    except Exception:
+        # Leave the cap live rather than a half-applied config: it is a
+        # fragmentation trade-off at worst, not a correctness problem.
+        logging.warning(
+            "WeightMemorySaver: could not restore default max_split_size_mb; "
+            "runtime allocations keep the init-phase cap",
+            exc_info=True,
+        )
+        return
+    _split_cap_live = False
+    logging.info(
+        "WeightMemorySaver: restored default max_split_size_mb for runtime "
+        "allocations (engine ready)"
+    )
 
 
 @contextmanager
@@ -675,6 +794,7 @@ def _reset_for_testing() -> None:
     global _tms, _import_attempted, _paused, _enabled_override
     global _expandable_prepared, _expandable_requested, _expandable_active
     global _expandable_base_conf, _expandable_live
+    global _base_conf_captured, _split_cap_live
     with _lock:
         _tms = None
         _import_attempted = False
@@ -685,4 +805,6 @@ def _reset_for_testing() -> None:
         _expandable_active = False
         _expandable_live = False
         _expandable_base_conf = ""
+        _base_conf_captured = False
+        _split_cap_live = False
     _region_depth.value = 0

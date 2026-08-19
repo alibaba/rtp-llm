@@ -16,7 +16,10 @@ from rtp_llm.config.sleep_mode_compatibility import (
 from rtp_llm.distribute.distributed_server import DistributedServer, get_world_info
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.model_loader.weight_memory_saver import enable_runtime_expandable
+from rtp_llm.model_loader.weight_memory_saver import (
+    enable_runtime_expandable,
+    release_init_segment_splitting,
+)
 from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
 from rtp_llm.ops import TaskType, VitSeparation
 from rtp_llm.utils.concurrency_controller import get_global_controller
@@ -168,6 +171,10 @@ class BackendManager(object):
         # land at low, registerable VA); runtime forward buffers get the benefit.
         # No-op unless expandable_segments:True was requested with sleep mode.
         enable_runtime_expandable()
+        # Same boundary for the init-phase segment-split cap: the load-time staging
+        # segments have already been returned, so runtime allocations go back to
+        # torch's default splitting rather than paying its fragmentation forever.
+        release_init_segment_splitting()
 
     def serve_forever(self):
         """Enter service loop to keep the process alive until shutdown is requested"""

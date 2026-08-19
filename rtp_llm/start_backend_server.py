@@ -23,7 +23,10 @@ from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_cuda_device_and_accl_env,
 )
-from rtp_llm.model_loader.weight_memory_saver import prepare_expandable_coexistence
+from rtp_llm.model_loader.weight_memory_saver import (
+    limit_init_segment_splitting,
+    prepare_expandable_coexistence,
+)
 from rtp_llm.model_loader.weight_memory_saver import (
     start_configured_process as start_memory_saver_configured_process,
 )
@@ -250,6 +253,11 @@ def local_rank_start(
         # VA. It is turned back on after the engine is ready (BackendManager.start
         # -> enable_runtime_expandable). No-op unless requested with sleep mode.
         prepare_expandable_coexistence()
+        # Keep the loader's ~1 GiB staging segments from being split by resident
+        # weights, which would strand the segment remainder for the process
+        # lifetime and show up as sleeping-residual GPU memory. Released at the
+        # same engine-ready point as expandable above.
+        limit_init_segment_splitting()
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)

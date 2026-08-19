@@ -460,6 +460,104 @@ class ExpandableCoexistenceTest(WeightMemorySaverTestBase):
         )
 
 
+class InitSegmentSplitCapTest(WeightMemorySaverTestBase):
+    """The init-phase max_split_size_mb cap keeps the loader's ~1 GiB staging
+    segments from being split by resident weights (which would strand the segment
+    remainder as sleeping-residual GPU memory), and is released once the engine is
+    ready so runtime allocations keep torch's default splitting.
+
+    GPU-free: the live allocator setter is patched out, so the tests assert the
+    composed config *strings* and the on/off sequence.
+    """
+
+    _CONF = "expandable_segments:True,garbage_collection_threshold:0.9"
+    _CAP = f"max_split_size_mb:{wms._INIT_SPLIT_CAP_MB}"
+
+    def setUp(self) -> None:
+        super().setUp()
+        os.environ[wms.ENV_SWITCH] = "1"
+        self._saved_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF")
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = self._CONF
+        self._inject_fake_tms()
+        # Capture the composed config instead of calling the CUDA driver.
+        self.applied: List[str] = []
+        self._real_apply = wms._apply_live_alloc_conf
+
+        def fake_apply(expandable: bool, split_cap: bool) -> None:
+            wms._capture_base_alloc_conf()
+            parts = [wms._expandable_base_conf] if wms._expandable_base_conf else []
+            parts.append(f"{wms._EXPANDABLE_KEY}:{'True' if expandable else 'False'}")
+            if split_cap:
+                parts.append(self._CAP)
+            self.applied.append(",".join(parts))
+
+        wms._apply_live_alloc_conf = fake_apply
+
+    def tearDown(self) -> None:
+        wms._apply_live_alloc_conf = self._real_apply
+        if self._saved_conf is None:
+            os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+        else:
+            os.environ["PYTORCH_CUDA_ALLOC_CONF"] = self._saved_conf
+        super().tearDown()
+
+    def test_cap_applied_once_and_released_once(self) -> None:
+        wms.limit_init_segment_splitting()
+        self.assertTrue(wms._split_cap_live)
+        # Idempotent: a second call must not re-push the config.
+        wms.limit_init_segment_splitting()
+        self.assertEqual(len(self.applied), 1)
+        self.assertIn(self._CAP, self.applied[0])
+
+        wms.release_init_segment_splitting()
+        self.assertFalse(wms._split_cap_live)
+        self.assertNotIn(self._CAP, self.applied[1])
+        # Releasing twice is a no-op.
+        wms.release_init_segment_splitting()
+        self.assertEqual(len(self.applied), 2)
+
+    def test_release_without_cap_is_inert(self) -> None:
+        wms.release_init_segment_splitting()
+        self.assertEqual(self.applied, [])
+
+    def test_inert_without_sleep_mode(self) -> None:
+        # The gain only exists at sleep, so the non-sleep load path must be
+        # byte-for-byte unchanged -- no allocator write at all.
+        os.environ.pop(wms.ENV_SWITCH, None)
+        os.environ.pop(wms.LEGACY_ENV_SWITCH, None)
+        wms.limit_init_segment_splitting()
+        self.assertFalse(wms._split_cap_live)
+        self.assertEqual(self.applied, [])
+
+    def test_env_base_conf_is_replayed(self) -> None:
+        # The live setter REPLACES the whole config, so the user's other env keys
+        # have to be restated on every write or they revert to torch defaults.
+        wms.limit_init_segment_splitting()
+        self.assertTrue(self.applied[0].startswith("garbage_collection_threshold:0.9,"))
+        # expandable_segments is owned by the deferral logic, never replayed raw.
+        self.assertNotIn("expandable_segments:True", wms._expandable_base_conf)
+
+    def test_cap_survives_expandable_toggles(self) -> None:
+        # expandable and the cap share one setter; flipping expandable must not
+        # silently drop the cap (the whole init phase depends on it staying on).
+        wms.limit_init_segment_splitting()
+        wms._set_expandable_segments(True)
+        self.assertIn(self._CAP, self.applied[-1])
+        self.assertIn("expandable_segments:True", self.applied[-1])
+        wms._set_expandable_segments(False)
+        self.assertIn(self._CAP, self.applied[-1])
+
+    def test_expandable_state_preserved_across_release(self) -> None:
+        # Release happens next to enable_runtime_expandable(); it must not undo it.
+        wms.limit_init_segment_splitting()
+        wms._set_expandable_segments(True)
+        wms.release_init_segment_splitting()
+        self.assertEqual(
+            self.applied[-1],
+            "garbage_collection_threshold:0.9,expandable_segments:True",
+        )
+
+
 class PausableAllocGuardTest(WeightMemorySaverTestBase):
     """assert_pausable_alloc_safe() refuses a sleep-persistent allocation while
     expandable_segments is live (the silent post-wake corruption guard).
