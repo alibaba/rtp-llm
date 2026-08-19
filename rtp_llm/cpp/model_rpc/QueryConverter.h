@@ -23,7 +23,7 @@ public:
 
     static std::vector<MultimodalInput> transMMInput(const MultimodalInputsPB* mm_inputs);
 
-    static MultimodalInputsPB transMMInputsPB(const std::vector<MultimodalInput> mm_inputs);
+    static MultimodalInputsPB transMMInputsPB(const std::vector<MultimodalInput> mm_inputs, int64_t request_id = 0);
 
     static MultimodalOutput transMMOutput(const MultimodalOutputPB* output_pb);
 

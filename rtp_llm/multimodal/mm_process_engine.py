@@ -599,6 +599,7 @@ class MMProcessEngine:
         self,
         mm_inputs: List[MultimodalInput],
         entry: Optional[MMEmbeddingCacheEntry] = None,
+        request_id: int = 0,
     ) -> Tuple[
         List[MultimodalInput], Optional["concurrent.futures.Future"], Optional[Any]
     ]:
@@ -622,10 +623,9 @@ class MMProcessEngine:
             return mm_inputs, None, None
 
         loop = self._ensure_greennet_loop()
-        # request_id is not threaded down to this layer; greennet uses it only for
-        # tracing headers, so best-effort empty is acceptable.
         req = SimpleNamespace(
-            id="", model_name=getattr(self.vit_config, "model_name", "") or ""
+            id=str(request_id),
+            model_name=getattr(self.vit_config, "model_name", "") or "",
         )
         handle = asyncio.run_coroutine_threadsafe(
             self._greennet_provider.preprocess_and_submit(req, mm_inputs), loop
@@ -669,18 +669,22 @@ class MMProcessEngine:
         self._greennet_loop_thread = None
 
     def _embed_with_greennet_sync(
-        self, mm_inputs: List[MultimodalInput]
+        self, mm_inputs: List[MultimodalInput], request_id: int = 0
     ) -> MMEmbeddingRes:
         """Synchronous embedding path with greennet (used by the in-process /
         cpp / rpc entrypoints). Preprocess + inspect run, ViT runs concurrently
         with inspect, then the verdict gates the result. Raises
         FtRuntimeException(UNSAFE_INPUT_CONTENT) on a non-passing verdict."""
         if len(mm_inputs) != 1 or mm_inputs[0].url == "":
-            rewritten, verdict_future, handle = self._begin_greennet(mm_inputs)
+            rewritten, verdict_future, handle = self._begin_greennet(
+                mm_inputs, request_id=request_id
+            )
             work_items: List[MMWorkItem] = []
             try:
                 result, work_items = self._mm_embedding_impl(
-                    rewritten, defer_cache_complete=True
+                    rewritten,
+                    defer_cache_complete=True,
+                    request_id=request_id,
                 )
                 verdict = GreenNetVerdict(passed=True)
                 if verdict_future is not None:
@@ -709,7 +713,7 @@ class MMProcessEngine:
         try:
             if state == "miss":
                 rewritten, verdict_future, handle = self._begin_greennet(
-                    mm_inputs, entry
+                    mm_inputs, entry, request_id
                 )
             else:
                 # The owner already ran GreenNet and owns any URL rewrite. A
@@ -720,6 +724,7 @@ class MMProcessEngine:
                 rewritten,
                 cache_claim=(cache_key, entry, state),
                 defer_cache_complete=state == "miss",
+                request_id=request_id,
             )
 
             if state == "miss":
@@ -753,7 +758,10 @@ class MMProcessEngine:
             self._cancel_greennet(handle)
 
     def wait_greennet_verdict(
-        self, mm_inputs: List[MultimodalInput], timeout_ms: int = 60000
+        self,
+        mm_inputs: List[MultimodalInput],
+        timeout_ms: int = 60000,
+        request_id: int = 0,
     ) -> GreenNetVerdict:
         """Block until every input's greennet verdict is decided; return the
         first non-passing verdict (first-failure-wins), else a passing verdict.
@@ -773,7 +781,7 @@ class MMProcessEngine:
                 single_input = [mm_input]
                 thread = threading.Thread(
                     target=self._async_compute,
-                    args=(single_input, cache_key, entry),
+                    args=(single_input, cache_key, entry, request_id),
                     daemon=True,
                 )
                 thread.start()
@@ -785,7 +793,9 @@ class MMProcessEngine:
     def mm_embedding_rpc(self, mm_inputs: MultimodalInputsPB) -> MMEmbeddingRes:
         """Process multimodal inputs from RPC protocol buffer."""
         converted_inputs = trans_mm_input(mm_inputs)
-        return self._embed_with_greennet_sync(converted_inputs)
+        return self._embed_with_greennet_sync(
+            converted_inputs, request_id=mm_inputs.request_id
+        )
 
     def mm_embedding_cpp(
         self,
@@ -793,6 +803,7 @@ class MMProcessEngine:
         types: List[int],
         tensors: List[torch.Tensor],
         mm_preprocess_configs: List[Any],
+        request_id: int = 0,
     ) -> MMEmbeddingRes:
         """Process multimodal inputs from C++ interface."""
         mm_inputs = [
@@ -803,13 +814,15 @@ class MMProcessEngine:
                 urls, types, tensors, mm_preprocess_configs
             )
         ]
-        res = self._embed_with_greennet_sync(mm_inputs)
+        res = self._embed_with_greennet_sync(mm_inputs, request_id=request_id)
         res.position_ids = [pos.cpu() for pos in res.position_ids]
         return res
 
-    def mm_embedding_impl(self, mm_inputs: List[MultimodalInput]) -> MMEmbeddingRes:
+    def mm_embedding_impl(
+        self, mm_inputs: List[MultimodalInput], request_id: int = 0
+    ) -> MMEmbeddingRes:
         """Core implementation for multimodal embedding processing."""
-        result, _ = self._mm_embedding_impl(mm_inputs)
+        result, _ = self._mm_embedding_impl(mm_inputs, request_id=request_id)
         return result
 
     def _mm_embedding_impl(
@@ -817,6 +830,7 @@ class MMProcessEngine:
         mm_inputs: List[MultimodalInput],
         cache_claim: Optional[Tuple[str, MMEmbeddingCacheEntry, str]] = None,
         defer_cache_complete: bool = False,
+        request_id: int = 0,
     ) -> Tuple[MMEmbeddingRes, List[MMWorkItem]]:
         """Internal implementation that also exposes canonical work-item values.
 
@@ -825,7 +839,7 @@ class MMProcessEngine:
         passes, so sync and async callers share one value and unsafe results are
         never made visible.
         """
-        logging.debug(f"{self.server_id} request received")
+        logging.debug(f"{self.server_id} request [{request_id}] received")
         work_items: List[MMWorkItem] = []
         try:
             with self.profiler.profile_request():
@@ -837,7 +851,7 @@ class MMProcessEngine:
 
                     self.inc_query_num()
                     if not self.vit_config.disable_access_log:
-                        self._access_logger.log_query_access(mm_inputs)
+                        self._access_logger.log_query_access(mm_inputs, request_id)
 
                     with torch.profiler.record_function("preprocess"):
                         work_items = self._create_work_items(
@@ -856,7 +870,9 @@ class MMProcessEngine:
                         result = MMEmbeddingRes(emb_res, pos_res, extra_input_res)
 
                     if not self.vit_config.disable_access_log:
-                        self._access_logger.log_success_access(mm_inputs, str(result))
+                        self._access_logger.log_success_access(
+                            mm_inputs, str(result), request_id
+                        )
 
                     if not self.is_proxy_mode:
                         kmonitor.report(AccMetrics.VIT_SUCCESS_QPS_METRIC, 1)
@@ -869,7 +885,7 @@ class MMProcessEngine:
             gc.collect()
             if not self.is_proxy_mode:
                 kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
-            self._access_logger.log_exception_access(mm_inputs, e)
+            self._access_logger.log_exception_access(mm_inputs, e, request_id)
             raise
         finally:
             self.dec_query_num()
@@ -963,7 +979,9 @@ class MMProcessEngine:
         )
         return MMEmbeddingRes(emb_res, pos_res, extra_res)
 
-    def async_submit(self, mm_inputs: List[MultimodalInput]) -> List[str]:
+    def async_submit(
+        self, mm_inputs: List[MultimodalInput], request_id: int = 0
+    ) -> List[str]:
         """Asynchronously submit multimodal URLs for embedding computation.
 
         Each input is submitted independently, keyed by its own cache_key.
@@ -983,7 +1001,7 @@ class MMProcessEngine:
                 single_input = [mm_input]
                 thread = threading.Thread(
                     target=self._async_compute,
-                    args=(single_input, cache_key, entry),
+                    args=(single_input, cache_key, entry, request_id),
                     daemon=True,
                 )
                 thread.start()
@@ -991,7 +1009,10 @@ class MMProcessEngine:
         return cache_keys
 
     def get_embedding_result(
-        self, mm_inputs: List[MultimodalInput], timeout_ms: int = 120000
+        self,
+        mm_inputs: List[MultimodalInput],
+        timeout_ms: int = 120000,
+        request_id: int = 0,
     ) -> List[MMEmbeddingRes]:
         """Retrieve embedding results, blocking until ready if necessary.
 
@@ -1011,7 +1032,7 @@ class MMProcessEngine:
             state, entry = self._async_cache.try_acquire(cache_key)
 
             if state == "miss":
-                self._async_compute([mm_input], cache_key, entry)
+                self._async_compute([mm_input], cache_key, entry, request_id)
 
             raw_result = entry.wait(timeout=timeout_ms / 1000.0)
             results.append(self._work_item_result_to_response(raw_result))
@@ -1023,18 +1044,22 @@ class MMProcessEngine:
         mm_inputs: List[MultimodalInput],
         cache_key: str,
         entry: MMEmbeddingCacheEntry,
+        request_id: int = 0,
     ) -> None:
         handle = None
         try:
             # GreenNet preprocess (rewrites URL) + async inspect. The inspect
             # done-callback stamps entry.greennet_verdict the moment inspection
             # finishes, so WaitGreenNetVerdict unblocks independently of ViT.
-            rewritten, verdict_future, handle = self._begin_greennet(mm_inputs, entry)
+            rewritten, verdict_future, handle = self._begin_greennet(
+                mm_inputs, entry, request_id
+            )
             # ViT embedding runs concurrently with inspection.
             _, work_items = self._mm_embedding_impl(
                 rewritten,
                 cache_claim=(cache_key, entry, "miss"),
                 defer_cache_complete=True,
+                request_id=request_id,
             )
             if verdict_future is not None:
                 verdict = verdict_future.result(timeout=self._greennet_timeout_s)

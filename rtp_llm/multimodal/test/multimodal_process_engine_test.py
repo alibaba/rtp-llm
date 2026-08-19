@@ -1,6 +1,7 @@
 import asyncio
 import concurrent.futures
 import io
+import json
 import os
 import sys
 import threading
@@ -9,7 +10,7 @@ import types
 from types import SimpleNamespace
 from typing import List
 from unittest import TestCase, main
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import PIL
 import pillow_avif
@@ -17,6 +18,7 @@ import pillow_heif
 import torch
 from PIL import Image, ImageFile
 
+from rtp_llm.access_logger.access_logger import MMAccessLogger
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
@@ -735,12 +737,14 @@ class _StubGreenNetProvider(GreenNetProvider):
         self._delay = delay
         self.calls = 0
         self.last_handle = None
+        self.request_ids = []
 
     def is_enabled(self) -> bool:
         return True
 
     async def preprocess_and_submit(self, request, mm_inputs):
         self.calls += 1
+        self.request_ids.append(str(request.id))
         if self._rewrite_suffix is not None:
             rewritten = [
                 MultimodalInput(
@@ -799,6 +803,30 @@ class MMProcessEngineGreenNetTest(TestCase):
             [self._make_input("./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg")]
         )
         self.assertTrue(verdict.passed)
+        engine.stop()
+
+    def test_request_id_reaches_greennet_and_vit_access_logs(self):
+        engine = self._make_engine()
+        provider = _StubGreenNetProvider(GreenNetVerdict(passed=True, code=1))
+        engine._greennet_provider = provider
+        engine._access_logger = MagicMock(spec=MMAccessLogger)
+        request_id = 987654321
+
+        engine.mm_embedding_cpp(
+            ["./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg?request_id"],
+            [MMUrlType.IMAGE],
+            [torch.empty(0)],
+            [[-1, -1, -1, -1, -1, -1, -1, [], 30000]],
+            request_id,
+        )
+
+        self.assertEqual(provider.request_ids, [str(request_id)])
+        self.assertEqual(
+            engine._access_logger.log_query_access.call_args.args[1], request_id
+        )
+        self.assertEqual(
+            engine._access_logger.log_success_access.call_args.args[2], request_id
+        )
         engine.stop()
 
     def test_local_path_passes_when_verdict_passes(self):
@@ -938,6 +966,20 @@ class MMProcessEngineGreenNetTest(TestCase):
         verdict = engine.wait_greennet_verdict([inp])
         self.assertFalse(verdict.passed)
         engine.stop()
+
+
+class MMAccessLoggerRequestIdTest(TestCase):
+    def test_request_id_is_serialized_at_top_level(self):
+        access_logger = MMAccessLogger.__new__(MMAccessLogger)
+        access_logger.query_logger = MagicMock()
+        mm_input = MagicMock()
+        mm_input.to_string.return_value = "image://test"
+
+        access_logger.log_query_access([mm_input], request_id=123456)
+
+        payload = json.loads(access_logger.query_logger.info.call_args.args[0])
+        self.assertEqual(payload["id"], 123456)
+        self.assertEqual(payload["query"], ["image://test"])
 
 
 _DEFAULT_CONFIG = [-1, -1, -1, -1, -1, -1, -1, [], 30000]

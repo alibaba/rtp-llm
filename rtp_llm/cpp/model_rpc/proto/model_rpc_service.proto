@@ -145,6 +145,9 @@ message MultimodalInputsPB {
     // LLM consumer declares it can receive the embedding via GPUDirect RDMA.
     // When false (default) or RDMA unavailable, encoder falls back to inline bytes.
     bool support_rdma = 2;
+    // Globally unique RTP-LLM request id. Propagated to the VIT worker for
+    // access logging and downstream data-inspection correlation.
+    int64 request_id = 3;
 }
 
 // {nicid, rkey} of an MR on the encoder-registered receive/send pool, one per NIC.

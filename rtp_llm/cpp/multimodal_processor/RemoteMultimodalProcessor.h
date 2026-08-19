@@ -32,7 +32,7 @@ public:
         MultimodalProcessor(py::none(), mm_model_config, max_seq_len) {
         // LLM consumer side of the encoder<->LLM RDMA fast path. nullptr when disabled /
         // unavailable, in which case every request transparently uses the inline-bytes path.
-        rdma_transport_         = createMMRdmaTransport(vit_config, MMRdmaRole::LLM_CLIENT);
+        rdma_transport_          = createMMRdmaTransport(vit_config, MMRdmaRole::LLM_CLIENT);
         rdma_release_timeout_ms_ = vit_config.mm_rdma_release_timeout_ms;
     }
 
@@ -41,7 +41,7 @@ private:
     std::string                      vit_cluster_name_;
     std::shared_ptr<MMRdmaTransport> rdma_transport_;
     // Deadline (ms) for the best-effort slot-release RPC; keeps it off the critical path.
-    int64_t                          rdma_release_timeout_ms_ = 1000;
+    int64_t rdma_release_timeout_ms_ = 1000;
 
     // Best-effort: tell the encoder it can return the slot(s) to its free list. One response may
     // carry several slots (chunked output), so all handles are released in a single RPC.
@@ -54,8 +54,7 @@ private:
             return;
         }
         grpc::ClientContext rel_ctx;
-        rel_ctx.set_deadline(std::chrono::system_clock::now()
-                             + std::chrono::milliseconds(rdma_release_timeout_ms_));
+        rel_ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(rdma_release_timeout_ms_));
         ReleaseEmbeddingPB rel;
         for (const auto& handle : handles) {
             rel.add_handle(handle);
@@ -75,9 +74,9 @@ private:
     // roles (the order the encoder packed: embedding chunk(s), optional pos_id, then per-image
     // extra_input). A large output is row-split across several slots, so there may be MORE THAN
     // ONE EMBEDDING tensor — they are concatenated back along dim 0 here.
-    MultimodalOutput assembleRdmaOutput(const std::vector<torch::Tensor>&         mm_tensors,
-                                        const std::vector<MMRdmaTensorPB::Role>&  roles,
-                                        const MultimodalOutputPB*                 output_pb) {
+    MultimodalOutput assembleRdmaOutput(const std::vector<torch::Tensor>&        mm_tensors,
+                                        const std::vector<MMRdmaTensorPB::Role>& roles,
+                                        const MultimodalOutputPB*                output_pb) {
         RTP_LLM_CHECK_WITH_INFO(mm_tensors.size() == roles.size(),
                                 "rdma read tensor count=%zu does not match manifest role count=%zu",
                                 mm_tensors.size(),
@@ -147,7 +146,8 @@ private:
     }
 
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                                      std::string                                 ip_port = "") {
+                                                      std::string                                 ip_port    = "",
+                                                      int64_t                                     request_id = 0) {
         if (ip_port == "") {
             return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "ip:port is empty in remote multimodal processing");
         }
@@ -160,7 +160,7 @@ private:
         MultimodalOutputPB  output_pb;
         grpc::ClientContext context;
 
-        auto request = QueryConverter::transMMInputsPB(mm_inputs);
+        auto request = QueryConverter::transMMInputsPB(mm_inputs, request_id);
         if (rdma_transport_ != nullptr) {
             request.set_support_rdma(true);
         }

@@ -82,6 +82,13 @@ TEST_F(QueryConverterTest, testTransInput) {
     ASSERT_EQ(generate_config->stop_words_list[1], stop_words_2);
 }
 
+TEST_F(QueryConverterTest, testTransMMInputsPBRequestId) {
+    const int64_t request_id = 987654321;
+    auto          output     = QueryConverter::transMMInputsPB({}, request_id);
+
+    EXPECT_EQ(output.request_id(), request_id);
+}
+
 TEST_F(QueryConverterTest, testTransOutput) {
     auto output_token_ids = torch::empty({1, 3}, torch::kInt32);
     auto data             = output_token_ids.data_ptr<int>();

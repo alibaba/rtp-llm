@@ -128,7 +128,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
 
     def AsyncSubmitEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
         converted_inputs = trans_mm_input(multimodal_inputs)
-        self.engine.async_submit(converted_inputs)
+        self.engine.async_submit(converted_inputs, multimodal_inputs.request_id)
         return EmptyPB()
 
     def WaitGreenNetVerdict(self, multimodal_inputs: MultimodalInputsPB, context):
@@ -137,7 +137,9 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         ErrorDetailsPB(error_code=UNSAFE_INPUT_CONTENT) trailer so the LLM
         client reconstructs the exact FtRuntimeException."""
         converted_inputs = trans_mm_input(multimodal_inputs)
-        verdict = self.engine.wait_greennet_verdict(converted_inputs)
+        verdict = self.engine.wait_greennet_verdict(
+            converted_inputs, request_id=multimodal_inputs.request_id
+        )
         if not verdict.passed:
             error_code = (
                 ExceptionType.UNSAFE_INPUT_CONTENT
@@ -158,7 +160,9 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
         try:
             converted_inputs = trans_mm_input(multimodal_inputs)
-            results = self.engine.get_embedding_result(converted_inputs)
+            results = self.engine.get_embedding_result(
+                converted_inputs, request_id=multimodal_inputs.request_id
+            )
             merged = merge_embedding_results(results)
             logging.debug(
                 "[VIT] transport negotiation: support_rdma=%s, rdma_ready=%s, embeddings=%d",

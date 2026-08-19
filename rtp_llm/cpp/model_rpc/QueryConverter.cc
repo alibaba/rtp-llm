@@ -226,8 +226,9 @@ std::vector<MultimodalInput> QueryConverter::transMMInput(const MultimodalInputs
     return inputs_vec;
 }
 
-MultimodalInputsPB QueryConverter::transMMInputsPB(const std::vector<MultimodalInput> mm_inputs) {
+MultimodalInputsPB QueryConverter::transMMInputsPB(const std::vector<MultimodalInput> mm_inputs, int64_t request_id) {
     MultimodalInputsPB mm_inputs_pb;
+    mm_inputs_pb.set_request_id(request_id);
     for (auto& mm_input : mm_inputs) {
         auto now_input = mm_inputs_pb.add_multimodal_inputs();
         now_input->set_multimodal_url(mm_input.url);

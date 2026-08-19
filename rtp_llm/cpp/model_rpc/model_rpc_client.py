@@ -240,6 +240,12 @@ def trans_input(input_py: GenerateInput):
     return input_pb
 
 
+def _make_multimodal_inputs_pb(input_pb: GenerateInputPB) -> MultimodalInputsPB:
+    mm_inputs_pb = MultimodalInputsPB(request_id=input_pb.request_id)
+    mm_inputs_pb.multimodal_inputs.extend(input_pb.multimodal_inputs)
+    return mm_inputs_pb
+
+
 def get_multimodal_preprocess_value(value: Optional[int], default: int):
     if value is not None and value != -1:
         return value
@@ -582,8 +588,7 @@ class ModelRpcClient(object):
             if role_addr.role == RoleType.VIT:
                 vit_addr = f"{role_addr.ip}:{role_addr.grpc_port}"
                 try:
-                    mm_inputs_pb = MultimodalInputsPB()
-                    mm_inputs_pb.multimodal_inputs.extend(input_pb.multimodal_inputs)
+                    mm_inputs_pb = _make_multimodal_inputs_pb(input_pb)
                     channel = await self._channel_pool.get(vit_addr)
                     stub = MultimodalRpcServiceStub(channel)
                     await stub.AsyncSubmitEmbedding(mm_inputs_pb, timeout=5.0)
@@ -617,8 +622,7 @@ class ModelRpcClient(object):
             if role_addr.role != RoleType.VIT:
                 continue
             vit_addr = f"{role_addr.ip}:{role_addr.grpc_port}"
-            mm_inputs_pb = MultimodalInputsPB()
-            mm_inputs_pb.multimodal_inputs.extend(input_pb.multimodal_inputs)
+            mm_inputs_pb = _make_multimodal_inputs_pb(input_pb)
             channel = await self._channel_pool.get(vit_addr)
             stub = MultimodalRpcServiceStub(channel)
             try:

@@ -30,6 +30,7 @@ from rtp_llm.config.log_config import setup_logging
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
     StreamState,
+    _make_multimodal_inputs_pb,
     trans_input,
     trans_output,
 )
@@ -120,6 +121,17 @@ class ModelRpcClientTest(TestCase):
         async for res in client.enqueue(input):
             responses.extend(res.generate_outputs)
         return responses
+
+    def test_multimodal_rpc_request_keeps_request_id(self):
+        input_pb = GenerateInputPB(request_id=987654321)
+        input_pb.multimodal_inputs.add().multimodal_url = "image://test"
+
+        mm_inputs_pb = _make_multimodal_inputs_pb(input_pb)
+
+        self.assertEqual(mm_inputs_pb.request_id, 987654321)
+        self.assertEqual(
+            mm_inputs_pb.multimodal_inputs[0].multimodal_url, "image://test"
+        )
 
     @unittest.skip("need fix")
     def test_generate_stream(self):

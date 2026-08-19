@@ -1,4 +1,5 @@
 import threading
+from types import SimpleNamespace
 from unittest import TestCase, main
 from unittest.mock import MagicMock, patch
 
@@ -14,6 +15,33 @@ from rtp_llm.server.vit_proxy_server import (
     WorkerConnectionPool,
     _resolve_rpc_timeout_seconds,
 )
+from rtp_llm.server.vit_rpc_server import MultimodalRpcServer
+
+
+class VitWorkerRequestIdTest(TestCase):
+    @patch("rtp_llm.server.vit_rpc_server.trans_mm_input")
+    def test_request_id_is_forwarded_to_all_engine_entrypoints(self, trans_mm_input):
+        converted = [MagicMock(name="mm_input")]
+        trans_mm_input.return_value = converted
+        engine = MagicMock()
+        engine.wait_greennet_verdict.return_value = SimpleNamespace(passed=True)
+        engine.get_embedding_result.return_value = []
+        servicer = MultimodalRpcServer.__new__(MultimodalRpcServer)
+        servicer.engine = engine
+        servicer._rdma = None
+        request = MultimodalInputsPB(request_id=987654321)
+
+        servicer.AsyncSubmitEmbedding(request, MagicMock())
+        servicer.WaitGreenNetVerdict(request, MagicMock())
+        servicer.RemoteMultimodalEmbedding(request, MagicMock())
+
+        engine.async_submit.assert_called_once_with(converted, 987654321)
+        engine.wait_greennet_verdict.assert_called_once_with(
+            converted, request_id=987654321
+        )
+        engine.get_embedding_result.assert_called_once_with(
+            converted, request_id=987654321
+        )
 
 
 class LoadBalancerRoundRobinTest(TestCase):
