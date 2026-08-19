@@ -715,6 +715,8 @@ def forward_prefill(
     #    when the model declares a position-id length factor, so the synthesize
     #    branch below stays the live path for DSV4).
     cu_seqlens = attn.cu_seqlens
+    if cu_seqlens.numel() == 0 and attn.cu_seqlens_device.numel() > 0:
+        cu_seqlens = attn.cu_seqlens_device
     positions = getattr(attn, "combo_position_ids", None)
     # warmup / cudagraph capture path doesn't populate combo_position_ids —
     # synthesize from (prefix_lengths, input_lengths). Prefer ``_d`` (GPU)
