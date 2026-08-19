@@ -137,13 +137,13 @@ class CostBasedPrefillMultiNodeSelectionTest {
 
     @Test
     void congestedQueueEndpointIsBenchedEvenWhenItsScoreIsBest() {
-        // w1 队列 900 ≥ ceil(0.8×1024)=820 → congested；其队头年龄≈0 使
+        // w1 队列 90 ≥ ceil(0.8×100)=80 → congested；其队头年龄≈0 使
         // score 严格更优（w2 队头老 5s，score 差 5000ms）。拥挤过滤必须
         // 压倒评分：必选 w2（8/17 慢引擎吸引子的直接反制）。
         setUpAutoTpmBatcherConfig();
         PrefillEndpoint w1 = parkedEndpoint("10.0.0.1");
         PrefillEndpoint w2 = parkedEndpoint("10.0.0.2");
-        fillQueue(w1, 50, 900, 1000, 0);
+        fillQueue(w1, 50, 90, 1000, 0);
         fillQueue(w2, 50, 10, 2000, -5_000);
 
         ServerStatus result = strategy.select(
@@ -155,12 +155,12 @@ class CostBasedPrefillMultiNodeSelectionTest {
 
     @Test
     void belowThresholdQueueStillCompetesAndWins() {
-        // w1 队列 800 < 820：未达阈值，正常参选；w2 队头老 5s（score 更
+        // w1 队列 79 < 80：未达阈值，正常参选；w2 队头老 5s（score 更
         // 差）→ 必选 w1。阈值边界不误伤。
         setUpAutoTpmBatcherConfig();
         PrefillEndpoint w1 = parkedEndpoint("10.0.0.1");
         PrefillEndpoint w2 = parkedEndpoint("10.0.0.2");
-        fillQueue(w1, 50, 800, 1000, 0);
+        fillQueue(w1, 50, 79, 1000, 0);
         fillQueue(w2, 50, 10, 2000, -5_000);
 
         ServerStatus result = strategy.select(
@@ -172,21 +172,23 @@ class CostBasedPrefillMultiNodeSelectionTest {
 
     @Test
     void allCongestedFallsBackToLeastLoadedEndpoint() {
-        // 两队列都 900（全 congested）→ survivor 全滤空 → least-loaded
-        // 回退：endpointWait 对称（60_000）时 first-seen（w1）胜出，且
-        // 路由不 fail-closed。
+        // 两队列都 90（全 congested）→ survivor 全滤空 → least-loaded 回退。
+        // w2 追加第二个 inflight batch（totalPredict 120_000 > w1 的 60_000，
+        // 两端的 elapsed 衰减差只有几 ms）→ w1 恒为 least-loaded → 回退必
+        // 选 w1，且路由不 fail-closed。
         setUpAutoTpmBatcherConfig();
         PrefillEndpoint w1 = parkedEndpoint("10.0.0.1");
         PrefillEndpoint w2 = parkedEndpoint("10.0.0.2");
-        fillQueue(w1, 50, 900, 1000, 0);
-        fillQueue(w2, 50, 900, 2000, 0);
+        w2.commitBatch(810_002L, 60_000, List.of());
+        fillQueue(w1, 50, 90, 1000, 0);
+        fillQueue(w2, 50, 90, 2000, 0);
 
         ServerStatus result = strategy.select(
                 priorityContext(9301L, 50), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess(), "all-congested must fall back, never fail closed");
         assertEquals("10.0.0.1", result.getServerIp(),
-                "symmetric wait → least-loaded fallback keeps the first-seen endpoint");
+                "the strictly lower-wait endpoint must win the least-loaded fallback");
     }
 
     // ============ 多节点矩阵：不可行 endpoint 绝不入选 ============
@@ -243,6 +245,13 @@ class CostBasedPrefillMultiNodeSelectionTest {
         config.setFlexlbBatchFixedWaitMs(1_000);
         config.setFlexlbBatchSizeMax(10);
         config.setFlexlbBatchFixedMaxInflightBatches(1);
+        // Small hard cap so the congestion tests can cross the 0.8 threshold
+        // (ceil(0.8×100)=80) with ~90 quick offers: filling 900 items against
+        // the default cap of 1024 is slow enough under a loaded CI JVM that
+        // the fixed window (1000ms) expires on the early head and the
+        // batcher starts draining the queue mid-test (observed as a flaky
+        // all-congested fallback on the full-module run).
+        config.setFlexlbBatchQueueMaxSize(100);
     }
 
     /**
