@@ -178,7 +178,7 @@ class Pipeline(object):
     @torch.inference_mode()
     def pipeline_async(  # type: ignore
         self,
-        prompt: str,
+        prompt: Union[str, List[int]],
         request_id: int = None,
         urls: Optional[List[str]] = None,
         **kwargs: Any,
@@ -216,16 +216,27 @@ class Pipeline(object):
                 ExceptionType.EMPTY_PROMPT_ERROR,
                 "prompt should have at least one token!",
             )
-        if type(prompt) is not str:
+        if isinstance(prompt, list):
+            vocab_size = len(self.tokenizer)
+            if not all(
+                type(token_id) is int and 0 <= token_id < vocab_size
+                for token_id in prompt
+            ):
+                raise FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    f"token_ids should contain integers in [0, {vocab_size})",
+                )
+            token_ids = prompt
+        elif isinstance(prompt, str):
+            # Recommendation parsing applies only to textual prompts.
+            parse_and_fill_banned_combo(prompt, generate_config, self.tokenizer)
+            token_ids = self.tokenizer.encode(prompt)
+        else:
             raise FtRuntimeException(
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                "expect string prompt, actual: " + str(prompt),
+                "expect string prompt or integer token_ids, actual: "
+                + type(prompt).__name__,
             )
-        # 生成式推荐：由开关控制，默认关闭、对非推荐场景零侵入。
-        # 在 tokenizer.encode(prompt) 之前解析及填充 banned_combo_token_ids，
-        # 避免重复编码 prompt。
-        parse_and_fill_banned_combo(prompt, generate_config, self.tokenizer)
-        token_ids = self.tokenizer.encode(prompt)
 
         # Prompt scoring constraints (max_new_tokens=1, non-streaming, no reuse/PD-sep) are
         # already enforced by validate() → enforce_prompt_scoring_constraints() during config creation.

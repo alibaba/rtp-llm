@@ -4,6 +4,7 @@ import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.DecodeRoutingScheme;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 import org.flexlb.enums.ScheduleModeEnum;
@@ -32,6 +33,69 @@ public class FlexlbConfig {
      * Load balancing strategy
      */
     private LoadBalanceStrategyEnum loadBalanceStrategy = LoadBalanceStrategyEnum.COST_BASED_PREFILL;
+
+    /**
+     * Selection objective used by the DECODE weighted-cache strategy.
+     */
+    private DecodeRoutingScheme decodeRoutingScheme = DecodeRoutingScheme.LOAD_ONLY;
+
+    /**
+     * Relative cost of a cache-miss token in CACHE_LOAD projected KV pressure.
+     */
+    private double decodeCacheLoadBeta = 1.0;
+
+    /**
+     * Context-length bucketing for DECODE routing. Requests with
+     * seqLen > threshold are routed to the long-bucket workers, others to the
+     * remaining workers. 0 disables bucketing.
+     */
+    private long decodeBucketSeqLenThreshold = 0;
+
+    /**
+     * Comma-separated worker ports (WorkerStatus.port) that form the DECODE
+     * long bucket. Only used when decodeBucketSeqLenThreshold > 0.
+     */
+    private String decodeLongBucketPorts = "";
+
+    /**
+     * Output-length-aware slot quota for DECODE. Requests with
+     * expectedOutputLen > decodeLongOutputThreshold are "long" and each decode
+     * worker may run at most decodeLongSlotQuota of them concurrently.
+     * 0 disables the quota.
+     */
+    private long decodeLongOutputThreshold = 0;
+
+    private int decodeLongSlotQuota = 8;
+
+    /**
+     * Estimated decode step latency used by TIME_BALANCE to convert expected
+     * output tokens into remaining milliseconds.
+     */
+    private long decodeStepMsEstimate = 25;
+
+    /**
+     * SRPT queue ordering: dequeue the request with the smallest effective key
+     * expectedOutputLen / (1 + waitSec / srptAgingWindowS). false = FIFO.
+     */
+    private boolean queueSrptEnabled = false;
+
+    private long srptAgingWindowS = 30;
+
+    /**
+     * Soft-bucket spillover: allow LONG requests (seqLen > bucket threshold)
+     * to use short-bucket workers that are nearly idle. A short worker is
+     * eligible when its resident task count < decodeSpilloverBatchThreshold
+     * and it currently runs < decodeSpilloverMaxPerWorker spilled long tasks.
+     * Requests with expectedOutputLen > decodeSpilloverMaxExpectedOutput never
+     * spill (0 = no output-length restriction).
+     */
+    private boolean decodeSpilloverEnabled = false;
+
+    private int decodeSpilloverBatchThreshold = 76;
+
+    private int decodeSpilloverMaxPerWorker = 8;
+
+    private long decodeSpilloverMaxExpectedOutput = 0;
 
     /**
      * Load balancing strategy for DECODE role

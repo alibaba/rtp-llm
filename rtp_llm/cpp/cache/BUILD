@@ -361,9 +361,11 @@ cc_library(
     name = "cache",
     srcs = [
         "KVCacheManager.cc",
+        "V32AdmissionStore.cc",
     ],
     hdrs = [
         "KVCacheManager.h",
+        "V32AdmissionStore.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

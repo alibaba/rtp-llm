@@ -25,6 +25,24 @@ struct RequestInfo {
     }
 };
 
+struct PDLatencyBreakdown {
+    int32_t     schema_version           = 0;
+    int64_t     prefill_queue_us         = 0;
+    int64_t     prefill_compute_wall_us  = 0;
+    int64_t     handoff_total_us         = 0;
+    int64_t     handoff_blocking_tail_us = 0;
+    int64_t     decode_kv_load_us        = 0;
+    int64_t     decode_queue_us          = 0;
+    int64_t     decode_service_us        = 0;
+    std::string prefill_worker_id;
+    std::string decode_worker_id;
+    int64_t     kv_bytes  = 0;
+    int64_t     kv_blocks = 0;
+    std::string transport_path;
+    std::string prefill_worker_addr;
+    std::string decode_worker_addr;
+};
+
 class GenerateInput {
 public:
     int inputLength() {
@@ -95,6 +113,8 @@ public:
     // tagging only — never used for engine-side scheduling decisions.
     int32_t priority = 0;
 
+    PDLatencyBreakdown pd_latency;
+
     // Batch grouping params
     int     group_size = 1;
     int64_t group_id   = -1;
@@ -127,6 +147,7 @@ struct AuxInfo {
     int32_t                      decode_local_reuse_len   = 0;
     int32_t                      decode_remote_reuse_len  = 0;
     int32_t                      decode_memory_reuse_len  = 0;
+    PDLatencyBreakdown           pd_latency;
     std::optional<torch::Tensor> cum_log_probs;
     std::optional<torch::Tensor> all_probs;
     std::optional<torch::Tensor> softmax_probs;
@@ -185,7 +206,8 @@ inline std::string StreamStateToString(StreamState state) {
 
 // 事件集合：外部通过 reportEvent() 投递事件，生命周期方法中统一消费。
 // 内部使用 bit flag 组合多个并发事件。
-// 所有事件均为永久事件：一旦设置即保留，不会被自动清除。
+// 事件不会被状态机自动清除。CanRun 可在 stream 进入 scheduler 前被显式撤销，
+// 以区分资源预分配阶段的临时许可与 scheduler 的真正 admission。
 class StreamEvents {
 public:
     enum EventType : uint32_t {
@@ -203,6 +225,10 @@ public:
 
     bool has(EventType event) const {
         return (flags_ & event) != 0;
+    }
+
+    void remove(EventType event) {
+        flags_ = static_cast<EventType>(static_cast<uint32_t>(flags_) & ~static_cast<uint32_t>(event));
     }
 
 private:

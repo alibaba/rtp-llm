@@ -74,6 +74,10 @@ struct MallocInfo {
     // Override for incrMalloc's seqLength read; -1 = fall back to complete_token_ids->seqLength().
     // Lets the state machine feed the publish-time value instead of racing with the async worker.
     int incr_seq_len_override = -1;
+    // Override for initMallocForCommonLen's target length; -1 = disabled. The v32
+    // staging-ring admission uses it to cap the first malloc at the resident
+    // window (block0 + staging + tail + ring) instead of the full prefix.
+    int init_seq_len_override = -1;
 
     int incrSeqLen() const;
 };

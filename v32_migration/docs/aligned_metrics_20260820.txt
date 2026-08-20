@@ -1,0 +1,72 @@
+== A0m   | A原版                          | rank0-only
+  总: 1000 ok=863 fail=137 失败率=13.7%
+  长(>=16k): 128 个, ok=3 失败率=97.7% | 短: 872 个, ok=860 失败率=1.4%
+  TPOT(ms): p50=110 p90=118 p99=168 | 长TPOT p50=109 p99=110
+  TTFT(ms): p50=1750 p99=14202 | 长TTFT p50=25865 p99=27634
+  decode排队(ms): p50=61 p90=103 p99=113
+  端到端(ms): p50=83855 p99=616313
+  失败码 top: [(('long', '8211_DECODE_MALLOC_FAILED'), 125), (('short', '514_UNKNOWN_ERROR'), 10), (('short', '8211_DECODE_MALLOC_FAILED'), 2)]
+== B0m   | B收缩offload                   | rank0-only
+  总: 1000 ok=866 fail=134 失败率=13.4%
+  长(>=16k): 128 个, ok=1 失败率=99.2% | 短: 872 个, ok=865 失败率=0.8%
+  TPOT(ms): p50=112 p90=130 p99=234 | 长TPOT p50=133 p99=133
+  TTFT(ms): p50=1736 p99=9699 | 长TTFT p50=30244 p99=30244
+  decode排队(ms): p50=60 p90=107 p99=146
+  端到端(ms): p50=63042 p99=614986
+  失败码 top: [(('long', '8211_DECODE_MALLOC_FAILED'), 127), (('short', '514_UNKNOWN_ERROR'), 5), (('short', '8211_DECODE_MALLOC_FAILED'), 2)]
+== Br0m  | B环准入16k窗                   | rank0-only
+  总: 1000 ok=866 fail=134 失败率=13.4%
+  长(>=16k): 128 个, ok=1 失败率=99.2% | 短: 872 个, ok=865 失败率=0.8%
+  TPOT(ms): p50=113 p90=124 p99=154 | 长TPOT p50=142 p99=142
+  TTFT(ms): p50=1908 p99=14725 | 长TTFT p50=29207 p99=29207
+  decode排队(ms): p50=54 p90=104 p99=119
+  端到端(ms): p50=70795 p99=624093
+  失败码 top: [(('long', '8211_DECODE_MALLOC_FAILED'), 126), (('short', '514_UNKNOWN_ERROR'), 5), (('long', '8207_REMOTE_ALLOCATE_RESOURCE_READ_FAILED'), 1), (('short', '8207_REMOTE_ALLOCATE_RESOURCE_READ_FAILED'), 1)]
+== Br3m  | B环准入4k窗                    | rank0-only
+  总: 1000 ok=553 fail=447 失败率=44.7%
+  长(>=16k): 128 个, ok=2 失败率=98.4% | 短: 872 个, ok=551 失败率=36.8%
+  TPOT(ms): p50=116 p90=127 p99=195 | 长TPOT p50=136 p99=150
+  TTFT(ms): p50=853 p99=11741 | 长TTFT p50=26170 p99=32604
+  decode排队(ms): p50=65 p90=109 p99=560
+  端到端(ms): p50=30416 p99=429439
+  失败码 top: [(('short', '8211_DECODE_MALLOC_FAILED'), 309), (('long', '8211_DECODE_MALLOC_FAILED'), 125), (('short', '514_UNKNOWN_ERROR'), 12), (('long', '8207_REMOTE_ALLOCATE_RESOURCE_READ_FAILED'), 1)]
+== Am8   | A原版                          | +8rank分发
+  总: 1000 ok=943 fail=57 失败率=5.7%
+  长(>=16k): 128 个, ok=85 失败率=33.6% | 短: 872 个, ok=858 失败率=1.6%
+  TPOT(ms): p50=108 p90=112 p99=119 | 长TPOT p50=108 p99=110
+  TTFT(ms): p50=1007 p99=67055 | 长TTFT p50=24702 p99=83619
+  decode排队(ms): p50=56 p90=96 p99=118
+  端到端(ms): p50=29114 p99=570146
+  失败码 top: [(('long', '8211_DECODE_MALLOC_FAILED'), 40), (('short', '514_UNKNOWN_ERROR'), 14), (('long', '8214_KEEP_ALIVE_TIMEOUT'), 3)]
+== Brm8  | B环准入                        | +8rank分发
+  总: 1000 ok=655 fail=345 失败率=34.5%
+  长(>=16k): 128 个, ok=4 失败率=96.9% | 短: 872 个, ok=651 失败率=25.3%
+  TPOT(ms): p50=117 p90=126 p99=160 | 长TPOT p50=128 p99=136
+  TTFT(ms): p50=16630 p99=75127 | 长TTFT p50=71831 p99=79477
+  decode排队(ms): p50=63 p90=107 p99=126
+  端到端(ms): p50=39011 p99=584627
+  失败码 top: [(('short', '514_UNKNOWN_ERROR'), 217), (('long', '514_UNKNOWN_ERROR'), 112), (('long', '8214_KEEP_ALIVE_TIMEOUT'), 6), (('long', '8207_REMOTE_ALLOCATE_RESOURCE_READ_FAILED'), 4)]
+== Brm9  | B环准入+块感知LB               | +8rank分发
+  总: 1000 ok=625 fail=375 失败率=37.5%
+  长(>=16k): 128 个, ok=6 失败率=95.3% | 短: 872 个, ok=619 失败率=29.0%
+  TPOT(ms): p50=123 p90=134 p99=182 | 长TPOT p50=135 p99=148
+  TTFT(ms): p50=14699 p99=67740 | 长TTFT p50=38904 p99=79068
+  decode排队(ms): p50=66 p90=115 p99=263
+  端到端(ms): p50=38083 p99=642658
+  失败码 top: [(('short', '514_UNKNOWN_ERROR'), 244), (('long', '514_UNKNOWN_ERROR'), 114), (('short', '8214_KEEP_ALIVE_TIMEOUT'), 6), (('long', '8207_REMOTE_ALLOCATE_RESOURCE_READ_FAILED'), 4)]
+== Brm10 | B环准入+块感知LB+限流(设备bug) | +8rank分发
+  总: 1000 ok=602 fail=398 失败率=39.8%
+  长(>=16k): 128 个, ok=3 失败率=97.7% | 短: 872 个, ok=599 失败率=31.3%
+  TPOT(ms): p50=117 p90=127 p99=174 | 长TPOT p50=129 p99=140
+  TTFT(ms): p50=12688 p99=66134 | 长TTFT p50=37911 p99=75587
+  decode排队(ms): p50=66 p90=105 p99=185
+  端到端(ms): p50=37699 p99=536204
+  失败码 top: [(('short', '514_UNKNOWN_ERROR'), 261), (('long', '514_UNKNOWN_ERROR'), 113), (('short', '8209_REMOTE_GENERATE_FAILED'), 8), (('long', '8207_REMOTE_ALLOCATE_RESOURCE_READ_FAILED'), 4)]
+== Brm11 | B环准入+块感知LB+限流+设备修复 | +8rank分发
+  总: 1000 ok=819 fail=181 失败率=18.1%
+  长(>=16k): 128 个, ok=39 失败率=69.5% | 短: 872 个, ok=780 失败率=10.6%
+  TPOT(ms): p50=128 p90=164 p99=282 | 长TPOT p50=146 p99=172
+  TTFT(ms): p50=858 p99=61729 | 长TTFT p50=25612 p99=88077
+  decode排队(ms): p50=65 p90=116 p99=1632
+  端到端(ms): p50=30937 p99=684326
+  失败码 top: [(('short', '514_UNKNOWN_ERROR'), 80), (('long', '8211_DECODE_MALLOC_FAILED'), 49), (('long', '8207_REMOTE_ALLOCATE_RESOURCE_READ_FAILED'), 33), (('short', '8207_REMOTE_ALLOCATE_RESOURCE_READ_FAILED'), 8)]

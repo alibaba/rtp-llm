@@ -43,6 +43,10 @@ public:
         return events_.has(event);
     }
 
+    void resetSchedulerAdmission() {
+        events_.remove(StreamEvents::CanRun);
+    }
+
     StreamState moveToNext();
 
     StreamState getStatus() const {

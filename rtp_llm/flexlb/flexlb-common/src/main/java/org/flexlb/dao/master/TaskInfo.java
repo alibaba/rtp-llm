@@ -18,6 +18,10 @@ public class TaskInfo {
     private long prefillTime;
     @JsonProperty("input_length")
     private long inputLength;
+
+    private long expectedOutputLength;
+
+    private long admitTimeUs = System.nanoTime() / 1000;
     @JsonProperty("waiting_time")
     private long waitingTime;
     @JsonProperty("iterate_count")

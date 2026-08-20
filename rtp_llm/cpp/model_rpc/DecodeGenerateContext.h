@@ -54,13 +54,14 @@ public:
         void    updateLoadEndTime();
         void    updateGenerateBeginTime();
         void    updateGenerateEndTime();
+        int64_t loadCacheTimeUs() const;
         int64_t loadCacheTimeMs() const;
 
-        int64_t request_begin_time_us;
-        int64_t load_begin_time_us;
-        int64_t load_end_time_us;
-        int64_t generate_begin_time_us;
-        int64_t generate_end_time_us;
+        int64_t request_begin_time_us  = 0;
+        int64_t load_begin_time_us     = 0;
+        int64_t load_end_time_us       = 0;
+        int64_t generate_begin_time_us = 0;
+        int64_t generate_end_time_us   = 0;
     };
 
 public:
@@ -70,6 +71,8 @@ public:
     DecodeStatInfo           stat_info;
     int64_t                  loading_cache_requests = 0;
     int32_t                  prefill_cp_size        = 1;  // CP size used by prefill; >1 means sharded KV cache
+    int64_t                  kv_bytes               = 0;
+    int64_t                  kv_blocks              = 0;
     // Guards meta_->finishTask() early-failure reporting: at most once per request.
     bool early_finish_reported = false;
 

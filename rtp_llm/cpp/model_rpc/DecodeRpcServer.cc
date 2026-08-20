@@ -5,6 +5,8 @@
 #include <unistd.h>
 #include <limits.h>
 #include <condition_variable>
+#include <cuda_runtime.h>
+#include "rtp_llm/cpp/cache/V32AdmissionStore.h"
 #include <unordered_set>
 #include <c10/core/DeviceGuard.h>
 #include <c10/core/InferenceMode.h>
@@ -176,31 +178,50 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
 void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] start to allocate resource", decode_context.request_key.c_str());
-    auto input                        = QueryConverter::transQuery(&decode_context.allocate_request.input());
-    decode_context.request_info       = input->request_info;
-    auto generate_stream              = engine_->makeStream(input);
-    decode_context.request_timeout_ms = generate_stream->getTimeoutMs();
+    auto input                  = QueryConverter::transQuery(&decode_context.allocate_request.input());
+    decode_context.request_info = input->request_info;
 
-    // Set CanRun event so that handleWaiting() will execute initKVBlock()
-    generate_stream->reportEvent(StreamEvents::CanRun);
-    decode_context.setStream(generate_stream);
+    // v32: optional bounded retry window for KV malloc at decode admission
+    // (env RTP_DECODE_MALLOC_RETRY_MS, default 0 = fail fast as before).
+    static const int64_t kMallocRetryMs = []() {
+        const char* retry_env = std::getenv("RTP_DECODE_MALLOC_RETRY_MS");
+        return retry_env ? atoll(retry_env) : 0LL;
+    }();
+    const auto retry_deadline = chrono::steady_clock::now() + chrono::milliseconds(kMallocRetryMs);
 
-    // WAITING -> LOADING_CACHE -> WAITING, 直到load cache完成并移动到 WAITING 状态
-    // NOTE: 此处的 busy-wait 是安全的，因为 stream 尚未 enqueue 到 scheduler，
-    // 不会与其他线程并发调用 moveToNext()。gRPC 线程独占驱动状态机直到 WAITING。
-    while (!generate_stream->hasError() && generate_stream->moveToNext() == StreamState::LOADING_CACHE) {
-        this_thread::sleep_for(chrono::milliseconds(1));
-    }
-    if (generate_stream->hasError()) {
-        auto   stream_error = generate_stream->statusInfo();
-        string error_msg    = stream_error.ToString();
-        if (error_msg.empty()) {
-            error_msg = "malloc kv cache block failed at decode node";
+    std::shared_ptr<GenerateStream> generate_stream;
+    while (true) {
+        generate_stream                   = engine_->makeStream(input);
+        decode_context.request_timeout_ms = generate_stream->getTimeoutMs();
+
+        // Set CanRun event so that handleWaiting() will execute initKVBlock()
+        generate_stream->reportEvent(StreamEvents::CanRun);
+        decode_context.setStream(generate_stream);
+
+        // WAITING -> LOADING_CACHE -> WAITING, 直到load cache完成并移动到 WAITING 状态
+        // NOTE: 此处的 busy-wait 是安全的，因为 stream 尚未 enqueue 到 scheduler，
+        // 不会与其他线程并发调用 moveToNext()。gRPC 线程独占驱动状态机直到 WAITING。
+        while (!generate_stream->hasError() && generate_stream->moveToNext() == StreamState::LOADING_CACHE) {
+            this_thread::sleep_for(chrono::milliseconds(1));
         }
-        error_msg = "request: [" + decode_context.request_key + "] " + error_msg;
-        RTP_LLM_LOG_ERROR(error_msg);
-        decode_context.error_status = grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, error_msg);
-        return;
+        if (!generate_stream->hasError()) {
+            break;
+        }
+        if (chrono::steady_clock::now() >= retry_deadline) {
+            auto   stream_error = generate_stream->statusInfo();
+            string error_msg    = stream_error.ToString();
+            if (error_msg.empty()) {
+                error_msg = "malloc kv cache block failed at decode node";
+            }
+            error_msg = "request: [" + decode_context.request_key + "] " + error_msg;
+            RTP_LLM_LOG_ERROR(error_msg);
+            decode_context.error_status = grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, error_msg);
+            return;
+        }
+        RTP_LLM_LOG_INFO("request [%s] kv malloc failed, retrying within %ld ms window",
+                         decode_context.request_key.c_str(),
+                         kMallocRetryMs);
+        this_thread::sleep_for(chrono::milliseconds(100));
     }
 
     GRPC_RET_IF_ERROR(decode_context,
@@ -222,6 +243,9 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
     decode_context.time_info.updateLoadBeginTime();
     auto error_info = loadCacheForAllRank(decode_context);
     decode_context.time_info.updateLoadEndTime();
+    // v32 staging-ring admission: the ring blocks are transfer scratch only;
+    // return them to the pool right away (all ranks finished their pulls).
+    decode_context.getStream()->streamCacheResource().releaseAdmissionRing();
     if (!error_info.ok()) {
         RTP_LLM_LOG_WARNING("request [%s] load kv cache failed, error code [%s], cost time [%ld] ms",
                             decode_context.request_key.c_str(),
@@ -293,7 +317,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
         // device-state tensors on the wrong GPU.
         c10::DeviceGuard device_guard(torch::Device(
             torch::kCUDA, static_cast<c10::DeviceIndex>(maga_init_params_.parallelism_config.local_rank)));
-        const size_t propose_step = propose_maga_init_params_->gen_num_per_circle;
+        const size_t     propose_step = propose_maga_init_params_->gen_num_per_circle;
         RTP_LLM_CHECK_WITH_INFO(propose_step > 0, "decode rpc propose_step should be positive");
         if (maga_init_params_.sp_config.gen_num_per_cycle > 0) {
             RTP_LLM_CHECK_WITH_INFO(propose_step == static_cast<size_t>(maga_init_params_.sp_config.gen_num_per_cycle),
@@ -421,6 +445,9 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
             }
         }
     }
+    for (const auto& ring_id : load_context.admission_ring) {
+        request.add_admission_ring_block_ids(ring_id);
+    }
     request.set_reuse_block_size(load_context.reuse_block_size);
     request.set_timeout_ms(load_context.timeout_ms);
     return request;
@@ -484,6 +511,9 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
             }
         }
     }
+    for (const auto& ring_id : load_context.admission_ring) {
+        request.add_admission_ring_block_ids(ring_id);
+    }
     request.set_reuse_block_size(load_context.reuse_block_size);
     request.set_timeout_ms(load_context.timeout_ms);
     return request;
@@ -530,6 +560,12 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
                                     0,
                                     decode_context.server_context,
                                     decode_context.prefill_cp_size};
+    {
+        auto& scr = generate_stream->streamCacheResource();
+        if (scr.admissionCapped()) {
+            load_context.admission_ring = scr.admissionRing();
+        }
+    }
 
     // Prefill: TP = 1 && Decode: TP = 1
     if (resource_.workers.size() == 1 && decode_context.peer_addrs.size() == 1) {
@@ -965,7 +1001,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         continue;
                     }
                     auto block_id = block_ids[block_pos];
-                    if (isNullBlockIdx(block_id)) {
+                    // block_id <= 0: v32 admission 0-sentinel (offloaded prefix,
+                    // pulled separately via the staging ring), not a pool slot.
+                    if (isNullBlockIdx(block_id) || block_id <= 0) {
                         continue;
                     }
                     size_t cache_key_index = 0;
@@ -1100,7 +1138,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                     continue;
                                 }
                                 auto block_id = block_ids[block_pos];
-                                if (isNullBlockIdx(block_id)) {
+                                if (isNullBlockIdx(block_id) || block_id <= 0) {
                                     continue;
                                 }
                                 size_t cache_key_index = 0;
@@ -1233,6 +1271,237 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         }
     }
 
+    // v32 staging-ring admission: the main pass above skipped the 0-sentinel
+    // prefix positions; pull them through the ring into the admission mirror.
+    if (!load_context.admission_ring.empty()) {
+        auto ring_error = loadPrefixViaRing(load_context);
+        if (!ring_error.ok()) {
+            return ring_error;
+        }
+    }
+    return ErrorInfo::OkStatus();
+}
+
+ErrorInfo DecodeRpcServer::loadPrefixViaRing(const LoadKVCacheContext& load_context) {
+    RTP_LLM_PROFILE_FUNCTION();
+    auto        cache_manager = engine_->resourceContext().cache_manager;
+    const auto& cache_config  = cache_manager->cacheConfig();
+    const auto& request_key   = load_context.request_key;
+    if (!cache_config.use_mla || cache_config.groupNums() != 1 || load_context.prefill_cp_size > 1
+        || load_context.peer_addrs.size() != 1 || engine_->isMTPEagle()) {
+        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "v32 ring pull: unsupported cache layout");
+    }
+
+    // Concurrency gate: concurrent 5GB-class ring pulls overload the TCP cache
+    // store (CACHE_STORE_PUSH_ITEM_FAILED cascades, see Brm8). Serialize pulls
+    // per rank; waiters give up after half the load timeout.
+    static const int kRingConcurrency = []() {
+        const char* s = std::getenv("RTP_KV_ADMIT_RING_CONCURRENCY");
+        const int   v = s ? atoi(s) : 1;
+        return v < 1 ? 1 : v;
+    }();
+    static std::mutex              ring_gate_mu;
+    static std::condition_variable ring_gate_cv;
+    static int                     ring_gate_inflight = 0;
+    {
+        std::unique_lock<std::mutex> lk(ring_gate_mu);
+        const auto                   gate_deadline = std::chrono::steady_clock::now()
+                                   + std::chrono::milliseconds(std::max<int64_t>(load_context.timeout_ms / 2, 5000));
+        if (!ring_gate_cv.wait_until(lk, gate_deadline, []() { return ring_gate_inflight < kRingConcurrency; })) {
+            return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "v32 ring pull: admission gate timeout");
+        }
+        ring_gate_inflight++;
+    }
+    struct RingGateGuard {
+        ~RingGateGuard() {
+            {
+                std::lock_guard<std::mutex> lk(ring_gate_mu_ref);
+                inflight_ref--;
+            }
+            cv_ref.notify_one();
+        }
+        std::mutex&              ring_gate_mu_ref;
+        std::condition_variable& cv_ref;
+        int&                     inflight_ref;
+    } ring_gate_guard{ring_gate_mu, ring_gate_cv, ring_gate_inflight};
+
+    const size_t layer_num = maga_init_params_.model_config_.num_layers;
+    const auto   tag       = cache_config.tagForGroup(0);
+    const size_t model_id  = maga_init_params_.model_id;
+    const int    spb       = static_cast<int>(cache_config.seq_size_per_block);
+
+    RTP_LLM_CHECK_WITH_INFO(!load_context.block_ids_by_group.empty() && load_context.block_ids_by_group[0] != nullptr,
+                            "v32 ring pull: missing group blocks");
+    const auto&         block_ids = load_context.block_ids_by_group[0]->blocks();
+    const size_t        bound     = std::min(block_ids.size(), load_context.cache_keys.size());
+    std::vector<size_t> prefix_pos;
+    for (size_t p = 0; p < bound; ++p) {
+        if (block_ids[p] == 0) {
+            prefix_pos.push_back(p);
+        }
+    }
+    if (prefix_pos.empty()) {
+        return ErrorInfo::OkStatus();
+    }
+
+    const auto& ring = load_context.admission_ring;
+    const int   R    = static_cast<int>(ring.size());
+
+    // Per (layer, slot) ring destinations; sizes probed from the pool layout.
+    // parts[0] = per-layer KV region of the block, parts[1] = kv_scale region
+    // (the DSA indexer-K bytes).
+    std::vector<std::vector<std::vector<BlockInfo>>> ring_parts(layer_num);
+    for (size_t layer_id = 0; layer_id < layer_num; ++layer_id) {
+        ring_parts[layer_id].reserve(R);
+        for (int j = 0; j < R; ++j) {
+            ring_parts[layer_id].push_back(cache_manager->convertIndexToBufferByTag(ring[j], layer_id, tag));
+        }
+    }
+    const auto&   probe        = ring_parts[0][0];
+    const int64_t kv_blk_bytes = static_cast<int64_t>(probe[0].size_bytes);
+    const int64_t idx_bytes    = probe.size() > 1 ? static_cast<int64_t>(probe[1].size_bytes) : 0;
+    const int64_t kv_bpt       = kv_blk_bytes / spb;
+
+    // Bind this thread to the pool's device: on multi-GPU DP decode the gRPC
+    // thread defaults to device 0 while rank r's pool lives on device r, so
+    // prepare()'s cudaMalloc and the drain memcpys otherwise hit the wrong
+    // device ("invalid argument", ranks 1-7 in Brm10). Restored on exit.
+    int prev_device = 0;
+    cudaGetDevice(&prev_device);
+    cudaPointerAttributes pool_attr{};
+    if (cudaPointerGetAttributes(&pool_attr, probe[0].addr) == cudaSuccess && pool_attr.type == cudaMemoryTypeDevice
+        && pool_attr.device != prev_device) {
+        cudaSetDevice(pool_attr.device);
+    }
+    struct DeviceGuard {
+        int dev;
+        ~DeviceGuard() {
+            cudaSetDevice(dev);
+        }
+    } device_guard{prev_device};
+
+    const int64_t key          = block_ids[0];
+    const int64_t total_blocks = static_cast<int64_t>(bound);
+    const int64_t nb_cap       = total_blocks + 160;  // headroom for generated tokens
+    const int64_t cap_tokens   = nb_cap * spb;
+    int           device_id    = 0;
+    cudaGetDevice(&device_id);
+    auto& store = V32AdmissionStore::instance();
+    if (!store.prepare(key, static_cast<int32_t>(layer_num), cap_tokens, nb_cap, kv_bpt, idx_bytes, spb, device_id)) {
+        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "v32 ring pull: admission mirror alloc failed");
+    }
+
+    auto        cancel_check_func = [&load_context]() -> bool { return load_context.server_context->IsCancelled(); };
+    const auto& peer_addr         = load_context.peer_addrs[0];
+    auto        ip_parts          = autil::StringUtil::split(peer_addr, ":");
+    if (ip_parts.size() != 3) {
+        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "v32 ring pull: invalid peer ip");
+    }
+    const auto peer_ip        = ip_parts[0];
+    const auto peer_port      = autil::StringUtil::strToInt32WithDefault(ip_parts[1].c_str(), 0);
+    const auto peer_rdma_port = autil::StringUtil::strToInt32WithDefault(ip_parts[2].c_str(), 0);
+
+    const auto start_us = currentTimeUs();
+    for (size_t base = 0; base < prefix_pos.size(); base += R) {
+        const int n = static_cast<int>(std::min<size_t>(R, prefix_pos.size() - base));
+        std::vector<std::shared_ptr<RequestBlockBuffer>> layer_caches;
+        layer_caches.reserve(layer_num);
+        for (size_t layer_id = 0; layer_id < layer_num; ++layer_id) {
+            auto rb_key =
+                makeTaggedRequestKey(load_context.request_id, layer_id, tag) + "_v32ring" + std::to_string(base);
+            auto rb = std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), rb_key);
+            for (int j = 0; j < n; ++j) {
+                const size_t block_pos = prefix_pos[base + j];
+                auto         cache_key =
+                    makeCacheKey(model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id, tag);
+                const auto&           parts = ring_parts[layer_id][j];
+                std::shared_ptr<void> kv_addr(parts[0].addr, [](void*) {});
+                rb->addBlock(
+                    "kv_" + cache_key, kv_addr, static_cast<uint32_t>(parts[0].size_bytes), parts[0].is_cuda, true);
+                if (parts.size() > 1) {
+                    std::shared_ptr<void> sc_addr(parts[1].addr, [](void*) {});
+                    rb->addBlock("kv_scale_" + cache_key,
+                                 sc_addr,
+                                 static_cast<uint32_t>(parts[1].size_bytes),
+                                 parts[1].is_cuda,
+                                 true);
+                }
+            }
+            layer_caches.push_back(std::move(rb));
+        }
+        auto ring_load_context = resource_.cache_store->loadBuffers(layer_caches,
+                                                                    peer_ip,
+                                                                    peer_port,
+                                                                    peer_rdma_port,
+                                                                    load_context.timeout_ms,
+                                                                    cancel_check_func,
+                                                                    load_context.partition_count,
+                                                                    load_context.partition_id);
+        if (!ring_load_context) {
+            return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "v32 ring pull: null load context");
+        }
+        ring_load_context->waitDone();
+        if (!ring_load_context->success()) {
+            const auto error_info = ring_load_context->getErrorInfo();
+            RTP_LLM_LOG_WARNING("request [%s] v32 ring pull batch@%zu failed: %s",
+                                request_key.c_str(),
+                                base,
+                                ring_load_context->getErrorInfoString().c_str());
+            return error_info;
+        }
+        // Drain the ring into the admission mirror, then the ring is reused by
+        // the next batch (the next loadBuffers overwrites the same blocks).
+        for (size_t layer_id = 0; layer_id < layer_num; ++layer_id) {
+            for (int j = 0; j < n; ++j) {
+                const size_t block_pos = prefix_pos[base + j];
+                const auto&  parts     = ring_parts[layer_id][j];
+                if (!store.enqueueDrain(key,
+                                        static_cast<int32_t>(layer_id),
+                                        parts[0].addr,
+                                        static_cast<int64_t>(parts[0].size_bytes),
+                                        parts.size() > 1 ? parts[1].addr : nullptr,
+                                        parts.size() > 1 ? static_cast<int64_t>(parts[1].size_bytes) : 0,
+                                        static_cast<int64_t>(block_pos))) {
+                    return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "v32 ring pull: drain enqueue failed");
+                }
+            }
+        }
+        if (!store.sync()) {
+            return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "v32 ring pull: drain sync failed");
+        }
+    }
+
+    // The resident positions (block0 + staging head + tail window) landed in
+    // the pool via the main pass; mirror them too so the host mirror and the
+    // idxp side pool are contiguous from position 0 (the python hook's serve
+    // path requires a contiguous durable prefix and a dense idxp).
+    for (size_t p = 0; p < bound; ++p) {
+        if (block_ids[p] <= 0) {
+            continue;
+        }
+        for (size_t layer_id = 0; layer_id < layer_num; ++layer_id) {
+            auto parts = cache_manager->convertIndexToBufferByTag(block_ids[p], layer_id, tag);
+            if (!store.enqueueDrain(key,
+                                    static_cast<int32_t>(layer_id),
+                                    parts[0].addr,
+                                    static_cast<int64_t>(parts[0].size_bytes),
+                                    parts.size() > 1 ? parts[1].addr : nullptr,
+                                    parts.size() > 1 ? static_cast<int64_t>(parts[1].size_bytes) : 0,
+                                    static_cast<int64_t>(p))) {
+                return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "v32 ring pull: resident drain failed");
+            }
+        }
+    }
+    if (!store.sync()) {
+        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "v32 ring pull: resident sync failed");
+    }
+    store.setDurable(key, total_blocks * spb);
+    RTP_LLM_LOG_INFO("request [%s] v32 ring pull done: prefix_blocks=%zu ring=%d layers=%zu cost=%ldms",
+                     request_key.c_str(),
+                     prefix_pos.size(),
+                     R,
+                     layer_num,
+                     (currentTimeUs() - start_us) / 1000);
     return ErrorInfo::OkStatus();
 }
 
@@ -1253,17 +1522,20 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
 
     // TODO(xinfei.sxf) add retry
-    auto error_info = loadCache({request->request_id(),
-                                 request->request_key(),
-                                 peer_addrs,
-                                 cache_keys,
-                                 block_ids_by_group,
-                                 request->reuse_block_size(),
-                                 request->timeout_ms(),
-                                 request->partition_count(),
-                                 request->partition_id(),
-                                 server_context,
-                                 request->prefill_cp_size() > 0 ? request->prefill_cp_size() : 1});
+    LoadKVCacheContext remote_load_context{request->request_id(),
+                                           request->request_key(),
+                                           peer_addrs,
+                                           cache_keys,
+                                           block_ids_by_group,
+                                           request->reuse_block_size(),
+                                           request->timeout_ms(),
+                                           request->partition_count(),
+                                           request->partition_id(),
+                                           server_context,
+                                           request->prefill_cp_size() > 0 ? request->prefill_cp_size() : 1};
+    remote_load_context.admission_ring.assign(request->admission_ring_block_ids().begin(),
+                                              request->admission_ring_block_ids().end());
+    auto error_info = loadCache(remote_load_context);
     response->mutable_error_info()->set_error_code(transErrorCodeToRPC(error_info.code()));
     response->mutable_error_info()->set_error_message(error_info.ToString());
     response->set_done_time_us(currentTimeUs());

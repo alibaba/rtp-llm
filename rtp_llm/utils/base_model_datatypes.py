@@ -8,7 +8,6 @@ from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.ops import MultimodalInput
 
 
-
 class EmbeddingOutput:
     text_embedding: torch.Tensor
     extra_input: Optional[torch.Tensor]
@@ -91,6 +90,25 @@ class GenerateInput:
 
 
 @dataclass
+class PDLatencyBreakdown:
+    schema_version: int = 0
+    prefill_queue_us: int = 0
+    prefill_compute_wall_us: int = 0
+    handoff_total_us: int = 0
+    handoff_blocking_tail_us: int = 0
+    decode_kv_load_us: int = 0
+    decode_queue_us: int = 0
+    decode_service_us: int = 0
+    prefill_worker_id: str = ""
+    decode_worker_id: str = ""
+    kv_bytes: int = 0
+    kv_blocks: int = 0
+    transport_path: str = ""
+    prefill_worker_addr: str = ""
+    decode_worker_addr: str = ""
+
+
+@dataclass
 class AuxInfo:
     cost_time: float = 0
     iter_count: int = 0
@@ -119,6 +137,8 @@ class AuxInfo:
     decode_local_reuse_len: int = 0
     decode_remote_reuse_len: int = 0
     decode_memory_reuse_len: int = 0
+
+    pd_latency: Optional[PDLatencyBreakdown] = None
 
     multimodal_lengths: Dict[int, int] = field(default_factory=dict)
 

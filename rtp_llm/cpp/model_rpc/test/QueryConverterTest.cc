@@ -179,6 +179,8 @@ TEST_F(QueryConverterTest, testTransOutput) {
     res.aux_info.iter_count   = 9;
     res.aux_info.input_len    = 8;
     res.aux_info.output_len   = 7;
+    res.aux_info.pd_latency   = {
+        1, 11, 12, 13, 14, 15, 16, 17, "prefill-id", "decode-id", 18, 19, "GDR_DIRECT", "prefill:1", "decode:2"};
     auto hidden_states_tensor = torch::empty({3, 2}, torch::kFloat32);
     auto hidden_states_data   = hidden_states_tensor.data_ptr<float>();
     for (int i = 0; i < 6; ++i) {
@@ -196,6 +198,23 @@ TEST_F(QueryConverterTest, testTransOutput) {
     EXPECT_EQ(aux_info_pb.iter_count(), 9);
     EXPECT_EQ(aux_info_pb.input_len(), 8);
     EXPECT_EQ(aux_info_pb.output_len(), 7);
+    ASSERT_TRUE(aux_info_pb.has_pd_latency());
+    const auto& pd_latency = aux_info_pb.pd_latency();
+    EXPECT_EQ(pd_latency.schema_version(), 1);
+    EXPECT_EQ(pd_latency.prefill_queue_us(), 11);
+    EXPECT_EQ(pd_latency.prefill_compute_wall_us(), 12);
+    EXPECT_EQ(pd_latency.handoff_total_us(), 13);
+    EXPECT_EQ(pd_latency.handoff_blocking_tail_us(), 14);
+    EXPECT_EQ(pd_latency.decode_kv_load_us(), 15);
+    EXPECT_EQ(pd_latency.decode_queue_us(), 16);
+    EXPECT_EQ(pd_latency.decode_service_us(), 17);
+    EXPECT_EQ(pd_latency.prefill_worker_id(), "prefill-id");
+    EXPECT_EQ(pd_latency.decode_worker_id(), "decode-id");
+    EXPECT_EQ(pd_latency.kv_bytes(), 18);
+    EXPECT_EQ(pd_latency.kv_blocks(), 19);
+    EXPECT_EQ(pd_latency.transport_path(), "GDR_DIRECT");
+    EXPECT_EQ(pd_latency.prefill_worker_addr(), "prefill:1");
+    EXPECT_EQ(pd_latency.decode_worker_addr(), "decode:2");
     auto output_ids_pb = output_pb.output_ids();
     ASSERT_EQ(output_ids_pb.data_type(), TensorPB_DataType::TensorPB_DataType_INT32);
     ASSERT_EQ(output_ids_pb.shape_size(), 3);

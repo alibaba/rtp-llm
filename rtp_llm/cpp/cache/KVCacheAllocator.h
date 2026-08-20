@@ -48,7 +48,8 @@ public:
     virtual ~KVCacheAllocator() = default;
 
     bool                           init();
-    virtual void                   free(const FreeInfo& free_info)                        = 0;
+    virtual void                   free(const FreeInfo& free_info) = 0;
+    virtual void                   freeBlockList(const BlockIndicesType& /*blocks*/) {}
     virtual void                   insertIntoCache(const InsertInfo& insert_info)         = 0;
     virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const   = 0;
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const = 0;
@@ -153,9 +154,9 @@ protected:
         TOTAL_AND_AVAILABLE,
     };
 
-    virtual bool         doInit() = 0;
-    virtual size_t       reservableAvailableBlocksNum() const;
-    MallocResult         initMalloc(const MallocInfo& malloc_info);
+    virtual bool   doInit() = 0;
+    virtual size_t reservableAvailableBlocksNum() const;
+    MallocResult   initMalloc(const MallocInfo& malloc_info);
     // Classifies an init-malloc shortfall: a total-capacity shortfall is
     // PERMANENT (the request can never fit), an available-capacity shortfall is
     // RETRYABLE (the pools are momentarily full) so the stream stays WAITING

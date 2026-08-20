@@ -17,6 +17,7 @@ public:
                                int64_t                            reserve_block_ratio = 0);
 
     void                   free(const FreeInfo& free_info) override;
+    void                   freeBlockList(const BlockIndicesType& blocks) override;
     void                   insertIntoCache(const InsertInfo& insert_info) override;
     BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const override;
     std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const override;

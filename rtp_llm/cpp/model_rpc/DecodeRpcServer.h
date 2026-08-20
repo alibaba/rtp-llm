@@ -58,6 +58,10 @@ public:
 
         grpc::ServerContext* server_context;
         int32_t              prefill_cp_size;
+        // v32 staging-ring admission: transfer scratch blocks for pulling the
+        // offloaded prefix (0-sentinel positions in block_ids) into the
+        // admission mirror. Empty = no ring pull.
+        BlockIndicesType admission_ring;
     };
 
 private:
@@ -79,7 +83,10 @@ private:
     void
     reportEarlyFinishTask(DecodeGenerateContext& decode_context, int64_t error_code, const std::string& error_message);
 
-    ErrorInfo              loadCache(const LoadKVCacheContext& load_context);
+    ErrorInfo loadCache(const LoadKVCacheContext& load_context);
+    // v32 staging-ring admission: pull the 0-sentinel prefix positions through
+    // the ring blocks into the V32AdmissionStore mirror, batch by batch.
+    ErrorInfo              loadPrefixViaRing(const LoadKVCacheContext& load_context);
     ErrorInfo              loadCacheForAllRank(DecodeGenerateContext& decode_context);
     ErrorInfo              loadCacheAsyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
     ErrorInfo              loadCacheSyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);

@@ -48,7 +48,11 @@ bool SingleTypeKVCacheAllocator::doInit() {
     BlockPoolConfig pool_config;
 
     pool_config = BlockPoolConfigHelper::createConfig(config_);
-    block_pool_ = std::make_shared<BlockPool>(pool_config, allocation_type_);
+    // Forward the RDMA cudaMalloc backing request (Hybrid* allocators already
+    // do this; without it the pool stays on the torch allocator, whose
+    // expandable-segment VMM memory cannot be MR-registered).
+    block_pool_ = std::make_shared<BlockPool>(
+        pool_config, allocation_type_, /*use_pinned_cpu_backing=*/false, use_cuda_malloc_block_pool_);
     if (!block_pool_->init()) {
         RTP_LLM_LOG_ERROR("Failed to initialize block pool for SingleTypeKVCacheAllocator");
         return false;
@@ -75,14 +79,23 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     int   reuse_len   = 0;
     int   common_seq_len =
         std::min(malloc_info.complete_token_ids->commonSeqLength(), malloc_info.complete_token_ids->totalSeqLength());
+    // v32 staging-ring admission: cap the first allocation at the resident
+    // window; the prefix beyond it is pulled through the ring into the
+    // admission mirror instead of the pool.
+    if (malloc_info.init_seq_len_override >= 0 && malloc_info.init_seq_len_override < common_seq_len) {
+        common_seq_len = malloc_info.init_seq_len_override;
+    }
 
     const auto& cache_keys         = kv_resource->cacheKeys(0);
     auto&       block_ids_0        = kv_resource->mutableBlockIds(0, 0);
     int64_t     match_cost_time_us = 0;
 
     const size_t reserve_blocks   = reserveBlocksNum();
-    const int    estimated_blocks = (reserve_blocks > 0) ? getNeedBlocks(malloc_info) : 0;
-    int          reuse_blocks     = 0;
+    int          estimated_blocks = (reserve_blocks > 0) ? getNeedBlocks(malloc_info) : 0;
+    if (malloc_info.init_seq_len_override >= 0 && reserve_blocks > 0) {
+        estimated_blocks = full_kv_cache_group_->needBlocksNum(common_seq_len, 0, 0);
+    }
+    int reuse_blocks = 0;
 
     // drop the last cache key of the partial block to avoid reuse it for two reasons:
     // 1. if the last block is partial, it actually cannot be reused, because only full blocks will be inserted into the
@@ -190,9 +203,30 @@ void SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
 
     auto all_blocks = kv_cache_resource->getAllBatchBlocks(0);
     for (const auto& blocks : all_blocks) {
-        full_kv_cache_group_->free(blocks);
+        // Offloaded streams carry NULL sentinels for released prefix blocks.
+        BlockIndicesType valid;
+        valid.reserve(blocks.size());
+        for (auto b : blocks) {
+            if (b > 0) {
+                valid.push_back(b);
+            }
+        }
+        full_kv_cache_group_->free(valid);
     }
     kv_cache_resource->clearBlocks();
+}
+
+void SingleTypeKVCacheAllocator::freeBlockList(const BlockIndicesType& blocks) {
+    BlockIndicesType valid;
+    valid.reserve(blocks.size());
+    for (auto b : blocks) {
+        if (b > 0) {
+            valid.push_back(b);
+        }
+    }
+    if (!valid.empty()) {
+        full_kv_cache_group_->free(valid);
+    }
 }
 
 void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
@@ -211,6 +245,16 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
         const auto& blocks     = kv_resource->blocks(batch_id, 0);
 
         size_t block_num = std::min(size_t(cache_keys.size()), size_t(blocks.size()));
+        // v32 offload: released streams may carry 0-sentinel entries for
+        // offloaded prefix blocks. Inserting sentinels poisons the shared
+        // reuse cache (eviction bookkeeping throws _Map_base::at and freed
+        // sentinel slots get handed out); only the contiguous leading run of
+        // real blocks is reusable.
+        size_t valid_prefix = 0;
+        while (valid_prefix < block_num && blocks[valid_prefix] > 0) {
+            ++valid_prefix;
+        }
+        block_num = valid_prefix;
         if (block_num == 0) {
             continue;
         }

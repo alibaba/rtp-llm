@@ -300,6 +300,7 @@ public:
         reportEventWithoutLock(StreamEvents::Error, error_code, error_msg);
     }
     bool         hasEvent(StreamEvents::EventType event) const;
+    void         resetSchedulerAdmission();
     virtual bool hasError() const;
     ErrorInfo    statusInfo();
     std::string  stopReason();

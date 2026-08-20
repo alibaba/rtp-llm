@@ -31,13 +31,33 @@ public:
     const CacheKeysType& cacheKeys(int32_t batch_id) const;
     absl::Status         initKVBlock();
     // seq_len_override (-1 = unset) is forwarded to MallocInfo::incr_seq_len_override.
-    absl::Status         incrKVBlock(int seq_len_override = -1);
-    void                 fakeInitKVBlock(size_t reserved_blocks = 0);
-    int                  tryReleaseKVBlock(size_t nums);
-    void                 freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
-    void                 releaseResource();
-    bool                 asyncLoadCache();
-    bool                 loadCacheDone();
+    // ECHO-style decode offload: release prefix blocks of group 0 back to the
+    // pool, keeping the vector length (NULL sentinels) so growth accounting is
+    // unchanged. Python-side hook serves attention for the released region
+    // from a host mirror. Returns number of blocks released.
+    int offloadPrefixBlocks(int keep_last_n);
+    // v32 staging-ring admission (decode): initKVBlock capped the first malloc
+    // at the resident window; the middle prefix positions are 0 sentinels and
+    // must be pulled through admissionRing() into the admission mirror.
+    bool admissionCapped() const {
+        return admission_capped_;
+    }
+    const BlockIndicesType& admissionRing() const {
+        return admission_ring_;
+    }
+    int64_t admissionBlock0() const {
+        return admission_block0_;
+    }
+    // Return the ring blocks to the pool (idempotent). Called right after the
+    // prefix pull finishes, and again from releaseResource() as a backstop.
+    void         releaseAdmissionRing();
+    absl::Status incrKVBlock(int seq_len_override = -1);
+    void         fakeInitKVBlock(size_t reserved_blocks = 0);
+    int          tryReleaseKVBlock(size_t nums);
+    void         freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
+    void         releaseResource();
+    bool         asyncLoadCache();
+    bool         loadCacheDone();
 
     // swap all linear groups rhs and lhs
     void swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs);
@@ -140,10 +160,14 @@ private:
     std::vector<TaggedBlockIdPair> block_update_mapping_;
 
     bool                          need_release_resource_ = true;
-    bool                          last_block_aligned_    = false;
-    int                           malloc_failed_times_   = 0;
-    bool                          fake_inited_           = false;
-    bool                          resource_released_     = false;
+    bool                          prefix_offloaded_      = false;
+    bool                          admission_capped_      = false;
+    int64_t                       admission_block0_      = 0;
+    BlockIndicesType              admission_ring_;
+    bool                          last_block_aligned_  = false;
+    int                           malloc_failed_times_ = 0;
+    bool                          fake_inited_         = false;
+    bool                          resource_released_   = false;
     std::shared_ptr<AsyncContext> load_cache_context_;
     int                           load_cache_retry_count_ = 0;
 

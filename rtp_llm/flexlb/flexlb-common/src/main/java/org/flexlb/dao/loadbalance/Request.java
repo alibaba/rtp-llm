@@ -24,6 +24,13 @@ public class Request {
     @JsonProperty("cache_key_block_size")
     private long cacheKeyBlockSize;
 
+    /**
+     * Expected output length in tokens (0 = unknown). Supplied by the frontend
+     * from generate_config; used for decode long-output slot quotas.
+     */
+    @JsonProperty("expected_output_len")
+    private long expectedOutputLen;
+
     @JsonProperty("request_id")
     private long requestId;
 

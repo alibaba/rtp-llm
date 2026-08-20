@@ -32,6 +32,7 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
+    PDLatencyBreakdown,
     RoleAddr,
 )
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
@@ -44,6 +45,7 @@ from rtp_llm.utils.grpc_util import (
 
 MAX_GRPC_TIMEOUT_SECONDS = 3600
 JsonableOption = Optional[Union[str, Dict[str, Any], bool]]
+
 
 class StreamState:
     def __init__(self):
@@ -426,6 +428,26 @@ def trans_output(
         current_aux_info = None
         if aux_info_flag and len(output_pb.aux_info) > i:
             aux_info_pb = output_pb.aux_info[i]
+            pd_latency = None
+            if aux_info_pb.HasField("pd_latency"):
+                pd_latency_pb = aux_info_pb.pd_latency
+                pd_latency = PDLatencyBreakdown(
+                    schema_version=pd_latency_pb.schema_version,
+                    prefill_queue_us=pd_latency_pb.prefill_queue_us,
+                    prefill_compute_wall_us=pd_latency_pb.prefill_compute_wall_us,
+                    handoff_total_us=pd_latency_pb.handoff_total_us,
+                    handoff_blocking_tail_us=pd_latency_pb.handoff_blocking_tail_us,
+                    decode_kv_load_us=pd_latency_pb.decode_kv_load_us,
+                    decode_queue_us=pd_latency_pb.decode_queue_us,
+                    decode_service_us=pd_latency_pb.decode_service_us,
+                    prefill_worker_id=pd_latency_pb.prefill_worker_id,
+                    decode_worker_id=pd_latency_pb.decode_worker_id,
+                    kv_bytes=pd_latency_pb.kv_bytes,
+                    kv_blocks=pd_latency_pb.kv_blocks,
+                    transport_path=pd_latency_pb.transport_path,
+                    prefill_worker_addr=pd_latency_pb.prefill_worker_addr,
+                    decode_worker_addr=pd_latency_pb.decode_worker_addr,
+                )
             current_aux_info = AuxInfo(
                 cost_time=aux_info_pb.cost_time_us / 1000.0,
                 first_token_cost_time=aux_info_pb.first_token_cost_time_us / 1000.0,
@@ -448,6 +470,7 @@ def trans_output(
                 decode_local_reuse_len=aux_info_pb.decode_local_reuse_len,
                 decode_remote_reuse_len=aux_info_pb.decode_remote_reuse_len,
                 decode_memory_reuse_len=aux_info_pb.decode_memory_reuse_len,
+                pd_latency=pd_latency,
                 aux_string=aux_info_pb.aux_string,
                 role_addrs=input_py.generate_config.role_addrs,
             )
@@ -678,7 +701,9 @@ class ModelRpcClient(object):
         except grpc.RpcError as e:
             if response_iterator:
                 response_iterator.cancel()
-            self._handle_grpc_error(e, f"request: [{input_pb.request_id}]", target_address)
+            self._handle_grpc_error(
+                e, f"request: [{input_pb.request_id}]", target_address
+            )
         except Exception as e:
             logging.error(
                 f"request: [{input_pb.request_id}] rpc to [{target_address}] unknown error: {str(e)}"

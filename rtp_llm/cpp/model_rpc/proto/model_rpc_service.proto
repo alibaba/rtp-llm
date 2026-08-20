@@ -209,6 +209,36 @@ message GenerateInputPB {
     int32 priority = 10;
 }
 
+// Versioned, low-overhead wall-clock durations for the active PREFILL-entrance
+// PD path. Every duration is computed within one process clock domain; clients
+// must not subtract timestamps from different workers.
+message PDLatencyBreakdownPB {
+    int32 schema_version = 1;
+    // P engine enqueue call to the first observed transition out of WAITING.
+    int64 prefill_queue_us = 2;
+    // P admission observation to first-token commit in the P stream.
+    int64 prefill_compute_wall_us = 3;
+    // P LOAD write start to the LOAD acknowledgement observed by P.
+    int64 handoff_total_us = 4;
+    // P first-token commit to LOAD acknowledgement observation. Transfer before
+    // the first token is ready is overlapped and excluded.
+    int64 handoff_blocking_tail_us = 5;
+    // D-local load begin to load end; no cross-host clock subtraction.
+    int64 decode_kv_load_us = 6;
+    // D engine enqueue to first transition out of WAITING.
+    int64 decode_queue_us = 7;
+    // D admission to this output snapshot, measured on D before P rewrites the
+    // legacy end-to-end cost_time_us field.
+    int64 decode_service_us = 8;
+    string prefill_worker_id = 9;
+    string decode_worker_id = 10;
+    int64 kv_bytes = 11;
+    int64 kv_blocks = 12;
+    string transport_path = 13; // GDR_DIRECT or TCP
+    string prefill_worker_addr = 14;
+    string decode_worker_addr = 15;
+}
+
 message AuxInfoPB {
     int32 cost_time_us = 1;
     int32 iter_count = 2;
@@ -236,6 +266,7 @@ message AuxInfoPB {
     int32 prefill_memory_reuse_len = 25;
     int32 decode_memory_reuse_len = 26;
     map<int32, int32> multimodal_lengths = 27;
+    PDLatencyBreakdownPB pd_latency = 28;
 }
 
 message PromptLogitsOutputPB {
@@ -354,12 +385,18 @@ message BroadcastLoadRequestPB {
     reserved "group_block_ids";
     int32 prefill_cp_size = 13;
     repeated TaggedBlockIdsPB tagged_group_block_ids = 14;
+    // v32 staging-ring admission: ring block ids used as transfer scratch when
+    // pulling the offloaded prefix (0-sentinel positions) into the admission
+    // mirror. Empty = no ring pull for this request.
+    repeated int32 admission_ring_block_ids = 15;
 
 }
 
 message BroadcastLoadResponsePB {
     RpcErrorPB error_info = 1;
     int64 done_time_us = 2;
+    int64 kv_bytes = 3;
+    int64 kv_blocks = 4;
 }
 
 message RemoteFinishRequestPB {
@@ -494,6 +531,13 @@ message TaskInfoPB {
 
 message UpdateWeightsRequestPB {
     string name = 1;
+    int64 context_batch_size = 16;
+    int64 generate_batch_size = 17;
+    int64 execute_token_size = 18;
+    int64 context_tps = 19;
+    int64 generate_tps = 20;
+    int64 model_forward_us = 21;
+    int64 last_step_timestamp_us = 22;
     string desc = 2;
     string method = 3;
 }

@@ -73,6 +73,14 @@ class WorkStatus(BaseModel):
     status_version: Optional[int] = -1  # 时间戳
     latest_finished_version: Optional[int] = -1  # 最新完成任务的版本
 
+    last_step_timestamp_us: int = 0
+    context_batch_size: int = 0
+    generate_batch_size: int = 0
+    execute_token_size: int = 0
+    context_tps: int = 0
+    generate_tps: int = 0
+    model_forward_us: int = 0
+
     profile_meta: Optional[ProfileMeta] = None  # 统计的处理数据
 
     @field_validator("role", mode="before")

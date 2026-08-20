@@ -34,9 +34,8 @@ namespace rtp_llm {
 namespace {
 
 bool enqueueIndividually(FIFOScheduler& scheduler, const vector<GenerateStreamPtr>& streams) {
-    return std::all_of(streams.begin(), streams.end(), [&scheduler](const auto& stream) {
-        return scheduler.enqueue(stream).ok();
-    });
+    return std::all_of(
+        streams.begin(), streams.end(), [&scheduler](const auto& stream) { return scheduler.enqueue(stream).ok(); });
 }
 
 }  // namespace
@@ -77,6 +76,20 @@ protected:
             runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
     }
 
+    std::shared_ptr<FIFOScheduler> createDecodeScheduler(size_t max_generate_batch_size) {
+        ModelConfig model_config;
+        model_config.max_seq_len = 8192;
+        RuntimeConfig runtime_config;
+        runtime_config.max_generate_batch_size                     = max_generate_batch_size;
+        runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+        PDSepConfig pd_sep_config;
+        pd_sep_config.role_type = RoleType::DECODE;
+        ParallelismConfig   parallelism_config;
+        ModelSpecificConfig model_specific_config;
+        return std::make_shared<FIFOScheduler>(
+            runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
+    }
+
     std::shared_ptr<PDFusionRatioScheduler> createPDFusionRatioScheduler() {
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
@@ -109,11 +122,13 @@ protected:
                                    bool                    reuse_cache         = false,
                                    bool                    enable_memory_cache = false,
                                    int                     max_new_tokens      = 1,
-                                   const std::vector<int>& variable_num_beams  = {}) {
+                                   const std::vector<int>& variable_num_beams  = {},
+                                   RoleType                role_type           = RoleType::PDFUSION) {
         ResourceContext resource_context;
         resource_context.cache_manager       = cache_manager_;
         resource_context.reuse_cache         = reuse_cache;
         resource_context.enable_memory_cache = enable_memory_cache;
+        resource_context.role_type           = role_type;
 
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
@@ -170,6 +185,48 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_NoReuseCache_DirectlyRunning
     ASSERT_EQ(scheduler->loading_cache_streams_.size(), 0u);
     ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler->runningStreamsSize(), 1);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testPreparedDecodeStreamsRespectConcurrencyLimitAfterAdmissionReset) {
+    auto scheduler = createDecodeScheduler(/*max_generate_batch_size=*/1);
+
+    std::vector<GenerateStreamPtr> streams;
+    for (int token = 1; token <= 4; ++token) {
+        auto stream = createStream({token},
+                                   /*reuse_cache=*/false,
+                                   /*enable_memory_cache=*/false,
+                                   /*max_new_tokens=*/2,
+                                   /*variable_num_beams=*/{},
+                                   RoleType::DECODE);
+
+        // Mirror DecodeRpcServer::allocateResource(): temporarily grant CanRun so KV
+        // resources are initialized, then revoke it immediately before scheduler enqueue.
+        stream->reportEvent(StreamEvents::CanRun);
+        ASSERT_EQ(stream->moveToNext(), StreamState::WAITING);
+        ASSERT_TRUE(stream->hasEvent(StreamEvents::CanRun));
+        ASSERT_TRUE(stream->hasEvent(StreamEvents::LoadInitiated));
+        stream->resetSchedulerAdmission();
+        ASSERT_FALSE(stream->hasEvent(StreamEvents::CanRun));
+        ASSERT_TRUE(scheduler->enqueue(stream).ok());
+        streams.push_back(stream);
+    }
+
+    for (size_t completed = 0; completed < streams.size(); ++completed) {
+        auto result = scheduler->schedule();
+        ASSERT_TRUE(result.ok());
+        ASSERT_EQ(result.value().size(), 1);
+        ASSERT_EQ(result.value().front().get(), streams[completed].get());
+        ASSERT_EQ(scheduler->runningStreamsSize(), 1);
+        ASSERT_EQ(scheduler->waitingStreamsSize(), streams.size() - completed - 1);
+
+        streams[completed]->reportEvent(StreamEvents::GenerateDone);
+    }
+
+    auto drained = scheduler->schedule();
+    ASSERT_TRUE(drained.ok());
+    ASSERT_TRUE(drained.value().empty());
+    ASSERT_EQ(scheduler->runningStreamsSize(), 0);
+    ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
 }
 
 // ============================================================================
@@ -937,8 +994,8 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionCompletedAsyncLoadStaysInAdmissi
     auto done_ctx = createDoneAsyncContext();
     EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(done_ctx)));
 
-    auto scheduler = createPDFusionRatioScheduler();
-    auto loaded    = createStream({1, 2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+    auto scheduler                           = createPDFusionRatioScheduler();
+    auto loaded                              = createStream({1, 2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
     loaded->generateConfig()->max_new_tokens = 2;
     ASSERT_TRUE(scheduler->enqueue(loaded).ok());
 
@@ -949,7 +1006,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionCompletedAsyncLoadStaysInAdmissi
     ASSERT_EQ(cache_manager_->freeBlocksNum(), 1);
     ASSERT_EQ(loaded->estimatePeakNeedBlocks(/*remaining_tokens=*/1), 1);
 
-    auto candidate = createStream({3});
+    auto candidate                              = createStream({3});
     candidate->generateConfig()->max_new_tokens = 2;
     ASSERT_EQ(candidate->estimatePeakNeedBlocks(/*remaining_tokens=*/1), 1);
     ASSERT_TRUE(scheduler->enqueue(candidate).ok());
@@ -1020,10 +1077,10 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionLoadingCacheReservesDelayedBeamT
 
     auto scheduler = createPDFusionRatioScheduler();
     auto loaded    = createStream({1, 2, 3, 4, 5},
-                                  /*reuse_cache=*/true,
-                                  /*enable_memory_cache=*/true,
-                                  /*max_new_tokens=*/3,
-                                  /*variable_num_beams=*/{1, 4});
+                               /*reuse_cache=*/true,
+                               /*enable_memory_cache=*/true,
+                               /*max_new_tokens=*/3,
+                               /*variable_num_beams=*/{1, 4});
     ASSERT_EQ(loaded->currentBatchSize(), 1);
     ASSERT_EQ(loaded->maxBatchSize(), 4);
     ASSERT_TRUE(scheduler->enqueue(loaded).ok());

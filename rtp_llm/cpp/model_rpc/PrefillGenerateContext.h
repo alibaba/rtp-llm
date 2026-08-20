@@ -80,10 +80,9 @@ public:
                            std::shared_ptr<RpcServerRuntimeMeta> meta,
                            int64_t                               prefill_stop_stream_wait_timeout_ms = 2000):
         GenerateContext(rpc_context.requestID(), timeout_ms, server_context, metrics_reporter, meta),
-        task_identity_{rpc_context.requestID(),
-                       rpc_context.request && rpc_context.request->has_group_id() ?
-                           rpc_context.request->group_id().value() :
-                           -1},
+        task_identity_{
+            rpc_context.requestID(),
+            rpc_context.request && rpc_context.request->has_group_id() ? rpc_context.request->group_id().value() : -1},
         resource(resource),
         rpc_context(rpc_context),
         cancel_state(std::make_shared<std::atomic<bool>>(false)),
@@ -91,16 +90,23 @@ public:
         prefill_worker_cache_store_addrs = resource->workers;
     }
     ~PrefillGenerateContext();
-    void         setStream(const std::shared_ptr<GenerateStream>& stream) override;
-    void         reset() override;
-    bool         isRequestCancelled() const override;
+    void setStream(const std::shared_ptr<GenerateStream>& stream) override;
+
+    // Local-clock landmarks used to produce the versioned PD latency breakdown.
+    int64_t                         prefill_queue_begin_time_us  = 0;
+    int64_t                         prefill_admit_time_us        = 0;
+    int64_t                         prefill_compute_done_time_us = 0;
+    int64_t                         handoff_begin_time_us        = 0;
+    int64_t                         handoff_end_time_us          = 0;
+    void                            reset() override;
+    bool                            isRequestCancelled() const override;
     PriorityPreemptionRequestResult requestPriorityPreempt();
-    bool         isPriorityPreempted() const;
-    bool         tryMarkOtherTerminal();
-    PrefillTerminalCause terminalCause() const;
-    void         tryCancelDownstream();
-    bool         finalizePriorityPreemption();
-    void         setLocalStreamSchedulerOwned(bool owned);
+    bool                            isPriorityPreempted() const;
+    bool                            tryMarkOtherTerminal();
+    PrefillTerminalCause            terminalCause() const;
+    void                            tryCancelDownstream();
+    bool                            finalizePriorityPreemption();
+    void                            setLocalStreamSchedulerOwned(bool owned);
     // Linearizes ordinary runtime-meta removal with installation of the
     // priority-preemption first cause and its CANCELING overlay.
     void         dequeueStreamFromRuntimeMeta();
@@ -161,9 +167,9 @@ private:
 
     std::atomic<PrefillTerminalCause> terminal_cause_{PrefillTerminalCause::ACTIVE};
     std::mutex                        terminal_transition_mu_;
-    std::mutex        priority_finalize_mu_;
-    bool              priority_finalized_{false};
-    bool              local_stream_scheduler_owned_{false};
+    std::mutex                        priority_finalize_mu_;
+    bool                              priority_finalized_{false};
+    bool                              local_stream_scheduler_owned_{false};
 };
 
 }  // namespace rtp_llm

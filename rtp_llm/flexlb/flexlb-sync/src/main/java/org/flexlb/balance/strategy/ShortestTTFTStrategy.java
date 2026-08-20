@@ -12,6 +12,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
@@ -353,3 +354,19 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         return !config.isBatchPath();
     }
 }
+            result.setDebugInfo(buildDebugInfo(selectedWorker));
+    private DebugInfo buildDebugInfo(ScoredWorker selectedWorker) {
+        WorkerStatus workerStatus = selectedWorker.worker();
+        DebugInfo debugInfo = new DebugInfo();
+        debugInfo.setRunningBatchSize(
+                workerStatus.getRunningTaskList() == null ? 0 : workerStatus.getRunningTaskList().size());
+        debugInfo.setQueueSize(
+                workerStatus.getWaitingTaskList() == null ? 0 : workerStatus.getWaitingTaskList().size());
+        debugInfo.setWaitingTimeMs(workerStatus.getRunningQueueTime().get());
+        debugInfo.setAvailableKvCacheLen(workerStatus.getAvailableKvCacheTokens().get());
+        debugInfo.setEstimateTtftMs(selectedWorker.ttft());
+        debugInfo.setEstimateTpotMs(Math.round(workerStatus.getStepLatencyMs()));
+        debugInfo.setHitCacheLen(selectedWorker.hitCacheTokens());
+        return debugInfo;
+    }
+

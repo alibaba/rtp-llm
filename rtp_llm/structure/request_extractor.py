@@ -120,8 +120,22 @@ class RequestExtractor:
         return self._format_chat_api_messages(generate_config, remain_kwargs)
 
     def _get_text(self, kwargs: Dict[str, Any]):
-        input_texts: Optional[Union[List[str], List[List[Dict[str, str]]]]] = None
-        if "prompt_batch" in kwargs:
+        input_texts: Optional[
+            Union[List[str], List[List[Dict[str, str]]], List[List[int]]]
+        ] = None
+        if "token_ids" in kwargs:
+            token_ids = kwargs.pop("token_ids")
+            if (
+                not isinstance(token_ids, list)
+                or not token_ids
+                or not all(type(token_id) is int for token_id in token_ids)
+            ):
+                raise FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    "token_ids should be a non-empty list of integers",
+                )
+            input_texts = [token_ids]
+        elif "prompt_batch" in kwargs:
             input_texts = kwargs.pop("prompt_batch")
             if not isinstance(input_texts, list):
                 raise FtRuntimeException(

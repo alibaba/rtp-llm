@@ -38,7 +38,12 @@ from unittest import TestCase, main
 
 import torch
 
-from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, RoleType, ThinkingMode
+from rtp_llm.config.generate_config import (
+    GenerateConfig,
+    RoleAddr,
+    RoleType,
+    ThinkingMode,
+)
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
@@ -87,6 +92,22 @@ class FakeStub:
         aux_info2 = output_pb2.aux_info.add()
         aux_info2.iter_count = 2
         aux_info2.output_len = 2
+        pd_latency = aux_info2.pd_latency
+        pd_latency.schema_version = 1
+        pd_latency.prefill_queue_us = 101
+        pd_latency.prefill_compute_wall_us = 102
+        pd_latency.handoff_total_us = 103
+        pd_latency.handoff_blocking_tail_us = 104
+        pd_latency.decode_kv_load_us = 105
+        pd_latency.decode_queue_us = 106
+        pd_latency.decode_service_us = 107
+        pd_latency.prefill_worker_id = "prefill-id"
+        pd_latency.decode_worker_id = "decode-id"
+        pd_latency.kv_bytes = 108
+        pd_latency.kv_blocks = 109
+        pd_latency.transport_path = "GDR_DIRECT"
+        pd_latency.prefill_worker_addr = "prefill:1"
+        pd_latency.decode_worker_addr = "decode:2"
         output_pb2.logits.data_type = TensorPB.DataType.FP32
         output_pb2.logits.shape.extend([1, 1, 2])
         output_pb2.logits.fp32_data = struct.pack("<ff", 0.1, 0.2)
@@ -390,6 +411,23 @@ class ModelRpcClientTest(TestCase):
         logits_1 = res[1].logits.tolist()
         self.assertAlmostEqual(logits_1[0][0], 0.1, places=6)
         self.assertAlmostEqual(logits_1[0][1], 0.2, places=6)
+        pd_latency = res[1].aux_info.pd_latency
+        self.assertIsNotNone(pd_latency)
+        self.assertEqual(pd_latency.schema_version, 1)
+        self.assertEqual(pd_latency.prefill_queue_us, 101)
+        self.assertEqual(pd_latency.prefill_compute_wall_us, 102)
+        self.assertEqual(pd_latency.handoff_total_us, 103)
+        self.assertEqual(pd_latency.handoff_blocking_tail_us, 104)
+        self.assertEqual(pd_latency.decode_kv_load_us, 105)
+        self.assertEqual(pd_latency.decode_queue_us, 106)
+        self.assertEqual(pd_latency.decode_service_us, 107)
+        self.assertEqual(pd_latency.prefill_worker_id, "prefill-id")
+        self.assertEqual(pd_latency.decode_worker_id, "decode-id")
+        self.assertEqual(pd_latency.kv_bytes, 108)
+        self.assertEqual(pd_latency.kv_blocks, 109)
+        self.assertEqual(pd_latency.transport_path, "GDR_DIRECT")
+        self.assertEqual(pd_latency.prefill_worker_addr, "prefill:1")
+        self.assertEqual(pd_latency.decode_worker_addr, "decode:2")
 
         # res[2] 是完成标记，包含指定位置token的logits
         self.assertTrue(res[2].finished)

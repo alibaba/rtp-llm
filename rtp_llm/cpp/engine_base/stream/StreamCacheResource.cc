@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/V32AdmissionStore.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
@@ -313,6 +314,11 @@ void StreamCacheResource::releaseResource() {
                       stream_->streamId(),
                       curBlocksNum(),
                       pd_kvcache_ref_.get());
+    releaseAdmissionRing();
+    if (admission_capped_) {
+        V32AdmissionStore::instance().release(admission_block0_);
+        admission_capped_ = false;
+    }
     tryReleaseKVBlock(curBlocksNum());
     batch_kv_cache_resource_->clearBlocks();
     resource_released_ = true;
@@ -415,6 +421,45 @@ absl::Status StreamCacheResource::initKVBlock() {
     }
     malloc_info.enable_remove_skipped_blocks = false;
 
+    // v32 staging-ring admission: cap the decode-side first malloc at the
+    // resident window (block0 + staging + tail) plus a small transfer ring; the
+    // prefix beyond the window is pulled through the ring into the admission
+    // mirror (host KV + GPU indexer-K) by DecodeRpcServer::loadCache.
+    static const int kAdmitRingBlocks = []() {
+        const char* env = std::getenv("RTP_KV_ADMIT_RING_BLOCKS");
+        return env ? atoi(env) : 0;
+    }();
+    static const int kAdmitKeepBlocks = []() {
+        const char* env = std::getenv("RTP_KV_OFFLOAD_KEEP_BLOCKS");
+        return env ? atoi(env) : 0;
+    }();
+    static const int kAdmitStagingBlocks = []() {
+        const char* env = std::getenv("RTP_KV_OFFLOAD_STAGING_BLOCKS");
+        return env ? atoi(env) : 32;
+    }();
+    static const int kAdmitMinSeq = []() {
+        const char* env = std::getenv("RTP_KV_OFFLOAD_MIN_SEQ");
+        return env ? atoi(env) : 0;
+    }();
+    int admit_total_blocks = 0;
+    if (kAdmitRingBlocks > 0 && kAdmitKeepBlocks > 0 && is_decode_role && is_first_malloc
+        && batch_kv_cache_resource_->batchSize() == 1 && resource_context_.cache_manager->cacheConfig().groupNums() == 1
+        && resource_context_.cache_manager->cacheConfig().use_mla
+        && resource_context_.cache_manager->cacheConfig().mtp_sub_configs.empty()
+        && stream_->seqLength() >= kAdmitMinSeq) {
+        const int spb      = seqSizePerBlock();
+        const int total    = (stream_->seqLength() + spb - 1) / spb;
+        const int resident = 1 + kAdmitStagingBlocks + kAdmitKeepBlocks;
+        // +1: keep at least one 0 sentinel in the middle so the python hook's
+        // offload detection (khead[1+STG]==0) holds.
+        if (total > resident + kAdmitRingBlocks + 1) {
+            admit_total_blocks                = total;
+            malloc_info.reuse_cache           = false;
+            malloc_info.enable_device_cache   = false;
+            malloc_info.init_seq_len_override = (resident + kAdmitRingBlocks) * spb;
+        }
+    }
+
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {
         malloc_failed_times_++;
@@ -436,6 +481,42 @@ absl::Status StreamCacheResource::initKVBlock() {
         return absl::InternalError("malloc failed with unknown status");
     }
 
+    if (admit_total_blocks > 0) {
+        auto&      ids    = batch_kv_cache_resource_->mutableBlockIds(0, 0);
+        const auto blocks = ids.blocks();  // copy: [block0, staging..., tail..., ring...]
+        const int  got    = static_cast<int>(blocks.size());
+        const int  head   = 1 + kAdmitStagingBlocks;
+        const int  tail   = got - kAdmitRingBlocks - head;
+        if (tail < kAdmitKeepBlocks || admit_total_blocks <= head + tail + 1) {
+            RTP_LLM_LOG_ERROR("stream [%ld] admission cap geometry unexpected: got=%d head=%d tail=%d total=%d",
+                              stream_->streamId(),
+                              got,
+                              head,
+                              tail,
+                              admit_total_blocks);
+            return absl::InternalError("admission capped malloc geometry unexpected");
+        }
+        admission_ring_.assign(blocks.end() - kAdmitRingBlocks, blocks.end());
+        BlockIndicesType table(admit_total_blocks, 0);
+        for (int j = 0; j < head; ++j) {
+            table[j] = blocks[j];
+        }
+        for (int j = 0; j < tail; ++j) {
+            table[admit_total_blocks - tail + j] = blocks[head + j];
+        }
+        ids.assign(std::move(table));
+        admission_block0_ = blocks[0];
+        admission_capped_ = true;
+        prefix_offloaded_ = true;  // admission is already the target shape: skip the post-hoc shrink
+        RTP_LLM_LOG_INFO("stream [%ld] admission capped: total=%d resident=%d(+%d tail extra) ring=%d block0=%ld",
+                         stream_->streamId(),
+                         admit_total_blocks,
+                         head + kAdmitKeepBlocks,
+                         tail - kAdmitKeepBlocks,
+                         kAdmitRingBlocks,
+                         admission_block0_);
+    }
+
     if (result.reuse_len > 0) {
         stream_->setReuseLength(result.reuse_len);
         stream_->setMtpTokenIndex(result.reuse_len);
@@ -445,11 +526,89 @@ absl::Status StreamCacheResource::initKVBlock() {
     return absl::OkStatus();
 }
 
+int StreamCacheResource::offloadPrefixBlocks(int keep_last_n) {
+    auto& batch = *batch_kv_cache_resource_;
+    if (batch.batchSize() != 1 || keep_last_n <= 0) {
+        return 0;
+    }
+    const auto& blocks = batch.blocks(0, 0);
+    const int   total  = static_cast<int>(blocks.size());
+    const int   n      = total - keep_last_n;
+    // Keep blocks[0] resident: stable per-stream identity for the python hook.
+    // Also keep RTP_KV_OFFLOAD_STAGING_BLOCKS blocks right after it as a python-
+    // managed staging area (native kernels read hot offloaded rows from there).
+    static const int kStagingBlocks = []() {
+        const char* env = std::getenv("RTP_KV_OFFLOAD_STAGING_BLOCKS");
+        return env ? atoi(env) : 32;
+    }();
+    const int free_from = 1 + kStagingBlocks;
+    if (n <= free_from) {
+        return 0;
+    }
+    BlockIndicesType to_free;
+    to_free.reserve(n - free_from);
+    for (int j = free_from; j < n; ++j) {
+        if (blocks[j] > 0) {
+            to_free.push_back(blocks[j]);
+        }
+    }
+    if (to_free.empty()) {
+        return 0;
+    }
+    // Zero released prefix entries: python treats phys==0 as "offloaded"; the
+    // kernels never dereference them (python feeds explicit global indices).
+    auto& mut = batch.mutableBlockIds(0, 0);
+    for (int j = free_from; j < n; ++j) {
+        mut.setAt(j, 0);
+    }
+    resource_context_.cache_manager->freeBlockList(to_free);
+    prefix_offloaded_ = true;
+    RTP_LLM_LOG_INFO("stream [%ld] offloaded %zu prefix blocks to host tier, keep_last=%d total=%d",
+                     stream_->streamId(),
+                     to_free.size(),
+                     keep_last_n,
+                     total);
+    return static_cast<int>(to_free.size());
+}
+
+void StreamCacheResource::releaseAdmissionRing() {
+    if (admission_ring_.empty()) {
+        return;
+    }
+    resource_context_.cache_manager->freeBlockList(admission_ring_);
+    RTP_LLM_LOG_INFO("stream [%ld] released %zu admission ring blocks", stream_->streamId(), admission_ring_.size());
+    admission_ring_.clear();
+}
+
 absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     RTP_LLM_PROFILE_FUNCTION();
     // TODO(xinfei.sxf) add reserver_blocks
     if (fake_inited_) {
         return absl::InternalError("fake inited not allow to incr block");
+    }
+
+    // ECHO-style decode offload: once the stream has generated >=1 token (so the
+    // python hook has mirrored full KV to host), shrink to a resident window.
+    static const int kOffloadKeepBlocks = []() {
+        const char* env = std::getenv("RTP_KV_OFFLOAD_KEEP_BLOCKS");
+        return env ? atoi(env) : 0;
+    }();
+    static const int kOffloadMinSeq = []() {
+        const char* env = std::getenv("RTP_KV_OFFLOAD_MIN_SEQ");
+        return env ? atoi(env) : 0;
+    }();
+    // Delay the shrink by N generated tokens (>=2: first token comes from the
+    // context pass / prefill node) so the python hook can mirror the prefix to
+    // host asynchronously in chunks across steps instead of one blocking copy.
+    static const int kOffloadAfterTokens = []() {
+        const char* env    = std::getenv("RTP_KV_OFFLOAD_AFTER_TOKENS");
+        int         tokens = env ? atoi(env) : 2;
+        return tokens < 2 ? 2 : tokens;
+    }();
+    if (kOffloadKeepBlocks > 0 && !prefix_offloaded_ && !isContextStream()
+        && stream_->seqLength() > stream_->inputLength() + kOffloadAfterTokens
+        && stream_->seqLength() >= kOffloadMinSeq) {
+        offloadPrefixBlocks(kOffloadKeepBlocks);
     }
 
     MallocInfo malloc_info;

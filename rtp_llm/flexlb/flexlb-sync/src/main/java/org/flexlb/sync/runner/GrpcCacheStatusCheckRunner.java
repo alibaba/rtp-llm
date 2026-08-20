@@ -89,7 +89,8 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             roundInterval = Math.max(roundInterval, 1);
 
             // Skip prefill cache status check if not in 100ms interval
-            if ((RoleType.PREFILL.equals(roleType) || RoleType.PDFUSION.equals(roleType))
+            if ((RoleType.PREFILL.equals(roleType) || RoleType.PDFUSION.equals(roleType)
+                        || RoleType.DECODE.equals(roleType))
                         && syncCount.longValue() % roundInterval != 0) {
                 logger.debug("Skip prefill cache status check for {} because not in {}ms interval", ipPort, prefillCacheStatusCheckInterval);
                 return; // finally will reset the flag
