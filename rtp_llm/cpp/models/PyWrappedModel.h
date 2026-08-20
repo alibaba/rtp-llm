@@ -416,14 +416,14 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // run only on decode roles, where prefill CP is off (colocated CP is
         // rejected at executor construction).
         //
-        // MTP hidden buffer is a DeepSeek-specific hand-off. It is written after
-        // CP token splitting and already contains rank-local rows, so it must not
-        // be split by the context-parallel processor again.
-        const bool split_hidden_states = !has_mtp_hidden_buffer_;
-        context_parallel_processor_    = ContextParallelProcessorFactory::create(
-            ProcessorType::ZIG_ZAG, params.parallelism_config, split_hidden_states);
-        RTP_LLM_LOG_INFO("Context parallel processor initialized with ZIG_ZAG strategy, split_hidden_states=%d.",
-                         static_cast<int>(split_hidden_states));
+        // Row count identifies global versus rank-local hidden input. The
+        // model capability only resolves the small-input case where those
+        // counts happen to be equal.
+        context_parallel_processor_ = ContextParallelProcessorFactory::create(
+            ProcessorType::ZIG_ZAG, params.parallelism_config, has_mtp_hidden_buffer_);
+        RTP_LLM_LOG_INFO(
+            "Context parallel processor initialized with ZIG_ZAG strategy, prefer_local_hidden_states=%d.",
+            static_cast<int>(has_mtp_hidden_buffer_));
     }
 
     RTP_LLM_LOG_INFO("PyWrappedModel initialized done.");
