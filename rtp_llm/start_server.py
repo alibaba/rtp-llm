@@ -46,6 +46,22 @@ STARTUP_REAL_WARMUP_MIN_TOKEN_LEN = 2
 STARTUP_REAL_WARMUP_TIMEOUT_S = 600.0
 STARTUP_REAL_WARMUP_MAX_NEW_TOKENS = 1
 STARTUP_REAL_WARMUP_TOKEN_ID = 100
+# 1/0 overrides the model-type allowlist below; empty keeps the allowlist.
+STARTUP_REAL_WARMUP_ENV = "STARTUP_REAL_WARMUP"
+# Caps the largest warmup request; defaults to model max_seq_len. Long-context
+# deployments can cap to the real traffic length to bound startup cost.
+STARTUP_REAL_WARMUP_MAX_TOKEN_LEN_ENV = "STARTUP_REAL_WARMUP_MAX_TOKEN_LEN"
+# Model types whose serving roles run real-request warmup before ready.
+STARTUP_REAL_WARMUP_MODEL_TYPES = frozenset(
+    {
+        "deepseek_v4",
+        "qwen_3",
+        "qwen_3_tool",
+        "qwen_3_moe",
+        "qwen_3_moe_eagle3",
+        "qwen3_next",
+    }
+)
 
 
 class StartupRealWarmupAddressResolutionError(RuntimeError):
@@ -518,8 +534,12 @@ def start_frontend_server_impl(
     return frontend_processes
 
 
-def _role_is_prefill(py_env_configs: PyEnvConfigs) -> bool:
-    return py_env_configs.role_config.role_type == RoleType.PREFILL
+def _role_runs_prefill(py_env_configs: PyEnvConfigs) -> bool:
+    # PDFUSION serves prefill traffic too, not only the PD-separated PREFILL role.
+    return py_env_configs.role_config.role_type in (
+        RoleType.PREFILL,
+        RoleType.PDFUSION,
+    )
 
 
 def _is_startup_real_warmup_entry_rank(py_env_configs: PyEnvConfigs) -> bool:
@@ -541,14 +561,13 @@ def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
     if not runtime_config.warm_up or not runtime_config.model_warm_up:
         return False
 
-    role_is_prefill = _role_is_prefill(py_env_configs)
-    if not role_is_prefill:
+    if not _role_runs_prefill(py_env_configs):
         return False
 
     if not _is_startup_real_warmup_entry_rank(py_env_configs):
         parallelism_config = py_env_configs.parallelism_config
         logging.info(
-            "skip DSV4 startup real warmup on non-entry rank, "
+            "skip startup real warmup on non-entry rank, "
             "world_rank=%s, tp_size=%s, world_size=%s",
             parallelism_config.world_rank,
             parallelism_config.tp_size,
@@ -556,7 +575,19 @@ def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
         )
         return False
 
-    return getattr(py_env_configs.model_args, "model_type", "") == "deepseek_v4"
+    model_type = getattr(py_env_configs.model_args, "model_type", "")
+    override = os.environ.get(STARTUP_REAL_WARMUP_ENV, "").strip()
+    if override:
+        enabled = str_to_bool(override)
+        logging.info(
+            "startup real warmup %s by %s=%s (model_type=%s)",
+            "enabled" if enabled else "disabled",
+            STARTUP_REAL_WARMUP_ENV,
+            override,
+            model_type,
+        )
+        return enabled
+    return model_type in STARTUP_REAL_WARMUP_MODEL_TYPES
 
 
 def _setup_startup_warmup_health_gate(py_env_configs: PyEnvConfigs):
@@ -742,18 +773,36 @@ def _get_startup_real_warmup_max_len(py_env_configs: PyEnvConfigs):
         raise ValueError(
             f"model_args.max_seq_len should be positive, got {model_max_len}"
         )
-    logging.info(
-        "DSV4 startup real warmup max len = model max_seq_len = %d",
-        model_max_len,
-    )
-    return model_max_len
+    cap_raw = os.environ.get(STARTUP_REAL_WARMUP_MAX_TOKEN_LEN_ENV, "").strip()
+    if cap_raw:
+        cap = int(cap_raw)
+        if cap <= 0:
+            raise ValueError(
+                f"{STARTUP_REAL_WARMUP_MAX_TOKEN_LEN_ENV} should be positive, got {cap}"
+            )
+        max_len = min(model_max_len, cap)
+        logging.info(
+            "startup real warmup max len capped to %d "
+            "(model max_seq_len=%d, %s=%d)",
+            max_len,
+            model_max_len,
+            STARTUP_REAL_WARMUP_MAX_TOKEN_LEN_ENV,
+            cap,
+        )
+    else:
+        max_len = model_max_len
+        logging.info(
+            "startup real warmup max len = model max_seq_len = %d",
+            max_len,
+        )
+    return max_len
 
 
 def _get_startup_real_warmup_token_lens(py_env_configs: PyEnvConfigs):
     max_len = _get_startup_real_warmup_max_len(py_env_configs)
     token_lens = _get_startup_real_warmup_pow2_lens(max_len)
     logging.info(
-        "DSV4 startup real warmup uses fixed pow2 token lens through max_seq_len=%d: %s",
+        "startup real warmup uses fixed pow2 token lens through max_seq_len=%d: %s",
         max_len,
         token_lens,
     )
@@ -784,17 +833,17 @@ def _get_startup_real_warmup_grpc_addresses(py_env_configs: PyEnvConfigs):
     if world_size > 1:
         if resolve_trace:
             logging.warning(
-                "failed to resolve DSV4 startup real warmup grpc addrs from world info, "
+                "failed to resolve startup real warmup grpc addrs from world info, "
                 "trace=%s",
                 resolve_trace,
             )
         raise StartupRealWarmupAddressResolutionError(
-            "failed to resolve DSV4 startup real warmup grpc entry address "
+            "failed to resolve startup real warmup grpc entry address "
             "in multi-rank mode; refusing to fallback to local rpc_server_port"
         )
     if resolve_trace:
         logging.warning(
-            "failed to resolve DSV4 startup real warmup grpc addrs from world info, "
+            "failed to resolve startup real warmup grpc addrs from world info, "
             "fallback to local rpc_server_port, trace=%s",
             resolve_trace,
         )
@@ -888,7 +937,7 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
         else {}
     )
     logging.info(
-        "running DSV4 startup real warmup via backend grpc, addrs=%s, "
+        "running startup real warmup via backend grpc, addrs=%s, "
         "token_lens=%s, token_id=%d, max_new_tokens=%d, reserve_step=%d, timeout=%.1fs",
         addresses,
         token_lens,
@@ -945,7 +994,7 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
                 last_aux = None
                 chunk_count = 0
                 logging.info(
-                    "DSV4 startup grpc warmup request begin, "
+                    "startup grpc warmup request begin, "
                     "addr=%s, request_id=%d, target_token_len=%d, "
                     "request_token_len=%d, max_new_tokens=%d, reserve_step=%d",
                     addr,
@@ -961,7 +1010,7 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
                         last_aux = outputs.generate_outputs[0].aux_info
                 if last_aux is not None:
                     logging.info(
-                        "DSV4 startup grpc warmup request finished, addr=%s, request_id=%d, "
+                        "startup grpc warmup request finished, addr=%s, request_id=%d, "
                         "target_token_len=%d, request_token_len=%d, max_new_tokens=%d, "
                         "chunks=%d, input_len=%s, "
                         "reuse_len=%s, output_len=%s, cost=%.2fs",
@@ -978,7 +1027,7 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
                     )
                 else:
                     logging.info(
-                        "DSV4 startup grpc warmup request finished, addr=%s, request_id=%d, "
+                        "startup grpc warmup request finished, addr=%s, request_id=%d, "
                         "target_token_len=%d, request_token_len=%d, max_new_tokens=%d, "
                         "chunks=%d, aux_info=None, cost=%.2fs",
                         addr,
@@ -994,13 +1043,13 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
                 await client.close()
             except Exception:
                 logging.warning(
-                    "failed to close DSV4 startup grpc warmup client, addr=%s, trace=%s",
+                    "failed to close startup grpc warmup client, addr=%s, trace=%s",
                     addr,
                     traceback.format_exc(),
                 )
 
     logging.info(
-        "DSV4 startup grpc warmup finished, requests=%d, addrs=%d, token_lens=%d, cost=%.2fs",
+        "startup grpc warmup finished, requests=%d, addrs=%d, token_lens=%d, cost=%.2fs",
         total_requests,
         len(addresses),
         len(token_lens),
@@ -1017,13 +1066,13 @@ def _maybe_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
         return True
     except StartupRealWarmupAddressResolutionError:
         logging.error(
-            "DSV4 startup real warmup address resolution failed, trace: %s",
+            "startup real warmup address resolution failed, trace: %s",
             traceback.format_exc(),
         )
         raise
     except Exception:
         logging.error(
-            "DSV4 startup real warmup failed, trace: %s",
+            "startup real warmup failed, trace: %s",
             traceback.format_exc(),
         )
         # This warmup owns the startup health gate. Propagate the failure so
