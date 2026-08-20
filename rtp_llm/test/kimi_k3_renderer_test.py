@@ -283,6 +283,60 @@ class KimiK3RendererTest(unittest.TestCase):
         self.assertEqual(len(tags), 1)
         self.assertIn('tool="get_weather"', tags[0]["begin"])
 
+    def test_global_and_multiple_dynamic_tools_share_one_constraint(self) -> None:
+        nested_tool = self._weather_tool("nested_lookup")
+        nested_tool["function"]["strict"] = False
+        nested_tool["function"]["parameters"] = {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                    "additionalProperties": False,
+                }
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        }
+        request = ChatCompletionRequest.model_validate(
+            {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "",
+                        "tools": [nested_tool],
+                    },
+                    {"role": "user", "content": "Weather?"},
+                    {
+                        "role": "system",
+                        "content": None,
+                        "tools": [self._weather_tool("clock")],
+                    },
+                ],
+                "tools": [self._weather_tool()],
+                "tool_choice": "required",
+                "thinking": {"type": "disabled"},
+            }
+        )
+        renderer = KimiK3Renderer.__new__(KimiK3Renderer)
+        config = GenerateConfig()
+
+        renderer.apply_chat_completion_constraints(request, config)
+
+        tags = json.loads(config.structural_tag)["format"]["elements"][1]["elements"][
+            1
+        ]["tags"]
+        self.assertEqual(
+            [tag["begin"].split('tool="', 1)[1].split('"', 1)[0] for tag in tags],
+            ["get_weather", "nested_lookup", "clock"],
+        )
+        nested_arguments = tags[1]["content"]["elements"][2]
+        self.assertEqual(nested_arguments["style"], "kimi_k3_xml")
+        self.assertEqual(
+            nested_arguments["json_schema"], nested_tool["function"]["parameters"]
+        )
+
     def test_auto_tool_choice_uses_optional_parallel_tools(self) -> None:
         request = ChatCompletionRequest.model_validate(
             {
@@ -389,6 +443,50 @@ class KimiK3RendererTest(unittest.TestCase):
             renderer.tokenizer.encoded,
             (KimiK3Renderer._THINK_TO_RESPONSE, False),
         )
+        response = json.loads(config.structural_tag)["format"]["elements"][0]
+        self.assertEqual(response["content"]["type"], "json_schema")
+        self.assertEqual(response["content"]["json_schema"], {"type": "object"})
+
+    def test_json_schema_is_applied_after_max_reasoning(self) -> None:
+        class Tokenizer:
+            def encode(self, text: str, add_special_tokens: bool) -> list[int]:
+                self.encoded = (text, add_special_tokens)
+                return [101, 102, 103]
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "city": {"type": "string"},
+                "temperature": {"type": "number"},
+            },
+            "required": ["city", "temperature"],
+            "additionalProperties": False,
+        }
+        request = ChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "Answer in JSON."}],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "weather",
+                        "strict": True,
+                        "schema": schema,
+                    },
+                },
+                "reasoning_effort": "max",
+            }
+        )
+        renderer = KimiK3Renderer.__new__(KimiK3Renderer)
+        renderer.tokenizer = Tokenizer()
+        config = GenerateConfig(json_schema=json.dumps(schema))
+
+        renderer.apply_chat_completion_constraints(request, config)
+
+        self.assertTrue(config.in_think_mode)
+        self.assertEqual(config.end_think_token_ids, [101, 102, 103])
+        response = json.loads(config.structural_tag)["format"]["elements"][0]
+        self.assertEqual(response["content"]["type"], "json_schema")
+        self.assertEqual(response["content"]["json_schema"], schema)
 
     def test_omitted_thinking_enables_forced_tool_constraint(self) -> None:
         class Tokenizer:
@@ -527,6 +625,30 @@ class KimiK3RendererTest(unittest.TestCase):
         self.assertIsNotNone(config.structural_tag)
         response = json.loads(config.structural_tag)["format"]["elements"][0]
         self.assertEqual(response["content"]["type"], "any_text")
+
+    def test_required_tool_supersedes_response_format_after_max_reasoning(self) -> None:
+        renderer = KimiK3Renderer.__new__(KimiK3Renderer)
+        renderer.tokenizer = Mock()
+        renderer.tokenizer.encode.return_value = [101, 102, 103]
+        request = ChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "Weather?"}],
+                "tools": [self._weather_tool()],
+                "tool_choice": "required",
+                "response_format": {"type": "json_object"},
+                "reasoning_effort": "max",
+            }
+        )
+        config = GenerateConfig(json_schema='{"type":"object"}')
+
+        renderer.apply_chat_completion_constraints(request, config)
+
+        self.assertTrue(config.in_think_mode)
+        self.assertEqual(config.end_think_token_ids, [101, 102, 103])
+        elements = json.loads(config.structural_tag)["format"]["elements"]
+        self.assertEqual(elements[0]["content"]["type"], "any_text")
+        self.assertEqual(elements[1]["type"], "sequence")
+        self.assertTrue(elements[1]["elements"][1]["at_least_one"])
 
     def test_pending_generation_channel_is_excluded_from_usage(self) -> None:
         class Tokenizer:

@@ -115,6 +115,27 @@ class KvvRequestValidationTest(unittest.TestCase):
         request = _request([{"role": "system", "content": "", "tools": [tool]}])
         self.assertIs(request.messages[0].tools[0]["function"]["strict"], False)
 
+    def test_dynamic_tool_parameters_and_strict_types_are_validated(self):
+        invalid_functions = [
+            {"name": "bad_parameters", "parameters": []},
+            {
+                "name": "bad_strict",
+                "parameters": {"type": "object"},
+                "strict": "false",
+            },
+        ]
+        for function in invalid_functions:
+            with self.subTest(function=function), self.assertRaises(ValidationError):
+                _request(
+                    [
+                        {
+                            "role": "system",
+                            "content": "",
+                            "tools": [{"type": "function", "function": function}],
+                        }
+                    ]
+                )
+
     def test_dynamic_tools_require_system_role_and_empty_content(self):
         bad_messages = [
             [{"role": "user", "content": "", "tools": [_tool()]}],
@@ -199,8 +220,33 @@ class KvvRequestValidationTest(unittest.TestCase):
         )
         self.assertEqual(request.messages[0].tool_call_id, "call_1")
 
+    def test_tool_choice_matches_kvv_empty_tools_contract(self):
+        for tool_choice in ("none", "auto"):
+            with self.subTest(tool_choice=tool_choice):
+                request = _request(
+                    [{"role": "user", "content": "hello"}],
+                    tool_choice=tool_choice,
+                )
+                self.assertEqual(request.tool_choice, tool_choice)
+
+        for tools in (None, []):
+            with self.subTest(tools=tools), self.assertRaises(ValidationError):
+                _request(
+                    [{"role": "user", "content": "hello"}],
+                    tools=tools,
+                    tool_choice="required",
+                )
+
+        with self.assertRaises(ValidationError):
+            _request(
+                [{"role": "user", "content": "hello"}],
+                tools=[_tool()],
+                tool_choice="bogus",
+            )
+
     def test_json_schema_requires_name_schema_and_strict_boolean(self):
         invalid_formats = [
+            {"type": "bogus"},
             {"type": "json_schema"},
             {
                 "type": "json_schema",
