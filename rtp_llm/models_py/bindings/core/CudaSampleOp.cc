@@ -44,14 +44,13 @@ void checkRejectionSamplingTensor(const torch::Tensor& tensor, const char* name,
 }
 
 void checkSameDevice(const torch::Tensor& tensor, const char* name, const c10::Device& device) {
-    RTP_LLM_CHECK_WITH_INFO(tensor.device() == device, "%s must be on the same device as draft_probs_d", name);
+    RTP_LLM_CHECK_WITH_INFO(tensor.device() == device, "%s must be on the same device as the sampling inputs", name);
 }
 
 RejectionSamplingLaunchConfig validateRejectionSamplingParams(const RejectionSamplingParams& params) {
-    checkRejectionSamplingTensor(params.draft_probs_d, "draft_probs_d", torch::kFloat32, 3);
-    const auto device = params.draft_probs_d.device();
-
     checkRejectionSamplingTensor(params.draft_token_ids_d, "draft_token_ids_d", torch::kInt32, 2);
+    const auto device = params.draft_token_ids_d.device();
+
     checkRejectionSamplingTensor(params.uniform_samples_d, "uniform_samples_d", torch::kFloat32, 2);
     checkRejectionSamplingTensor(params.target_probs_d, "target_probs_d", torch::kFloat32, 3);
     checkRejectionSamplingTensor(params.target_token_ids_d, "target_token_ids_d", torch::kInt32, 2);
@@ -59,6 +58,10 @@ RejectionSamplingLaunchConfig validateRejectionSamplingParams(const RejectionSam
     checkRejectionSamplingTensor(params.output_accepted_token_num_d, "output_accepted_token_num_d", torch::kInt32, 1);
     checkRejectionSamplingTensor(params.do_sample_d, "do_sample_d", torch::kBool, 1);
 
+    if (!params.draft_probs_point_mass) {
+        checkRejectionSamplingTensor(params.draft_probs_d, "draft_probs_d", torch::kFloat32, 3);
+        checkSameDevice(params.draft_probs_d, "draft_probs_d", device);
+    }
     checkSameDevice(params.draft_token_ids_d, "draft_token_ids_d", device);
     checkSameDevice(params.uniform_samples_d, "uniform_samples_d", device);
     checkSameDevice(params.target_probs_d, "target_probs_d", device);
@@ -67,9 +70,9 @@ RejectionSamplingLaunchConfig validateRejectionSamplingParams(const RejectionSam
     checkSameDevice(params.output_accepted_token_num_d, "output_accepted_token_num_d", device);
     checkSameDevice(params.do_sample_d, "do_sample_d", device);
 
-    const int64_t batch_size             = params.draft_probs_d.size(0);
-    const int64_t num_speculative_tokens = params.draft_probs_d.size(1);
-    const int64_t target_vocab_size      = params.draft_probs_d.size(2);
+    const int64_t batch_size             = params.draft_token_ids_d.size(0);
+    const int64_t num_speculative_tokens = params.draft_token_ids_d.size(1);
+    const int64_t target_vocab_size      = params.target_probs_d.size(2);
     const int64_t target_token_stride    = params.target_token_ids_d.size(1);
 
     RTP_LLM_CHECK_WITH_INFO(target_vocab_size > 0, "target_vocab_size must be positive");
@@ -82,9 +85,13 @@ RejectionSamplingLaunchConfig validateRejectionSamplingParams(const RejectionSam
 
     const int64_t target_token_rows = batch_size * (num_speculative_tokens + 1);
 
-    RTP_LLM_CHECK_WITH_INFO(params.draft_token_ids_d.size(0) == batch_size, "draft_token_ids_d shape[0] mismatch");
-    RTP_LLM_CHECK_WITH_INFO(params.draft_token_ids_d.size(1) == num_speculative_tokens,
-                            "draft_token_ids_d shape[1] mismatch");
+    if (!params.draft_probs_point_mass) {
+        RTP_LLM_CHECK_WITH_INFO(params.draft_probs_d.size(0) == batch_size, "draft_probs_d shape[0] mismatch");
+        RTP_LLM_CHECK_WITH_INFO(params.draft_probs_d.size(1) == num_speculative_tokens,
+                                "draft_probs_d shape[1] mismatch");
+        RTP_LLM_CHECK_WITH_INFO(params.draft_probs_d.size(2) == target_vocab_size,
+                                "draft_probs_d shape[2] mismatch");
+    }
     RTP_LLM_CHECK_WITH_INFO(params.uniform_samples_d.size(0) == batch_size, "uniform_samples_d shape[0] mismatch");
     RTP_LLM_CHECK_WITH_INFO(params.uniform_samples_d.size(1) == num_speculative_tokens + 1,
                             "uniform_samples_d shape[1] mismatch");
@@ -465,7 +472,8 @@ void rejectionSampling(const RejectionSamplingParams& params) {
     auto config = validateRejectionSamplingParams(params);
     auto stream = at::cuda::getCurrentCUDAStream().stream();
 
-    check_cuda_value(invokeRejectionSampling(params.draft_probs_d.data_ptr<float>(),
+    check_cuda_value(invokeRejectionSampling(params.draft_probs_point_mass ? nullptr :
+                                                                            params.draft_probs_d.data_ptr<float>(),
                                              params.draft_token_ids_d.data_ptr<int32_t>(),
                                              params.uniform_samples_d.data_ptr<float>(),
                                              params.target_probs_d.data_ptr<float>(),
@@ -477,7 +485,8 @@ void rejectionSampling(const RejectionSamplingParams& params) {
                                              config.batch_size,
                                              config.num_speculative_tokens,
                                              config.target_vocab_size,
-                                             stream));
+                                             stream,
+                                             params.draft_probs_point_mass));
 }
 
 void mappingDraft2Target(const MappingDraft2TargetParams& params) {
@@ -820,7 +829,8 @@ void rejectionSampling(const RejectionSamplingParams& params) {
     auto config = validateRejectionSamplingParams(params);
     auto stream = at::hip::getCurrentHIPStream().stream();
 
-    hipError_t err = ::invokeRejectionSampling(params.draft_probs_d.data_ptr<float>(),
+    hipError_t err = ::invokeRejectionSampling(params.draft_probs_point_mass ? nullptr :
+                                                                                params.draft_probs_d.data_ptr<float>(),
                                                params.draft_token_ids_d.data_ptr<int32_t>(),
                                                params.uniform_samples_d.data_ptr<float>(),
                                                params.target_probs_d.data_ptr<float>(),
@@ -832,7 +842,8 @@ void rejectionSampling(const RejectionSamplingParams& params) {
                                                config.batch_size,
                                                config.num_speculative_tokens,
                                                config.target_vocab_size,
-                                               stream);
+                                               stream,
+                                               params.draft_probs_point_mass);
     RTP_LLM_CHECK_WITH_INFO(err == hipSuccess, "invokeRejectionSampling failed: %s", hipGetErrorString(err));
 }
 

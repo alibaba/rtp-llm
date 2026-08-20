@@ -371,6 +371,30 @@ TEST_F(LinearKVCacheGroupTest, MallocBackfillsExistingNullReadSlot) {
     EXPECT_EQ(block_pool->freeBlocksNum(), free_before);
 }
 
+TEST_F(LinearKVCacheGroupTest, MallocDoesNotBackfillHistoricalHolesBeforeReusedCheckpoint) {
+    auto block_pool = createBlockPool();
+    ASSERT_TRUE(block_pool->init());
+
+    auto               spec = makeTestLinearSpec(/*seq_size_per_block=*/4);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/1);
+    ASSERT_TRUE(group.init());
+
+    auto checkpoint = block_pool->malloc(1);
+    ASSERT_EQ(checkpoint.size(), 1u);
+    BlockIds blocks;
+    blocks.assign(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, checkpoint[0]});
+    const size_t free_before = block_pool->freeBlocksNum();
+
+    ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/16, /*enable_reuse_cache=*/true));
+
+    ASSERT_EQ(blocks.blocksNum(), 4u);
+    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[0]));
+    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[1]));
+    EXPECT_EQ(blocks.blocks()[2], checkpoint[0]);
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[3]));
+    EXPECT_EQ(block_pool->freeBlocksNum(), free_before - 1);
+}
+
 TEST_F(LinearKVCacheGroupTest, MallocMaterializesCausalConvReadSlotAtBoundaries) {
     const std::vector<int> seq_lens = {4, 5, 8, 9};
 

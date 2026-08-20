@@ -115,6 +115,17 @@ py_test(
     },
 )
 
+py_test(
+    name = "test_flash_attn_3_graph_geometry",
+    srcs = ["test_flash_attn_3.py"],
+    main = "test_flash_attn_3.py",
+    deps = py_test_deps,
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
+)
+
 # FlashInfer TRT-LLM FMHA v2 tests
 py_test(
     name = "test_trtllm_fmha_v2_paged_prefill_sm90",

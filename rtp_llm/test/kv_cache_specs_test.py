@@ -9,7 +9,7 @@ from rtp_llm.models.qwen3_next.qwen3_next import Qwen3Next, Qwen35Moe
 from rtp_llm.models.qwen3_next.qwen3_next_mtp import Qwen3NextMTP
 from rtp_llm.models.qwen3_vl import QWen3_VL
 from rtp_llm.models.qwen_v2 import QwenV2MTP
-from rtp_llm.ops import HybridAttentionType, KVCacheSpecDesc, KVCacheSpecType
+from rtp_llm.ops import DataType, HybridAttentionType, KVCacheSpecDesc, KVCacheSpecType
 
 
 class HybridKVCacheSpecTest(TestCase):
@@ -109,6 +109,50 @@ class HybridKVCacheSpecTest(TestCase):
         Qwen35Moe._parse_rope_config({"rope_parameters": rope_parameters}, config)
 
         self.assertTrue(config.attn_config.rope_config.mrope_interleaved)
+
+    def test_qwen35_uses_checkpoint_ssm_state_dtype(self):
+        config = ModelConfig()
+        Qwen35Moe._parse_linear_attention_config(
+            {
+                "linear_conv_kernel_dim": 4,
+                "linear_key_head_dim": 128,
+                "linear_num_key_heads": 16,
+                "linear_num_value_heads": 48,
+                "linear_value_head_dim": 128,
+                "mamba_ssm_dtype": "float32",
+            },
+            config,
+        )
+
+        self.assertEqual(
+            config.linear_attention_config.ssm_state_dtype, DataType.TYPE_FP32
+        )
+
+    def test_qwen35_uses_independent_hybrid_cache_pools(self):
+        config = ModelConfig()
+        config.num_layers = 8
+
+        Qwen35Moe._parse_hybrid_attention_config(
+            {"full_attention_interval": 4}, config
+        )
+
+        self.assertTrue(config.hybrid_attention_config.enable_hybrid_attention)
+        self.assertTrue(
+            config.hybrid_attention_config.enable_independent_kv_cache_pools
+        )
+        self.assertEqual(
+            config.hybrid_attention_config.hybrid_attention_types,
+            [
+                HybridAttentionType.LINEAR,
+                HybridAttentionType.LINEAR,
+                HybridAttentionType.LINEAR,
+                HybridAttentionType.NONE,
+                HybridAttentionType.LINEAR,
+                HybridAttentionType.LINEAR,
+                HybridAttentionType.LINEAR,
+                HybridAttentionType.NONE,
+            ],
+        )
 
     def test_qwen35_rejects_non_interleaved_mrope(self):
         config = ModelConfig()

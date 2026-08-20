@@ -1450,6 +1450,102 @@ TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBloc
     EXPECT_EQ(manager->freeBlocksNum(), free_before);
 }
 
+TEST_F(KVCacheManagerTest, HybridAdmissionPreviewChargesOnlyMissingHotPrefixBlocks) {
+    auto manager_config =
+        makeProductionDSV4Config(/*full_block_num=*/8, /*max_concurrency=*/4, /*hca_state_pool_blocks=*/12);
+    auto manager = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
+    ASSERT_TRUE(manager->init());
+
+    const int spb        = static_cast<int>(manager_config.seq_size_per_block);
+    const int seq_len    = 4 * spb;
+    auto      makeTokens = [&]() {
+        auto gi             = std::make_shared<GenerateInput>();
+        gi->input_ids       = torch::arange(0, seq_len, torch::kInt32);
+        gi->generate_config = std::make_shared<GenerateConfig>();
+        auto tokens         = std::make_shared<CompleteTokenIds>(1, 1, seq_len + spb, spb);
+        tokens->init(gi);
+        tokens->setSeqLength(seq_len);
+        return tokens;
+    };
+
+    // Materialize one completed prefix in every reusable hybrid cache group.
+    auto       seed_resource = makeDSV4BatchResource(manager_config);
+    auto       seed_tokens   = makeTokens();
+    MallocInfo seed_malloc{seed_resource, seed_tokens};
+    seed_malloc.reuse_cache         = true;
+    seed_malloc.enable_device_cache = false;
+    ASSERT_TRUE(manager->malloc(seed_malloc).success);
+    manager->insertIntoCache(InsertInfo{seed_resource, seed_tokens, /*is_resident=*/false});
+    manager->free(FreeInfo{seed_resource, seed_tokens});
+
+    auto      hot_resource = makeDSV4BatchResource(manager_config);
+    auto      hot_tokens   = makeTokens();
+    const int no_hit_need  = manager->estimatePeakNeedBlocks(hot_resource,
+                                                            seq_len,
+                                                            seq_len,
+                                                            /*remaining_tokens=*/0,
+                                                            /*reserve_step=*/0,
+                                                            /*enable_reuse_cache=*/true,
+                                                            /*target_batch_size=*/1);
+    manager->prepareCacheKeys(hot_resource, hot_tokens);
+    ASSERT_TRUE(hot_resource->cacheKeysInitialized());
+    const int hot_need = manager->estimatePeakNeedBlocks(hot_resource,
+                                                         seq_len,
+                                                         seq_len,
+                                                         /*remaining_tokens=*/0,
+                                                         /*reserve_step=*/0,
+                                                         /*enable_reuse_cache=*/true,
+                                                         /*target_batch_size=*/1);
+    EXPECT_LT(hot_need, no_hit_need);
+
+    InitialKVCacheAllocation hot{seq_len,
+                                 seq_len,
+                                 /*remaining_tokens=*/0,
+                                 /*reserve_step=*/0,
+                                 /*enable_reuse_cache=*/true,
+                                 /*enable_device_cache=*/true,
+                                 /*target_batch_size=*/1,
+                                 hot_resource};
+    InitialKVCacheAllocation cold = hot;
+    cold.batch_kv_cache_resource  = makeDSV4BatchResource(manager_config);
+
+    // Two cold four-block prefixes do not fit in the seven usable FULL-pool
+    // blocks. Two references to the cached prefix do fit because admission
+    // charges only the uncached active tail/state blocks.
+    EXPECT_FALSE(manager->canAdmitInitialBatch({cold, cold}));
+    EXPECT_TRUE(manager->canAdmitInitialBatch({hot, hot}));
+
+    // Admission is followed by sequential stream initialization. Pin both
+    // cache matches first, then consume the plans in order. The first tail
+    // allocation must not evict the second stream's prefix in between.
+    auto hot_resource_2 = makeDSV4BatchResource(manager_config);
+    auto hot_tokens_2   = makeTokens();
+    manager->prepareCacheKeys(hot_resource_2, hot_tokens_2);
+    auto reservation_1 = manager->reserveCacheForAdmission(hot_resource, /*enable_reuse_cache=*/true);
+    auto reservation_2 = manager->reserveCacheForAdmission(hot_resource_2, /*enable_reuse_cache=*/true);
+    ASSERT_NE(reservation_1, nullptr);
+    ASSERT_NE(reservation_2, nullptr);
+
+    MallocInfo hot_malloc_1{hot_resource, hot_tokens};
+    hot_malloc_1.reuse_cache           = true;
+    hot_malloc_1.enable_device_cache   = true;
+    hot_malloc_1.admission_reservation = std::move(reservation_1);
+    auto hot_result_1                  = manager->malloc(hot_malloc_1);
+    ASSERT_TRUE(hot_result_1.success);
+    EXPECT_GT(hot_result_1.reuse_len, 0);
+
+    MallocInfo hot_malloc_2{hot_resource_2, hot_tokens_2};
+    hot_malloc_2.reuse_cache           = true;
+    hot_malloc_2.enable_device_cache   = true;
+    hot_malloc_2.admission_reservation = std::move(reservation_2);
+    auto hot_result_2                  = manager->malloc(hot_malloc_2);
+    ASSERT_TRUE(hot_result_2.success);
+    EXPECT_EQ(hot_result_2.reuse_len, hot_result_1.reuse_len);
+
+    manager->free(FreeInfo{hot_resource, hot_tokens});
+    manager->free(FreeInfo{hot_resource_2, hot_tokens_2});
+}
+
 TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeContinuation) {
     // This test simulates full DSV4 inference including SWA group eviction.
     //

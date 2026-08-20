@@ -279,7 +279,17 @@ void registerPyOpDefs(pybind11::module& m) {
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")
         .def(pybind11::init<torch::Tensor>(), pybind11::arg("hidden_states"), "Initialize with hidden states tensor")
-        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor");
+        .def(pybind11::init<torch::Tensor, torch::Tensor>(),
+             pybind11::arg("hidden_states"),
+             pybind11::arg("auxiliary_hidden_states"),
+             "Initialize with hidden and auxiliary hidden states")
+        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
+        .def_readwrite("auxiliary_hidden_states",
+                       &PyModelOutputs::auxiliary_hidden_states,
+                       "Optional speculative-runtime feature output tensor")
+        .def_readwrite("speculative_token_ids",
+                       &PyModelOutputs::speculative_token_ids,
+                       "Optional graph-produced speculative token ids");
 }
 
 }  // namespace torch_ext

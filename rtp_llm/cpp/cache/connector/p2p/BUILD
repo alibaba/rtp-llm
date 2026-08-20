@@ -111,6 +111,7 @@ cc_library(
     hdrs = [
         "P2PConnectorAsyncContext.h",
         "P2PConnectorConfig.h",
+        "DecodeTargetWriteLease.h",
         "P2PConnectorScheduler.h",
         "P2PConnectorSchedulerPrefill.h",
         "P2PConnectorSchedulerDecode.h",

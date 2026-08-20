@@ -3,12 +3,13 @@
 
 import contextlib
 import functools
+import hashlib
 import logging
 import os
 import sys
 from enum import Enum
 from functools import lru_cache
-from typing import Any, Callable, Dict, Literal, Optional, Tuple
+from typing import Any, Callable, Literal, Optional
 
 import torch
 import triton
@@ -85,6 +86,84 @@ def assert_close(prefix, ref, tri, ratio, warning=False, err_atol=1e-6):
 
 
 SUPPRESS_LEVEL = int(os.getenv("GDN_RECOMPUTE_SUPPRESS_LEVEL", "0"))
+_CUDA_GRAPH_CACHE_HOLDS_ATTR = "_rtp_fla_cuda_graph_cache_holds"
+
+
+def _retain_tensor_cache_result_for_cuda_graph(
+    args: tuple[Any, ...], kwargs: dict[str, Any], result: Any
+) -> None:
+    """Tie cached CUDA metadata to the graph's stable input tensor.
+
+    FLA index helpers are normally backed by a four-entry process-wide LRU.
+    During capture they often hit a result allocated by the eager warmup, so
+    that result is an external graph input rather than graph-pool storage.  If
+    later graph keys evict it, the captured Triton kernels retain a dangling
+    pointer.  Pin the result on the CUDA input object already owned by the graph
+    instance; its lifetime is therefore exact, with no global/unbounded cache.
+    """
+    if not torch.cuda.is_available() or not torch.cuda.is_current_stream_capturing():
+        return
+
+    owner = next(
+        (
+            value
+            for value in (*args, *kwargs.values())
+            if isinstance(value, torch.Tensor) and value.is_cuda
+        ),
+        None,
+    )
+    if owner is None:
+        return
+    holds = getattr(owner, _CUDA_GRAPH_CACHE_HOLDS_ATTR, None)
+    if holds is None:
+        holds = []
+        setattr(owner, _CUDA_GRAPH_CACHE_HOLDS_ATTR, holds)
+    if not any(held is result for held in holds):
+        holds.append(result)
+
+
+def _cpu_tensor_fingerprint(value: torch.Tensor) -> Optional[str]:
+    """Fingerprint small CPU metadata that may be backed by external memory.
+
+    PyTorch's version counter does not change when a byte buffer is mutated by
+    its C++ owner.  FLA index helpers receive exactly such reusable
+    ``cu_seqlens`` views, so object identity alone is not a valid cache key.
+    """
+    if value.device.type != "cpu":
+        return None
+    if value.numel() == 0:
+        return "empty"
+    data = value.detach().contiguous().view(torch.uint8).numpy().tobytes()
+    return hashlib.blake2b(data, digest_size=8).hexdigest()
+
+
+def _tensor_version(value: torch.Tensor) -> Optional[int]:
+    # Inference tensors deliberately have no version counter.  CPU metadata
+    # remains mutation-safe because its content fingerprint is in this key.
+    try:
+        return value._version
+    except RuntimeError:
+        return None
+
+
+def _tensor_cache_key(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return (
+            "tensor",
+            id(value),
+            value.data_ptr() if value.numel() else 0,
+            tuple(value.shape),
+            tuple(value.stride()),
+            str(value.dtype),
+            str(value.device),
+            _tensor_version(value),
+            _cpu_tensor_fingerprint(value),
+        )
+    try:
+        hash(value)
+        return ("value", value)
+    except TypeError:
+        return ("object", id(value))
 
 
 def tensor_cache(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
@@ -100,30 +179,44 @@ def tensor_cache(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]
             A wrapped version of the input function with single-entry caching.
     """
 
-    cache_entries: Tuple[Optional[Tuple], Optional[Dict], Any] = []
+    # Keep the original arguments alive with the derived key.  Storing only
+    # id/data_ptr permits a false hit after Python and CUDA allocators recycle
+    # both values for a later tensor, which can feed stale device indices to a
+    # kernel.  Four entries retain the legacy cache's bounded lifetime.
+    cache_entries: list[tuple[tuple[Any, ...], dict[str, Any], Any, Any]] = []
     cache_size = 4
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         nonlocal cache_entries, cache_size
+        cache_key = (
+            tuple(_tensor_cache_key(arg) for arg in args),
+            tuple(
+                sorted(
+                    (key, _tensor_cache_key(value))
+                    for key, value in kwargs.items()
+                )
+            ),
+        )
         for i, entry in enumerate(cache_entries):
-            last_args, last_kwargs, last_result = entry
-            if len(args) == len(last_args) and len(kwargs) == len(last_kwargs):
-                if all(a is b for a, b in zip(args, last_args)) and all(
-                    k in last_kwargs and v is last_kwargs[k] for k, v in kwargs.items()
-                ):
-                    cache_entries = (
-                        cache_entries[:i]
-                        + cache_entries[i + 1 :]
-                        + [(args, kwargs, last_result)]
-                    )
-                    return last_result
+            last_args, last_kwargs, last_key, last_result = entry
+            if cache_key == last_key:
+                cache_entries = (
+                    cache_entries[:i]
+                    + cache_entries[i + 1 :]
+                    + [(last_args, last_kwargs, last_key, last_result)]
+                )
+                _retain_tensor_cache_result_for_cuda_graph(
+                    args, kwargs, last_result
+                )
+                return last_result
 
         result = fn(*args, **kwargs)
+        _retain_tensor_cache_result_for_cuda_graph(args, kwargs, result)
 
         if len(cache_entries) >= cache_size:
             cache_entries = cache_entries[1:]
-        cache_entries.append((args, kwargs, result))
+        cache_entries.append((args, kwargs, cache_key, result))
         return result
 
     return wrapper

@@ -145,6 +145,10 @@ public:
 
     virtual void updateOutput(const StreamUpdateInfo& update_info) = 0;
     void         update(const StreamUpdateInfo& update_info);
+    // Apply an update while the caller already owns the stream mutex.  P/D
+    // decode-entrance uses this when completing an asynchronous cache load
+    // from moveToNext(); taking the mutex again would deadlock.
+    void         updateWithoutLock(const StreamUpdateInfo& update_info);
     void         specUpdate(const StreamSpecUpdateInfo& update_info);
     bool         updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
@@ -157,17 +161,21 @@ public:
     }
 
     // Only used in C++ world.
-    int                  reuseBlockSize() const;
-    void                 fakeInitKVBlock(size_t reserved_blocks = 0);
-    virtual absl::Status initKVBlock();
-    virtual absl::Status incrKVBlock();
-    virtual void         releaseResource();
-    int                  nextNeedBlockNums(int reserve_step) const;
-    int                  estimateInitialNeedBlocks() const;
-    int                  estimatePeakNeedBlocks(int remaining_tokens) const;
-    void                 setNeedReleaseResource(bool need_release_resource);
-    bool                 hasCacheKeys() const;
-    const CacheKeysType& cacheKeys(int32_t batch_id = 0) const;
+    int                      reuseBlockSize() const;
+    void                     fakeInitKVBlock(size_t reserved_blocks = 0);
+    virtual absl::Status     initKVBlock();
+    virtual absl::Status     incrKVBlock();
+    virtual void             releaseResource();
+    int                      nextNeedBlockNums(int reserve_step) const;
+    int                      estimateInitialNeedBlocks() const;
+    int                      estimatePeakNeedBlocks(int remaining_tokens) const;
+    void                     prepareCacheKeysForAdmission();
+    void                     reserveCacheForAdmission();
+    void                     releaseCacheAdmissionReservation();
+    InitialKVCacheAllocation initialKVCacheAllocation(int remaining_tokens = 0) const;
+    void                     setNeedReleaseResource(bool need_release_resource);
+    bool                     hasCacheKeys() const;
+    const CacheKeysType&     cacheKeys(int32_t batch_id = 0) const;
 
     std::shared_ptr<GenerateInput>   generateInput() const;
     std::shared_ptr<GenerateConfig>& generateConfig() const;
@@ -257,6 +265,8 @@ public:
     torch::Tensor              multimodalLocations() const;
 
     int64_t getTimeoutMs() const;
+    // Refresh timeout state for RPC wait loops that do not drive the scheduler.
+    void checkTimeout();
     void    recordWaitLatency();
     void    recordSchedulerEnqueueTime(int64_t time_us);
     void    recordCanRunTime();
@@ -458,6 +468,10 @@ public:
         contain_propose_token_ = contain_propose_token;
     }
 
+    bool getContainProposeToken() const {
+        return contain_propose_token_;
+    }
+
     void setMtpTokenIndex(int mtp_token_index) {
         mtp_token_index_ = mtp_token_index;
     }
@@ -519,7 +533,6 @@ public:
         return logits_processor_list_;
     }
 
-
     at::Generator getGenerator() {
         return generator_;
     }
@@ -564,7 +577,18 @@ public:
         uint64_t      epoch = 0;
         torch::Tensor accept_len_gpu;
         torch::Tensor accept_tokens_gpu;
+        // Newest committed token, prepared once for the whole batch when the
+        // accept result is published.  Keeping a per-stream view here avoids
+        // launching accept_len/index_select kernels for every stream while
+        // building the next speculative round.
+        torch::Tensor latest_token_gpu;
         torch::Tensor next_seq_len_gpu;
+        // Position tuple for the newest committed token in the next
+        // speculative round. For Qwen3Next MRoPE this is [1, 3]; ordinary
+        // rotary position ids use [1, 1]. It is published with accept_len so
+        // target-verify input construction never has to wait for host
+        // seqLength()/position bookkeeping.
+        torch::Tensor next_position_ids_gpu;
         torch::Tensor propose_tokens_gpu;
         // Main-thread mirrors used when DROP_BROAD_SYNC lets the next step run
         // before worker-side specUpdate has written sp_output_buffer fields.
@@ -605,7 +629,11 @@ public:
                                   torch::Tensor next_seq_len_gpu,
                                   torch::Tensor propose_tokens_gpu = torch::Tensor()) {
         MtpAsyncDeviceState state;
-        state.accept_len_gpu     = std::move(accept_len_gpu);
+        state.accept_len_gpu = std::move(accept_len_gpu);
+        if (state.accept_len_gpu.defined() && accept_tokens_gpu.defined()) {
+            auto latest_idx        = (state.accept_len_gpu.to(torch::kInt64) - 1).reshape({-1, 1});
+            state.latest_token_gpu = accept_tokens_gpu.gather(1, latest_idx).reshape({-1}).to(torch::kInt32);
+        }
         state.accept_tokens_gpu  = std::move(accept_tokens_gpu);
         state.next_seq_len_gpu   = std::move(next_seq_len_gpu);
         state.propose_tokens_gpu = std::move(propose_tokens_gpu);
@@ -617,8 +645,14 @@ public:
     const torch::Tensor& getAcceptTokensGpu() const {
         return mtp_async_state_.accept_tokens_gpu;
     }
+    const torch::Tensor& getLatestTokenGpu() const {
+        return mtp_async_state_.latest_token_gpu;
+    }
     const torch::Tensor& getNextSeqLenGpu() const {
         return mtp_async_state_.next_seq_len_gpu;
+    }
+    const torch::Tensor& getNextPositionIdsGpu() const {
+        return mtp_async_state_.next_position_ids_gpu;
     }
     const torch::Tensor& getProposeTokensGpu() const {
         return mtp_async_state_.propose_tokens_gpu;
@@ -780,8 +814,8 @@ protected:
     int64_t                               load_done_to_running_us_     = 0;
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
     std::shared_ptr<bool>                 is_context_stream_;
-    size_t                                iter_count_    = 0;
-    size_t                                sp_iter_count_ = 0;
+    size_t                                iter_count_           = 0;
+    size_t                                sp_iter_count_        = 0;
     size_t                                last_output_pos_      = 0;
     int                                   initial_reuse_length_ = 0;
     int                                   reuse_length_         = 0;

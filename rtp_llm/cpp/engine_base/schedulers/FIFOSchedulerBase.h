@@ -65,6 +65,8 @@ protected:
     void   cancelStreams(std::list<GenerateStreamPtr>& streams);
     size_t evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
     void   evaluateWaitingStreams(std::list<GenerateStreamPtr>& waiting_streams);
+    bool   canAdmitInitialKVBatch(const std::list<GenerateStreamPtr>& admitted_streams,
+                                  const GenerateStreamPtr&            new_stream) const;
     void   addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
     size_t countInitedKVCacheStreams() const;
 

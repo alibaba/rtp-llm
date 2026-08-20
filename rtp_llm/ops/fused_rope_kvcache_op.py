@@ -19,15 +19,6 @@ def _get_fused_rope_kvcache():
 
     return fused_rope_kvcache
 
-# TODO: remove this compatibility probe after the CUDA 13 rtp_kernel artifact
-# is upgraded.  Older wheels expose the same tensor as ``cp_position_ids``;
-# current wheels call it ``position_ids``.
-_PREFILL_POSITION_IDS_ARG = (
-    "position_ids"
-    if "position_ids" in prefill_fused_rope_kvcache.__annotations__
-    else "cp_position_ids"
-)
-
 
 @dataclass
 class FusedRopeAttnParams:
@@ -51,16 +42,25 @@ class FusedRopeKVCachePrefillOpBase:
     def __init__(self, attn_configs: AttentionConfigs) -> None:
         self.attn_configs = attn_configs
 
+    def prepare_kv_cache_offset(
+        self, attn_inputs: PyAttentionInputs
+    ) -> Optional[torch.Tensor]:
+        """Build the device KV-offset table without preparing host scalars.
+
+        CUDA-graph replay only needs to refresh this table when the request's
+        page table changes.  Re-running :meth:`prepare` for that update would
+        also read ``input_lengths.max()`` and ``prefix_lengths.max()`` back to
+        the host even though those captured RoPE launch parameters are static.
+        Keep the replay update device-only while sharing the same conversion
+        used by the normal preparation path.
+        """
+        block_ids = attn_inputs.kv_cache_kernel_block_id_device
+        if block_ids is None or block_ids.numel() == 0:
+            return None
+        return _get_fused_rope_kvcache().convert_offset_to_block_array(block_ids)
+
     def prepare(self, attn_inputs: PyAttentionInputs) -> FusedRopeAttnParams:
-        if (
-            attn_inputs.kv_cache_kernel_block_id_device is not None
-            and attn_inputs.kv_cache_kernel_block_id_device.numel() > 0
-        ):
-            kv_cache_offset = _get_fused_rope_kvcache().convert_offset_to_block_array(
-                attn_inputs.kv_cache_kernel_block_id_device
-            )
-        else:
-            kv_cache_offset = None
+        kv_cache_offset = self.prepare_kv_cache_offset(attn_inputs)
         kv_cache_offset_h = None  # not used
 
         position_ids = attn_inputs.combo_position_ids
@@ -124,7 +124,7 @@ class FusedRopeKVCachePrefillOpBase:
                 rope_cache.data if check_rope_cache(rope_config, rope_cache) else None
             ),
             padding_offset=params.padding_offset,
-            **{_PREFILL_POSITION_IDS_ARG: params.position_ids},
+            position_ids=params.position_ids,
             use_logn_attn=self.attn_configs.use_logn_attn,
             rope_style=rope_config.style,
             rope_dim=rope_config.dim,

@@ -49,10 +49,14 @@ void StoreWaitContextChecker::checkOnce() {
 
         // check event readiness
         if (!context.event || context.event->query()) {
+            bool stored = true;
             if (computed_buffers_) {
-                computed_buffers_->addBuffer(context.request_id, context.layer_cache_buffer, context.deadline_ms);
+                stored = computed_buffers_->addBuffer(
+                             context.request_id, context.layer_cache_buffer, context.deadline_ms)
+                         != nullptr;
             }
             if (context.collector) {
+                context.collector->success                 = stored;
                 context.collector->store_wait_done_time_us = currentTimeUs() - context.collector->start_time_us;
             }
             if (metrics_reporter_ && context.collector) {

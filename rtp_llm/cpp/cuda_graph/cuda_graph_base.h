@@ -21,7 +21,11 @@ struct GraphParams {
     bool             enable_cuda_graph            = false;
     bool             enable_cuda_graph_debug_mode = false;
     bool             is_prefill_cuda_graph_mode   = false;
+    // Generative prompt prefill mutates KV and recurrent state. It therefore
+    // uses exact token-count graph keys instead of embedding-style padding.
+    bool             is_generative_prefill        = false;
     bool             is_target_verify             = false;
+    DSparkCallPhase  dspark_call_phase            = DSparkCallPhase::NONE;
     int              max_seq_len                  = 0;
     int              tokens_per_block             = 0;  // physical kv block size
     int              kernel_tokens_per_block      = 0;  // must be explicitly configured
@@ -33,6 +37,9 @@ struct GraphParams {
     std::vector<int> prefill_capture_seq_lens;
     std::vector<int> decode_capture_batch_sizes;
     int64_t          hc_mult = 1;
+    // Input hidden width is independent of the model output hidden width for
+    // DSpARK, which concatenates several target auxiliary-layer features.
+    std::size_t      input_hidden_size = 0;
     // Golden cache-group identity for CUDA graph capture/replay. A one-group
     // topology keeps the direct AttentionInputs fast path; multiple groups
     // require an exact tag -> AttentionInputs mapping at replay time.
@@ -54,6 +61,13 @@ public:
     virtual void           setTokenTypeEmbedding(torch::Tensor token_type_embedding)    = 0;
     virtual void           setInputEmbeddingScalar(float input_embedding_scalar)        = 0;
     virtual bool           canRun(const PyModelInputs& inputs, CudaGraphState& state)   = 0;
+    // True only when every captured attention implementation explicitly
+    // promises that replay preparation consumes CUDA-resident metadata and
+    // never reads the host mirrors.  The conservative default keeps existing
+    // backends on the synchronized host-metadata path.
+    virtual bool           usesDeviceOnlyAttentionMetadata() const {
+        return false;
+    }
     virtual void           prepareAttentionInputs(const PyModelInputs& inputs,
                                                   CudaGraphState&      state,
                                                   bool                 skip_forward_event_sync = false) = 0;

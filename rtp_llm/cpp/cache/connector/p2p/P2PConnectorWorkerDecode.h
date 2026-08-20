@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/AsymmetricTpUtil.h"
+#include "rtp_llm/cpp/cache/connector/p2p/DecodeTargetWriteLease.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/IKVCacheReceiver.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <atomic>
@@ -13,6 +14,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace rtp_llm {
@@ -34,6 +36,12 @@ public:
 
     bool cancelRead(const std::string& unique_key);
 
+    // A decode allocation remains pinned until every receiver write that may
+    // still be in flight has stopped.  Rank 0 queries this state after an RPC
+    // timeout/cancel instead of guessing from the RPC return itself.
+    bool
+    queryLeaseStatus(const std::string& unique_key, bool& sealed, int& started_ops, int& finished_ops, bool& stopped);
+
 private:
     int calculateRecvPartitionCount(int remote_tp_size) const;
 
@@ -42,6 +50,7 @@ private:
         std::vector<std::string>                   partition_keys;
         std::vector<transfer::IKVCacheRecvTaskPtr> tasks;
         std::atomic<bool>                          cancelled{false};
+        std::shared_ptr<DecodeTargetWriteLease>    lease;
     };
 
     enum class ReadWaitOutcome {
@@ -74,6 +83,8 @@ private:
 
     void reportReadMetrics(int total_block_count, bool success, int64_t read_start_time_us) const;
 
+    void cleanupRecvTaskStore(const std::shared_ptr<ReadTaskGroup>& task_group, bool cancel_pending_tasks) const;
+
 private:
     P2PConnectorWorkerConfig             config_;
     std::shared_ptr<LayerBlockConverter> layer_block_converter_;
@@ -82,6 +93,20 @@ private:
 
     mutable std::mutex                                              read_tasks_mutex_;
     std::unordered_map<std::string, std::shared_ptr<ReadTaskGroup>> read_tasks_;
+    std::unordered_set<std::string>                                 building_read_keys_;
+    std::unordered_set<std::string>                                 pending_cancel_keys_;
+
+    struct LeaseMapEntry {
+        std::shared_ptr<ReadTaskGroup> task_group;
+        int                            finish_counted{0};
+        int64_t                        create_time_ms{0};
+    };
+
+    static constexpr int64_t kLeaseMapTtlMs = 600000;
+
+    void evictStaleLeases();
+    mutable std::mutex                             lease_map_mutex_;
+    std::unordered_map<std::string, LeaseMapEntry> lease_map_;
 };
 
 }  // namespace rtp_llm

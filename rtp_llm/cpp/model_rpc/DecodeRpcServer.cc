@@ -305,6 +305,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
             auto accept_len         = torch::ones({1}, cuda_i32);
             auto accept_tokens      = torch::zeros({1, static_cast<int64_t>(propose_step + 1)}, cuda_i32);
             accept_tokens[0][0]     = sp_output_buffer->tokens[0][0];
+            auto latest_token       = accept_tokens.narrow(1, 0, 1).reshape({1});
             propose_tokens_gpu[0]   = sp_output_buffer->tokens[0][1];
 
             auto next_seq_len = torch::ones({1}, cuda_i32);
@@ -325,6 +326,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                     .epoch                  = 0,
                     .accept_len_gpu         = std::move(accept_len),
                     .accept_tokens_gpu      = std::move(accept_tokens),
+                    .latest_token_gpu       = std::move(latest_token),
                     .next_seq_len_gpu       = std::move(next_seq_len),
                     .propose_tokens_gpu     = std::move(propose_tokens_gpu),
                     .last_hidden_states_gpu = sp_output_buffer->hidden_states,

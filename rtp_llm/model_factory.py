@@ -465,11 +465,21 @@ class ModelFactory:
                 f"dspark requires a positive gen_num_per_cycle, got {gamma}"
             )
 
+        # Production DSpARK uses BF16 LM-head and Markov weights. Keeping the
+        # draft head in FP32 prevents the graph-native fused kernel and doubles
+        # hot-path weight bandwidth; a target-model CLI default must not leak
+        # into this independent draft checkpoint contract.
+        propose_model_config.enable_fp32_lm_head = False
+
         noise_token_id = int(propose_model_config.dspark_noise_token_id)
-        if noise_token_id < 0 or noise_token_id >= propose_model_config.vocab_size:
+        input_vocab_size = int(
+            propose_model_config.input_vocab_size
+            or propose_model_config.vocab_size
+        )
+        if noise_token_id < 0 or noise_token_id >= input_vocab_size:
             raise ValueError(
-                f"invalid dspark_noise_token_id {noise_token_id} for vocab_size "
-                f"{propose_model_config.vocab_size}"
+                f"invalid dspark_noise_token_id {noise_token_id} for input_vocab_size "
+                f"{input_vocab_size}"
             )
 
         target_layer_ids = [
@@ -477,6 +487,11 @@ class ModelFactory:
         ]
         if not target_layer_ids:
             raise ValueError("dspark_target_layer_ids must not be empty")
+        if target_layer_ids != sorted(set(target_layer_ids)):
+            raise ValueError(
+                "dspark_target_layer_ids must be unique and ordered by target "
+                f"layer boundary, got {target_layer_ids}"
+            )
         invalid_layer_ids = [
             layer_id
             for layer_id in target_layer_ids
@@ -496,11 +511,13 @@ class ModelFactory:
         sp_config.sp_dspark_sample_from_anchor = bool(
             getattr(propose_model_config, "dspark_sample_from_anchor", True)
         )
-        # Both models carry the capture ids: the target uses them to capture
-        # and to size the shared MTP hidden buffer rows; the draft only needs
-        # them for the same row-width derivation (it never captures).
+        # Auxiliary extraction belongs exclusively to the target model.  The
+        # draft derives its input width from dspark_target_layer_ids when it
+        # builds Qwen3DSparkModel; setting capture_aux_hidden_layer_ids on the
+        # draft would make its own five-layer backbone try to capture target
+        # boundaries such as [7, 20, ...] during every proposal graph.
         model_config.capture_aux_hidden_layer_ids = target_layer_ids
-        propose_model_config.capture_aux_hidden_layer_ids = target_layer_ids
+        propose_model_config.capture_aux_hidden_layer_ids = None
         logging.info(
             "DSpARK fixed-width wiring: gamma=%d, noise_token_id=%d, "
             "target capture layer ids=%s, markov_rank=%d",

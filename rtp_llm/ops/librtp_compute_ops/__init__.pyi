@@ -377,6 +377,10 @@ class PyModelInputs:
     def multimodal_inputs(self, arg0: PyMultimodalInputs) -> None: ...
 
 class PyModelOutputs:
+    hidden_states: torch.Tensor
+    auxiliary_hidden_states: torch.Tensor | None
+    speculative_token_ids: torch.Tensor | None
+
     @typing.overload
     def __init__(self) -> None:
         """
@@ -388,6 +392,14 @@ class PyModelOutputs:
         """
         Initialize with hidden states tensor
         """
+
+    @typing.overload
+    def __init__(
+        self,
+        hidden_states: torch.Tensor,
+        auxiliary_hidden_states: torch.Tensor,
+    ) -> None:
+        """Initialize with hidden and auxiliary hidden states."""
 
     @property
     def hidden_states(self) -> torch.Tensor:

@@ -221,4 +221,57 @@ std::string P2PBroadcastClient::Result::errorMessage() const {
     return "";
 }
 
+P2PBroadcastClient::LeaseStatusResult P2PBroadcastClient::queryLeaseStatus(const std::string& unique_key,
+                                                                           int64_t poll_timeout_ms) {
+    LeaseStatusResult result;
+    const size_t      worker_num = tp_broadcast_manager_->workerNum();
+
+    std::vector<FunctionRequestPB> requests;
+    requests.reserve(worker_num);
+    for (size_t i = 0; i < worker_num; ++i) {
+        FunctionRequestPB request;
+        auto*             p2p_request = request.mutable_p2p_request();
+        p2p_request->set_unique_key(unique_key);
+        p2p_request->set_type(P2PConnectorBroadcastType::QUERY_LEASE_STATUS);
+        requests.push_back(std::move(request));
+    }
+
+    auto rpc_call = [](std::shared_ptr<RpcService::Stub>&    stub,
+                       std::shared_ptr<grpc::ClientContext>& client_context,
+                       const FunctionRequestPB&              request,
+                       grpc::CompletionQueue*                cq) {
+        return stub->AsyncExecuteFunction(client_context.get(), request, cq);
+    };
+    auto broadcast_result = tp_broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
+        requests, static_cast<int>(poll_timeout_ms), rpc_call);
+    if (!broadcast_result || !broadcast_result->waitDone(static_cast<int>(poll_timeout_ms))
+        || !broadcast_result->success()) {
+        RTP_LLM_LOG_WARNING("queryLeaseStatus failed, unique_key=%s", unique_key.c_str());
+        return result;
+    }
+
+    auto responses = broadcast_result->responses();
+    result.ranks.reserve(responses.size());
+    for (size_t rank = 0; rank < responses.size(); ++rank) {
+        const auto& resp = responses[rank];
+        LeaseStatusResult::RankStatus status;
+        if (resp.has_p2p_response() && resp.p2p_response().error_code() == ErrorCodePB::NONE_ERROR
+            && resp.p2p_response().has_lease_status()) {
+            const auto& lease_status = resp.p2p_response().lease_status();
+            status.valid             = true;
+            status.sealed            = lease_status.sealed();
+            status.started_ops       = lease_status.started_ops();
+            status.finished_ops      = lease_status.finished_ops();
+            status.stopped           = lease_status.stopped();
+        } else {
+            RTP_LLM_LOG_WARNING("queryLeaseStatus rank=%zu returned no valid status, unique_key=%s",
+                                rank,
+                                unique_key.c_str());
+        }
+        result.ranks.push_back(status);
+    }
+    result.success = true;
+    return result;
+}
+
 }  // namespace rtp_llm

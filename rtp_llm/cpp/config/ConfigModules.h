@@ -161,7 +161,9 @@ struct KVCacheConfig {
     int                                     linear_step                       = 1;  // for linear attention cache reuse
     // Fields merged from PyKvCacheConfig
     int         fp8_kv_cache              = 0;
-    std::string ssm_state_dtype           = "bf16";
+    // "auto" preserves a model-declared recurrent-state dtype.  Models
+    // without such a declaration keep LinearAttentionConfig's BF16 default.
+    std::string ssm_state_dtype           = "auto";
     int64_t     kv_cache_mem_mb           = -1;
     int         seq_size_per_block        = 64;
     int         kernel_seq_size_per_block = 0;
@@ -342,6 +344,12 @@ struct CacheStoreConfig {
     int     p2p_resource_store_timeout_check_interval_ms = 100;
     int64_t p2p_layer_cache_buffer_store_timeout_ms      = 100 * 1000;
     int64_t p2p_cancel_broadcast_timeout_ms              = 1000;
+    // Bound resource and transfer lifetimes independently of the business
+    // request timeout.  A client timeout may be an hour; KV ownership and a
+    // wedged transport must not pin decode capacity for that long.
+    int64_t p2p_prefill_resource_hold_ms = 300 * 1000;
+    int64_t p2p_max_transfer_deadline_ms = 300 * 1000;
+    int64_t p2p_cancelled_keys_ttl_ms    = 3600 * 1000;
     int     cache_store_tcp_anet_rpc_thread_num          = 3;
     int     cache_store_tcp_anet_rpc_queue_num           = 100;
 
@@ -409,7 +417,6 @@ struct RuntimeConfig {
     std::string              model_name = "";
     std::vector<std::string> worker_grpc_addrs;
     std::vector<std::string> worker_addrs;
-
     // Fields merged from PyDeviceResourceConfig
     std::string specify_gpu_arch = "";
 

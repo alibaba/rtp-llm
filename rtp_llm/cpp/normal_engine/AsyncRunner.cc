@@ -47,6 +47,13 @@ void AsyncRunner::sync(const torch::Stream& wait_stream) {
     event_.block(wait_stream);
 }
 
+void AsyncRunner::syncCpu() {
+    RTP_LLM_PROFILE_SCOPE("async_runner.sync_cpu");
+    std::unique_lock<std::mutex> lk(mutex_);
+    cv_done_.wait(lk, [this] { return task_done_; });
+    rethrowPendingExceptionIfAny(lk);
+}
+
 void AsyncRunner::rethrowPendingExceptionIfAny(std::unique_lock<std::mutex>& lk) {
     if (!pending_exception_) {
         return;

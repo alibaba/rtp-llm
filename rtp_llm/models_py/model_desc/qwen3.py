@@ -5,7 +5,10 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.model_desc.block_map import select_fmha_impl_for_layer
+from rtp_llm.models_py.model_desc.block_map import (
+    get_primary_attention_inputs,
+    select_fmha_impl_for_layer,
+)
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     CausalAttention,
@@ -127,7 +130,12 @@ class Qwen3Model(GptModelBase):
         hidden_states = inputs_embeds
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
-        self.begin_aux_hidden_capture()
+        capture_aux_hidden = bool(self._mtp_aux_capture_layer_ids)
+        if capture_aux_hidden:
+            attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
+            self.begin_aux_hidden_capture(
+                hidden_states, attention_inputs.is_target_verify
+            )
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             layer_fmha_impl = select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
             hidden_states = decoder_layer(
@@ -135,9 +143,13 @@ class Qwen3Model(GptModelBase):
                 layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
-            self.capture_aux_hidden(i, hidden_states)
-        self.finish_aux_hidden_capture()
+            if i in self._mtp_aux_capture_layer_id_set:
+                self.capture_aux_hidden(i, hidden_states)
+        if capture_aux_hidden:
+            self.finish_aux_hidden_capture()
         hidden_states = self.norm(hidden_states)
+        if self._mtp_target_hidden_states is not None:
+            return PyModelOutputs(hidden_states, self._mtp_target_hidden_states)
         return PyModelOutputs(hidden_states)
 
 

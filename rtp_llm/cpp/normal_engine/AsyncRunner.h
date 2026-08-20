@@ -21,6 +21,11 @@ public:
 
     void launch(std::function<void()> fn);
     void sync(const torch::Stream& wait_stream);
+    // Wait only for the worker thread to finish its current task. Unlike
+    // sync(), this does not make wait_stream depend on the worker CUDA event.
+    // It is used to bound an async pipeline after the next round's GPU work
+    // has already been enqueued, without serializing the two CUDA streams.
+    void syncCpu();
 
 private:
     void workerLoop();

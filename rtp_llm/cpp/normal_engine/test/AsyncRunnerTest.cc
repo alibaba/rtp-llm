@@ -155,6 +155,33 @@ TEST_F(AsyncRunnerTest, SyncWithoutLaunch) {
     runner.sync(currentStream());
 }
 
+TEST_F(AsyncRunnerTest, SyncCpuWaitsForWorkerWithoutCudaDependency) {
+    auto        stream = makeStream();
+    AsyncRunner runner(stream);
+
+    std::atomic<bool> worker_finished{false};
+    runner.launch([&worker_finished] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        worker_finished.store(true, std::memory_order_release);
+    });
+    runner.syncCpu();
+
+    EXPECT_TRUE(worker_finished.load(std::memory_order_acquire));
+}
+
+TEST_F(AsyncRunnerTest, SyncCpuRethrowsWorkerException) {
+    auto        stream = makeStream();
+    AsyncRunner runner(stream);
+
+    runner.launch([] { throw std::runtime_error("async cpu-only sync failure"); });
+    EXPECT_THROW(runner.syncCpu(), std::runtime_error);
+
+    std::atomic<int> counter{0};
+    runner.launch([&counter] { counter.fetch_add(1); });
+    runner.syncCpu();
+    EXPECT_EQ(counter.load(), 1);
+}
+
 TEST_F(AsyncRunnerTest, RethrowsWorkerExceptionFromSync) {
     auto        stream = makeStream();
     AsyncRunner runner(stream);

@@ -6,6 +6,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <queue>
 #include <set>
 #include <unordered_map>
 #include <utility>
@@ -62,9 +63,26 @@ public:
     int64_t                                   getBuffersCount() const;
 
 private:
+    struct RemovedRequestExpiry {
+        int64_t expire_at_ms;
+        int64_t request_id;
+        int64_t removed_at_ms;
+    };
+    struct RemovedRequestExpiryCompare {
+        bool operator()(const RemovedRequestExpiry& lhs, const RemovedRequestExpiry& rhs) const {
+            return lhs.expire_at_ms > rhs.expire_at_ms;
+        }
+    };
+    void markRemovedLocked(int64_t request_id, int64_t removed_at_ms);
+
     // stores layer cache buffer already computed
     mutable std::mutex                                                     computed_buffers_mutex_;
     std::unordered_map<int64_t, std::shared_ptr<ComputedLayerCacheBuffer>> computed_buffers_;
+    std::unordered_map<int64_t, int64_t>                                   removed_request_ids_;
+    std::priority_queue<RemovedRequestExpiry,
+                        std::vector<RemovedRequestExpiry>,
+                        RemovedRequestExpiryCompare>
+        removed_request_expiry_queue_;
 };
 
 }  // namespace rtp_llm

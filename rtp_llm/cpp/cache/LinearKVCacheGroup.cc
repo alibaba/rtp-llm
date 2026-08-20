@@ -215,9 +215,21 @@ bool LinearKVCacheGroup::malloc(BlockIds&            block_ids,
     };
 
     std::vector<size_t> positions_to_backfill;
-    const auto&         existing_blocks = block_ids.blocks();
-    const int           existing_scan   = std::min(current_blocks_len, total_slots);
-    for (int i = 0; i < existing_scan; ++i) {
+    const auto&         existing_blocks       = block_ids.blocks();
+    const int           existing_scan         = std::min(current_blocks_len, total_slots);
+    int                 last_materialized_pos = -1;
+    for (int i = existing_scan - 1; i >= 0; --i) {
+        if (!isNullBlockIdx(existing_blocks[static_cast<size_t>(i)])) {
+            last_materialized_pos = i;
+            break;
+        }
+    }
+    // A reused LINEAR prefix intentionally contains holes followed by one
+    // materialized state checkpoint.  Those historical states cannot be
+    // reconstructed while executing only the suffix, so keep the holes sparse
+    // and allocate only slots after the checkpoint.  Null reserve/tail slots
+    // after the last materialized position still need normal backfilling.
+    for (int i = last_materialized_pos + 1; i < existing_scan; ++i) {
         if (should_materialize(i) && isNullBlockIdx(existing_blocks[static_cast<size_t>(i)])) {
             positions_to_backfill.push_back(static_cast<size_t>(i));
         }

@@ -5,6 +5,7 @@ import torch
 
 from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import CudaGraphRunner
 from rtp_llm.ops.compute_ops import (
+    DSparkCallPhase,
     PyAttentionInputs,
     PyModelInputs,
     PyModelOutputs,
@@ -14,6 +15,16 @@ from rtp_llm.ops.compute_ops import (
 GROUP_TAGS = ["full", "aux"]
 HIDDEN_SIZE = 4
 TOKENS_PER_BLOCK = 8
+
+
+class DeviceOnlyAttentionImpl:
+    cuda_graph_device_metadata_only = True
+
+    def prepare_cuda_graph(self, attention_inputs) -> None:
+        pass
+
+
+DEVICE_ONLY_ATTENTION = DeviceOnlyAttentionImpl()
 
 
 class TaggedBlockTableModel:
@@ -34,7 +45,7 @@ class TaggedSequenceLengthModel:
     """Expose the cumulative lengths used by a tagged captured graph."""
 
     def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
-        return None
+        return DEVICE_ONLY_ATTENTION
 
     def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
         full_inputs = inputs.attention_inputs["full"]
@@ -47,6 +58,36 @@ class TaggedSequenceLengthModel:
             )
         ).to(inputs.input_hiddens.dtype)
         return PyModelOutputs(inputs.input_hiddens + signature)
+
+
+class AuxiliaryOutputModel:
+    """Expose a graph-updated auxiliary output alongside normal hidden states."""
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        auxiliary = inputs.input_hiddens[:, :2] * 2
+        return PyModelOutputs(inputs.input_hiddens + 1, auxiliary)
+
+
+class SpeculativeTokenOutputModel:
+    """Expose point-mass proposal ids as a graph-updated batch output."""
+
+    def __init__(self, query_len: int):
+        self.query_len = query_len
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        outputs = PyModelOutputs(inputs.input_hiddens + 1)
+        outputs.speculative_token_ids = (
+            inputs.input_hiddens[:, 0]
+            .view(-1, self.query_len)
+            .to(torch.int64)
+        )
+        return outputs
 
 
 def _tag_attention_inputs(
@@ -96,7 +137,11 @@ def _build_common_inputs(
     attention_inputs.kv_cache_block_id_device = (
         attention_inputs.kv_cache_kernel_block_id_device
     )
-    inputs.attention_inputs = _tag_attention_inputs(attention_inputs, tags, values)
+    inputs.attention_inputs = (
+        _tag_attention_inputs(attention_inputs, tags, values)
+        if tags
+        else attention_inputs
+    )
     return inputs
 
 
@@ -250,6 +295,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             [2],
             GROUP_TAGS,
         )
+        self.assertFalse(runner.usesDeviceOnlyAttentionMetadata())
 
         self._assert_replay_signature(
             runner,
@@ -377,6 +423,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             True,
             query_len,
         )
+        self.assertTrue(runner.usesDeviceOnlyAttentionMetadata())
 
         for batch_size in (1, 2, 4):
             with self.subTest(batch_size=batch_size):
@@ -408,6 +455,152 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     output.hidden_states,
                     expected_signature.unsqueeze(0).expand_as(output.hidden_states),
                 )
+
+    def test_target_verify_replays_explicit_auxiliary_output(self) -> None:
+        query_len = 5
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            AuxiliaryOutputModel(),
+            HIDDEN_SIZE,
+            64,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [4],
+            GROUP_TAGS,
+            True,
+            query_len,
+        )
+
+        for value in (3, 7):
+            with self.subTest(value=value):
+                inputs = _build_target_verify_inputs(
+                    GROUP_TAGS,
+                    {"full": 2, "aux": 1},
+                    batch_size=1,
+                    query_len=query_len,
+                    prefix_len=11,
+                )
+                inputs.input_hiddens.fill_(value)
+                self.assertTrue(runner.canRun(inputs))
+                output = runner.forward(inputs)
+                torch.cuda.synchronize()
+                self.assertEqual(tuple(output.auxiliary_hidden_states.shape), (5, 2))
+                torch.testing.assert_close(
+                    output.auxiliary_hidden_states,
+                    torch.full_like(output.auxiliary_hidden_states, value * 2),
+                )
+
+    def test_replays_graph_native_speculative_token_output(self) -> None:
+        query_len = 5
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            SpeculativeTokenOutputModel(query_len),
+            HIDDEN_SIZE,
+            64,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [4],
+            GROUP_TAGS,
+            True,
+            query_len,
+        )
+
+        for value in (3, 7):
+            with self.subTest(value=value):
+                inputs = _build_target_verify_inputs(
+                    GROUP_TAGS,
+                    {"full": 2, "aux": 1},
+                    batch_size=1,
+                    query_len=query_len,
+                    prefix_len=11,
+                )
+                inputs.input_hiddens.fill_(value)
+                self.assertTrue(runner.canRun(inputs))
+                output = runner.forward(inputs)
+                torch.cuda.synchronize()
+                self.assertEqual(tuple(output.speculative_token_ids.shape), (1, 5))
+                torch.testing.assert_close(
+                    output.speculative_token_ids,
+                    torch.full_like(output.speculative_token_ids, value),
+                )
+
+    def test_dspark_proposal_preserves_exact_batch_width_and_phase(self) -> None:
+        query_len = 8
+        runner = CudaGraphRunner()
+        runner.init_prefill(
+            SpeculativeTokenOutputModel(query_len),
+            8,
+            64,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [],
+            HIDDEN_SIZE,
+            [],
+            query_len,
+            int(DSparkCallPhase.PROPOSE),
+            HIDDEN_SIZE,
+            [1, 8],
+        )
+
+        for batch_size in (1, 7, 8):
+            with self.subTest(batch_size=batch_size):
+                inputs = _build_target_verify_inputs(
+                    [],
+                    {},
+                    batch_size=batch_size,
+                    query_len=query_len,
+                    prefix_len=11,
+                )
+                inputs.attention_inputs.is_target_verify = False
+                inputs.dspark_call_phase = DSparkCallPhase.PROPOSE
+                inputs.input_hiddens.copy_(
+                    torch.arange(
+                        batch_size * query_len,
+                        dtype=torch.bfloat16,
+                        device="cuda",
+                    ).view(-1, 1)
+                )
+
+                self.assertTrue(runner.canRun(inputs))
+                self.assertEqual(
+                    runner.getCurrentRealGraphSize(),
+                    batch_size * query_len,
+                )
+                output = runner.forward(inputs)
+                torch.cuda.synchronize()
+                self.assertEqual(
+                    tuple(output.speculative_token_ids.shape),
+                    (batch_size, query_len),
+                )
+
+        # Hybrid runtimes expose a common staging-table width across cache
+        # groups.  A draft graph may capture a narrower model-local table; the
+        # extra staging columns are padding and must not overflow graph memory
+        # or force an eager fallback.
+        wider = _build_target_verify_inputs(
+            [], {}, batch_size=1, query_len=query_len, prefix_len=11
+        )
+        wider.attention_inputs.is_target_verify = False
+        wider.dspark_call_phase = DSparkCallPhase.PROPOSE
+        padded_host_blocks = torch.arange(32, dtype=torch.int32).view(1, 32).pin_memory()
+        padded_device_blocks = padded_host_blocks.cuda()
+        wider.attention_inputs.kv_cache_kernel_block_id = padded_device_blocks
+        wider.attention_inputs.kv_cache_kernel_block_id_device = padded_device_blocks
+        self.assertTrue(runner.canRun(wider))
+        output = runner.forward(wider)
+        torch.cuda.synchronize()
+        self.assertEqual(tuple(output.speculative_token_ids.shape), (1, query_len))
+
+        mismatch = _build_target_verify_inputs(
+            [],
+            {},
+            batch_size=1,
+            query_len=query_len,
+            prefix_len=11,
+        )
+        mismatch.attention_inputs.is_target_verify = False
+        mismatch.dspark_call_phase = DSparkCallPhase.COMMIT
+        self.assertFalse(runner.canRun(mismatch))
 
 
 if __name__ == "__main__":

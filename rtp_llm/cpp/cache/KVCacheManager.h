@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "kmonitor/client/MetricsReporter.h"
 
@@ -47,6 +48,11 @@ public:
     const CacheConfig& getMTPModuleCacheConfig(int mtp_module_id) const;
 
     // 显存管理和缓存分配
+    // Compute the immutable prompt cache keys before scheduler admission. The
+    // allocation path calls the same method, so retries do not re-hash long
+    // prompts and admission can ask the allocator for an exact prefix plan.
+    void         prepareCacheKeys(const BatchKVCacheResourcePtr&           batch_kv_cache_resource,
+                                  const std::shared_ptr<CompleteTokenIds>& complete_token_ids);
     MallocResult malloc(const MallocInfo& malloc_info);
     void         free(const FreeInfo& free_info);
     void         insertIntoCache(const InsertInfo& insert_info);
@@ -54,13 +60,17 @@ public:
     int
     singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step) const;
 
-    int estimatePeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                               int                            seq_len,
-                               int                            common_seq_len,
-                               int                            remaining_tokens,
-                               int                            reserve_step,
-                               bool                           enable_reuse_cache,
-                               int                            target_batch_size) const;
+    int                            estimatePeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                          int                            seq_len,
+                                                          int                            common_seq_len,
+                                                          int                            remaining_tokens,
+                                                          int                            reserve_step,
+                                                          bool                           enable_reuse_cache,
+                                                          int                            target_batch_size) const;
+    bool canAdmitInitialBatch(const std::vector<InitialKVCacheAllocation>& allocations,
+                              bool preserve_reserve_blocks = true) const;
+    KVCacheAdmissionReservationPtr reserveCacheForAdmission(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                            bool                           enable_reuse_cache) const;
 
     // 块操作相关
     void blockCopy(int src_block_index, int dest_block_index);
@@ -137,6 +147,9 @@ public:
 
     bool hasActiveConnectors() const;
     bool hasP2PConnector() const;
+    void notifySideChannelReady(const std::string&                                unique_key,
+                                int64_t                                           deadline_ms,
+                                const P2PConnectorResourceEntry::SideChannelData& data);
 
     std::shared_ptr<KVCacheConnectorCoordinator> connectorCoordinator() const {
         return coordinator_;

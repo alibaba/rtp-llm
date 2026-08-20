@@ -336,7 +336,11 @@ class CkptDatabase(BaseDatabase):
                 hf_weights_files=hf_weights_files,
                 use_tqdm_on_load=use_tqdm_on_load,
                 device=device,
-                bbuf_size_kb=1024 * 1024 * 2,
+                # LoadWithShm rejects a buffer of exactly 2 GiB, and every TP
+                # rank registers its buffer concurrently.  Keep the per-rank
+                # bounce buffer large while staying within the aggregate
+                # pinned-memory limit on H20 hosts.
+                bbuf_size_kb=768 * 1024,
                 use_shm=True,
             )
             if stacked_key_config:

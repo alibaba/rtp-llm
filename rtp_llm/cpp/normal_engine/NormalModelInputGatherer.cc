@@ -325,6 +325,7 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     model_input.prefix_lengths        = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
     model_input.request_id            = torch::empty({(int64_t)total_context_batch_size}, pinned_i64);
     model_input.request_pd_separation = torch::empty({(int64_t)total_context_batch_size}, pinned_bool);
+    model_input.request_deadline_ms   = torch::empty({(int64_t)total_context_batch_size}, pinned_i64);
 
     if (max_blocks_num) {
         model_input.kv_cache_kernel_block_id =
@@ -545,6 +546,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             }
 
             *(model_input.request_id.data_ptr<int64_t>() + prefill_batch_idx) = stream->streamId();
+            *(model_input.request_deadline_ms.data_ptr<int64_t>() + prefill_batch_idx) = stream->deadlineMs();
             *(reinterpret_cast<bool*>(model_input.request_pd_separation.data_ptr()) + prefill_batch_idx) =
                 stream->queryPdSep();
 

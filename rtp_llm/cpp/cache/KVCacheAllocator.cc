@@ -38,18 +38,35 @@ size_t KVCacheAllocator::reservableAvailableBlocksNum() const {
 }
 
 MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
-    auto init_result = initMallocForCommonLen(malloc_info);
-    if (!init_result.success) {
+    // Gross demand decides whether this request can ever fit. Current
+    // availability is checked after cache matching, when the allocator knows
+    // how many new physical blocks are really required.
+    const auto capacity_status = evaluateInitCapacity(malloc_info, reserveBlocksNum(), InitCapacityMode::TOTAL_ONLY);
+    if (capacity_status != MallocStatus::NONE) {
+        return {false, 0, 0, capacity_status};
+    }
+
+    auto finalize_init_failure = [this, &malloc_info](MallocResult result) {
+        // Classify against the failure-time snapshot. Rolling back first can
+        // make a transient shortage look sufficient and hide the real cause.
+        if (result.status == MallocStatus::NONE || result.status == MallocStatus::INTERNAL_ERROR) {
+            const auto status =
+                evaluateInitCapacity(malloc_info, reserveBlocksNum(), InitCapacityMode::TOTAL_AND_AVAILABLE);
+            result.status = status == MallocStatus::NONE ? MallocStatus::INTERNAL_ERROR : status;
+        }
         FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};
         free(free_info);
-        return init_result;
+        return result;
+    };
+
+    auto init_result = initMallocForCommonLen(malloc_info);
+    if (!init_result.success) {
+        return finalize_init_failure(init_result);
     }
 
     auto incr_result = incrMalloc(malloc_info);
     if (!incr_result.success) {
-        FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};
-        free(free_info);
-        return incr_result;
+        return finalize_init_failure(incr_result);
     } else {
         if (metrics_reporter_ && malloc_info.enable_device_cache) {
             int64_t device_input_length = 0;
@@ -73,6 +90,28 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
         }
         return init_result;
     }
+}
+
+MallocStatus KVCacheAllocator::evaluateInitCapacity(const MallocInfo& malloc_info,
+                                                    size_t            reserve_blocks,
+                                                    InitCapacityMode  mode) const {
+    const int need_blocks = getNeedBlocks(malloc_info);
+    if (need_blocks <= 0) {
+        return MallocStatus::NONE;
+    }
+
+    const size_t required_blocks = static_cast<size_t>(need_blocks);
+    auto         fits            = [required_blocks, reserve_blocks](size_t capacity) {
+        return required_blocks <= capacity && reserve_blocks <= capacity - required_blocks;
+    };
+
+    if (!fits(totalBlocksNum())) {
+        return MallocStatus::PERMANENT_RESOURCE_EXHAUSTED;
+    }
+    if (mode == InitCapacityMode::TOTAL_AND_AVAILABLE && !fits(availableBlocksNum())) {
+        return MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED;
+    }
+    return MallocStatus::NONE;
 }
 
 MallocResult KVCacheAllocator::malloc(const MallocInfo& malloc_info) {
@@ -290,6 +329,30 @@ int64_t KVCacheAllocator::getMrCostTimeMs() const {
 
 size_t KVCacheAllocator::availableBlocksNum() const {
     return block_pool_ ? block_pool_->availableBlocksNum() : 0;
+}
+
+bool KVCacheAllocator::canAdmitInitialBatch(const std::vector<InitialKVCacheAllocation>& allocations,
+                                            bool preserve_reserve_blocks) const {
+    int64_t need_blocks = 0;
+    for (const auto& allocation : allocations) {
+        need_blocks += estimateBatchPeakNeedBlocks(allocation.batch_kv_cache_resource,
+                                                   allocation.seq_len,
+                                                   allocation.common_seq_len,
+                                                   allocation.remaining_tokens,
+                                                   allocation.reserve_step,
+                                                   allocation.enable_reuse_cache && allocation.enable_device_cache,
+                                                   allocation.target_batch_size);
+    }
+    const size_t available = availableBlocksNum();
+    const size_t reserve   = preserve_reserve_blocks ? reserveBlocksNum() : 0;
+    const size_t capacity  = available > reserve ? available - reserve : 0;
+    return need_blocks <= static_cast<int64_t>(capacity);
+}
+
+KVCacheAdmissionReservationPtr
+KVCacheAllocator::reserveCacheForAdmission(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                           bool                           enable_reuse_cache) const {
+    return nullptr;
 }
 
 BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_to_free) {

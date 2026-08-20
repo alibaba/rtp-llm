@@ -8,6 +8,17 @@
 
 namespace rtp_llm {
 
+namespace {
+constexpr int64_t kLeasePollInitialIntervalMs = 10;
+constexpr int64_t kLeasePollMaxIntervalMs     = 100;
+constexpr int64_t kLeasePollRpcTimeoutMs      = 500;
+
+bool shouldHoldReadOutcomeUntilLeaseStops(ErrorCode error_code) {
+    return error_code == ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE
+        || error_code == ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED;
+}
+}  // namespace
+
 /*----------------------------------------------- P2PConnectorAsyncMatchContext
  * -------------------------------------------------*/
 size_t P2PConnectorAsyncMatchContext::matchedBlockCount() const {
@@ -62,7 +73,7 @@ void P2PConnectorAsyncReadContext::checkDone() {
     if (done()) {
         return;
     }
-    if (tryFinishExpiredTransferNotDoneHold()) {
+    if (tryFinishExpiredLeaseHold()) {
         return;
     }
     if (!tp_sync_result_->done()) {
@@ -88,17 +99,19 @@ void P2PConnectorAsyncReadContext::checkDone() {
 // - hold 且已到期 → 清 hold、刷新两侧 result；若都已 done 则 applyMergedReadOutcome(..., false)
 // 终态合并（含成功补救），
 //   否则仅 done_=true；返回 true，调用方 return。
-bool P2PConnectorAsyncReadContext::tryFinishExpiredTransferNotDoneHold() {
-    if (!transfer_not_done_hold_pending_.load(std::memory_order_acquire)) {
+bool P2PConnectorAsyncReadContext::tryFinishExpiredLeaseHold() {
+    if (!lease_hold_pending_.load(std::memory_order_acquire)) {
         return false;
     }
-    const int64_t until_ms = transfer_not_done_hold_until_ms_.load(std::memory_order_relaxed);
-    if (currentTimeMs() < until_ms) {
+    const int64_t until_ms    = lease_hold_until_ms_.load(std::memory_order_relaxed);
+    const bool    timed_out   = currentTimeMs() >= until_ms;
+    const bool    all_stopped = lease_all_ranks_stopped_.load(std::memory_order_acquire);
+    if (!timed_out && !all_stopped) {
         return true;
     }
 
-    transfer_not_done_hold_pending_.store(false, std::memory_order_release);
-    transfer_not_done_hold_until_ms_.store(0, std::memory_order_relaxed);
+    lease_hold_pending_.store(false, std::memory_order_release);
+    lease_hold_until_ms_.store(0, std::memory_order_relaxed);
 
     if (!tp_sync_result_->done()) {
         tp_sync_result_->checkDone();
@@ -140,10 +153,14 @@ void P2PConnectorAsyncReadContext::applyMergedReadOutcome(const MergedReadOutcom
     ErrorCode   error_code = outcome.error_code;
     std::string error_message{outcome.error_message};
 
-    if (allow_transfer_not_done_hold && !success && error_code == ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE
-        && transfer_not_done_hold_ms_ > 0) {
-        transfer_not_done_hold_until_ms_.store(currentTimeMs() + transfer_not_done_hold_ms_, std::memory_order_relaxed);
-        transfer_not_done_hold_pending_.store(true, std::memory_order_release);
+    if (allow_transfer_not_done_hold && !success && transfer_not_done_hold_ms_ > 0
+        && shouldHoldReadOutcomeUntilLeaseStops(error_code)) {
+        lease_hold_until_ms_.store(currentTimeMs() + transfer_not_done_hold_ms_, std::memory_order_relaxed);
+        lease_all_ranks_stopped_.store(false, std::memory_order_relaxed);
+        lease_poll_interval_ms_.store(kLeasePollInitialIntervalMs, std::memory_order_relaxed);
+        lease_poll_next_ms_.store(currentTimeMs() + kLeasePollInitialIntervalMs, std::memory_order_relaxed);
+        lease_poll_retry_count_.store(0, std::memory_order_relaxed);
+        lease_hold_pending_.store(true, std::memory_order_release);
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
             success_       = false;
@@ -177,7 +194,7 @@ ErrorInfo P2PConnectorAsyncReadContext::errorInfo() const {
 }
 
 bool P2PConnectorAsyncReadContext::needCancel() const {
-    if (transfer_not_done_hold_pending_.load()) {
+    if (lease_hold_pending_.load()) {
         return false;
     }
     {
@@ -193,6 +210,30 @@ bool P2PConnectorAsyncReadContext::needCancel() const {
         return true;
     }
     return false;
+}
+
+void P2PConnectorAsyncReadContext::pollLeaseIfNeeded(
+    const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client) {
+    if (!lease_hold_pending_.load(std::memory_order_acquire) || done()
+        || lease_all_ranks_stopped_.load(std::memory_order_acquire) || !tp_broadcast_client) {
+        return;
+    }
+    const int64_t now = currentTimeMs();
+    if (now < lease_poll_next_ms_.load(std::memory_order_relaxed)) {
+        return;
+    }
+
+    const auto unique_key = uniqueKey();
+    lease_poll_retry_count_.fetch_add(1, std::memory_order_relaxed);
+    auto result = tp_broadcast_client->queryLeaseStatus(unique_key, kLeasePollRpcTimeoutMs);
+    if (result.success && result.allStopped()) {
+        lease_all_ranks_stopped_.store(true, std::memory_order_release);
+        return;
+    }
+    const int64_t interval =
+        std::min(lease_poll_interval_ms_.load(std::memory_order_relaxed) * 2, kLeasePollMaxIntervalMs);
+    lease_poll_interval_ms_.store(interval, std::memory_order_relaxed);
+    lease_poll_next_ms_.store(now + interval, std::memory_order_relaxed);
 }
 
 void P2PConnectorAsyncReadContext::cancel(const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client) {
@@ -275,38 +316,60 @@ size_t P2PConnectorAsyncReadContextChecker::inflightContextCount() const {
 void P2PConnectorAsyncReadContextChecker::checkOnce() {
     int64_t start_time_us = currentTimeUs();
 
-    std::lock_guard<std::mutex> lock(async_contexts_mutex_);
-    for (auto& async_context : async_contexts_) {
+    // RPC polling/cancellation must never run while holding the admission
+    // vector lock: under load that serialized new decode handoffs behind a
+    // slow network operation.
+    std::vector<std::shared_ptr<P2PConnectorAsyncReadContext>> snapshot;
+    {
+        std::lock_guard<std::mutex> lock(async_contexts_mutex_);
+        snapshot = async_contexts_;
+    }
+    std::vector<std::shared_ptr<P2PConnectorAsyncReadContext>> to_poll;
+    std::vector<std::shared_ptr<P2PConnectorAsyncReadContext>> to_cancel;
+    for (const auto& async_context : snapshot) {
         async_context->checkDone();
-        // 检查是否需要取消另一个未完成的请求
+        if (async_context->needLeasePoll()) {
+            to_poll.push_back(async_context);
+        }
         if (async_context->needCancel()) {
-            RTP_LLM_LOG_DEBUG("P2PConnectorAsyncReadContextChecker checkOnce: needCancel, unique_key: %s",
-                              async_context->uniqueKey().c_str());
-            async_context->cancel(tp_broadcast_client_);
+            to_cancel.push_back(async_context);
         }
     }
-    for (auto& async_context : async_contexts_) {
-        if (async_context->done() && !async_context->success()) {
-            auto error = async_context->errorInfo();
-            RTP_LLM_LOG_WARNING(
-                "P2PConnectorAsyncReadContextChecker checkOnce: async read failed, unique_key: %s, error: %s",
-                async_context->uniqueKey().c_str(),
-                error.ToString().c_str());
-        }
+    for (const auto& async_context : to_poll) {
+        async_context->pollLeaseIfNeeded(tp_broadcast_client_);
+    }
+    for (const auto& async_context : to_cancel) {
+        async_context->cancel(tp_broadcast_client_);
     }
 
-    async_contexts_.erase(
-        std::remove_if(async_contexts_.begin(),
-                       async_contexts_.end(),
-                       [](const std::shared_ptr<P2PConnectorAsyncReadContext>& async_context) -> bool {
-                           return async_context->done();
-                       }),
-        async_contexts_.end());
+    size_t inflight_after = 0;
+    std::vector<std::shared_ptr<P2PConnectorAsyncReadContext>> failed_contexts;
+    {
+        std::lock_guard<std::mutex> lock(async_contexts_mutex_);
+        auto it = async_contexts_.begin();
+        while (it != async_contexts_.end()) {
+            if ((*it)->done()) {
+                if (!(*it)->success()) {
+                    failed_contexts.push_back(*it);
+                }
+                it = async_contexts_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        inflight_after = async_contexts_.size();
+    }
+    for (const auto& async_context : failed_contexts) {
+        auto error = async_context->errorInfo();
+        RTP_LLM_LOG_WARNING("P2P async read failed, unique_key=%s, error=%s",
+                            async_context->uniqueKey().c_str(),
+                            error.ToString().c_str());
+    }
 
     if (metrics_reporter_) {
         auto collector                     = std::make_shared<DecodeSchedulerStatusMetricsCollector>();
         collector->check_once_cost_time_us = currentTimeUs() - start_time_us;
-        collector->inflight_context_count  = async_contexts_.size();
+        collector->inflight_context_count  = inflight_after;
         metrics_reporter_->report<P2PConnectorMetrics, DecodeSchedulerStatusMetricsCollector>(nullptr, collector.get());
     }
 }

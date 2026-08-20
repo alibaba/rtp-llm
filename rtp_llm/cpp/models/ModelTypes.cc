@@ -103,6 +103,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         if (inputs.kv_cache_kernel_block_id.defined() && inputs.kv_cache_kernel_block_id.is_cuda()) {
             device_bits |= GptModelInputDeviceBit::kDeviceBitKernelBlockId;
         }
+        if (inputs.combo_position_ids.defined() && inputs.combo_position_ids.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitComboPositionIds;
+        }
         shape_hints_ptr[GptModelInputIndex::tensorDeviceMap] = static_cast<int32_t>(device_bits);
     }
 
@@ -228,11 +231,15 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
         inputs.request_id            = allocBuf(rtp_llm::DataType::TYPE_INT64, {request_length});
         inputs.request_pd_separation = allocBuf(rtp_llm::DataType::TYPE_BOOL, {request_length});
+        inputs.request_deadline_ms   = allocBuf(rtp_llm::DataType::TYPE_INT64, {request_length});
         inputs.lm_output_indexes     = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                                 {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputIndexes]},
                                             pickAlloc(GptModelInputDeviceBit::kDeviceBitLmOutputIndexes));
         if (combo_position_ids_size) {
-            inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32, {combo_position_ids_size});
+            inputs.combo_position_ids = allocBuf(
+                rtp_llm::DataType::TYPE_INT32,
+                {static_cast<size_t>(combo_position_ids_size)},
+                pickAlloc(GptModelInputDeviceBit::kDeviceBitComboPositionIds));
         }
         if (hidden_states_size) {
             const auto hidden_states_dim0 = (size_t)shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesRows];
@@ -245,10 +252,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                          rtp_llm::AllocationType::DEVICE);
         }
         if (text_tokens_mask_size) {
-            inputs.text_tokens_mask = allocBuf(rtp_llm::DataType::TYPE_INT32, {text_tokens_mask_size});
+            inputs.text_tokens_mask =
+                allocBuf(rtp_llm::DataType::TYPE_INT32, {static_cast<size_t>(text_tokens_mask_size)});
         }
         if (mm_features_locs_size) {
-            inputs.mm_features_locs = allocBuf(rtp_llm::DataType::TYPE_INT32, {mm_features_locs_size});
+            inputs.mm_features_locs =
+                allocBuf(rtp_llm::DataType::TYPE_INT32, {static_cast<size_t>(mm_features_locs_size)});
         }
         if (mm_features_num) {
             std::vector<torch::Tensor> mm_features;
@@ -301,6 +310,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     }
     collect(inputs.request_id);
     collect(inputs.request_pd_separation);
+    collect(inputs.request_deadline_ms);
     collect(inputs.lm_output_indexes);
     if (combo_position_ids_size) {
         collect(inputs.combo_position_ids);

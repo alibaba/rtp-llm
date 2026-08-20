@@ -1,9 +1,23 @@
+import functools
 from typing import NamedTuple, Optional
 
 import torch
 
 try:
+    import flashinfer.prefill as _flashinfer_prefill
     from flashinfer.prefill import trtllm_fmha_v2_prefill
+
+    # FlashInfer 0.6.9 creates and initializes this immutable device scalar on
+    # every FMHA-v2 invocation.  The scalar assignment is illegal during CUDA
+    # graph capture and the allocation is unnecessary in eager execution too.
+    # Cache it by value/dtype/device until FlashInfer owns the same lifetime.
+    if hasattr(_flashinfer_prefill, "_create_scale_bmm2_d_tensor"):
+        _create_scale_bmm2_d_tensor = (
+            _flashinfer_prefill._create_scale_bmm2_d_tensor
+        )
+        _flashinfer_prefill._create_scale_bmm2_d_tensor = functools.lru_cache(
+            maxsize=None
+        )(_create_scale_bmm2_d_tensor)
 except (ImportError, AttributeError):
     trtllm_fmha_v2_prefill = None
 
@@ -26,10 +40,9 @@ from rtp_llm.ops.compute_ops import (
 # Pad max_q_len / max_kv_len to this minimum so the dispatch selects flash kernels.
 _TRTLLM_FMHA_V2_MIN_SEQ_LEN = 16
 
-# This interface uses persistent CTAs, so partial outputs stay within each CTA
-# instead of being stored in the workspace. Only a few runtime variables need
-# workspace storage.
-_TRTLLM_FMHA_V2_WORKSPACE_SIZE_BYTES = 1024
+# Match FlashInfer v0.6.9 FMHA v2 tests: runtime softmax statistics and
+# conditional kernel scratch are allocated from this pooled workspace.
+_TRTLLM_FMHA_V2_WORKSPACE_SIZE_BYTES = 128 * 1024 * 1024
 _g_trtllm_fmha_v2_workspace_pool: list[torch.Tensor] = []
 _g_trtllm_fmha_v2_pool_lock = __import__("threading").Lock()
 

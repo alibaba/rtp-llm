@@ -3,7 +3,6 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 #include <c10/core/Event.h>
-#include <optional>
 #include "rtp_llm/cpp/cache/connector/p2p/AsymmetricTpUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/ComputedLayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
@@ -13,8 +12,10 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/IKVCacheSender.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "autil/LoopThread.h"
+#include "autil/ThreadPool.h"
 #include <atomic>
 #include <condition_variable>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -35,8 +36,11 @@ public:
 public:
     bool init(int64_t store_wait_timeout_ms);
 
-    bool
-    writeByLayer(int layer_id, const KVCacheResourcePtr& resource, int64_t request_id, std::optional<c10::Event> event);
+    bool writeByLayer(int                           layer_id,
+                      const KVCacheResourcePtr&     resource,
+                      int64_t                       request_id,
+                      std::shared_ptr<c10::Event>   event,
+                      int64_t deadline_ms = std::numeric_limits<int64_t>::max());
 
     ErrorInfo sendKVCache(int64_t                                              request_id,
                           const std::string&                                   unique_key,
@@ -57,6 +61,7 @@ private:
 
     struct SendTransferResult {
         std::atomic<int>        done_count{0};
+        std::atomic<int>        async_send_task_count{0};
         std::atomic<bool>       all_success{true};
         mutable std::mutex      result_mutex;
         std::condition_variable result_cv;
@@ -73,17 +78,27 @@ private:
                                       const std::shared_ptr<std::atomic<bool>>&        cancel_flag,
                                       const std::shared_ptr<SendTransferResult>&       transfer_result,
                                       std::set<std::pair<int, std::string>>&           sent_layer_groups,
-                                      int&                                             total_transfers);
+                                      int&                                             total_transfers,
+                                      int64_t&                                         first_layer_ready_time_us);
 
     int sendLayerToPartitions(const std::shared_ptr<LayerCacheBuffer>&   layer_cache_buffer,
                               const std::vector<AsymmetricTPContext>&    tp_partition_ctxs,
                               const std::string&                         unique_key,
                               int64_t                                    transfer_deadline_ms,
+                              int                                        max_outstanding_tasks,
+                              const std::shared_ptr<std::atomic<bool>>&  cancel_flag,
                               const std::shared_ptr<SendTransferResult>& transfer_result);
+
+    bool waitForAsyncSendSlot(const std::shared_ptr<SendTransferResult>& transfer_result,
+                              int                                        max_outstanding_tasks,
+                              int64_t                                    return_deadline_ms,
+                              const std::shared_ptr<std::atomic<bool>>&  cancel_flag,
+                              const std::string&                         unique_key) const;
 
     bool waitSendCallbacksWithTimeout(const std::shared_ptr<SendTransferResult>& transfer_result,
                                       int                                        sent_transfer_count,
-                                      int64_t                                    return_deadline_ms) const;
+                                      int64_t                                    return_deadline_ms,
+                                      const std::shared_ptr<std::atomic<bool>>&  cancel_flag) const;
 
     struct SendResultInfo {
         bool        success = true;
@@ -93,11 +108,30 @@ private:
 
     SendResultInfo determineSendResult(const std::shared_ptr<SendTransferResult>& transfer_result,
                                        const std::shared_ptr<std::atomic<bool>>&  cancel_flag,
+                                       bool                                       timeout_cancelled_pending_tasks,
                                        bool                                       all_callbacks_received,
                                        int                                        sent_transfer_count,
                                        int                                        total_transfers,
                                        int64_t                                    return_deadline_ms,
                                        const std::string&                         unique_key) const;
+
+    struct AsyncSendTaskState {
+        bool takeForStart(transfer::SendRequestPtr* send_request_out,
+                          std::shared_ptr<LayerCacheBuffer>* buffer_keepalive_out);
+        bool releaseIfNotStarted();
+
+        mutable std::mutex               mutex;
+        transfer::SendRequestPtr         send_request;
+        std::shared_ptr<LayerCacheBuffer> buffer_keepalive;
+        bool                             started{false};
+        bool                             released{false};
+    };
+
+    void registerAsyncSendTask(const std::string& unique_key,
+                               const std::shared_ptr<AsyncSendTaskState>& task_state);
+    int releasePendingAsyncSendTasks(const std::string& unique_key,
+                                     std::shared_ptr<SendTransferResult>* transfer_result_out = nullptr);
+    static int releaseNotStartedTaskStates(const std::vector<std::shared_ptr<AsyncSendTaskState>>& task_states);
 
 private:
     // IMPORTANT: Declaration order determines initialization order in the constructor
@@ -112,8 +146,14 @@ private:
     int64_t                                                             store_wait_timeout_ms_ = 10 * 1000;
     std::shared_ptr<StoreWaitContextChecker>                            store_wait_context_checker_;
     autil::LoopThreadPtr                                                cleanup_thread_;
-    mutable std::mutex                                                  handle_cancel_mutex_;
-    std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> handle_cancel_flags_;
+    struct HandleCancelEntry {
+        std::shared_ptr<std::atomic<bool>>              cancel_flag;
+        std::weak_ptr<SendTransferResult>               transfer_result;
+        std::vector<std::weak_ptr<AsyncSendTaskState>> async_send_tasks;
+    };
+    mutable std::mutex                                 handle_cancel_mutex_;
+    std::unordered_map<std::string, HandleCancelEntry> handle_cancel_flags_;
+    autil::ThreadPoolBasePtr                           async_sender_pool_;
 };
 
 }  // namespace rtp_llm

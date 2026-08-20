@@ -84,9 +84,22 @@ HybridKVCacheAllocator::HybridKVCacheAllocator(const CacheConfig&               
                                                int64_t                            reserve_block_ratio):
     KVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio) {}
 
-int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cache_keys,
-                                       BatchKVCacheResource&                kv_resource,
-                                       const std::shared_ptr<CPSlotMapper>& cp_mapper) {
+CacheKeysType HybridKVCacheAllocator::matchableCacheKeys(const CacheKeysType&                 cache_keys,
+                                                         const std::shared_ptr<CPSlotMapper>& cp_mapper) const {
+    CacheKeysType cp_keys   = cpCanonicalCacheKeys(cp_mapper, cache_keys);
+    const bool    cp_active = cp_mapper && cp_mapper->isSharded();
+    if (!cp_active && !cp_keys.empty()) {
+        cp_keys.pop_back();
+    }
+    return cp_keys;
+}
+
+HybridKVCacheAllocator::ReuseCachePlan
+HybridKVCacheAllocator::planReuseCache(const CacheKeysType&                 cache_keys,
+                                       const std::shared_ptr<CPSlotMapper>& cp_mapper) const {
+    ReuseCachePlan plan;
+    plan.blocks_by_group.resize(kv_cache_groups_.size());
+
     // Under cp shard, FULL groups index block_ids by cp-virtual-block units
     // (one entry covers cp_size physical blocks). LINEAR/SWA groups index by
     // raw block_size logical blocks. So when populating tail blocks for
@@ -97,7 +110,7 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
     std::vector<BlockIndicesType> full_matched_blocks(kv_cache_groups_.size());
 
     for (int gid : full_group_ids_) {
-        auto match_result     = kv_cache_groups_[static_cast<size_t>(gid)]->match(cache_keys);
+        auto match_result     = kv_cache_groups_[static_cast<size_t>(gid)]->matchPrefix(cache_keys);
         min_full_reuse_blocks = std::min(min_full_reuse_blocks, static_cast<int>(match_result.reuse_blocks));
         full_matched_blocks[static_cast<size_t>(gid)] = std::move(match_result.block_indices);
     }
@@ -145,15 +158,16 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
 
     const int reuse_blocks_len = has_tail_groups ? std::max(pos + 1, 0) : std::max(min_full_reuse_blocks, 0);
     if (reuse_blocks_len <= 0) {
-        return 0;
+        return plan;
     }
+    plan.reuse_blocks = reuse_blocks_len;
 
     for (int gid : full_group_ids_) {
         BlockIndicesType full_blocks = full_matched_blocks[static_cast<size_t>(gid)];
         if (static_cast<int>(full_blocks.size()) > reuse_blocks_len) {
             full_blocks.resize(static_cast<size_t>(reuse_blocks_len));
         }
-        kv_resource.mutableBlockIds(0, gid).assign(std::move(full_blocks));
+        plan.blocks_by_group[static_cast<size_t>(gid)] = std::move(full_blocks);
     }
 
     // LINEAR/SWA arrays are sized in logical-block units (cp_size× larger
@@ -163,26 +177,47 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
     // logical units, NOT `reuse_blocks_len - 1`.
     const int logical_reuse_len = reuse_blocks_len * cp_scale;
     for (size_t i = 0; i < linear_group_ids_.size(); ++i) {
-        const int gid = linear_group_ids_[i];
-        kv_resource.mutableBlockIds(0, gid).assign(
-            BlockIndicesType(static_cast<size_t>(logical_reuse_len), NULL_BLOCK_IDX));
-        kv_resource.mutableBlockIds(0, gid).setAt(static_cast<size_t>(logical_reuse_len - 1), linear_tail_blocks[i]);
+        const int gid    = linear_group_ids_[i];
+        auto&     blocks = plan.blocks_by_group[static_cast<size_t>(gid)];
+        blocks.assign(static_cast<size_t>(logical_reuse_len), NULL_BLOCK_IDX);
+        blocks[static_cast<size_t>(logical_reuse_len - 1)] = linear_tail_blocks[i];
     }
     for (size_t i = 0; i < swa_group_ids_.size(); ++i) {
         const int gid             = swa_group_ids_[i];
         const int group_reuse_len = cpCompactSwaGroup(gid, cp_mapper) ? reuse_blocks_len : logical_reuse_len;
-        kv_resource.mutableBlockIds(0, gid).assign(
-            BlockIndicesType(static_cast<size_t>(group_reuse_len), NULL_BLOCK_IDX));
+        auto&     blocks          = plan.blocks_by_group[static_cast<size_t>(gid)];
+        blocks.assign(static_cast<size_t>(group_reuse_len), NULL_BLOCK_IDX);
         if (skipReuseCacheGroup(gid)) {
             continue;
         }
         const size_t tail_begin =
             static_cast<size_t>(std::max(group_reuse_len - static_cast<int>(swa_tail_blocks[i].size()), 0));
         for (size_t j = 0; j < swa_tail_blocks[i].size(); ++j) {
-            kv_resource.mutableBlockIds(0, gid).setAt(tail_begin + j, swa_tail_blocks[i][j]);
+            blocks[tail_begin + j] = swa_tail_blocks[i][j];
         }
     }
-    return reuse_blocks_len;
+    return plan;
+}
+
+void HybridKVCacheAllocator::applyReuseCachePlan(const ReuseCachePlan& plan, BatchKVCacheResource& kv_resource) const {
+    if (plan.reuse_blocks <= 0) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(plan.blocks_by_group.size() == static_cast<size_t>(kv_resource.groupNums()),
+                            "reuse plan groups=%zu resource groups=%d",
+                            plan.blocks_by_group.size(),
+                            kv_resource.groupNums());
+    for (int gid = 0; gid < kv_resource.groupNums(); ++gid) {
+        kv_resource.mutableBlockIds(0, gid).assign(plan.blocks_by_group[static_cast<size_t>(gid)]);
+    }
+}
+
+int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cache_keys,
+                                       BatchKVCacheResource&                kv_resource,
+                                       const std::shared_ptr<CPSlotMapper>& cp_mapper) const {
+    auto plan = planReuseCache(cache_keys, cp_mapper);
+    applyReuseCachePlan(plan, kv_resource);
+    return plan.reuse_blocks;
 }
 
 MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& malloc_info) {
@@ -208,33 +243,44 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     std::vector<BlockIndicesType> referenced_blocks(static_cast<size_t>(kv_resource->groupNums()));
 
     if (malloc_info.enable_device_cache) {
-        // CP-sharded: subsample to last-rank canonical key namespace before matching.
-        CacheKeysType cp_keys = cpCanonicalCacheKeys(cp_mapper, cache_keys);
-        // Off mode drops the last key to skip the partial trailing block. Under
-        // CP sharding canonicalCacheKeys already excludes the partial block
-        // (last-rank stride lands inside completed full blocks only), so the
-        // extra drop would discard a valid full-block key — costing the SWA
-        // tail-loop its only matchable key (full_keys[cp_size-1 + (n-1)*cp_size]
-        // is exactly what the non-sharded SWA group caches).
-        const bool    cp_active = cp_mapper && cp_mapper->isSharded();
-        CacheKeysType match_keys(cp_keys.begin(),
-                                 cp_active ? cp_keys.end() : (cp_keys.empty() ? cp_keys.end() : cp_keys.end() - 1));
-        auto          begin_us = currentTimeUs();
-        reuse_blocks           = reuseCache(match_keys, *kv_resource, cp_mapper);
-        match_cost_time_us     = currentTimeUs() - begin_us;
-
-        for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-            const auto&      blocks = kv_resource->blocks(0, gid);
-            BlockIndicesType valid;
-            valid.reserve(blocks.size());
-            for (auto b : blocks) {
-                if (!isNullBlockIdx(b)) {
-                    valid.push_back(b);
+        if (malloc_info.admission_reservation) {
+            // The scheduler already pinned this exact match. Consume transfers
+            // those references into the stream; do not look up or reference a
+            // second time, since the shared-cache entry may have been evicted
+            // between admission and this allocation.
+            reuse_blocks = malloc_info.admission_reservation->consume(*kv_resource);
+            for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
+                const auto& blocks = kv_resource->blocks(0, gid);
+                auto&       valid  = referenced_blocks[static_cast<size_t>(gid)];
+                valid.reserve(blocks.size());
+                for (auto b : blocks) {
+                    if (!isNullBlockIdx(b)) {
+                        valid.push_back(b);
+                    }
                 }
             }
-            if (!valid.empty()) {
-                referenceBlocksInGroup(gid, valid);
-                referenced_blocks[static_cast<size_t>(gid)] = std::move(valid);
+        } else {
+            // Use the same CP namespace and partial-tail rule as scheduler-side
+            // admission preview; this is the single source of truth for what can
+            // become a real device-cache reference.
+            CacheKeysType match_keys = matchableCacheKeys(cache_keys, cp_mapper);
+            auto          begin_us   = currentTimeUs();
+            reuse_blocks             = reuseCache(match_keys, *kv_resource, cp_mapper);
+            match_cost_time_us       = currentTimeUs() - begin_us;
+
+            for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
+                const auto&      blocks = kv_resource->blocks(0, gid);
+                BlockIndicesType valid;
+                valid.reserve(blocks.size());
+                for (auto b : blocks) {
+                    if (!isNullBlockIdx(b)) {
+                        valid.push_back(b);
+                    }
+                }
+                if (!valid.empty()) {
+                    referenceBlocksInGroup(gid, valid);
+                    referenced_blocks[static_cast<size_t>(gid)] = std::move(valid);
+                }
             }
         }
         kv_resource->cacheResource(0).setDeviceReuseBlockNum(reuse_blocks);
@@ -778,7 +824,23 @@ int HybridKVCacheAllocator::seqSizePerBlock() const {
 }
 
 bool HybridKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const {
-    const int need_blocks = getNeedBlocks(malloc_info);
+    int need_blocks = 0;
+    if (malloc_info.admission_reservation && malloc_info.batch_kv_cache_resource
+        && malloc_info.batch_kv_cache_resource->batchSize() == 1 && malloc_info.complete_token_ids) {
+        const int raw_seq_len  = malloc_info.complete_token_ids->seqLength();
+        const int reserve_step = malloc_info.complete_token_ids->getReserveStep();
+        for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
+            const int group_seq_len = cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, gid, raw_seq_len);
+            need_blocks += kv_cache_groups_[static_cast<size_t>(gid)]->estimatePeakNeedBlocks(
+                group_seq_len,
+                malloc_info.batch_kv_cache_resource->blocks(0, gid),
+                /*remaining_tokens=*/0,
+                reserve_step,
+                malloc_info.reuse_cache);
+        }
+    } else {
+        need_blocks = getNeedBlocks(malloc_info);
+    }
     if (need_blocks <= 0) {
         return true;
     }
@@ -923,6 +985,108 @@ int HybridKVCacheAllocator::estimatePeakNeedBlocks(const KVCacheResource& kv_cac
             seq_len, kv_cache_resource.blocks(gid), remaining_tokens, reserve_step, enable_reuse_cache);
     }
     return need_blocks;
+}
+
+BatchKVCacheResourcePtr
+HybridKVCacheAllocator::previewReuseCache(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                          bool                           enable_reuse_cache) const {
+    if (!enable_reuse_cache || !batch_kv_cache_resource || batch_kv_cache_resource->batchSize() != 1
+        || batch_kv_cache_resource->curBlocksNum() != 0 || !batch_kv_cache_resource->cacheKeysInitialized()) {
+        return nullptr;
+    }
+
+    const auto match_keys = matchableCacheKeys(batch_kv_cache_resource->cacheKeys(0), cp_slot_mapper_);
+    const auto plan       = planReuseCache(match_keys, cp_slot_mapper_);
+    if (plan.reuse_blocks <= 0) {
+        return nullptr;
+    }
+
+    auto preview = std::make_shared<BatchKVCacheResource>();
+    preview->resetBatchSize(1);
+    preview->initGroups(config_.topologyPtr());
+    applyReuseCachePlan(plan, *preview);
+    return preview;
+}
+
+KVCacheAdmissionReservationPtr
+HybridKVCacheAllocator::reserveCacheForAdmission(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                 bool                           enable_reuse_cache) const {
+    if (!enable_reuse_cache || !batch_kv_cache_resource || batch_kv_cache_resource->batchSize() != 1
+        || batch_kv_cache_resource->curBlocksNum() != 0 || !batch_kv_cache_resource->cacheKeysInitialized()) {
+        return nullptr;
+    }
+
+    const auto match_keys = matchableCacheKeys(batch_kv_cache_resource->cacheKeys(0), cp_slot_mapper_);
+    auto       plan       = planReuseCache(match_keys, cp_slot_mapper_);
+    if (plan.reuse_blocks <= 0) {
+        return nullptr;
+    }
+
+    auto preview = std::make_shared<BatchKVCacheResource>();
+    preview->resetBatchSize(1);
+    preview->initGroups(config_.topologyPtr());
+    applyReuseCachePlan(plan, *preview);
+
+    std::vector<BlockIndicesType> reserved_blocks(plan.blocks_by_group.size());
+    for (size_t gid = 0; gid < plan.blocks_by_group.size(); ++gid) {
+        for (const auto block : plan.blocks_by_group[gid]) {
+            if (!isNullBlockIdx(block)) {
+                reserved_blocks[gid].push_back(block);
+            }
+        }
+        if (!reserved_blocks[gid].empty()) {
+            referenceBlocksInGroup(static_cast<int>(gid), reserved_blocks[gid]);
+        }
+    }
+
+    auto self     = std::const_pointer_cast<HybridKVCacheAllocator>(shared_from_this());
+    auto plan_ptr = std::make_shared<ReuseCachePlan>(std::move(plan));
+    return std::make_shared<KVCacheAdmissionReservation>(
+        std::move(preview),
+        [self, plan_ptr](BatchKVCacheResource& destination) {
+            self->applyReuseCachePlan(*plan_ptr, destination);
+            return plan_ptr->reuse_blocks;
+        },
+        [self, reserved_blocks = std::move(reserved_blocks)]() {
+            for (size_t gid = 0; gid < reserved_blocks.size(); ++gid) {
+                if (!reserved_blocks[gid].empty()) {
+                    self->freeBlocksInGroup(static_cast<int>(gid), reserved_blocks[gid]);
+                }
+            }
+        });
+}
+
+int HybridKVCacheAllocator::estimateBatchPeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                        int                            seq_len,
+                                                        int                            common_seq_len,
+                                                        int                            remaining_tokens,
+                                                        int                            reserve_step,
+                                                        bool                           enable_reuse_cache,
+                                                        int                            target_batch_size) const {
+    // Prefix blocks are physical allocations already owned by the shared cache;
+    // referencing them consumes no new pool capacity. For the overwhelmingly
+    // common one-sequence request, estimate from the exact same hybrid match
+    // plan that initMalloc will apply. Multi-return/beam admission remains on
+    // the existing conservative estimator until shared/private fan-out has an
+    // equally exact preview contract.
+    if (target_batch_size <= 1) {
+        if (auto preview = previewReuseCache(batch_kv_cache_resource, enable_reuse_cache)) {
+            return KVCacheAllocator::estimateBatchPeakNeedBlocks(preview,
+                                                                 seq_len,
+                                                                 common_seq_len,
+                                                                 remaining_tokens,
+                                                                 reserve_step,
+                                                                 enable_reuse_cache,
+                                                                 target_batch_size);
+        }
+    }
+    return KVCacheAllocator::estimateBatchPeakNeedBlocks(batch_kv_cache_resource,
+                                                         seq_len,
+                                                         common_seq_len,
+                                                         remaining_tokens,
+                                                         reserve_step,
+                                                         enable_reuse_cache,
+                                                         target_batch_size);
 }
 
 int HybridKVCacheAllocator::estimateInitialBatchPeakNeedBlocks(int  seq_len,

@@ -34,8 +34,9 @@ std::optional<TransferWindow> getTransferWindow(const KVCacheResource& resource,
 
     const auto& cache_keys                = resource.cacheKeys();
     const auto& block_ids                 = resource.blocksForLayer(layer_id, cache_tag);
-    const auto  rank                      = static_cast<size_t>(cp_rank);
-    const auto  world_size                = static_cast<size_t>(cp_size);
+    const bool  already_projected         = resource.cacheKeysAreCpCanonical();
+    const auto  rank                      = already_projected ? size_t{0} : static_cast<size_t>(cp_rank);
+    const auto  world_size                = already_projected ? size_t{1} : static_cast<size_t>(cp_size);
     size_t      max_local_blocks_for_keys = cache_keys.size();
     if (world_size > 1) {
         max_local_blocks_for_keys =

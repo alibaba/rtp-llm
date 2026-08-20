@@ -211,11 +211,19 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
         const auto& spec = config.specForGroup(gid);
         RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache_specs[%zu] is null", gid);
         const auto   layer_count         = static_cast<uint32_t>(config.layerIdsForGroup(gid).size());
-        const size_t kernel_kv_stride    = spec->block_size_bytes();
-        const auto   kernel_scale        = spec->scale_block_size_bytes();
-        const size_t group_bpk           = config.kernelBlocksPerKvBlockForGroup(gid);
-        const size_t kv_stride           = kernel_kv_stride * group_bpk;
-        const size_t scale_stride        = kernel_scale * group_bpk;
+        const size_t spec_kv_stride = spec->block_size_bytes();
+        const auto   spec_scale     = spec->scale_block_size_bytes();
+        const size_t group_bpk      = config.kernelBlocksPerKvBlockForGroup(gid);
+
+        // Attention specs are built with the physical seq_size_per_block, so
+        // their block sizes already cover every kernel page packed in the
+        // physical pool block.  OpaqueKV is the legacy exception: compressed
+        // regions are currently built for one kernel page and expanded here.
+        // Multiplying MHA/MLA again over-allocates the pool and makes an MTP
+        // model with the same physical attention layout look incompatible.
+        const size_t physical_page_multiplier = spec->type == KVCacheSpecType::OpaqueKV ? group_bpk : 1;
+        const size_t kv_stride                 = spec_kv_stride * physical_page_multiplier;
+        const size_t scale_stride              = spec_scale * physical_page_multiplier;
         group_kv_block_stride_bytes[gid] = kv_stride;
         group_kv_scale_stride_bytes[gid] = scale_stride;
         const auto type                  = config.typeForGroup(gid);

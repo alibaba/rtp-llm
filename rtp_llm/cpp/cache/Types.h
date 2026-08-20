@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -60,13 +61,54 @@ struct MatchResult {
     BlockIndicesType block_indices;
 };
 
+// Pins a scheduler-visible device-cache match until the allocator consumes it.
+// The release callback makes rejected/cancelled admission automatically return
+// references; consume transfers those references into the destination stream
+// without another cache lookup or block copy.
+class KVCacheAdmissionReservation {
+public:
+    using ConsumeFn = std::function<int(BatchKVCacheResource&)>;
+    using ReleaseFn = std::function<void()>;
+
+    KVCacheAdmissionReservation(BatchKVCacheResourcePtr preview_resource, ConsumeFn consume, ReleaseFn release):
+        preview_resource_(std::move(preview_resource)), consume_(std::move(consume)), release_(std::move(release)) {}
+
+    ~KVCacheAdmissionReservation() {
+        if (release_) {
+            release_();
+        }
+    }
+
+    const BatchKVCacheResourcePtr& previewResource() const {
+        return preview_resource_;
+    }
+
+    int consume(BatchKVCacheResource& destination) {
+        if (!consume_) {
+            return 0;
+        }
+        const int reuse_blocks = consume_(destination);
+        consume_               = {};
+        release_               = {};
+        return reuse_blocks;
+    }
+
+private:
+    BatchKVCacheResourcePtr preview_resource_;
+    ConsumeFn               consume_;
+    ReleaseFn               release_;
+};
+
+using KVCacheAdmissionReservationPtr = std::shared_ptr<KVCacheAdmissionReservation>;
+
 struct MallocInfo {
-    BatchKVCacheResourcePtr batch_kv_cache_resource;
-    CompleteTokenIdsPtr     complete_token_ids;
-    int64_t                 request_id          = 0;
-    bool                    verbose             = true;  // for failed log
-    bool                    reuse_cache         = true;
-    bool                    enable_device_cache = true;
+    BatchKVCacheResourcePtr        batch_kv_cache_resource;
+    CompleteTokenIdsPtr            complete_token_ids;
+    int64_t                        request_id          = 0;
+    bool                           verbose             = true;  // for failed log
+    bool                           reuse_cache         = true;
+    bool                           enable_device_cache = true;
+    KVCacheAdmissionReservationPtr admission_reservation;
     // Sparse tail-group cleanup is only valid for incremental allocation.
     // Prefill init keeps reused prefix slots intact because model-path kernels
     // still read them by prefix_length.
@@ -78,11 +120,35 @@ struct MallocInfo {
     int incrSeqLen() const;
 };
 
-struct MallocResult {
-    bool success;
-    int  reuse_len;
+// Keep transient cache pressure distinct from requests that can never fit.
+// The scheduler may leave a transiently blocked stream in WAITING, while a
+// permanent or internal allocation failure must still terminate the request.
+enum class MallocStatus : uint8_t {
+    NONE = 0,
+    RETRYABLE_RESOURCE_EXHAUSTED,
+    PERMANENT_RESOURCE_EXHAUSTED,
+    INTERNAL_ERROR,
+};
 
-    int64_t match_cost_time_us = 0;
+struct MallocResult {
+    MallocResult() = default;
+
+    constexpr MallocResult(bool         success,
+                           int          reuse_len,
+                           int64_t      match_cost_time_us = 0,
+                           MallocStatus status             = MallocStatus::NONE):
+        success(success),
+        reuse_len(reuse_len),
+        match_cost_time_us(match_cost_time_us),
+        status(success                      ? MallocStatus::NONE :
+               status == MallocStatus::NONE ? MallocStatus::INTERNAL_ERROR :
+                                              status) {}
+
+    bool success   = false;
+    int  reuse_len = 0;
+
+    int64_t      match_cost_time_us = 0;
+    MallocStatus status             = MallocStatus::INTERNAL_ERROR;
 };
 
 struct FreeInfo {

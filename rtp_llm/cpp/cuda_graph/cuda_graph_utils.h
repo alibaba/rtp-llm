@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include <torch/version.h>
+#include <pybind11/pybind11.h>
 
 #include <string>
 
@@ -15,6 +16,10 @@ void printTensorInfo(const std::string& name, const torch::Tensor& tensor, int m
 void debugPrintPyModelInputs(const torch_ext::PyModelInputs& inputs);
 // Copy common attention metadata to every tag while retaining each tag's block tables.
 void refreshTaggedAttentionInputs(torch_ext::PyModelInputs& inputs);
+// Attention implementations opt in with
+// ``cuda_graph_device_metadata_only = True``.  Tagged implementations are
+// device-only only when every selected tag opts in.
+bool usesDeviceOnlyCudaGraphMetadata(const pybind11::handle& attn_pyobj);
 
 }  // namespace rtp_llm
 
@@ -22,6 +27,14 @@ class CaptureMemoryHold {
 public:
     void setHiddenStates(at::Tensor hidden_states) {
         decoder_layer_hidden_states_ = hidden_states;
+    };
+
+    void setAuxiliaryHiddenStates(at::Tensor auxiliary_hidden_states) {
+        auxiliary_hidden_states_ = auxiliary_hidden_states;
+    };
+
+    void setSpeculativeTokenIds(at::Tensor speculative_token_ids) {
+        speculative_token_ids_ = speculative_token_ids;
     };
 
     CaptureMemoryHold() {}
@@ -42,6 +55,10 @@ public:
         py_model_inputs_.attention_inputs.combo_position_ids       = inputs.attention_inputs.combo_position_ids;
         py_model_inputs_.input_ids                                 = inputs.input_ids;
         py_model_inputs_.combo_position_ids                        = inputs.combo_position_ids;
+        // Phase is part of the DSpARK graph identity. CaptureMemoryHold copies
+        // fields selectively, so preserve it explicitly for warmup/capture and
+        // replay instead of silently resetting to NONE.
+        py_model_inputs_.dspark_call_phase                         = inputs.dspark_call_phase;
 
         // for spec
         py_model_inputs_.input_hiddens                            = inputs.input_hiddens;
@@ -66,7 +83,10 @@ public:
 
 public:
     py::object               attn_pyobj_{py::none()};
+    bool                     attention_metadata_device_only_{false};
     at::Tensor               decoder_layer_hidden_states_;
+    at::Tensor               auxiliary_hidden_states_;
+    at::Tensor               speculative_token_ids_;
     torch_ext::PyModelInputs py_model_inputs_;
 };
 

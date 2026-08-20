@@ -34,6 +34,20 @@ struct KVCachePoolMetricsSnapshot {
     float       used_ratio           = 0.0f;
 };
 
+// Immutable scheduler-side description of one stream's first KV allocation.
+// Keeping this cache-generic lets allocators apply their real pool topology
+// without teaching the scheduler about FULL/LINEAR/SWA group semantics.
+struct InitialKVCacheAllocation {
+    int                     seq_len             = 0;
+    int                     common_seq_len      = 0;
+    int                     remaining_tokens    = 0;
+    int                     reserve_step        = 0;
+    bool                    enable_reuse_cache  = false;
+    bool                    enable_device_cache = false;
+    int                     target_batch_size   = 1;
+    BatchKVCacheResourcePtr batch_kv_cache_resource;
+};
+
 class KVCacheAllocator {
 public:
     KVCacheAllocator(const CacheConfig&                 config,
@@ -76,13 +90,24 @@ public:
                                                           int                            seq_len,
                                                           int                            reserve_step) const                       = 0;
     // Common-prefix growth is charged once; non-common growth is charged once per target sequence.
-    int estimateBatchPeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                    int                            seq_len,
-                                    int                            common_seq_len,
-                                    int                            remaining_tokens,
-                                    int                            reserve_step,
-                                    bool                           enable_reuse_cache,
-                                    int                            target_batch_size) const;
+    virtual int estimateBatchPeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                            int                            seq_len,
+                                            int                            common_seq_len,
+                                            int                            remaining_tokens,
+                                            int                            reserve_step,
+                                            bool                           enable_reuse_cache,
+                                            int                            target_batch_size) const;
+
+    // Returns whether all not-yet-materialized streams in one scheduler round
+    // can complete their initial allocation from the currently available
+    // blocks while preserving the allocator's reserve watermark.
+    virtual bool canAdmitInitialBatch(const std::vector<InitialKVCacheAllocation>& allocations,
+                                      bool preserve_reserve_blocks = true) const;
+
+    // Pin a cache-hit plan between scheduler admission and allocator malloc.
+    // Allocators without a previewable device cache return nullptr.
+    virtual KVCacheAdmissionReservationPtr
+    reserveCacheForAdmission(const BatchKVCacheResourcePtr& batch_kv_cache_resource, bool enable_reuse_cache) const;
 
     MallocResult malloc(const MallocInfo& malloc_info);
     virtual void blockCopy(int src_block_index, int dest_block_index);
@@ -145,9 +170,16 @@ public:
     uint32_t convertToGlobalLayerId(size_t model_id, int local_layer_id) const;
 
 protected:
+    enum class InitCapacityMode {
+        TOTAL_ONLY,
+        TOTAL_AND_AVAILABLE,
+    };
+
     virtual bool         doInit() = 0;
     virtual size_t       reservableAvailableBlocksNum() const;
     MallocResult         initMalloc(const MallocInfo& malloc_info);
+    virtual MallocStatus
+    evaluateInitCapacity(const MallocInfo& malloc_info, size_t reserve_blocks, InitCapacityMode mode) const;
     virtual MallocResult incrMalloc(const MallocInfo& malloc_info)             = 0;
     virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) = 0;
     virtual int          getNeedBlocks(const MallocInfo& malloc_info) const    = 0;

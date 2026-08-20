@@ -9,7 +9,6 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include <c10/core/Event.h>
-#include <optional>
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <memory>
 #include <string>
@@ -29,8 +28,11 @@ public:
     bool init(int64_t store_wait_timeout_ms = 10 * 1000);
 
 public:
-    bool
-    writeByLayer(int layer_id, const KVCacheResourcePtr& resource, int64_t request_id, std::optional<c10::Event> event);
+    bool writeByLayer(int                           layer_id,
+                      const KVCacheResourcePtr&     resource,
+                      int64_t                       request_id,
+                      std::shared_ptr<c10::Event>   event,
+                      int64_t                       deadline_ms);
 
     ErrorInfo sendKVCache(int64_t                                              request_id,
                           const std::string&                                   unique_key,
@@ -45,6 +47,8 @@ public:
 
     bool cancelRead(const std::string& unique_key);
     bool cancelSend(const std::string& unique_key);
+    bool
+    queryLeaseStatus(const std::string& unique_key, bool& sealed, int& started_ops, int& finished_ops, bool& stopped);
 
 public:
     std::shared_ptr<ComputedLayerCacheBufferStore> getComputedBuffersStore() const;

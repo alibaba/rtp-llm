@@ -66,6 +66,32 @@ public:
     /// @brief 向所有 TP worker 广播 cancel 请求
     std::shared_ptr<Result> cancel(const std::string& unique_key, P2PConnectorBroadcastType type);
 
+    struct LeaseStatusResult {
+        bool success{false};
+        struct RankStatus {
+            bool valid{false};
+            bool sealed{true};
+            int  started_ops{0};
+            int  finished_ops{0};
+            bool stopped{false};
+        };
+        std::vector<RankStatus> ranks;
+
+        bool allStopped() const {
+            if (ranks.empty()) {
+                return false;
+            }
+            for (const auto& rank : ranks) {
+                if (!rank.valid || !rank.stopped) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    };
+
+    LeaseStatusResult queryLeaseStatus(const std::string& unique_key, int64_t poll_timeout_ms);
+
 private:
     void genBroadcastRequest(FunctionRequestPB&                                    request,
                              int64_t                                               request_id,

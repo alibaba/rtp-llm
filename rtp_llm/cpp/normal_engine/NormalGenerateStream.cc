@@ -1,4 +1,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
+#include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 
 #include <algorithm>
 #include <chrono>
@@ -226,7 +229,54 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         setSoftmaxProbs(update_info.softmax_probs, seqLength() - update_info.num_new_tokens);
     }
 
-    finished_ = needFinish();
+    if (!finished_ && queryPdSep() && update_info.update_remote_generate
+        && resourceContext().role_type == RoleType::PREFILL) {
+        auto& resource_context = resourceContext();
+        if (resource_context.decode_entrance) {
+            reportEventWithoutLock(StreamEvents::NeedRemoteGenerate);
+            if (resource_context.cache_manager && resource_context.cache_manager->hasP2PConnector()) {
+                P2PConnectorResourceEntry::SideChannelData side_data;
+                const auto                                 tokens = currentExecuteTokens(0);
+                if (!tokens.empty()) {
+                    side_data.has_first_token = true;
+                    side_data.first_token_id  = tokens.back();
+                }
+                side_data.total_reuse_len  = reuseLength();
+                side_data.local_reuse_len  = localReuseLength();
+                side_data.remote_reuse_len = remoteReuseLength();
+                side_data.memory_reuse_len = memoryReuseLength();
+                if (getContainProposeToken()) {
+                    side_data.propose_tokens = getProposeToken();
+                }
+                if (auto sp_output = getSPOutputBuffer()) {
+                    auto probs = sp_output->all_probs.defined() ? sp_output->all_probs.detach().cpu() : torch::Tensor();
+                    auto hidden = sp_output->hidden_states.defined() ? sp_output->hidden_states.detach().cpu() :
+                                                                      torch::Tensor();
+                    if (probs.defined()) {
+                        TensorPbConvert::torchToPb(&side_data.propose_probs, probs);
+                    }
+                    if (hidden.defined()) {
+                        TensorPbConvert::torchToPb(&side_data.propose_hidden, hidden);
+                    }
+                }
+                auto position_ids = getContextPositionIds();
+                if (position_ids.defined() && position_ids.numel() > 0) {
+                    auto position_ids_cpu = position_ids.to(torch::kCPU).contiguous();
+                    side_data.position_ids.assign(position_ids_cpu.data_ptr<int32_t>(),
+                                                  position_ids_cpu.data_ptr<int32_t>() + position_ids_cpu.numel());
+                }
+                resource_context.cache_manager->notifySideChannelReady(uniqueKey(), deadlineMs(), side_data);
+            }
+            fillSubGenerateStatus(StreamState::FINISHED);
+            finished_ = true;
+        } else {
+            holdKVCacheForPDSep();
+            reportEventWithoutLock(StreamEvents::NeedRemoteGenerate);
+            reportEventWithoutLock(StreamEvents::GenerateDone);
+        }
+    }
+
+    finished_ = finished_ || needFinish();
     if (finished_) {
         reportEventWithoutLock(StreamEvents::GenerateDone);
         fillSubGenerateStatus(StreamState::FINISHED);
@@ -236,25 +286,6 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     }
     if (update_info.all_probs.defined()) {
         all_probs_ = update_info.all_probs.cpu();
-    }
-
-    // TODO: move it to better position
-    RTP_LLM_LOG_DEBUG("stream [%ld] finished: %d, pd_sep: %d, is_streaming: %d, need_remote_generate: %d",
-                      streamId(),
-                      finished_,
-                      queryPdSep(),
-                      isStreaming(),
-                      update_info.update_remote_generate);
-
-    if (queryPdSep() && update_info.update_remote_generate) {
-        // Hold KV cache even when the stream already finished in prefill
-        // (e.g. stop words hit): the decode role still issues RemoteLoad for
-        // these blocks and would hang if they were freed here.
-        holdKVCacheForPDSep();
-        if (!finished_) {
-            reportEventWithoutLock(StreamEvents::NeedRemoteGenerate);
-            reportEventWithoutLock(StreamEvents::GenerateDone);
-        }
     }
 
     bool pd_sep_first_token = queryPdSep();

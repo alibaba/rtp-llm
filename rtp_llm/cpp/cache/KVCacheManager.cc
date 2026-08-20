@@ -286,6 +286,16 @@ const CacheConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) co
 
 // 显存管理和缓存分配
 
+void KVCacheManager::prepareCacheKeys(const BatchKVCacheResourcePtr&           batch_kv_cache_resource,
+                                      const std::shared_ptr<CompleteTokenIds>& complete_token_ids) {
+    RTP_LLM_CHECK(batch_kv_cache_resource && complete_token_ids);
+    if (batch_kv_cache_resource->cacheKeysInitialized()) {
+        return;
+    }
+    initCacheKeys(batch_kv_cache_resource, complete_token_ids, config_.seq_size_per_block);
+    batch_kv_cache_resource->markCacheKeysInitialized();
+}
+
 MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_CHECK(malloc_info.batch_kv_cache_resource && malloc_info.complete_token_ids);
@@ -293,7 +303,7 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     const int  seq_size_per_block = config_.seq_size_per_block;
     const bool is_first_malloc    = !malloc_info.batch_kv_cache_resource->curBlocksNum();
     if (is_first_malloc) {
-        initCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
+        prepareCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids);
     } else {
         updateCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
     }
@@ -347,6 +357,19 @@ int KVCacheManager::estimatePeakNeedBlocks(const BatchKVCacheResourcePtr& batch_
                                                    reserve_step,
                                                    enable_reuse_cache,
                                                    target_batch_size);
+}
+
+bool KVCacheManager::canAdmitInitialBatch(const std::vector<InitialKVCacheAllocation>& allocations,
+                                          bool preserve_reserve_blocks) const {
+    RTP_LLM_CHECK_WITH_INFO(allocator_ != nullptr, "canAdmitInitialBatch called before KVCacheManager initialized");
+    return allocator_->canAdmitInitialBatch(allocations, preserve_reserve_blocks);
+}
+
+KVCacheAdmissionReservationPtr
+KVCacheManager::reserveCacheForAdmission(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                         bool                           enable_reuse_cache) const {
+    RTP_LLM_CHECK_WITH_INFO(allocator_ != nullptr, "reserveCacheForAdmission called before KVCacheManager initialized");
+    return allocator_->reserveCacheForAdmission(batch_kv_cache_resource, enable_reuse_cache);
 }
 
 // 块操作相关
@@ -595,6 +618,14 @@ KVCacheManager::incrKVCacheRef(const KVCacheResource& resource, const CacheKeysT
 
 bool KVCacheManager::hasP2PConnector() const {
     return coordinator_ && coordinator_->hasP2PConnector();
+}
+
+void KVCacheManager::notifySideChannelReady(const std::string&                                unique_key,
+                                            int64_t                                           deadline_ms,
+                                            const P2PConnectorResourceEntry::SideChannelData& data) {
+    if (coordinator_) {
+        coordinator_->notifySideChannelReady(unique_key, deadline_ms, data);
+    }
 }
 
 // 异步连接器操作

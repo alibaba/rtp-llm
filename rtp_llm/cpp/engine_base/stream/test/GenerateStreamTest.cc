@@ -591,12 +591,15 @@ TEST_F(GenerateStreamTest, testMtpAsyncDeviceStateBackCompatWrappers) {
     stream->setSpecDecodeDeviceState(accept_len, accept_tokens, next_seq_len, propose_tokens);
     ASSERT_TRUE(stream->getAcceptLenGpu().defined());
     ASSERT_TRUE(stream->getAcceptTokensGpu().defined());
+    ASSERT_TRUE(stream->getLatestTokenGpu().defined());
+    ASSERT_EQ(stream->getLatestTokenGpu().item<int32_t>(), 1);
     ASSERT_TRUE(stream->getNextSeqLenGpu().defined());
     ASSERT_TRUE(stream->getProposeTokensGpu().defined());
 
     stream->clearSpecDecodeDeviceState();
     ASSERT_FALSE(stream->getAcceptLenGpu().defined());
     ASSERT_FALSE(stream->getAcceptTokensGpu().defined());
+    ASSERT_FALSE(stream->getLatestTokenGpu().defined());
     ASSERT_FALSE(stream->getNextSeqLenGpu().defined());
     ASSERT_FALSE(stream->getProposeTokensGpu().defined());
 }

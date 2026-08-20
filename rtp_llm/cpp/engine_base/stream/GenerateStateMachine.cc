@@ -64,6 +64,12 @@ void GenerateStateMachine::handleWaiting() {
         }
         auto result = stream_cache_resource_->initKVBlock();
         if (!result.ok()) {
+            // Connector-held or running-request blocks are transient cache
+            // pressure. Keep the stream in WAITING and let FIFO admission retry
+            // after those owners release their blocks.
+            if (absl::IsUnavailable(result)) {
+                return;
+            }
             error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
             status.store(StreamState::FINISHED, std::memory_order_release);
             releaseResource();

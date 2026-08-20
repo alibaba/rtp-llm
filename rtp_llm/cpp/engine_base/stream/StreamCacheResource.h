@@ -29,15 +29,18 @@ public:
     void                 init(int batch_size);
     bool                 hasCacheKeys() const;
     const CacheKeysType& cacheKeys(int32_t batch_id) const;
+    void                 prepareCacheKeysForAdmission();
+    void                 reserveCacheForAdmission();
+    void                 releaseCacheAdmissionReservation();
     absl::Status         initKVBlock();
     // seq_len_override (-1 = unset) is forwarded to MallocInfo::incr_seq_len_override.
-    absl::Status         incrKVBlock(int seq_len_override = -1);
-    void                 fakeInitKVBlock(size_t reserved_blocks = 0);
-    int                  tryReleaseKVBlock(size_t nums);
-    void                 freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
-    void                 releaseResource();
-    bool                 asyncLoadCache();
-    bool                 loadCacheDone();
+    absl::Status incrKVBlock(int seq_len_override = -1);
+    void         fakeInitKVBlock(size_t reserved_blocks = 0);
+    int          tryReleaseKVBlock(size_t nums);
+    void         freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
+    void         releaseResource();
+    bool         asyncLoadCache();
+    bool         loadCacheDone();
 
     // swap all linear groups rhs and lhs
     void swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs);
@@ -53,7 +56,13 @@ public:
 
     const BatchKVCacheResource& kvCache() const;
     BatchKVCacheResource&       kvCacheMutable();
-    void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);
+    BatchKVCacheResourcePtr     kvCachePtr() const {
+        return batch_kv_cache_resource_;
+    }
+    BatchKVCacheResourcePtr estimationKVCacheResource() const {
+        return admission_reservation_ ? admission_reservation_->previewResource() : batch_kv_cache_resource_;
+    }
+    void setKVCache(const BatchKVCacheResource& kv_cache_resource);
 
     // Rebuild KV block ownership for beam/multiple-return sequences.
     // This records copy mappings; caller must execute them via
@@ -104,6 +113,9 @@ public:
     }
 
     bool reuseCache() const;
+    // The first allocation of a hybrid DECODE stream intentionally bypasses
+    // reuse/device cache. Admission and allocation must use the same policy.
+    bool initialMallocReuseCache() const;
     bool enableMemoryCache() const;
     bool enableRemoteCache() const;
     bool enableDeviceCache() const;
@@ -139,13 +151,14 @@ private:
     ResourceContext                resource_context_;
     std::vector<TaggedBlockIdPair> block_update_mapping_;
 
-    bool                          need_release_resource_ = true;
-    bool                          last_block_aligned_    = false;
-    int                           malloc_failed_times_   = 0;
-    bool                          fake_inited_           = false;
-    bool                          resource_released_     = false;
-    std::shared_ptr<AsyncContext> load_cache_context_;
-    int                           load_cache_retry_count_ = 0;
+    bool                           need_release_resource_ = true;
+    bool                           last_block_aligned_    = false;
+    int                            malloc_failed_times_   = 0;
+    bool                           fake_inited_           = false;
+    bool                           resource_released_     = false;
+    KVCacheAdmissionReservationPtr admission_reservation_;
+    std::shared_ptr<AsyncContext>  load_cache_context_;
+    int                            load_cache_retry_count_ = 0;
 
     // Connector reference counting for PD separation (RAII auto-release)
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;

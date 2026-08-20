@@ -15,11 +15,6 @@ local_repository(
     path = "deps",
 )
 
-local_repository(
-    name = "arch_config",
-    path = "arch_config",
-)
-
 load("@rtp_deps//:http.bzl", "http_deps")
 
 http_deps()
@@ -39,6 +34,13 @@ py_repositories()
 load("@rtp_deps//:pip.bzl", "pip_deps")
 
 pip_deps()
+
+# arch_config imports the pip requirement repositories.  Declare it only
+# after pip_deps() so a clean output base does not form a repository cycle.
+local_repository(
+    name = "arch_config",
+    path = "arch_config",
+)
 
 load("@pip_cpu_torch//:requirements.bzl", pip_cpu_torch_install_deps = "install_deps")
 pip_cpu_torch_install_deps()

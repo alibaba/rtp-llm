@@ -3,6 +3,15 @@ load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm = "requireme
 
 requirement(["triton", "torch", "numpy", "einops", "packaging"])
 
+py_test(
+    name = "test_index",
+    srcs = ["test_index.py"],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:fla",
+    ] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
+    visibility = ["//visibility:public"],
+)
+
 # flydsl is ROCm-only (only present in pip_gpu_rocm requirements).
 # On non-ROCm configs we point to an empty stub to avoid analysis failures.
 py_library(

@@ -38,8 +38,6 @@ public:
                            const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result = {},
                            const torch::Tensor&                        draft_token_ids    = {}) const;
 
-    SamplerInputs gatherDSparkDraftSamplerInput(const StreamGroups& stream_groups, size_t vocab_size) const;
-
     void prepareDecodeDraftModelInput(const StreamGroups& stream_groups,
                                       GptModelInputs&     model_input,
                                       TensorHolder&       host_holder);
@@ -56,6 +54,14 @@ public:
                                                   TensorHolder&       host_holder) const;
 
     void expandTargetVerifyPositionIds(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
+
+    // Expands the next-round position tuple published in each stream's MTP
+    // device state to [batch, propose_step + 1, position_factor]. Returns
+    // false without modifying model_input when any stream has no device
+    // tuple, allowing the caller to join host bookkeeping and use the legacy
+    // stream-derived path.
+    bool expandTargetVerifyPositionIdsFromDeviceState(const StreamGroups& stream_groups,
+                                                       GptModelInputs&     model_input) const;
 
     void updateDecodeDraftModelInput(GptModelInputs&        model_input,
                                      const GptModelOutputs& model_output,

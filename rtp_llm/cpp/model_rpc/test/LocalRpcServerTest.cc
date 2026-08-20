@@ -3,12 +3,14 @@
 #include <chrono>
 #include <future>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/model_rpc/GenerateContext.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 
@@ -67,6 +69,18 @@ public:
     }
 
     std::vector<GenerateOutputsPB> outputs_;
+};
+
+class TestGenerateContext: public GenerateContext {
+public:
+    TestGenerateContext(kmonitor::MetricsReporterPtr& metrics_reporter, std::shared_ptr<RpcServerRuntimeMeta> meta):
+        GenerateContext(/*request_id=*/1,
+                        /*request_timeout_ms=*/0,
+                        /*server_context=*/nullptr,
+                        metrics_reporter,
+                        std::move(meta)) {}
+
+    using GenerateContext::stopStream;
 };
 
 enum class WakeReason {
@@ -232,6 +246,39 @@ TEST(LocalRpcServerTest, PollWritesFinalLocalOutputBeforeRemoteHandoff) {
     EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
     EXPECT_FALSE(normal_stream->stream_cache_resource_->isResourceReleased());
     EXPECT_FALSE(normal_stream->hasOutput());
+}
+
+TEST(GenerateContextTest, FinalOutputPendingSchedulerCommitIsNotCancelled) {
+    kmonitor::MetricsReporterPtr metrics_reporter;
+    auto                         meta    = std::make_shared<RpcServerRuntimeMeta>();
+    auto                         stream  = createNormalStream();
+    TestGenerateContext          context(metrics_reporter, meta);
+    context.setStream(stream);
+    stream->generate_status_->status.store(StreamState::RUNNING);
+    stream->reportEvent(StreamEvents::GenerateDone);
+
+    std::thread scheduler_commit([stream] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        stream->generate_status_->status.store(StreamState::FINISHED);
+    });
+    context.stopStream();
+    scheduler_commit.join();
+
+    EXPECT_FALSE(stream->hasError());
+    EXPECT_EQ(stream->getStatus(), StreamState::FINISHED);
+}
+
+TEST(GenerateContextTest, IncompleteStreamIsCancelled) {
+    kmonitor::MetricsReporterPtr metrics_reporter;
+    auto                         meta   = std::make_shared<RpcServerRuntimeMeta>();
+    auto                         stream = createNormalStream();
+    TestGenerateContext          context(metrics_reporter, meta);
+    context.setStream(stream);
+
+    context.stopStream();
+
+    EXPECT_TRUE(stream->hasError());
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
 }
 
 }  // namespace rtp_llm

@@ -149,6 +149,19 @@ cc_library(
 )
 
 cc_library(
+    name = "dspark_persistent_markov",
+    srcs = ["dspark_persistent_markov.cu"],
+    hdrs = ["dspark_persistent_markov.h"],
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = any_cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "mtp_target_verify_prepare",
     srcs = ["mtp_target_verify_prepare.cu"],
     hdrs = ["mtp_target_verify_prepare.h"],

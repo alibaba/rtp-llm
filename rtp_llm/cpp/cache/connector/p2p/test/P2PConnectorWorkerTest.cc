@@ -403,7 +403,7 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayer_ReturnTrue_WithReadyEvent) {
     resource->cacheKeys() = {0, 1};
 
     // Pass nullopt — means "immediately ready" in StoreWaitContext logic
-    bool success = prefill_->writeByLayer(layer_id, resource, request_id, std::nullopt);
+    bool success = prefill_->writeByLayer(layer_id, resource, request_id, nullptr);
     EXPECT_TRUE(success);
 
     auto computed_buffer = computed_buffers_->getBuffer(request_id);
@@ -416,7 +416,7 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayer_ReturnTrue_WithReadyEvent) {
     ASSERT_NE(computed_buffers_->getBuffer(request_id), nullptr);
 }
 
-TEST_F(P2PConnectorWorkerTest, WriteByLayerCountsOnlyTransferableSparseGroups) {
+TEST_F(P2PConnectorWorkerTest, WriteByLayerPublishesTopologyCountBeforeAllGroupsBecomeTransferable) {
     constexpr int64_t request_id = 1003;
     auto              resource   = std::make_shared<KVCacheResource>();
     resource->initGroups(makeTestCacheTopology(/*group_num=*/2, /*layer_num=*/2, {{0, 1}, {1}}));
@@ -424,12 +424,16 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayerCountsOnlyTransferableSparseGroups) {
     resource->mutableBlockIds(/*group_id=*/1).add({3, 4});
     resource->cacheKeys() = {10, 11};
 
-    EXPECT_TRUE(prefill_->writeByLayer(/*layer_id=*/0, resource, request_id, std::nullopt));
+    EXPECT_TRUE(prefill_->writeByLayer(/*layer_id=*/0, resource, request_id, nullptr));
 
     auto computed_buffer = computed_buffers_->getBuffer(request_id);
     ASSERT_NE(computed_buffer, nullptr);
     ASSERT_TRUE(computed_buffer->expectedBufferCount().has_value());
-    EXPECT_EQ(*computed_buffer->expectedBufferCount(), 2u);
+    // The first per-layer resource can contain physical blocks for only one
+    // cache group.  Completion must nevertheless describe the immutable
+    // layer/tag topology; otherwise StartLoad can finish and release the
+    // request before later hybrid groups are produced.
+    EXPECT_EQ(*computed_buffer->expectedBufferCount(), 3u);
 }
 
 // ==================== sendKVCache 测试 (Prefill 端) ====================
@@ -841,6 +845,43 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_Timeout) {
 
     auto end_time_ms = currentTimeMs();
     EXPECT_LE(end_time_ms - start_time_ms, 300);
+}
+
+TEST_F(P2PConnectorWorkerTest, ReadTimeoutKeepsLeaseUntilReceiverWriteStops) {
+    const std::string unique_key  = "test_read_timeout_lease";
+    const int64_t     deadline_ms = currentTimeMs() + 120;
+    auto buffer = createTaggedLayerCacheBuffer(/*layer_id=*/0, "group2", /*num_blocks=*/2);
+
+    auto error = decode_->read(/*request_id=*/3013, unique_key, deadline_ms, {buffer});
+    ASSERT_EQ(error.code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE);
+
+    bool sealed = false;
+    bool stopped = true;
+    int  started = 0;
+    int  finished = 0;
+    ASSERT_TRUE(decode_->queryLeaseStatus(unique_key, sealed, started, finished, stopped));
+    EXPECT_TRUE(sealed);
+    EXPECT_EQ(started, 1);
+    EXPECT_EQ(finished, 0);
+    EXPECT_FALSE(stopped);
+
+    const auto transfer_key = P2PKeyUtil::makePartitionLayerTagKey(unique_key, 0, "group2", 0);
+    mock_receiver_->setTaskDone(transfer_key, true);
+    ASSERT_TRUE(decode_->queryLeaseStatus(unique_key, sealed, started, finished, stopped));
+    EXPECT_EQ(finished, 1);
+    EXPECT_TRUE(stopped);
+}
+
+TEST(DecodeTargetWriteLeaseTest, SealDoesNotStopBeforeAllStartedWritesFinish) {
+    DecodeTargetWriteLease lease;
+    lease.onTransferStarted();
+    lease.onTransferStarted();
+    lease.seal();
+    EXPECT_FALSE(lease.isStopped());
+    lease.onTransferFinished();
+    EXPECT_FALSE(lease.isStopped());
+    lease.onTransferFinished();
+    EXPECT_TRUE(lease.isStopped());
 }
 
 TEST_F(P2PConnectorWorkerTest, Read_ReturnTrue_EmptyBuffers) {

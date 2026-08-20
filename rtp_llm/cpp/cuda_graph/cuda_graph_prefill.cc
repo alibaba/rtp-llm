@@ -32,6 +32,27 @@ void CudaGraphRunner::capturePrefill() {
             inputs.attention_inputs.cu_seqlens[0] = 0;
             inputs.attention_inputs.cu_seqlens_device.copy_(inputs.attention_inputs.cu_seqlens, false);
             inputs.attention_inputs.cu_kv_seqlens_device.copy_(inputs.attention_inputs.cu_seqlens, false);
+        } else if (isGenerativePrefillCudaGraph()) {
+            // Exact-shape single-request prompt graph. Capture against the
+            // longest legal prefix so the paged-attention and recurrent cache
+            // paths allocate their maximum metadata, while only seq_len query
+            // rows execute. Replay replaces lengths and block tables.
+            const int prefix_len = std::max(max_seq_len_ - seq_len, 0);
+            inputs.attention_inputs.input_lengths.fill_(0);
+            inputs.attention_inputs.prefix_lengths.fill_(0);
+            inputs.attention_inputs.input_lengths[0]  = seq_len;
+            inputs.attention_inputs.prefix_lengths[0] = prefix_len;
+
+            auto cu_seqlens_host    = inputs.attention_inputs.cu_seqlens;
+            auto cu_kv_seqlens_host = inputs.attention_inputs.cu_kv_seqlens_device.cpu();
+            cu_seqlens_host.fill_(seq_len);
+            cu_kv_seqlens_host.fill_(prefix_len + seq_len);
+            cu_seqlens_host[0]    = 0;
+            cu_kv_seqlens_host[0] = 0;
+            inputs.attention_inputs.cu_seqlens_device.copy_(cu_seqlens_host);
+            inputs.attention_inputs.cu_kv_seqlens_device.copy_(cu_kv_seqlens_host);
+            inputs.attention_inputs.input_lengths_device.copy_(inputs.attention_inputs.input_lengths);
+            inputs.attention_inputs.prefix_lengths_device.copy_(inputs.attention_inputs.prefix_lengths);
         } else {
             // Draft model prefill: distribute seq_len tokens across batches (max num_tokens_per_bs_ each).
             // All max_bs_ batches get the largest legal prefix so
@@ -68,7 +89,8 @@ void CudaGraphRunner::capturePrefill() {
             inputs.attention_inputs.prefix_lengths_device.copy_(prefix_lengths);
         }
 
-        inputs.attention_inputs.context_total_kv_length = seq_len;
+        inputs.attention_inputs.context_total_kv_length =
+            isGenerativePrefillCudaGraph() ? max_seq_len_ : seq_len;
         inputs.attention_inputs.prefill_cuda_graph_copy_params =
             capture_mem_hold_.py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params;
         if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
@@ -79,16 +101,19 @@ void CudaGraphRunner::capturePrefill() {
         }
         // Prefill reshapes common metadata after prepareCaptureInputs synchronized the tag map.
         refreshTaggedAttentionInputs(inputs);
-        graph_instances_[seq_len].mem_hold_ = createCaptureMemoryHold(inputs, max_bs_ * num_tokens_per_bs_);
+        // Every output owned by a graph key must use the same geometry as the
+        // model forward. Generic HC-shaped MTP keeps fixed max capacity;
+        // embedding and phase-specific DSpARK graphs produce the real
+        // flattened token count. This applies to hidden states and graph-native
+        // proposal ids alike -- mixing max-capacity proposal storage with a
+        // B*width model output makes non-max graph keys impossible to capture.
+        const int output_tokens = usesFixedCapacityMtpDraftPrefillCudaGraph() ?
+                                      static_cast<int>(max_bs_) * num_tokens_per_bs_ :
+                                      seq_len;
+        graph_instances_[seq_len].mem_hold_ = createCaptureMemoryHold(inputs, output_tokens);
         graph_instances_[seq_len].mem_hold_.attn_pyobj_ =
             py_attn_pyobj_method_(graph_instances_[seq_len].mem_hold_.py_model_inputs_, true);
-        // HC-shaped MTP draft prefill keeps its output at fixed graph capacity.
-        // Other paths produce the real flattened seq_len and must keep their
-        // metadata shapes aligned.
-        if (!usesFixedCapacityMtpDraftPrefillCudaGraph()) {
-            graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_ =
-                graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_.slice(0, 0, seq_len);
-        }
+        cacheAttentionMetadataCapability(graph_instances_[seq_len].mem_hold_);
         capturePrefillOneSeqLen(seq_len);
         cuda_graph::finish_capture_session();
         replayAndSyncCheck(seq_len, "seq len");
@@ -98,8 +123,49 @@ void CudaGraphRunner::capturePrefill() {
 }
 
 std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
+    if (isGenerativePrefillCudaGraph()) {
+        std::vector<int> result;
+        result.reserve(prefill_capture_seq_lens_.size());
+        for (const int seq_len : prefill_capture_seq_lens_) {
+            if (seq_len > 0 && seq_len <= num_tokens_per_bs_) {
+                result.push_back(seq_len);
+            }
+        }
+        std::sort(result.begin(), result.end());
+        result.erase(std::unique(result.begin(), result.end()), result.end());
+        RTP_LLM_CHECK_WITH_INFO(!result.empty(),
+                                "generative prefill graph needs at least one exact capture key <= %d",
+                                num_tokens_per_bs_);
+        RTP_LLM_LOG_INFO("Generative prompt prefill: capture %zu exact token keys (max=%d, batch=1)",
+                         result.size(),
+                         result.back());
+        return result;
+    }
+
     // MTP draft prefill: capture at multiples of num_tokens_per_bs_
     if (isMtpDraftPrefillCudaGraph()) {
+        // DSpARK proposal/commit execute every captured B*width row. In
+        // particular, commit performs KV projection/RoPE/scatter without an
+        // attention-side active-row mask. Rounding B up to a sparse decode
+        // bucket would therefore make the padded rows scatter through cache
+        // metadata that belongs to no stream. Preserve the validated DSpARK
+        // contract: one exact fixed-width graph for every serving batch.
+        if (dspark_call_phase_ != DSparkCallPhase::NONE) {
+            std::vector<int> result;
+            result.reserve(max_bs_);
+            for (int batch_size = 1; batch_size <= static_cast<int>(max_bs_); ++batch_size) {
+                result.push_back(batch_size * num_tokens_per_bs_);
+            }
+            RTP_LLM_LOG_INFO(
+                "DSpARK phase %d: capture %zu exact-batch fixed-width prefill token keys "
+                "(max_bs=%zu, query_width=%d)",
+                static_cast<int>(dspark_call_phase_),
+                result.size(),
+                max_bs_,
+                num_tokens_per_bs_);
+            return result;
+        }
+
         std::vector<int> result;
         for (int i = 1; i <= max_bs_; ++i) {
             result.push_back(i * num_tokens_per_bs_);

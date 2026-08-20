@@ -9,6 +9,7 @@
 namespace rtp_llm {
 
 class KVCacheConnectorReadWriteContext;
+class KVCacheResource;
 
 class IKVCacheConnectorCoordinator {
 public:
@@ -28,6 +29,11 @@ public:
 
     virtual std::shared_ptr<AsyncContext>
     asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) = 0;
+
+    virtual std::shared_ptr<KVCacheResource>
+    holdKVCacheResourceForConnector(const KVCacheResource& resource, int layer_id = -1) = 0;
+
+    virtual void reportP2PCacheWriteFailure() {}
 };
 
 }  // namespace rtp_llm

@@ -29,11 +29,20 @@ public:
                        bool                            copy_last_block,
                        std::vector<TaggedBlockIdPair>& block_update_mapping) override;
 
-    int              seqSizePerBlock() const override;
-    int              singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                           int                            seq_len,
-                                           int                            reserve_step) const override;
-    std::vector<int> independentEvictionGroupIds() const override;
+    int                            seqSizePerBlock() const override;
+    int                            singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                         int                            seq_len,
+                                                         int                            reserve_step) const override;
+    int                            estimateBatchPeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                               int                            seq_len,
+                                                               int                            common_seq_len,
+                                                               int                            remaining_tokens,
+                                                               int                            reserve_step,
+                                                               bool                           enable_reuse_cache,
+                                                               int                            target_batch_size) const override;
+    KVCacheAdmissionReservationPtr reserveCacheForAdmission(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                            bool enable_reuse_cache) const override;
+    std::vector<int>               independentEvictionGroupIds() const override;
 
 protected:
     MallocResult incrMalloc(const MallocInfo& malloc_info) override;
@@ -53,9 +62,21 @@ protected:
     void         checkCPShardedMallocResult(const MallocInfo& malloc_info) const override;
     void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override;
 
-    int reuseCache(const CacheKeysType&                 cache_keys,
-                   BatchKVCacheResource&                kv_resource,
-                   const std::shared_ptr<CPSlotMapper>& cp_mapper);
+    struct ReuseCachePlan {
+        int                           reuse_blocks = 0;
+        std::vector<BlockIndicesType> blocks_by_group;
+    };
+
+    CacheKeysType           matchableCacheKeys(const CacheKeysType&                 cache_keys,
+                                               const std::shared_ptr<CPSlotMapper>& cp_mapper) const;
+    ReuseCachePlan          planReuseCache(const CacheKeysType&                 cache_keys,
+                                           const std::shared_ptr<CPSlotMapper>& cp_mapper) const;
+    void                    applyReuseCachePlan(const ReuseCachePlan& plan, BatchKVCacheResource& kv_resource) const;
+    int                     reuseCache(const CacheKeysType&                 cache_keys,
+                                       BatchKVCacheResource&                kv_resource,
+                                       const std::shared_ptr<CPSlotMapper>& cp_mapper) const;
+    BatchKVCacheResourcePtr previewReuseCache(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                              bool                           enable_reuse_cache) const;
 
     virtual void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) const = 0;
     virtual void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false)            = 0;

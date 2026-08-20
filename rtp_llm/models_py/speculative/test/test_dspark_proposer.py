@@ -73,6 +73,22 @@ class ProposerContractTest(unittest.TestCase):
                 None,
             )
 
+    def test_single_tag_attention_uses_generic_fast_path(self) -> None:
+        proposer = _TinyProposer(width=3)
+        selected = SimpleNamespace(prefix_lengths=torch.tensor([7]))
+        inputs = SimpleNamespace(attention_inputs={"full": selected})
+
+        self.assertIs(proposer.dspark_attention_inputs(inputs), selected)
+
+    def test_multiple_tags_require_model_layer_selection(self) -> None:
+        proposer = _TinyProposer(width=3)
+        inputs = SimpleNamespace(
+            attention_inputs={"full": SimpleNamespace(), "linear0": SimpleNamespace()}
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "select its attention cache group"):
+            proposer.dspark_attention_inputs(inputs)
+
 
 class _CommitProposer(DSparkProposerMixin):
     """Captures the rows handed to the projection and commit hooks."""
@@ -192,6 +208,26 @@ class ProposeStepTest(unittest.TestCase):
         # Zero-prefix rows are CUDA-graph padding, not live requests.
         self.assertEqual(active.tolist(), [True, False])
         self.assertTrue(torch.equal(outputs.hidden_states, self.proposer.seen_hidden))
+
+    def test_graph_metadata_capacity_does_not_define_query_batch(self) -> None:
+        """New-main prefill graphs may reserve metadata beyond the graph key."""
+        input_ids = torch.zeros(self.width, dtype=torch.int32)
+        input_ids[0] = 3
+        inputs = _propose_inputs(
+            input_ids,
+            torch.tensor([self.width, 0], dtype=torch.int32),
+            torch.tensor([7, 0], dtype=torch.int32),
+        )
+
+        self.proposer.run_propose_step(
+            inputs, fmha_impl=None, device=self.device
+        )
+
+        query_ids, positions, prefix, active = self.proposer.query_call
+        self.assertEqual(tuple(query_ids.shape), (1, self.width))
+        self.assertEqual(positions[0].tolist(), [7, 8, 9, 10, 11])
+        self.assertEqual(prefix.tolist(), [7])
+        self.assertEqual(active.tolist(), [True])
 
     def test_rejects_wrong_token_count(self) -> None:
         inputs = _propose_inputs(

@@ -43,7 +43,7 @@ bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams
     RTP_LLM_PROFILE_FUNCTION();
     if (pd_sep_config_.role_type == RoleType::DECODE) {
         if (running_streams_.size() + streams.size() + 1 <= max_generate_batch_size_) {
-            return true;
+            return canAdmitInitialKVBatch(streams, new_stream);
         }
     }
     // prefill and decode not mixed together
@@ -61,14 +61,16 @@ bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams
 
     int max_token_size = new_stream->contextLength();
     if (streams.empty() && max_token_size + running_streams_.size() < int(max_seq_len_)) {
-        return true;
+        return canAdmitInitialKVBatch(streams, new_stream);
     }
     for (auto& stream : streams) {
         max_token_size = std::max(max_token_size, stream->contextLength());
     }
     // 这里的判断是要求当前调度轮所有请求参与计算的 token 数之和小于 max_batch_tokens_size_，loading_cache_streams
     // 这一轮实际不参与计算，不需要计入。
-    return max_token_size * (streams.size() + 1) + running_streams_.size() < int(max_batch_tokens_size_);
+    const bool fits_batch_tokens =
+        max_token_size * (streams.size() + 1) + running_streams_.size() < int(max_batch_tokens_size_);
+    return fits_batch_tokens && canAdmitInitialKVBatch(streams, new_stream);
 }
 
 void FIFOScheduler::accountBatchMetrics(const GenerateStreamPtr& new_stream) {

@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 
 from rtp_llm.models_py.triton_kernels.fla.chunk import chunk_gated_delta_rule
+from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
 from rtp_llm.models_py.triton_kernels.fla.utils import assert_close, device
 
 logging.basicConfig(
@@ -16,6 +17,23 @@ logging.basicConfig(
     format="[process-%(process)d][%(name)s][%(asctime)s.%(msecs)03d][%(filename)s:%(funcName)s():%(lineno)s][%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+
+
+def test_fused_gdn_gating_preserves_fp32_beta():
+    """Qwen3Next must not truncate sigmoid(b) before its fp32 state update."""
+    rows, heads = 17, 24
+    b = torch.linspace(-4, 4, rows * heads, device=device).reshape(rows, heads)
+    b = b.to(torch.bfloat16)
+    a = torch.zeros_like(b)
+    a_log = torch.zeros(heads, dtype=torch.bfloat16, device=device)
+    dt_bias = torch.zeros(heads, dtype=torch.bfloat16, device=device)
+
+    _, beta = fused_gdn_gating(a_log, a, b, dt_bias)
+
+    assert beta.dtype == torch.float32
+    torch.testing.assert_close(
+        beta.squeeze(0), torch.sigmoid(b.float()), rtol=1e-5, atol=1e-6
+    )
 
 
 def recurrent_gated_delta_rule_ref(
@@ -217,7 +235,64 @@ def test_chunk_varlen(
     assert_close("ht", ref_ht, tri_ht.transpose(-1, -2), 0.005)
 
 
+def test_chunk_cuda_graph_retains_cached_indices():
+    """Cached index tensors captured by a graph must live as long as the graph.
+
+    FLA's four-entry tensor cache can evict the pre-capture chunk indices after
+    other graph keys are constructed. The captured kernels still contain those
+    raw pointers, so eviction used to turn a later replay into illegal memory
+    access. This reproduces the Qwen3.5 TP2 hot-prefix geometry and deliberately
+    churns more cache keys than the legacy LRU capacity before replay.
+    """
+    torch.manual_seed(43)
+    T, Hg, H, K, V = 45, 8, 24, 128, 128
+    q = torch.randn(1, T, Hg, K, dtype=torch.bfloat16, device=device)
+    k = F.normalize(torch.randn_like(q, dtype=torch.float32), p=2, dim=-1).to(
+        torch.bfloat16
+    )
+    v = torch.randn(1, T, H, V, dtype=torch.bfloat16, device=device)
+    g = F.logsigmoid(torch.randn(1, T, H, dtype=torch.float32, device=device))
+    beta = torch.sigmoid(
+        torch.randn(1, T, H, dtype=torch.float32, device=device)
+    )
+    initial_state = torch.randn(
+        1, H, V, K, dtype=torch.float32, device=device
+    )
+    cu_seqlens = torch.tensor([0, T], dtype=torch.int32, device=device)
+
+    def run(cu):
+        return chunk_gated_delta_rule(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=initial_state,
+            output_final_state=True,
+            cu_seqlens=cu,
+            use_qk_l2norm_in_kernel=True,
+        )
+
+    run(cu_seqlens)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        graph_output, _, graph_final_state = run(cu_seqlens)
+
+    # Every FLA index helper has an LRU capacity of four. Distinct tensor
+    # identities force the graph's cached metadata out unless capture pins it.
+    for _ in range(8):
+        run(torch.tensor([0, T], dtype=torch.int32, device=device))
+    torch.cuda.synchronize()
+
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.isfinite(graph_output).all()
+    assert torch.isfinite(graph_final_state).all()
+
+
 if __name__ == "__main__":
+    test_chunk_cuda_graph_retains_cached_indices()
     test_params = [
         # (H, D, mask_p, cu_seqlens, dtype, state_dtype)
         (4, 64, 0, [0, 15], torch.bfloat16),

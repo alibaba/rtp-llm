@@ -21,7 +21,11 @@ public:
                       int64_t                  kernel_tokens_per_block,
                       std::vector<int>         prefill_capture_seq_lens,
                       int64_t                  hidden_size,
-                      std::vector<std::string> group_tags) {
+                      std::vector<std::string> group_tags,
+                      int64_t                  num_tokens_per_bs,
+                      int64_t                  dspark_call_phase,
+                      int64_t                  input_hidden_size,
+                      std::vector<int>         decode_capture_batch_sizes) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph_debug_mode = true;
@@ -29,12 +33,16 @@ public:
         params.max_seq_len                  = static_cast<int>(max_seq_len);
         params.tokens_per_block             = static_cast<int>(tokens_per_block);
         params.kernel_tokens_per_block      = static_cast<int>(kernel_tokens_per_block);
-        params.num_tokens_per_bs            = static_cast<int>(max_seq_len);
+        params.num_tokens_per_bs = static_cast<int>(
+            num_tokens_per_bs > 0 ? num_tokens_per_bs : max_seq_len);
         params.max_context_batch_size       = static_cast<size_t>(max_context_batch_size);
         params.hidden_size                  = static_cast<size_t>(hidden_size);
         params.model_data_type              = c10::ScalarType::BFloat16;
         params.prefill_capture_seq_lens     = std::move(prefill_capture_seq_lens);
         params.kv_cache_group_tags          = std::move(group_tags);
+        params.dspark_call_phase            = static_cast<DSparkCallPhase>(dspark_call_phase);
+        params.input_hidden_size            = static_cast<size_t>(input_hidden_size);
+        params.decode_capture_batch_sizes   = std::move(decode_capture_batch_sizes);
 
         runner_ = CudaGraphRunner::createForPrefill(std::move(py_instance), std::move(params));
     }
@@ -47,7 +55,9 @@ public:
                      std::vector<int>         decode_capture_batch_sizes,
                      std::vector<std::string> group_tags,
                      bool                     is_target_verify,
-                     int64_t                  num_tokens_per_bs) {
+                     int64_t                  num_tokens_per_bs,
+                     int64_t                  dspark_call_phase,
+                     int64_t                  input_hidden_size) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph_debug_mode = false;
@@ -62,6 +72,8 @@ public:
         params.decode_capture_batch_sizes   = std::move(decode_capture_batch_sizes);
         params.kv_cache_group_tags          = std::move(group_tags);
         params.is_target_verify             = is_target_verify;
+        params.dspark_call_phase            = static_cast<DSparkCallPhase>(dspark_call_phase);
+        params.input_hidden_size            = static_cast<size_t>(input_hidden_size);
 
         runner_ = CudaGraphRunner::createForDecode(std::move(py_instance), std::move(params));
     }
@@ -82,6 +94,10 @@ public:
 
     int getCurrentRealGraphSize() {
         return runner_ != nullptr ? runner_->getCurrentRealGraphBs(state_) : 0;
+    }
+
+    bool usesDeviceOnlyAttentionMetadata() const {
+        return runner_ != nullptr && runner_->usesDeviceOnlyAttentionMetadata();
     }
 
     ~CudaGraphTestRunner() {
@@ -115,7 +131,11 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("kernel_tokens_per_block"),
              py::arg("prefill_capture_seq_lens"),
              py::arg("hidden_size"),
-             py::arg("group_tags") = std::vector<std::string>{})
+             py::arg("group_tags")        = std::vector<std::string>{},
+             py::arg("num_tokens_per_bs") = 0,
+             py::arg("dspark_call_phase") = static_cast<int64_t>(DSparkCallPhase::NONE),
+             py::arg("input_hidden_size") = 0,
+             py::arg("decode_capture_batch_sizes") = std::vector<int>{})
         .def("init_decode",
              &CudaGraphTestRunner::init_decode,
              py::arg("py_instance"),
@@ -126,8 +146,11 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("decode_capture_batch_sizes"),
              py::arg("group_tags")        = std::vector<std::string>{},
              py::arg("is_target_verify")  = false,
-             py::arg("num_tokens_per_bs") = 1)
+             py::arg("num_tokens_per_bs") = 1,
+             py::arg("dspark_call_phase") = static_cast<int64_t>(DSparkCallPhase::NONE),
+             py::arg("input_hidden_size") = 0)
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)
-        .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);
+        .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize)
+        .def("usesDeviceOnlyAttentionMetadata", &CudaGraphTestRunner::usesDeviceOnlyAttentionMetadata);
 }

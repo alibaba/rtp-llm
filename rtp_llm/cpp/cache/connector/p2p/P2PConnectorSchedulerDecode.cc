@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include <algorithm>
 #include <memory>
 #include <optional>
 
@@ -57,7 +58,8 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
 
     const int64_t     request_id      = routing->request_id;
     const std::string unique_key      = routing->unique_key;
-    const int64_t     deadline_ms     = routing->deadline_ms;
+    const int64_t     deadline_ms     =
+        std::min(routing->deadline_ms, currentTimeMs() + config_.p2p_max_transfer_deadline_ms);
     const auto&       prefill_addr    = routing->prefill_addr;
     const int         prefill_tp_size = routing->prefill_tp_size;
 

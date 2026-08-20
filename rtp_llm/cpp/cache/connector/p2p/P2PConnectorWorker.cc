@@ -52,11 +52,12 @@ bool P2PConnectorWorker::init(int64_t store_wait_timeout_ms) {
     return true;
 }
 
-bool P2PConnectorWorker::writeByLayer(int                       layer_id,
-                                      const KVCacheResourcePtr& resource,
-                                      int64_t                   request_id,
-                                      std::optional<c10::Event> event) {
-    return prefill_->writeByLayer(layer_id, resource, request_id, std::move(event));
+bool P2PConnectorWorker::writeByLayer(int                           layer_id,
+                                      const KVCacheResourcePtr&     resource,
+                                      int64_t                       request_id,
+                                      std::shared_ptr<c10::Event>   event,
+                                      int64_t                       deadline_ms) {
+    return prefill_->writeByLayer(layer_id, resource, request_id, std::move(event), deadline_ms);
 }
 
 ErrorInfo
@@ -81,6 +82,11 @@ bool P2PConnectorWorker::cancelRead(const std::string& unique_key) {
 
 bool P2PConnectorWorker::cancelSend(const std::string& unique_key) {
     return prefill_->cancelSend(unique_key);
+}
+
+bool P2PConnectorWorker::queryLeaseStatus(
+    const std::string& unique_key, bool& sealed, int& started_ops, int& finished_ops, bool& stopped) {
+    return decode_->queryLeaseStatus(unique_key, sealed, started_ops, finished_ops, stopped);
 }
 
 std::shared_ptr<ComputedLayerCacheBufferStore> P2PConnectorWorker::getComputedBuffersStore() const {

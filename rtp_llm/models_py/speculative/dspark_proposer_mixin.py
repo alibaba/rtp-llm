@@ -28,17 +28,20 @@ are request-major):
   committed sequence length immediately before the query block. No
   feature input — the block reads the committed feature KV.
 
-The Python model stops at normalized hidden-state production. The C++ model
-wrapper applies the regular lm_head, then the speculative executor applies the
-sequential Markov correction and samples with the framework's high-performance
-sampler using each request's real sampling parameters.
+The shared Python path stops at normalized hidden-state production. Serving
+checkpoint families override the output hook and keep the full-vocabulary
+LM head plus the dependent Markov chain inside the same CUDA graph. DSpARK deliberately has no
+launch-bound framework-sampler fallback: every decode proposal must export
+graph-native point-mass token ids.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 
@@ -47,6 +50,55 @@ def optional_tensor(value: Any) -> Optional[torch.Tensor]:
     if value is None or not isinstance(value, torch.Tensor):
         return None
     return value if value.numel() > 0 else None
+
+
+def graph_captured_greedy_markov_decode(
+    base_logits: torch.Tensor,
+    anchors: torch.Tensor,
+    markov_w1: torch.Tensor,
+    markov_w2: torch.Tensor,
+    draft_id_to_target_id: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Reference implementation of DSpARK's left-to-right Markov head.
+
+    The previous sampled target token makes the steps inherently sequential.
+    This straightforward form is kept as a unit-test oracle. Serving uses the
+    full-vocabulary persistent device kernel captured by the proposal graph;
+    TopK pruning is not equivalent because the Markov correction can promote
+    any draft-vocabulary item.
+    """
+    if base_logits.ndim != 3:
+        raise ValueError("base_logits must have shape [batch, steps, draft_vocab]")
+    if anchors.ndim != 1 or anchors.shape[0] != base_logits.shape[0]:
+        raise ValueError("anchors must have shape [batch]")
+    if markov_w1.ndim != 2 or markov_w2.ndim != 2:
+        raise ValueError("Markov weights must be matrices")
+    if markov_w1.shape[1] != markov_w2.shape[1]:
+        raise ValueError("Markov weights must have the same rank")
+    if markov_w2.shape[0] != base_logits.shape[2]:
+        raise ValueError("Markov W2 must cover the complete draft vocabulary")
+
+    previous = anchors.long()
+    proposal_columns = []
+    for step in range(base_logits.shape[1]):
+        markov_embedding = F.embedding(previous, markov_w1)
+        markov_bias = F.linear(markov_embedding, markov_w2)
+        # Each base row is consumed once. Updating it in place avoids another
+        # batch-by-vocabulary graph allocation without changing the result.
+        step_logits = base_logits[:, step]
+        step_logits.add_(markov_bias)
+        draft_ids = step_logits.argmax(-1)
+        previous = (
+            draft_id_to_target_id[draft_ids]
+            if draft_id_to_target_id is not None
+            else draft_ids
+        )
+        proposal_columns.append(previous)
+    # d2t is int64 so that the generic rejection sampler can also use it as a
+    # vocabulary index.  Cast the assembled block once instead of launching a
+    # conversion for every dependent Markov step; the whole operation remains
+    # part of the proposal CUDA graph.
+    return torch.stack(proposal_columns, dim=1).to(torch.int32)
 
 
 def map_context_rows(
@@ -141,6 +193,26 @@ class DSparkProposerMixin:
         draft-input features ``[rows, hidden_dim]`` (bf16)."""
         raise NotImplementedError
 
+    def dspark_attention_inputs(self, inputs: PyModelInputs) -> Any:
+        """Select the attention metadata owned by the DSpARK draft layers.
+
+        The generic single-cache fast path exposes one ``PyAttentionInputs``
+        value.  New-main hybrid cache exposes a tag mapping instead; a model
+        family with more than one visible tag must override this hook and use
+        the main layer-to-cache-group selector.  This keeps phase geometry in
+        the shared proposer without guessing tag names or depending on map
+        iteration order.
+        """
+        attention = inputs.attention_inputs
+        if isinstance(attention, Mapping):
+            if len(attention) != 1:
+                raise RuntimeError(
+                    "DSpARK draft model must select its attention cache group: "
+                    f"available tags={list(attention)}"
+                )
+            return next(iter(attention.values()))
+        return attention
+
     def commit_feature_rows(
         self,
         main_x: torch.Tensor,
@@ -194,6 +266,19 @@ class DSparkProposerMixin:
         """Reduce backbone output to ``[B*width, dim]`` when needed."""
         return hidden.contiguous()
 
+    def build_proposal_outputs(
+        self, hidden: torch.Tensor, query_ids: torch.Tensor
+    ) -> PyModelOutputs:
+        """Build model outputs after the shared proposal backbone.
+
+        The base contract only describes the shared backbone output. Serving
+        subclasses must additionally export graph-native point-mass token
+        proposals without changing phase, attention, cache, or executor
+        semantics.
+        """
+        del query_ids
+        return PyModelOutputs(self.compute_draft_hidden_states(hidden))
+
     # ------------------------------------------------------------------
     # Shared per-round flow
     # ------------------------------------------------------------------
@@ -225,7 +310,7 @@ class DSparkProposerMixin:
         on), ``prefix_lengths`` is where they start, and ``input_hiddens``
         carries the feature rows packed in the same request-major order.
         Produces no logits."""
-        attention_inputs = inputs.attention_inputs
+        attention_inputs = self.dspark_attention_inputs(inputs)
         input_lengths = optional_tensor(
             getattr(attention_inputs, "input_lengths", None)
         )
@@ -327,18 +412,16 @@ class DSparkProposerMixin:
         :meth:`run_commit_step`; the call carries no feature input."""
         width = self._dspark_query_width
 
-        attention_inputs = inputs.attention_inputs
-        input_lengths = optional_tensor(
-            getattr(attention_inputs, "input_lengths", None)
-        )
-        batch_size = int(input_lengths.numel()) if input_lengths is not None else 0
-        expected_tokens = batch_size * width
-        if int(inputs.input_ids.numel()) != expected_tokens:
+        attention_inputs = self.dspark_attention_inputs(inputs)
+        token_count = int(inputs.input_ids.numel())
+        if token_count % width != 0:
             raise RuntimeError(
                 "DSpark input_ids must contain exactly B*gamma tokens: "
-                f"numel={inputs.input_ids.numel()}, batch={batch_size}, "
-                f"gamma={width}"
+                f"numel={token_count}, gamma={width}"
             )
+        # Generic prefill graphs reserve attention metadata at max batch, while
+        # the selected graph key fixes the actual query token count.
+        batch_size = token_count // width
 
         prefix = optional_tensor(getattr(attention_inputs, "prefix_lengths", None))
         prefix_device = optional_tensor(
@@ -348,8 +431,15 @@ class DSparkProposerMixin:
         if batch_size > 0 and (
             prefix_source is None or int(prefix_source.numel()) < batch_size
         ):
+            prefix_rows = 0 if prefix is None else int(prefix.numel())
+            prefix_device_rows = (
+                0 if prefix_device is None else int(prefix_device.numel())
+            )
             raise RuntimeError(
-                "DSpark requires prefix_lengths with one value per request"
+                "DSpark requires prefix_lengths with one value per request: "
+                f"tokens={token_count}, query_width={width}, batch={batch_size}, "
+                f"host_prefix_rows={prefix_rows}, "
+                f"device_prefix_rows={prefix_device_rows}"
             )
         prefix_lengths = (
             prefix_source[:batch_size].to(device=device, dtype=torch.int32)
@@ -386,4 +476,4 @@ class DSparkProposerMixin:
         if batch_size == 0:
             return self.dspark_empty_outputs(0, device)
 
-        return PyModelOutputs(self.compute_draft_hidden_states(hidden))
+        return self.build_proposal_outputs(hidden, query_ids)

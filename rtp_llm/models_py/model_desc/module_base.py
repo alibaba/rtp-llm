@@ -54,9 +54,18 @@ class GptModelBase(nn.Module):
 
         self.kv_cache: Optional[KVCache] = None
         self.device_type: DeviceType = get_device_type()
-        self._mtp_target_hidden_parts: list[torch.Tensor] = []
+        self._mtp_aux_capture_layer_ids = tuple(
+            config.capture_aux_hidden_layer_ids or ()
+        )
+        self._mtp_aux_capture_layer_id_set = frozenset(
+            self._mtp_aux_capture_layer_ids
+        )
         self._mtp_target_hidden_states: Optional[torch.Tensor] = None
-
+        self._mtp_target_graph_buffer: Optional[torch.Tensor] = None
+        self._mtp_target_prompt_buffer: Optional[torch.Tensor] = None
+        self._mtp_aux_capture_buffer: Optional[torch.Tensor] = None
+        self._mtp_aux_capture_rows = 0
+        self._mtp_aux_capture_index = 0
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
         if self.kv_cache is not None:
@@ -115,20 +124,86 @@ class GptModelBase(nn.Module):
         """Model hook: None means every attention-input tag requires FMHA."""
         return None
 
-    def begin_aux_hidden_capture(self) -> None:
-        self._mtp_target_hidden_parts.clear()
+    def begin_aux_hidden_capture(
+        self, hidden_states: torch.Tensor, is_target_verify: bool
+    ) -> None:
         self._mtp_target_hidden_states = None
+        self._mtp_aux_capture_buffer = None
+        self._mtp_aux_capture_rows = int(hidden_states.shape[0])
+        self._mtp_aux_capture_index = 0
 
-    def capture_aux_hidden(self, layer_id: int, hidden_states: torch.Tensor) -> None:
-        layer_ids = self.config.capture_aux_hidden_layer_ids
-        if layer_ids is not None and layer_id in layer_ids:
-            self._mtp_target_hidden_parts.append(hidden_states)
+        layer_ids = self._mtp_aux_capture_layer_ids
+        if not layer_ids:
+            return
+        width = len(layer_ids) * int(hidden_states.shape[-1])
+        # Target-verify replay must retain a stable address for the lifetime of
+        # every captured graph. Prompt prefill can be much longer, so it uses a
+        # separate grow-only buffer instead of replacing the graph-held tensor.
+        buffer = (
+            self._mtp_target_graph_buffer
+            if is_target_verify
+            else self._mtp_target_prompt_buffer
+        )
+        if (
+            buffer is None
+            or int(buffer.shape[0]) < self._mtp_aux_capture_rows
+            or int(buffer.shape[1]) != width
+            or buffer.dtype != hidden_states.dtype
+            or buffer.device != hidden_states.device
+        ):
+            buffer = torch.empty(
+                (self._mtp_aux_capture_rows, width),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            if is_target_verify:
+                # Capture warmup allocates the maximum verify shape once; all
+                # smaller graph keys and replays retain this address.
+                self._mtp_target_graph_buffer = buffer
+            else:
+                self._mtp_target_prompt_buffer = buffer
+        self._mtp_aux_capture_buffer = buffer
+
+    def capture_aux_hidden(
+        self,
+        layer_id: int,
+        hidden_states: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> None:
+        if layer_id in self._mtp_aux_capture_layer_id_set:
+            # Fused residual models keep the layer-boundary value split across
+            # two tensors. DSpARK was trained from the materialized boundary,
+            # matching vLLM's generic auxiliary-hidden extraction contract.
+            buffer = self._mtp_aux_capture_buffer
+            if buffer is None:
+                raise RuntimeError(
+                    "auxiliary hidden capture was not initialized for this forward"
+                )
+            hidden_width = int(hidden_states.shape[-1])
+            start = self._mtp_aux_capture_index * hidden_width
+            target = buffer[
+                : self._mtp_aux_capture_rows, start : start + hidden_width
+            ]
+            if residual is None:
+                target.copy_(hidden_states)
+            else:
+                torch.add(hidden_states, residual, out=target)
+            self._mtp_aux_capture_index += 1
 
     def finish_aux_hidden_capture(self) -> None:
-        if self._mtp_target_hidden_parts:
-            self._mtp_target_hidden_states = torch.cat(
-                self._mtp_target_hidden_parts, dim=-1
+        expected_parts = len(self._mtp_aux_capture_layer_ids)
+        if expected_parts == 0:
+            return
+        if self._mtp_aux_capture_index != expected_parts:
+            raise RuntimeError(
+                "auxiliary hidden capture missed configured layers: "
+                f"captured={self._mtp_aux_capture_index}, expected={expected_parts}"
             )
+        if self._mtp_aux_capture_buffer is None:
+            raise RuntimeError("auxiliary hidden capture buffer is unavailable")
+        self._mtp_target_hidden_states = self._mtp_aux_capture_buffer[
+            : self._mtp_aux_capture_rows
+        ]
 
     def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
         hidden = self._mtp_target_hidden_states

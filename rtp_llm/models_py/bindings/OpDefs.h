@@ -257,6 +257,7 @@ struct PyCacheStoreInputs {
     torch::Tensor host_kv_cache_offset;   // int32, [batch, tag-local blocks]
     torch::Tensor request_id;             // int64, [context]
     torch::Tensor request_pd_separation;  // bool, [context]
+    torch::Tensor request_deadline_ms;    // int64, [context]
     torch::Tensor cache_keys;             // int64, [context, global key width]
 };
 
@@ -368,10 +369,21 @@ struct PyModelInputs {
 
 struct PyModelOutputs {
     torch::Tensor hidden_states;
+    // Optional model-side features consumed by generic speculative runtimes.
+    // CUDA graph runners bind this as an explicit per-graph output instead of
+    // relying on mutable Python object state from the last captured graph.
+    torch::Tensor auxiliary_hidden_states;
+    // Optional device-resident token proposals produced inside a speculative
+    // model CUDA graph.  A missing tensor keeps the existing logits/sampler
+    // contract; a defined tensor is a point-mass proposal distribution.
+    torch::Tensor speculative_token_ids;
 
     PyModelOutputs() = default;
 
     PyModelOutputs(torch::Tensor hidden_states): hidden_states(std::move(hidden_states)) {}
+
+    PyModelOutputs(torch::Tensor hidden_states, torch::Tensor auxiliary_hidden_states):
+        hidden_states(std::move(hidden_states)), auxiliary_hidden_states(std::move(auxiliary_hidden_states)) {}
 };
 
 void registerPyOpDefs(pybind11::module& m);

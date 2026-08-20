@@ -23,7 +23,9 @@ public:
         GraphBase(std::move(py_instance)),
         enable_cuda_graph_(graph_params.enable_cuda_graph),
         is_prefill_cuda_graph_mode_(graph_params.is_prefill_cuda_graph_mode),
+        is_generative_prefill_(graph_params.is_generative_prefill),
         is_target_verify_(graph_params.is_target_verify),
+        dspark_call_phase_(graph_params.dspark_call_phase),
         capture_stream_(cuda_graph::graphGetStreamFromPool(true)),
         enable_cuda_graph_debug_mode_(graph_params.enable_cuda_graph_debug_mode),
         num_tokens_per_bs_(graph_params.num_tokens_per_bs),
@@ -32,6 +34,7 @@ public:
         kernel_seq_size_per_block_(graph_params.kernel_tokens_per_block),
         hidden_size_(graph_params.hidden_size),
         hc_mult_(static_cast<int>(graph_params.hc_mult)),
+        input_hidden_size_(graph_params.input_hidden_size),
         sp_steps_(graph_params.sp_steps),
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
@@ -82,6 +85,7 @@ public:
                                           bool                 skip_forward_event_sync = false) override;
     void           updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) override;
     bool           canRun(const PyModelInputs& inputs, CudaGraphState& state) override;
+    bool           usesDeviceOnlyAttentionMetadata() const override;
     void           replayGraph(int key);
     void           replayDecode(int bs);
     void           replayPrefill(int seq_len);
@@ -100,13 +104,20 @@ private:
     void replayAndSyncCheck(int key, const char* key_type);
 
     bool isEmbeddingStylePrefillCudaGraph() const {
-        return is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ == max_seq_len_;
+        return is_prefill_cuda_graph_mode_ && !is_generative_prefill_ && num_tokens_per_bs_ == max_seq_len_;
+    }
+    bool isGenerativePrefillCudaGraph() const {
+        return is_prefill_cuda_graph_mode_ && is_generative_prefill_;
     }
     bool isMtpDraftPrefillCudaGraph() const {
-        return is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
+        return is_prefill_cuda_graph_mode_ && !is_generative_prefill_ && num_tokens_per_bs_ != max_seq_len_;
     }
     bool usesFixedCapacityMtpDraftPrefillCudaGraph() const {
-        return isMtpDraftPrefillCudaGraph() && hc_mult_ > 1;
+        // DSpARK proposal/commit have an exact B*width contract for every
+        // graph key. Their wider feature input is described independently by
+        // input_hidden_size_ and must never promote a small batch to max_bs.
+        return isMtpDraftPrefillCudaGraph() && hc_mult_ > 1
+               && dspark_call_phase_ == DSparkCallPhase::NONE;
     }
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
@@ -133,11 +144,14 @@ private:
     void                    initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
     void                    initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
     void                    initCaptureAttentionInputsPost();
+    void                    cacheAttentionMetadataCapability(CaptureMemoryHold& mem_hold);
     py::object              py_forward_method_;
     py::object              py_attn_pyobj_method_;
     bool                    enable_cuda_graph_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
+    bool                    is_generative_prefill_{false};
     bool                    is_target_verify_{false};
+    DSparkCallPhase         dspark_call_phase_{DSparkCallPhase::NONE};
     cuda_graph::GraphStream capture_stream_;
     bool                    enable_cuda_graph_debug_mode_{false};
     size_t                  max_bs_{1};
@@ -148,6 +162,7 @@ private:
     int                     kernel_seq_size_per_block_{0};
     int                     hidden_size_{0};
     int                     hc_mult_{1};
+    std::size_t             input_hidden_size_{0};
     int                     sp_steps_{0};
     std::vector<int>        capture_range_;
     std::vector<int>        prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python

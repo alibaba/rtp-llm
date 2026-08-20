@@ -65,6 +65,7 @@ void CudaGraphRunner::captureDecode() {
         graph_instances_[bs].mem_hold_ = createCaptureMemoryHold(inputs, bs * num_tokens_per_bs_);
         graph_instances_[bs].mem_hold_.attn_pyobj_ =
             py_attn_pyobj_method_(graph_instances_[bs].mem_hold_.py_model_inputs_, true);
+        cacheAttentionMetadataCapability(graph_instances_[bs].mem_hold_);
         captureDecodeOneBatchSize(bs);
         cuda_graph::finish_capture_session();
         replayAndSyncCheck(bs, "batch size");

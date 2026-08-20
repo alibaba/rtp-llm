@@ -27,6 +27,21 @@ namespace py = pybind11;
 
 namespace rtp_llm {
 
+inline void syncCudaGraphCaptureRanks(const ParallelismConfig& parallelism_config, const char* phase) {
+    if (parallelism_config.world_size <= 1) {
+        return;
+    }
+    py::gil_scoped_acquire gil;
+    try {
+        auto collective = py::module_::import("rtp_llm.models_py.distributed.collective_torch");
+        auto group      = collective.attr("Group").attr("DP_AND_TP");
+        collective.attr("barrier")(group);
+    } catch (const py::error_already_set& e) {
+        RTP_LLM_LOG_ERROR("CUDA graph capture rank sync failed at %s:\n%s", phase, e.what());
+        throw;
+    }
+}
+
 class KVCacheManager;  // Forward declaration
 
 class PyWrappedModel: public ModelBase {
@@ -36,7 +51,9 @@ public:
                    py::object                py_instance,
                    bool                      is_prefill_cuda_graph_mode = false,
                    bool                      use_spec_decoding          = false,
-                   bool                      is_dspark_draft            = false);
+                   bool                      is_dspark_draft            = false,
+                   DSparkCallPhase           dspark_graph_phase         = DSparkCallPhase::NONE,
+                   bool                      is_generative_prefill_graph = false);
     ~PyWrappedModel();
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
@@ -86,6 +103,8 @@ private:
     const rtp_llm::ExecProperties                   device_props_;
     const bool                                      enable_prefill_cp_;
     const bool                                      is_dspark_draft_;
+    const DSparkCallPhase                           dspark_graph_phase_;
+    const bool                                      require_dspark_graph_replay_;
     const rtp_llm::MlaOpsType                       mla_ops_type_;
     const size_t                                    layer_num_;
     const GptModelDescription                       description_;
@@ -93,6 +112,7 @@ private:
     std::shared_ptr<KVCacheManager>                 cache_manager_;  // For cache_store access
     torch::Tensor                                   residual_scale_fp32_;
     torch::Tensor                                   residual_scale_;
+    torch::Tensor                                   mtp_target_hidden_states_;
     TensorHolder                               buffer_holder_;
 
     GraphBase* graph_runner_{nullptr};
@@ -100,6 +120,7 @@ private:
     py::object held_attn_pyobj_;
     bool       enable_cuda_graph_{false};
     bool       is_prefill_cuda_graph_mode_{false};
+    bool       is_generative_prefill_graph_{false};
     bool       use_spec_decoding_{false};
     bool       enable_device_perf_{false};
     bool       check_nan_{false};
@@ -125,7 +146,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                       py::object                py_instance,
                                       bool                      is_prefill_cuda_graph_mode,
                                       bool                      use_spec_decoding,
-                                      bool                      is_dspark_draft):
+                                      bool                      is_dspark_draft,
+                                      DSparkCallPhase           dspark_graph_phase,
+                                      bool                      is_generative_prefill_graph):
     device_props_(buildExecProperties(params.parallelism_config, params.device_resource_config)),
     // Every prefill-shaped forward of a CP-enabled model goes through the
     // standard split/gather path — including the DSpARK draft commit, whose
@@ -136,14 +159,18 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     // rejected at executor construction).
     enable_prefill_cp_(device_props_.enable_prefill_cp),
     is_dspark_draft_(is_dspark_draft),
+    dspark_graph_phase_(dspark_graph_phase),
+    require_dspark_graph_replay_(params.sp_config.type == SP_TYPE_DSPARK
+                                 && (use_spec_decoding || dspark_graph_phase != DSparkCallPhase::NONE)),
     mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
     description_(params.description),
     cache_manager_(params.cache_manager),
-    // DSpARK consumes auxiliary hidden states between target verify and draft
-    // commit, which are not a valid CUDA-graph replay output today.
-    enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph && !is_dspark_draft),
+    // The ordinary DSpARK draft wrapper remains eager. Decode workers use
+    // distinct fixed-width prefill graph wrappers for proposal and commit.
+    enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph && (!is_dspark_draft || is_prefill_cuda_graph_mode)),
     is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
+    is_generative_prefill_graph_(is_generative_prefill_graph),
     use_spec_decoding_(use_spec_decoding),
     enable_device_perf_(params.profile_debug_logging_config.enable_device_perf),
     check_nan_(params.profile_debug_logging_config.check_nan) {
@@ -201,13 +228,25 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.enable_cuda_graph            = params.hw_kernel_config.enable_cuda_graph;
         graph_params.enable_cuda_graph_debug_mode = params.hw_kernel_config.enable_cuda_graph_debug_mode;
         graph_params.is_prefill_cuda_graph_mode   = is_prefill_cuda_graph_mode;
+        graph_params.is_generative_prefill        = is_generative_prefill_graph_;
+        graph_params.dspark_call_phase            = dspark_graph_phase_;
         graph_params.max_seq_len                  = params.max_seq_len;
         graph_params.tokens_per_block             = params.tokens_per_block;
         graph_params.kernel_tokens_per_block      = params.kernel_tokens_per_block;
         graph_params.hidden_size                  = params.hidden_size;
         graph_params.hc_mult                      = params.hc_mult;
+        graph_params.input_hidden_size            = params.hidden_size * params.hc_mult;
+        if (is_dspark_draft_) {
+            const auto width = py_instance.attr("cuda_graph_input_hidden_size")().cast<int64_t>();
+            RTP_LLM_CHECK_WITH_INFO(width > 0, "DSpARK CUDA graph input hidden width must be positive, got %ld", width);
+            graph_params.input_hidden_size = static_cast<std::size_t>(width);
+        }
         graph_params.model_data_type              = dtype;
-        graph_params.max_context_batch_size       = params.concurrency_config.concurrency_limit;
+        // A token-count key is sufficient for one prompt. Batched prompt
+        // distributions require device-built recurrent metadata before they
+        // can safely share the same graph key.
+        graph_params.max_context_batch_size       = is_generative_prefill_graph_ ? 1 :
+                                                                                params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
         if (params.kv_cache_layer_layout.has_value()) {
@@ -235,7 +274,13 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // +---------------------------+--------------------------+----------------+----------+-------------------------+
         // clang-format on
 
-        if (is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {
+        if (is_generative_prefill_graph_) {
+            graph_params.num_tokens_per_bs = static_cast<int>(
+                std::min<int64_t>(params.max_seq_len, static_cast<int64_t>(params.kernel_tokens_per_block)));
+        } else if (is_dspark_draft_ && dspark_graph_phase_ == DSparkCallPhase::PROPOSE) {
+            graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle
+                                             + static_cast<int>(!params.sp_config.sp_dspark_sample_from_anchor);
+        } else if (is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {
             // for embedding model
             graph_params.num_tokens_per_bs = params.max_seq_len;
         } else if (params.sp_config.type != SP_TYPE_NONE && params.sp_config.gen_num_per_cycle > 0
@@ -277,8 +322,16 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_runner_->setInputEmbeddingScalar(description_.input_embedding_scalar);
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be null");
         auto py_initialize_method = py_instance.attr("initialize");
-        py_init_result            = py_initialize_method(init_resources);
-        graph_runner_->initCapture();
+        try {
+            py_init_result = py_initialize_method(init_resources);
+            // Initialization/JIT can finish at different times on TP ranks.
+            // Align them before graph-held collectives are captured.
+            syncCudaGraphCaptureRanks(params.parallelism_config, "after_initialize_before_initCapture");
+            graph_runner_->initCapture();
+        } catch (const py::error_already_set& e) {
+            RTP_LLM_LOG_ERROR("Python model initialize/capture failed (cuda_graph branch):\n%s", e.what());
+            throw;
+        }
     }
 
     auto py_init_success = py_init_result.cast<bool>();

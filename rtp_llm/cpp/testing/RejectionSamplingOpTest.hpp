@@ -338,8 +338,7 @@ private:
         output.accepted_token_num.assign(batch_size, 0);
 
         for (int batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
-            bool all_same_token = true;
-            int  pos            = num_speculative_tokens;
+            int pos = num_speculative_tokens;
             for (int i = 0; i < num_speculative_tokens; ++i) {
                 auto draft_id = draft_token_ids[batch_idx * num_speculative_tokens + i];
                 auto target_id =
@@ -349,25 +348,30 @@ private:
                 auto u = uniform_samples[batch_idx * (num_speculative_tokens + 1) + i];
 
                 bool same_token = target_id == draft_id;
-                if (same_token || (do_sample[batch_idx] && u * p < q)) {
+                bool accept = do_sample[batch_idx] ? u * p < q : same_token;
+                if (accept) {
                     output.token_ids[batch_idx * (num_speculative_tokens + 1) + i] = draft_id;
-                    all_same_token                                                 = all_same_token && same_token;
                 } else {
                     pos = i;
+                    if (!do_sample[batch_idx]) {
+                        output.token_ids[batch_idx * (num_speculative_tokens + 1) + i] = target_id;
+                    }
                     break;
                 }
             }
 
             output.accepted_token_num[batch_idx] = pos + 1;
 
-            if (all_same_token) {
+            if (pos == num_speculative_tokens) {
                 output.token_ids[batch_idx * (num_speculative_tokens + 1) + pos] =
                     targetTokenId(target_token_ids, num_speculative_tokens, target_token_stride, batch_idx, pos);
                 continue;
             }
 
-            output.token_ids[batch_idx * (num_speculative_tokens + 1) + pos] = sampleFromReluDiff(
-                batch_idx, pos, num_speculative_tokens, vocab_size, draft_probs, uniform_samples, target_probs);
+            if (do_sample[batch_idx]) {
+                output.token_ids[batch_idx * (num_speculative_tokens + 1) + pos] = sampleFromReluDiff(
+                    batch_idx, pos, num_speculative_tokens, vocab_size, draft_probs, uniform_samples, target_probs);
+            }
         }
 
         return output;

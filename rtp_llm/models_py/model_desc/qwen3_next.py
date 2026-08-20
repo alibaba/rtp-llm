@@ -554,6 +554,7 @@ class Qwen3NextAttention(CausalAttention):
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
         layernorm_eps: float,
+        layer_idx: int,
         quant_config: Optional[object] = None,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
@@ -564,6 +565,7 @@ class Qwen3NextAttention(CausalAttention):
             layernorm_eps,
             quant_config,
             hw_kernel_config=hw_kernel_config,
+            layer_idx=layer_idx,
         )
         # maybe fuse gate in qkv_proj later
         self.gate = LinearFactory.create_linear_from_weights(
@@ -988,6 +990,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 parallelism_config,
                 weights,
                 config.layernorm_eps,
+                layer_idx,
                 config.quant_config,
                 hw_kernel_config=hw_kernel_config,
             )
@@ -1092,6 +1095,14 @@ class Qwen3NextModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        # Causal-conv launch metadata is derived from host-visible sequence
+        # lengths.  Build it while the generic graph runner prepares the FMHA
+        # implementation, before CUDA stream capture starts, and retain it for
+        # the lifetime of that graph instance.  The FMHA object itself is kept
+        # in the value so an id cannot be accidentally reused after collection.
+        self._cuda_graph_prefill_conv1d_metadata: dict[
+            int, tuple[Any, CausalConv1dMetadata]
+        ] = {}
 
     def _get_fmha_group_tags(self) -> Optional[list[str]]:
         if self.kv_cache is None:
@@ -1102,6 +1113,27 @@ class Qwen3NextModel(GptModelBase):
             if layer.layer_type != HybridAttentionType.LINEAR
         )
         return get_group_tags_for_layers(self.kv_cache, full_attention_layers)
+
+    def prepare_fmha_impl(
+        self, inputs: PyModelInputs, is_cuda_graph: bool = False
+    ) -> Any:
+        fmha_impl = super().prepare_fmha_impl(inputs, is_cuda_graph)
+        attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
+        if (
+            is_cuda_graph
+            and attention_inputs.is_prefill
+            and not attention_inputs.is_target_verify
+            and not self.parallelism_config.prefill_cp_config.is_enabled()
+        ):
+            metadata = prepare_causal_conv1d_metadata(
+                query_start_loc=attention_inputs.cu_seqlens_device,
+                device=attention_inputs.cu_seqlens_device.device,
+            )
+            self._cuda_graph_prefill_conv1d_metadata[id(fmha_impl)] = (
+                fmha_impl,
+                metadata,
+            )
+        return fmha_impl
 
     def _build_cp_linear_attn_metadata(
         self,
@@ -1169,6 +1201,9 @@ class Qwen3NextModel(GptModelBase):
         hidden_states = self.word_embedding(inputs)
 
         attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
+        if fmha_impl is None:
+            fmha_impl = self.prepare_fmha_impl(inputs)
+
         prefill_conv1d_meta = None
         is_target_verify = attention_inputs.is_target_verify
         is_cp = self.parallelism_config.prefill_cp_config.is_enabled()
@@ -1190,11 +1225,14 @@ class Qwen3NextModel(GptModelBase):
                     attention_inputs, hidden_states.device
                 )
             else:
-                cu_seqlen_without_padding = attention_inputs.cu_seqlens_device
-                prefill_conv1d_meta = prepare_causal_conv1d_metadata(
-                    query_start_loc=cu_seqlen_without_padding,
-                    device=hidden_states.device,
-                )
+                cached = self._cuda_graph_prefill_conv1d_metadata.get(id(fmha_impl))
+                if cached is not None and cached[0] is fmha_impl:
+                    prefill_conv1d_meta = cached[1]
+                else:
+                    prefill_conv1d_meta = prepare_causal_conv1d_metadata(
+                        query_start_loc=attention_inputs.cu_seqlens_device,
+                        device=hidden_states.device,
+                    )
 
         attn_meta = Qwen3NextMetadata(
             prefill_conv1d_meta=prefill_conv1d_meta,
@@ -1206,11 +1244,10 @@ class Qwen3NextModel(GptModelBase):
             cp_local_valid_mask=cp_local_valid_mask,
         )
 
-        if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(inputs)
-
         residual = torch.zeros_like(hidden_states)
-
+        capture_aux_hidden = bool(self._mtp_aux_capture_layer_ids)
+        if capture_aux_hidden:
+            self.begin_aux_hidden_capture(hidden_states, is_target_verify)
         for i, decoder_layer in enumerate(self.layers):
             layer_attention_inputs = select_attention_inputs_for_layer(
                 inputs, self.kv_cache, i
@@ -1228,8 +1265,14 @@ class Qwen3NextModel(GptModelBase):
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
             )
+            if i in self._mtp_aux_capture_layer_id_set:
+                self.capture_aux_hidden(i, hidden_states, residual)
+        if capture_aux_hidden:
+            self.finish_aux_hidden_capture()
 
         hidden_states, residual = self.norm(hidden_states, residual)
+        if self._mtp_target_hidden_states is not None:
+            return PyModelOutputs(hidden_states, self._mtp_target_hidden_states)
         return PyModelOutputs(hidden_states)
 
 

@@ -95,11 +95,25 @@ class PyModelInputsCompatTest(unittest.TestCase):
         self.assertTrue(inputs.attention_inputs.is_prefill)
         self.assertEqual(3, inputs.attention_inputs.input_lengths.item())
 
-    def test_model_outputs_only_exposes_hidden_states(self) -> None:
+    def test_model_outputs_exposes_optional_speculative_outputs(self) -> None:
         hidden_states = torch.empty(0)
         outputs = PyModelOutputs(hidden_states)
 
         self.assertEqual(hidden_states.data_ptr(), outputs.hidden_states.data_ptr())
+        self.assertIsNone(outputs.auxiliary_hidden_states)
+        self.assertIsNone(outputs.speculative_token_ids)
+        auxiliary_hidden_states = torch.empty(0, 4)
+        outputs = PyModelOutputs(hidden_states, auxiliary_hidden_states)
+        self.assertEqual(
+            auxiliary_hidden_states.data_ptr(),
+            outputs.auxiliary_hidden_states.data_ptr(),
+        )
+        speculative_token_ids = torch.tensor([[1, 2]], dtype=torch.int64)
+        outputs.speculative_token_ids = speculative_token_ids
+        self.assertEqual(
+            speculative_token_ids.data_ptr(),
+            outputs.speculative_token_ids.data_ptr(),
+        )
         self.assertFalse(hasattr(outputs, "params_ptr"))
         with self.assertRaises(TypeError):
             PyModelOutputs(hidden_states, {"full": None})

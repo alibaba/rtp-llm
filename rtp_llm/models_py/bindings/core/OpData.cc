@@ -66,6 +66,9 @@ std::string GptModelInputs::debugString(bool force) const {
     if (request_pd_separation.defined()) {
         debug_string << ", request_pd_separation: " << tb(request_pd_separation);
     }
+    if (request_deadline_ms.defined()) {
+        debug_string << ", request_deadline_ms: " << tb(request_deadline_ms);
+    }
     if (cache_keys.defined()) {
         debug_string << ", cache_keys: " << tb(cache_keys);
     }

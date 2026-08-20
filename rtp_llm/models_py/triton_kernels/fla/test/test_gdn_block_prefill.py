@@ -35,6 +35,106 @@ def _constexpr_linear_offset_test_kernel(output, stride):
 
 
 class BlockTest(unittest.TestCase):
+    def test_fragmented_block_map_cuda_graph_replay(self):
+        """Graph replay must follow the current physical page table.
+
+        This is the production hot-prefix geometry that was previously absent
+        from the unit suite: capture happens with one set of pages, cache churn
+        replaces them with sparse/high page IDs, and the same graph is replayed.
+        Both the prefix-state load and tail-state store must use the replay map.
+        """
+        device = torch.device("cuda")
+        seq_size_per_block = 64
+        chunk_size = 64
+        prefix_length = 5440
+        input_length = 45
+        map_width = 327
+        total_pages = 596
+        head_num = 4
+        v_size = 128
+        k_size = 128
+
+        prefix_lengths = torch.tensor(
+            [prefix_length], dtype=torch.int32, device=device
+        )
+        cu_seqlens = torch.tensor(
+            [0, input_length], dtype=torch.int32, device=device
+        )
+        block_map = torch.arange(
+            1, map_width + 1, dtype=torch.int32, device=device
+        ).view(1, -1)
+        ssm_states = torch.zeros(
+            total_pages,
+            head_num,
+            v_size,
+            k_size,
+            dtype=torch.float32,
+            device=device,
+        )
+        initial_states = torch.empty(
+            1,
+            head_num,
+            v_size,
+            k_size,
+            dtype=torch.float32,
+            device=device,
+        )
+        h = torch.empty(
+            1,
+            head_num,
+            v_size,
+            k_size,
+            dtype=torch.float32,
+            device=device,
+        )
+        final_states = torch.full_like(initial_states, 17.0)
+
+        def run_load_store():
+            load_initial_state_from_block_map(
+                prefix_lengths,
+                block_map,
+                ssm_states,
+                initial_states,
+                seq_size_per_block,
+            )
+            store_ssm_state_to_block_map(
+                h,
+                final_states,
+                prefix_lengths,
+                cu_seqlens,
+                block_map,
+                ssm_states,
+                seq_size_per_block,
+                chunk_size,
+            )
+
+        # Compile both Triton kernels before graph capture.
+        run_load_store()
+        torch.cuda.synchronize()
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run_load_store()
+
+        replay_map = torch.arange(
+            200, 200 + map_width, dtype=torch.int32, device=device
+        ).remainder(total_pages - 1).add_(1)
+        source_position = (prefix_length - 1) // seq_size_per_block
+        destination_position = (
+            prefix_length + input_length - 1
+        ) // seq_size_per_block
+        replay_map[source_position] = 355
+        replay_map[destination_position] = 439
+        block_map.copy_(replay_map.view_as(block_map))
+        ssm_states[355].fill_(11.0)
+        ssm_states[439].zero_()
+
+        graph.replay()
+        torch.cuda.synchronize()
+
+        torch.testing.assert_close(initial_states, torch.full_like(initial_states, 11.0))
+        torch.testing.assert_close(ssm_states[439], final_states[0])
+
     def test_large_chunk_state_offset_uses_int64(self):
         output = torch.empty(1, dtype=torch.int64, device="cuda")
         cases = [

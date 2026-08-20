@@ -107,6 +107,13 @@ void PyWrappedModel::releaseBuffers() {
 }
 
 torch::Tensor PyWrappedModel::getMtpTargetHiddenStates(int64_t num_tokens) {
+    if (mtp_target_hidden_states_.defined()) {
+        RTP_LLM_CHECK_WITH_INFO(num_tokens >= 0 && num_tokens <= mtp_target_hidden_states_.size(0),
+                                "requested %ld MTP target rows from %ld explicit output rows",
+                                num_tokens,
+                                mtp_target_hidden_states_.size(0));
+        return mtp_target_hidden_states_.slice(0, 0, num_tokens);
+    }
     if (!py_model_) {
         return torch::Tensor();
     }
@@ -245,10 +252,21 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         // prefix_lengths): the CUDA graph padding fill copies this scalar into
         // the cu_kv_seqlens tail, and a prefix-less value makes the array
         // non-monotonic whenever prefix reuse / target verify is active.
-        // prefix_lengths here is a source tensor (never a deferred H2D copy),
-        // so summing it is safe; item() adds one stream sync on this path.
+        // A DSpARK steady-state graph is not allowed to fall back to eager.
+        // When every captured attention implementation has explicitly opted
+        // into device-only metadata, the scalar below is not consumed by the
+        // replay path: cumulative KV lengths and graph padding are built from
+        // cu_kv_seqlens_device.  Avoid materializing prefix_lengths on the
+        // host, which otherwise synchronizes against the previous phase every
+        // decode iteration.  Unknown backends retain the conservative scalar.
+        const bool is_dspark_steady_state = inputs.dspark_call_phase != DSparkCallPhase::NONE
+                                            || inputs.is_target_verify;
+        const bool device_only_graph_metadata = enable_cuda_graph_ && graph_runner_ != nullptr
+                                                && require_dspark_graph_replay_ && is_dspark_steady_state
+                                                && graph_runner_->usesDeviceOnlyAttentionMetadata();
         int64_t prefix_sum = 0;
-        if (py_attn_inputs.prefix_lengths.defined() && py_attn_inputs.prefix_lengths.numel() > 0) {
+        if (!device_only_graph_metadata && py_attn_inputs.prefix_lengths.defined()
+            && py_attn_inputs.prefix_lengths.numel() > 0) {
             prefix_sum = py_attn_inputs.prefix_lengths.sum().item<int64_t>();
         }
         py_attn_inputs.context_total_kv_length = py_attn_inputs.total_tokens + static_cast<int>(prefix_sum);
@@ -493,6 +511,7 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
     cache_store_inputs.host_kv_cache_offset  = to_host(inputs.kv_cache_block_id);
     cache_store_inputs.request_id            = inputs.request_id;
     cache_store_inputs.request_pd_separation = inputs.request_pd_separation;
+    cache_store_inputs.request_deadline_ms   = inputs.request_deadline_ms;
     cache_store_inputs.cache_keys            = inputs.cache_keys;
     return cache_store_inputs;
 }
@@ -685,9 +704,13 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
 
     graph_state_ = CudaGraphState();
     auto empty   = torch::Tensor();
+    // buildPyAttentionInputs() has already materialized the caller's position
+    // ids on device.  The graph eligibility check must see that same tensor;
+    // passing an undefined placeholder makes MRoPE target-verify preparation
+    // look like a graph miss even though the subsequent forward can replay.
     auto py_model_inputs = PyModelInputs({empty,
                                           empty,
-                                          empty,
+                                          attention_inputs_.combo_position_ids,
                                           torch_ext::PyEmbeddingInputs(),
                                           torch_ext::PyMultimodalInputs(),
                                           attention_inputs_,
@@ -714,7 +737,7 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
         auto empty = torch::Tensor();
         auto py_model_inputs = PyModelInputs({empty,
                                               empty,
-                                              empty,
+                                              attention_inputs_.combo_position_ids,
                                               torch_ext::PyEmbeddingInputs(),
                                               torch_ext::PyMultimodalInputs(),
                                               attention_inputs_,
@@ -804,8 +827,20 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
-        // Cast the Python object to PyModelOutputs and extract hidden states
-        if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
+        // Cast the Python object to PyModelOutputs and extract graph outputs.
+        // DSpARK decode wrappers have a fixed phase/shape contract: silently
+        // taking the normal Python path would hide a capacity regression and
+        // reintroduce launch-bound proposal/verify/commit execution.
+        const bool can_replay_graph = enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_);
+        const bool is_dspark_steady_state = inputs.dspark_call_phase != DSparkCallPhase::NONE
+                                            || py_model_inputs.attention_inputs.is_target_verify;
+        if (require_dspark_graph_replay_ && is_dspark_steady_state && !can_replay_graph) {
+            RTP_LLM_CHECK_WITH_INFO(false,
+                                    "DSpARK steady-state phase requires CUDA graph replay: phase=%d target_verify=%d",
+                                    static_cast<int>(inputs.dspark_call_phase),
+                                    static_cast<int>(py_model_inputs.attention_inputs.is_target_verify));
+        }
+        if (can_replay_graph) {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(cuda_graph)");
             DevicePerfWrapper wrapper(enable_device_perf_, "cuda graph python forward");
@@ -817,7 +852,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state_);
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
-            hidden_states = py_model_outputs.hidden_states.clone();
+            if (!py_model_outputs.speculative_token_ids.defined()) {
+                hidden_states = py_model_outputs.hidden_states.clone();
+            }
         } else {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
@@ -829,12 +866,16 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             auto py_model_forward = py_model_.attr("forward");
             auto outputs          = py_model_forward(py_model_inputs, held_attn_pyobj_);
             py_model_outputs      = outputs.cast<PyModelOutputs>();
-            hidden_states         = py_model_outputs.hidden_states.clone();
+            if (!py_model_outputs.speculative_token_ids.defined()) {
+                hidden_states = py_model_outputs.hidden_states.clone();
+            }
         }
         // The cloned tensor is the only hidden-state owner needed below. Drop
         // the Python output's rank-local tensor before CP post-processing so a
         // long-context gather/restore can reuse that storage.
         py_model_outputs.hidden_states = torch::Tensor();
+        mtp_target_hidden_states_       = std::move(py_model_outputs.auxiliary_hidden_states);
+        auto speculative_token_ids      = std::move(py_model_outputs.speculative_token_ids);
 
         cache_store_write_cycle.finish();
 
@@ -842,6 +883,16 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
         if (is_dspark_draft_) {
             if (inputs.dspark_call_phase == DSparkCallPhase::PROPOSE) {
+                if (speculative_token_ids.defined()) {
+                    GptModelOutputs outputs;
+                    // The graph instance owns this stable output buffer until
+                    // the next replay. DSpARK consumes it completely while
+                    // assembling and verifying the current round, so another
+                    // allocation/copy here only adds an uncaptured kernel to
+                    // every decode iteration.
+                    outputs.speculative_token_ids = std::move(speculative_token_ids);
+                    return outputs;
+                }
                 return callForwardPostLayers(hidden_states, inputs, true);
             }
             GptModelOutputs outputs;
@@ -1191,6 +1242,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     inputs.request_pd_separation.defined() ?
                         inputs.request_pd_separation.narrow(0, prefill_batch_idx, p_micro_batch_size) :
                         torch::Tensor();
+                micro_model_inputs.request_deadline_ms =
+                    inputs.request_deadline_ms.defined() ?
+                        inputs.request_deadline_ms.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                        torch::Tensor();
                 micro_model_inputs.cache_keys = inputs.cache_keys.defined() ?
                                                     inputs.cache_keys.narrow(0, prefill_batch_idx, p_micro_batch_size) :
                                                     torch::Tensor();
@@ -1272,6 +1327,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     inputs.request_pd_separation.defined() ?
                         inputs.request_pd_separation.narrow(0, prefill_batch_idx, p_micro_batch_size) :
                         torch::Tensor();
+                micro_model_inputs.request_deadline_ms =
+                    inputs.request_deadline_ms.defined() ?
+                        inputs.request_deadline_ms.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                        torch::Tensor();
                 micro_model_inputs.cache_keys = inputs.cache_keys.defined() ?
                                                     inputs.cache_keys.narrow(0, prefill_batch_idx, p_micro_batch_size) :
                                                     torch::Tensor();
@@ -1328,6 +1387,7 @@ void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
 
     buffer_holder_.hold_host(inputs.request_id);
     buffer_holder_.hold_host(inputs.request_pd_separation);
+    buffer_holder_.hold_host(inputs.request_deadline_ms);
     buffer_holder_.hold_host(inputs.cache_keys);
 }
 

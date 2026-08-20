@@ -3,9 +3,6 @@
 namespace rtp_llm {
 
 GenerateContext::~GenerateContext() {
-    if (stream_ && stream_->getStatus() != StreamState::FINISHED) {
-        stream_->reportError(ErrorCode::CANCELLED, "cancel stream");
-    }
     stopStream();
     reportTime();
 }
@@ -73,7 +70,17 @@ void GenerateContext::stopStream() {
     if (stream_) {
         // if is waiting, cancel it
         meta->dequeue(request_id, stream_);
-        stream_->reportError(ErrorCode::CANCELLED, "cancel stream");
+        // The async output path can publish the final response immediately
+        // after reporting GenerateDone, before the scheduler has committed
+        // RUNNING -> FINISHED and released the KV blocks.  Do not overwrite
+        // that natural completion with CANCELLED: doing so makes prefix-cache
+        // insertion depend on a race between the RPC destructor and scheduler.
+        const bool naturally_done = stream_->getStatus() == StreamState::FINISHED
+                                    || stream_->hasEvent(StreamEvents::GenerateDone)
+                                    || stream_->hasEvent(StreamEvents::NeedRemoteGenerate);
+        if (!naturally_done) {
+            stream_->reportError(ErrorCode::CANCELLED, "cancel stream");
+        }
         // if is running, waiting util done
         while (stream_->getStatus() == StreamState::RUNNING) {
             RTP_LLM_LOG_DEBUG("waiting stream [%d] running done to cancel", stream_->generateInput()->request_id);

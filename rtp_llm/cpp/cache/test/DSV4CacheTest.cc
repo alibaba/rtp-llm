@@ -830,6 +830,32 @@ TEST(HybridPoolConfigCreatorTest, HybridAttentionIndependentPoolUsesHybridPoolCo
     EXPECT_EQ(config.blockNumForGroup(full_gid), 37u);
 }
 
+TEST(HybridPoolConfigCreatorTest, HybridAttentionPhysicalMhaStrideIsNotExpandedByKernelPages) {
+    auto              model_config = makeHybridAttentionModelConfig(true);
+    ParallelismConfig parallelism_config;
+    RuntimeConfig     runtime_config;
+    KVCacheConfig     kv_cache_config;
+    kv_cache_config.seq_size_per_block        = 8;
+    kv_cache_config.kernel_seq_size_per_block = 2;
+    kv_cache_config.test_block_num            = 4;
+
+    auto config = CacheConfigCreator::createConfig(
+        model_config, parallelism_config, runtime_config, kv_cache_config, std::nullopt, std::nullopt);
+
+    const auto full_gid   = gidForTag(config, "full");
+    const auto linear_gid = gidForTag(config, "linear");
+    ASSERT_EQ(config.kernelBlocksPerKvBlockForGroup(full_gid), 4u);
+    EXPECT_EQ(config.kvBlockStrideBytesForGroup(full_gid), config.specForGroup(full_gid)->block_size_bytes());
+    EXPECT_EQ(config.kvScaleStrideBytesForGroup(full_gid), config.specForGroup(full_gid)->scale_block_size_bytes());
+    EXPECT_EQ(config.kvBlockStrideBytesForGroup(linear_gid), config.specForGroup(linear_gid)->block_size_bytes());
+
+    const auto full_pool = BlockPoolConfigHelper::createConfigForGroup(config, full_gid);
+    ASSERT_EQ(full_pool.memory_layouts.size(), 1u);
+    EXPECT_EQ(full_pool.memory_layouts[0].kv_block_stride_bytes,
+              config.specForGroup(full_gid)->block_size_bytes());
+    EXPECT_EQ(full_pool.memory_layouts[0].kernel_blocks_per_kv_block, 4u);
+}
+
 TEST(HybridPoolConfigCreatorTest, HybridAttentionIndependentPoolSplitsFullAndSwaSpecs) {
     auto mc                                           = makeHybridAttentionModelConfig(true);
     mc.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::NONE,

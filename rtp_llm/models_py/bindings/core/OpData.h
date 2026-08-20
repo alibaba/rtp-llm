@@ -72,6 +72,7 @@ struct GptModelInputs {
 
     torch::Tensor request_id;             // int64, [context_batch_size]
     torch::Tensor request_pd_separation;  // bool, [context_batch_size]
+    torch::Tensor request_deadline_ms;    // int64, [context_batch_size]
     torch::Tensor cache_keys;             // [context_batch_size]
     // Physical KV-manager block strides. These are independent of any kernel-block view exposed to attention ops.
     size_t kv_block_stride_bytes;
@@ -111,6 +112,10 @@ struct GptModelOutputs {
     torch::Tensor all_hidden_states;
     torch::Tensor all_logits;
     torch::Tensor softmax_result;
+    // Optional point-mass proposals emitted by a graph-native speculative
+    // model tail.  Kept separate from logits so generic model semantics stay
+    // intact and the verifier can intentionally omit a dense q distribution.
+    torch::Tensor speculative_token_ids;
 
     std::vector<torch::Tensor> moe_gating;
 };

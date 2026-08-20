@@ -1,5 +1,9 @@
 """Qwen3 DSpark draft-model registration."""
 
+from typing import Any, List
+
+import torch
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.weight_module import AtomicWeight
@@ -8,7 +12,25 @@ from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, transpose
 from rtp_llm.utils.util import get_config_from_path
 
 
+def dspark_offset_d2t_to_absolute(ts: List[torch.Tensor]) -> torch.Tensor:
+    """Normalize Speculators' offset d2t table to RTP's absolute-id contract."""
+    offsets = identity(ts).to(torch.int64)
+    return offsets + torch.arange(
+        offsets.numel(), dtype=offsets.dtype, device=offsets.device
+    )
+
+
 class Qwen3DSparkWeight(QWenV3Weight):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._has_d2t = False
+
+    def _process_meta(self, meta_dicts: Any, weight_keys: List[str]):
+        # QWenV2Weight also detects the flat Speculators backbone layout and
+        # drops the usual ``model.`` prefix here.
+        super()._process_meta(meta_dicts, weight_keys)
+        self._has_d2t = "d2t" in weight_keys
+
     def _get_weight_info(self):
         info = super()._get_weight_info()
         extras = (
@@ -21,6 +43,15 @@ class Qwen3DSparkWeight(QWenV3Weight):
             AtomicWeight(name, [CkptWeightInfo(path, identity)], transform)
             for name, path, transform in extras
         )
+        if self._has_d2t:
+            info.weights.append(
+                AtomicWeight(
+                    W.multi_tokens_predict_d2t_map,
+                    [CkptWeightInfo("d2t", identity)],
+                    dspark_offset_d2t_to_absolute,
+                    data_type=torch.int64,
+                )
+            )
         return info
 
 

@@ -47,6 +47,8 @@ public:
     size_t                  maxAvailableTokensNum() const override;
     KVCacheTokenCapacity    tokenCapacity(size_t default_seq_size_per_block) const override;
     std::vector<KVCachePoolMetricsSnapshot> poolMetricsSnapshots() const override;
+    bool canAdmitInitialBatch(const std::vector<InitialKVCacheAllocation>& allocations,
+                              bool preserve_reserve_blocks = true) const override;
     void    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr) override;
     int64_t getMrCostTimeMs() const override;
 
@@ -58,6 +60,9 @@ public:
 private:
     bool   doInit() override;
     size_t reservableAvailableBlocksNum() const override;
+
+    MallocStatus
+    evaluateInitCapacity(const MallocInfo& malloc_info, size_t reserve_blocks, InitCapacityMode mode) const override;
 
     void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) const override;
     void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) override;

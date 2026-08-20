@@ -6,7 +6,10 @@ import unittest
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.models_py.triton_kernels.causal_conv1d import causal_conv1d_fn
+from rtp_llm.models_py.triton_kernels.causal_conv1d import (
+    causal_conv1d_fn,
+    prepare_causal_conv1d_metadata,
+)
 
 logging.basicConfig(
     level="INFO",
@@ -58,6 +61,73 @@ def causal_conv1d_ref(
 
 
 class TestCausalConv1dPrefill(unittest.TestCase):
+    def test_fragmented_block_map_cuda_graph_replay(self):
+        """Hot-prefix replay follows sparse physical pages after cache churn."""
+        device = torch.device("cuda")
+        dtype = torch.bfloat16
+        dim = 5120
+        width = 4
+        query_len = 45
+        prefix_len = 5440
+        seq_size_per_block = 64
+        map_width = 327
+        total_pages = 596
+
+        x = torch.randn(dim, query_len, device=device, dtype=dtype)
+        weight = torch.randn(dim, width, device=device, dtype=dtype)
+        cu_seqlens = torch.tensor([0, query_len], device=device, dtype=torch.int32)
+        prefix_lengths = torch.tensor(
+            [prefix_len], device=device, dtype=torch.int32
+        )
+        block_map = torch.arange(
+            1, map_width + 1, device=device, dtype=torch.int32
+        ).view(1, -1)
+        conv_states = torch.randn(
+            total_pages,
+            width - 1,
+            dim,
+            device=device,
+            dtype=dtype,
+        ).transpose(1, 2)
+        metadata = prepare_causal_conv1d_metadata(cu_seqlens, device)
+
+        def run(states):
+            return causal_conv1d_fn(
+                x,
+                weight,
+                None,
+                states,
+                cu_seqlens,
+                block_map,
+                prefix_lengths,
+                seq_size_per_block,
+                metadata=metadata,
+            )
+
+        # Compile before capture so the graph contains only the steady-state path.
+        run(conv_states)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            graph_output = run(conv_states)
+
+        replay_map = torch.arange(
+            200, 200 + map_width, device=device, dtype=torch.int32
+        ).remainder(total_pages - 1).add_(1)
+        replay_map[(prefix_len - 1) // seq_size_per_block] = 355
+        replay_map[(prefix_len + query_len - 1) // seq_size_per_block] = 439
+        block_map.copy_(replay_map.view_as(block_map))
+        initial_cache = conv_states.clone()
+
+        expected_cache = initial_cache.clone()
+        expected = run(expected_cache)
+        conv_states.copy_(initial_cache)
+        graph.replay()
+        torch.cuda.synchronize()
+
+        torch.testing.assert_close(graph_output, expected, rtol=1e-2, atol=5e-2)
+        torch.testing.assert_close(conv_states[439], expected_cache[439])
+
     # without KVCache
     def test_basic(self):
         device = "cuda"

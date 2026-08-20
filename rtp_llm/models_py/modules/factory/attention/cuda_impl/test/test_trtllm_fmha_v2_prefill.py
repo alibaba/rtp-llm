@@ -51,6 +51,88 @@ class TestTRTLLMFMHAv2PrefillOpBF16(TRTLLMFMHAv2TestBase):
             kwargs.setdefault("max_mismatch_rate", 1e-5)
         return super().run_correctness_test(*args, **kwargs)
 
+    def test_impl_persists_prompt_kv(self):
+        """The non-paged prompt path must also populate the paged decode cache."""
+        # Match the online Qwen3.5 prompt geometry that exposed the missing
+        # last-page write, while keeping a single TP-rank's local heads.
+        input_lengths = [5485]
+        head_num = 12
+        head_num_kv = 2
+        head_dim = 256
+        tokens_per_block = 64
+
+        attn_configs = self._create_config(
+            head_num=head_num,
+            head_num_kv=head_num_kv,
+            size_per_head=head_dim,
+            seq_size_per_block=tokens_per_block,
+        )
+        attn_configs.rope_config.style = 7
+        attn_configs.rope_config.dim = 64
+        attn_configs.rope_config.base = 10_000_000
+        attn_configs.rope_config.index_factor = 3
+        attn_configs.rope_config.mrope_dim1 = 11
+        attn_configs.rope_config.mrope_dim2 = 11
+        attn_configs.rope_config.mrope_dim3 = 10
+        attn_configs.rope_config.mrope_interleaved = True
+        attn_inputs = self._create_prefill_attention_inputs(
+            1, input_lengths, tokens_per_block, prefix_lengths=None
+        )
+        text_positions = torch.arange(
+            input_lengths[0], dtype=torch.int32, device=self.device
+        )
+        attn_inputs.combo_position_ids = text_positions.repeat(3)
+        # Production hybrid pools reserve physical block zero and expose
+        # kernel-page ids offset from the beginning of the layer tensor.
+        first_physical_page = 32
+        num_pages = (input_lengths[0] + tokens_per_block - 1) // tokens_per_block
+        last_physical_page = first_physical_page + num_pages - 1
+        # The production scheduler pads this row to 96 entries; only the first
+        # 86 pages are live for the 5485-token prompt.
+        attn_inputs.kv_cache_kernel_block_id = torch.zeros(
+            (1, 96), dtype=torch.int32
+        )
+        attn_inputs.kv_cache_kernel_block_id[0, :num_pages] = torch.arange(
+            first_physical_page,
+            first_physical_page + num_pages,
+            dtype=torch.int32,
+        )
+        attn_inputs.kv_cache_kernel_block_id_device = (
+            attn_inputs.kv_cache_kernel_block_id.to(self.device)
+        )
+        qkv = self._create_qkv_tensor(
+            sum(input_lengths),
+            head_num,
+            head_num_kv,
+            head_dim,
+            dtype=attn_configs.dtype,
+        )
+        attn_inputs.dtype = get_typemeta(qkv)
+        cache_dtype = (
+            torch.float8_e4m3fn
+            if self.kv_cache_dtype == KvCacheDataType.FP8
+            else attn_configs.dtype
+        )
+        kv_cache, _, _ = self._create_kv_cache(
+            last_physical_page + 1,
+            tokens_per_block,
+            head_num_kv,
+            head_dim,
+            dtype=cache_dtype,
+        )
+        kv_cache.kv_cache_base.zero_()
+
+        impl = FlashInferTRTLLMFMHAv2PrefillImpl(attn_configs, attn_inputs)
+        impl.forward(qkv, kv_cache, layer_idx=0)
+
+        self.assertGreater(
+            torch.count_nonzero(
+                kv_cache.kv_cache_base[last_physical_page]
+            ).item(),
+            0,
+            "prompt prefill returned attention output but did not persist K/V",
+        )
+
     def test_basic(self):
         """Test basic prefill with single sequence"""
         print("\n=== Test FMHAv2Prefill: Basic ===", flush=True)

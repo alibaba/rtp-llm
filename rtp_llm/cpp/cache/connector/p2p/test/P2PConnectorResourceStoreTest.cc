@@ -92,6 +92,38 @@ TEST_F(P2PConnectorResourceStoreTest, StealResource_CanOnlyStealOnce) {
     EXPECT_EQ(entry2, nullptr);
 }
 
+TEST_F(P2PConnectorResourceStoreTest, CancelTombstoneRejectsLateResourceAndReleasesRequestState) {
+    const std::string unique_key = "cancelled_before_resource";
+    const int64_t     request_id = 1012;
+    std::atomic<int64_t> released_id{-1};
+    stream_store_->setOnRequestReleased([&](int64_t id) { released_id.store(id); });
+
+    stream_store_->markCancelled(unique_key);
+    EXPECT_TRUE(stream_store_->isMarkedCancelled(unique_key));
+    auto meta = createMockMeta(unique_key, request_id, getDeadlineMs());
+    EXPECT_FALSE(stream_store_->addResource(meta, createMockKVCacheResource()));
+    EXPECT_EQ(released_id.load(), request_id);
+    EXPECT_EQ(stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 50), nullptr);
+}
+
+TEST(P2PConnectorResourceStoreLifetimeTest, CapsPrefillResourceHoldBelowBusinessDeadline) {
+    P2PConnectorResourceStore store(nullptr,
+                                    /*timeout_check_interval_ms=*/10,
+                                    /*prefill_resource_hold_ms=*/50,
+                                    /*cancelled_keys_ttl_ms=*/1000);
+    ASSERT_TRUE(store.init());
+    auto meta = std::make_shared<MockMeta>();
+    meta->setUniqueKey("hold_cap");
+    meta->setRequestId(1013);
+    meta->setDeadlineMs(currentTimeMs() + 3600000);
+    meta->setPrefillAddr("127.0.0.1", 12345);
+    meta->setPrefillTpSize(1);
+    ASSERT_TRUE(store.addResource(meta, std::make_shared<KVCacheResource>()));
+    auto entry = store.waitAndStealResource("hold_cap", currentTimeMs() + 100);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_LE(entry->deadline_ms, currentTimeMs() + 60);
+}
+
 // ==================== waitAndStealResource 测试 ====================
 
 TEST_F(P2PConnectorResourceStoreTest, WaitAndStealResource_ImmediateReturn) {

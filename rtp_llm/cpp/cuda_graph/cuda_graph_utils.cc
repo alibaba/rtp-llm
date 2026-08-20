@@ -4,6 +4,27 @@
 
 namespace rtp_llm {
 
+bool usesDeviceOnlyCudaGraphMetadata(const pybind11::handle& attn_pyobj) {
+    namespace py = pybind11;
+    if (!attn_pyobj || attn_pyobj.is_none()) {
+        return false;
+    }
+    if (py::isinstance<py::dict>(attn_pyobj)) {
+        const auto impls = py::reinterpret_borrow<py::dict>(attn_pyobj);
+        if (impls.empty()) {
+            return false;
+        }
+        for (const auto item : impls) {
+            if (!usesDeviceOnlyCudaGraphMetadata(item.second)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return py::hasattr(attn_pyobj, "cuda_graph_device_metadata_only")
+           && py::cast<bool>(attn_pyobj.attr("cuda_graph_device_metadata_only"));
+}
+
 void refreshTaggedAttentionInputs(torch_ext::PyModelInputs& inputs) {
     for (auto& [tag, tagged_inputs] : inputs.attention_inputs_by_tag) {
         (void)tag;

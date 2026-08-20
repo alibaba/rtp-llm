@@ -12,6 +12,16 @@
 using namespace std;
 namespace rtp_llm {
 
+namespace {
+
+int remainingKVAllocationSteps(const GenerateStreamPtr& stream) {
+    // The final generated token is returned to the client but is never used as
+    // input to another target forward, so it does not need a KV entry.
+    return stream ? std::max(0, static_cast<int>(stream->maxTokenNum()) - stream->seqLength() - 1) : 0;
+}
+
+}  // namespace
+
 FIFOSchedulerBase::FIFOSchedulerBase(const RuntimeConfig&                   runtime_config,
                                      const ModelConfig&                     model_config,
                                      const PDSepConfig&                     pd_sep_config,
@@ -66,13 +76,13 @@ bool FIFOSchedulerBase::checkInputLength(const GenerateStreamPtr& stream) {
     const auto reserve_step = stream->reserveStep();
     if (reserve_step > 0 && !(input_length <= max_seq_len_ && reserve_step <= max_seq_len_ - input_length)) {
         const auto allowed_input_length = reserve_step <= max_seq_len_ ? max_seq_len_ - reserve_step : 0;
-        auto       error_info           = autil::StringUtil::formatString(
-            "input len %zu with speculative reserve_step %zu exceeds max seq len %zu, "
-            "allowed max input len for speculative decoding is %zu",
-            input_length,
-            reserve_step,
-            max_seq_len_,
-            allowed_input_length);
+        auto       error_info =
+            autil::StringUtil::formatString("input len %zu with speculative reserve_step %zu exceeds max seq len %zu, "
+                                            "allowed max input len for speculative decoding is %zu",
+                                            input_length,
+                                            reserve_step,
+                                            max_seq_len_,
+                                            allowed_input_length);
         stream->reportError(ErrorCode::LONG_PROMPT_ERROR, error_info);
         return false;
     }
@@ -140,6 +150,61 @@ size_t FIFOSchedulerBase::evaluateAndUpdateStreams(list<GenerateStreamPtr>& stre
     return moved_count;
 }
 
+bool FIFOSchedulerBase::canAdmitInitialKVBatch(const list<GenerateStreamPtr>& admitted_streams,
+                                               const GenerateStreamPtr&       new_stream) const {
+    if (pd_sep_config_.role_type == RoleType::DECODE) {
+        // Decode admission owns the lifecycle guarantee: account the remaining
+        // growth of every active stream plus the candidate against the real
+        // allocator topology. availableBlocksNum already excludes blocks held
+        // by initialized streams, while their estimates contain only future
+        // growth. Fresh streams contain both initial and future demand.
+        std::vector<InitialKVCacheAllocation> allocations;
+        allocations.reserve(loading_cache_streams_.size() + running_streams_.size() + admitted_streams.size() + 1);
+        std::unordered_set<const GenerateStream*> seen;
+        auto append = [&](const GenerateStreamPtr& stream) {
+            if (!stream || !seen.insert(stream.get()).second) {
+                return;
+            }
+            allocations.push_back(stream->initialKVCacheAllocation(remainingKVAllocationSteps(stream)));
+        };
+        for (const auto& stream : loading_cache_streams_) {
+            append(stream);
+        }
+        for (const auto& stream : running_streams_) {
+            append(stream);
+        }
+        for (const auto& stream : admitted_streams) {
+            append(stream);
+        }
+        append(new_stream);
+
+        // All known decode growth is explicitly represented above, so the
+        // allocator reserve watermark need not be charged a second time.
+        return allocations.empty() || cache_manager_->canAdmitInitialBatch(allocations,
+                                                                            /*preserve_reserve_blocks=*/false);
+    }
+
+    // Preserve the existing idle behavior: a standalone request is attempted
+    // by the allocator, which owns the final error and cache-eviction policy.
+    // Once any work is active or batched in this round, admission must account
+    // for every not-yet-materialized stream before moveToNext() allocates them.
+    if (admitted_streams.empty() && loading_cache_streams_.empty() && running_streams_.empty()) {
+        return true;
+    }
+
+    std::vector<InitialKVCacheAllocation> allocations;
+    allocations.reserve(admitted_streams.size() + 1);
+    for (const auto& stream : admitted_streams) {
+        if (stream->curBlocksNum() == 0) {
+            allocations.push_back(stream->initialKVCacheAllocation());
+        }
+    }
+    if (new_stream->curBlocksNum() == 0) {
+        allocations.push_back(new_stream->initialKVCacheAllocation());
+    }
+    return allocations.empty() || cache_manager_->canAdmitInitialBatch(allocations);
+}
+
 void FIFOSchedulerBase::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_streams) {
     RTP_LLM_PROFILE_FUNCTION();
     list<GenerateStreamPtr>             admitted_streams;
@@ -148,17 +213,14 @@ void FIFOSchedulerBase::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_
     last_admitted_context_token_size_ = 0;
     last_waiting_oldest_age_us_       = 0;
     if (!waiting_streams.empty()) {
-        auto oldest_enqueue_time_us = (*std::min_element(waiting_streams.begin(),
-                                                         waiting_streams.end(),
-                                                         [](const auto& lhs, const auto& rhs) {
-                                                             return lhs->schedulerEnqueueTimeUs()
-                                                                    < rhs->schedulerEnqueueTimeUs();
-                                                         }))
-                                          ->schedulerEnqueueTimeUs();
+        auto oldest_enqueue_time_us =
+            (*std::min_element(waiting_streams.begin(), waiting_streams.end(), [](const auto& lhs, const auto& rhs) {
+                return lhs->schedulerEnqueueTimeUs() < rhs->schedulerEnqueueTimeUs();
+            }))->schedulerEnqueueTimeUs();
         last_waiting_oldest_age_us_ =
             std::max<int64_t>(0, autil::TimeUtility::currentTimeInMicroSeconds() - oldest_enqueue_time_us);
     }
-    const size_t inited_kv_streams = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
+    const size_t inited_kv_streams         = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
     size_t       admitted_new_init_streams = 0;
 
     struct GroupInfo {
@@ -213,9 +275,22 @@ void FIFOSchedulerBase::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_
             continue;
         }
 
+        // Pin a cache-hit plan before capacity evaluation. Without this
+        // ownership transfer, admitting a batch from cache previews is racy:
+        // an earlier stream's tail allocation may evict a later stream's
+        // still-unreferenced prefix before moveToNext() reaches it.
+        bool admitted = false;
+        if (!stream->hasError()) {
+            stream->reserveCacheForAdmission();
+            admitted = evaluateRunningMemory(admitted_streams, stream);
+            if (!admitted) {
+                stream->releaseCacheAdmissionReservation();
+            }
+        }
+
         // PD decode streams may already carry CanRun before FIFO admission.
         // Capacity checks must still run for the current scheduling round.
-        if (!stream->hasError() && evaluateRunningMemory(admitted_streams, stream)) {
+        if (admitted) {
             if (!stream->hasEvent(StreamEvents::CanRun)) {
                 stream->reportEvent(StreamEvents::CanRun);
             }

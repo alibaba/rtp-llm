@@ -295,6 +295,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
     //    然后 handleRead steal entry 时，entry 已经是 ready 状态
     //    waitAndFillResponse 会立即返回
     P2PConnectorResourceEntry::SideChannelData data;
+    data.has_first_token  = true;
     data.first_token_id   = 12345;
     data.total_reuse_len  = 10;
     data.local_reuse_len  = 5;
@@ -307,7 +308,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
 
     // 注意：notifySideChannelReady 需要在 handleRead steal entry 之前调用
     // 这样 entry 的 side_channel_ready 才会被设置
-    connector_->streamStore()->notifySideChannelReady(unique_key, data);
+    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, data);
 
     // 4. 创建 request 并调用 handleRead
     //    使用 num_workers = 1 简化测试

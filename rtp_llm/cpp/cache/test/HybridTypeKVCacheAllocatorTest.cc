@@ -1360,10 +1360,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
 }
 
 // Prefill init path (StreamCacheResource::initKVBlock sets enable_remove_skipped_blocks=false).
-// With step=2 and reuse_blocks_len=3, the reused linear tail lands at pos 2, which is NOT
-// a step hit ((2+1)%2==1). Without sparse cleanup, that slot must survive so that
-// causal_conv1d can still read it by prefix_length.
-TEST_F(HybridTypeKVCacheAllocatorTest, PrefillInitSkipsSparseCleanupAndPreservesReusedLinearTail) {
+// With step=2 and reuse_blocks_len=3, the reused linear checkpoint lands at pos 2. Historical
+// holes before that checkpoint cannot be reconstructed while only the suffix is executed, so
+// they must remain sparse. The checkpoint itself and newly materialized suffix slots must survive.
+TEST_F(HybridTypeKVCacheAllocatorTest, PrefillInitPreservesSparseReusedLinearPrefixAndTail) {
     auto config       = makeTinyHybridConfig();
     config.block_num  = 16;  // 6 cached (resident, non-evictable) + 4 new + 1 null reserved
     auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
@@ -1399,8 +1399,8 @@ TEST_F(HybridTypeKVCacheAllocatorTest, PrefillInitSkipsSparseCleanupAndPreserves
     const auto& linear_out = batch_res->blocks(0, gid_linear);
     ASSERT_EQ(linear_out.size(), 5u);
     EXPECT_TRUE(isNullBlockIdx(linear_out[0]));
-    EXPECT_FALSE(isNullBlockIdx(linear_out[1]));
-    EXPECT_EQ(linear_out[2], cached_linear_blocks[2]) << "reused linear tail must survive prefill init";
+    EXPECT_TRUE(isNullBlockIdx(linear_out[1]));
+    EXPECT_EQ(linear_out[2], cached_linear_blocks[2]) << "reused linear checkpoint must survive prefill init";
     EXPECT_FALSE(isNullBlockIdx(linear_out[3]));
     EXPECT_FALSE(isNullBlockIdx(linear_out[4]));
 }

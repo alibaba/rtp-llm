@@ -14,6 +14,9 @@ struct P2PConnectorSchedulerConfig {
     int64_t                  p2p_transfer_not_done_resource_hold_ms       = 10 * 1000;
     int                      p2p_resource_store_timeout_check_interval_ms = 100;
     int64_t                  p2p_cancel_broadcast_timeout_ms              = 1000;
+    int64_t                  p2p_prefill_resource_hold_ms                 = 300 * 1000;
+    int64_t                  p2p_max_transfer_deadline_ms                 = 300 * 1000;
+    int64_t                  p2p_cancelled_keys_ttl_ms                    = 3600 * 1000;
 
     static P2PConnectorSchedulerConfig create(const RuntimeConfig&    runtime_config,
                                               const CacheStoreConfig& cache_store_config,
@@ -25,6 +28,9 @@ struct P2PConnectorSchedulerConfig {
         config.p2p_resource_store_timeout_check_interval_ms =
             cache_store_config.p2p_resource_store_timeout_check_interval_ms;
         config.p2p_cancel_broadcast_timeout_ms = cache_store_config.p2p_cancel_broadcast_timeout_ms;
+        config.p2p_prefill_resource_hold_ms    = cache_store_config.p2p_prefill_resource_hold_ms;
+        config.p2p_max_transfer_deadline_ms    = cache_store_config.p2p_max_transfer_deadline_ms;
+        config.p2p_cancelled_keys_ttl_ms       = cache_store_config.p2p_cancelled_keys_ttl_ms;
         return config;
     }
 };
@@ -35,6 +41,7 @@ struct P2PConnectorWorkerConfig {
     int64_t p2p_read_steal_before_deadline_ms       = 250;
     int64_t p2p_read_return_before_deadline_ms      = 100;
     int64_t p2p_layer_cache_buffer_store_timeout_ms = 100 * 1000;
+    int64_t p2p_prefill_resource_hold_ms            = 300 * 1000;
 
     int64_t  tp_size       = 1;
     int64_t  tp_rank       = 0;
@@ -63,6 +70,7 @@ struct P2PConnectorWorkerConfig {
         config.p2p_layer_cache_buffer_store_timeout_ms = cache_store_config.p2p_layer_cache_buffer_store_timeout_ms;
         config.p2p_read_steal_before_deadline_ms       = cache_store_config.p2p_read_steal_before_deadline_ms;
         config.p2p_read_return_before_deadline_ms      = cache_store_config.p2p_read_return_before_deadline_ms;
+        config.p2p_prefill_resource_hold_ms            = cache_store_config.p2p_prefill_resource_hold_ms;
         config.tp_size                                 = parallelism_config.tp_size;
         config.tp_rank                                 = parallelism_config.tp_rank;
         config.layer_all_num                           = layer_all_num;

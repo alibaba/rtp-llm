@@ -11,13 +11,21 @@ from rtp_llm.models_py.model_desc.block_map import (
     select_attention_inputs_for_layer,
 )
 from rtp_llm.models_py.model_desc.qwen3 import Qwen3Model
+from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules import LinearFactory, RMSNorm
 from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
 )
-from rtp_llm.models_py.speculative.dspark_proposer_mixin import DSparkProposerMixin
+from rtp_llm.models_py.speculative.dspark_proposer_mixin import (
+    DSparkProposerMixin,
+)
 from rtp_llm.ops import ParallelismConfig
-from rtp_llm.ops.compute_ops import DSparkCallPhase, PyModelInputs, PyModelOutputs
+from rtp_llm.ops.compute_ops import (
+    DSparkCallPhase,
+    PyModelInputs,
+    PyModelOutputs,
+    rtp_llm_ops,
+)
 from rtp_llm.utils.model_weight import W
 
 
@@ -74,6 +82,118 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
             eps=config.layernorm_eps,
         )
 
+        self._dspark_proposal_driver = parallelism_config.tp_rank == 0
+        lm_head = weights.get_global_weight(W.lm_head).contiguous()
+        if parallelism_config.tp_size > 1:
+            # The serving target may be TP2 while the online fusion kernel
+            # is vocab-local. Reconstruct and retain the small 20k draft
+            # head once at initialization; steady-state proposal replay
+            # then has no vocab all-gather or host synchronization.
+            lm_head = all_gather(lm_head, group=Group.TP)
+        self._dspark_lm_head = (
+            lm_head[: int(config.vocab_size)].contiguous()
+            if self._dspark_proposal_driver
+            else None
+        )
+        self._dspark_markov_w1 = None
+        self._dspark_markov_w2 = None
+        self._dspark_d2t = None
+        self._dspark_markov_output = None
+        self._dspark_markov_current_state = None
+        self._dspark_markov_partial_scores = None
+        self._dspark_markov_partial_tokens = None
+        self._dspark_markov_barrier_state = None
+        if self._dspark_proposal_driver:
+            if proposal_width != 7:
+                raise ValueError(
+                    "SM90 DSpARK persistent Markov requires proposal width 7"
+                )
+            if max_generate_batch_size > 32:
+                raise ValueError(
+                    "SM90 DSpARK persistent Markov supports max batch size 32"
+                )
+
+            self._dspark_markov_w1 = weights.get_global_weight(
+                W.dspark_markov_w1
+            ).contiguous()
+            raw_markov_w2 = weights.get_global_weight(
+                W.dspark_markov_w2
+            ).contiguous()
+            if (
+                self._dspark_markov_w1.dtype != torch.bfloat16
+                or raw_markov_w2.dtype != torch.bfloat16
+                or self._dspark_markov_w1.shape[1] != 256
+                or raw_markov_w2.shape[1] != 256
+            ):
+                raise ValueError(
+                    "SM90 DSpARK persistent Markov requires BF16 rank-256 weights"
+                )
+
+            draft_vocab_size = int(config.vocab_size)
+            padded_vocab_size = (draft_vocab_size + 127) // 128 * 128
+            if not draft_vocab_size <= raw_markov_w2.shape[0] <= padded_vocab_size:
+                raise ValueError(
+                    "DSpARK Markov W2 rows must cover exactly the draft "
+                    "vocabulary, with at most one 128-token padding tile"
+                )
+            if self._dspark_markov_w1.shape[0] < int(config.input_vocab_size):
+                raise ValueError(
+                    "DSpARK Markov W1 must cover the target/input vocabulary"
+                )
+            if raw_markov_w2.shape[0] == padded_vocab_size:
+                self._dspark_markov_w2 = raw_markov_w2
+            else:
+                self._dspark_markov_w2 = raw_markov_w2.new_zeros(
+                    (padded_vocab_size, 256)
+                )
+                self._dspark_markov_w2[: raw_markov_w2.shape[0]].copy_(
+                    raw_markov_w2
+                )
+
+            d2t = weights.get_global_weight_or_none(
+                W.multi_tokens_predict_d2t_map
+            )
+            if int(config.input_vocab_size) != draft_vocab_size and d2t is None:
+                raise ValueError(
+                    "reduced-vocabulary DSpARK requires an absolute d2t map"
+                )
+            self._dspark_d2t = (
+                torch.arange(
+                    draft_vocab_size,
+                    dtype=torch.int64,
+                    device=self._dspark_markov_w1.device,
+                )
+                if d2t is None
+                else d2t.to(dtype=torch.int64).contiguous()
+            )
+            if self._dspark_d2t.shape != (draft_vocab_size,):
+                raise ValueError("DSpARK d2t must cover the draft vocabulary")
+
+            # The cooperative kernel always operates on 16-request tiles, so
+            # B=17..32 needs a full 32-row state workspace even when the
+            # configured admission limit is not itself tile aligned.
+            workspace_batch = (
+                (int(max_generate_batch_size) + 15) // 16 * 16
+            )
+            device = self._dspark_markov_w1.device
+            self._dspark_markov_output = torch.empty(
+                (max_generate_batch_size, proposal_width),
+                dtype=torch.int32,
+                device=device,
+            )
+            self._dspark_markov_current_state = torch.empty(
+                (workspace_batch, 256), dtype=torch.bfloat16, device=device
+            )
+            self._dspark_markov_partial_scores = torch.empty(
+                (2, 256, 16), dtype=torch.float32, device=device
+            )
+            self._dspark_markov_partial_tokens = torch.empty(
+                (2, 256, 16), dtype=torch.int32, device=device
+            )
+            self._dspark_markov_barrier_state = torch.empty(
+                4, dtype=torch.int32, device=device
+            )
+
         heads = self.attn_configs.head_num
         kv_heads = self.attn_configs.kv_head_num
         head_dim = self.attn_configs.size_per_head
@@ -103,10 +223,65 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
 
         self.context_rope = MhaRotaryEmbeddingOp(self.attn_configs)
 
+    def cuda_graph_input_hidden_size(self) -> int:
+        """Width of the concatenated target auxiliary features per token."""
+        return self._dspark_aux_feature_dim
+
     def combine_hidden_states(self, features: torch.Tensor) -> torch.Tensor:
         return self.fc(features)
 
-    def _draft_attention_inputs(self, inputs: PyModelInputs):
+    def build_proposal_outputs(
+        self, hidden: torch.Tensor, query_ids: torch.Tensor
+    ) -> PyModelOutputs:
+        head_hidden = self.compute_draft_hidden_states(hidden)
+        if not self._dspark_proposal_driver:
+            # Target verification input is assembled and TP-synchronized by
+            # the C++ driver rank.  Other TP ranks still execute the sharded
+            # draft backbone/collectives, but must not duplicate the full
+            # 20k-vocabulary LM head and sequential Markov kernel.
+            if self.config.dspark_sample_from_anchor:
+                placeholder = query_ids[:, : self._dspark_width]
+            else:
+                placeholder = query_ids[:, 1 : self._dspark_width + 1]
+            outputs = PyModelOutputs(head_hidden)
+            outputs.speculative_token_ids = placeholder
+            return outputs
+
+        batch_size = int(query_ids.shape[0])
+        shaped_hidden = head_hidden.view(
+            batch_size, self._dspark_query_width, self._dspark_hidden_dim
+        )
+        if self.config.dspark_sample_from_anchor:
+            sample_hidden = shaped_hidden[:, : self._dspark_width]
+        else:
+            sample_hidden = shaped_hidden[:, 1 : self._dspark_width + 1]
+        # Full-vocabulary LM head plus the one-launch, seven-round persistent
+        # Markov kernel are both captured in the proposal CUDA graph.  The
+        # kernel retains exact dense argmax semantics; no eager or TopK path is
+        # used by serving.
+        base_logits = torch.nn.functional.linear(
+            sample_hidden.contiguous(), self._dspark_lm_head
+        )
+        proposal_ids = self._dspark_markov_output[:batch_size]
+        rtp_llm_ops.dspark_persistent_markov(
+            proposal_ids,
+            query_ids[:, 0],
+            base_logits,
+            self._dspark_d2t,
+            self._dspark_markov_w1,
+            self._dspark_markov_w2,
+            self._dspark_markov_current_state,
+            self._dspark_markov_partial_scores,
+            self._dspark_markov_partial_tokens,
+            self._dspark_markov_barrier_state,
+            1.0,
+            78,
+        )
+        outputs = PyModelOutputs(head_hidden)
+        outputs.speculative_token_ids = proposal_ids
+        return outputs
+
+    def dspark_attention_inputs(self, inputs: PyModelInputs):
         attention = select_attention_inputs_for_layer(inputs, self.kv_cache, 0)
         if isinstance(attention, list):
             if len(attention) != 1:
@@ -118,7 +293,7 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
         return attention
 
     def _block_table(self, inputs: PyModelInputs) -> torch.Tensor:
-        attention = self._draft_attention_inputs(inputs)
+        attention = self.dspark_attention_inputs(inputs)
         # The draft KV tensor is indexed by the attention kernel's local page
         # ids.  ``kv_cache_block_id_device`` is the physical/cache-store table
         # in main's split cache API and can contain ids outside this tensor.
@@ -165,11 +340,18 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
             cache[pages, 1, :, slots, :] = value.to(cache.dtype)
 
         writer = create_write_cache_store_impl(
-            self._draft_attention_inputs(inputs)
+            self.dspark_attention_inputs(inputs)
         )
         if writer is not None:
             for layer_idx in range(self.layer_num):
-                writer(self.kv_cache.get_layer_caches(layer_idx))
+                layer_caches = self.kv_cache.get_layer_cache_groups(layer_idx)
+                if len(layer_caches) != 1:
+                    raise RuntimeError(
+                        "Qwen3 DSpark commit requires exactly one KV cache "
+                        f"group per draft layer, got {len(layer_caches)} for "
+                        f"layer {layer_idx}"
+                    )
+                writer(layer_caches[0])
 
     def forward_query_block(
         self,
