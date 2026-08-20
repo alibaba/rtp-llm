@@ -180,7 +180,7 @@ std::vector<GroupSetPtr> makeCascadeGroups() {
     auto full_device_pool   = makeTestDevicePool(2, "cascade_policy_full");
     auto swa_device_pool    = makeTestDevicePool(2, "cascade_policy_swa");
     auto linear_device_pool = makeTestDevicePool(2, "cascade_policy_linear");
-    auto full = std::make_shared<FullGroupSet>(
+    auto full               = std::make_shared<FullGroupSet>(
         std::vector<DeviceBlockPoolPtr>{full_device_pool}, makePageableHostPool(4), nullptr);
     auto swa = std::make_shared<SWAGroupSet>(
         2, 1, std::vector<DeviceBlockPoolPtr>{swa_device_pool}, makePageableHostPool(4), nullptr);
@@ -472,9 +472,8 @@ protected:
             return false;
         }
         resource.transfer_state = GroupSetTransferState::LOAD_PENDING;
-        evictor_->refreshCandidate(node, group_set_id);
+        evictor_->suspendCandidate(node, group_set_id, source);
         resource.transfer_state = GroupSetTransferState::LOADING;
-        evictor_->refreshCandidate(node, group_set_id);
         return true;
     }
 
@@ -483,7 +482,7 @@ protected:
         if (copy_ok) {
             evictor_->onLoaded(node, group_set_id);
         } else {
-            evictor_->refreshCandidate(node, group_set_id);
+            evictor_->admitCandidate(node, group_set_id, node->group_set_resources[group_set_id].getTopTier());
         }
     }
 
@@ -520,10 +519,10 @@ TEST_F(BlockTreeEvictorTest, PendingReleasesFollowAsyncTaskSourcePools) {
 }
 
 TEST_F(BlockTreeEvictorTest, PendingReleasesCountEveryDeviceMemberBlock) {
-    auto policy   = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    auto topology = block_transfer_engine_test::makeTestTopology(
-        {block_transfer_engine_test::makeTestGroupBase(policy, {0}, 16),
-         block_transfer_engine_test::makeTestGroupBase(policy, {1}, 16)});
+    auto policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    auto topology =
+        block_transfer_engine_test::makeTestTopology({block_transfer_engine_test::makeTestGroupBase(policy, {0}, 16),
+                                                      block_transfer_engine_test::makeTestGroupBase(policy, {1}, 16)});
     group_ =
         std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool_, device_pool_}, nullptr, nullptr);
     group_->initialize(0, std::move(topology), {0, 1});
@@ -571,13 +570,12 @@ TEST_F(BlockTreeEvictorTest, CompleteEvictRejectsNonDemotingResource) {
     TreeNode*          node         = insertedNode(result);
     ASSERT_NE(node, nullptr);
 
-    const TransferDescriptor desc{
-        node, /*group_set_id=*/0, /*path_index=*/0, Tier::DEVICE, Tier::NONE, {source_block}};
-    DisableCoreDumpGuard core_dump_guard;
+    const TransferDescriptor desc{node, /*group_set_id=*/0, /*path_index=*/0, Tier::DEVICE, Tier::NONE, {source_block}};
+    DisableCoreDumpGuard     core_dump_guard;
     EXPECT_THROW(evictor_->completeEvict(desc), std::exception);
 
+    evictor_->suspendCandidate(node, 0, Tier::DEVICE);
     node->group_set_resources[0].evictFromTier(Tier::DEVICE);
-    evictor_->refreshCandidate(node, 0);
     unreferenceDeviceBlocksForTest(*group_, MultiNodeBlocks{{source_block}}, BlockRefType::BLOCK_CACHE);
 }
 
@@ -642,8 +640,8 @@ TEST_F(BlockTreeEvictorTest, RunEvictionTaskReleasesPendingCapacityBeforeSettled
     EXPECT_EQ(settled_count, 1u);
     GroupSetResource&       resource = insertedNode(result)->group_set_resources[0];
     const MultiNodeResource source{0, Tier::DEVICE, {{insertedNode(result), {source_block}}}};
+    evictor_->suspendCandidate(insertedNode(result), 0, Tier::DEVICE);
     resource.evictFromTier(Tier::DEVICE);
-    evictor_->refreshCandidate(insertedNode(result), 0);
     unreferenceDeviceBlocksForTest(*group_, MultiNodeBlocks{{source_block}}, BlockRefType::BLOCK_CACHE);
 }
 
@@ -695,8 +693,7 @@ TEST(BlockTreeEvictorCascadeTest, NonLeafCascadeFollowsGroupPriority) {
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(groups.size()));
     for (auto& node_resources : resources) {
         for (size_t group_set_id = 0; group_set_id < groups.size(); ++group_set_id) {
-            const BlockIdxType block =
-                groups[group_set_id]->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+            const BlockIdxType block = groups[group_set_id]->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
             ASSERT_FALSE(isNullBlockIdx(block));
             node_resources[group_set_id] = makeResource(Tier::HOST, block);
         }
@@ -711,9 +708,10 @@ TEST(BlockTreeEvictorCascadeTest, NonLeafCascadeFollowsGroupPriority) {
     EXPECT_EQ(cascadeGroupSetIds(BlockTreeEvictorTestPeer::selectCascades(
                   evictor, makeSelectionDesc(non_leaf, /*group_set_id=*/1, Tier::HOST, Tier::DISK))),
               (std::vector<size_t>{2}));
-    EXPECT_TRUE(cascadeGroupSetIds(BlockTreeEvictorTestPeer::selectCascades(
-                    evictor, makeSelectionDesc(non_leaf, /*group_set_id=*/2, Tier::HOST, Tier::DISK)))
-                    .empty());
+    EXPECT_TRUE(
+        cascadeGroupSetIds(BlockTreeEvictorTestPeer::selectCascades(
+                               evictor, makeSelectionDesc(non_leaf, /*group_set_id=*/2, Tier::HOST, Tier::DISK)))
+            .empty());
 }
 
 TEST(BlockTreeEvictorCascadeTest, ReverseCascadeSelectsAllOtherGroupsAtLeaf) {
@@ -734,12 +732,10 @@ TEST(BlockTreeEvictorCascadeTest, ReverseCascadeSelectsAllOtherGroupsAtLeaf) {
 
     ASSERT_NE(insertedNode(inserted), nullptr);
     EXPECT_EQ(cascadeGroupSetIds(BlockTreeEvictorTestPeer::selectCascades(
-                  evictor,
-                  makeSelectionDesc(insertedNode(inserted), /*group_set_id=*/0, Tier::HOST, Tier::DISK))),
+                  evictor, makeSelectionDesc(insertedNode(inserted), /*group_set_id=*/0, Tier::HOST, Tier::DISK))),
               (std::vector<size_t>{1, 2}));
     EXPECT_EQ(cascadeGroupSetIds(BlockTreeEvictorTestPeer::selectCascades(
-                  evictor,
-                  makeSelectionDesc(insertedNode(inserted), /*group_set_id=*/1, Tier::HOST, Tier::DISK))),
+                  evictor, makeSelectionDesc(insertedNode(inserted), /*group_set_id=*/1, Tier::HOST, Tier::DISK))),
               (std::vector<size_t>{0, 2}));
 }
 
@@ -769,8 +765,7 @@ TEST(BlockTreeEvictorCascadeTest, DemotionDoesNotCascadeToUnmatchableParent) {
     ASSERT_EQ(inserted.inserted_nodes.size(), 3u);
 
     const EvictionTask task = BlockTreeEvictorTestPeer::selectCascades(
-        *evictor,
-        makeSelectionDesc(inserted.inserted_nodes.back(), /*group_set_id=*/0, Tier::HOST, Tier::DISK));
+        *evictor, makeSelectionDesc(inserted.inserted_nodes.back(), /*group_set_id=*/0, Tier::HOST, Tier::DISK));
 
     EXPECT_TRUE(task.cascade_descs.empty());
 }
@@ -782,8 +777,7 @@ TEST(BlockTreeEvictorCascadeTest, StopsAtLogicallyMatchableParent) {
     ASSERT_NE(device_pool, nullptr);
     ASSERT_NE(host_pool, nullptr);
     ASSERT_NE(disk_pool, nullptr);
-    auto group = std::make_shared<FullGroupSet>(
-        std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, disk_pool);
+    auto group = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, disk_pool);
     initializeFullGroup(group, device_pool);
     std::vector<GroupSetPtr> groups = {group};
     BlockTree                tree(groups);
@@ -804,8 +798,7 @@ TEST(BlockTreeEvictorCascadeTest, StopsAtLogicallyMatchableParent) {
     ASSERT_EQ(inserted.inserted_nodes.size(), 2u);
 
     const EvictionTask task = BlockTreeEvictorTestPeer::selectCascades(
-        *evictor,
-        makeSelectionDesc(inserted.inserted_nodes.back(), /*group_set_id=*/0, Tier::HOST, Tier::DISK));
+        *evictor, makeSelectionDesc(inserted.inserted_nodes.back(), /*group_set_id=*/0, Tier::HOST, Tier::DISK));
 
     EXPECT_TRUE(task.cascade_descs.empty());
 }
@@ -822,8 +815,8 @@ TEST(BlockTreeEvictorCascadeTest, StopsAtParentWithAnotherEmptyChild) {
     TestEvictorRuntime       runtime;
     auto                     evictor = runtime.make(&tree);
 
-    const BlockIdxType parent_block  = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
-    const BlockIdxType leaf_block    = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+    const BlockIdxType parent_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+    const BlockIdxType leaf_block   = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_FALSE(isNullBlockIdx(parent_block));
     ASSERT_FALSE(isNullBlockIdx(leaf_block));
     const std::vector<std::vector<GroupSetResource>> leaf_resources = {
@@ -835,8 +828,7 @@ TEST(BlockTreeEvictorCascadeTest, StopsAtParentWithAnotherEmptyChild) {
     releaseLowerTierSeedRefs(groups, leaf_resources);
     ASSERT_EQ(inserted.inserted_nodes.size(), 3u);
 
-    group->referenceBlocks(MultiNodeResource{0, Tier::HOST, {{nullptr, {parent_block}}}},
-                           BlockRefType::BLOCK_CACHE);
+    group->referenceBlocks(MultiNodeResource{0, Tier::HOST, {{nullptr, {parent_block}}}}, BlockRefType::BLOCK_CACHE);
     const std::vector<std::vector<GroupSetResource>> sibling_resources = {
         {GroupSetResource{}},
         {makeResource(Tier::HOST, parent_block)},
@@ -847,8 +839,7 @@ TEST(BlockTreeEvictorCascadeTest, StopsAtParentWithAnotherEmptyChild) {
     ASSERT_EQ(sibling.inserted_nodes.size(), 1u);
 
     const EvictionTask task = BlockTreeEvictorTestPeer::selectCascades(
-        *evictor,
-        makeSelectionDesc(inserted.inserted_nodes.back(), /*group_set_id=*/0, Tier::HOST, Tier::DISK));
+        *evictor, makeSelectionDesc(inserted.inserted_nodes.back(), /*group_set_id=*/0, Tier::HOST, Tier::DISK));
 
     EXPECT_TRUE(task.cascade_descs.empty());
 }
@@ -860,8 +851,7 @@ TEST(BlockTreeEvictorCascadeTest, DemotionPrepareLeavesAncestorUnchanged) {
     ASSERT_NE(device_pool, nullptr);
     ASSERT_NE(host_pool, nullptr);
     ASSERT_NE(disk_pool, nullptr);
-    auto group = std::make_shared<FullGroupSet>(
-        std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, disk_pool);
+    auto group = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, disk_pool);
     initializeFullGroup(group, device_pool);
     std::vector<GroupSetPtr> groups = {group};
     BlockTree                tree(groups);
@@ -886,8 +876,7 @@ TEST(BlockTreeEvictorCascadeTest, DemotionPrepareLeavesAncestorUnchanged) {
     auto task = evictor->prepareEvictionLocked(*victim);
     ASSERT_TRUE(task.has_value());
     EXPECT_TRUE(task->cascade_descs.empty());
-    EXPECT_EQ(inserted.inserted_nodes[1]->group_set_resources[0].transfer_state,
-              GroupSetTransferState::IDLE);
+    EXPECT_EQ(inserted.inserted_nodes[1]->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
     EXPECT_EQ(inserted.inserted_nodes[1]->group_set_resources[0].host_block, parent_block);
 
     evictor->abortEvictionLocked(*task);
@@ -898,17 +887,13 @@ TEST(BlockTreeEvictorCascadeTest, ForceDropRemovesUnmatchableParentChain) {
     auto host_pool   = makePageableHostPool(2);
     ASSERT_NE(device_pool, nullptr);
     ASSERT_NE(host_pool, nullptr);
-    auto group = std::make_shared<FullGroupSet>(
-        std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
+    auto group = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
     initializeFullGroup(group, device_pool);
     std::vector<GroupSetPtr> groups = {group};
     BlockTree                tree(groups);
     TestEvictorRuntime       runtime;
-    auto evictor = runtime.make(&tree,
-                                EvictionPolicy::LRU,
-                                EvictionPolicy::LRU,
-                                EvictionPolicy::FIFO,
-                                [](Tier) { return false; });
+    auto                     evictor =
+        runtime.make(&tree, EvictionPolicy::LRU, EvictionPolicy::LRU, EvictionPolicy::FIFO, [](Tier) { return false; });
 
     const BlockIdxType parent_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     const BlockIdxType leaf_block   = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
@@ -954,8 +939,7 @@ TEST(BlockTreeEvictorCascadeTest, PruneCascadesAncestorResourcesFromTheirActualT
     ASSERT_EQ(inserted.inserted_nodes.size(), 3u);
 
     const EvictionTask task = BlockTreeEvictorTestPeer::selectCascades(
-        *evictor,
-        makeSelectionDesc(inserted.inserted_nodes.back(), /*group_set_id=*/0, Tier::HOST, Tier::NONE));
+        *evictor, makeSelectionDesc(inserted.inserted_nodes.back(), /*group_set_id=*/0, Tier::HOST, Tier::NONE));
 
     ASSERT_EQ(task.cascade_descs.size(), 1u);
     EXPECT_EQ(task.cascade_descs[0].node, inserted.inserted_nodes[1]);
@@ -977,7 +961,7 @@ TEST_F(BlockTreeEvictorTest, TierEntryRefreshesLastAccessTime) {
     TreeNode*             node   = insertedNode(result);
     ASSERT_NE(node, nullptr);
 
-    CandidateMeta& candidate_meta = node->group_set_resources[0].candidate_meta;
+    CandidateMeta& candidate_meta      = node->group_set_resources[0].candidate_meta;
     candidate_meta.tier_enter_time_us  = 0;
     candidate_meta.last_access_time_us = 0;
     evictor_->onLoaded(node, 0);
@@ -986,7 +970,7 @@ TEST_F(BlockTreeEvictorTest, TierEntryRefreshesLastAccessTime) {
     EXPECT_EQ(candidate_meta.last_access_time_us, candidate_meta.tier_enter_time_us);
 }
 
-TEST_F(BlockTreeEvictorTest, IsEvictableRejectsNonIdleTransferState) {
+TEST_F(BlockTreeEvictorTest, SuspendAndAdmitCandidateTrackTransferState) {
     auto host_pool = makePageableHostPool(1);
     auto disk_pool = makeTestDiskPool(1, "block_tree_evictor_is_evictable");
     ASSERT_NE(host_pool, nullptr);
@@ -1000,19 +984,49 @@ TEST_F(BlockTreeEvictorTest, IsEvictableRejectsNonIdleTransferState) {
 
     TreeNode*         node     = insertedNode(result);
     GroupSetResource& resource = node->group_set_resources[0];
-    ASSERT_TRUE(evictor_->isEvictable(*group_, node, Tier::HOST));
+    ASSERT_EQ(evictor_->candidateCount(/*group_set_id=*/0, Tier::HOST), 1u);
 
     resource.transfer_state = GroupSetTransferState::DEMOTING;
-    EXPECT_FALSE(evictor_->isEvictable(*group_, node, Tier::HOST));
+    evictor_->suspendCandidate(node, /*group_set_id=*/0, Tier::HOST);
+    EXPECT_EQ(evictor_->candidateCount(/*group_set_id=*/0, Tier::HOST), 0u);
 
     resource.transfer_state = GroupSetTransferState::IDLE;
-    resource.host_block     = NULL_BLOCK_IDX;
+    evictor_->admitCandidate(node, /*group_set_id=*/0, Tier::HOST);
+    EXPECT_EQ(evictor_->candidateCount(/*group_set_id=*/0, Tier::HOST), 1u);
+
+    evictor_->suspendCandidate(node, /*group_set_id=*/0, Tier::HOST);
+    resource.host_block = NULL_BLOCK_IDX;
     group_->releaseSingleBlock(Tier::HOST, source, BlockRefType::BLOCK_CACHE);
 }
 
 TEST_F(BlockTreeEvictorTest, ChooseVictimRejectsUnsupportedTier) {
     EXPECT_FALSE(evictor_->chooseVictim(/*group_set_id=*/0, Tier::REMOTE).has_value());
     EXPECT_FALSE(evictor_->chooseVictim(/*group_set_id=*/0, Tier::NONE).has_value());
+}
+
+TEST_F(BlockTreeEvictorTest, ChooseVictimSkipsInvalidHeapEntry) {
+    MultiNodeBlocks device_blocks = allocateDeviceBlocksForTest(*group_, 2, BlockRefType::BLOCK_CACHE);
+    ASSERT_EQ(device_blocks.size(), 2u);
+
+    auto      first       = insert({100}, {{makeResource(Tier::DEVICE, device_blocks[0][0])}});
+    auto      second      = insert({200}, {{makeResource(Tier::DEVICE, device_blocks[1][0])}});
+    TreeNode* first_node  = insertedNode(first);
+    TreeNode* second_node = insertedNode(second);
+    ASSERT_NE(first_node, nullptr);
+    ASSERT_NE(second_node, nullptr);
+    unreferenceDeviceBlocksForTest(*group_, device_blocks, BlockRefType::BLOCK_CACHE);
+
+    first_node->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
+
+    const auto victim = evictor_->chooseVictim(/*group_set_id=*/0, Tier::DEVICE);
+    ASSERT_TRUE(victim.has_value());
+    EXPECT_EQ(victim->node, second_node);
+    EXPECT_EQ(evictor_->candidateCount(/*group_set_id=*/0, Tier::DEVICE), 1u);
+
+    first_node->group_set_resources[0].transfer_state = GroupSetTransferState::IDLE;
+    first_node->group_set_resources[0].evictFromTier(Tier::DEVICE);
+    second_node->group_set_resources[0].evictFromTier(Tier::DEVICE);
+    unreferenceDeviceBlocksForTest(*group_, device_blocks, BlockRefType::BLOCK_CACHE);
 }
 
 TEST_F(BlockTreeEvictorTest, EvictForceDropsSelectedVictim) {
@@ -1118,9 +1132,9 @@ TEST_F(BlockTreeEvictorTest, MatchUpdatesIntermediateHistoryWithoutAdmittingIt) 
     EXPECT_EQ(evictor_->candidateStats().device_candidates, 2u);
 
     const MultiNodeResource leaf_resource{0, Tier::DEVICE, {{leaf, {leaf_block}}}};
+    evictor_->suspendCandidate(leaf, 0, Tier::DEVICE);
     leaf->group_set_resources[0].evictFromTier(Tier::DEVICE);
     group_->unreferenceBlocks(leaf_resource, BlockRefType::BLOCK_CACHE);
-    evictor_->refreshCandidate(leaf, 0);
     tree_->removeNodeAndEmptyAncestors(leaf);
     evictor_->onTopologyChanged(parent);
 
@@ -1132,13 +1146,13 @@ TEST_F(BlockTreeEvictorTest, MatchUpdatesIntermediateHistoryWithoutAdmittingIt) 
     EXPECT_EQ(parent->group_set_resources[0].candidate_meta.hit_count, parent_meta.hit_count);
 
     const MultiNodeResource parent_resource{0, Tier::DEVICE, {{parent, {parent_block}}}};
+    evictor_->suspendCandidate(parent, 0, Tier::DEVICE);
     parent->group_set_resources[0].evictFromTier(Tier::DEVICE);
     group_->unreferenceBlocks(parent_resource, BlockRefType::BLOCK_CACHE);
-    evictor_->refreshCandidate(parent, 0);
     const MultiNodeResource rival_resource{0, Tier::DEVICE, {{insertedNode(rival), {rival_block}}}};
+    evictor_->suspendCandidate(insertedNode(rival), 0, Tier::DEVICE);
     insertedNode(rival)->group_set_resources[0].evictFromTier(Tier::DEVICE);
     group_->unreferenceBlocks(rival_resource, BlockRefType::BLOCK_CACHE);
-    evictor_->refreshCandidate(insertedNode(rival), 0);
 }
 
 TEST_F(BlockTreeEvictorTest, ExistingGroupFillAdmitsChildAndRemovesFullParentCandidate) {
@@ -1473,7 +1487,7 @@ TEST_F(BlockTreeEvictorTest, DemotionExcludesSourceAndRollbackOrSuccessRestoresO
     ASSERT_EQ(evictor_->candidateStats().device_candidates, 1u);
 
     const CandidateMeta candidate_meta = resource.candidate_meta;
-    auto victim = evictor_->chooseVictim(/*group_set_id=*/0, Tier::DEVICE);
+    auto                victim         = evictor_->chooseVictim(/*group_set_id=*/0, Tier::DEVICE);
     ASSERT_TRUE(victim.has_value());
     auto task = evictor_->prepareEvictionLocked(*victim);
     ASSERT_TRUE(task.has_value());
@@ -1545,8 +1559,8 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimKeepsCandidateUntilTaskActivation) {
 
     evictor_->abortEvictionLocked(*task);
     const MultiNodeResource source{0, Tier::DEVICE, {{insertedNode(result), {source_block}}}};
+    evictor_->suspendCandidate(insertedNode(result), 0, Tier::DEVICE);
     resource.evictFromTier(Tier::DEVICE);
-    evictor_->refreshCandidate(insertedNode(result), 0);
     unreferenceDeviceBlocksForTest(*group_, MultiNodeBlocks{{source_block}}, BlockRefType::BLOCK_CACHE);
 }
 
@@ -1583,8 +1597,8 @@ TEST_F(BlockTreeEvictorTest, PrimaryTargetExhaustionLeavesSourceAndCandidateUnch
     EXPECT_EQ(retry->node, insertedNode(result));
 
     const MultiNodeResource source{0, Tier::DEVICE, {{insertedNode(result), {source_block}}}};
+    evictor_->suspendCandidate(insertedNode(result), 0, Tier::DEVICE);
     resource.evictFromTier(Tier::DEVICE);
-    evictor_->refreshCandidate(insertedNode(result), 0);
     unreferenceDeviceBlocksForTest(*group_, MultiNodeBlocks{{source_block}}, BlockRefType::BLOCK_CACHE);
     group_->releaseSingleBlock(Tier::HOST, exhausted_target, BlockRefType::REQUEST);
 }
@@ -1629,7 +1643,7 @@ TEST(BlockTreeEvictorCascadeTest, PrepareTaskSkipsLoadingSiblingAndReadmitsAfter
     CascadeTestEnvironment environment;
     ASSERT_TRUE(environment.init());
     environment.node_->group_set_resources[1].transfer_state = GroupSetTransferState::LOADING;
-    environment.evictor_->refreshCandidate(environment.node_, 1);
+    environment.evictor_->suspendCandidate(environment.node_, 1, Tier::HOST);
 
     auto task = environment.prepareTask(0);
     ASSERT_TRUE(task.has_value());
@@ -1642,7 +1656,7 @@ TEST(BlockTreeEvictorCascadeTest, PrepareTaskSkipsLoadingSiblingAndReadmitsAfter
 
     environment.evictor_->abortEvictionLocked(*task);
     environment.node_->group_set_resources[1].transfer_state = GroupSetTransferState::IDLE;
-    environment.evictor_->refreshCandidate(environment.node_, 1);
+    environment.evictor_->admitCandidate(environment.node_, 1, Tier::HOST);
     EXPECT_EQ(environment.node_->group_set_resources[1].transfer_state, GroupSetTransferState::IDLE);
 
     auto retry = environment.prepareTask(0);
@@ -2007,10 +2021,7 @@ TEST(BlockTreeEvictorPolicyTest, MatchDoesNotChangeFifoAdmissionOrder) {
     std::vector<GroupSetPtr> groups = {group};
     BlockTree                tree(groups);
     TestEvictorRuntime       runtime;
-    auto evictor_holder = runtime.make(&tree,
-                                       EvictionPolicy::FIFO,
-                                       EvictionPolicy::LRU,
-                                       EvictionPolicy::FIFO);
+    auto evictor_holder       = runtime.make(&tree, EvictionPolicy::FIFO, EvictionPolicy::LRU, EvictionPolicy::FIFO);
     BlockTreeEvictor& evictor = *evictor_holder;
 
     MultiNodeBlocks device_set = allocateDeviceBlocksForTest(*group, 2, BlockRefType::BLOCK_CACHE);
@@ -2057,10 +2068,7 @@ TEST(BlockTreeEvictorPolicyTest, ExistingGroupFillPrecedesNewSuffixAdmission) {
     std::vector<GroupSetPtr> groups = {group};
     BlockTree                tree(groups);
     TestEvictorRuntime       runtime;
-    auto evictor_holder = runtime.make(&tree,
-                                       EvictionPolicy::FIFO,
-                                       EvictionPolicy::LRU,
-                                       EvictionPolicy::FIFO);
+    auto evictor_holder       = runtime.make(&tree, EvictionPolicy::FIFO, EvictionPolicy::LRU, EvictionPolicy::FIFO);
     BlockTreeEvictor& evictor = *evictor_holder;
 
     GroupSetResource empty_resource;
@@ -2103,10 +2111,7 @@ TEST(BlockTreeEvictorPolicyTest, MatchUpdatesLfuHitCountAndOrder) {
     std::vector<GroupSetPtr> groups = {group};
     BlockTree                tree(groups);
     TestEvictorRuntime       runtime;
-    auto evictor_holder = runtime.make(&tree,
-                                       EvictionPolicy::LFU,
-                                       EvictionPolicy::LRU,
-                                       EvictionPolicy::FIFO);
+    auto evictor_holder       = runtime.make(&tree, EvictionPolicy::LFU, EvictionPolicy::LRU, EvictionPolicy::FIFO);
     BlockTreeEvictor& evictor = *evictor_holder;
 
     MultiNodeBlocks device_set = allocateDeviceBlocksForTest(*group, 2, BlockRefType::BLOCK_CACHE);

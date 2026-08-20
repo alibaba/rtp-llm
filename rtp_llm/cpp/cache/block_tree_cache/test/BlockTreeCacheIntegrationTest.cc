@@ -219,9 +219,10 @@ private:
 class BlockTreeCacheIntegrationTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        auto                     full_group = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
-        std::vector<GroupSetPtr> groups     = {full_group};
-        cache_                              = makeBlockTreeCacheForTest(std::move(groups));
+        auto full_group = std::make_shared<FullGroupSet>(
+            std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+        std::vector<GroupSetPtr> groups = {full_group};
+        cache_                          = makeBlockTreeCacheForTest(std::move(groups));
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
@@ -294,8 +295,8 @@ size_t contextDescCountForGroupSet(const std::shared_ptr<LoadAsyncContext>& cont
     if (context == nullptr) {
         return 0;
     }
-    return static_cast<size_t>(
-        std::count_if(context->loadDescs().begin(), context->loadDescs().end(), [group_set_id](const TransferDescriptor& desc) {
+    return static_cast<size_t>(std::count_if(
+        context->loadDescs().begin(), context->loadDescs().end(), [group_set_id](const TransferDescriptor& desc) {
             return desc.group_set_id == group_set_id;
         }));
 }
@@ -324,12 +325,13 @@ void demoteSwaSuffixKeepingFullDevice(FullSWAEnvironment& environment) {
     EXPECT_EQ(path.size(), kPathLength);
     for (TreeNode* node : path) {
         node->group_set_resources[0].transfer_state = GroupSetTransferState::LOADING;
+        BlockTreeCacheTestPeer::refreshCandidateForTest(*environment.cache, node, /*group_set_id=*/0);
     }
-    const bool first_demoted = BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(
-        *environment.cache, /*group_set_id=*/1, Tier::DEVICE);
+    const bool first_demoted =
+        BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment.cache, /*group_set_id=*/1, Tier::DEVICE);
     BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment.cache);
-    const bool second_demoted = BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(
-        *environment.cache, /*group_set_id=*/1, Tier::DEVICE);
+    const bool second_demoted =
+        BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment.cache, /*group_set_id=*/1, Tier::DEVICE);
     BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment.cache);
     for (TreeNode* node : path) {
         node->group_set_resources[0].transfer_state = GroupSetTransferState::IDLE;
@@ -382,9 +384,8 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     auto disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
 
     auto device_pool = makeDevicePool({{256, 0}}, 8, "watermark_host_to_disk");
-    auto full = std::make_shared<FullGroupSet>(
-        std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, disk_pool);
-    auto topology    = block_transfer_engine_test::makeTestTopology(
+    auto full     = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, disk_pool);
+    auto topology = block_transfer_engine_test::makeTestTopology(
         {block_transfer_engine_test::makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 256)});
     full->initialize(0, topology, {0});
     const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
@@ -604,8 +605,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadSettleme
         const size_t      host_free_before   = host_pool->freeBlocksNum();
         const size_t      disk_free_before   = disk_pool->freeBlocksNum();
 
-        auto full = std::make_shared<FullGroupSet>(
-            std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, disk_pool);
+        auto full = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, disk_pool);
         auto topology = block_transfer_engine_test::makeTestTopology({block_transfer_engine_test::makeTestGroupBase(
             defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, kBlockBytes)});
         full->initialize(0, topology, {0});
@@ -711,15 +711,14 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadSettleme
 TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightDemotionAndDiscardsItsTarget) {
     auto device_pool = makeStructuralDevicePool(0);
     auto host_pool   = makeHostPool(/*payload_bytes=*/1, /*usable_count=*/4);
-    auto disk_pool = makeDiskPool(
+    auto disk_pool   = makeDiskPool(
         /*payload_bytes=*/1, /*usable_count=*/4, std::make_unique<MemoryDiskBlockIO>());
-    auto full = std::make_shared<FullGroupSet>(
-        std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, disk_pool);
+    auto full = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, disk_pool);
 
     BlockTreeCacheConfig config;
-    config.enable_host_cache   = true;
-    config.enable_disk_cache   = true;
-    auto cache = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full}, config);
+    config.enable_host_cache = true;
+    config.enable_disk_cache = true;
+    auto cache               = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full}, config);
     ASSERT_NE(cache, nullptr);
 
     auto pausable_copy = std::make_shared<PausablePerRankBlockTransferEngine>(
@@ -763,12 +762,11 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightDemotionAndDisca
 TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesPendingLoadAndRejectsCommit) {
     auto device_pool = makeStructuralDevicePool(0);
     auto host_pool   = makeHostPool(/*payload_bytes=*/1, /*usable_count=*/4);
-    auto full = std::make_shared<FullGroupSet>(
-        std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
+    auto full        = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
 
     BlockTreeCacheConfig config;
     config.enable_host_cache = true;
-    auto cache = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full}, config);
+    auto cache               = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full}, config);
     ASSERT_NE(cache, nullptr);
 
     const BlockIdxType host_source = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
@@ -811,12 +809,11 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesPendingLoadAndRejectsCom
 TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightLoadAndDiscardsItsTarget) {
     auto device_pool = makeStructuralDevicePool(0);
     auto host_pool   = makeHostPool(/*payload_bytes=*/1, /*usable_count=*/4);
-    auto full = std::make_shared<FullGroupSet>(
-        std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
+    auto full        = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
 
     BlockTreeCacheConfig config;
     config.enable_host_cache = true;
-    auto cache = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full}, config);
+    auto cache               = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full}, config);
     ASSERT_NE(cache, nullptr);
 
     auto pausable_copy = std::make_shared<PausablePerRankBlockTransferEngine>(
@@ -824,9 +821,9 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightLoadAndDiscardsI
     PausableTransferReleaseGuard release_guard(pausable_copy);
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, pausable_copy);
 
-    const size_t device_free_before = device_pool->freeBlocksNum();
-    const size_t host_free_before   = host_pool->freeBlocksNum();
-    const BlockIdList prefix_blocks{10};
+    const size_t       device_free_before = device_pool->freeBlocksNum();
+    const size_t       host_free_before   = host_pool->freeBlocksNum();
+    const BlockIdList  prefix_blocks{10};
     const BlockIdxType host_source = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_FALSE(isNullBlockIdx(host_source));
 
@@ -1135,7 +1132,7 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
         for (size_t desc_index = 0; desc_index < joined_context->loadDescs().size(); ++desc_index) {
             EXPECT_TRUE(joined_context->joinedLoads()[desc_index]);
             const TransferDescriptor&        desc           = joined_context->loadDescs()[desc_index];
-            const size_t                             group_set_id   = desc.group_set_id;
+            const size_t                     group_set_id   = desc.group_set_id;
             const std::vector<BlockIdxType>& joined_targets = desc.target_blocks;
             ASSERT_EQ(joined_targets.size(), environment->groups[group_set_id]->devicePools().size());
             for (size_t pool_index = 0; pool_index < joined_targets.size(); ++pool_index) {
@@ -1326,9 +1323,9 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadRequestOnlyKeepsDiskResidency) {
     constexpr size_t payload_bytes = 256;
     auto             device_pool   = makeDevicePool({{payload_bytes, 0}}, 4, "request_only_load_device");
     auto             disk_pool     = makeDiskPool(payload_bytes, 4, std::make_unique<MemoryDiskBlockIO>());
-    auto             topology      = block_transfer_engine_test::makeTestTopology(
-        {block_transfer_engine_test::makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, payload_bytes)});
-    auto group = block_transfer_engine_test::makeTestGroupSet(0, topology, {0}, {device_pool}, nullptr, disk_pool);
+    auto topology = block_transfer_engine_test::makeTestTopology({block_transfer_engine_test::makeTestGroupBase(
+        defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, payload_bytes)});
+    auto group    = block_transfer_engine_test::makeTestGroupSet(0, topology, {0}, {device_pool}, nullptr, disk_pool);
 
     BlockTreeCacheConfig config;
     config.enable_device_cache      = false;
@@ -1533,7 +1530,7 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesContextAndReleasesAl
     }
     for (size_t desc_index = 0; desc_index < context->loadDescs().size(); ++desc_index) {
         const TransferDescriptor& desc         = context->loadDescs()[desc_index];
-        const size_t                             group_set_id = desc.group_set_id;
+        const size_t              group_set_id = desc.group_set_id;
         ASSERT_EQ(desc.source_blocks.size(), 1u);
         const BlockIdxType source_block = desc.source_blocks.front();
         const IBlockPool&  source_pool  = GetParam() == Tier::HOST ?
@@ -1911,7 +1908,7 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesLoadAndRestoresCandi
     for (size_t desc_index = 0; desc_index < joined_context->loadDescs().size(); ++desc_index) {
         EXPECT_TRUE(joined_context->joinedLoads()[desc_index]);
         const TransferDescriptor& desc         = joined_context->loadDescs()[desc_index];
-        const size_t                             group_set_id = desc.group_set_id;
+        const size_t              group_set_id = desc.group_set_id;
         ASSERT_LT(group_set_id, environment->groups.size());
         const std::vector<BlockIdxType>&       joined_targets = desc.target_blocks;
         const std::vector<DeviceBlockPoolPtr>& device_pools   = environment->groups[group_set_id]->devicePools();
@@ -2090,17 +2087,17 @@ TEST_F(BlockTreeCacheIntegrationTest, MixedHostDiskContextAbortRestoresSources) 
     EXPECT_EQ(context->matchedBlocks(), kPathLength);
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 0u);
 
-    bool                                             saw_host = false;
-    bool                                             saw_disk = false;
+    bool                                              saw_host = false;
+    bool                                              saw_disk = false;
     std::vector<std::pair<IBlockPool*, BlockIdxType>> source_refs;
     for (const TransferDescriptor& desc : context->loadDescs()) {
         ASSERT_TRUE(desc.source_tier == Tier::HOST || desc.source_tier == Tier::DISK);
         ASSERT_EQ(desc.source_blocks.size(), 1u);
-        saw_host = saw_host || desc.source_tier == Tier::HOST;
-        saw_disk = saw_disk || desc.source_tier == Tier::DISK;
-        IBlockPool* source_pool = desc.source_tier == Tier::HOST ?
-                                      static_cast<IBlockPool*>(environment->host_pools.at(desc.group_set_id).get()) :
-                                      static_cast<IBlockPool*>(environment->disk_pools.at(desc.group_set_id).get());
+        saw_host                        = saw_host || desc.source_tier == Tier::HOST;
+        saw_disk                        = saw_disk || desc.source_tier == Tier::DISK;
+        IBlockPool*        source_pool  = desc.source_tier == Tier::HOST ?
+                                              static_cast<IBlockPool*>(environment->host_pools.at(desc.group_set_id).get()) :
+                                              static_cast<IBlockPool*>(environment->disk_pools.at(desc.group_set_id).get());
         const BlockIdxType source_block = desc.source_blocks.front();
         EXPECT_EQ(source_pool->refCount(source_block), 2u);
         ASSERT_NE(desc.node, nullptr);
@@ -2162,8 +2159,8 @@ TEST_F(BlockTreeCacheIntegrationTest, MixedHostDiskFailureInstallsNoTargets) {
     for (size_t desc_index = 0; desc_index < context->loadDescs().size(); ++desc_index) {
         const TransferDescriptor& desc = context->loadDescs()[desc_index];
         ASSERT_TRUE(desc.source_tier == Tier::HOST || desc.source_tier == Tier::DISK);
-        saw_host = saw_host || desc.source_tier == Tier::HOST;
-        saw_disk = saw_disk || desc.source_tier == Tier::DISK;
+        saw_host                = saw_host || desc.source_tier == Tier::HOST;
+        saw_disk                = saw_disk || desc.source_tier == Tier::DISK;
         IBlockPool* source_pool = desc.source_tier == Tier::HOST ?
                                       static_cast<IBlockPool*>(environment->host_pools.at(desc.group_set_id).get()) :
                                       static_cast<IBlockPool*>(environment->disk_pools.at(desc.group_set_id).get());
@@ -2440,7 +2437,7 @@ TEST_F(BlockTreeCacheIntegrationTest, SparseDisconnectedSWADoesNotPublishVacuous
     }
 
     FullSWAEnvironmentOptions options;
-    auto environment = FullSWAEnvironment::create(options);
+    auto                      environment = FullSWAEnvironment::create(options);
     environment->insertRequestPath();
     environment->releaseRequestRefs();
 
@@ -2450,10 +2447,9 @@ TEST_F(BlockTreeCacheIntegrationTest, SparseDisconnectedSWADoesNotPublishVacuous
     for (size_t path_index = 0; path_index < kPathLength; ++path_index) {
         GroupSetResource& swa_resource = find[path_index]->group_set_resources[1];
         ASSERT_TRUE(swa_resource.hasTier(Tier::DEVICE));
-        const std::vector<BlockIdxType> old_device_blocks =
-            swa_resource.getBlocks(Tier::DEVICE);
-        const MultiNodeResource device_resource{
-            1, Tier::DEVICE, {{find[path_index], old_device_blocks}}};
+        const std::vector<BlockIdxType> old_device_blocks = swa_resource.getBlocks(Tier::DEVICE);
+        const MultiNodeResource         device_resource{1, Tier::DEVICE, {{find[path_index], old_device_blocks}}};
+        environment->cache->evictor_.suspendCandidate(find[path_index], /*group_set_id=*/1, Tier::DEVICE);
         swa_resource.evictFromTier(Tier::DEVICE);
         environment->groups[1]->unreferenceBlocks(device_resource, BlockRefType::BLOCK_CACHE);
         if (path_index >= 2) {
