@@ -594,7 +594,7 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
     }
 }
 
-TEST_F(FIFOSchedulerTest, testMaxBatchKvLenUsesSumKvLengthAndIsOptIn) {
+TEST_F(FIFOSchedulerTest, testMaxBatchKvLenUsesSumQAndKvLengthAndIsOptIn) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, DataType::TYPE_FP16);
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
@@ -627,6 +627,14 @@ TEST_F(FIFOSchedulerTest, testMaxBatchKvLenUsesSumKvLengthAndIsOptIn) {
     // incorrectly reject this pair as 70 * 2 = 140.
     std::list<GenerateStreamPtr> admitted{make_stream(70)};
     EXPECT_TRUE(scheduler.evaluateRunningBatch(admitted, make_stream(20)));
+
+    // With MAX_BATCH_KV_LEN enabled, MAX_BATCH_TOKENS_SIZE is still enforced,
+    // now using sum(q_len): KV 70 + 20 fits 100, while q 70 + 20 exceeds 80.
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 80;
+    FIFOScheduler q_limit_scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+    EXPECT_FALSE(q_limit_scheduler.evaluateRunningBatch(admitted, make_stream(20)));
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 100;
 
     // Disabled by default: MAX_BATCH_TOKENS_SIZE keeps its old max(q_len) *
     // batch behavior and rejects this same 70/20 pair as 70 * 2 = 140.

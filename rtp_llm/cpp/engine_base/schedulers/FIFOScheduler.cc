@@ -42,6 +42,10 @@ int64_t prefillKvTokenSize(const GenerateStreamPtr& stream) {
     return static_cast<int64_t>(stream->seqLength()) * stream->currentBatchSize();
 }
 
+int64_t prefillQTokenSize(const GenerateStreamPtr& stream) {
+    return static_cast<int64_t>(stream->contextLength()) * stream->currentBatchSize();
+}
+
 }  // namespace
 
 FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_config,
@@ -232,20 +236,29 @@ bool FIFOScheduler::evaluateRunningBatch(const list<GenerateStreamPtr>& streams,
 
     if (max_batch_kv_len_ > 0) {
         int64_t total_kv_tokens = prefillKvTokenSize(new_stream);
+        int64_t total_q_tokens  = prefillQTokenSize(new_stream);
         for (const auto& stream : streams) {
             total_kv_tokens += prefillKvTokenSize(stream);
+            total_q_tokens += prefillQTokenSize(stream);
         }
         // Indexer materializes scores against every request's complete visible
-        // KV. When explicitly enabled, this replaces (rather than combines
-        // with) the legacy max(q_len) * batch admission rule.
-        const bool fits =
+        // KV. When explicitly enabled, limit both sum(KV) and sum(q_len); the
+        // legacy max(q_len) * batch rule remains unchanged when it is disabled.
+        const bool fits_kv =
             total_kv_tokens + static_cast<int64_t>(running_streams_.size()) < static_cast<int64_t>(max_batch_kv_len_);
+        const bool fits_q = total_q_tokens + static_cast<int64_t>(running_streams_.size())
+                            < static_cast<int64_t>(max_batch_tokens_size_);
+        const bool fits = fits_kv && fits_q;
         if (fifoBatchTraceEnabled()) {
-            RTP_LLM_LOG_INFO("[FIFO_BATCH_TRACE] mode=sum_kv candidate_batch=%zu sum_kv_tokens=%ld limit=%zu "
-                             "admitted=%d",
+            RTP_LLM_LOG_INFO("[FIFO_BATCH_TRACE] mode=sum_q_and_kv candidate_batch=%zu sum_q_tokens=%ld "
+                             "q_limit=%zu fits_q=%d sum_kv_tokens=%ld kv_limit=%zu fits_kv=%d admitted=%d",
                              streams.size() + 1,
+                             total_q_tokens,
+                             max_batch_tokens_size_,
+                             fits_q,
                              total_kv_tokens,
                              max_batch_kv_len_,
+                             fits_kv,
                              fits);
         }
         return fits;
