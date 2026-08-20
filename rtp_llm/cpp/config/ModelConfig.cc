@@ -72,6 +72,8 @@ static std::string quantMethodToString(QuantMethod quant_method) {
             return "FP8PTPC";
         case QuantMethod::W4A8INT4PTPC:
             return "W4A8INT4PTPC";
+        case QuantMethod::W8A8INT8PTPC:
+            return "W8A8INT8PTPC";
         case QuantMethod::ModelOptFP4:
             return "ModelOptFP4";
         default:
