@@ -10,16 +10,16 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
-BlockTreeStorer::BlockTreeStorer(BlockTree*                     tree,
-                                 BlockTreeEvictor&              evictor,
-                                 BlockTransferDispatcher*       transfer_dispatcher,
-                                 BlockTreeTaskPool*             task_pool,
-                                 BlockTreeCacheMetricsReporter& metrics_reporter,
-                                 std::mutex&                    mutex,
-                                 int                            host_timeout_ms,
-                                 int                            disk_timeout_ms,
+BlockTreeStorer::BlockTreeStorer(BlockTree*                      tree,
+                                 BlockTreeEvictor&               evictor,
+                                 BlockTransferDispatcher*        transfer_dispatcher,
+                                 BlockTreeTaskPool*              task_pool,
+                                 BlockTreeCacheMetricsReporter&  metrics_reporter,
+                                 std::mutex&                     mutex,
+                                 int                             host_timeout_ms,
+                                 int                             disk_timeout_ms,
                                  std::shared_ptr<StorageBackend> storage_backend,
-                                 SettledFn                      settled):
+                                 SettledFn                       settled):
     tree_(tree),
     evictor_(evictor),
     transfer_dispatcher_(transfer_dispatcher),
@@ -37,8 +37,8 @@ void BlockTreeStorer::stopAdmissionLocked() {
 }
 
 StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&                              cache_keys,
-                                  const std::vector<std::vector<GroupSetResource>>& resources,
-                                  Tier                                              target_tier) {
+                                              const std::vector<std::vector<GroupSetResource>>& resources,
+                                              Tier                                              target_tier) {
     if (target_tier == Tier::DEVICE) {
         return publishDeviceLocked(cache_keys, resources);
     }
@@ -152,8 +152,6 @@ void BlockTreeStorer::settleTask(const StoreTask& task, bool copy_success) {
 
 size_t BlockTreeStorer::settleLocked(const StoreTask& task, bool publish) {
     BlockTreeInsertResult insert_result;
-    std::vector<TreeNode*>        fallback_path;
-    const std::vector<TreeNode*>* source_path = &insert_result.path;
     if (publish) {
         std::vector<std::vector<GroupSetResource>> resources(task.cache_keys.size(),
                                                              std::vector<GroupSetResource>(tree_->groupSets().size()));
@@ -162,24 +160,11 @@ size_t BlockTreeStorer::settleLocked(const StoreTask& task, bool publish) {
                 task.target_tier, {descriptor.singleBlockAt(task.target_tier)});
         }
         insert_result = tree_->insertNode(task.cache_keys, resources, true);
-    } else {
-        fallback_path = tree_->findNode(task.cache_keys);
-        source_path   = &fallback_path;
     }
 
     // Publication owns the target through BLOCK_CACHE; temporary STORE holders
     // are no longer needed once every target has been installed.
     store_task_runner_.releaseTaskResources(task);
-    for (const TransferDescriptor& descriptor : task.descriptors) {
-        if (descriptor.path_index >= source_path->size()) {
-            continue;
-        }
-        TreeNode*               node     = (*source_path)[descriptor.path_index];
-        const GroupSetResource& resource = node->group_set_resources[descriptor.group_set_id];
-        if (!resource.device_blocks.empty() && resource.device_blocks[0] == descriptor.source_blocks[0]) {
-            evictor_.refreshCandidate(node, descriptor.group_set_id);
-        }
-    }
 
     if (insert_result.accepted_resource_count > 0) {
         evictor_.onInserted(insert_result);
