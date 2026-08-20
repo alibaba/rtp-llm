@@ -7,12 +7,13 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/mha_paged_attn_plan.h"
 #include <cstdint>
 #include <algorithm>
+#include <limits>
 #include <numeric>
 #include <cuda_runtime.h>
 using namespace torch_ext;
 
 namespace rtp_llm {
-static const int MIN_CACHE_PAGE_NUM        = 1024 * 1024;
+static const int MIN_CACHE_PAGE_NUM        = 1048900;
 static const int MIN_CACHE_BATCH_SIZE      = 256;
 static const int MIN_CACHE_INPUT_TOKEN_NUM = 512;
 
@@ -97,7 +98,8 @@ void FlashInferMlaAttnParams::ensureTensorSize(int  batch_size,
                                                int  page_num,
                                                int  reuse_page_num,
                                                int  batch_reuse_info_size,
-                                               bool forbid_realloc) {
+                                               bool forbid_realloc,
+                                               int  page_num_capacity) {
     // Save old values for error reporting
     int    old_max_batch_size       = max_batch_size_;
     int    old_max_input_token_num  = max_input_token_num_;
@@ -109,10 +111,11 @@ void FlashInferMlaAttnParams::ensureTensorSize(int  batch_size,
     // Calculate required int64 elements for slot_mapping (aligned to 32)
     size_t required_i64_elements =
         (static_cast<size_t>(std::max(input_token_num, MIN_CACHE_INPUT_TOKEN_NUM)) + 31) / 32 * 32;
+    const int required_page_num = std::max({MIN_CACHE_PAGE_NUM, page_num, page_num_capacity});
 
     // Check if we need to reallocate tensors
     bool need_realloc = (batch_size > max_batch_size_) || (input_token_num > max_input_token_num_)
-                        || (page_num > max_page_num_) || (reuse_page_num > max_reuse_page_num_)
+                        || (required_page_num > max_page_num_) || (reuse_page_num > max_reuse_page_num_)
                         || (batch_reuse_info_size > max_batch_reuse_info_)
                         || (required_i64_elements > max_i64_elements_);
 
@@ -134,11 +137,9 @@ void FlashInferMlaAttnParams::ensureTensorSize(int  batch_size,
                               std::max(MIN_CACHE_INPUT_TOKEN_NUM, input_token_num),
                               input_token_num);
         }
-        if (page_num > old_max_page_num) {
-            RTP_LLM_LOG_ERROR("  - max_page_num: %d -> %d (requested: %d)",
-                              old_max_page_num,
-                              std::max(MIN_CACHE_PAGE_NUM, page_num),
-                              page_num);
+        if (required_page_num > old_max_page_num) {
+            RTP_LLM_LOG_ERROR(
+                "  - max_page_num: %d -> %d (requested: %d)", old_max_page_num, required_page_num, required_page_num);
         }
         if (reuse_page_num > old_max_reuse_page_num) {
             RTP_LLM_LOG_ERROR("  - max_reuse_page_num: %d -> %d (requested: %d)",
@@ -168,14 +169,13 @@ void FlashInferMlaAttnParams::ensureTensorSize(int  batch_size,
     // Update max sizes
     max_batch_size_       = std::max(max_batch_size_, batch_size);
     max_input_token_num_  = std::max(max_input_token_num_, input_token_num);
-    max_page_num_         = std::max(max_page_num_, page_num);
+    max_page_num_         = std::max({MIN_CACHE_PAGE_NUM, max_page_num_, page_num, page_num_capacity});
     max_reuse_page_num_   = std::max(max_reuse_page_num_, reuse_page_num);
     max_batch_reuse_info_ = std::max(max_batch_reuse_info_, batch_reuse_info_size);
     max_i64_elements_     = required_i64_elements;
 
     max_batch_size_      = std::max(MIN_CACHE_BATCH_SIZE, max_batch_size_);
     max_input_token_num_ = std::max(MIN_CACHE_INPUT_TOKEN_NUM, max_input_token_num_);
-    max_page_num_        = std::max(MIN_CACHE_PAGE_NUM, max_page_num_);
 
     // Allocate HOST buffer with all tensors in continuous memory
     auto alloc_ret_h = allocateManyBuffer({{max_input_token_num_},  // batch_indice
@@ -480,9 +480,27 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
     const int cuda_graph_token_capacity =
         pad_cuda_graph_tokens ? static_cast<int>(batch_indice_h.numel()) : requested_input_token_num;
 
-    // Ensure tensors are allocated with sufficient size
-    ensureTensorSize(
-        batch_size, cuda_graph_token_capacity, page_num, reuse_page_num, batch_reuse_info_size, forbid_realloc);
+    int64_t page_num_capacity = 0;
+    if (t_kv_cache_block_id_host.defined() && t_kv_cache_block_id_host.numel() > 0) {
+        RTP_LLM_CHECK_WITH_INFO(t_kv_cache_block_id_host.dim() == 2, "kv_cache_block_id_host must be 2-D");
+        const int64_t max_capture_batch_size = t_kv_cache_block_id_host.size(0);
+        const int64_t max_blocks_per_bs      = t_kv_cache_block_id_host.size(1);
+        page_num_capacity                    = max_capture_batch_size * max_blocks_per_bs;
+        RTP_LLM_CHECK_WITH_INFO(page_num_capacity <= std::numeric_limits<int>::max(),
+                                "cache page capacity exceeds int range: %ld",
+                                page_num_capacity);
+    }
+
+    // Keep page_num as the exact active-page count. page_num_capacity is a
+    // separate CUDA graph reservation derived from the largest captured block
+    // table; ensureTensorSize combines both with MIN_CACHE_PAGE_NUM.
+    ensureTensorSize(batch_size,
+                     cuda_graph_token_capacity,
+                     page_num,
+                     reuse_page_num,
+                     batch_reuse_info_size,
+                     forbid_realloc,
+                     static_cast<int>(page_num_capacity));
 
     // Fill params directly into HOST tensors
     fillParamsInternal(t_prefix_lengths_host,

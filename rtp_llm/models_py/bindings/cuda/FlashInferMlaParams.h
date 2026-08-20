@@ -56,7 +56,8 @@ private:
                           int  page_num,
                           int  reuse_page_num,
                           int  batch_reuse_info_size,
-                          bool forbid_realloc = false);
+                          bool forbid_realloc    = false,
+                          int  page_num_capacity = 0);
 
 protected:
     static std::tuple<torch::Tensor, std::vector<torch::Tensor>> allocateManyBuffer(
