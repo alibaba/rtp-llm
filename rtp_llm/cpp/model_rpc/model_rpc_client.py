@@ -276,7 +276,7 @@ def trans_embedding_inputs(input_py: GenerateInput, input_pb: GenerateInputPB):
 
     # 转换 embeddings
     for emb in embedding_inputs.embeddings:
-        input_embeddings_pb.embeddings.add().CopyFrom(trans_from_tensor(emb))
+        trans_from_tensor(emb, input_embeddings_pb.embeddings.add())
 
     # 转换 embedding_locs
     input_embeddings_pb.embedding_locs.extend(embedding_inputs.embedding_locs)
@@ -536,7 +536,6 @@ class ModelRpcClient(object):
             input_py.generate_config.timeout_ms
         )
         input_py.generate_config.timeout_ms = int(grpc_timeout_seconds * 1000)
-        input_pb = trans_input(input_py)
         response_iterator = None
         stream_state = StreamState()
 
