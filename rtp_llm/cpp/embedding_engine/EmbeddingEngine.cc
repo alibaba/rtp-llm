@@ -1,6 +1,6 @@
 #include "rtp_llm/cpp/embedding_engine/EmbeddingEngine.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
-#include "rtp_llm/models_py/bindings/NoBlockCopy.h"
+#include "rtp_llm/cpp/core/CopyOps.h"
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -26,7 +26,7 @@ EmbeddingEngine::EmbeddingEngine(const EngineInitParams& params, py::object hand
                              params.device_resource_config.enable_comm_overlap,
                              params.model_config_.mla_ops_type);
     }
-    warmupNoBlockCopy();
+    runtimeWarmupNoBlockCopy();
     executor_.reset(new EmbeddingExecutor(params, handler));
     scheduler_.reset(
         new EmbeddingScheduler(model_config_, concurrency_config, params.runtime_config, metrics_reporter_));

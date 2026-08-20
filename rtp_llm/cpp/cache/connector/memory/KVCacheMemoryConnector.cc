@@ -9,7 +9,7 @@
 #include "rtp_llm/cpp/cache/connector/memory/MemoryAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
-#include "rtp_llm/models_py/bindings/NoBlockCopy.h"
+#include "rtp_llm/cpp/core/CopyOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -17,7 +17,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
-// When set on MultiCopyParams, execNoBlockCopy may try CUDA split scatter/gather (SplitKvCacheCopy; not on PPU).
+// When set on MultiCopyParams, runtimeNoBlockCopy may try CUDA split scatter/gather.
 // This layer SM-copy path is only used for non typed layer-region layouts.
 static void applySplitKvMultiCopyFieldsIfEligible(bool enable_sm_copy, const CacheConfig& cfg, MultiCopyParams& out) {
     if (!enable_sm_copy) {
@@ -2077,7 +2077,7 @@ bool KVCacheMemoryConnector::copyMemoryItemsGeneric(const NormalizedCopyItems&  
         const bool      can_use_split_kv_copy = !hasTypedLayerTagSlots(slots);
         applySplitKvMultiCopyFieldsIfEligible(
             kv_cache_config_.enable_memory_cache_sm_copy && can_use_split_kv_copy, cache_config_, mc);
-        execNoBlockCopy(mc);
+        runtimeNoBlockCopy(mc);
     }
     return true;
 }
@@ -2214,7 +2214,7 @@ bool KVCacheMemoryConnector::tryCopyCacheWithStagedMemoryCopy(const NormalizedCo
                       params.device_index);
     RTP_LLM_PROFILE_SCOPE("reuse_cache.memory.copy.exec_staged");
     std::lock_guard<std::mutex> scratch_lock(staged_copy_scratch_mutex_);
-    if (!execStagedMemoryCopy(params, &stagedCopyScratchForDevice(params.device_index))) {
+    if (!runtimeStagedMemoryCopy(params, &stagedCopyScratchForDevice(params.device_index))) {
         return false;
     }
     execHostMemoryCopyTiles(host_tiles);
@@ -2326,7 +2326,7 @@ bool KVCacheMemoryConnector::tryCopyCacheWithBatchedMemoryCopy(const NormalizedC
                       payload_bytes,
                       params.device_index);
     RTP_LLM_PROFILE_SCOPE("reuse_cache.memory.copy.exec_batch");
-    return execBatchedMemoryCopy(params);
+    return runtimeBatchedMemoryCopy(params);
 }
 
 bool KVCacheMemoryConnector::copyPrefixMemoryItems(const NormalizedCopyItems&       items,
@@ -2451,7 +2451,7 @@ bool KVCacheMemoryConnector::copyPrefixMemoryItems(const NormalizedCopyItems&   
         }
         if (!dst_buffers.empty()) {
             MultiCopyParams mc{dst_buffers, src_buffers};
-            execNoBlockCopy(mc);
+            runtimeNoBlockCopy(mc);
         }
         if (direction == CopyDirection::D2H && item.backing_type == CacheBackingType::DISK
             && !disk_pool->write(item.disk_slot, raw_buffer, disk_pool->slotStrideBytes())) {
@@ -2544,7 +2544,7 @@ bool KVCacheMemoryConnector::copyDiskItem(const NormalizedCopyItem&        item,
         }
         if (!dst_buffers.empty()) {
             MultiCopyParams mc{dst_buffers, src_buffers};
-            execNoBlockCopy(mc);
+            runtimeNoBlockCopy(mc);
         }
         if (direction == CopyDirection::D2H && !disk_pool->write(disk_slot, raw_buffer, stride_bytes)) {
             RTP_LLM_LOG_WARNING("disk cache write failed, slot=%d, bytes=%zu", disk_slot, stride_bytes);
@@ -2581,7 +2581,7 @@ bool KVCacheMemoryConnector::copyDiskItem(const NormalizedCopyItem&        item,
 
     if (!dst_buffers.empty()) {
         MultiCopyParams mc{dst_buffers, src_buffers};
-        execNoBlockCopy(mc);
+        runtimeNoBlockCopy(mc);
     }
 
     if (direction == CopyDirection::D2H && !disk_pool->write(disk_slot, raw_buffer, stride_bytes)) {

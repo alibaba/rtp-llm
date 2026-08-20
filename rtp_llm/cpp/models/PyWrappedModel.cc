@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/core/CopyOps.h"
+#include "rtp_llm/cpp/comm/CollectiveBackend.h"
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
@@ -503,7 +505,7 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
 GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.forwardMicroBatched");
 
-    // Per-launch capacity contract: see fuse_copy_util.h sizing rationale.
+    // Per-launch capacity contract: see FusedCopyTypes.h.
     // d2d_copies_ accumulates across ALL micro-batches before the single
     // fusedCopy() flush below. Per micro-batch this adds ~6 copies from
     // buildPyAttentionInputs + padding_offset, plus group_count from

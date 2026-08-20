@@ -27,9 +27,9 @@
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/core/CopyOps.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
-#include "rtp_llm/models_py/bindings/NoBlockCopy.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -3036,7 +3036,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SingleLayer) {
 }
 
 // MLA FP8 online-style: separate kv + kv-scale blobs per layer (656 + 132 bytes/token at seq_size_per_block=512).
-// copyCache uses execNoBlockCopy split KV path (sm_copy scatter/gather) when eligible.
+// copyCache uses the split-KV path (scatter/gather) when eligible.
 // ~40k prompt tokens => 79 full blocks in one request.
 TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlockCopyOpt) {
     constexpr int      kLayerNum    = 78;

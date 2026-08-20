@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
@@ -155,12 +156,9 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                          model_config_.max_seq_len,
                          int(runtime_config.warm_up_with_loss));
         warm_up_result = warmUp(params);
-        RTP_LLM_LOG_INFO(
-            "warm up done, max runtime used memory: %ld bytes (%ld MiB), device reserved memory: %ld bytes (%ld MiB)",
-            warm_up_result->max_used_memory,
-            warm_up_result->max_used_memory / 1024 / 1024,
-            warm_up_result->device_reserved_bytes,
-            warm_up_result->device_reserved_bytes / 1024 / 1024);
+        RTP_LLM_LOG_INFO("warm up done, device reserved memory: %ld bytes (%ld MiB)",
+                         warm_up_result->device_reserved_bytes,
+                         warm_up_result->device_reserved_bytes / 1024 / 1024);
     } else {
         RTP_LLM_LOG_INFO("skip warm up.");
     }
@@ -337,16 +335,13 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     auto fake_input                                   = makeFakeInput(getWarmUpInputLength());
     fake_input->generate_config->num_return_sequences = runtime_config.fifo_scheduler_config.max_context_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
-    rtp_llm::setTraceMemory(true);
     executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, mla_ops_type_));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
-    const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
-    rtp_llm::setTraceMemory(false);
     (void)executor_.reset(nullptr);
     cudaDeviceSynchronize();
     c10::cuda::CUDACachingAllocator::emptyCache();
     const auto device_status = getGpuExecStatus();
-    return WarmUpResult({device_status.device_memory_status.available_bytes, max_consumed});
+    return WarmUpResult({device_status.device_memory_status.available_bytes});
 #endif
 }
 
@@ -358,7 +353,6 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     auto fake_input                                   = makeFakeInput(getWarmUpInputLength());
     fake_input->generate_config->num_return_sequences = runtime_config.max_generate_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
-    rtp_llm::setTraceMemory(true);
 
     // Do NOT override seq_size_per_block here. createBasicConfig already
     // returns the correct value: model_config.attn_config.tokens_per_block
@@ -387,13 +381,11 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     }
     executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0, mla_ops_type_));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
-    const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
-    rtp_llm::setTraceMemory(false);
     (void)executor_.reset(nullptr);
     cudaDeviceSynchronize();
     c10::cuda::CUDACachingAllocator::emptyCache();
     const auto device_status = getGpuExecStatus();
-    return WarmUpResult({device_status.device_memory_status.available_bytes, max_consumed});
+    return WarmUpResult({device_status.device_memory_status.available_bytes});
 #endif
 }
 

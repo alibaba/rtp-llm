@@ -1,0 +1,25 @@
+#pragma once
+
+#include <cstddef>
+
+#include "rtp_llm/cpp/runtime/DeviceTypes.h"
+
+namespace rtp_llm {
+namespace kernels {
+
+struct BatchCopyConfig {
+    size_t uniform_size;
+    bool   is_fully_aligned;
+};
+
+BatchCopyConfig getBatchCopyConfig(const size_t* bytes_host, size_t batch_size);
+
+void invokeBatchCopy(void* const*           dst,
+                     void const* const*     src,
+                     size_t*                bytes,
+                     size_t                 batch_size,
+                     const BatchCopyConfig& config,
+                     DeviceStream           stream);
+
+}  // namespace kernels
+}  // namespace rtp_llm

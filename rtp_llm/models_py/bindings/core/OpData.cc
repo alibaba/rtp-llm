@@ -1,12 +1,9 @@
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
-#include "rtp_llm/cpp/utils/StackTrace.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 
 #include <optional>
 #include <functional>
 #include <algorithm>
-#include <sstream>
 
 namespace rtp_llm {
 
@@ -17,21 +14,6 @@ std::string combineStrings(const std::vector<std::string>& vec) {
     }
     result += "\"";
     return result;
-}
-
-OpException::OpException(const OpStatus& status): status_(status) {
-    std::stringstream ss;
-    ss << "OpException[" << (int32_t)status_.error_type << "]: " << status_.error_message << std::endl;
-    RTP_LLM_LOG_INFO("%s", ss.str().c_str());
-    const auto stack = rtp_llm::getStackTrace();
-    RTP_LLM_STACKTRACE_LOG_INFO("%s", stack.c_str());
-    ss << stack;
-    detail_str_ = ss.str();
-    if (StaticConfig::user_ft_core_dump_on_exception) {
-        fflush(stdout);
-        fflush(stderr);
-        abort();
-    }
 }
 
 std::string GptModelInputs::debugString(bool force) const {
@@ -75,44 +57,6 @@ std::string GptModelInputs::debugString(bool force) const {
     debug_string << ", pd_separation: " << pd_separation;
     debug_string << "}";
     return debug_string.str();
-}
-
-BatchCopyParams::CopyType BatchCopyParams::get_copy_type(MemoryType dst_type, MemoryType src_type) {
-    if (src_type == MEMORY_GPU) {
-        if (dst_type == MEMORY_GPU) {
-            return CopyType::D2D;
-        } else {
-            return CopyType::D2H;
-        }
-    } else {
-        if (dst_type == MEMORY_GPU) {
-            return CopyType::H2D;
-        } else {
-            return CopyType::H2H;
-        }
-    }
-}
-
-BatchCopyParams& BatchCopyParams::reserve(CopyType copy_type, size_t size) {
-    RTP_LLM_CHECK_WITH_INFO(copy_type < TYPE_SIZE, "unexpected CopyType %d", copy_type);
-    copy_buffers[copy_type].dst_ptr.reserve(size);
-    copy_buffers[copy_type].src_ptr.reserve(size);
-    copy_buffers[copy_type].sizes.reserve(size);
-
-    return *this;
-}
-
-BatchCopyParams& BatchCopyParams::add(void* dst, const void* src, size_t size, CopyType copy_type) {
-    RTP_LLM_CHECK_WITH_INFO(copy_type < TYPE_SIZE, "unexpected CopyType %d", copy_type);
-
-    if (size > 0) {
-        auto& buffers = copy_buffers[copy_type];
-        buffers.dst_ptr.push_back(dst);
-        buffers.src_ptr.push_back(src);
-        buffers.sizes.push_back(size);
-    }
-
-    return *this;
 }
 
 }  // namespace rtp_llm

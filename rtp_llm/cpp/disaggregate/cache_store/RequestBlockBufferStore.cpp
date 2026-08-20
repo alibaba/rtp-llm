@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/core/CopyOps.h"
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <torch/torch.h>
@@ -179,7 +180,7 @@ bool RequestBlockBufferStore::copyBlock(const std::shared_ptr<BlockBuffer>& dst_
 
     RTP_LLM_INTERVAL_LOG(120, INFO, "copy block cache once, may affect performance");
 
-    execNoBlockCopy(
+    runtimeNoBlockCopy(
         {torch::from_blob(
              dst_block->addr.get(),
              {(int64_t)dst_block->len},

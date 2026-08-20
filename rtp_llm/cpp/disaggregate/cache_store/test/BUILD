@@ -35,8 +35,9 @@ cc_library(
     hdrs = test_base_includes,
     deps = [
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
+        "//rtp_llm/cpp/runtime:cuda_runtime_hdrs",
+        "//rtp_llm/models_py/bindings/core:device_ops_test_impls",
         "@com_google_googletest//:gtest",
-        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
@@ -49,7 +50,6 @@ cc_test(
     deps = [
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
         ":cache_store_test_base",
-        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + device_impl_target() + cuda13_torch_link_deps,

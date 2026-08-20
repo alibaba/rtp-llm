@@ -1,6 +1,6 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreLoadServiceClosure.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreDevicePin.h"
+#include "rtp_llm/cpp/core/CopyOps.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include <torch/torch.h>
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreUtil.h"
@@ -65,7 +65,7 @@ void TcpCacheStoreLoadServiceClosure::Run() {
         auto src_tensor = torch::from_blob(const_cast<char*>(block.content().data()),
                                            {(int64_t)block.len()},
                                            torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
-        execNoBlockCopy({dst_tensor, src_tensor});
+        runtimeNoBlockCopy({dst_tensor, src_tensor});
     }
     end(true, CacheStoreErrorCode::None);
 }

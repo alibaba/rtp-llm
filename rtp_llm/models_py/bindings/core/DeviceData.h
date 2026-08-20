@@ -5,6 +5,7 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/runtime/DeviceStatus.h"
 
 namespace rtp_llm {
 
@@ -27,20 +28,6 @@ struct ExecProperties {
     bool ffn_as_service              = false;
     bool enable_prefill_cp           = false;
     bool prefill_cp_kv_cache_sharded = false;
-};
-
-struct MemoryStatus {
-    size_t used_bytes         = 0;
-    size_t free_bytes         = 0;
-    size_t available_bytes    = 0;  // free GPU memory available for allocation
-    size_t allocated_bytes    = 0;  // memory allocated via current device
-    size_t max_consumed_bytes = 0;  // only applicable if RTP_LLM_TRACE_MEMORY is enabled.
-};
-
-// runtime device status, such as available memory.
-struct ExecStatus {
-    MemoryStatus device_memory_status;
-    MemoryStatus host_memory_status;
 };
 
 inline ExecProperties buildExecProperties(const ParallelismConfig&    parallelism_config,

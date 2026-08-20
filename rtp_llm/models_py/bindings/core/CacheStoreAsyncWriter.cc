@@ -1,6 +1,7 @@
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/cache/CacheStoreWriter.h"
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
 
 #include <memory>
 #include <utility>

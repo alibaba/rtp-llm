@@ -3,7 +3,7 @@
 #include "MockKVCMClient.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "autil/EnvUtil.h"
 

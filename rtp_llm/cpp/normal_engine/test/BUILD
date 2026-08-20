@@ -29,7 +29,7 @@ cc_library(
     copts = test_copts,
     deps =  [
         "//rtp_llm/cpp/testing:device_test_utils",
-        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "//rtp_llm/models_py/bindings/core:device_ops_test_impls",
         "//rtp_llm/cpp/normal_engine:normal_engine",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/config:config_modules",
@@ -64,7 +64,7 @@ cc_test(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/testing:device_test_utils",
-        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "//rtp_llm/models_py/bindings/core:device_ops_test_impls",
         "//rtp_llm/cpp/normal_engine:normal_engine",
         "//rtp_llm/cpp/models:models",
         "@com_google_googletest//:gtest",

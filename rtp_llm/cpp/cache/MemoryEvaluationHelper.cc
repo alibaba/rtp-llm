@@ -9,7 +9,7 @@
 #include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
 #endif
 
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
@@ -86,7 +86,6 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
                                                     const std::optional<WarmUpResult>&               warm_up_result,
                                                     const std::optional<SpeculativeExecutionConfig>& sp_config) {
     size_t device_reserved_memory_bytes = getGpuExecStatus().device_memory_status.available_bytes;
-    size_t runtime_required_bytes       = 0;
 
     if (kv_cache_config.kv_cache_mem_mb > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache memory size %ld MiB",
@@ -94,10 +93,12 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
         return kv_cache_config.kv_cache_mem_mb * 1024 * 1024;
     }
 
-    size_t env_runtime_required_bytes = MemoryEvaluationHelper::getDefaultRuntimeMemorySize(
+    size_t runtime_required_bytes = MemoryEvaluationHelper::getDefaultRuntimeMemorySize(
         runtime_config, parallelism_config, model_config, sp_config);
 
     if (warm_up_result) {
+        // Warm-up now only calibrates the available-memory snapshot. Peak
+        // runtime-memory reservation was never populated and has been removed.
         if (device_reserved_memory_bytes != warm_up_result->device_reserved_bytes) {
             RTP_LLM_LOG_WARNING("device reserved memory bytes %ld when create config does not equal to "
                                 "the amount when warm up %ld. take min value.",
@@ -106,20 +107,11 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
             device_reserved_memory_bytes =
                 std::min(device_reserved_memory_bytes, warm_up_result->device_reserved_bytes);
         }
-
-        runtime_required_bytes = std::max(env_runtime_required_bytes, warm_up_result->max_used_memory);
-
-        RTP_LLM_LOG_INFO(
-            "devices reserved %ld MiB memory, warm up consumed %ld MiB max memory, env runtime memory %ld MiB, final runtime memory %ld MiB",
-            device_reserved_memory_bytes / 1024 / 1024,
-            warm_up_result->max_used_memory / 1024 / 1024,
-            env_runtime_required_bytes / 1024 / 1024,
-            runtime_required_bytes / 1024 / 1024);
-    } else {
-        runtime_required_bytes = env_runtime_required_bytes;
-        RTP_LLM_LOG_INFO("warm up result not available, use default runtime memory size %ld MiB",
-                         runtime_required_bytes / 1024 / 1024);
     }
+    RTP_LLM_LOG_INFO("devices reserved %ld MiB memory, default runtime memory %ld MiB%s",
+                     device_reserved_memory_bytes / 1024 / 1024,
+                     runtime_required_bytes / 1024 / 1024,
+                     warm_up_result ? " (available memory calibrated by warm-up)" : "");
 
     size_t sample_need_mem =
         (size_t)runtime_config.max_generate_batch_size * model_config.vocab_size * 4 * 8;  // just estimated value
