@@ -8,16 +8,18 @@ import torch
 from torch import nn
 
 from rtp_llm.model_loader.linear_attn_weight import split_kda_qkvg_fa_beta_sections
-from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
+    all_reduce,
+    get_process_group,
+)
 from rtp_llm.models_py.distributed.sequence_parallel import (
     TokenShardLayout,
     shard_tokens_with_padding,
 )
-from rtp_llm.models_py.modules.factory.linear.parallel import (
-    all_gather_matmul,
-    row_parallel_linear,
-    should_use_fused_all_gather_matmul,
-)
+from rtp_llm.models_py.modules.factory.linear.parallel import row_parallel_linear
+from rtp_llm.models_py.modules.kimi_k3.all_gather_gemm import all_gather_gemm
+from rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter import gemm_reduce_scatter
 from rtp_llm.models_py.modules.kimi_k3.kda.cache import KimiK3KDACache
 from rtp_llm.models_py.modules.kimi_k3.kda.decode import KimiK3KDADecode
 from rtp_llm.models_py.modules.kimi_k3.kda.prefill import (
@@ -25,9 +27,7 @@ from rtp_llm.models_py.modules.kimi_k3.kda.prefill import (
     KimiKDACurrentStateRegistry,
     KimiKDAPrefillMetadata,
 )
-from rtp_llm.models_py.triton_kernels.kimi_kda import (
-    kimi_kda_rms_norm_sigmoid_gate,
-)
+from rtp_llm.models_py.triton_kernels.kimi_kda import kimi_kda_rms_norm_sigmoid_gate
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
@@ -176,13 +176,10 @@ class KimiK3KDA(nn.Module):
         """Run and unpack the loader-provided Q/K/V/G/F_A/beta projection."""
 
         if prefill_sp_layout is not None:
-            projected_fused = all_gather_matmul(
+            projected_fused = all_gather_gemm(
                 hidden_states,
                 [self.kda_fused_w],
-                logical_tokens=prefill_sp_layout.logical_tokens,
-                use_fused=should_use_fused_all_gather_matmul(
-                    hidden_states.shape[0] * self.attn_tp_size
-                ),
+                logical_m=prefill_sp_layout.logical_tokens,
             )[0]
         else:
             projected_fused = torch.matmul(hidden_states, self.kda_fused_w)
@@ -206,9 +203,7 @@ class KimiK3KDA(nn.Module):
         raw_gate = torch.matmul(forget_latent, self.weights[W.linear_attn_f_b_w])
         beta_begin = self.attn_tp_rank * self.local_heads
         raw_beta = full_raw_beta.narrow(1, beta_begin, self.local_heads)
-        mixed_qkv_projected = projected_fused.narrow(
-            1, 0, 3 * self.projection_size
-        )
+        mixed_qkv_projected = projected_fused.narrow(1, 0, 3 * self.projection_size)
         return (
             mixed_qkv_projected,
             q_projected,
@@ -290,9 +285,7 @@ class KimiK3KDA(nn.Module):
             if self.attn_tp_size > 1:
                 output = all_reduce(output, group=Group.TP)
                 decode_sp = (
-                    sequence_parallel
-                    and not is_target_verify
-                    and hidden_states.is_cuda
+                    sequence_parallel and not is_target_verify and hidden_states.is_cuda
                 )
                 if decode_sp:
                     output, _ = shard_tokens_with_padding(
@@ -302,21 +295,27 @@ class KimiK3KDA(nn.Module):
                         self.attn_tp_rank,
                     )
             return output
+        use_reduce_scatter = (
+            sequence_parallel and self.attn_tp_size > 1 and hidden_states.is_cuda
+        )
+        pad_reduce_scatter = use_reduce_scatter and (
+            mode == "decode" or token_count % self.attn_tp_size != 0
+        )
+        if mode == "prefill" and use_reduce_scatter:
+            fused = gemm_reduce_scatter(
+                projection_input,
+                self.weights[W.linear_attn_out_w],
+                get_process_group(Group.TP),
+                pad_rows=pad_reduce_scatter,
+            )
+            if fused is not None:
+                return fused
         return row_parallel_linear(
             projection_input,
             self.weights[W.linear_attn_out_w],
             self.attn_tp_size,
-            reduce_scatter_tokens=(
-                sequence_parallel
-                and self.attn_tp_size > 1
-                and hidden_states.is_cuda
-            ),
-            pad_reduce_scatter_tokens=(
-                sequence_parallel
-                and self.attn_tp_size > 1
-                and hidden_states.is_cuda
-                and (mode == "decode" or token_count % self.attn_tp_size != 0)
-            ),
+            reduce_scatter_tokens=use_reduce_scatter,
+            pad_reduce_scatter_tokens=pad_reduce_scatter,
             use_input_dtype_reduce_scatter=(mode == "prefill"),
         )
 

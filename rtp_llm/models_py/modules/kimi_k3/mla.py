@@ -6,19 +6,15 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
 
+from rtp_llm.models_py.distributed.collective_torch import Group, get_process_group
 from rtp_llm.models_py.distributed.sequence_parallel import TokenShardLayout
-from rtp_llm.models_py.modules.factory.linear.parallel import (
-    all_gather_matmul,
-    row_parallel_linear,
-    should_use_fused_all_gather_matmul,
-)
 from rtp_llm.models_py.modules.base import RMSNorm
+from rtp_llm.models_py.modules.factory.linear.parallel import row_parallel_linear
 from rtp_llm.models_py.modules.hybrid.mla_attention import MlaAttention
+from rtp_llm.models_py.modules.kimi_k3.all_gather_gemm import all_gather_gemm
+from rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter import gemm_reduce_scatter
 from rtp_llm.ops import ParallelismConfig, RoleType
-from rtp_llm.ops.compute_ops import (
-    LayerKVCache,
-    PyAttentionInputs,
-)
+from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
 if TYPE_CHECKING:
@@ -114,13 +110,10 @@ class KimiK3MLA(MlaAttention):
                 if prefill_layout is None
                 else prefill_layout.logical_tokens
             )
-            packed = all_gather_matmul(
+            packed = all_gather_gemm(
                 hidden_states,
                 [self._packed_qkv_gate_w],
-                logical_tokens=logical_tokens,
-                use_fused=should_use_fused_all_gather_matmul(
-                    hidden_states.shape[0] * self.attn_tp_size
-                ),
+                logical_m=logical_tokens,
             )[0]
             return torch.split(
                 packed,
@@ -162,18 +155,25 @@ class KimiK3MLA(MlaAttention):
     def _project_output(self, attn_output: torch.Tensor) -> torch.Tensor:
         if self._sp_active_for_forward:
             tp_size = self.parallelism_config.get_attn_tp_size()
+            pad_reduce_scatter = self._sp_padded_for_forward or (
+                self._sp_prefill_input_is_sharded
+                and attn_output.shape[0] % tp_size != 0
+            )
+            if self._sp_prefill_input_is_sharded:
+                fused = gemm_reduce_scatter(
+                    attn_output,
+                    self._o_w,
+                    get_process_group(Group.TP),
+                    pad_rows=pad_reduce_scatter,
+                )
+                if fused is not None:
+                    return fused
             return row_parallel_linear(
                 attn_output,
                 self._o_w,
                 tp_size,
                 reduce_scatter_tokens=True,
-                pad_reduce_scatter_tokens=(
-                    self._sp_padded_for_forward
-                    or (
-                        self._sp_prefill_input_is_sharded
-                        and attn_output.shape[0] % tp_size != 0
-                    )
-                ),
+                pad_reduce_scatter_tokens=pad_reduce_scatter,
                 use_input_dtype_reduce_scatter=(self._sp_prefill_input_is_sharded),
             )
         return super()._project_output(attn_output)

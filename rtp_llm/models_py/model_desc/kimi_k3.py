@@ -37,9 +37,6 @@ from rtp_llm.models_py.distributed.sequence_parallel import (
     shard_tokens_with_padding,
     token_shard_layout,
 )
-from rtp_llm.models_py.distributed.symm_mem import (
-    reserve_fused_all_gather_matmul_workspace,
-)
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.base import RMSNorm
@@ -50,12 +47,13 @@ from rtp_llm.models_py.modules.base.common.kvcache_store import (
 from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
     MultimodalEmbeddingInjector,
 )
-from rtp_llm.models_py.modules.factory.linear.parallel import (
-    should_use_fused_all_gather_matmul,
-)
 from rtp_llm.models_py.modules.hybrid.dense_mlp import (
     DenseMLP,
     DenseMLPParallelExecutor,
+)
+from rtp_llm.models_py.modules.kimi_k3.all_gather_gemm import (
+    configure_all_gather_gemm,
+    should_use_all_gather_gemm,
 )
 from rtp_llm.models_py.modules.kimi_k3.chunk_prefill import (
     KimiK3ChunkRound,
@@ -66,6 +64,10 @@ from rtp_llm.models_py.modules.kimi_k3.chunk_prefill import (
     plan_kimi_k3_chunk_rounds,
     prepare_round_fmha,
     validate_whole_chunk_prefill,
+)
+from rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter import (
+    configure_gemm_reduce_scatter,
+    should_use_gemm_reduce_scatter,
 )
 from rtp_llm.models_py.modules.kimi_k3.kda import KDAExecutionMode, KimiK3KDA
 from rtp_llm.models_py.modules.kimi_k3.kda.prefill import (
@@ -92,7 +94,7 @@ from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
 from rtp_llm.models_py.modules.kimi_k3.moe_se import KimiK3LatentMoESE
 from rtp_llm.models_py.modules.kimi_k3.residual import KimiK3AttentionResidual
 from rtp_llm.models_py.modules.kimi_k3.utils import (
-    fused_ag_workspace_global_tokens,
+    collective_gemm_workspace_global_tokens,
     mask_multimodal_token_ids,
     prefill_chunk_tokens,
     resolve_cu_seqlens,
@@ -430,7 +432,8 @@ class KimiK3Model(GptModelBase):
             model_config.layernorm_eps,
         )
         self._layer_group_ids: Optional[tuple[int, ...]] = None
-        self._fused_ag_gemm_workspace_ready = False
+        self._all_gather_gemm_configured = False
+        self._gemm_reduce_scatter_configured = False
         self._max_generate_batch_size = int(max_generate_batch_size)
         self._is_decode_role = False
         self._mtp_hidden_buffer: Optional[torch.Tensor] = None
@@ -438,7 +441,7 @@ class KimiK3Model(GptModelBase):
         self._prefill_static_attn_res_bank: Optional[torch.Tensor] = None
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
-        """Bind runtime resources and reserve the largest Prefill AG workspace."""
+        """Bind runtime resources and reserve Prefill collective workspaces."""
 
         super().initialize(init_resource)
         self._is_decode_role = bool(init_resource.is_decode_role)
@@ -463,40 +466,50 @@ class KimiK3Model(GptModelBase):
                     "[K3_EAGLE3] allocated Decode hidden buffer shape=%s",
                     tuple(self._mtp_hidden_buffer.shape),
                 )
-        if self._fused_ag_gemm_workspace_ready:
-            return True
-
         tp_size = int(self.parallelism_config.get_attn_tp_size())
-        max_global_tokens = fused_ag_workspace_global_tokens(
+        max_global_tokens = collective_gemm_workspace_global_tokens(
             int(self.config.max_seq_len),
             int(init_resource.max_context_batch_size),
             prefill_chunk_tokens(),
         )
         max_local_tokens = (max_global_tokens + tp_size - 1) // tp_size
         max_physical_tokens = max_local_tokens * tp_size
-        if (
-            init_resource.is_decode_role
-            or tp_size <= 1
-            or not should_use_fused_all_gather_matmul(max_physical_tokens)
-        ):
-            return True
-        workspace_bytes = (
-            max_local_tokens
-            * int(self.config.hidden_size)
-            * self.embedding_weight.element_size()
-        )
-        reserve_fused_all_gather_matmul_workspace(
-            get_process_group(Group.TP),
-            workspace_bytes,
-        )
-        self._fused_ag_gemm_workspace_ready = True
-        logging.info(
-            "[K3_FUSED_AG_GEMM] reserved %.3f GiB symmetric workspace "
-            "for %d global Prefill tokens (TP%d)",
-            workspace_bytes / (1 << 30),
-            max_global_tokens,
-            tp_size,
-        )
+        if not getattr(self, "_all_gather_gemm_configured", False):
+            all_gather_gemm_requested = (
+                not init_resource.is_decode_role
+                and tp_size > 1
+                and self.embedding_weight.is_cuda
+                and self.embedding_weight.dtype == torch.bfloat16
+                and should_use_all_gather_gemm(max_physical_tokens)
+            )
+            if all_gather_gemm_requested:
+                configure_all_gather_gemm(
+                    get_process_group(Group.TP),
+                    self.embedding_weight.device,
+                    enabled=True,
+                    max_m=max_physical_tokens,
+                    k=int(self.config.hidden_size),
+                    dtype=self.embedding_weight.dtype,
+                )
+            self._all_gather_gemm_configured = True
+
+        if not getattr(self, "_gemm_reduce_scatter_configured", False):
+            gemm_reduce_scatter_requested = (
+                not init_resource.is_decode_role
+                and tp_size > 1
+                and self.embedding_weight.is_cuda
+                and self.embedding_weight.dtype == torch.bfloat16
+                and should_use_gemm_reduce_scatter(max_physical_tokens)
+            )
+            if gemm_reduce_scatter_requested:
+                configure_gemm_reduce_scatter(
+                    get_process_group(Group.TP),
+                    self.embedding_weight.device,
+                    enabled=True,
+                    max_m=max_physical_tokens,
+                    n=int(self.config.hidden_size),
+                )
+            self._gemm_reduce_scatter_configured = True
         return True
 
     def _write_mtp_hidden_buffer(

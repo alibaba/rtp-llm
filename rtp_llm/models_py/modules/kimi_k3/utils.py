@@ -28,12 +28,12 @@ def prefill_chunk_tokens() -> int:
     return value
 
 
-def fused_ag_workspace_global_tokens(
+def collective_gemm_workspace_global_tokens(
     max_seq_len: int,
     max_context_batch_size: int,
     chunk_tokens: int,
 ) -> int:
-    """Bound the symmetric AG/GEMM workspace by one model invocation."""
+    """Bound collective GEMM workspaces by one model invocation."""
 
     configured_tokens = int(max_seq_len) * int(max_context_batch_size)
     if chunk_tokens <= 0:
@@ -149,7 +149,7 @@ def resolve_cu_seqlens(
 
 
 __all__ = [
-    "fused_ag_workspace_global_tokens",
+    "collective_gemm_workspace_global_tokens",
     "mask_multimodal_token_ids",
     "prefill_chunk_tokens",
     "resolve_cu_seqlens",

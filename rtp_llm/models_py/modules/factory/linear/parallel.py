@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Dict, Sequence
+from typing import Dict
 
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import (
     Group,
     all_gather,
-    all_gather_into,
     all_reduce,
-    get_process_group,
     reduce_scatter,
     reduce_scatter_padded,
 )
@@ -21,27 +19,6 @@ from rtp_llm.models_py.distributed.sequence_parallel import (
     shard_tokens_with_padding,
     token_shard_layout,
 )
-from rtp_llm.models_py.distributed.symm_mem import fused_all_gather_matmul
-
-DEFAULT_FUSED_ALL_GATHER_MATMUL_MIN_TOKENS = 32 * 1024
-
-
-def should_use_fused_all_gather_matmul(
-    global_token_count: int,
-    *,
-    min_global_tokens: int = DEFAULT_FUSED_ALL_GATHER_MATMUL_MIN_TOKENS,
-) -> bool:
-    """Choose fused AG-GEMM after its fixed launch cost is amortized."""
-
-    if global_token_count < 0:
-        raise ValueError(
-            f"global_token_count must be non-negative, got {global_token_count}"
-        )
-    if min_global_tokens < 0:
-        raise ValueError(
-            f"min_global_tokens must be non-negative, got {min_global_tokens}"
-        )
-    return global_token_count >= min_global_tokens
 
 
 def _replicate_column_weight(
@@ -138,59 +115,6 @@ def sequence_parallel_row_weight(
     return full_weight[begin : begin + local_height]
 
 
-def all_gather_matmul(
-    local_input: torch.Tensor,
-    weights: Sequence[torch.Tensor],
-    *,
-    logical_tokens: int,
-    use_fused: bool,
-    group: Group = Group.TP,
-) -> list[torch.Tensor]:
-    """All-gather equal token shards, project, and trim padding rows."""
-
-    if logical_tokens < 0:
-        raise ValueError(f"logical_tokens must be non-negative, got {logical_tokens}")
-    if use_fused:
-        with torch.profiler.record_function(
-            "RTP::modules.parallel_linear.fused_all_gather_gemm"
-        ):
-            _, outputs = fused_all_gather_matmul(
-                local_input,
-                weights,
-                get_process_group(group),
-                return_gathered=False,
-            )
-    else:
-        process_group = get_process_group(group)
-        world_size = torch.distributed.get_world_size(process_group)
-        with torch.profiler.record_function(
-            "RTP::modules.parallel_linear.all_gather"
-        ):
-            gathered = all_gather_into(
-                local_input,
-                local_input.new_empty(
-                    (local_input.shape[0] * world_size, *local_input.shape[1:])
-                ),
-                group,
-            )
-            gathered = gathered.narrow(0, 0, logical_tokens)
-        with torch.profiler.record_function("RTP::modules.parallel_linear.gemm"):
-            outputs = [torch.matmul(gathered, weight) for weight in weights]
-    trimmed = []
-    for output in outputs:
-        if output.shape[0] < logical_tokens:
-            raise ValueError(
-                "projection output has fewer rows than the logical token count: "
-                f"output={tuple(output.shape)}, logical_tokens={logical_tokens}"
-            )
-        trimmed.append(
-            output
-            if output.shape[0] == logical_tokens
-            else output.narrow(0, 0, logical_tokens)
-        )
-    return trimmed
-
-
 def row_parallel_linear(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -272,14 +196,11 @@ def _matmul_with_padded_rows(
 
 
 __all__ = [
-    "DEFAULT_FUSED_ALL_GATHER_MATMUL_MIN_TOKENS",
     "TokenShardLayout",
-    "all_gather_matmul",
     "row_parallel_linear",
     "sequence_parallel_column_weight",
     "sequence_parallel_row_weight",
     "shard_tokens",
     "shard_tokens_with_padding",
-    "should_use_fused_all_gather_matmul",
     "token_shard_layout",
 ]
