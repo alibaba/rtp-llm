@@ -15,6 +15,7 @@ from rtp_llm.models_py.new_models.qwen3_next.language import (
     Qwen3NextMTPForCausalLM,
     Qwen35MoeMTPForCausalLM,
     _build_qwen3_next_metadata,
+    _write_linear_cache_store,
     reorder_ba,
     reorder_qkvz,
     reorder_qkvz_scale,
@@ -637,6 +638,23 @@ class Qwen3NextLoadTest(unittest.TestCase):
 
 
 class Qwen3NextLinearAttentionLoadTest(unittest.TestCase):
+    def test_cache_store_uses_writer_only_for_active_plan(self):
+        writer = mock.Mock()
+        plan = object()
+        kv_cache = object()
+        attn_inputs = types.SimpleNamespace(
+            cache_store_inputs=plan,
+            cache_store_writer=writer,
+        )
+
+        _write_linear_cache_store(attn_inputs, kv_cache)
+        writer.write.assert_called_once_with(plan, kv_cache)
+
+        attn_inputs.cache_store_inputs = None
+        _write_linear_cache_store(attn_inputs, kv_cache)
+        _write_linear_cache_store(attn_inputs, None)
+        writer.write.assert_called_once_with(plan, kv_cache)
+
     def _layer(self, tp_rank):
         config = _config(HybridAttentionType.LINEAR)
         return Qwen3NextGatedDeltaNet(
