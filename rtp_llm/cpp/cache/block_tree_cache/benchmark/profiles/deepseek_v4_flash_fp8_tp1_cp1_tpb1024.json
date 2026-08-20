@@ -1,0 +1,105 @@
+{
+  "profile_id": "deepseek_v4_flash_fp8_tp1_cp1_tpb1024",
+  "model": "deepseek_v4_flash",
+  "dtype": "fp8",
+  "tp_size": 1,
+  "prefill_cp_size": 1,
+  "tokens_per_block": 1024,
+  "kernel_tokens_block": 128,
+  "num_layers": 43,
+  "swa_config": {
+    "sliding_window_size": 128,
+    "gen_num_per_cycle": 0,
+    "state_ring_include_gen_num_per_cycle": true,
+    "include_mtp": false,
+    "transfer_members": ["csa_state", "indexer_state", "swa_kv"],
+    "device_only_members": ["hca_state"]
+  },
+  "groups": [
+    {
+      "tag": "csa_kv",
+      "layer_count": 21,
+      "type": "FULL",
+      "entries_per_block": 256,
+      "layer_stride_bytes": 152064,
+      "group_payload_bytes": 3193344,
+      "tier_policy": "device_host_disk"
+    },
+    {
+      "tag": "hca_kv",
+      "layer_count": 20,
+      "type": "FULL",
+      "entries_per_block": 8,
+      "layer_stride_bytes": 9216,
+      "group_payload_bytes": 184320,
+      "tier_policy": "device_host_disk"
+    },
+    {
+      "tag": "indexer_kv",
+      "layer_count": 21,
+      "type": "FULL",
+      "entries_per_block": 256,
+      "layer_stride_bytes": 33792,
+      "group_payload_bytes": 709632,
+      "tier_policy": "device_host_disk"
+    },
+    {
+      "tag": "indexer_state",
+      "layer_count": 21,
+      "type": "SWA",
+      "sliding_window_size": 128,
+      "entries_per_block": 8,
+      "layer_stride_bytes": 16384,
+      "group_payload_bytes": 344064,
+      "tier_policy": "device_host_disk"
+    },
+    {
+      "tag": "csa_state",
+      "layer_count": 21,
+      "type": "SWA",
+      "sliding_window_size": 128,
+      "entries_per_block": 8,
+      "layer_stride_bytes": 65536,
+      "group_payload_bytes": 1376256,
+      "tier_policy": "device_host_disk"
+    },
+    {
+      "tag": "hca_state",
+      "layer_count": 20,
+      "type": "SWA",
+      "sliding_window_size": 128,
+      "entries_per_block": 128,
+      "layer_stride_bytes": 524288,
+      "group_payload_bytes": 10485760,
+      "tier_policy": "device_only"
+    },
+    {
+      "tag": "swa_kv",
+      "layer_count": 43,
+      "type": "SWA",
+      "sliding_window_size": 128,
+      "entries_per_block": 128,
+      "layer_stride_bytes": 74880,
+      "group_payload_bytes": 3219840,
+      "tier_policy": "device_host_disk"
+    }
+  ],
+  "group_sets": [
+    {
+      "name": "full_context",
+      "members": ["csa_kv", "hca_kv", "indexer_kv"],
+      "payload_bytes": 4087296
+    },
+    {
+      "name": "swa",
+      "members": ["csa_state", "indexer_state", "swa_kv"],
+      "payload_bytes": 4940160
+    }
+  ],
+  "device_only_groups": ["hca_state"],
+  "default_capacity": {
+    "device_block_count": 65536,
+    "host_block_count": 65536,
+    "disk_block_count": 65536
+  }
+}
