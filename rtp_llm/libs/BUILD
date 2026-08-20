@@ -5,6 +5,20 @@ package(default_visibility = ["//rtp_llm:__subpackages__"])
 
 copy_all_so()
 
+cuda13_flashinfer_shared_libs = [
+    ":libflashinfer_batch_paged_prefill_so",
+    ":libflashinfer_batch_paged_prefill_256_so",
+    ":libflashinfer_batch_paged_decode_so",
+    ":libflashinfer_batch_paged_decode_256_so",
+    ":libflashinfer_batch_ragged_prefill_so",
+    ":libflashinfer_batch_ragged_prefill_256_so",
+    ":libflashinfer_single_decode_so",
+    ":libflashinfer_single_decode_256_so",
+    ":libflashinfer_single_prefill_so",
+    ":libflashinfer_single_prefill_256_so",
+    ":libflashinfer_sm90_so",
+]
+
 # copy 3fs libs
 copy_files(
     name = "copy_hf3fs_libs",
@@ -59,5 +73,9 @@ filegroup(
         ":libth_grammar_tokenizer_info_so",
         ":libth_transformer_config_so",
         ":libth_transformer_so",
-    ],
+    ] + select({
+        "//:using_cuda13_x86": cuda13_flashinfer_shared_libs,
+        "//:using_cuda13_arm": cuda13_flashinfer_shared_libs,
+        "//conditions:default": [],
+    }),
 )
