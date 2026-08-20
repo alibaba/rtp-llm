@@ -1,0 +1,222 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700" role="img" aria-labelledby="title desc">
+  <title id="title">AutoTPM group scheduling and asynchronous KV cache preparation</title>
+  <desc id="desc">An animated flow from EnqueueBatch through the FIFO group queue, a lock-free cache prepare worker, memory-cache loading, retryable LACK_MEM backpressure, CachePrepared admission, and GPU execution.</desc>
+
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#081321"/>
+      <stop offset="1" stop-color="#101a31"/>
+    </linearGradient>
+    <linearGradient id="gpuGradient" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#155e75"/>
+      <stop offset="0.5" stop-color="#0891b2"/>
+      <stop offset="1" stop-color="#22c55e"/>
+    </linearGradient>
+    <filter id="softGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#64748b"/>
+    </marker>
+    <marker id="arrowAsync" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#22d3ee"/>
+    </marker>
+    <marker id="arrowRetry" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#f59e0b"/>
+    </marker>
+    <marker id="arrowError" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#fb7185"/>
+    </marker>
+  </defs>
+
+  <style>
+    text { font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    .lane { fill: #0f1c30; stroke: #26354b; stroke-width: 1; }
+    .lane-label { fill: #8ca0ba; font-size: 13px; font-weight: 700; letter-spacing: 1.4px; }
+    .node rect { fill: #15243a; stroke: #40516a; stroke-width: 1.5; }
+    .node .main { fill: #f8fafc; font-size: 15px; font-weight: 700; text-anchor: middle; }
+    .node .sub { fill: #9fb0c6; font-size: 11px; text-anchor: middle; }
+    .node .node-rect {
+      animation: nodeCycle 13s linear infinite;
+      animation-delay: calc(var(--step) * 1s);
+    }
+    .retry-node .node-rect { animation-name: retryCycle; }
+    .ready-node .node-rect { animation-name: readyCycle; }
+    .edge { fill: none; stroke: #64748b; stroke-width: 2; marker-end: url(#arrow); }
+    .edge-async { fill: none; stroke: #22d3ee; stroke-width: 2.5; marker-end: url(#arrowAsync); }
+    .edge-retry { fill: none; stroke: #f59e0b; stroke-width: 2.5; stroke-dasharray: 7 6; marker-end: url(#arrowRetry); animation: dash 1s linear infinite; }
+    .edge-error { fill: none; stroke: #fb7185; stroke-width: 2; stroke-dasharray: 5 5; marker-end: url(#arrowError); }
+    .small-label { fill: #8ca0ba; font-size: 11px; }
+    .phase { fill: #94a3b8; font-size: 12px; font-weight: 700; text-anchor: middle; }
+    .gpu-bar { animation: gpuOverlap 13s linear infinite; }
+    .gpu-dot { animation: gpuDot 1.25s linear infinite; }
+    .legend { fill: #9fb0c6; font-size: 11px; }
+    @keyframes nodeCycle {
+      0%, 6% { fill: #123e63; stroke: #38bdf8; stroke-width: 3; filter: url(#softGlow); }
+      8%, 100% { fill: #15243a; stroke: #40516a; stroke-width: 1.5; filter: none; }
+    }
+    @keyframes retryCycle {
+      0%, 6% { fill: #4a3012; stroke: #f59e0b; stroke-width: 3; filter: url(#softGlow); }
+      8%, 100% { fill: #241f1a; stroke: #7c5c24; stroke-width: 1.5; filter: none; }
+    }
+    @keyframes readyCycle {
+      0%, 6% { fill: #123b2c; stroke: #4ade80; stroke-width: 3; filter: url(#softGlow); }
+      8%, 100% { fill: #15243a; stroke: #40516a; stroke-width: 1.5; filter: none; }
+    }
+    @keyframes dash { to { stroke-dashoffset: -13; } }
+    @keyframes gpuOverlap {
+      0%, 13% { opacity: .28; }
+      18%, 82% { opacity: 1; }
+      88%, 100% { opacity: .28; }
+    }
+    @keyframes gpuDot {
+      from { transform: translateX(0); }
+      to { transform: translateX(430px); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .node .node-rect, .edge-retry, .gpu-bar, .gpu-dot { animation: none; }
+    }
+  </style>
+
+  <rect width="1200" height="700" rx="20" fill="url(#background)"/>
+  <text x="42" y="45" fill="#f8fafc" font-size="24" font-weight="700">AutoTPM Group + Async KV Cache Prepare</text>
+  <text x="42" y="69" fill="#8ca0ba" font-size="13">The current GPU batch keeps running while the next group allocates KV and loads memory cache.</text>
+
+  <g aria-label="phase legend">
+    <text class="phase" x="235" y="92">1 · ENQUEUE</text>
+    <text class="phase" x="555" y="92">2 · PREPARE OUTSIDE LOCK</text>
+    <text class="phase" x="850" y="92">3 · LOAD OR RETRY</text>
+    <text class="phase" x="1060" y="92">4 · ADMIT</text>
+  </g>
+
+  <rect class="lane" x="28" y="105" width="1144" height="112" rx="14"/>
+  <rect class="lane" x="28" y="235" width="1144" height="145" rx="14"/>
+  <rect class="lane" x="28" y="398" width="1144" height="146" rx="14"/>
+  <text class="lane-label" x="48" y="127">SCHEDULER MAIN THREAD</text>
+  <text class="lane-label" x="48" y="257">CACHE PREPARE WORKER</text>
+  <text class="lane-label" x="48" y="420">CONNECTOR / RESOURCE CONTROL</text>
+
+  <!-- Scheduler lane -->
+  <g class="node" style="--step:0" transform="translate(150 134)">
+    <rect class="node-rect" width="170" height="62" rx="12"/>
+    <text class="main" x="85" y="27">EnqueueBatch</text>
+    <text class="sub" x="85" y="46">AutoTPM / FlexLB</text>
+  </g>
+  <g class="node" style="--step:1" transform="translate(370 134)">
+    <rect class="node-rect" width="170" height="62" rx="12"/>
+    <text class="main" x="85" y="27">enqueueGroup()</text>
+    <text class="sub" x="85" y="46">front group + notify</text>
+  </g>
+  <g class="node ready-node" style="--step:11" transform="translate(840 134)">
+    <rect class="node-rect" width="170" height="62" rx="12"/>
+    <text class="main" x="85" y="27">CanRun</text>
+    <text class="sub" x="85" y="46">admission boundary</text>
+  </g>
+  <g class="node ready-node" style="--step:12" transform="translate(1030 134)">
+    <rect class="node-rect" width="130" height="62" rx="12"/>
+    <text class="main" x="65" y="27">RUNNING</text>
+    <text class="sub" x="65" y="46">group on GPU</text>
+  </g>
+
+  <!-- Worker lane -->
+  <g class="node" style="--step:2" transform="translate(250 280)">
+    <rect class="node-rect" width="190" height="64" rx="12"/>
+    <text class="main" x="95" y="27">Lane + quota recheck</text>
+    <text class="sub" x="95" y="47">front group only</text>
+  </g>
+  <g class="node" style="--step:3" transform="translate(500 280)">
+    <rect class="node-rect" width="200" height="64" rx="12"/>
+    <text class="main" x="100" y="27">prepareCache()</text>
+    <text class="sub" x="100" y="47">scheduler lock NOT held</text>
+  </g>
+  <g class="node" style="--step:4" transform="translate(760 280)">
+    <rect class="node-rect" width="170" height="64" rx="12"/>
+    <text class="main" x="85" y="27">initKVBlock</text>
+    <text class="sub" x="85" y="47">per-pool capacity</text>
+  </g>
+  <g class="node ready-node" style="--step:10" transform="translate(980 280)">
+    <rect class="node-rect" width="190" height="64" rx="12"/>
+    <text class="main" x="95" y="27">CachePrepared</text>
+    <text class="sub" x="95" y="47">DONE + notify scheduler</text>
+  </g>
+
+  <!-- Connector / retry lane -->
+  <g class="node retry-node" style="--step:6" transform="translate(230 448)">
+    <rect class="node-rect" width="210" height="64" rx="12"/>
+    <text class="main" x="105" y="26">Blocker snapshot</text>
+    <text class="sub" x="105" y="45">per-pool low-water</text>
+    <text class="sub" x="105" y="58">10 ms poll / 250 ms retry</text>
+  </g>
+  <g class="node retry-node" style="--step:5" transform="translate(500 448)">
+    <rect class="node-rect" width="170" height="64" rx="12"/>
+    <text class="main" x="85" y="27">LACK_MEM</text>
+    <text class="sub" x="85" y="47">internal backpressure</text>
+  </g>
+  <g class="node" style="--step:8" transform="translate(760 448)">
+    <rect class="node-rect" width="180" height="64" rx="12"/>
+    <text class="main" x="90" y="27">asyncRead()</text>
+    <text class="sub" x="90" y="47">memory cache copy task</text>
+  </g>
+  <g class="node" style="--step:9" transform="translate(1000 448)">
+    <rect class="node-rect" width="170" height="64" rx="12"/>
+    <text class="main" x="85" y="27">WAIT / loadDone</text>
+    <text class="sub" x="85" y="47">worker polls; main runs</text>
+  </g>
+
+  <!-- Main edges -->
+  <path class="edge" d="M320 165 H360"/>
+  <path class="edge-async" d="M455 196 V240 Q455 260 435 275 L420 285"/>
+  <path class="edge-async" d="M440 312 H490"/>
+  <path class="edge-async" d="M700 312 H750"/>
+  <path class="edge-async" d="M845 344 V438"/>
+  <path class="edge-async" d="M940 480 H990"/>
+  <path class="edge-async" d="M1085 448 V354"/>
+  <path class="edge" d="M1075 280 V222 Q1075 196 1018 166"/>
+  <path class="edge" d="M1010 165 H1020"/>
+
+  <!-- Retry branch -->
+  <path class="edge-retry" d="M785 344 C750 390 675 418 620 443"/>
+  <path class="edge-retry" d="M500 480 H450"/>
+  <path class="edge-retry" d="M335 448 C335 400 330 365 342 354"/>
+  <path class="edge-retry" d="M440 300 C560 250 680 252 760 294"/>
+  <text class="small-label" x="643" y="402">temporary shortage → rollback + retry</text>
+
+  <!-- Terminal alternative -->
+  <path class="edge-error" d="M670 495 C790 555 910 558 1010 579"/>
+  <rect x="980" y="565" width="190" height="46" rx="10" fill="#2b1720" stroke="#fb7185" stroke-width="1.5"/>
+  <text x="1075" y="584" fill="#fecdd3" font-size="12" font-weight="700" text-anchor="middle">TERMINAL ALTERNATIVE</text>
+  <text x="1075" y="601" fill="#fda4af" font-size="11" text-anchor="middle">permanent / running shortage → 602</text>
+
+  <!-- Moving request token -->
+  <g filter="url(#softGlow)">
+    <circle r="8" fill="#f8fafc" stroke="#38bdf8" stroke-width="4">
+      <animate attributeName="cx" dur="13s" repeatCount="indefinite"
+        values="235;455;345;600;845;585;335;845;850;1085;1075;925;1095;235"
+        keyTimes="0;0.0769;0.1538;0.2308;0.3077;0.3846;0.4615;0.5385;0.6154;0.6923;0.7692;0.8462;0.9231;1"/>
+      <animate attributeName="cy" dur="13s" repeatCount="indefinite"
+        values="165;165;312;312;312;480;480;312;480;480;312;165;165;165"
+        keyTimes="0;0.0769;0.1538;0.2308;0.3077;0.3846;0.4615;0.5385;0.6154;0.6923;0.7692;0.8462;0.9231;1"/>
+    </circle>
+  </g>
+
+  <!-- Parallel GPU work -->
+  <g class="gpu-bar">
+    <text x="48" y="634" fill="#67e8f9" font-size="12" font-weight="700">CURRENT GPU BATCH CONTINUES</text>
+    <rect x="310" y="615" width="470" height="26" rx="13" fill="#0b2632" stroke="#155e75"/>
+    <rect x="318" y="622" width="440" height="12" rx="6" fill="url(#gpuGradient)" opacity=".7"/>
+    <circle class="gpu-dot" cx="324" cy="628" r="5" fill="#ecfeff"/>
+    <text x="800" y="633" fill="#8ca0ba" font-size="12">overlaps next-group allocation and cache I/O</text>
+  </g>
+
+  <g transform="translate(48 670)">
+    <circle cx="0" cy="0" r="5" fill="#38bdf8"/><text class="legend" x="12" y="4">control / prepare</text>
+    <circle cx="155" cy="0" r="5" fill="#22d3ee"/><text class="legend" x="167" y="4">async handoff</text>
+    <circle cx="310" cy="0" r="5" fill="#f59e0b"/><text class="legend" x="322" y="4">retryable pressure</text>
+    <circle cx="485" cy="0" r="5" fill="#4ade80"/><text class="legend" x="497" y="4">ready / admitted</text>
+    <circle cx="650" cy="0" r="5" fill="#fb7185"/><text class="legend" x="662" y="4">terminal alternative</text>
+  </g>
+</svg>
