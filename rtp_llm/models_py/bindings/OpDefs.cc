@@ -106,16 +106,17 @@ void registerPyOpDefs(pybind11::module& m) {
         [](caffe2::TypeMeta dtype) { return dtype.toScalarType(); },
         "Convert TypeMeta to scalar type");
 
-    pybind11::class_<PyCacheStoreInputs>(m, "PyCacheStoreInputs")
-        .def(pybind11::init<>())
-        .def_readwrite("input_lengths_host", &PyCacheStoreInputs::input_lengths_host)
-        .def_readwrite("prefix_lengths_host", &PyCacheStoreInputs::prefix_lengths_host);
-
     pybind11::class_<PyCacheStorePublishPlan>(m, "PyCacheStorePublishPlan")
         .def(pybind11::init<>())
         .def_readwrite("begin_block_host", &PyCacheStorePublishPlan::begin_block_host)
         .def_readwrite("end_block_host", &PyCacheStorePublishPlan::end_block_host)
         .def_readwrite("terminal_host", &PyCacheStorePublishPlan::terminal_host);
+
+    pybind11::class_<PyCacheStoreInputs>(m, "PyCacheStoreInputs")
+        .def(pybind11::init<>())
+        .def_readwrite("input_lengths_host", &PyCacheStoreInputs::input_lengths_host)
+        .def_readwrite("prefix_lengths_host", &PyCacheStoreInputs::prefix_lengths_host)
+        .def_readwrite("publish_plan", &PyCacheStoreInputs::publish_plan);
 
     pybind11::class_<rtp_llm::ParamsBase, std::shared_ptr<rtp_llm::ParamsBase>>(m, "ParamsBase")
         .def(pybind11::init<>())
@@ -158,6 +159,8 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("is_cuda_graph", &PyAttentionInputs::is_cuda_graph)
         .def_readwrite("is_target_verify", &PyAttentionInputs::is_target_verify)
         .def_readwrite("cuda_graph_fmha_workspace", &PyAttentionInputs::cuda_graph_fmha_workspace)
+        .def_readwrite("is_mtp_draft_update", &PyAttentionInputs::is_mtp_draft_update)
+        .def_readwrite("is_prefill_chunk", &PyAttentionInputs::is_prefill_chunk)
         .def_readwrite("is_fake_stream", &PyAttentionInputs::is_fake_stream)
         .def_readwrite("prefix_lengths", &PyAttentionInputs::prefix_lengths)
         .def_readwrite("sequence_lengths", &PyAttentionInputs::sequence_lengths)

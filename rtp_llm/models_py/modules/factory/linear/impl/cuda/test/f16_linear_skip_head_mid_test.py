@@ -1,6 +1,14 @@
 import os
 import sys
+import tempfile
 import unittest
+
+os.environ.setdefault("HOME", "/tmp")
+os.environ.setdefault(
+    "DG_JIT_CACHE_DIR",
+    os.path.join(tempfile.gettempdir(), f"deep_gemm_jit_{os.getuid()}_{os.getpid()}"),
+)
+os.makedirs(os.environ["DG_JIT_CACHE_DIR"], exist_ok=True)
 
 _LOCAL_DEEP_GEMM_PATH = os.environ.get("RTP_LOCAL_DEEP_GEMM_PATH")
 if _LOCAL_DEEP_GEMM_PATH:
@@ -59,6 +67,17 @@ class CudaF16LinearSkipHeadMidTest(unittest.TestCase):
         actual = linear.forward_skip_head_mid(
             inputs, (k_nope_dim, k_pe_dim, v_dim)
         ).view(tokens, heads, physical_head_dim)
+        caller_output = torch.empty(
+            (tokens, heads * physical_head_dim),
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        caller_output_ptr = caller_output.data_ptr()
+        reused = linear.forward_skip_head_mid(
+            inputs,
+            (k_nope_dim, k_pe_dim, v_dim),
+            out=caller_output,
+        )
         expected = linear(inputs).view(tokens, heads, logical_head_dim)
 
         torch.testing.assert_close(
@@ -74,7 +93,25 @@ class CudaF16LinearSkipHeadMidTest(unittest.TestCase):
             atol=0,
         )
         self.assertTrue(actual.is_contiguous())
+        self.assertIs(reused, caller_output)
+        self.assertEqual(reused.data_ptr(), caller_output_ptr)
+        torch.testing.assert_close(reused.view_as(actual), actual, rtol=0, atol=0)
         self.assertEqual(linear.weight.stride(), (1, heads * logical_head_dim))
+
+    def test_caller_output_contract_is_validated(self) -> None:
+        inputs = torch.randn((1, 512), device="cuda", dtype=torch.bfloat16)
+        checkpoint_weight = torch.randn(
+            (512, 12 * 256), device="cuda", dtype=torch.bfloat16
+        )
+        linear = CudaF16Linear(checkpoint_weight)
+
+        wrong_shape = torch.empty((1, 12 * 319), device="cuda", dtype=torch.bfloat16)
+        with self.assertRaisesRegex(ValueError, "output must be contiguous"):
+            linear.forward_skip_head_mid(
+                inputs,
+                (128, 64, 128),
+                out=wrong_shape,
+            )
 
 
 if __name__ == "__main__":

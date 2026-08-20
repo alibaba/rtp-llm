@@ -8,6 +8,7 @@ replaced.
 """
 
 import logging
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -27,6 +28,17 @@ _FLASHMLA_LOGGED_DEVICES: set[int] = set()
 # shape, so including them turns this guard into a per-step INFO log.
 _FLASHMLA_LOGGED_CONFIGS: set[tuple[int, int, tuple[int, ...], bool]] = set()
 _K3_PACKED_KV_HEAD_SPLITS = (128, 64, 128)
+
+
+@dataclass(frozen=True)
+class _FlashMLAKVTile:
+    q_start: int
+    q_length: int
+    kv_start: int
+    kv_length: int
+    causal: bool
+    qo_indptr: torch.Tensor
+    kv_indptr: torch.Tensor
 
 
 def _workspace(device: torch.device) -> torch.Tensor:
@@ -352,6 +364,25 @@ class MlaFlashMLAPrefillOp:
         self.kv_lens: List[int] = []
         self._direct_attn_inputs: Optional[Any] = None
         self._direct_block_table_width = 0
+        self._chunk_prefill_kv_tile_tokens = 0
+        self._chunk_prefill_kv_tiles: tuple[_FlashMLAKVTile, ...] = ()
+        self._packed_kv_tile_workspace: Optional[torch.Tensor] = None
+
+    def set_chunk_prefill_kv_tile_tokens(self, tile_tokens: int) -> None:
+        """Enable fixed-size KV projection tiles for one whole-chunk session."""
+
+        tile_tokens = int(tile_tokens)
+        if tile_tokens < 0:
+            raise ValueError(
+                f"FlashMLA KV tile size must be non-negative, got {tile_tokens}"
+            )
+        self._chunk_prefill_kv_tile_tokens = tile_tokens
+        self._chunk_prefill_kv_tiles = ()
+        if tile_tokens == 0:
+            workspace = self._packed_kv_tile_workspace
+            if workspace is not None and workspace.is_cuda:
+                workspace.record_stream(torch.cuda.current_stream(workspace.device))
+            self._packed_kv_tile_workspace = None
 
     def plan(self, mla_params: Any) -> None:
         if isinstance(mla_params, FlashMLADeviceParams):
@@ -413,6 +444,89 @@ class MlaFlashMLAPrefillOp:
                 "FlashMLA Q/KV lengths disagree with cache reuse metadata: "
                 f"expected={expected_kv_lens}, actual={self.kv_lens}"
             )
+        self._chunk_prefill_kv_tiles = self._build_chunk_prefill_kv_tiles(
+            prefix_lens,
+            device=self.qo_indptr.device,
+        )
+
+    def _build_chunk_prefill_kv_tiles(
+        self,
+        prefix_lens: List[int],
+        *,
+        device: torch.device,
+    ) -> tuple[_FlashMLAKVTile, ...]:
+        tile_tokens = self._chunk_prefill_kv_tile_tokens
+        if tile_tokens <= 0:
+            return ()
+        if len(prefix_lens) != len(self.q_lens):
+            raise ValueError(
+                "FlashMLA prefix metadata does not match the query batch: "
+                f"prefix={len(prefix_lens)} q={len(self.q_lens)}"
+            )
+
+        tiles: list[_FlashMLAKVTile] = []
+        q_start = 0
+        kv_start = 0
+        for q_length, kv_length, prefix_length in zip(
+            self.q_lens,
+            self.kv_lens,
+            prefix_lens,
+        ):
+            if q_length > tile_tokens:
+                raise ValueError(
+                    "whole-chunk FlashMLA query exceeds its KV tile size: "
+                    f"q={q_length} tile={tile_tokens}"
+                )
+            if prefix_length + q_length != kv_length:
+                raise ValueError(
+                    "FlashMLA tiled prefix/query lengths do not cover KV: "
+                    f"prefix={prefix_length} q={q_length} kv={kv_length}"
+                )
+            for prefix_start in range(0, prefix_length, tile_tokens):
+                tile_length = min(tile_tokens, prefix_length - prefix_start)
+                tiles.append(
+                    self._make_kv_tile(
+                        q_start=q_start,
+                        q_length=q_length,
+                        kv_start=kv_start + prefix_start,
+                        kv_length=tile_length,
+                        causal=False,
+                        device=device,
+                    )
+                )
+            tiles.append(
+                self._make_kv_tile(
+                    q_start=q_start,
+                    q_length=q_length,
+                    kv_start=kv_start + prefix_length,
+                    kv_length=q_length,
+                    causal=True,
+                    device=device,
+                )
+            )
+            q_start += q_length
+            kv_start += kv_length
+        return tuple(tiles)
+
+    @staticmethod
+    def _make_kv_tile(
+        *,
+        q_start: int,
+        q_length: int,
+        kv_start: int,
+        kv_length: int,
+        causal: bool,
+        device: torch.device,
+    ) -> _FlashMLAKVTile:
+        return _FlashMLAKVTile(
+            q_start=q_start,
+            q_length=q_length,
+            kv_start=kv_start,
+            kv_length=kv_length,
+            causal=causal,
+            qo_indptr=torch.tensor([0, q_length], dtype=torch.int32, device=device),
+            kv_indptr=torch.tensor([0, kv_length], dtype=torch.int32, device=device),
+        )
 
     def _gather_reused_kv(
         self,
@@ -489,6 +603,8 @@ class MlaFlashMLAPrefillOp:
         compressed_kv: torch.Tensor,
         k_pe: torch.Tensor,
         layer_id: int,
+        *,
+        packed_output: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         kv_b_proj = LinearFactory.create_linear_from_weights(
             self.weights[layer_id],
@@ -513,9 +629,16 @@ class MlaFlashMLAPrefillOp:
             and getattr(kv_b_proj, "bias", None) is None
             and torch.cuda.get_device_capability(compressed_kv.device)[0] == 10
         ):
-            packed_kv = packed_projection(compressed_kv, head_splits).view(
-                num_tokens, self.num_heads, sum(head_splits)
+            projected = (
+                packed_projection(compressed_kv, head_splits)
+                if packed_output is None
+                else packed_projection(
+                    compressed_kv,
+                    head_splits,
+                    out=packed_output,
+                )
             )
+            packed_kv = projected.view(num_tokens, self.num_heads, sum(head_splits))
             packed_kv[..., self.qk_nope_head_dim : -self.v_head_dim].copy_(
                 k_pe.view(num_tokens, 1, self.qk_rope_head_dim)
             )
@@ -540,6 +663,24 @@ class MlaFlashMLAPrefillOp:
             k_pe.view(num_tokens, 1, self.qk_rope_head_dim)
         )
         return k, value_states
+
+    def _packed_kv_tile_output(self, source: torch.Tensor) -> torch.Tensor:
+        tile_tokens = self._chunk_prefill_kv_tile_tokens
+        if tile_tokens <= 0:
+            raise RuntimeError(
+                "FlashMLA packed KV tile requested outside chunk Prefill"
+            )
+        physical_features = self.num_heads * sum(_K3_PACKED_KV_HEAD_SPLITS)
+        workspace = self._packed_kv_tile_workspace
+        if (
+            workspace is None
+            or workspace.shape != (tile_tokens, physical_features)
+            or workspace.dtype != source.dtype
+            or workspace.device != source.device
+        ):
+            workspace = source.new_empty(tile_tokens, physical_features)
+            self._packed_kv_tile_workspace = workspace
+        return workspace
 
     def _dense_attention(
         self,
@@ -579,6 +720,114 @@ class MlaFlashMLAPrefillOp:
         )
         return out
 
+    def _dense_attention_tile(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        value_states: torch.Tensor,
+        tile: _FlashMLAKVTile,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        out = torch.empty(
+            tile.q_length,
+            self.num_heads,
+            self.v_head_dim,
+            dtype=q.dtype,
+            device=q.device,
+        )
+        lse = torch.empty(
+            self.num_heads,
+            tile.q_length,
+            dtype=torch.float32,
+            device=q.device,
+        ).transpose(0, 1)
+        self.flash_mla_cuda.dense_prefill_fwd(
+            _workspace(q.device),
+            q,
+            k,
+            value_states,
+            tile.qo_indptr,
+            tile.kv_indptr,
+            out,
+            lse,
+            1 if tile.causal else 0,
+            self.scale,
+            tile.q_length,
+            tile.kv_length,
+            True,
+        )
+        # FlashMLA writes natural-log LSE through the transposed [query, head]
+        # view expected by its kernel. Materialize the contiguous logical view
+        # only on the tiled path where the LSE is consumed.
+        return out, lse.contiguous()
+
+    @staticmethod
+    def _merge_attention_state_in_place(
+        output_a: torch.Tensor,
+        lse_a: torch.Tensor,
+        output_b: torch.Tensor,
+        lse_b: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Merge two disjoint KV attention states without another large output."""
+
+        merged_lse = torch.logaddexp(lse_a, lse_b)
+        weight_a = torch.exp(lse_a - merged_lse)
+        output_b.lerp_(output_a, weight_a.to(output_b.dtype).unsqueeze(-1))
+        lse_b.copy_(merged_lse)
+        return output_b, lse_b
+
+    def _forward_chunk_prefill_kv_tiles(
+        self,
+        q: torch.Tensor,
+        compressed_kv: torch.Tensor,
+        k_pe: torch.Tensor,
+        layer_id: int,
+    ) -> torch.Tensor:
+        if not self._chunk_prefill_kv_tiles:
+            raise RuntimeError("FlashMLA chunk Prefill has no KV tile plan")
+
+        packed_workspace = self._packed_kv_tile_output(compressed_kv)
+        outputs: list[torch.Tensor] = []
+        tile_index = 0
+        while tile_index < len(self._chunk_prefill_kv_tiles):
+            first = self._chunk_prefill_kv_tiles[tile_index]
+            q_slice = q.narrow(0, first.q_start, first.q_length)
+            merged_out: Optional[torch.Tensor] = None
+            merged_lse: Optional[torch.Tensor] = None
+            while (
+                tile_index < len(self._chunk_prefill_kv_tiles)
+                and self._chunk_prefill_kv_tiles[tile_index].q_start == first.q_start
+            ):
+                tile = self._chunk_prefill_kv_tiles[tile_index]
+                compressed_tile = compressed_kv.narrow(0, tile.kv_start, tile.kv_length)
+                k_pe_tile = k_pe.narrow(0, tile.kv_start, tile.kv_length)
+                packed_output = packed_workspace.narrow(0, 0, tile.kv_length)
+                k, value_states = self._project_kv(
+                    compressed_tile,
+                    k_pe_tile,
+                    layer_id,
+                    packed_output=packed_output,
+                )
+                tile_out, tile_lse = self._dense_attention_tile(
+                    q_slice,
+                    k,
+                    value_states,
+                    tile,
+                )
+                if merged_out is None:
+                    merged_out, merged_lse = tile_out, tile_lse
+                else:
+                    assert merged_lse is not None
+                    merged_out, merged_lse = self._merge_attention_state_in_place(
+                        merged_out,
+                        merged_lse,
+                        tile_out,
+                        tile_lse,
+                    )
+                tile_index += 1
+            assert merged_out is not None
+            outputs.append(merged_out)
+        return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=0)
+
     def forward(
         self,
         q: torch.Tensor,
@@ -595,8 +844,16 @@ class MlaFlashMLAPrefillOp:
                 "FlashMLA gathered KV length disagrees with kv_indptr: "
                 f"tensor={compressed_kv.shape[0]}, indptr={self.total_kv_lens}"
             )
-        k, value_states = self._project_kv(compressed_kv, k_pe, layer_id)
-        out = self._dense_attention(q, k, value_states)
+        if self._chunk_prefill_kv_tile_tokens > 0:
+            out = self._forward_chunk_prefill_kv_tiles(
+                q,
+                compressed_kv,
+                k_pe,
+                layer_id,
+            )
+        else:
+            k, value_states = self._project_kv(compressed_kv, k_pe, layer_id)
+            out = self._dense_attention(q, k, value_states)
 
         device_index = q.device.index if q.device.index is not None else 0
         if device_index not in _FLASHMLA_LOGGED_DEVICES:

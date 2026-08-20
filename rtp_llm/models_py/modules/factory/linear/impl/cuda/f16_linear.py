@@ -93,6 +93,7 @@ class CudaF16Linear(LinearBase):
         self,
         input: torch.Tensor,
         head_splits: Tuple[int, int, int],
+        out: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Run one BF16 GEMM into ``[left | mid gap | right]`` per head."""
         self._validate_skip_head_mid_input(input, head_splits)
@@ -101,7 +102,24 @@ class CudaF16Linear(LinearBase):
         logical_head_dim = left + right
         num_heads = output_features // logical_head_dim
         physical_features = num_heads * (left + mid + right)
-        output = input.new_empty((input.shape[0], physical_features))
+        expected_shape = (input.shape[0], physical_features)
+        if out is None:
+            output = input.new_empty(expected_shape)
+        else:
+            if (
+                out.shape != expected_shape
+                or out.dtype != input.dtype
+                or out.device != input.device
+                or not out.is_contiguous()
+            ):
+                raise ValueError(
+                    "bf16_gemm_nt_skip_head_mid output must be contiguous and "
+                    f"match shape={expected_shape}, dtype={input.dtype}, "
+                    f"device={input.device}; got shape={tuple(out.shape)}, "
+                    f"dtype={out.dtype}, device={out.device}, "
+                    f"contiguous={out.is_contiguous()}"
+                )
+            output = out
 
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
             bf16_gemm_nt_skip_head_mid,

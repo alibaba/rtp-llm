@@ -1,8 +1,16 @@
 import os
 import sys
+import tempfile
 import unittest
 from typing import Sequence
 from unittest import mock
+
+os.environ.setdefault("HOME", "/tmp")
+os.environ.setdefault(
+    "DG_JIT_CACHE_DIR",
+    os.path.join(tempfile.gettempdir(), f"deep_gemm_jit_{os.getuid()}_{os.getpid()}"),
+)
+os.makedirs(os.environ["DG_JIT_CACHE_DIR"], exist_ok=True)
 
 _LOCAL_DEEP_GEMM_PATH = os.environ.get("RTP_LOCAL_DEEP_GEMM_PATH")
 if _LOCAL_DEEP_GEMM_PATH:
@@ -11,6 +19,7 @@ if _LOCAL_DEEP_GEMM_PATH:
 import torch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_dense_prefill import (
+    FlashMLADeviceParams,
     MlaFlashMLAPrefillOp,
 )
 from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
@@ -45,6 +54,11 @@ class FlashMLADensePrefillPackedKVTest(unittest.TestCase):
         op.v_head_dim = 128
         op.weights = [{}]
         op.quant_config = None
+        op._direct_attn_inputs = None
+        op._direct_block_table_width = 0
+        op._chunk_prefill_kv_tile_tokens = 0
+        op._chunk_prefill_kv_tiles = ()
+        op._packed_kv_tile_workspace = None
         return op
 
     def _assert_close_chunked(
@@ -219,6 +233,7 @@ class FlashMLADensePrefillPackedKVTest(unittest.TestCase):
                 packed_k, packed_v = op._project_kv(
                     gathered_compressed, gathered_k_pe, 0
                 )
+        self.assertIsNone(op._packed_kv_tile_workspace)
 
         self._assert_close_chunked(packed_k, reference_k)
         self._assert_close_chunked(packed_v, reference_v)
@@ -290,6 +305,49 @@ class FlashMLADensePrefillPackedKVTest(unittest.TestCase):
             [final_slice.absolute_start],
         )
 
+    def test_long_prefix_is_partitioned_into_chunk_sized_kv_tiles(self) -> None:
+        op = self._make_op()
+        q_len = 32768
+        prefix_len = 491520
+        kv_len = q_len + prefix_len
+        params = FlashMLADeviceParams(
+            attn_inputs=None,
+            q_lens_host=[q_len],
+            kv_lens_host=[kv_len],
+            prefix_lens_host=[prefix_len],
+            qo_indptr_d=torch.tensor([0, q_len], device="cuda", dtype=torch.int32),
+            kv_indptr_d=torch.tensor([0, kv_len], device="cuda", dtype=torch.int32),
+            positions_d=torch.empty(0, device="cuda", dtype=torch.int32),
+            batch_indice_d=torch.empty(0, device="cuda", dtype=torch.int32),
+            reuse_cache_page_indice_d=torch.empty(
+                0, device="cuda", dtype=torch.int32
+            ),
+            batch_reuse_info_vec_d=torch.empty(
+                0, device="cuda", dtype=torch.int32
+            ),
+            block_table_width=0,
+        )
+
+        op.set_chunk_prefill_kv_tile_tokens(q_len)
+        op.plan(params)
+
+        self.assertEqual(op.total_kv_lens, kv_len)
+        self.assertEqual(len(op._chunk_prefill_kv_tiles), 16)
+        self.assertTrue(
+            all(tile.kv_length <= q_len for tile in op._chunk_prefill_kv_tiles)
+        )
+        self.assertTrue(
+            all(not tile.causal for tile in op._chunk_prefill_kv_tiles[:-1])
+        )
+        self.assertTrue(op._chunk_prefill_kv_tiles[-1].causal)
+        self.assertEqual(op._chunk_prefill_kv_tiles[-1].kv_length, q_len)
+        self.assertIsNone(op._packed_kv_tile_workspace)
+
+        op.set_chunk_prefill_kv_tile_tokens(0)
+        op.plan(params)
+        self.assertEqual(op._chunk_prefill_kv_tiles, ())
+        self.assertIsNone(op._packed_kv_tile_workspace)
+
     def test_project_kv_and_attention_match_reference(self) -> None:
         torch.manual_seed(456)
         tokens = 257
@@ -327,10 +385,21 @@ class FlashMLADensePrefillPackedKVTest(unittest.TestCase):
         reference_k[..., op.qk_nope_head_dim :].copy_(k_pe.view(tokens, 1, -1))
         reference_v = reference_kv[..., op.qk_nope_head_dim :]
 
-        with mock.patch.object(
-            LinearFactory, "create_linear_from_weights", return_value=linear
+        with (
+            mock.patch.object(
+                linear,
+                "forward_skip_head_mid",
+                wraps=linear.forward_skip_head_mid,
+            ) as packed_projection,
+            mock.patch.object(
+                LinearFactory, "create_linear_from_weights", return_value=linear
+            ),
         ):
             packed_k, packed_v = op._project_kv(compressed_kv, k_pe, 0)
+
+        packed_projection.assert_called_once()
+        self.assertNotIn("out", packed_projection.call_args.kwargs)
+        self.assertIsNone(op._packed_kv_tile_workspace)
 
         torch.testing.assert_close(packed_k, reference_k, rtol=0, atol=0)
         torch.testing.assert_close(packed_v, reference_v, rtol=0, atol=0)
@@ -373,6 +442,99 @@ class FlashMLADensePrefillPackedKVTest(unittest.TestCase):
         reference_out = op._dense_attention(q, reference_k, reference_v)
         packed_out = op._dense_attention(q, packed_k, packed_v)
         torch.testing.assert_close(packed_out, reference_out, rtol=0, atol=0)
+
+    def test_chunk_prefill_tiles_match_full_kv_attention(self) -> None:
+        torch.manual_seed(654)
+        op = self._make_op()
+        op.num_heads = 96
+        op.page_size = 128
+        op.scale = (op.qk_nope_head_dim + op.qk_rope_head_dim) ** -0.5
+        q_len = 128
+        prefix_len = 512
+        kv_len = prefix_len + q_len
+        tile_tokens = 128
+
+        import flash_mla.cuda as flash_mla_cuda
+
+        op.flash_mla_cuda = flash_mla_cuda
+        op.q_lens = [q_len]
+        op.kv_lens = [kv_len]
+        op.qo_indptr = torch.tensor([0, q_len], device="cuda", dtype=torch.int32)
+        op.kv_indptr = torch.tensor([0, kv_len], device="cuda", dtype=torch.int32)
+        op.max_q_len = q_len
+        op.max_kv_len = kv_len
+        op.total_kv_lens = kv_len
+        op.set_chunk_prefill_kv_tile_tokens(tile_tokens)
+        op._chunk_prefill_kv_tiles = op._build_chunk_prefill_kv_tiles(
+            [prefix_len],
+            device=op.qo_indptr.device,
+        )
+
+        q = torch.randn(
+            (q_len, op.num_heads, op.qk_nope_head_dim + op.qk_rope_head_dim),
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        compressed_kv = torch.randn(
+            (kv_len, op.kv_lora_rank), device="cuda", dtype=torch.bfloat16
+        )
+        k_pe = torch.randn(
+            (kv_len, op.qk_rope_head_dim), device="cuda", dtype=torch.bfloat16
+        )
+        checkpoint_weight = torch.randn(
+            (
+                op.kv_lora_rank,
+                op.num_heads * (op.qk_nope_head_dim + op.v_head_dim),
+            ),
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        linear = CudaF16Linear(checkpoint_weight)
+
+        with mock.patch.object(
+            LinearFactory, "create_linear_from_weights", return_value=linear
+        ):
+            full_k, full_v = op._project_kv(compressed_kv, k_pe, 0)
+            reference = op._dense_attention(q, full_k, full_v)
+            tiled_reference = None
+            tiled_reference_lse = None
+            for tile in op._chunk_prefill_kv_tiles:
+                tile_k = full_k.narrow(0, tile.kv_start, tile.kv_length)
+                tile_v = full_v.narrow(0, tile.kv_start, tile.kv_length)
+                tile_out, tile_lse = op._dense_attention_tile(
+                    q,
+                    tile_k,
+                    tile_v,
+                    tile,
+                )
+                if tiled_reference is None:
+                    tiled_reference = tile_out
+                    tiled_reference_lse = tile_lse
+                else:
+                    tiled_reference, tiled_reference_lse = (
+                        op._merge_attention_state_in_place(
+                            tiled_reference,
+                            tiled_reference_lse,
+                            tile_out,
+                            tile_lse,
+                        )
+                    )
+            actual = op._forward_chunk_prefill_kv_tiles(
+                q,
+                compressed_kv,
+                k_pe,
+                0,
+            )
+
+        self.assertIsNotNone(tiled_reference)
+        torch.testing.assert_close(
+            tiled_reference, reference, rtol=3e-2, atol=5e-1
+        )
+        self.assertEqual(
+            op._packed_kv_tile_workspace.shape,
+            (tile_tokens, op.num_heads * sum((128, 64, 128))),
+        )
+        torch.testing.assert_close(actual, tiled_reference, rtol=3e-2, atol=5e-1)
 
     def test_project_kv_keeps_linear_implementations_without_packed_api(
         self,

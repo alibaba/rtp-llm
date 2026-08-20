@@ -150,6 +150,10 @@ public:
     virtual void            releaseBuffers() {}
     virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
 
+    // Best-effort cleanup for executor-orchestrated Prefill sessions. The
+    // default model is stateless across calls.
+    virtual void abortPrefillChunkSession() noexcept {}
+
     // Refresh only kv_cache_kernel_block_id-dependent state on a previously-
     // prepared attention_inputs_ (e.g., after an MTP propose+verify re-gather).
     // No-op when no attention inputs have been prepared yet.

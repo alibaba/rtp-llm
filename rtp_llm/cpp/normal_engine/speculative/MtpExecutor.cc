@@ -27,6 +27,7 @@
 #endif
 #include "autil/TimeUtility.h"
 #include <algorithm>
+#include <cerrno>
 #include <limits>
 #include <cstdlib>
 #include <memory>
@@ -44,6 +45,55 @@ bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* labe
     const bool  on  = (env != nullptr && std::string(env) == "1");
     RTP_LLM_LOG_INFO("[%s] %s=%s -> %s=%d", log_tag, env_name, env ? env : "(unset)", label, static_cast<int>(on));
     return on;
+}
+
+size_t configuredK3PrefillChunkTokens() {
+    const char* raw = std::getenv("KIMI_K3_PREFILL_CHUNK_TOKENS");
+    if (raw == nullptr || *raw == '\0') {
+        return 0;
+    }
+    char* end        = nullptr;
+    errno            = 0;
+    const auto value = std::strtoll(raw, &end, 10);
+    RTP_LLM_CHECK_WITH_INFO(errno == 0 && end != raw && *end == '\0' && value >= 0,
+                            "KIMI_K3_PREFILL_CHUNK_TOKENS must be a non-negative integer, got [%s]",
+                            raw);
+    return static_cast<size_t>(value);
+}
+
+bool isK3Eagle3PrefillChunkingEnabled() {
+    const char* sp_type = std::getenv("SP_TYPE");
+    return configuredK3PrefillChunkTokens() > 0 && sp_type != nullptr && std::string(sp_type) == "eagle3";
+}
+
+torch::Tensor narrowTokenAlignedTensor(
+    const torch::Tensor& tensor, size_t total_tokens, size_t start, size_t length, const char* field_name) {
+    if (!tensor.defined() || tensor.numel() == 0) {
+        return tensor;
+    }
+    RTP_LLM_CHECK_WITH_INFO(tensor.dim() > 0 && static_cast<size_t>(tensor.size(0)) == total_tokens,
+                            "K3 chunk Prefill requires token-aligned %s: first_dim=%ld total_tokens=%ld",
+                            field_name,
+                            tensor.dim() > 0 ? tensor.size(0) : -1,
+                            total_tokens);
+    return tensor.narrow(0, start, length);
+}
+
+// Select rows along a batch dimension. Undefined input stays undefined; an
+// empty index set produces an empty first-dim tensor via index_select.
+torch::Tensor selectBatchRows(const torch::Tensor& tensor, const torch::Tensor& indices, int64_t batch_dim) {
+    if (!tensor.defined()) {
+        return tensor;
+    }
+    const auto long_indices = indices.to(torch::TensorOptions(tensor.device()).dtype(torch::kLong));
+    return tensor.index_select(batch_dim, long_indices);
+}
+
+torch::Tensor catDefinedTokenParts(const std::vector<torch::Tensor>& parts) {
+    if (parts.empty() || !parts.front().defined()) {
+        return torch::Tensor();
+    }
+    return torch::cat(parts, 0);
 }
 
 bool debugTargetVerifyInputEnabled() {
@@ -193,7 +243,302 @@ void applySpecLogitsAcceptLenCap(const SamplerInputs&                   sampler_
     }
 }
 
+// Convert the Python planner's KimiK3ChunkRound (a dataclass holding a
+// ``slices`` tuple of KimiK3ChunkSlice) into the C++ carrier struct. The
+// Python planner is authoritative for round scheduling; the executor only
+// needs the packed offsets and lengths to materialize round inputs.
+KimiK3ChunkRound parsePyK3ChunkRound(const py::object& round_plan) {
+    KimiK3ChunkRound round;
+    const py::object  slices = round_plan.attr("slices");
+    for (const auto& slice_obj : slices) {
+        KimiK3ChunkSlice slice;
+        slice.original_batch_idx = slice_obj.attr("original_batch_idx").cast<int>();
+        slice.source_start       = slice_obj.attr("source_start").cast<int>();
+        slice.source_end         = slice_obj.attr("source_end").cast<int>();
+        slice.new_length         = slice_obj.attr("new_length").cast<int>();
+        slice.absolute_start     = slice_obj.attr("absolute_start").cast<int>();
+        slice.absolute_end       = slice_obj.attr("absolute_end").cast<int>();
+        slice.terminal           = slice_obj.attr("terminal").cast<bool>();
+        round.slices.push_back(slice);
+    }
+    return round;
+}
+
 }  // namespace
+
+GptModelInputs MtpExecutor::makePrefillRoundInput(const GptModelInputs& full_inputs,
+                                                  const KimiK3ChunkRound& round,
+                                                  size_t total_tokens) {
+    RTP_LLM_CHECK_WITH_INFO(!round.slices.empty(), "K3 MTP chunk Prefill round must not be empty");
+    RTP_LLM_CHECK_WITH_INFO(full_inputs.combo_tokens.defined(), "K3 MTP chunk Prefill requires combo_tokens");
+    const size_t request_count = static_cast<size_t>(full_inputs.input_lengths.numel());
+
+    std::vector<torch::Tensor> token_parts;
+    std::vector<torch::Tensor> token_host_parts;
+    std::vector<torch::Tensor> type_id_parts;
+    std::vector<torch::Tensor> position_id_parts;
+    std::vector<torch::Tensor> text_mask_parts;
+    std::vector<int32_t>       batch_indices;
+    std::vector<int32_t>       round_input_lengths;
+    std::vector<int32_t>       round_prefix_lengths;
+    std::vector<int32_t>       lm_output_indexes;
+    token_parts.reserve(round.slices.size());
+    int32_t packed_offset = 0;
+    for (const auto& slice : round.slices) {
+        RTP_LLM_CHECK_WITH_INFO(slice.original_batch_idx >= 0
+                                    && static_cast<size_t>(slice.original_batch_idx) < request_count
+                                    && slice.new_length > 0 && slice.source_start >= 0
+                                    && slice.source_end - slice.source_start == slice.new_length
+                                    && static_cast<size_t>(slice.source_end) <= total_tokens,
+                                "K3 MTP chunk Prefill round contains an invalid slice");
+        token_parts.push_back(full_inputs.combo_tokens.narrow(0, slice.source_start, slice.new_length));
+        token_host_parts.push_back(narrowTokenAlignedTensor(full_inputs.combo_tokens_host_for_log,
+                                                            total_tokens,
+                                                            slice.source_start,
+                                                            slice.new_length,
+                                                            "combo_tokens_host_for_log"));
+        type_id_parts.push_back(narrowTokenAlignedTensor(
+            full_inputs.combo_tokens_type_ids, total_tokens, slice.source_start, slice.new_length,
+            "combo_tokens_type_ids"));
+        position_id_parts.push_back(narrowTokenAlignedTensor(
+            full_inputs.combo_position_ids, total_tokens, slice.source_start, slice.new_length, "combo_position_ids"));
+        text_mask_parts.push_back(narrowTokenAlignedTensor(
+            full_inputs.text_tokens_mask, total_tokens, slice.source_start, slice.new_length, "text_tokens_mask"));
+        batch_indices.push_back(slice.original_batch_idx);
+        round_input_lengths.push_back(slice.new_length);
+        round_prefix_lengths.push_back(slice.absolute_start);
+        if (slice.terminal) {
+            lm_output_indexes.push_back(packed_offset + slice.new_length - 1);
+        }
+        packed_offset += slice.new_length;
+    }
+    GptModelInputs chunk = full_inputs;
+    chunk.combo_tokens   = torch::cat(token_parts, 0);
+    chunk.combo_tokens_host_for_log = catDefinedTokenParts(token_host_parts);
+    chunk.combo_tokens_type_ids     = catDefinedTokenParts(type_id_parts);
+    chunk.combo_position_ids        = catDefinedTokenParts(position_id_parts);
+    chunk.text_tokens_mask          = catDefinedTokenParts(text_mask_parts);
+
+    const auto device_i32 = torch::TensorOptions().dtype(torch::kInt32).device(full_inputs.combo_tokens.device());
+    const auto host_i32   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
+    chunk.input_lengths   = torch::tensor(round_input_lengths, device_i32);
+    chunk.prefix_lengths  = torch::tensor(round_prefix_lengths, device_i32);
+    chunk.sequence_lengths  = torch::empty({0}, device_i32);
+    chunk.lm_output_indexes = torch::tensor(lm_output_indexes, device_i32);
+    chunk.input_lengths_host_for_log    = torch::tensor(round_input_lengths, host_i32);
+    chunk.prefix_lengths_host_for_log   = torch::tensor(round_prefix_lengths, host_i32);
+    chunk.sequence_lengths_host_for_log = torch::empty({0}, host_i32);
+    chunk.cache_store_publish_plan.reset();
+
+    // Select the per-request cache/store metadata rows for this round.
+    const auto index_options = torch::TensorOptions().dtype(torch::kInt64).device(full_inputs.combo_tokens.device());
+    const std::vector<int64_t> batch_indices_64(batch_indices.begin(), batch_indices.end());
+    auto indices = torch::tensor(batch_indices_64, index_options);
+    const auto& block_table_ref =
+        full_inputs.kv_cache_block_id.defined() ? full_inputs.kv_cache_block_id : full_inputs.kv_cache_block_id_host;
+    const int64_t block_batch_dim = block_table_ref.defined() && block_table_ref.dim() == 3 ? 1 : 0;
+    chunk.kv_cache_block_id       = selectBatchRows(full_inputs.kv_cache_block_id, indices, block_batch_dim);
+    chunk.kv_cache_block_id_host  = selectBatchRows(full_inputs.kv_cache_block_id_host, indices, block_batch_dim);
+    const auto& kernel_table_ref  = full_inputs.kv_cache_kernel_block_id.defined() ?
+                                        full_inputs.kv_cache_kernel_block_id :
+                                        full_inputs.kv_cache_kernel_block_id_host;
+    const int64_t kernel_batch_dim = kernel_table_ref.defined() && kernel_table_ref.dim() == 3 ? 1 : 0;
+    chunk.kv_cache_kernel_block_id = selectBatchRows(full_inputs.kv_cache_kernel_block_id, indices, kernel_batch_dim);
+    chunk.kv_cache_kernel_block_id_host =
+        selectBatchRows(full_inputs.kv_cache_kernel_block_id_host, indices, kernel_batch_dim);
+    chunk.request_id            = selectBatchRows(full_inputs.request_id, indices, 0);
+    chunk.request_pd_separation = selectBatchRows(full_inputs.request_pd_separation, indices, 0);
+    chunk.cache_keys            = selectBatchRows(full_inputs.cache_keys, indices, 0);
+
+    chunk.last_hidden_states     = torch::Tensor();
+    chunk.is_prefill_chunk       = true;
+    chunk.prefill_chunk_kv_length = static_cast<size_t>(round.kv_length());
+    return chunk;
+}
+
+void MtpExecutor::setPrefillChunkCacheStorePublishPlan(GptModelInputs&          chunk_input,
+                                                       const KimiK3ChunkRound& round,
+                                                       size_t                  seq_size_per_block,
+                                                       bool                    complete_blocks_only) {
+    RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0, "K3 MTP chunk cache-store block size must be positive");
+    RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(chunk_input.input_lengths.numel()) == round.slices.size()
+                                && static_cast<size_t>(chunk_input.prefix_lengths.numel()) == round.slices.size(),
+                            "K3 MTP chunk cache-store range size mismatch: input=%ld prefix=%ld slices=%zu",
+                            chunk_input.input_lengths.numel(),
+                            chunk_input.prefix_lengths.numel(),
+                            round.slices.size());
+
+    const int64_t block_size = static_cast<int64_t>(seq_size_per_block);
+    std::vector<int32_t> begin_blocks;
+    std::vector<int32_t> end_blocks;
+    std::vector<uint8_t> terminal;
+    begin_blocks.reserve(round.slices.size());
+    end_blocks.reserve(round.slices.size());
+    terminal.reserve(round.slices.size());
+    for (const auto& slice : round.slices) {
+        RTP_LLM_CHECK_WITH_INFO(slice.absolute_start >= 0 && slice.absolute_end > slice.absolute_start,
+                                "K3 MTP chunk cache-store received invalid absolute range [%d, %d)",
+                                slice.absolute_start,
+                                slice.absolute_end);
+        const int64_t begin_block = static_cast<int64_t>(slice.absolute_start) / block_size;
+        const int64_t end_block   = complete_blocks_only ?
+                                        static_cast<int64_t>(slice.absolute_end) / block_size :
+                                        (static_cast<int64_t>(slice.absolute_end) + block_size - 1) / block_size;
+        RTP_LLM_CHECK_WITH_INFO(end_block >= begin_block && end_block <= std::numeric_limits<int32_t>::max(),
+                                "K3 MTP chunk cache-store produced invalid block range [%ld, %ld)",
+                                begin_block,
+                                end_block);
+        begin_blocks.push_back(static_cast<int32_t>(begin_block));
+        end_blocks.push_back(static_cast<int32_t>(end_block));
+        terminal.push_back(slice.terminal ? 1 : 0);
+    }
+
+    const auto host_i32  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
+    const auto host_bool = torch::TensorOptions().dtype(torch::kBool).device(torch::kCPU);
+    auto       terminal_host = torch::empty({static_cast<int64_t>(terminal.size())}, host_bool);
+    auto*      terminal_data = terminal_host.data_ptr<bool>();
+    for (size_t index = 0; index < terminal.size(); ++index) {
+        terminal_data[index] = terminal[index] != 0;
+    }
+    chunk_input.cache_store_publish_plan = CacheStorePublishPlan{torch::tensor(begin_blocks, host_i32),
+                                                                 torch::tensor(end_blocks, host_i32),
+                                                                 std::move(terminal_host)};
+}
+
+void MtpExecutor::shiftRoundComboTokens(GptModelInputs&         chunk_input,
+                                        const GptModelInputs&   full_inputs,
+                                        const KimiK3ChunkRound& round) {
+    // Draft position p consumes target token p + 1, so each slice keeps N
+    // tokens: N - 1 shifted rows plus the first token of the next slice as
+    // lookahead. This also makes the draft KV store write every position
+    // [absolute_start, absolute_end) exactly once across rounds.
+    const size_t total_tokens = static_cast<size_t>(full_inputs.combo_tokens.size(0));
+    std::vector<torch::Tensor> token_parts;
+    std::vector<torch::Tensor> host_parts;
+    token_parts.reserve(round.slices.size());
+    host_parts.reserve(round.slices.size());
+    for (const auto& slice : round.slices) {
+        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(slice.source_start) + 1 + slice.new_length <= total_tokens,
+                                "K3 MTP chunk Prefill draft shift overruns the packed token count");
+        token_parts.push_back(full_inputs.combo_tokens.narrow(0, slice.source_start + 1, slice.new_length));
+        host_parts.push_back(narrowTokenAlignedTensor(full_inputs.combo_tokens_host_for_log,
+                                                      total_tokens,
+                                                      slice.source_start + 1,
+                                                      slice.new_length,
+                                                      "draft_combo_tokens_host_for_log"));
+    }
+    chunk_input.combo_tokens            = torch::cat(token_parts, 0);
+    chunk_input.combo_tokens_host_for_log = catDefinedTokenParts(host_parts);
+}
+
+torch::Tensor MtpExecutor::buildDraftCacheGroupTypes(const CacheConfig&      global_cache_config,
+                                                     const CacheLayerLayout& draft_cache_layer_layout) {
+    RTP_LLM_CHECK_WITH_INFO(draft_cache_layer_layout.layer_to_groups.size()
+                                == draft_cache_layer_layout.layer_group_types.size(),
+                            "draft cache layer group metadata size mismatch: ids=%zu types=%zu",
+                            draft_cache_layer_layout.layer_to_groups.size(),
+                            draft_cache_layer_layout.layer_group_types.size());
+
+    size_t group_count = global_cache_config.group_types.size();
+    if (group_count == 0) {
+        // Single-type cache configs use an empty group_types vector and an
+        // implicit FULL group 0.  Preserve that legacy representation while
+        // still making room for the global ids carried by the layer layout.
+        group_count = 1;
+        for (const int global_group_id : draft_cache_layer_layout.layer_to_groups) {
+            if (global_group_id >= 0) {
+                group_count = std::max(group_count, static_cast<size_t>(global_group_id) + 1);
+            }
+        }
+    }
+    auto group_types =
+        torch::full({static_cast<int64_t>(group_count)}, static_cast<int32_t>(CacheGroupType::FULL), torch::kInt32)
+            .pin_memory();
+    auto* group_types_data = group_types.data_ptr<int32_t>();
+    for (size_t group_id = 0; group_id < global_cache_config.group_types.size(); ++group_id) {
+        group_types_data[group_id] = static_cast<int32_t>(global_cache_config.group_types[group_id]);
+    }
+
+    for (size_t layer_id = 0; layer_id < draft_cache_layer_layout.layer_to_groups.size(); ++layer_id) {
+        const int global_group_id = draft_cache_layer_layout.layer_to_groups[layer_id];
+        RTP_LLM_CHECK_WITH_INFO(global_group_id >= 0 && static_cast<size_t>(global_group_id) < group_count,
+                                "draft cache layer %zu has invalid global group id %d (global group count=%zu)",
+                                layer_id,
+                                global_group_id,
+                                group_count);
+        group_types_data[global_group_id] = static_cast<int32_t>(draft_cache_layer_layout.layer_group_types[layer_id]);
+    }
+    return group_types;
+}
+
+void MtpExecutor::runK3ChunkPrefillRound(K3ChunkPrefillHook& hook, const KimiK3ChunkRound& round, bool is_last) {
+    KimiK3ChunkRound draft_round;
+    for (const auto& slice : round.slices) {
+        RTP_LLM_CHECK_WITH_INFO(slice.original_batch_idx >= 0
+                                    && static_cast<size_t>(slice.original_batch_idx) < hook.terminal_seen.size(),
+                                "K3 MTP chunk Prefill slice has invalid request index %d",
+                                slice.original_batch_idx);
+        if (!slice.terminal) {
+            draft_round.slices.push_back(slice);
+            continue;
+        }
+
+        const size_t request_idx = static_cast<size_t>(slice.original_batch_idx);
+        RTP_LLM_CHECK_WITH_INFO(!hook.terminal_seen[request_idx],
+                                "K3 MTP chunk Prefill request %zu became terminal more than once",
+                                request_idx);
+        hook.terminal_seen[request_idx] = true;
+
+        // A terminal slice has no in-request lookahead for its final position.
+        // Publish its first N-1 draft positions now, then defer exactly the
+        // last position until the sampled target token is available.
+        if (slice.new_length > 1) {
+            auto prefix_slice = slice;
+            prefix_slice.new_length -= 1;
+            prefix_slice.source_end -= 1;
+            prefix_slice.absolute_end -= 1;
+            prefix_slice.terminal = false;
+            draft_round.slices.push_back(prefix_slice);
+        }
+        auto terminal_slice           = slice;
+        terminal_slice.source_start   = slice.source_end - 1;
+        terminal_slice.new_length     = 1;
+        terminal_slice.absolute_start = slice.absolute_end - 1;
+        hook.terminal_round.slices.push_back(terminal_slice);
+    }
+
+    if (is_last) {
+        RTP_LLM_CHECK_WITH_INFO(
+            std::all_of(hook.terminal_seen.begin(), hook.terminal_seen.end(), [](bool seen) { return seen; }),
+            "K3 MTP chunk Prefill final planner round left a request unterminated");
+    }
+    if (hook.full_inputs.force_disable_sp_run || draft_round.slices.empty()) {
+        return;
+    }
+
+    GptModelInputs chunk_input = makePrefillRoundInput(hook.full_inputs, draft_round, hook.total_tokens);
+    shiftRoundComboTokens(chunk_input, hook.full_inputs, draft_round);
+
+    const auto& draft_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
+    chunk_input.kv_block_stride_bytes        = draft_cache_cfg.kv_block_stride_bytes;
+    chunk_input.kv_scale_stride_bytes        = draft_cache_cfg.kv_scale_stride_bytes;
+    chunk_input.seq_size_per_block           = draft_cache_cfg.seq_size_per_block;
+    chunk_input.kernel_seq_size_per_block    = draft_cache_cfg.kernel_seq_size_per_block;
+    chunk_input.kv_cache_layer_to_group      = draft_kv_cache_layer_to_group;
+    chunk_input.kv_cache_layer_to_group_host = draft_kv_cache_layer_to_group;
+    chunk_input.kv_cache_group_types         = draft_kv_cache_group_types;
+    chunk_input.kv_cache_group_types_host    = draft_kv_cache_group_types;
+    // A terminal slice's N-1 prefix may end inside a physical block. Do not
+    // publish that incomplete block before the sampled final token is written.
+    setPrefillChunkCacheStorePublishPlan(
+        chunk_input, draft_round, draft_cache_cfg.seq_size_per_block, /*complete_blocks_only=*/true);
+    maybeOverrideLastHiddenWithMtpBuffer(chunk_input, *model_);
+
+    maybePrintModelInput(chunk_input, "prefill round draft model");
+    int64_t draft_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    draft_model_->forward(chunk_input);
+    *hook.model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - draft_start_us;
+}
 
 bool MtpExecutor::isTpRank0() const {
     return tp_rank_ == 0;
@@ -683,6 +1028,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         torch::empty({(int64_t)target_cache_layer_layout.layers_to_kv_buffer_ptrs.size()}, torch::kInt32).pin_memory();
     draft_kv_cache_layer_to_group =
         torch::empty({(int64_t)draft_cache_layer_layout.layers_to_kv_buffer_ptrs.size()}, torch::kInt32).pin_memory();
+    draft_kv_cache_group_types = buildDraftCacheGroupTypes(target_cache_config, draft_cache_layer_layout);
 
     memcpy(target_kv_cache_layer_to_group.data_ptr<int>(),
            target_cache_layer_layout.layer_to_groups.data(),
@@ -690,7 +1036,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     memcpy(draft_kv_cache_layer_to_group.data_ptr<int>(),
            draft_cache_layer_layout.layer_to_groups.data(),
            draft_cache_layer_layout.layer_to_groups.size() * sizeof(int));
-
     const auto& draft_weights = propose_params->getEngineInitParams().gpt_weights;
     d2t_map_                  = draft_model_ ? draft_model_->weights_.d2t_map : draft_weights.d2t_map;
     speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_));
@@ -829,47 +1174,234 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         saved_input_lengths = toCudaWithHostHold(model_input.input_lengths, buffer_holder_);
     }
 
-    // target model prefill
-    {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_forward)");
-        maybePrintModelInput(model_input, "prefill target model");
-        int64_t start_time_us               = autil::TimeUtility::currentTimeInMicroSeconds();
-        model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
-        model_output                        = std::move(model_->forward(model_input));
-        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-    }
+    const size_t configured_chunk_tokens = configuredK3PrefillChunkTokens();
+    const bool   chunked_mtp_prefill     = isK3Eagle3PrefillChunkingEnabled() && model_input.combo_tokens.defined()
+                                     && static_cast<size_t>(model_input.combo_tokens.size(0)) > configured_chunk_tokens;
 
-    // eplb
-    if (expert_balancer_) {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(eplb_step_forward)");
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        expert_balancer_->stepForward(*model_, executor_collector);
-        executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-    }
+    if (chunked_mtp_prefill) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(chunked_target_draft_forward)");
+        const size_t total_tokens = static_cast<size_t>(model_input.combo_tokens.size(0));
+        RTP_LLM_CHECK_WITH_INFO((tp_rank_ == 0 && !streams.empty()) || (tp_rank_ != 0 && streams.empty()),
+                                "K3 MTP chunk Prefill requires user streams on TP rank 0 only: streams=%ld TP rank=%d",
+                                streams.size(),
+                                tp_rank_);
+        RTP_LLM_CHECK_WITH_INFO(!cp_enabled, "K3 MTP chunk Prefill does not support Prefill CP");
+        RTP_LLM_CHECK_WITH_INFO(model_input.input_lengths.numel() >= 1
+                                    && model_input.input_lengths.numel() == model_input.prefix_lengths.numel()
+                                    && model_input.sequence_lengths.numel() == 0,
+                                "K3 MTP chunk Prefill requires context-only requests with prefix metadata");
+        RTP_LLM_CHECK_WITH_INFO(!model_input.multimodal_features.has_value()
+                                    || model_input.multimodal_features->empty(),
+                                "K3 MTP chunk Prefill does not support multimodal features");
+        RTP_LLM_CHECK_WITH_INFO(!model_input.input_embeddings.has_value() || model_input.input_embeddings->empty(),
+                                "K3 MTP chunk Prefill does not support input embeddings");
 
-    // target model sample
-    if (isTpRank0()) {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_sample)");
-        if (model_input.is_fake_stream) {
-            model_input.last_hidden_states = model_output.all_hidden_states;
-        } else {
-            CHECK_AND_RETURN_REF(sampler_input,
-                                 batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
-            holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
-            sampler_output = std::move(sampler_->forward(sampler_input));
-            // Restore the full combo_tokens / input_lengths before the MTP
-            // shift logic — under CP both were mutated to rank-local by the
-            // target forward's handleInputs and the shift formula assumes a
-            // contiguous full sequence (offset += input_length, last token
-            // overwrite at offset+input_length-1).
+        // Round scheduling belongs to the Python planner (restored target chunk
+        // prefill design): it validates chunk%TP and MLA-page alignment itself.
+        // K3 target and draft share one --seq_size_per_block, so the two cache
+        // configs must agree rather than the old executor-side LCM alignment.
+        const auto& target_cache_cfg = cache_manager_->cacheConfig();
+        const auto& draft_cache_cfg  = cache_manager_->getMTPModuleCacheConfig(0);
+        RTP_LLM_CHECK_WITH_INFO(target_cache_cfg.seq_size_per_block == draft_cache_cfg.seq_size_per_block,
+                                "K3 MTP chunk Prefill requires matching target/draft seq_size_per_block: "
+                                "target=%zu draft=%zu",
+                                target_cache_cfg.seq_size_per_block,
+                                draft_cache_cfg.seq_size_per_block);
+
+        auto* py_model = dynamic_cast<PyWrappedModel*>(model_.get());
+        RTP_LLM_CHECK_WITH_INFO(py_model != nullptr && draft_model_ != nullptr,
+                                "K3 MTP chunk Prefill requires a PyWrappedModel target and a draft model");
+
+        struct PrefillChunkSessionGuard {
+            ModelBase& model;
+            bool       complete = false;
+            ~PrefillChunkSessionGuard() {
+                if (!complete) {
+                    model.abortPrefillChunkSession();
+                }
+            }
+        } session_guard{*model_};
+
+        struct PrefillRoundHookGuard {
+            PyWrappedModel* model;
+            ~PrefillRoundHookGuard() {
+                model->setMtpChunkPrefillRoundHook({});
+            }
+        } hook_guard{py_model};
+
+        K3ChunkPrefillHook chunk_hook;
+        chunk_hook.full_inputs      = model_input;
+        chunk_hook.total_tokens     = total_tokens;
+        chunk_hook.terminal_seen.assign(static_cast<size_t>(model_input.input_lengths.numel()), false);
+        chunk_hook.model_forward_us = &model_forward_us;
+        py_model->setMtpChunkPrefillRoundHook([this, &chunk_hook](py::object round_plan, bool is_last) {
+            runK3ChunkPrefillRound(chunk_hook, parsePyK3ChunkRound(round_plan), is_last);
+        });
+
+        // The Python planner runs every planned round inside this single target
+        // forward and invokes the hook after each round's target pass. The hook
+        // materializes the round input and runs the draft for non-final rounds;
+        // the final round's draft runs below once its sampled token is known.
+        model_input.kv_block_stride_bytes        = target_cache_cfg.kv_block_stride_bytes;
+        model_input.kv_scale_stride_bytes        = target_cache_cfg.kv_scale_stride_bytes;
+        model_input.seq_size_per_block           = target_cache_cfg.seq_size_per_block;
+        model_input.kernel_seq_size_per_block    = target_cache_cfg.kernel_seq_size_per_block;
+        model_input.kv_cache_layer_to_group      = target_kv_cache_layer_to_group;
+        model_input.kv_cache_layer_to_group_host = target_kv_cache_layer_to_group;
+
+        maybePrintModelInput(model_input, "prefill target model (whole chunk)");
+        int64_t target_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        model_output            = std::move(model_->forward(model_input));
+        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - target_start_us;
+        RTP_LLM_CHECK_WITH_INFO(chunk_hook.terminal_round.slices.size() == chunk_hook.terminal_seen.size(),
+                                "K3 MTP chunk Prefill terminal request count mismatch: got=%zu expected=%zu",
+                                chunk_hook.terminal_round.slices.size(),
+                                chunk_hook.terminal_seen.size());
+        std::sort(chunk_hook.terminal_round.slices.begin(),
+                  chunk_hook.terminal_round.slices.end(),
+                  [](const auto& lhs, const auto& rhs) { return lhs.original_batch_idx < rhs.original_batch_idx; });
+        GptModelInputs final_chunk_input =
+            makePrefillRoundInput(chunk_hook.full_inputs, chunk_hook.terminal_round, total_tokens);
+        // Attention consumes one terminal token with its true absolute prefix,
+        // while cache store republishes the complete physical block containing
+        // that token. Keep the two spans explicit instead of weakening the
+        // cache-store block-alignment invariant.
+        setPrefillChunkCacheStorePublishPlan(final_chunk_input,
+                                             chunk_hook.terminal_round,
+                                             draft_cache_cfg.seq_size_per_block,
+                                             /*complete_blocks_only=*/false);
+
+        if (isTpRank0()) {
+            RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_sample)");
+            if (final_chunk_input.is_fake_stream) {
+                final_chunk_input.last_hidden_states = model_output.all_hidden_states;
+            } else {
+                CHECK_AND_RETURN_REF(
+                    sampler_input,
+                    batch_stream_processor_->gatherSamplerInput(stream_groups, final_chunk_input, model_output));
+                holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
+                sampler_output = std::move(sampler_->forward(sampler_input));
+                if (!final_chunk_input.force_disable_sp_run) {
+                    batch_stream_processor_->updatePrefillPostDraftModelInput(
+                        final_chunk_input, model_output, sampler_output, buffer_holder_);
+                }
+            }
+        }
+        if (!final_chunk_input.force_disable_sp_run) {
+            RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
+            // Every rank already owns the target chunk auxiliary buffer.
+            // The second tpSync broadcasts the round-selected per-request
+            // metadata (including PD keys), so no full-batch restore is
+            // needed. Never sync [C, H].
+            final_chunk_input.last_hidden_states = torch::Tensor();
+            tpSyncModelInputs(final_chunk_input, parallelism_config_);
+
+            // Non-final draft KV was published incrementally by the hook;
+            // this final pass publishes the last round's draft keys.
+            final_chunk_input.kv_block_stride_bytes        = draft_cache_cfg.kv_block_stride_bytes;
+            final_chunk_input.kv_scale_stride_bytes        = draft_cache_cfg.kv_scale_stride_bytes;
+            final_chunk_input.seq_size_per_block           = draft_cache_cfg.seq_size_per_block;
+            final_chunk_input.kernel_seq_size_per_block    = draft_cache_cfg.kernel_seq_size_per_block;
+            final_chunk_input.kv_cache_layer_to_group      = draft_kv_cache_layer_to_group;
+            final_chunk_input.kv_cache_layer_to_group_host = draft_kv_cache_layer_to_group;
+            final_chunk_input.kv_cache_group_types         = draft_kv_cache_group_types;
+            final_chunk_input.kv_cache_group_types_host    = draft_kv_cache_group_types;
+            maybeOverrideLastHiddenWithMtpBuffer(final_chunk_input, *model_);
+
+            maybePrintModelInput(final_chunk_input, "prefill final round draft model");
+            int64_t draft_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            draft_model_output     = std::move(draft_model_->forward(final_chunk_input));
+            model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - draft_start_us;
+
+            // The terminal pass contains exactly one token per request.
+            if (draft_model_output.all_hidden_states.defined() && draft_model_output.all_hidden_states.size(0) > 0) {
+                draft_last_hidden_states = draft_model_output.all_hidden_states.clone();
+            }
+        }
+        session_guard.complete = true;
+
+        // EPLB must observe the complete target Prefill, including every chunk.
+        if (expert_balancer_) {
+            RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(eplb_step_forward)");
+            int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            expert_balancer_->stepForward(*model_, executor_collector);
+            executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        }
+    } else {
+        // target model prefill
+        {
+            RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_forward)");
+            maybePrintModelInput(model_input, "prefill target model");
+            int64_t start_time_us               = autil::TimeUtility::currentTimeInMicroSeconds();
+            model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
+            model_output                        = std::move(model_->forward(model_input));
+            model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        }
+
+        // eplb
+        if (expert_balancer_) {
+            RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(eplb_step_forward)");
+            int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            expert_balancer_->stepForward(*model_, executor_collector);
+            executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        }
+
+        // target model sample
+        if (isTpRank0()) {
+            RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_sample)");
+            if (model_input.is_fake_stream) {
+                model_input.last_hidden_states = model_output.all_hidden_states;
+            } else {
+                CHECK_AND_RETURN_REF(
+                    sampler_input,
+                    batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
+                holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
+                sampler_output = std::move(sampler_->forward(sampler_input));
+                // Restore the full combo_tokens / input_lengths before the MTP
+                // shift logic — under CP both were mutated to rank-local by the
+                // target forward's handleInputs and the shift formula assumes a
+                // contiguous full sequence (offset += input_length, last token
+                // overwrite at offset+input_length-1).
+                if (cp_enabled) {
+                    model_input.combo_tokens  = saved_combo_tokens;
+                    model_input.input_lengths = saved_input_lengths;
+                }
+                if (!model_input.force_disable_sp_run) {
+                    batch_stream_processor_->updatePrefillPostDraftModelInput(
+                        model_input, model_output, sampler_output, buffer_holder_);
+                }
+            }
+        }
+
+        // draft model prefill
+        if (!model_input.force_disable_sp_run) {
+            RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
+            // Under prefill CP the post-reduce hidden just copied by
+            // updatePrefillPostDraftModelInput is not the tensor consumed by
+            // DSV4 MTP.  Avoid broadcasting it; after sync each rank reloads the
+            // full pre-hc residual from the Python MTP buffer, and the CP input
+            // processor slices it with the same zigzag plan as combo_tokens.
             if (cp_enabled) {
-                model_input.combo_tokens  = saved_combo_tokens;
-                model_input.input_lengths = saved_input_lengths;
+                model_input.last_hidden_states = torch::Tensor();
             }
-            if (!model_input.force_disable_sp_run) {
-                batch_stream_processor_->updatePrefillPostDraftModelInput(
-                    model_input, model_output, sampler_output, buffer_holder_);
+            tpSyncModelInputs(model_input, parallelism_config_);
+            if (model_input.pd_separation) {
+                model_input.request_id            = pd_request_id;
+                model_input.request_pd_separation = pd_request_separation;
+                model_input.cache_keys            = pd_cache_keys;
             }
+            maybePrintModelInput(model_input, "prefill post draft model");
+            int64_t     start_time_us                = autil::TimeUtility::currentTimeInMicroSeconds();
+            const auto& mtp_cache_cfg                = cache_manager_->getMTPModuleCacheConfig(0);
+            model_input.kv_block_stride_bytes        = mtp_cache_cfg.kv_block_stride_bytes;
+            model_input.kv_scale_stride_bytes        = mtp_cache_cfg.kv_scale_stride_bytes;
+            model_input.kv_cache_layer_to_group      = draft_kv_cache_layer_to_group;
+            model_input.kv_cache_layer_to_group_host = draft_kv_cache_layer_to_group;
+            model_input.kv_cache_group_types         = draft_kv_cache_group_types;
+            model_input.kv_cache_group_types_host    = draft_kv_cache_group_types;
+            maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_, cp_enabled);
+            draft_model_output = std::move(draft_model_->forward(model_input));
+            model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         }
     }
 
@@ -888,37 +1420,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                                    0,
                                    stream_groups.modelExecuteTokenSize(),
                                    model_forward_us);
-        return batch_stream_processor_->dispatch(
-            stream_groups, {std::move(model_output), std::move(sampler_output)});
-    }
-
-    // draft model prefill
-    {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
-        // Under prefill CP the post-reduce hidden just copied by
-        // updatePrefillPostDraftModelInput is not the tensor consumed by
-        // DSV4 MTP.  Avoid broadcasting it; after sync each rank reloads the
-        // full pre-hc residual from the Python MTP buffer, and the CP input
-        // processor slices it with the same zigzag plan as combo_tokens.
-        if (cp_enabled) {
-            model_input.last_hidden_states = torch::Tensor();
-        }
-        tpSyncModelInputs(model_input, parallelism_config_);
-        if (model_input.pd_separation) {
-            model_input.request_id            = pd_request_id;
-            model_input.request_pd_separation = pd_request_separation;
-            model_input.cache_keys            = pd_cache_keys;
-        }
-        maybePrintModelInput(model_input, "prefill post draft model");
-        int64_t     start_time_us           = autil::TimeUtility::currentTimeInMicroSeconds();
-        const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
-        model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
-        model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
-        model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
-        // Source = main (just ran prefill; its pre-hc buffer is current).
-        maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_, cp_enabled);
-        draft_model_output = std::move(draft_model_->forward(model_input));
-        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        return batch_stream_processor_->dispatch(stream_groups, {std::move(model_output), std::move(sampler_output)});
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
@@ -1684,6 +2186,7 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
     // main-stream mutations cannot affect draft prefill prepare.
     auto* prefill_model    = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
     auto  model_input_copy = model_input;
+    model_input_copy.is_mtp_draft_update = true;
     model_input_copy.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
     model_input_copy.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
     model_input_copy.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
@@ -1920,16 +2423,23 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_forward)");
     maybePrintModelInput(model_input, "decode post draft model");
     ensureModelInputsOnCuda(model_input, "decode.draft_prefill_forward");
-    // Use sp_prefill_draft_model_ if CUDA graph is enabled, otherwise use draft_model_.
-    GptModelOutputs draft_prefill_model_output;
-    if (sp_prefill_draft_model_) {
-        draft_prefill_model_output = sp_prefill_draft_model_->forward(model_input);
-        maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *sp_prefill_draft_model_);
-    } else {
-        draft_prefill_model_output = draft_model_->forward(model_input);
-        maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *draft_model_);
+    model_input.is_mtp_draft_update = true;
+    try {
+        // Use sp_prefill_draft_model_ if CUDA graph is enabled, otherwise use draft_model_.
+        GptModelOutputs draft_prefill_model_output;
+        if (sp_prefill_draft_model_) {
+            draft_prefill_model_output = sp_prefill_draft_model_->forward(model_input);
+            maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *sp_prefill_draft_model_);
+        } else {
+            draft_prefill_model_output = draft_model_->forward(model_input);
+            maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *draft_model_);
+        }
+        model_input.is_mtp_draft_update = false;
+        return draft_prefill_model_output;
+    } catch (...) {
+        model_input.is_mtp_draft_update = false;
+        throw;
     }
-    return draft_prefill_model_output;
 }
 
 void MtpExecutor::collectDecodeMetrics(const StreamGroups&                          stream_groups,
@@ -2320,6 +2830,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         // strict packed-sequence check.
         populateTargetVerifyHostMetadata(
             model_input, spec_prefix_lengths_host, batch_size, static_cast<int32_t>(tokens_per_batch));
+        buffer_holder_.hold_host(model_input.input_lengths_host_for_log);
         ensureModelInputsOnCuda(model_input, "draft_decode.build_spec_decode_input");
 
         // Since other tp ranks don't have streams, its combo_tokens' first token is not correct.

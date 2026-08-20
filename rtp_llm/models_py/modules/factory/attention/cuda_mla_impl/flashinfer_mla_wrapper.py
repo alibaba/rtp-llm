@@ -9,6 +9,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_writ
     MlaKVCacheWriteOp,
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import MlaImplBase
+from rtp_llm.models_py.modules.kimi_k3.utils import prefill_chunk_tokens
 from rtp_llm.ops import AttentionConfigs, FMHAConfig, KvCacheDataType, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, rtp_llm_ops
 
@@ -24,7 +25,8 @@ from .rope_emb_new import NewMlaRotaryEmbeddingOp
 def decode_query_length(attn_inputs: PyAttentionInputs) -> int:
     """Return the rectangular per-request decode query width without a device sync."""
     is_target_verify = bool(getattr(attn_inputs, "is_target_verify", False))
-    if not is_target_verify:
+    is_mtp_draft_update = bool(getattr(attn_inputs, "is_mtp_draft_update", False))
+    if not is_target_verify and not is_mtp_draft_update:
         if getattr(attn_inputs, "is_prefill", False):
             raise RuntimeError(
                 "paged MLA decode query length was requested for a prefill batch"
@@ -133,6 +135,16 @@ class MlaFlashInferImplBase(MlaImplBase):
             self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
             self.rope_params = self.fmha_params
             self.prepare(attn_inputs)
+
+    def set_chunk_prefill_kv_tile_tokens(self, tile_tokens: int) -> None:
+        """Scope dense FlashMLA KV tiling to an explicit whole-chunk session."""
+
+        setter = getattr(self.fmha_impl, "set_chunk_prefill_kv_tile_tokens", None)
+        if not callable(setter):
+            raise RuntimeError(
+                "whole-chunk K3 Prefill requires an FMHA backend with KV tiling"
+            )
+        setter(int(tile_tokens))
 
     def prepare(self, attn_inputs: PyAttentionInputs, forbid_realloc: bool = False):
         """Update fmha_params for prepare or CUDA Graph replay.
@@ -448,6 +460,29 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         return self.compute_prefill_context(q, compressed_kv, k_pe, kv_cache, layer_id)
 
 
+def _configure_chunk_prefill_kv_tiling(
+    fmha_impl: Any, attn_inputs: PyAttentionInputs
+) -> None:
+    """Apply the explicit whole-chunk KV bound before FlashMLA planning.
+
+    Target-model whole-chunk Prefill scopes this setting on its persistent FMHA
+    wrapper. Eagle3 draft Prefill creates a fresh wrapper for every C++ planned
+    round, so it must restore the same bound from the round marker before the
+    constructor plans the cumulative prefix. Ordinary Prefill inputs never set
+    ``is_prefill_chunk`` and retain the original full-prefix path.
+    """
+
+    if not bool(getattr(attn_inputs, "is_prefill_chunk", False)):
+        return
+    tile_tokens = prefill_chunk_tokens()
+    if tile_tokens <= 0:
+        raise RuntimeError(
+            "K3 Prefill chunk input requires a positive "
+            "KIMI_K3_PREFILL_CHUNK_TOKENS value"
+        )
+    fmha_impl.set_chunk_prefill_kv_tile_tokens(tile_tokens)
+
+
 class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
     """Dense FlashMLA variant of RTP's shared MLA Prefill pipeline."""
 
@@ -466,21 +501,23 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
     ) -> None:
         from .flashmla_dense_prefill import MlaFlashMLAPrefillOp
 
+        fmha_impl = MlaFlashMLAPrefillOp(
+            attn_configs.head_num,
+            attn_configs.kv_lora_rank,
+            attn_configs.rope_head_dim,
+            attn_configs.nope_head_dim,
+            attn_configs.v_head_dim,
+            attn_configs.kernel_tokens_per_block,
+            attn_configs.softmax_extra_scale,
+            attn_configs.use_mla,
+            weights,
+            quant_config,
+            attn_configs.kv_cache_dtype,
+        )
+        _configure_chunk_prefill_kv_tiling(fmha_impl, attn_inputs)
         MlaFlashInferImplBase.__init__(
             self,
-            MlaFlashMLAPrefillOp(
-                attn_configs.head_num,
-                attn_configs.kv_lora_rank,
-                attn_configs.rope_head_dim,
-                attn_configs.nope_head_dim,
-                attn_configs.v_head_dim,
-                attn_configs.kernel_tokens_per_block,
-                attn_configs.softmax_extra_scale,
-                attn_configs.use_mla,
-                weights,
-                quant_config,
-                attn_configs.kv_cache_dtype,
-            ),
+            fmha_impl,
             NewMlaRotaryEmbeddingOp(
                 cos_sin_cache=cos_sin_cache,
                 is_neox_style=attn_configs.rope_config.is_neox_style,
@@ -556,8 +593,9 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
     ) -> None:
         query_length = decode_query_length(attn_inputs)
         is_target_verify = bool(getattr(attn_inputs, "is_target_verify", False))
+        is_mtp_draft_update = bool(getattr(attn_inputs, "is_mtp_draft_update", False))
         sequence_lengths_host = getattr(attn_inputs, "sequence_lengths_host", None)
-        if is_target_verify:
+        if is_target_verify or is_mtp_draft_update:
             max_bs = int(attn_inputs.input_lengths.size(0))
             num_tokens = max_bs * query_length
         elif sequence_lengths_host is not None and sequence_lengths_host.numel() > 0:
@@ -607,20 +645,27 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
+        is_target_verify = bool(getattr(attn_inputs, "is_target_verify", False))
+        is_mtp_draft_update = bool(getattr(attn_inputs, "is_mtp_draft_update", False))
         return (
             attn_configs.use_mla
             and (
                 not attn_inputs.is_prefill
-                or bool(getattr(attn_inputs, "is_target_verify", False))
+                or is_target_verify
+                or is_mtp_draft_update
             )
             and (
                 not attn_configs.is_sparse
-                or bool(getattr(attn_inputs, "is_target_verify", False))
+                or is_target_verify
+                or is_mtp_draft_update
             )
         )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         is_target_verify = bool(getattr(attn_inputs, "is_target_verify", False))
+        is_mtp_draft_update = bool(
+            getattr(attn_inputs, "is_mtp_draft_update", False)
+        )
         sequence_lengths_d = getattr(
             attn_inputs, "sequence_lengths_plus_1_d", None
         )
@@ -636,6 +681,7 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
         # arrays that FlashInfer's length-dependent scheduler still requires.
         if (
             not is_target_verify
+            and not is_mtp_draft_update
             and sequence_lengths_d is not None
             and sequence_lengths_d.numel() > 0
             and sequence_lengths_host is not None
@@ -659,5 +705,6 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
             self.fmha_impl.plan(self.fmha_params)
             return
 
-        # Target verification has q>1 and still needs the generic planner.
+        # Target verification and the Prefill-shaped MTP draft update have
+        # q>1 and must use the generic planner.
         self.prepare(attn_inputs, forbid_realloc=True)

@@ -274,35 +274,52 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
         }
         RTP_LLM_CHECK_WITH_INFO(param.prefix_lengths_host.defined() && param.input_lengths_host.defined(),
                                 "failed to get prefix_length_host and input_length_host for cache store");
-        RTP_LLM_CHECK_WITH_INFO(param.prefix_lengths_host.data_ptr<int>()[batch_id] % seq_size_per_block == 0,
-                                "prefix_length %% seq_size_per_block != 0");
+        if (!incremental_publish) {
+            RTP_LLM_CHECK_WITH_INFO(param.prefix_lengths_host.data_ptr<int>()[batch_id] % seq_size_per_block == 0,
+                                    "prefix_length %% seq_size_per_block != 0");
+        }
         const bool is_cp_compact_fixed_region =
             param.cp_size > 1 && isDsv4FixedRegion(param.region_name) && seq_size_per_block % param.cp_size == 0;
         const size_t canonical_seq_size_per_block =
             is_cp_compact_fixed_region ? seq_size_per_block / static_cast<size_t>(param.cp_size) : seq_size_per_block;
-        int reuse_block_num = param.prefix_lengths_host.data_ptr<int>()[batch_id] / seq_size_per_block;
-        int block_num =
-            (param.input_lengths_host.data_ptr<int>()[param.decoder_batch_size + batch_id] + seq_size_per_block - 1)
-            / seq_size_per_block;
         int canonical_reuse_block_num =
             param.prefix_lengths_host.data_ptr<int>()[batch_id] / canonical_seq_size_per_block;
         int canonical_block_num = (param.input_lengths_host.data_ptr<int>()[param.decoder_batch_size + batch_id]
                                    + canonical_seq_size_per_block - 1)
                                   / canonical_seq_size_per_block;
+        int32_t publish_begin_block = 0;
+        int32_t publish_end_block   = 0;
+        if (incremental_publish) {
+            const auto& publish_plan = param.publish_plan.value();
+            publish_begin_block = publish_plan.begin_block_host.data_ptr<int32_t>()[batch_id];
+            publish_end_block   = publish_plan.end_block_host.data_ptr<int32_t>()[batch_id];
+            RTP_LLM_CHECK_WITH_INFO(publish_begin_block >= 0 && publish_end_block >= publish_begin_block,
+                                    "invalid incremental cache-store range [%d, %d) for batch %zu",
+                                    publish_begin_block,
+                                    publish_end_block,
+                                    batch_id);
+        }
+
         auto request_id     = *(param.request_id.data_ptr<int64_t>() + batch_id);
         auto event          = param.pre_created_event ? param.pre_created_event : runtimeCreateEvent();
         auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
-        RTP_LLM_LOG_DEBUG(
-            "write cache store, request id is %ld, blocks num is %ld", request_id, block_num + reuse_block_num);
 
         CacheGroupType group_type = CacheGroupType::FULL;
         if (param.kv_cache_group_types_host.defined()) {
             group_type = static_cast<CacheGroupType>(param.kv_cache_group_types_host.data_ptr<int32_t>()[gid]);
         }
 
-        const int total_blocks           = block_num + reuse_block_num;
-        const int canonical_total_blocks = canonical_block_num + canonical_reuse_block_num;
-        if (total_blocks <= 0) {
+        // An explicit plan is authoritative: attention may execute a terminal
+        // singleton at an unaligned prefix while CacheStore republishes the
+        // complete physical block containing it. Legacy publication continues
+        // to derive its range from aligned attention lengths.
+        const int canonical_total_blocks = incremental_publish ?
+                                               publish_end_block :
+                                               canonical_block_num + canonical_reuse_block_num;
+        RTP_LLM_LOG_DEBUG("write cache store, request id is %ld, blocks num is %d",
+                          request_id,
+                          canonical_total_blocks);
+        if (canonical_total_blocks <= 0) {
             continue;
         }
 
@@ -430,14 +447,7 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             static_cast<size_t>(std::min<int>(canonical_total_blocks, static_cast<int>(cache_keys_per_batch)));
         std::vector<CacheStoreBlockPair> block_plan;
         if (incremental_publish) {
-            const auto&   publish_plan = param.publish_plan.value();
-            const int32_t begin_block  = publish_plan.begin_block_host.data_ptr<int32_t>()[batch_id];
-            const int32_t end_block    = publish_plan.end_block_host.data_ptr<int32_t>()[batch_id];
-            RTP_LLM_CHECK_WITH_INFO(begin_block >= 0 && end_block >= begin_block,
-                                    "invalid incremental cache-store range [%d, %d) for batch %zu",
-                                    begin_block,
-                                    end_block,
-                                    batch_id);
+            const auto& publish_plan = param.publish_plan.value();
             block_plan = buildIncrementalCacheStoreBlockPlan(
                 planned_total_blocks,
                 /*reuse_block_size=*/0,
@@ -445,12 +455,14 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                 group_type,
                 param.cp_rank,
                 param.cp_size,
-                CacheStorePublishRange{static_cast<size_t>(begin_block),
-                                       static_cast<size_t>(end_block),
+                CacheStorePublishRange{static_cast<size_t>(publish_begin_block),
+                                       static_cast<size_t>(publish_end_block),
                                        publish_plan.terminal_host.data_ptr<bool>()[batch_id]});
         } else {
             block_plan = buildCacheStoreBlockPlan(planned_total_blocks,
-                                                  /*reuse_block_size=*/0,
+                                                  param.cache_store_full_from_begin ?
+                                                      0 :
+                                                      static_cast<size_t>(canonical_reuse_block_num),
                                                   use_group_cache_transfer_policy,
                                                   group_type,
                                                   param.cp_rank,
@@ -471,14 +483,30 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             }
         };
         if (request_blocks->getBlocksCount() > 0) {
-            cache_store->store(request_blocks, storeCallback);
+            if (param.wait_cache_store_done) {
+                constexpr int64_t kChunkPrefillCacheStoreWaitTimeoutMs = 5000;
+                auto store_context = cache_store->storeBuffers({request_blocks}, kChunkPrefillCacheStoreWaitTimeoutMs);
+                RTP_LLM_CHECK_WITH_INFO(store_context != nullptr,
+                                        "chunk Prefill cache-store staging returned no context: request=%ld layer=%d",
+                                        request_id,
+                                        param.layer_id);
+                store_context->waitDone();
+                RTP_LLM_CHECK_WITH_INFO(
+                    store_context->success(),
+                    "chunk Prefill cache-store staging failed or timed out: request=%ld layer=%d timeout_ms=%ld error=%s",
+                    request_id,
+                    param.layer_id,
+                    kChunkPrefillCacheStoreWaitTimeoutMs,
+                    store_context->getErrorInfoString().c_str());
+            } else {
+                cache_store->store(request_blocks, storeCallback);
+            }
         } else {
             RTP_LLM_LOG_DEBUG("skip cache store because all selected blocks are null, request id [%ld], layer id [%d]",
                               request_id,
                               param.layer_id);
         }
     }
-
 }
 
 // ============================================================

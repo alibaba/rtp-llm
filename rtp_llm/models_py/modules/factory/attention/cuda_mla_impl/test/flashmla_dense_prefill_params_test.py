@@ -1,11 +1,12 @@
 from types import SimpleNamespace
 from unittest import TestCase, main, skipUnless
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
     MlaFlashMLAPrefillImpl,
+    _configure_chunk_prefill_kv_tiling,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_dense_prefill import (
     MlaFlashMLAPrefillOp,
@@ -14,6 +15,57 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_dense_pr
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 CUDA_AVAILABLE = torch.cuda.is_available()
+
+
+class FlashMlaChunkPrefillDraftTilingTest(TestCase):
+    @patch(
+        "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl."
+        "flashinfer_mla_wrapper.prefill_chunk_tokens",
+        return_value=65536,
+    )
+    def test_chunk_round_enables_configured_kv_tile_before_plan(
+        self, configured_chunk_tokens: Mock
+    ) -> None:
+        fmha_impl = Mock()
+
+        _configure_chunk_prefill_kv_tiling(
+            fmha_impl, SimpleNamespace(is_prefill_chunk=True)
+        )
+
+        configured_chunk_tokens.assert_called_once_with()
+        fmha_impl.set_chunk_prefill_kv_tile_tokens.assert_called_once_with(65536)
+
+    @patch(
+        "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl."
+        "flashinfer_mla_wrapper.prefill_chunk_tokens"
+    )
+    def test_ordinary_prefill_keeps_full_prefix_path(
+        self, configured_chunk_tokens: Mock
+    ) -> None:
+        fmha_impl = Mock()
+
+        _configure_chunk_prefill_kv_tiling(
+            fmha_impl, SimpleNamespace(is_prefill_chunk=False)
+        )
+
+        configured_chunk_tokens.assert_not_called()
+        fmha_impl.set_chunk_prefill_kv_tile_tokens.assert_not_called()
+
+    @patch(
+        "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl."
+        "flashinfer_mla_wrapper.prefill_chunk_tokens",
+        return_value=0,
+    )
+    def test_chunk_round_rejects_missing_configured_bound(
+        self, configured_chunk_tokens: Mock
+    ) -> None:
+        with self.assertRaisesRegex(
+            RuntimeError, "requires a positive KIMI_K3_PREFILL_CHUNK_TOKENS"
+        ):
+            _configure_chunk_prefill_kv_tiling(
+                Mock(), SimpleNamespace(is_prefill_chunk=True)
+            )
+        configured_chunk_tokens.assert_called_once_with()
 
 
 def _indptr(lengths: list[int]) -> torch.Tensor:

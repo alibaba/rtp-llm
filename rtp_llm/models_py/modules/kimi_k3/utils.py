@@ -38,10 +38,10 @@ def collective_gemm_workspace_global_tokens(
     configured_tokens = int(max_seq_len) * int(max_context_batch_size)
     if chunk_tokens <= 0:
         return configured_tokens
-    return min(
-        configured_tokens,
-        int(chunk_tokens) * int(max_context_batch_size),
-    )
+    # ``plan_kimi_k3_chunk_rounds`` applies one shared token budget to the
+    # complete packed batch. A model invocation therefore contains at most
+    # ``chunk_tokens`` rows, regardless of the number of active requests.
+    return min(configured_tokens, int(chunk_tokens))
 
 
 def mask_multimodal_token_ids(
