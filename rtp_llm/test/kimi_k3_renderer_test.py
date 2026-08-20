@@ -116,7 +116,9 @@ class KimiK3RendererTest(unittest.TestCase):
         self.assertFalse(config.in_think_mode)
         self.assertEqual(config.max_thinking_tokens, 0)
 
-    def test_thinking_budget_uses_k3_xtml_transition_without_grammar(self) -> None:
+    def test_thinking_budget_uses_k3_xtml_transition_with_universal_grammar(
+        self,
+    ) -> None:
         renderer = KimiK3Renderer.__new__(KimiK3Renderer)
         renderer.tokenizer = Mock()
         renderer.tokenizer.encode.return_value = [101, 102, 103]
@@ -127,6 +129,12 @@ class KimiK3RendererTest(unittest.TestCase):
         )
 
         self.assertEqual(config.end_think_token_ids, [101, 102, 103])
+        tag = json.loads(config.structural_tag)
+        self.assertEqual(tag["type"], "structural_tag")
+        self.assertEqual(
+            tag["format"]["elements"][-1]["value"],
+            "<|close|>message<|sep|>",
+        )
         renderer.tokenizer.encode.assert_called_once_with(
             renderer._THINK_TO_RESPONSE,
             add_special_tokens=False,
@@ -212,20 +220,24 @@ class KimiK3RendererTest(unittest.TestCase):
         renderer.apply_chat_completion_constraints(request, config)
 
         tag = json.loads(config.structural_tag)
-        fmt = tag["format"]
+        elements = tag["format"]["elements"]
+        self.assertEqual(elements[0]["begin"], "")
+        self.assertEqual(elements[0]["end"], "<|close|>response<|sep|>")
+        tools = elements[1]["elements"]
+        self.assertEqual(tools[0]["value"], "<|open|>tools<|sep|>")
+        self.assertEqual(tools[2]["value"], "<|close|>tools<|sep|>")
+        self.assertTrue(tools[1]["at_least_one"])
+        self.assertFalse(tools[1]["stop_after_first"])
+        call = tools[1]["tags"][0]
+        self.assertIn('tool="get_weather" index="', call["begin"])
+        self.assertEqual(call["content"]["elements"][0]["pattern"], r"\d+")
+        arguments = call["content"]["elements"][2]
+        self.assertEqual(arguments["style"], "kimi_k3_xml")
         self.assertEqual(
-            fmt["begin"],
-            "<|close|>response<|sep|><|open|>tools<|sep|>",
-        )
-        self.assertEqual(fmt["end"], "<|close|>tools<|sep|>")
-        self.assertTrue(fmt["content"]["at_least_one"])
-        self.assertTrue(fmt["content"]["stop_after_first"])
-        call = fmt["content"]["tags"][0]
-        self.assertIn('tool="get_weather" index="1"', call["begin"])
-        self.assertEqual(
-            call["content"]["json_schema"],
+            arguments["json_schema"],
             self._weather_tool()["function"]["parameters"],
         )
+        self.assertEqual(elements[-1]["value"], "<|close|>message<|sep|>")
 
     def test_named_tool_choice_filters_constraint_alternatives(self) -> None:
         request = ChatCompletionRequest.model_validate(
@@ -244,9 +256,10 @@ class KimiK3RendererTest(unittest.TestCase):
 
         renderer.apply_chat_completion_constraints(request, config)
 
-        tags = json.loads(config.structural_tag)["format"]["content"]["tags"]
-        self.assertEqual(len(tags), 1)
-        self.assertIn('tool="search"', tags[0]["begin"])
+        tools = json.loads(config.structural_tag)["format"]["elements"][1]
+        self.assertEqual(tools["type"], "sequence")
+        call = tools["elements"][1]
+        self.assertIn('tool="search"', call["begin"])
 
     def test_dynamic_required_tool_is_in_constraint(self) -> None:
         request = ChatCompletionRequest.model_validate(
@@ -264,9 +277,61 @@ class KimiK3RendererTest(unittest.TestCase):
 
         renderer.apply_chat_completion_constraints(request, config)
 
-        tags = json.loads(config.structural_tag)["format"]["content"]["tags"]
+        tags = json.loads(config.structural_tag)["format"]["elements"][1]["elements"][
+            1
+        ]["tags"]
         self.assertEqual(len(tags), 1)
         self.assertIn('tool="get_weather"', tags[0]["begin"])
+
+    def test_auto_tool_choice_uses_optional_parallel_tools(self) -> None:
+        request = ChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "Weather?"}],
+                "tools": [self._weather_tool()],
+                "tool_choice": "auto",
+                "thinking": {"type": "disabled"},
+            }
+        )
+        renderer = KimiK3Renderer.__new__(KimiK3Renderer)
+        config = GenerateConfig()
+
+        renderer.apply_chat_completion_constraints(request, config)
+
+        elements = json.loads(config.structural_tag)["format"]["elements"]
+        self.assertEqual(elements[1]["type"], "optional")
+        calls = elements[1]["content"]["content"]
+        self.assertTrue(calls["at_least_one"])
+        self.assertFalse(calls["stop_after_first"])
+
+    def test_no_tools_still_closes_k3_message_and_uses_xgrammar(self) -> None:
+        renderer = KimiK3Renderer.__new__(KimiK3Renderer)
+        config = GenerateConfig()
+
+        renderer.apply_chat_completion_constraints(
+            self.request(enable_thinking=False), config
+        )
+
+        elements = json.loads(config.structural_tag)["format"]["elements"]
+        self.assertEqual(len(elements), 2)
+        self.assertEqual(elements[0]["content"]["type"], "any_text")
+        self.assertEqual(elements[1]["value"], "<|close|>message<|sep|>")
+
+    def test_tool_choice_none_excludes_tools_from_constraint(self) -> None:
+        request = ChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "Weather?"}],
+                "tools": [self._weather_tool()],
+                "tool_choice": "none",
+                "thinking": {"type": "disabled"},
+            }
+        )
+        renderer = KimiK3Renderer.__new__(KimiK3Renderer)
+        config = GenerateConfig()
+
+        renderer.apply_chat_completion_constraints(request, config)
+
+        elements = json.loads(config.structural_tag)["format"]["elements"]
+        self.assertEqual(len(elements), 2)
 
     def test_thinking_constraint_switches_after_full_xtml_boundary(self) -> None:
         class Tokenizer:
@@ -292,6 +357,9 @@ class KimiK3RendererTest(unittest.TestCase):
         renderer.apply_chat_completion_constraints(request, config)
 
         self.assertEqual(config.end_think_token_ids, [101, 102, 103])
+        response = json.loads(config.structural_tag)["format"]["elements"][0]
+        self.assertEqual(response["content"]["type"], "any_text")
+        self.assertIsNone(config.json_schema)
         self.assertEqual(
             renderer.tokenizer.encoded,
             [(KimiK3Renderer._THINK_TO_RESPONSE, False)],
@@ -406,6 +474,8 @@ class KimiK3RendererTest(unittest.TestCase):
 
     def test_k3_sampling_contract_accepts_top_p_one_for_all_modes(self) -> None:
         renderer = KimiK3Renderer.__new__(KimiK3Renderer)
+        renderer.tokenizer = Mock()
+        renderer.tokenizer.encode.return_value = [101, 102, 103]
         for thinking in ({"type": "enabled"}, {"type": "disabled"}):
             with self.subTest(thinking=thinking):
                 request = ChatCompletionRequest.model_validate(
@@ -419,7 +489,7 @@ class KimiK3RendererTest(unittest.TestCase):
                 renderer.apply_chat_completion_constraints(request, config)
                 self.assertEqual(config.top_p, 1.0)
 
-    def test_forced_tool_choice_rejects_existing_grammar(self) -> None:
+    def test_existing_json_schema_is_composed_inside_k3_envelope(self) -> None:
         request = ChatCompletionRequest.model_validate(
             {
                 "messages": [{"role": "user", "content": "Weather?"}],
@@ -430,12 +500,13 @@ class KimiK3RendererTest(unittest.TestCase):
         )
         renderer = KimiK3Renderer.__new__(KimiK3Renderer)
 
-        with self.assertRaisesRegex(
-            FtRuntimeException, "conflicts with existing grammar constraint"
-        ):
-            renderer.apply_chat_completion_constraints(
-                request, GenerateConfig(json_schema={"type": "object"})
-            )
+        config = GenerateConfig(json_schema={"type": "object"})
+        renderer.apply_chat_completion_constraints(request, config)
+
+        response = json.loads(config.structural_tag)["format"]["elements"][0]
+        self.assertEqual(response["content"]["type"], "json_schema")
+        self.assertEqual(response["content"]["json_schema"], {"type": "object"})
+        self.assertIsNone(config.json_schema)
 
     def test_forced_tool_choice_supersedes_response_format_grammar(self) -> None:
         request = ChatCompletionRequest.model_validate(
@@ -454,6 +525,8 @@ class KimiK3RendererTest(unittest.TestCase):
 
         self.assertIsNone(config.json_schema)
         self.assertIsNotNone(config.structural_tag)
+        response = json.loads(config.structural_tag)["format"]["elements"][0]
+        self.assertEqual(response["content"]["type"], "any_text")
 
     def test_pending_generation_channel_is_excluded_from_usage(self) -> None:
         class Tokenizer:

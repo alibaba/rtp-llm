@@ -92,7 +92,7 @@ public:
     }
 };
 
-class SamplerTest: public DeviceTestBase {};
+class SamplerTest: public EngineBaseTest {};
 
 #define EXPECT_SIMILAR(vec1, vec2, eps)                                                                                \
     do {                                                                                                               \
@@ -328,6 +328,45 @@ TEST_F(SamplerTest, testThinkingAllowsNaturalThinkEndBeforeBudgetEnforce) {
     EXPECT_EQ(0, sampler_inputs.logits[0][201].item<float>());
     EXPECT_EQ(0, sampler_inputs.logits[0][128822].item<float>());
     EXPECT_EQ(0, sampler_inputs.logits[0][271].item<float>());
+}
+
+TEST_F(SamplerTest, testThinkingMasksEosBeforeThinkBoundaryCompletes) {
+    SamplerDataBuilder builder;
+
+    auto generate_input                                  = std::make_shared<GenerateInput>();
+    generate_input->generate_config                      = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->in_think_mode       = true;
+    generate_input->generate_config->max_thinking_tokens = 32;
+    generate_input->generate_config->end_think_token_ids = {8, 9};
+    generate_input->input_ids                            = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    constexpr int64_t eos_token_id = 15;
+    auto              processor    = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, 1, eos_token_id);
+    ASSERT_NE(processor, nullptr);
+
+    SamplerInputs inputs    = builder.allocate({1, 16, 8}, {processor}, {1});
+    inputs.input_lengths    = torch::tensor({3}, torch::kInt32);
+    inputs.sequence_lengths = torch::tensor({3}, torch::kInt32);
+    processor->process(inputs, 0, 1);
+
+    EXPECT_EQ(BaseLogitsProcessor::neg_inf, inputs.logits[0][eos_token_id].item<float>());
+
+    processor->updateStatus(torch::tensor({{8}}, torch::kInt32), 1);
+    SamplerInputs closing_inputs    = builder.allocate({1, 16, 8}, {processor}, {1});
+    closing_inputs.input_lengths    = torch::tensor({3}, torch::kInt32);
+    closing_inputs.sequence_lengths = torch::tensor({4}, torch::kInt32);
+    processor->process(closing_inputs, 0, 1);
+
+    EXPECT_EQ(BaseLogitsProcessor::neg_inf, closing_inputs.logits[0][eos_token_id].item<float>());
+    EXPECT_EQ(1, closing_inputs.logits[0][9].item<float>());
+
+    processor->updateStatus(torch::tensor({{9}}, torch::kInt32), 1);
+    SamplerInputs after_inputs    = builder.allocate({1, 16, 8}, {processor}, {1});
+    after_inputs.input_lengths    = torch::tensor({3}, torch::kInt32);
+    after_inputs.sequence_lengths = torch::tensor({5}, torch::kInt32);
+    processor->process(after_inputs, 0, 1);
+
+    EXPECT_EQ(0, after_inputs.logits[0][eos_token_id].item<float>());
 }
 
 TEST_F(SamplerTest, testThinkingMasksThinkBoundaryTokensAfterThinkEnd) {
@@ -611,6 +650,36 @@ TEST_F(SamplerTest, testSpecForceMismatchCapsWithoutMutatingParent) {
     EXPECT_TRUE(processor.isSpecVerifyEligible());
     EXPECT_EQ(processor.tryAcceptAndFillBitmask(request), 0);
     EXPECT_EQ(0, processor.thinkEndTokensStatus()[0]);
+}
+
+TEST_F(SamplerTest, testSpecThinkingRejectsEosDraft) {
+    std::vector<int> end_think_token_ids = {8, 9};
+    StreamThinkInfo  info(true,
+                         32,
+                         {7},
+                         end_think_token_ids,
+                         0,
+                         0,
+                         false,
+                         std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids));
+    std::vector<StreamThinkInfo> infos        = {info};
+    constexpr int32_t            eos_token_id = 15;
+    ThinkModeLogitsProcessor     processor(infos, eos_token_id);
+
+    const int            P     = 1;
+    const size_t         W     = SpecLogitsProcessor::bitmaskWordCount(16);
+    std::vector<int32_t> draft = {eos_token_id};
+    std::vector<int32_t> bitmask((P + 1) * W, SpecLogitsProcessor::kBitmaskAllowAll);
+
+    SpecLogitsProcessorRequest request;
+    request.draft_tokens       = draft.data();
+    request.propose_step       = P;
+    request.bitmask_cpu_out    = bitmask.data();
+    request.bitmask_size_int32 = W;
+    request.vocab_size         = 16;
+
+    EXPECT_EQ(processor.tryAcceptAndFillBitmask(request), 0);
+    EXPECT_EQ(static_cast<uint32_t>(bitmask[0]) & (1u << eos_token_id), 0u);
 }
 
 TEST_F(SamplerTest, testUpdateStatusAllowsPartialCommitWindow) {

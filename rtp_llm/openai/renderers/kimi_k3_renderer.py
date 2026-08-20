@@ -44,13 +44,6 @@ _K3_MEDIA_EXECUTOR = ThreadPoolExecutor(
     max_workers=_K3_MEDIA_PREFLIGHT_CONCURRENCY,
     thread_name_prefix="kimi-k3-media",
 )
-_GRAMMAR_RESPONSE_FORMAT_TYPES = {
-    "json_object",
-    "json_schema",
-    "regex",
-    "ebnf",
-    "structural_tag",
-}
 
 
 def _thinking_enabled(
@@ -134,6 +127,8 @@ class KimiK3Renderer(CustomChatRenderer):
     _TOOLS_CLOSE = "<|close|>tools<|sep|>"
     _THINK_TO_RESPONSE = "<|close|>think<|sep|><|open|>response<|sep|>"
     _RESPONSE_CLOSE = "<|close|>response<|sep|>"
+    _MESSAGE_CLOSE = "<|close|>message<|sep|>"
+    _SPECIAL_TEXT_EXCLUDES = ["<|open|>", "<|close|>"]
     _XTML_CALL_RE = re.compile(
         r"<\|open\|>call tool=\"(?P<tool>[^\"]*)\" index=\"(?P<index>\d+)\"<\|sep\|>"
         r"(?P<body>.*?)<\|close\|>call<\|sep\|>",
@@ -625,6 +620,8 @@ class KimiK3Renderer(CustomChatRenderer):
     @classmethod
     def _active_tools(cls, request: ChatCompletionRequest) -> List[Dict[str, Any]]:
         tools = cls._all_tools(request)
+        if request.tool_choice == "none":
+            return []
         name = cls._tool_choice_name(request)
         if name is None:
             return tools
@@ -639,14 +636,9 @@ class KimiK3Renderer(CustomChatRenderer):
         return value.replace("&", "&amp;").replace('"', "&quot;")
 
     @classmethod
-    def _build_tool_call_structural_tag(
-        cls, request: ChatCompletionRequest
-    ) -> Optional[Dict[str, Any]]:
-        if not cls._tool_choice_forces_tool(request):
-            return None
-
+    def _tool_call_tags(cls, request: ChatCompletionRequest) -> List[Dict[str, Any]]:
         tools = cls._active_tools(request)
-        if not tools:
+        if cls._tool_choice_forces_tool(request) and not tools:
             raise ValueError("tool_choice requires at least one tool")
 
         call_tags = []
@@ -656,64 +648,176 @@ class KimiK3Renderer(CustomChatRenderer):
             call_tags.append(
                 {
                     "type": "tag",
-                    "begin": (
-                        f'<|open|>call tool="{name}" index="1"<|sep|>'
-                        '<|open|>json type="object"<|sep|>'
-                    ),
+                    "begin": f'<|open|>call tool="{name}" index="',
                     "content": {
-                        "type": "json_schema",
-                        "json_schema": function.get("parameters") or {},
+                        "type": "sequence",
+                        "elements": [
+                            {"type": "regex", "pattern": r"\d+"},
+                            {"type": "const_string", "value": '"<|sep|>'},
+                            {
+                                "type": "json_schema",
+                                "json_schema": function.get("parameters") or {},
+                                "style": "kimi_k3_xml",
+                                "any_order": False,
+                                "max_whitespace_cnt": None,
+                            },
+                        ],
                     },
-                    "end": "<|close|>json<|sep|><|close|>call<|sep|>",
+                    "end": "<|close|>call<|sep|>",
                 }
             )
-
-        return {
-            "format": {
-                "type": "tag",
-                "begin": cls._RESPONSE_CLOSE + cls._TOOLS_OPEN,
-                "content": {
-                    "type": "tags_with_separator",
-                    "tags": call_tags,
-                    "separator": "",
-                    "at_least_one": True,
-                    # K3 call indices are embedded in the opening tag. Emit one
-                    # schema-valid call so every alternative can use index 1.
-                    "stop_after_first": True,
-                },
-                "end": cls._TOOLS_CLOSE,
-            }
-        }
+        return call_tags
 
     @staticmethod
-    def _response_format_has_grammar(response_format: Any) -> bool:
-        if response_format is None:
-            return False
-        if isinstance(response_format, str):
-            try:
-                response_format = json.loads(response_format)
-            except ValueError:
-                return True
-        return not isinstance(response_format, dict) or response_format.get(
-            "type"
-        ) in _GRAMMAR_RESPONSE_FORMAT_TYPES
+    def _json_value(value: Any, field_name: str) -> Any:
+        if not isinstance(value, str):
+            return value
+        try:
+            return json.loads(value)
+        except ValueError as error:
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                f"Kimi K3 cannot compose invalid {field_name}: {error}",
+            ) from error
 
     @classmethod
-    def _grammar_constraint_fields(cls, config: GenerateConfig) -> List[str]:
-        fields = []
-        if config.json_format:
-            fields.append("json_format")
+    def _response_content_format(cls, config: GenerateConfig) -> Dict[str, Any]:
         if config.json_schema is not None:
-            fields.append("json_schema")
+            return {
+                "type": "json_schema",
+                "json_schema": cls._json_value(config.json_schema, "json_schema"),
+            }
         if config.regex is not None:
-            fields.append("regex")
+            return {"type": "regex", "pattern": config.regex}
         if config.ebnf is not None:
-            fields.append("ebnf")
+            return {"type": "grammar", "grammar": config.ebnf}
         if config.structural_tag is not None:
-            fields.append("structural_tag")
-        if cls._response_format_has_grammar(config.response_format):
-            fields.append("response_format")
-        return fields
+            structural_tag = cls._json_value(config.structural_tag, "structural_tag")
+            if not isinstance(structural_tag, dict) or not isinstance(
+                structural_tag.get("format"), dict
+            ):
+                raise FtRuntimeException(
+                    ExceptionType.INVALID_PARAMS,
+                    "Kimi K3 structural_tag must contain a format object",
+                )
+            return structural_tag["format"]
+        if config.response_format is not None:
+            response_format = cls._json_value(config.response_format, "response_format")
+            if not isinstance(response_format, dict):
+                raise FtRuntimeException(
+                    ExceptionType.INVALID_PARAMS,
+                    "Kimi K3 response_format must be a JSON object",
+                )
+            response_type = response_format.get("type")
+            if response_type in (None, "text"):
+                pass
+            elif response_type == "json_object":
+                return {"type": "json_schema", "json_schema": {"type": "object"}}
+            elif response_type == "json_schema":
+                schema = response_format.get("json_schema")
+                if isinstance(schema, dict) and "schema" in schema:
+                    schema = schema["schema"]
+                return {
+                    "type": "json_schema",
+                    "json_schema": cls._json_value(
+                        schema, "response_format.json_schema"
+                    ),
+                }
+            elif response_type == "regex":
+                return {"type": "regex", "pattern": response_format.get("pattern", "")}
+            elif response_type == "ebnf":
+                return {
+                    "type": "grammar",
+                    "grammar": response_format.get("grammar", ""),
+                }
+            elif response_type == "structural_tag":
+                nested = cls._json_value(
+                    response_format.get("structural_tag"),
+                    "response_format.structural_tag",
+                )
+                if isinstance(nested, dict) and isinstance(nested.get("format"), dict):
+                    return nested["format"]
+                raise FtRuntimeException(
+                    ExceptionType.INVALID_PARAMS,
+                    "Kimi K3 response_format.structural_tag must contain a format object",
+                )
+            else:
+                raise FtRuntimeException(
+                    ExceptionType.INVALID_PARAMS,
+                    f"Kimi K3 cannot compose response_format.type={response_type!r}",
+                )
+        if config.json_format:
+            return {"type": "json_schema", "json_schema": {"type": "object"}}
+        return {"type": "any_text", "excludes": cls._SPECIAL_TEXT_EXCLUDES}
+
+    @staticmethod
+    def _clear_grammar_constraints(config: GenerateConfig) -> None:
+        config.json_format = False
+        config.json_schema = None
+        config.regex = None
+        config.ebnf = None
+        config.structural_tag = None
+        config.response_format = None
+
+    @classmethod
+    def _build_k3_structural_tag(
+        cls,
+        request: ChatCompletionRequest,
+        response_content: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        elements: List[Dict[str, Any]] = [
+            {
+                "type": "tag",
+                "begin": "",
+                "content": response_content,
+                "end": cls._RESPONSE_CLOSE,
+            }
+        ]
+
+        call_tags = cls._tool_call_tags(request)
+        if call_tags:
+            calls = {
+                "type": "tags_with_separator",
+                "tags": call_tags,
+                "separator": "",
+                "at_least_one": True,
+                "stop_after_first": False,
+            }
+            if cls._tool_choice_name(request) is not None:
+                tools: Dict[str, Any] = {
+                    "type": "sequence",
+                    "elements": [
+                        {"type": "const_string", "value": cls._TOOLS_OPEN},
+                        call_tags[0],
+                        {"type": "const_string", "value": cls._TOOLS_CLOSE},
+                    ],
+                }
+            elif request.tool_choice == "required":
+                tools = {
+                    "type": "sequence",
+                    "elements": [
+                        {"type": "const_string", "value": cls._TOOLS_OPEN},
+                        calls,
+                        {"type": "const_string", "value": cls._TOOLS_CLOSE},
+                    ],
+                }
+            else:
+                tools = {
+                    "type": "optional",
+                    "content": {
+                        "type": "tag",
+                        "begin": cls._TOOLS_OPEN,
+                        "content": calls,
+                        "end": cls._TOOLS_CLOSE,
+                    },
+                }
+            elements.append(tools)
+
+        elements.append({"type": "const_string", "value": cls._MESSAGE_CLOSE})
+        return {
+            "type": "structural_tag",
+            "format": {"type": "sequence", "elements": elements},
+        }
 
     @staticmethod
     def _clear_response_format_constraint(
@@ -875,20 +979,15 @@ class KimiK3Renderer(CustomChatRenderer):
         if not thinking:
             generate_config.max_thinking_tokens = 0
 
-        structural_tag = self._build_tool_call_structural_tag(request)
-        if structural_tag is not None:
+        if self._tool_choice_forces_tool(request):
             self._clear_response_format_constraint(request, generate_config)
-            conflicts = self._grammar_constraint_fields(generate_config)
-            if conflicts:
-                raise FtRuntimeException(
-                    ExceptionType.INVALID_PARAMS,
-                    "tool_choice forced tool-call decoding conflicts with existing "
-                    f"grammar constraint(s): {', '.join(conflicts)}",
-                )
 
-            generate_config.structural_tag = json.dumps(
-                structural_tag, ensure_ascii=False, separators=(",", ":")
-            )
+        response_content = self._response_content_format(generate_config)
+        structural_tag = self._build_k3_structural_tag(request, response_content)
+        self._clear_grammar_constraints(generate_config)
+        generate_config.structural_tag = json.dumps(
+            structural_tag, ensure_ascii=False, separators=(",", ":")
+        )
 
         if generate_config.in_think_mode:
             boundary_ids = self.tokenizer.encode(

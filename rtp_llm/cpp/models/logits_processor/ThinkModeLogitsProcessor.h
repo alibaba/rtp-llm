@@ -78,12 +78,12 @@ struct ThinkModeSpecSnapshot {
 class ThinkModeLogitsProcessor: public BaseLogitsProcessor, public SpecLogitsProcessor {
 public:
     ThinkModeLogitsProcessor() = default;
-    ThinkModeLogitsProcessor(std::vector<StreamThinkInfo> think_infos);
+    ThinkModeLogitsProcessor(std::vector<StreamThinkInfo> think_infos, int64_t eos_token_id = -1);
     virtual ~ThinkModeLogitsProcessor() {}
 
 public:
-    static std::shared_ptr<ThinkModeLogitsProcessor> fromGenerateInput(std::shared_ptr<GenerateInput> generate_input,
-                                                                       int32_t                        num);
+    static std::shared_ptr<ThinkModeLogitsProcessor>
+    fromGenerateInput(std::shared_ptr<GenerateInput> generate_input, int32_t num, int64_t eos_token_id = -1);
 
 public:
     void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
@@ -119,6 +119,7 @@ private:
     mutable std::mutex                           mutex_;
     std::shared_ptr<const ThinkModeSpecSnapshot> spec_snapshot_;
     uint64_t                                     spec_snapshot_version_ = 0;
+    int64_t                                      eos_token_id_          = -1;
 };
 typedef std::shared_ptr<ThinkModeLogitsProcessor> ThinkModeLogitsProcessorPtr;
 
