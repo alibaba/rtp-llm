@@ -83,31 +83,10 @@ def smart_resize(
     factor: int = 28,
     min_pixels: int = 4 * 28 * 28,
     max_pixels: int = 451584,
-    min_image_dimension: int = 10,
-    max_image_aspect_ratio: float = 200.0,
     max_long_side_pixel: Optional[int] = None,
     min_short_side_pixel: int = MIN_SHORT_SIDE_PIXEL,
     max_total_pixels: Optional[int] = None,
 ) -> tuple[int, int]:
-    if min_image_dimension > 0 and (
-        height < min_image_dimension or width < min_image_dimension
-    ):
-        raise_mm(
-            MMErr.IMG_HW.format(
-                f"height:{height} or width:{width} must be larger than "
-                f"{min_image_dimension}"
-            )
-        )
-    if max_image_aspect_ratio > 0 and (
-        max(height, width) / min(height, width) > max_image_aspect_ratio
-    ):
-        ratio_limit = f"{float(max_image_aspect_ratio):g}"
-        raise_mm(
-            MMErr.IMG_HW.format(
-                f"absolute aspect ratio must be smaller than {ratio_limit}, "
-                f"got {height} / {width}"
-            )
-        )
     if max_long_side_pixel is not None:
         return _smart_resize_by_long_side(
             height,
