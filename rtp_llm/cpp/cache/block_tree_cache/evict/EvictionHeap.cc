@@ -55,6 +55,20 @@ void EvictionHeap::upsert(TreeNode* node, const CandidateMeta& meta) {
     }
 }
 
+bool EvictionHeap::updateIfPresent(TreeNode* node, const CandidateMeta& meta) {
+    auto index_it = index_.find(node);
+    if (index_it == index_.end()) {
+        return false;
+    }
+    ordered_.erase(index_it->second);
+    auto [ordered_it, inserted] = ordered_.insert(makeEntry(node, meta));
+    RTP_LLM_CHECK_WITH_INFO(inserted,
+                            "EvictionHeap::updateIfPresent failed to insert a unique entry for node=%p",
+                            static_cast<void*>(node));
+    index_it->second = ordered_it;
+    return true;
+}
+
 void EvictionHeap::erase(TreeNode* node) {
     auto it = index_.find(node);
     if (it == index_.end())

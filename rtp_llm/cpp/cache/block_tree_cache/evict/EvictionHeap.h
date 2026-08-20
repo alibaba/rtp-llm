@@ -32,6 +32,8 @@ public:
 
     // Insert or replace a node's ordered entry from its candidate meta.
     void upsert(TreeNode* node, const CandidateMeta& meta);
+    // Replace an existing entry without admitting a missing node.
+    bool updateIfPresent(TreeNode* node, const CandidateMeta& meta);
     // Remove a node's entry if present. Idempotent.
     void erase(TreeNode* node);
     // Read the best victim without changing heap membership.
