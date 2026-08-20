@@ -64,6 +64,25 @@ TEST(MtpExecutorPolicyTest, DSparkPrefillRoleDisablesDraftGraphCapture) {
     EXPECT_TRUE(MtpExecutor::dsparkDraftGraphAllowed(/*is_dspark=*/false, RoleType::DECODE));
 }
 
+TEST(MtpExecutorPolicyTest, CpRestoreSnapshotOwnsMutableHostInput) {
+    auto input_lengths = torch::tensor({3683}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+    TensorHolder holder;
+    auto         snapshot = MtpExecutor::snapshotMutableHostInputToCuda(input_lengths, holder);
+
+    ASSERT_TRUE(snapshot.is_cuda());
+    ASSERT_EQ(holder.tensors.size(), 1);
+    ASSERT_TRUE(holder.tensors.front().is_pinned());
+    ASSERT_NE(holder.tensors.front().data_ptr(), input_lengths.data_ptr());
+    input_lengths.fill_(922);
+    EXPECT_EQ(holder.tensors.front().item<int32_t>(), 3683);
+    EXPECT_EQ(snapshot.cpu().item<int32_t>(), 3683);
+
+    auto device_input    = input_lengths.to(torch::kCUDA);
+    auto device_snapshot = MtpExecutor::snapshotMutableHostInputToCuda(device_input, holder);
+    EXPECT_EQ(device_snapshot.data_ptr(), device_input.data_ptr());
+    EXPECT_EQ(holder.tensors.size(), 1);
+}
+
 struct MtpExecutorTestConfig {
     size_t  max_seq_len            = 2048;
     size_t  vocab_size             = 4;
