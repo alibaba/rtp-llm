@@ -20,7 +20,6 @@
 
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
-#include <ATen/cuda/CUDAEvent.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
 #include "ATen/ops/cat.h"
@@ -232,9 +231,11 @@ void waitForCurrentStream(const at::cuda::CUDAStream& copy_stream) {
     if (current_stream.stream() == copy_stream.stream()) {
         return;
     }
-    at::cuda::CUDAEvent ready;
-    ready.record(current_stream);
-    ready.block(copy_stream);
+    cudaEvent_t ready;
+    RTP_LLM_DEVICE_CHECK(cudaEventCreateWithFlags(&ready, cudaEventDisableTiming));
+    RTP_LLM_DEVICE_CHECK(cudaEventRecord(ready, current_stream));
+    RTP_LLM_DEVICE_CHECK(cudaStreamWaitEvent(copy_stream, ready, 0));
+    RTP_LLM_DEVICE_CHECK(cudaEventDestroy(ready));
 }
 
 int getCopyDevice(const torch::Tensor& dst, const torch::Tensor& src) {
