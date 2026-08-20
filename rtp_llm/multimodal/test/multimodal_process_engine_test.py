@@ -1117,8 +1117,6 @@ class MiniMaxM3VLPreprocessTest(TestCase):
         config = VitConfig()
         self.assertEqual(config.mm_image_max_file_size_kb, 100 * 1024)
         self.assertEqual(config.mm_video_max_file_size_kb, 2 * 1024 * 1024)
-        self.assertEqual(config.mm_image_min_dimension, 10)
-        self.assertEqual(config.mm_image_max_aspect_ratio, 200.0)
 
     def test_image_open_error(self):
         from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl.minimax_m3_vl_mixin import (
@@ -1139,34 +1137,22 @@ class MiniMaxM3VLPreprocessTest(TestCase):
                 MMErr.IMG_OPEN,
             )
 
-    def test_image_dimension_errors(self):
+    def test_image_resize_accepts_small_and_extreme_aspect_inputs(self):
         from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl.image_processor import (
             smart_resize,
         )
 
-        self.assert_mm_error(
-            lambda: smart_resize(9, 100),
-            MMErr.IMG_HW.format("height:9 or width:100 must be larger than 10"),
+        self.assertEqual(smart_resize(9, 100), (28, 112))
+        self.assertEqual(smart_resize(10, 3000), (28, 2996))
+
+    def test_image_resize_too_small_after_max_pixels(self):
+        from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl.image_processor import (
+            smart_resize,
         )
+
         self.assert_mm_error(
             lambda: smart_resize(100, 100, max_pixels=1),
             MMErr.IMG_TOO_SMALL,
-        )
-
-    def test_image_dimension_limits_are_configurable(self):
-        from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl.image_processor import (
-            smart_resize,
-        )
-
-        self.assert_mm_error(
-            lambda: smart_resize(19, 100, min_image_dimension=20),
-            MMErr.IMG_HW.format("height:19 or width:100 must be larger than 20"),
-        )
-        self.assert_mm_error(
-            lambda: smart_resize(20, 100, max_image_aspect_ratio=4),
-            MMErr.IMG_HW.format(
-                "absolute aspect ratio must be smaller than 4, got 20 / 100"
-            ),
         )
 
     def test_minimax_long_side_resize_rules(self):

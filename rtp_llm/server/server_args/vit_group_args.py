@@ -105,22 +105,6 @@ def init_vit_group_args(parser, vit_config):
         help="视频文件大小上限，单位为KB",
     )
     vit_group.add_argument(
-        "--mm_image_min_dimension",
-        env_name="MM_IMAGE_MIN_DIMENSION",
-        bind_to=(vit_config, "mm_image_min_dimension"),
-        type=int,
-        default=VitConfig.DEFAULT_MM_IMAGE_MIN_DIMENSION,
-        help="图片最小边长；小于等于0时关闭该检查",
-    )
-    vit_group.add_argument(
-        "--mm_image_max_aspect_ratio",
-        env_name="MM_IMAGE_MAX_ASPECT_RATIO",
-        bind_to=(vit_config, "mm_image_max_aspect_ratio"),
-        type=float,
-        default=VitConfig.DEFAULT_MM_IMAGE_MAX_ASPECT_RATIO,
-        help="图片最大宽高比；小于等于0时关闭该检查",
-    )
-    vit_group.add_argument(
         "--mm_video_max_frames",
         env_name="MM_VIDEO_MAX_FRAMES",
         bind_to=(vit_config, "mm_video_max_frames"),

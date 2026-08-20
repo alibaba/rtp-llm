@@ -241,6 +241,9 @@ class VitConfig:
     # shared by the --mm_timeout_ms / MM_TIMEOUT_MS server arg and the
     # MMScheduler fallback so the three never drift.
     DEFAULT_MM_TIMEOUT_MS: int = 120000
+    DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB: int = 100 * 1024
+    DEFAULT_MM_VIDEO_MAX_FILE_SIZE_KB: int = 2 * 1024 * 1024
+    DEFAULT_MM_VIDEO_MAX_FRAMES: int = 64
 
     def __init__(self):
         self.vit_separation: VitSeparation = VitSeparation.VIT_SEPARATION_LOCAL
@@ -248,6 +251,13 @@ class VitConfig:
         self.trt_cache_enabled: int = 0
         self.trt_cache_path: Optional[str] = None
         self.download_headers: str = ""
+        self.mm_image_max_file_size_kb: int = (
+            VitConfig.DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB
+        )
+        self.mm_video_max_file_size_kb: int = (
+            VitConfig.DEFAULT_MM_VIDEO_MAX_FILE_SIZE_KB
+        )
+        self.mm_video_max_frames: int = VitConfig.DEFAULT_MM_VIDEO_MAX_FRAMES
         self.mm_cache_item_num: int = 10
         self.url_cache_item_num: int = 100
         self.use_igraph_cache: bool = True
@@ -303,6 +313,9 @@ class VitConfig:
             f"trt_cache_enabled: {self.trt_cache_enabled}\n"
             f"trt_cache_path: {self.trt_cache_path}\n"
             f"download_headers: {self.download_headers}\n"
+            f"mm_image_max_file_size_kb: {self.mm_image_max_file_size_kb}\n"
+            f"mm_video_max_file_size_kb: {self.mm_video_max_file_size_kb}\n"
+            f"mm_video_max_frames: {self.mm_video_max_frames}\n"
             f"mm_cache_item_num: {self.mm_cache_item_num}\n"
             f"url_cache_item_num: {self.url_cache_item_num}\n"
             f"use_igraph_cache: {self.use_igraph_cache}\n"
