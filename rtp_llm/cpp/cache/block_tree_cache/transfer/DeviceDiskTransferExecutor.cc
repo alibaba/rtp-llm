@@ -18,7 +18,6 @@ namespace rtp_llm {
 namespace {
 
 constexpr std::chrono::milliseconds kStagingAcquireTimeout{1000};
-constexpr size_t                    kLaneWorkerCount = 1;
 constexpr size_t                    kLaneQueueSize   = 10000;
 
 size_t alignedStride(size_t payload_bytes) {
@@ -50,9 +49,11 @@ void logBatchFailure(const std::vector<TransferDescriptor>& descriptors, size_t 
 DeviceDiskTransferExecutor::DeviceDiskTransferExecutor(DeviceHostTransferExecutor&     device_host_executor,
                                                        HostDiskTransferExecutor&       host_disk_executor,
                                                        const std::vector<GroupSetPtr>& group_sets,
-                                                       size_t                          staging_block_count):
+                                                       size_t                          staging_block_count,
+                                                       size_t                          transfer_worker_count):
     device_host_executor_(device_host_executor), host_disk_executor_(host_disk_executor) {
     RTP_LLM_CHECK(staging_block_count >= 2 && staging_block_count % 2 == 0);
+    RTP_LLM_CHECK(transfer_worker_count > 0);
 
     size_t max_stride  = 0;
     size_t full_stride = 0;
@@ -80,8 +81,10 @@ DeviceDiskTransferExecutor::DeviceDiskTransferExecutor(DeviceHostTransferExecuto
 
     full_staging_pool_ = std::make_unique<HostStagingBlockPool>(full_batch_capacity_, full_stride);
     swa_staging_pool_  = std::make_unique<HostStagingBlockPool>(swa_batch_capacity_, swa_stride);
-    full_task_pool_ = std::make_unique<BlockTreeTaskPool>(kLaneWorkerCount, kLaneQueueSize, "BlockDisk2DeviceFull");
-    swa_task_pool_  = std::make_unique<BlockTreeTaskPool>(kLaneWorkerCount, kLaneQueueSize, "BlockDisk2DeviceSwa");
+    full_task_pool_ =
+        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, kLaneQueueSize, "BlockDisk2DeviceFull");
+    swa_task_pool_ =
+        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, kLaneQueueSize, "BlockDisk2DeviceSwa");
     RTP_LLM_CHECK(full_task_pool_->start());
     RTP_LLM_CHECK(swa_task_pool_->start());
 }
@@ -104,7 +107,19 @@ DeviceDiskTransferExecutor::execute(const std::vector<TransferDescriptor>& descr
         return context;
     }
 
-    const bool accepted = task_pool->submit([this, descriptors, group_sets, context, pool, capacity] {
+    const auto enqueue_time = std::chrono::steady_clock::now();
+    const bool accepted = task_pool->submit([this, descriptors, group_sets, context, pool, capacity, enqueue_time] {
+        const auto executor_start = std::chrono::steady_clock::now();
+        benchmark_queue_wait_ns_.fetch_add(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(executor_start - enqueue_time).count(),
+            std::memory_order_relaxed);
+        const auto record_executor = [this, executor_start] {
+            benchmark_executor_ns_.fetch_add(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()
+                                                                    - executor_start).count(),
+                std::memory_order_relaxed);
+            benchmark_executor_count_.fetch_add(1, std::memory_order_relaxed);
+        };
         try {
             for (size_t begin = 0; begin < descriptors.size(); begin += capacity) {
                 const size_t end = std::min(begin + capacity, descriptors.size());
@@ -115,6 +130,7 @@ DeviceDiskTransferExecutor::execute(const std::vector<TransferDescriptor>& descr
                 for (size_t index = begin; index < end; ++index) {
                     auto lease = pool->mallocWithBackoff(kStagingAcquireTimeout);
                     if (!lease.has_value()) {
+                        record_executor();
                         context->complete(transferError(TransferStatus::RESOURCE_EXHAUSTED, begin, end));
                         return;
                     }
@@ -129,20 +145,25 @@ DeviceDiskTransferExecutor::execute(const std::vector<TransferDescriptor>& descr
                 TransferStatus status = host_disk_executor_.execute(hosts, sub_descriptors, sub_group_sets);
                 if (status != TransferStatus::OK) {
                     logBatchFailure(sub_descriptors, begin, "disk-to-staging");
+                    record_executor();
                     context->complete(transferError(status, begin, end));
                     return;
                 }
                 status = device_host_executor_.execute(hosts, sub_descriptors, sub_group_sets);
                 if (status != TransferStatus::OK) {
                     logBatchFailure(sub_descriptors, begin, "staging-to-device");
+                    record_executor();
                     context->complete(transferError(status, begin, end));
                     return;
                 }
             }
+            record_executor();
             context->complete(ErrorInfo::OkStatus());
         } catch (const std::exception& error) {
+            record_executor();
             context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
         } catch (...) {
+            record_executor();
             context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown disk-to-device exception"));
         }
     });
@@ -151,6 +172,12 @@ DeviceDiskTransferExecutor::execute(const std::vector<TransferDescriptor>& descr
             ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "RESOURCE_EXHAUSTED: disk-to-device queue is full or stopped"));
     }
     return context;
+}
+
+void DeviceDiskTransferExecutor::resetBenchmarkTimingStats() {
+    benchmark_queue_wait_ns_.store(0, std::memory_order_relaxed);
+    benchmark_executor_ns_.store(0, std::memory_order_relaxed);
+    benchmark_executor_count_.store(0, std::memory_order_relaxed);
 }
 
 TransferStatus DeviceDiskTransferExecutor::execute(const TransferDescriptor& descriptor,

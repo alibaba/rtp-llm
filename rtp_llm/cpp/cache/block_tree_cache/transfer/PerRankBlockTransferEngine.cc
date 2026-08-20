@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 
 #include <algorithm>
+#include <chrono>
 #include <exception>
 #include <memory>
 #include <string>
@@ -18,7 +19,6 @@ namespace rtp_llm {
 
 namespace {
 
-constexpr size_t kTransferWorkerCount = 1;
 constexpr size_t kTransferQueueSize   = 10000;
 
 ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
@@ -42,20 +42,22 @@ ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
 PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> group_sets,
                                                        DeviceHostCopyOptions    device_host_options,
                                                        size_t                   device_disk_staging_block_count,
-                                                       size_t                   max_descriptors_per_batch):
+                                                       size_t                   max_descriptors_per_batch,
+                                                       size_t                   transfer_worker_count):
     group_sets_(std::move(group_sets)),
     device_host_executor_(std::make_unique<DeviceHostTransferExecutor>(std::move(device_host_options))),
     host_disk_executor_(std::make_unique<HostDiskTransferExecutor>()),
     max_descriptors_per_batch_(max_descriptors_per_batch) {
     RTP_LLM_CHECK(max_descriptors_per_batch_ > 0);
+    RTP_LLM_CHECK(transfer_worker_count > 0);
     device_to_host_task_pool_ =
-        std::make_unique<BlockTreeTaskPool>(kTransferWorkerCount, kTransferQueueSize, "BlockD2HTransfer");
+        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, kTransferQueueSize, "BlockD2HTransfer");
     host_to_device_task_pool_ =
-        std::make_unique<BlockTreeTaskPool>(kTransferWorkerCount, kTransferQueueSize, "BlockH2DTransfer");
+        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, kTransferQueueSize, "BlockH2DTransfer");
     host_to_disk_task_pool_ =
-        std::make_unique<BlockTreeTaskPool>(kTransferWorkerCount, kTransferQueueSize, "BlockH2DiskTransfer");
+        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, kTransferQueueSize, "BlockH2DiskTransfer");
     disk_to_host_task_pool_ =
-        std::make_unique<BlockTreeTaskPool>(kTransferWorkerCount, kTransferQueueSize, "BlockDisk2HTransfer");
+        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, kTransferQueueSize, "BlockDisk2HTransfer");
     RTP_LLM_CHECK(device_to_host_task_pool_->start());
     RTP_LLM_CHECK(host_to_device_task_pool_->start());
     RTP_LLM_CHECK(host_to_disk_task_pool_->start());
@@ -66,7 +68,11 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
     });
     if (any_disk_pool) {
         device_disk_executor_ = std::make_unique<DeviceDiskTransferExecutor>(
-            *device_host_executor_, *host_disk_executor_, group_sets_, device_disk_staging_block_count);
+            *device_host_executor_,
+            *host_disk_executor_,
+            group_sets_,
+            device_disk_staging_block_count,
+            transfer_worker_count);
     }
 }
 
@@ -111,7 +117,12 @@ PerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descri
     }
 
     auto context = std::make_shared<TransferBatchAsyncContext>();
-    const bool accepted = task_pool->submit([this, descriptors, group_sets, hosts, context] {
+    const auto enqueue_time = std::chrono::steady_clock::now();
+    const bool accepted = task_pool->submit([this, descriptors, group_sets, hosts, context, enqueue_time] {
+        const auto executor_start = std::chrono::steady_clock::now();
+        benchmark_queue_wait_ns_.fetch_add(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(executor_start - enqueue_time).count(),
+            std::memory_order_relaxed);
         try {
             for (size_t begin = 0; begin < descriptors.size(); begin += max_descriptors_per_batch_) {
                 const size_t end = std::min(begin + max_descriptors_per_batch_, descriptors.size());
@@ -128,16 +139,36 @@ PerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descri
                                             descriptors[index].debugString().c_str());
                     }
                     const auto error = transferStatusToErrorInfo(status);
+                    benchmark_executor_ns_.fetch_add(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()
+                                                                            - executor_start).count(),
+                        std::memory_order_relaxed);
+                    benchmark_executor_count_.fetch_add(1, std::memory_order_relaxed);
                     context->complete(ErrorInfo(error.code(),
                                                 error.ToString() + ", descriptor_range=[" + std::to_string(begin)
                                                     + "," + std::to_string(end) + ")"));
                     return;
                 }
             }
+            benchmark_executor_ns_.fetch_add(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()
+                                                                    - executor_start).count(),
+                std::memory_order_relaxed);
+            benchmark_executor_count_.fetch_add(1, std::memory_order_relaxed);
             context->complete(ErrorInfo::OkStatus());
         } catch (const std::exception& error) {
+            benchmark_executor_ns_.fetch_add(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()
+                                                                    - executor_start).count(),
+                std::memory_order_relaxed);
+            benchmark_executor_count_.fetch_add(1, std::memory_order_relaxed);
             context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
         } catch (...) {
+            benchmark_executor_ns_.fetch_add(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()
+                                                                    - executor_start).count(),
+                std::memory_order_relaxed);
+            benchmark_executor_count_.fetch_add(1, std::memory_order_relaxed);
             context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown transfer executor exception"));
         }
     });
@@ -146,6 +177,36 @@ PerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descri
             ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "RESOURCE_EXHAUSTED: transfer queue is full or stopped"));
     }
     return context;
+}
+
+void PerRankBlockTransferEngine::resetBenchmarkTimingStats() {
+    benchmark_queue_wait_ns_.store(0, std::memory_order_relaxed);
+    benchmark_executor_ns_.store(0, std::memory_order_relaxed);
+    benchmark_executor_count_.store(0, std::memory_order_relaxed);
+    if (device_disk_executor_ != nullptr) {
+        device_disk_executor_->resetBenchmarkTimingStats();
+    }
+}
+
+int64_t PerRankBlockTransferEngine::benchmarkQueueWaitNs() const {
+    return benchmark_queue_wait_ns_.load(std::memory_order_relaxed)
+           + (device_disk_executor_ == nullptr ? 0 :
+                                                device_disk_executor_->benchmark_queue_wait_ns_.load(
+                                                    std::memory_order_relaxed));
+}
+
+int64_t PerRankBlockTransferEngine::benchmarkExecutorNs() const {
+    return benchmark_executor_ns_.load(std::memory_order_relaxed)
+           + (device_disk_executor_ == nullptr ? 0 :
+                                                device_disk_executor_->benchmark_executor_ns_.load(
+                                                    std::memory_order_relaxed));
+}
+
+size_t PerRankBlockTransferEngine::benchmarkExecutorCount() const {
+    return benchmark_executor_count_.load(std::memory_order_relaxed)
+           + (device_disk_executor_ == nullptr ? 0 :
+                                                device_disk_executor_->benchmark_executor_count_.load(
+                                                    std::memory_order_relaxed));
 }
 
 TransferStatus

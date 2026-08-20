@@ -4,6 +4,7 @@
 #include <cuda_runtime.h>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/ModelProfile.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/benchmark/DescriptorSizeProfile.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/CommonBenchmarkOptions.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/TreeBenchmarkOptions.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/TransferBenchmarkOptions.h"
@@ -61,12 +62,13 @@ cudaDeviceProp selectCudaDevice(int cuda_device) {
     return prop;
 }
 
-template<typename Options, typename ParseOptions, typename ValidateOptions, typename Run>
+template<typename Options, typename ParseOptions, typename ValidateOptions, typename LoadProfile, typename Run>
 int runBenchmark(const char*       label,
                  int               argc,
                  char**            argv,
                  ParseOptions&&    parse_options,
                  ValidateOptions&& validate_options,
+                 LoadProfile&&     load_profile,
                  Run&&             run) {
     const BenchmarkOptions common  = BenchmarkOptions::parse(argc, argv);
     const Options          options = parse_options(argc, argv);
@@ -78,7 +80,7 @@ int runBenchmark(const char*       label,
     }
 
     try {
-        const ModelProfile profile = ModelProfile::load(common.model_profile_path);
+        const ModelProfile profile = load_profile(common.model_profile_path);
         std::cout << "Loaded profile: " << profile.profile_id << " (SHA256: " << profile.sha256_hex.substr(0, 16)
                   << "...)" << std::endl;
         const cudaDeviceProp prop = selectCudaDevice(common.cuda_device);
@@ -101,6 +103,7 @@ int runTree(int argc, char** argv) {
         argv,
         TreeOptions::parse,
         [](const TreeOptions&) {},
+        ModelProfile::load,
         [](const ModelProfile& profile, const TreeOptions& options, const BenchmarkOptions& common) {
             return TreeBenchmarkRunner(profile,
                                        options,
@@ -120,6 +123,7 @@ int runTransfer(int argc, char** argv) {
         argv,
         TransferOptions::parse,
         validateTransferOptions,
+        [](const std::string& path) { return DescriptorSizeProfile::load(path).toSyntheticModelProfile(); },
         [](const ModelProfile& profile, const TransferOptions& options, const BenchmarkOptions& common) {
             return TransferBenchmarkRunner(profile, options, common.seed, common.output_json_path).run();
         });
