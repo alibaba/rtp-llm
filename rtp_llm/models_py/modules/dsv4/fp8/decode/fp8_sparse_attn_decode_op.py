@@ -178,8 +178,13 @@ class SparseAttnV4DecodeFp8Op:
             swa_indices.reshape(rows, -1),
             topk_length,
             (128, 512, 1024),
-            trim_dspark_padding=True,
-            pad_to_supported=False,
+            # DSpark reserves a 256-column CUDA-graph buffer, but MTP can
+            # make 132 entries valid.  Trimming that buffer to 128 leaves
+            # swa_topk_lens larger than the index row and drops four real KV
+            # entries.  Preserve all 256 columns and pad to FlashInfer's next
+            # instantiated Top-K shape instead.
+            trim_dspark_padding=False,
+            pad_to_supported=True,
         )
         extra_indices = extra_topk_idxs
         if extra_indices is not None and extra_indices.dim() == 4:

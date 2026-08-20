@@ -11,9 +11,27 @@ import torch
 from rtp_llm.models_py.modules.dsv4.fp8.decode.fp8_sparse_attn_decode_op import (
     SparseAttnV4DecodeFp8Op,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import canonical_topk
 
 
 class TestSparseAttnV4DecodeFp8Op(unittest.TestCase):
+    def test_dspark_mtp_topk_keeps_132_valid_entries(self):
+        indices = torch.arange(256, dtype=torch.int32).view(1, 256)
+        lengths = torch.tensor([132], dtype=torch.int32)
+
+        canonical, canonical_lens = canonical_topk(
+            indices,
+            lengths,
+            (128, 512, 1024),
+            trim_dspark_padding=False,
+            pad_to_supported=True,
+        )
+
+        self.assertEqual(tuple(canonical.shape), (1, 512))
+        self.assertTrue(torch.equal(canonical[:, :256], indices))
+        self.assertTrue(bool((canonical[:, 256:] == -1).all()))
+        self.assertEqual(canonical_lens.tolist(), [132])
+
     def test_sparse_indices_drop_dense_cache_metadata(self):
         calls = []
         fake_flash_mla = types.ModuleType("flash_mla")
