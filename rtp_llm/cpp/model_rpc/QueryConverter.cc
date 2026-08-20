@@ -499,6 +499,14 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
     stackBuffersToTensorPB(
         flatten_output->mutable_hidden_states(), source_outputs, [](const auto& r) { return r.hidden_states; });
 
+    if (dump_aux_info) {
+        // Keep writing the per-output AuxInfo field for rolling-upgrade compatibility.
+        // New clients consume this aggregate tensor and avoid deserializing one TensorPB per beam/output.
+        stackBuffersToTensorPB(flatten_output->mutable_all_softmax_probs(), source_outputs, [](const auto& r) {
+            return r.aux_info.softmax_probs;
+        });
+    }
+
     stackBuffersToTensorPB(flatten_output->mutable_loss(), source_outputs, [](const auto& r) { return r.loss; });
 
     stackBuffersToTensorPB(flatten_output->mutable_logits(), source_outputs, [](const auto& r) { return r.logits; });
