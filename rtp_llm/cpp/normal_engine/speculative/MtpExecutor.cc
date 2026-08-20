@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include "rtp_llm/cpp/utils/K3PdTrace.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
@@ -1968,6 +1969,34 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
             // rejection sampling
             speculative_sampler_output = speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
+            if (!streams.empty() && k3PdTraceEnabledForTraceId(streams.front()->traceId())) {
+                const auto target_tail = sampler_output.token_ids.slice(
+                    1, std::max<int64_t>(0, sampler_output.token_ids.size(1) - 5), sampler_output.token_ids.size(1));
+                RTP_LLM_LOG_DEBUG("[K3_EAGLE_TRACE] combo_tokens=%s input_lengths=%s prefix_lengths=%s "
+                                 "lm_output_indexes=%s logits_absmax=%.7g hidden_absmax=%.7g "
+                                 "target_logits_argmax=%s sampler_step=%zu sequence_lengths=%s "
+                                 "sampler_success=%s draft_token_ids=%s target_token_tail=%s accept_len=%s "
+                                 "accept_tokens=%s",
+                                 tensorDebugStringWithData<int32_t>(model_input.combo_tokens.cpu()).c_str(),
+                                 tensorDebugStringWithData<int32_t>(model_input.input_lengths.cpu()).c_str(),
+                                 tensorDebugStringWithData<int32_t>(model_input.prefix_lengths.cpu()).c_str(),
+                                 tensorDebugStringWithData<int32_t>(model_input.lm_output_indexes.cpu()).c_str(),
+                                 model_output.logits.abs().max().item<double>(),
+                                 model_output.hidden_states.defined() ?
+                                     model_output.hidden_states.abs().max().item<double>() :
+                                     0.0,
+                                 tensorDebugStringWithData<int64_t>(model_output.logits.argmax(-1).cpu()).c_str(),
+                                 sampler_input.step,
+                                 tensorDebugStringWithData<int32_t>(sampler_input.sequence_lengths).c_str(),
+                                 sampler_output.success.defined() ?
+                                     tensorDebugStringWithData<bool>(sampler_output.success.cpu()).c_str() :
+                                     "undefined",
+                                 tensorDebugStringWithData<int32_t>(draft_sampler_output.token_ids.cpu()).c_str(),
+                                 tensorDebugStringWithData<int32_t>(target_tail.cpu()).c_str(),
+                                 tensorDebugStringWithData<int32_t>(speculative_sampler_output.accept_len.cpu()).c_str(),
+                                 tensorDebugStringWithData<int32_t>(speculative_sampler_output.accept_tokens.cpu())
+                                     .c_str());
+            }
             applySpecLogitsAcceptLenCap(
                 sampler_input, sampler_output, speculative_sampler_output, batch_size, propose_step_);
         }

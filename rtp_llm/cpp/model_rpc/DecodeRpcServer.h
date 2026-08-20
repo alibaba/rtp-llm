@@ -37,7 +37,8 @@ public:
                            int                              partition_id,
                            grpc::ServerContext*             server_context,
                            int32_t                          prefill_cp_size = 1,
-                           bool                             force_disable_sp_run = false):
+                           bool                             force_disable_sp_run = false,
+                           bool                             k3_pd_trace = false):
             request_id(request_id),
             request_key(request_key),
             peer_addrs(peer_addrs),
@@ -49,7 +50,8 @@ public:
             partition_id(partition_id),
             server_context(server_context),
             prefill_cp_size(prefill_cp_size),
-            force_disable_sp_run(force_disable_sp_run) {}
+            force_disable_sp_run(force_disable_sp_run),
+            k3_pd_trace(k3_pd_trace) {}
         int64_t                          request_id;
         const std::string&               request_key;
         const std::vector<std::string>&  peer_addrs;
@@ -63,6 +65,7 @@ public:
         grpc::ServerContext* server_context;
         int32_t              prefill_cp_size;
         bool                 force_disable_sp_run;
+        bool                 k3_pd_trace;
     };
 
 private:

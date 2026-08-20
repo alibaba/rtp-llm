@@ -25,6 +25,7 @@ cc_library(
         "//rtp_llm/cpp/models:eplb",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
         "//rtp_llm/cpp/utils:tensor_debug_utils",
+        "//rtp_llm/cpp/utils:k3_pd_trace",
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + select({
         "//:using_cuda": [

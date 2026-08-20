@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/ErrorCodeUtil.h"
 #include "autil/StackTracer.h"
 #include "autil/EnvUtil.h"
+#include "autil/TimeUtility.h"
 #include <unistd.h>
 #include <sstream>
 #include <iomanip>
@@ -424,12 +425,25 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
         if (request_blocks->getBlocksCount() > 0) {
             if (param.wait_cache_store_done) {
                 constexpr int64_t kChunkPrefillCacheStoreWaitTimeoutMs = 5000;
+                const auto        store_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
                 auto store_context = cache_store->storeBuffers({request_blocks}, kChunkPrefillCacheStoreWaitTimeoutMs);
                 RTP_LLM_CHECK_WITH_INFO(store_context != nullptr,
                                         "chunk Prefill cache-store staging returned no context: request=%ld layer=%d",
                                         request_id,
                                         param.layer_id);
                 store_context->waitDone();
+                const auto store_elapsed_ms =
+                    (autil::TimeUtility::currentTimeInMicroSeconds() - store_start_us) / 1000;
+                if (!store_context->success()) {
+                    RTP_LLM_LOG_WARNING(
+                        "chunk Prefill cache-store FAILED: request=%ld layer=%d model=%d blocks=%zu elapsed_ms=%ld error=%s",
+                        request_id,
+                        param.layer_id,
+                        param.model_id,
+                        request_blocks->getBlocksCount(),
+                        store_elapsed_ms,
+                        store_context->getErrorInfoString().c_str());
+                }
                 RTP_LLM_CHECK_WITH_INFO(
                     store_context->success(),
                     "chunk Prefill cache-store staging failed or timed out: request=%ld layer=%d timeout_ms=%ld error=%s",

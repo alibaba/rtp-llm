@@ -9,6 +9,7 @@
 #include <sstream>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/utils/K3PdTrace.h"
 #include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
@@ -280,10 +281,27 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
     auto error_info = loadCacheForAllRank(decode_context);
     decode_context.time_info.updateLoadEndTime();
     if (!error_info.ok()) {
-        RTP_LLM_LOG_WARNING("request [%s] load kv cache failed, error code [%s], cost time [%ld] ms",
-                            decode_context.request_key.c_str(),
-                            error_info.ToString().c_str(),
-                            decode_context.time_info.loadCacheTimeMs());
+        const bool k3_pd_trace = k3PdTraceEnabledForTraceId(decode_context.request_info.trace_id);
+        std::string expected_keys_summary;
+        if (k3_pd_trace) {
+            std::ostringstream oss;
+            for (const auto& key : decode_context.getStream()->cacheKeys(0)) {
+                oss << key << " ";
+            }
+            expected_keys_summary = oss.str();
+            RTP_LLM_LOG_WARNING(
+                "[K3_PD_TRACE] event=decode_load_timeout_failed request_key=%s error_code=%s cost_time_ms=%ld "
+                "expected_keys=[%s]",
+                decode_context.request_key.c_str(),
+                error_info.ToString().c_str(),
+                decode_context.time_info.loadCacheTimeMs(),
+                expected_keys_summary.c_str());
+        } else {
+            RTP_LLM_LOG_WARNING("request [%s] load kv cache failed, error code [%s], cost time [%ld] ms",
+                                decode_context.request_key.c_str(),
+                                error_info.ToString().c_str(),
+                                decode_context.time_info.loadCacheTimeMs());
+        }
     }
 
     GenerateOutputsPB load_response;
@@ -584,6 +602,8 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
         min_timeout_ms = std::min(min_timeout_ms, request_timeout_ms);
     }
 
+    const bool k3_pd_trace = k3PdTraceEnabledForTraceId(decode_context.request_info.trace_id);
+
     LoadKVCacheContext load_context{decode_context.request_id,
                                     decode_context.request_key,
                                     decode_context.peer_addrs,
@@ -595,7 +615,19 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
                                     0,
                                     decode_context.server_context,
                                     decode_context.prefill_cp_size,
-                                    generate_stream->forceDisableSpRun()};
+                                    generate_stream->forceDisableSpRun(),
+                                    k3_pd_trace};
+
+    if (k3_pd_trace) {
+        std::ostringstream keys;
+        for (const auto& key : cache_keys) {
+            keys << key << " ";
+        }
+        RTP_LLM_LOG_INFO("[K3_PD_TRACE] event=decode_load_expected_keys request_key=%s trace_id=%s cache_keys=[%s]",
+                         decode_context.request_key.c_str(),
+                         decode_context.request_info.trace_id.c_str(),
+                         keys.str().c_str());
+    }
 
     // Prefill: TP = 1 && Decode: TP = 1
     if (resource_.workers.size() == 1 && decode_context.peer_addrs.size() == 1) {
@@ -1011,6 +1043,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         }
         return cache_key_index < cache_key_count;
     };
+    const std::string store_request_id = load_context.k3_pd_trace
+                                             ? makeK3PdTraceRequestId(std::to_string(load_context.request_id))
+                                             : std::to_string(load_context.request_id);
     for (int i = 0; i < load_context.peer_addrs.size(); i++) {
         auto&                                            peer_addr = load_context.peer_addrs[i];
         std::vector<std::shared_ptr<RequestBlockBuffer>> layer_caches;
@@ -1026,8 +1061,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 const size_t gid = static_cast<size_t>(gid_int);
                 auto request_key = std::to_string(load_context.request_id) + "-" + std::to_string(layer_id) + "-g"
                                    + std::to_string(gid);
-                auto load_layer_cache =
-                    std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), request_key);
+                auto load_layer_cache = std::make_shared<RequestBlockBuffer>(store_request_id, request_key);
 
                 RTP_LLM_CHECK_WITH_INFO(gid < load_context.block_ids_by_group.size(),
                                         "group id out of range: gid=%zu group_num=%zu",
@@ -1181,8 +1215,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             const size_t gid = static_cast<size_t>(gid_int);
                             auto request_key = std::to_string(load_context.request_id) + "-" + std::to_string(layer_id)
                                                + "-g" + std::to_string(gid);
-                            auto load_layer_cache = std::make_shared<RequestBlockBuffer>(
-                                std::to_string(load_context.request_id), request_key);
+                            auto load_layer_cache = std::make_shared<RequestBlockBuffer>(store_request_id, request_key);
 
                             KVCacheRegionName region_name = KVCacheRegionName::DEFAULT;
                             if (mtp_use_typed_regions && gid < mtp_cache_cfg.group_region_names.size()) {

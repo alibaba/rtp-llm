@@ -27,6 +27,7 @@ protected:
     std::shared_ptr<BlockBufferInfo> getAndEraseUnLoadedBlock(const std::string& block_key);
     void                             stopTimer();
     void                             runSuccess(bool direct_write);
+    std::string                      unloadedKeysSummary();
 
 protected:
     const CacheLoadRequest* request_;
@@ -36,6 +37,7 @@ protected:
     const std::string       peer_ip_;
     const int32_t           partition_count_{1};
     const int32_t           partition_id_{0};
+    const bool              k3_pd_trace_{false};
 
     std::mutex         response_mutex_;
     CacheLoadResponse* response_;

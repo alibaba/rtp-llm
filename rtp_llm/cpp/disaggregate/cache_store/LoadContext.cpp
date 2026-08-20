@@ -84,7 +84,10 @@ void SyncContext::waitDone() {
         if (autil::TimeUtility::currentTimeInMilliSeconds() >= deadline_ms_) {
             auto error_code = ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT;
             error_info_     = ErrorInfo(error_code, ErrorCodeToString(error_code));
-            RTP_LLM_LOG_INFO("load context wait done on timeout");
+            RTP_LLM_LOG_WARNING("sync context wait done on timeout: done=%d expect=%d elapsed_ms=%ld",
+                                done_layer_cnt_.load(),
+                                expect_layer_cnt_,
+                                autil::TimeUtility::currentTimeInMilliSeconds() - start_time_ms_);
             return;
         }
 

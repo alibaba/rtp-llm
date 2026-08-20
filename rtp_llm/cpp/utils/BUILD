@@ -85,6 +85,15 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "k3_pd_trace",
+    hdrs = [
+        "K3PdTrace.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
 # Signal handling utilities
 cc_library(
     name = "signal_utils",
