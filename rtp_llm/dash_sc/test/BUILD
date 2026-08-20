@@ -9,10 +9,35 @@ py_test(
 py_test(
     name = "grammar_validator_test",
     srcs = ["inference/grammar_validator_test.py"],
+    data = ["//:th_transformer_config"],
     main = "inference/grammar_validator_test.py",
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm/dash_sc:dash_sc_grpc_server"],
     imports = [],
     exec_properties = {"gpu": "A10"},
+)
+
+py_test(
+    name = "core_dump_control_test",
+    srcs = ["inference/core_dump_control_test.py"],
+    main = "inference/core_dump_control_test.py",
+    deps = ["//rtp_llm/dash_sc:xgrammar_core_dump_control"],
+)
+
+py_test(
+    name = "grammar_validator_core_dump_test",
+    srcs = ["inference/grammar_validator_core_dump_test.py"],
+    data = ["//:th_transformer_config"],
+    main = "inference/grammar_validator_core_dump_test.py",
+    tags = [
+        "local",
+        "manual",
+        "no-remote",
+    ],
+    deps = [
+        "//rtp_llm/dash_sc:dash_sc_grpc_server",
+        "//rtp_llm/dash_sc:xgrammar",
+        "//rtp_llm/dash_sc:xgrammar_core_dump_control",
+    ],
 )
 
 py_test(
