@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstddef>
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -20,7 +22,8 @@ public:
     DeviceDiskTransferExecutor(DeviceHostTransferExecutor&     device_host_executor,
                                HostDiskTransferExecutor&       host_disk_executor,
                                const std::vector<GroupSetPtr>& group_sets,
-                               size_t                          staging_block_count);
+                               size_t                          staging_block_count,
+                               size_t                          transfer_worker_count = 1);
     ~DeviceDiskTransferExecutor();
 
     DeviceDiskTransferExecutor(const DeviceDiskTransferExecutor&)            = delete;
@@ -30,6 +33,11 @@ public:
                                           const std::vector<const GroupSet*>&    group_sets);
 
     TransferStatus execute(const TransferDescriptor& descriptor, const GroupSet& group_set);
+
+    void resetBenchmarkTimingStats();
+    std::atomic<int64_t> benchmark_queue_wait_ns_{0};
+    std::atomic<int64_t> benchmark_executor_ns_{0};
+    std::atomic<size_t>  benchmark_executor_count_{0};
 
 private:
     HostStagingBlockPool* stagingPool(CacheGroupType group_type) const;
