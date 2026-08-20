@@ -95,6 +95,7 @@ Padding-token slots are nulled via ``cp_info.prefill_qkv_padding_mask``.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
@@ -296,6 +297,7 @@ def forward_layers(
     cu_seqlens: torch.Tensor,  # [B+1] int64 — request boundaries
     block_tables_by_type: Optional[Dict[str, torch.Tensor]],
     attn_inputs: Optional[PyAttentionInputs] = None,
+    attention_inputs: Any = None,
     prepare_hidden_fn: Optional[Any] = None,
 ) -> torch.Tensor:
     """Flat per-layer loop — vLLM-aligned layout.
@@ -366,13 +368,25 @@ def forward_layers(
         if _rt._get_buf() is None:
             _rt_on = False
 
-    # Build the per-layer cache_store writer once per forward. Active
-    # only on prefill calls with cache_store_inputs bound; otherwise
-    # ``write_cache_store_impl`` is None and the per-layer call site is
-    # a cheap None check.
+    # Tagged inputs carry a group-local physical block table in each value.
+    # Preserve that tag when pairing a writer with each LayerKVCache below.
+    cache_store_source = (
+        attention_inputs if attention_inputs is not None else attn_inputs
+    )
     write_cache_store_impl = None
-    if kv_cache is not None and attn_inputs is not None:
-        write_cache_store_impl = create_write_cache_store_impl(attn_inputs, kv_cache)
+    write_cache_store_impl_by_tag = None
+    if kv_cache is not None and cache_store_source is not None:
+        if isinstance(cache_store_source, Mapping):
+            write_cache_store_impl_by_tag = {
+                str(tag): writer
+                for tag, group_inputs in cache_store_source.items()
+                if (writer := create_write_cache_store_impl(group_inputs, kv_cache))
+                is not None
+            }
+        else:
+            write_cache_store_impl = create_write_cache_store_impl(
+                cache_store_source, kv_cache
+            )
 
     if prepare_hidden_fn is None:
         h = v4.embed(input_ids)  # [T_total, dim]
@@ -525,8 +539,25 @@ def forward_layers(
                     v4.capture_aux_hidden(layer_idx, h)
                 if _rt_on:
                     _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
-                if write_cache_store_impl is not None:
-                    write_cache_store_impl(kv_cache.get_layer_cache_groups(layer_idx))
+                if write_cache_store_impl_by_tag:
+                    for layer_cache in kv_cache.get_layer_cache_groups(layer_idx):
+                        writer = write_cache_store_impl_by_tag.get(
+                            str(layer_cache.tag)
+                        )
+                        if writer is None:
+                            raise RuntimeError(
+                                "missing cache-store writer for layer "
+                                f"{layer_idx} tag {layer_cache.tag!r}"
+                            )
+                        writer(layer_cache)
+                elif write_cache_store_impl is not None:
+                    layer_caches = kv_cache.get_layer_cache_groups(layer_idx)
+                    if len(layer_caches) != 1:
+                        raise RuntimeError(
+                            "plain cache-store inputs require exactly one cache group "
+                            f"for layer {layer_idx}; got {len(layer_caches)}"
+                        )
+                    write_cache_store_impl(layer_caches[0])
                 if _rt_on:
                     _rt.record(f"layer{layer_idx:02d}_out", h)
                     if cp_ctx is None:
@@ -746,6 +777,7 @@ def forward_prefill(
         cu_seqlens,
         block_tables_by_type,
         attn_inputs=attn,
+        attention_inputs=attn_inputs,
         prepare_hidden_fn=prepare_hidden_fn,
     )  # [T_total, dim]
     return PyModelOutputs(hidden)
