@@ -90,7 +90,7 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
             || group_set->groupIds().size() != group_set->devicePools().size()) {
             for (const auto& [group_id, pool, blocks] : request_holds) {
                 (void)group_id;
-                pool->decRef(blocks, BlockRefType::REQUEST);
+                pool->decRef(blocks);
             }
             return result;
         }
@@ -101,7 +101,7 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
             if (!device_pool) {
                 for (const auto& [group_id, pool, blocks] : request_holds) {
                     (void)group_id;
-                    pool->decRef(blocks, BlockRefType::REQUEST);
+                    pool->decRef(blocks);
                 }
                 return result;
             }
@@ -109,16 +109,17 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
             auto allocated = device_pool->malloc(keys.size());
             if (!allocated.has_value() || allocated->size() != keys.size()) {
                 if (allocated.has_value()) {
-                    device_pool->free(*allocated);
+                    device_pool->incRef(*allocated);
+                    device_pool->decRef(*allocated);
                 }
                 for (const auto& [group_id, pool, held_blocks] : request_holds) {
                     (void)group_id;
-                    pool->decRef(held_blocks, BlockRefType::REQUEST);
+                    pool->decRef(held_blocks);
                 }
                 return result;
             }
             BlockIndicesType blocks = std::move(*allocated);
-            device_pool->incRef(blocks, BlockRefType::REQUEST);
+            device_pool->incRef(blocks);
 
             for (size_t path_index = 0; path_index < keys.size(); ++path_index) {
                 auto& device_blocks = slots[path_index][group_set_id].device_blocks;
@@ -133,7 +134,7 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
     cache->insert(keys, slots, Tier::DEVICE);
     for (const auto& [group_id, pool, blocks] : request_holds) {
         (void)group_id;
-        pool->decRef(blocks, BlockRefType::REQUEST);
+        pool->decRef(blocks);
     }
 
     auto match     = cache->match(keys);

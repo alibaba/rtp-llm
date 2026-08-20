@@ -30,6 +30,24 @@ public:
     size_t blockSizeBytes() const override {
         return 0;
     }
+
+    size_t            first_tree_edges{0};
+    size_t            last_tree_edges{0};
+    std::vector<bool> cache_edges;
+
+protected:
+    void onFirstTreeRefNoLock(BlockIdxType) override {
+        ++first_tree_edges;
+    }
+
+    bool onLastTreeRefNoLock(BlockIdxType) override {
+        ++last_tree_edges;
+        return true;
+    }
+
+    void onCacheRefChangedNoLock(BlockIdxType, bool cached) override {
+        cache_edges.push_back(cached);
+    }
 };
 
 std::shared_ptr<TestPool> makeInitializedPool(size_t physical_block_count) {
@@ -55,15 +73,14 @@ TEST(IBlockPoolTest, BlockZeroIsInvalidAndNeverAllocated) {
     EXPECT_EQ(std::find(blocks->begin(), blocks->end(), 0), blocks->end());
 }
 
-TEST(IBlockPoolTest, MallocReturnsAllocatedRefcountZeroBlocks) {
+TEST(IBlockPoolTest, MallocReturnsAllocatedTreeRefcountZeroBlocks) {
     auto pool = TestPool(std::make_shared<TestPoolConfig>("test", 4));
     ASSERT_TRUE(pool.init());
 
     auto block = pool.malloc();
     ASSERT_TRUE(block.has_value());
     EXPECT_TRUE(pool.isAllocated(*block));
-    EXPECT_EQ(pool.refCount(*block), 0u);
-    EXPECT_EQ(block_tree_cache_test::unreferencedBlocksNum(pool), 1u);
+    EXPECT_EQ(pool.treeRefCount(*block), 0u);
 }
 
 TEST(IBlockPoolTest, BatchMallocIsAtomic) {
@@ -79,40 +96,50 @@ TEST(IBlockPoolTest, BatchMallocIsAtomic) {
     EXPECT_EQ(pool.freeBlocksNum(), 1u);
 }
 
-TEST(IBlockPoolTest, RefMetricsCountDistinctBlocksAndActiveTreeCachedBlocks) {
-    TestPool pool(std::make_shared<TestPoolConfig>("test", 4));
-    ASSERT_TRUE(pool.init());
+TEST(IBlockPoolTest, TreeHooksRunOnlyOnTotalAndCacheEdges) {
+    auto pool  = makeInitializedPool(/*physical_block_count=*/4);
+    auto block = pool->malloc();
+    ASSERT_TRUE(block.has_value());
 
-    const std::optional<BlockIdxType> first_block  = pool.malloc();
-    const std::optional<BlockIdxType> second_block = pool.malloc();
+    pool->incTreeRef(*block, BlockTreeRefType::LOAD);
+    pool->incTreeRef(*block, BlockTreeRefType::CACHE);
+    pool->incTreeRef(*block, BlockTreeRefType::CACHE);
+
+    EXPECT_EQ(pool->first_tree_edges, 1u);
+    EXPECT_EQ(pool->last_tree_edges, 0u);
+    EXPECT_EQ(pool->cache_edges, (std::vector<bool>{true}));
+
+    pool->decTreeRef(*block, BlockTreeRefType::CACHE);
+    EXPECT_EQ(pool->cache_edges, (std::vector<bool>{true}));
+
+    pool->decTreeRef(*block, BlockTreeRefType::CACHE);
+    EXPECT_EQ(pool->cache_edges, (std::vector<bool>{true, false}));
+    EXPECT_TRUE(pool->isAllocated(*block));
+
+    pool->decTreeRef(*block, BlockTreeRefType::LOAD);
+    EXPECT_EQ(pool->last_tree_edges, 1u);
+    EXPECT_FALSE(pool->isAllocated(*block));
+}
+
+TEST(IBlockPoolTest, TreeRefMetricsCountDistinctBlocks) {
+    auto pool         = makeInitializedPool(/*physical_block_count=*/4);
+    auto first_block  = pool->malloc();
+    auto second_block = pool->malloc();
     ASSERT_TRUE(first_block.has_value());
     ASSERT_TRUE(second_block.has_value());
 
-    pool.incRef(*first_block, BlockRefType::REQUEST);
-    pool.incRef(*first_block, BlockRefType::REQUEST);
-    EXPECT_EQ(pool.referencedBlocksNum(BlockRefType::REQUEST), 1u);
-    EXPECT_EQ(pool.activeTreeCachedBlocksNum(), 0u);
+    pool->incTreeRef(*first_block, BlockTreeRefType::CACHE);
+    pool->incTreeRef(*first_block, BlockTreeRefType::CACHE);
+    pool->incTreeRef(*second_block, BlockTreeRefType::LOAD);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::LOAD), 1u);
 
-    pool.incRef(*second_block, BlockRefType::REQUEST);
-    EXPECT_EQ(pool.referencedBlocksNum(BlockRefType::REQUEST), 2u);
-
-    pool.incRef(*first_block, BlockRefType::BLOCK_CACHE);
-    EXPECT_EQ(pool.referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
-    EXPECT_EQ(pool.activeTreeCachedBlocksNum(), 1u);
-
-    pool.incRef(*first_block, BlockRefType::STORAGE_BACKEND);
-    pool.decRef(*first_block, BlockRefType::REQUEST);
-    pool.decRef(*first_block, BlockRefType::STORAGE_BACKEND);
-    EXPECT_EQ(pool.referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 0u);
-    EXPECT_EQ(pool.referencedBlocksNum(BlockRefType::REQUEST), 2u);
-    EXPECT_EQ(pool.activeTreeCachedBlocksNum(), 1u);
-
-    pool.decRef(*first_block, BlockRefType::REQUEST);
-    EXPECT_EQ(pool.referencedBlocksNum(BlockRefType::REQUEST), 1u);
-    EXPECT_EQ(pool.activeTreeCachedBlocksNum(), 0u);
-    pool.decRef(*first_block, BlockRefType::BLOCK_CACHE);
-    pool.decRef(*second_block, BlockRefType::REQUEST);
-    EXPECT_EQ(pool.freeBlocksNum(), 3u);
+    pool->decTreeRef(*first_block, BlockTreeRefType::CACHE);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
+    pool->decTreeRef(*first_block, BlockTreeRefType::CACHE);
+    pool->decTreeRef(*second_block, BlockTreeRefType::LOAD);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
 }
 
 TEST(IBlockPoolTest, AscendingOrderReturnsSortedBlockIds) {
@@ -122,87 +149,99 @@ TEST(IBlockPoolTest, AscendingOrderReturnsSortedBlockIds) {
     auto blocks = pool.malloc(3);
     ASSERT_TRUE(blocks.has_value());
     ASSERT_EQ(*blocks, (BlockIdList{1, 2, 3}));
-    pool.free(BlockIdList{2});
+    pool.incTreeRef(BlockIdList{2}, BlockTreeRefType::STORE);
+    pool.decTreeRef(BlockIdList{2}, BlockTreeRefType::STORE);
 
     auto more = pool.malloc(2);
     ASSERT_TRUE(more.has_value());
     EXPECT_EQ(*more, (BlockIdList{4, 5}));
 
-    pool.free(BlockIdList{1, 3});
+    pool.incTreeRef(BlockIdList{1, 3}, BlockTreeRefType::STORE);
+    pool.decTreeRef(BlockIdList{1, 3}, BlockTreeRefType::STORE);
     auto afterMerge = pool.malloc(2);
     ASSERT_TRUE(afterMerge.has_value());
     EXPECT_EQ(*afterMerge, (BlockIdList{1, 2}));
 }
 
-TEST(IBlockPoolTest, DecRefDoesNotFreeWhileAnotherHolderExists) {
+TEST(IBlockPoolTest, MultipleTreeRefsReleaseOnlyAtLastHolder) {
     auto pool  = makeInitializedPool(/*physical_block_count=*/4);
     auto block = pool->malloc();
     ASSERT_TRUE(block.has_value());
 
-    // malloc() only reserves capacity; owners must explicitly take refs.
-    pool->incRef(*block, BlockRefType::BLOCK_CACHE);
-    pool->incRef(*block, BlockRefType::REQUEST);
-    EXPECT_EQ(pool->refCount(*block), 2u);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::REQUEST), 1u);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 0u);
-
-    pool->decRef(*block, BlockRefType::REQUEST);
-    EXPECT_TRUE(pool->isAllocated(*block));
-    EXPECT_EQ(pool->refCount(*block), 1u);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::REQUEST), 0u);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
-
-    pool->decRef(*block, BlockRefType::BLOCK_CACHE);
-    EXPECT_FALSE(pool->isAllocated(*block));
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 0u);
-}
-
-TEST(IBlockPoolTest, DecRefFreesSingleRequestHolder) {
-    auto pool  = makeInitializedPool(/*physical_block_count=*/4);
-    auto block = pool->malloc();
-    ASSERT_TRUE(block.has_value());
-
-    pool->incRef(*block, BlockRefType::REQUEST);
-    pool->decRef(*block, BlockRefType::REQUEST);
-
-    EXPECT_FALSE(pool->isAllocated(*block));
-}
-
-TEST(IBlockPoolTest, RefTypeMismatchOnlyAffectsMetrics) {
-    std::shared_ptr<TestPool>   pool  = makeInitializedPool(/*physical_block_count=*/4);
-    std::optional<BlockIdxType> block = pool->malloc();
-    ASSERT_TRUE(block.has_value());
-
-    pool->incRef(*block, BlockRefType::BLOCK_CACHE);
-    pool->incRef(*block, BlockRefType::REQUEST);
-    pool->decRef(*block, BlockRefType::STORAGE_BACKEND);
+    pool->incTreeRef(*block, BlockTreeRefType::CACHE);
+    pool->incTreeRef(*block, BlockTreeRefType::LOAD);
 
     EXPECT_TRUE(pool->isAllocated(*block));
-    EXPECT_EQ(pool->refCount(*block), 1u);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::REQUEST), 1u);
+    EXPECT_EQ(pool->treeRefCount(*block), 2u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::LOAD), 1u);
 
-    pool->decRef(*block, BlockRefType::STORAGE_BACKEND);
+    pool->decTreeRef(*block, BlockTreeRefType::LOAD);
+    EXPECT_TRUE(pool->isAllocated(*block));
+    EXPECT_EQ(pool->treeRefCount(*block), 1u);
+
+    pool->decTreeRef(*block, BlockTreeRefType::CACHE);
     EXPECT_FALSE(pool->isAllocated(*block));
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 0u);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::REQUEST), 0u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
 }
 
-TEST(IBlockPoolTest, DecRefRejectsUnheldAllocatedBlock) {
+TEST(IBlockPoolTest, DecTreeRefRejectsWrongInternalType) {
     auto pool  = makeInitializedPool(/*physical_block_count=*/4);
     auto block = pool->malloc();
     ASSERT_TRUE(block.has_value());
-    EXPECT_EQ(pool->refCount(*block), 0u);
+    pool->incTreeRef(*block, BlockTreeRefType::CACHE);
 
-    // RTP_LLM_CHECK aborts unless core-dump-on-exception is disabled; flip it so the
-    // guard is observable as a throw in this test env.
     const bool old_core_dump                     = StaticConfig::user_ft_core_dump_on_exception;
     StaticConfig::user_ft_core_dump_on_exception = false;
-    EXPECT_ANY_THROW(pool->decRef(*block, BlockRefType::REQUEST));
+    EXPECT_ANY_THROW(pool->decTreeRef(*block, BlockTreeRefType::LOAD));
     StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
 
     EXPECT_TRUE(pool->isAllocated(*block));
+    EXPECT_EQ(pool->treeRefCount(*block), 1u);
+    pool->decTreeRef(*block, BlockTreeRefType::CACHE);
 }
 
+TEST(IBlockPoolTest, BatchIncTreeRefRejectsInvalidTailWithoutMutatingPrefix) {
+    auto pool  = makeInitializedPool(/*physical_block_count=*/4);
+    auto block = pool->malloc();
+    ASSERT_TRUE(block.has_value());
+    const BlockIdxType unallocated_block = *block + 1;
+
+    const bool old_core_dump                     = StaticConfig::user_ft_core_dump_on_exception;
+    StaticConfig::user_ft_core_dump_on_exception = false;
+    EXPECT_ANY_THROW(pool->incTreeRef(BlockIdList{*block, unallocated_block}, BlockTreeRefType::CACHE));
+    StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
+
+    EXPECT_EQ(pool->treeRefCount(*block), 0u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
+    if (pool->treeRefCount(*block) == 0) {
+        pool->incTreeRef(*block, BlockTreeRefType::STORE);
+        pool->decTreeRef(*block, BlockTreeRefType::STORE);
+    } else {
+        pool->decTreeRef(*block, BlockTreeRefType::CACHE);
+    }
+}
+
+TEST(IBlockPoolTest, BatchDecTreeRefRejectsInvalidTailWithoutMutatingPrefix) {
+    auto pool   = makeInitializedPool(/*physical_block_count=*/4);
+    auto blocks = pool->malloc(2);
+    ASSERT_TRUE(blocks.has_value());
+    pool->incTreeRef(blocks->front(), BlockTreeRefType::CACHE);
+    pool->incTreeRef(blocks->back(), BlockTreeRefType::LOAD);
+
+    const bool old_core_dump                     = StaticConfig::user_ft_core_dump_on_exception;
+    StaticConfig::user_ft_core_dump_on_exception = false;
+    EXPECT_ANY_THROW(pool->decTreeRef(*blocks, BlockTreeRefType::CACHE));
+    StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
+
+    EXPECT_TRUE(pool->isAllocated(blocks->front()));
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::LOAD), 1u);
+    if (pool->isAllocated(blocks->front())) {
+        EXPECT_EQ(pool->treeRefCount(blocks->front()), 1u);
+        pool->decTreeRef(blocks->front(), BlockTreeRefType::CACHE);
+    }
+    pool->decTreeRef(blocks->back(), BlockTreeRefType::LOAD);
+}
 }  // namespace rtp_llm

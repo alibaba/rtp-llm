@@ -2,6 +2,46 @@
 
 namespace rtp_llm {
 
+namespace {
+
+std::vector<BlockIdList> collectDeviceBlocks(const MultiNodeResource& resource, size_t pool_count) {
+    std::vector<BlockIdList> blocks_by_pool(pool_count);
+    for (const auto& [_, blocks] : resource.node_blocks) {
+        for (size_t pool_index = 0; pool_index < blocks.size(); ++pool_index) {
+            blocks_by_pool[pool_index].push_back(blocks[pool_index]);
+        }
+    }
+    return blocks_by_pool;
+}
+
+BlockIdList collectBlocks(const MultiNodeResource& resource) {
+    BlockIdList result;
+    for (const auto& [_, blocks] : resource.node_blocks) {
+        result.insert(result.end(), blocks.begin(), blocks.end());
+    }
+    return result;
+}
+
+template<typename Operation>
+void applyToResourcePools(const MultiNodeResource&               resource,
+                          const std::vector<DeviceBlockPoolPtr>& device_pools,
+                          const std::shared_ptr<HostBlockPool>&  host_pool,
+                          const BlockTreeDiskBlockPoolPtr&       disk_pool,
+                          Operation&&                            operation) {
+    if (resource.tier == Tier::DEVICE) {
+        const auto blocks_by_pool = collectDeviceBlocks(resource, device_pools.size());
+        for (size_t pool_index = 0; pool_index < device_pools.size(); ++pool_index) {
+            operation(*device_pools[pool_index], blocks_by_pool[pool_index]);
+        }
+    } else if (resource.tier == Tier::HOST && host_pool) {
+        operation(*host_pool, collectBlocks(resource));
+    } else if (resource.tier == Tier::DISK && disk_pool) {
+        operation(*disk_pool, collectBlocks(resource));
+    }
+}
+
+}  // namespace
+
 GroupSet::GroupSet(std::vector<DeviceBlockPoolPtr> device_pools,
                    std::shared_ptr<HostBlockPool>  host_pool,
                    BlockTreeDiskBlockPoolPtr       disk_pool):
@@ -36,63 +76,41 @@ bool GroupSet::hasAllocatedDeviceBlocks(const std::vector<BlockIdxType>& blocks)
     return true;
 }
 
-void GroupSet::referenceBlocks(const MultiNodeResource& resource, BlockRefType ref_type) const {
-    switch (resource.tier) {
-        case Tier::DEVICE:
-            for (const auto& [_, blocks] : resource.node_blocks) {
-                for (size_t p = 0; p < blocks.size(); ++p) {
-                    device_pools_[p]->incRef(blocks[p], ref_type);
-                }
-            }
-            break;
-        case Tier::HOST:
-            if (host_pool_) {
-                for (const auto& [_, blocks] : resource.node_blocks)
-                    for (auto b : blocks)
-                        host_pool_->incRef(b, ref_type);
-            }
-            break;
-        case Tier::DISK:
-            if (disk_pool_) {
-                for (const auto& [_, blocks] : resource.node_blocks)
-                    for (auto b : blocks)
-                        disk_pool_->incRef(b, ref_type);
-            }
-            break;
-        default:
-            break;
+void GroupSet::referenceBlocks(const MultiNodeResource& resource) const {
+    if (resource.tier != Tier::DEVICE) {
+        return;
+    }
+    const auto blocks_by_pool = collectDeviceBlocks(resource, device_pools_.size());
+    for (size_t pool_index = 0; pool_index < device_pools_.size(); ++pool_index) {
+        device_pools_[pool_index]->incRef(blocks_by_pool[pool_index]);
     }
 }
 
-void GroupSet::unreferenceBlocks(const MultiNodeResource& resource, BlockRefType ref_type) const {
-    switch (resource.tier) {
-        case Tier::DEVICE:
-            for (const auto& [_, blocks] : resource.node_blocks) {
-                for (size_t p = 0; p < blocks.size(); ++p) {
-                    device_pools_[p]->decRef(blocks[p], ref_type);
-                }
-            }
-            break;
-        case Tier::HOST:
-            if (host_pool_) {
-                for (const auto& [_, blocks] : resource.node_blocks)
-                    for (auto b : blocks)
-                        host_pool_->decRef(b, ref_type);
-            }
-            break;
-        case Tier::DISK:
-            if (disk_pool_) {
-                for (const auto& [_, blocks] : resource.node_blocks)
-                    for (auto b : blocks)
-                        disk_pool_->decRef(b, ref_type);
-            }
-            break;
-        default:
-            break;
+void GroupSet::unreferenceBlocks(const MultiNodeResource& resource) const {
+    if (resource.tier != Tier::DEVICE) {
+        return;
+    }
+    const auto blocks_by_pool = collectDeviceBlocks(resource, device_pools_.size());
+    for (size_t pool_index = 0; pool_index < device_pools_.size(); ++pool_index) {
+        device_pools_[pool_index]->decRef(blocks_by_pool[pool_index]);
     }
 }
 
-BlockIdxType GroupSet::allocateSingleBlock(Tier tier, BlockRefType ref_type) {
+void GroupSet::referenceBlocks(const MultiNodeResource& resource, BlockTreeRefType ref_type) const {
+    applyToResourcePools(
+        resource, device_pools_, host_pool_, disk_pool_, [ref_type](IBlockPool& pool, const BlockIdList& blocks) {
+            pool.incTreeRef(blocks, ref_type);
+        });
+}
+
+void GroupSet::unreferenceBlocks(const MultiNodeResource& resource, BlockTreeRefType ref_type) const {
+    applyToResourcePools(
+        resource, device_pools_, host_pool_, disk_pool_, [ref_type](IBlockPool& pool, const BlockIdList& blocks) {
+            pool.decTreeRef(blocks, ref_type);
+        });
+}
+
+BlockIdxType GroupSet::allocateSingleBlock(Tier tier, BlockTreeRefType ref_type) {
     IBlockPool* pool = nullptr;
     if (tier == Tier::HOST) {
         pool = host_pool_.get();
@@ -104,17 +122,17 @@ BlockIdxType GroupSet::allocateSingleBlock(Tier tier, BlockRefType ref_type) {
     auto b = pool->malloc();
     if (!b.has_value())
         return NULL_BLOCK_IDX;
-    pool->incRef(*b, ref_type);
+    pool->incTreeRef(*b, ref_type);
     return *b;
 }
 
-void GroupSet::releaseSingleBlock(Tier tier, BlockIdxType block, BlockRefType ref_type) const {
+void GroupSet::releaseSingleBlock(Tier tier, BlockIdxType block, BlockTreeRefType ref_type) const {
     if (tier == Tier::HOST) {
         if (host_pool_)
-            host_pool_->decRef(block, ref_type);
+            host_pool_->decTreeRef(block, ref_type);
     } else if (tier == Tier::DISK) {
         if (disk_pool_)
-            disk_pool_->decRef(block, ref_type);
+            disk_pool_->decTreeRef(block, ref_type);
     }
 }
 

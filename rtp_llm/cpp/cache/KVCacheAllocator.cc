@@ -476,11 +476,11 @@ std::vector<KVCachePoolMetricsSnapshot> KVCacheAllocator::poolMetricsSnapshots()
         snapshot.used_blocks               = snapshot.total_blocks - snapshot.free_blocks;
         snapshot.active_tree_cached_blocks = pool->activeTreeCachedBlocksNum();
         snapshot.reserve_blocks            = reserveBlocksForPoolMetrics(pool_index);
-        snapshot.request_ref_blocks        = pool->referencedBlocksNum(BlockRefType::REQUEST);
-        snapshot.connector_ref_blocks      = pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND);
-        snapshot.block_cache_ref_blocks    = pool->referencedBlocksNum(BlockRefType::BLOCK_CACHE);
-        snapshot.eviction_ref_blocks       = pool->referencedBlocksNum(BlockRefType::EVICTION);
-        snapshot.store_ref_blocks          = pool->referencedBlocksNum(BlockRefType::STORE);
+        snapshot.request_ref_blocks        = pool->referencedBlocksNum();
+        snapshot.block_cache_ref_blocks    = pool->referencedBlocksNum(BlockTreeRefType::CACHE);
+        snapshot.load_ref_blocks           = pool->referencedBlocksNum(BlockTreeRefType::LOAD);
+        snapshot.eviction_ref_blocks       = pool->referencedBlocksNum(BlockTreeRefType::EVICTION);
+        snapshot.store_ref_blocks          = pool->referencedBlocksNum(BlockTreeRefType::STORE);
         snapshot.used_ratio =
             snapshot.total_blocks == 0 ?
                 0.0f :

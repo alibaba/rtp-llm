@@ -35,8 +35,8 @@ struct KVCachePoolMetricsSnapshot {
     size_t      total_blocks              = 0;
     size_t      reserve_blocks            = 0;
     size_t      request_ref_blocks        = 0;
-    size_t      connector_ref_blocks      = 0;
     size_t      block_cache_ref_blocks    = 0;
+    size_t      load_ref_blocks           = 0;
     size_t      eviction_ref_blocks       = 0;
     size_t      store_ref_blocks          = 0;
     float       used_ratio                = 0.0f;
@@ -191,23 +191,23 @@ protected:
                                            size_t            planned_blocks,
                                            int               group_id = -1);
     // Estimate peak additional blocks for one sequence resource.
-    virtual int  estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,
-                                        int                    seq_len,
-                                        int                    remaining_tokens,
-                                        int                    reserve_step,
-                                        bool                   enable_reuse_cache) const           = 0;
-    virtual int  estimateInitialBatchPeakNeedBlocks(int  seq_len,
-                                                    int  common_seq_len,
-                                                    int  remaining_tokens,
-                                                    int  reserve_step,
-                                                    bool enable_reuse_cache,
-                                                    int  target_batch_size) const = 0;
-    virtual void checkCPShardedMallocResult(const MallocInfo&) const {}
-    virtual void decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) = 0;
-    bool         cpShardThisGroupForCapacity(size_t gid) const;
-    size_t       logicalSeqSizePerBlockForCapacity(size_t gid) const;
-    int          cpEffectiveSeqLenForAlloc(size_t gid, int seq_len) const;
-    int          deviceCacheMetricTokensPerBlock() const;
+    virtual int   estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,
+                                         int                    seq_len,
+                                         int                    remaining_tokens,
+                                         int                    reserve_step,
+                                         bool                   enable_reuse_cache) const           = 0;
+    virtual int   estimateInitialBatchPeakNeedBlocks(int  seq_len,
+                                                     int  common_seq_len,
+                                                     int  remaining_tokens,
+                                                     int  reserve_step,
+                                                     bool enable_reuse_cache,
+                                                     int  target_batch_size) const = 0;
+    virtual void  checkCPShardedMallocResult(const MallocInfo&) const {}
+    virtual void  decrKVCacheRef(const KVCacheResource& kvcache_resource) = 0;
+    bool          cpShardThisGroupForCapacity(size_t gid) const;
+    size_t        logicalSeqSizePerBlockForCapacity(size_t gid) const;
+    int           cpEffectiveSeqLenForAlloc(size_t gid, int seq_len) const;
+    int           deviceCacheMetricTokensPerBlock() const;
     static size_t maxReusableMatchKeys(int seq_len, int reuse_unit_tokens) {
         if (seq_len <= 1 || reuse_unit_tokens <= 0) {
             return 0;

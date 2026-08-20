@@ -25,7 +25,7 @@ public:
                 incrKVCacheRef,
                 (const KVCacheResource& kvcache_resource, const CacheKeysType& cache_keys, bool is_connector),
                 (override));
-    MOCK_METHOD(void, decrKVCacheRef, (const KVCacheResource& kvcache_resource, bool is_connector), (override));
+    MOCK_METHOD(void, decrKVCacheRef, (const KVCacheResource& kvcache_resource), (override));
     MOCK_METHOD(GroupedCacheLayerLayout, allLayerCacheBase, (), (const, override));
     MOCK_METHOD(bool,
                 updateKVBlock,

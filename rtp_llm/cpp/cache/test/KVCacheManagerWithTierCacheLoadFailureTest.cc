@@ -89,7 +89,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerHitOuterIncrFailureAbortsBefore
         EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
         EXPECT_EQ(resource.getTopTier(), Tier::HOST);
         host_sources[group_set_id] = resource.host_block;
-        EXPECT_EQ(group_set->hostPool()->refCount(resource.host_block), 1u);
+        EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 1u);
     }
 
     const auto device_before = snapshotDevicePools(manager_);
@@ -138,9 +138,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerHitOuterIncrFailureAbortsBefore
             const auto pool = group->blockPool();
             EXPECT_EQ(pool->usedBlocksNum(), 1u) << pool->poolName();
             EXPECT_EQ(pool->freeBlocksNum(), 0u) << pool->poolName();
-            EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::REQUEST), 1u) << pool->poolName();
-            EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 0u) << pool->poolName();
-            EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::EVICTION), 0u) << pool->poolName();
+            EXPECT_EQ(pool->referencedBlocksNum(), 1u) << pool->poolName();
+            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), 0u) << pool->poolName();
+            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u) << pool->poolName();
         }
 
         auto pending_path = snapshotPathResources(*cache, seed.cache_keys);
@@ -153,12 +153,12 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerHitOuterIncrFailureAbortsBefore
                 EXPECT_TRUE(resource.hasTier(Tier::HOST)) << "group_set=" << group_set_id;
                 EXPECT_FALSE(resource.hasTier(Tier::DEVICE)) << "group_set=" << group_set_id;
                 EXPECT_EQ(resource.host_block, host_sources[group_set_id]) << "group_set=" << group_set_id;
-                EXPECT_EQ(group_set->hostPool()->refCount(resource.host_block), 2u) << "group_set=" << group_set_id;
-                EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::REQUEST), 1u)
+                EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 2u) << "group_set=" << group_set_id;
+                EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::LOAD), 1u)
                     << "group_set=" << group_set_id;
-                EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u)
+                EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::CACHE), 1u)
                     << "group_set=" << group_set_id;
-                EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u)
+                EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u)
                     << "group_set=" << group_set_id;
             }
         }
@@ -205,8 +205,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerHitOuterIncrFailureAbortsBefore
         ASSERT_TRUE(resource.hasTier(Tier::HOST));
         EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
         EXPECT_EQ(resource.host_block, host_sources[group_set_id]);
-        EXPECT_EQ(group_set->hostPool()->refCount(resource.host_block), 1u);
-        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::REQUEST), 0u);
+        EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 1u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
     }
     const auto stats_after = cache->getStats();
     EXPECT_EQ(stats_after.tree_node_count, stats_before.tree_node_count);
