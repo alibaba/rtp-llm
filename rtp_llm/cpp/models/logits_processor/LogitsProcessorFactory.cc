@@ -197,8 +197,9 @@ BaseLogitsProcessorPtr createGrammarProcessor(std::shared_ptr<GenerateInput>    
 
 void appendThinkProcessor(std::vector<BaseLogitsProcessorPtr>& result,
                           std::shared_ptr<GenerateInput>       generate_input,
-                          int32_t                              max_batch_size) {
-    auto think_processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, max_batch_size);
+                          int32_t                              max_batch_size,
+                          int64_t                              eos_token_id) {
+    auto think_processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, max_batch_size, eos_token_id);
     if (think_processor != nullptr) {
         result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(think_processor));
     }
@@ -301,7 +302,7 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
     }
 
     if (grammar_key.empty()) {
-        appendThinkProcessor(result, generate_input, max_batch_size);
+        appendThinkProcessor(result, generate_input, max_batch_size, eos_token_id);
     } else if (config->in_think_mode) {
         if (config->hasNumBeams() || config->num_return_sequences > 1) {
             if (error_reporter) {
