@@ -51,12 +51,6 @@ def parse_args():
         help="Path to model profile JSON " "(default: auto-detect from Bazel runfiles)",
     )
     parser.add_argument(
-        "--descriptor-size-profile",
-        default=None,
-        help="Path to transfer descriptor-size JSON "
-        "(default: auto-detect from Bazel runfiles)",
-    )
-    parser.add_argument(
         "--output-dir",
         default="/tmp/block_tree_cache_benchmark",
         help="Output directory for results",
@@ -751,23 +745,12 @@ def load_profile_group_set_payloads(model_profile: str) -> Dict[str, int]:
     try:
         with open(model_profile) as f:
             data = json.load(f)
-        if "descriptor_size_bytes" in data:
-            return {
-                name: int(payload)
-                for name, payload in data["descriptor_size_bytes"].items()
-            }
         payloads = {}
         for gs in data.get("group_sets", []):
             payloads[gs["name"]] = int(gs.get("payload_bytes", 0))
         return payloads
     except Exception:
         return {}
-
-
-def profile_for_subcommand(
-    subcommand: str, model_profile: str, descriptor_size_profile: str
-) -> str:
-    return descriptor_size_profile if subcommand == "transfer" else model_profile
 
 
 def run_case(
@@ -1066,7 +1049,6 @@ def run_suite(
     case_name: str,
     binary: str,
     model_profile: str,
-    descriptor_size_profile: str,
     output_dir: str,
     cuda_device: int,
     max_device_memory_fraction: float,
@@ -1107,26 +1089,16 @@ def run_suite(
     force_perf = case_name != "all"
 
     model_profile_payloads = load_profile_group_set_payloads(model_profile)
-    descriptor_profile_payloads = load_profile_group_set_payloads(
-        descriptor_size_profile
-    )
     all_manifests = []
     for case in cases:
         rep_count = 1 if case.suite == "smoke" else repetitions
         print(f"  Running: {case.name} ({rep_count} rep(s))...", end=" ", flush=True)
 
-        case_profile = profile_for_subcommand(
-            case.subcommand, model_profile, descriptor_size_profile
-        )
-        case_payloads = (
-            descriptor_profile_payloads
-            if case.subcommand == "transfer"
-            else model_profile_payloads
-        )
+        case_payloads = model_profile_payloads
         case_manifest = run_case(
             case=case,
             binary=binary,
-            model_profile=case_profile,
+            model_profile=model_profile,
             output_dir=output_dir,
             cuda_device=cuda_device,
             max_device_memory_fraction=max_device_memory_fraction,
@@ -1149,7 +1121,6 @@ def run_suite(
         "suite": suite,
         "binary": binary,
         "model_profile": model_profile,
-        "descriptor_size_profile": descriptor_size_profile,
         "cuda_device": cuda_device,
         "max_device_memory_fraction": max_device_memory_fraction,
         "environment": collect_environment(
@@ -1264,21 +1235,10 @@ def main():
     model_profile = args.model_profile
     if model_profile is None:
         model_profile = resolve_runfile_path(
-            "profiles/deepseek_v4_pro_fp8_tp1_cp1.json"
+            "profiles/deepseek_v4_flash_fp8_tp1_cp1_tpb1024.json"
         )
         if model_profile:
             print(f"Auto-detected model profile: {model_profile}")
-
-    descriptor_size_profile = args.descriptor_size_profile
-    if descriptor_size_profile is None:
-        descriptor_size_profile = resolve_runfile_path(
-            "profiles/deepseek_v4_pro_fp8_descriptor_sizes.json"
-        )
-        if descriptor_size_profile:
-            print(
-                "Auto-detected descriptor size profile: "
-                f"{descriptor_size_profile}"
-            )
 
     # Check binary exists
     if not binary or not os.path.exists(binary):
@@ -1289,12 +1249,6 @@ def main():
     if not model_profile or not os.path.exists(model_profile):
         print(
             f"Error: model profile not found (pass --model-profile explicitly): {model_profile}"
-        )
-        sys.exit(1)
-    if not descriptor_size_profile or not os.path.exists(descriptor_size_profile):
-        print(
-            "Error: descriptor size profile not found "
-            f"(pass --descriptor-size-profile explicitly): {descriptor_size_profile}"
         )
         sys.exit(1)
 
@@ -1324,7 +1278,6 @@ def main():
         case_name=args.case,
         binary=binary,
         model_profile=model_profile,
-        descriptor_size_profile=descriptor_size_profile,
         output_dir=args.output_dir,
         cuda_device=args.cuda_device,
         max_device_memory_fraction=args.max_device_memory_fraction,
