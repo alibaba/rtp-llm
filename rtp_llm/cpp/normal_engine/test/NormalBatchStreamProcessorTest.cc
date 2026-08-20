@@ -123,8 +123,10 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
     query->input_ids                             = hostIntBuffer({1, 2, 3});
     query->generate_config                       = make_shared<GenerateConfig>();
     query->generate_config->num_return_sequences = 2;
+    // Keep both return sequences active during prefill so this test can verify
+    // cache-key row width independently from the block-table width.
     GenerateStreamPtr stream =
-        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr, 0, true);
 
     BatchKVCacheResource resource;
     resource.resetBatchSize(2);
@@ -135,6 +137,7 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
     resource.setBatchCacheKeys(1, CacheKeysType{201, 202, 203, 204, 205});
     stream->setKVCache(resource);
     stream->generate_status_->status = StreamState::RUNNING;
+    ASSERT_EQ(stream->currentBatchSize(), 2);
 
     StreamGroups stream_groups({stream});
     EXPECT_EQ(stream_groups.curBlocksNum(), 2);

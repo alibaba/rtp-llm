@@ -213,7 +213,8 @@ void NormalSamplerInputGatherer::setLogitsProcessorInputs(SamplerInputs&        
     LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>();
     size_t                   idx       = 0;
     std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, &idx](auto& stream) {
-        const size_t batch_size = stream->currentBatchSize();
+        const size_t batch_size =
+            stream->needTilingForSampling() ? stream->nextBatchSize() : stream->currentBatchSize();
         for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
             if (processor) {
                 state_ptr->insert(processor, idx, idx + batch_size);

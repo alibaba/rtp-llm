@@ -86,9 +86,13 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
         RTP_LLM_LOG_WARNING("beam search does not support PERF_TEST for now");
     }
 
-    // Note it is invalid to use currentBatchSize here, because currentBatchSize depends on complete_token_ids_,
-    // which has not been initialized yet
+    // currentBatchSize/nextBatchSize depend on complete_token_ids_, which is not initialized yet.
     const size_t init_batch_size = batchSize(0);
+    const size_t next_batch_size = batchSize(1);
+    // Non-beam num_return_sequences expands after prefill. Logits processing happens after
+    // sampler tiling, so initialize its state with the expanded sampler batch size.
+    const size_t logits_processor_init_batch_size =
+        init_batch_size != next_batch_size && !hasNumBeams() ? next_batch_size : init_batch_size;
 
     begin_time_us_ = input->begin_time_us;
     if (generate_input_->generate_config->calculate_loss && inputLength() > 1) {
@@ -134,7 +138,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     }
 
     auto processors_result = LogitsProcessorFactory::createLogitsProcessors(
-        generate_input_, init_batch_size, maxBatchSize(), processor_eos_token_id);
+        generate_input_, logits_processor_init_batch_size, maxBatchSize(), processor_eos_token_id);
     if (processors_result.ok()) {
         auto processors = std::move(processors_result.value());
         if (output_vocab_size_ > 0) {
@@ -331,7 +335,7 @@ int GenerateStream::batchSize(int output_len) const {
     if (generate_input_->generate_config->hasNumBeams()) {
         return numBeams(output_len);
     } else {
-        return std::max(numReturnSequences(), 1);
+        return output_len == 0 && !perf_test_ ? 1 : std::max(numReturnSequences(), 1);
     }
 }
 
@@ -1180,7 +1184,7 @@ std::optional<ErrorInfo> GenerateStream::updateLogitProcessorStatus(const torch:
 
 void GenerateStream::updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices) {
     RTP_LLM_PROFILE_FUNCTION();
-    if (!src_batch_indices.defined() || !hasNumBeams()) {
+    if (!src_batch_indices.defined()) {
         return;
     }
 
