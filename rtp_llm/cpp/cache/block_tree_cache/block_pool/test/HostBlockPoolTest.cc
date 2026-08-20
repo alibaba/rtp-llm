@@ -163,7 +163,7 @@ TEST(HostBlockPoolTest, HostBufferMemoryIsUsableAndDistinct) {
     }
 }
 
-TEST(HostBlockPoolTest, LifecycleComesFromIBlockPool) {
+TEST(HostBlockPoolTest, LastTreeRefReleasesBlock) {
     auto          config = makeConfig();
     HostBlockPool pool(config);
     ASSERT_TRUE(pool.init());
@@ -171,11 +171,11 @@ TEST(HostBlockPoolTest, LifecycleComesFromIBlockPool) {
     auto block = pool.malloc();
     ASSERT_TRUE(block.has_value());
     EXPECT_TRUE(pool.isAllocated(*block));
-    EXPECT_EQ(pool.refCount(*block), 0u);
+    EXPECT_EQ(pool.treeRefCount(*block), 0u);
 
-    pool.incRef(*block, BlockRefType::REQUEST);
-    EXPECT_EQ(pool.refCount(*block), 1u);
-    pool.decRef(*block, BlockRefType::REQUEST);
+    pool.incTreeRef(*block, BlockTreeRefType::STORE);
+    EXPECT_EQ(pool.treeRefCount(*block), 1u);
+    pool.decTreeRef(*block, BlockTreeRefType::STORE);
     EXPECT_FALSE(pool.isAllocated(*block));
 }
 

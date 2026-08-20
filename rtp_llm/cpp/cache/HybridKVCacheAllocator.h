@@ -64,7 +64,7 @@ protected:
                                                     bool enable_reuse_cache,
                                                     int  target_batch_size) const override;
     void         checkCPShardedMallocResult(const MallocInfo& malloc_info) const override;
-    void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override;
+    void         decrKVCacheRef(const KVCacheResource& kvcache_resource) override;
 
     std::shared_ptr<LoadAsyncContext> prepareKVCache(const CacheKeysType&                 cache_keys,
                         BatchKVCacheResource&                kv_resource,
@@ -79,7 +79,6 @@ protected:
                                                            LoadAsyncContext& context,
                                                            size_t            matched_blocks);
 
-    void freeBlocksInGroup(int group_id, const BlockIndicesType& blocks, BlockRefType ref_type);
     virtual MallocStatus evaluatePreparedInitCapacity(const MallocInfo&       malloc_info,
                                                       size_t                  reserve_blocks,
                                                       const PreparedKVCache& prepared,

@@ -42,8 +42,8 @@ mergeCachePoolMetricsSnapshots(const std::vector<KVCachePoolMetricsSnapshot>&   
         report_snapshot.active_tree_cached_blocks = snapshot.active_tree_cached_blocks;
         report_snapshot.reserve_blocks            = snapshot.reserve_blocks;
         report_snapshot.request_ref_blocks        = snapshot.request_ref_blocks;
-        report_snapshot.connector_ref_blocks      = snapshot.connector_ref_blocks;
         report_snapshot.block_cache_ref_blocks    = snapshot.block_cache_ref_blocks;
+        report_snapshot.load_ref_blocks           = snapshot.load_ref_blocks;
         report_snapshot.eviction_ref_blocks       = snapshot.eviction_ref_blocks;
         report_snapshot.store_ref_blocks          = snapshot.store_ref_blocks;
         report_snapshot.used_ratio                = snapshot.used_ratio;
@@ -68,8 +68,8 @@ mergeCachePoolMetricsSnapshots(const std::vector<KVCachePoolMetricsSnapshot>&   
         report_snapshot.used_blocks               = snapshot.used_blocks;
         report_snapshot.available_blocks          = snapshot.available_blocks;
         report_snapshot.request_ref_blocks        = snapshot.request_ref_blocks;
-        report_snapshot.connector_ref_blocks      = snapshot.connector_ref_blocks;
         report_snapshot.block_cache_ref_blocks    = snapshot.block_cache_ref_blocks;
+        report_snapshot.load_ref_blocks           = snapshot.load_ref_blocks;
         report_snapshot.eviction_ref_blocks       = snapshot.eviction_ref_blocks;
         report_snapshot.store_ref_blocks          = snapshot.store_ref_blocks;
         report_snapshot.active_tree_cached_blocks = snapshot.active_tree_cached_blocks;

@@ -557,10 +557,9 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     if (result->isRemoteCacheEnabled()) {
         const auto                               storage_topology = cache_config.topologyPtr();
         const auto                               resolver_pools   = group_pools;
-        std::vector<std::shared_ptr<IBlockPool>> storage_device_pools(group_pools.begin(), group_pools.end());
         RTP_LLM_CHECK_WITH_INFO(result->storageBackend()->init(
                                     storage_topology,
-                                    std::move(storage_device_pools),
+                                    group_pools,
                                     [storage_topology, resolver_pools](int layer_id, int group_id, int block_id) {
                                         return resolveStorageBuffers(
                                             *storage_topology, resolver_pools, layer_id, group_id, block_id);

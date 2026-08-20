@@ -9,7 +9,7 @@
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/IBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackendExecutor.h"
 
 namespace rtp_llm {
@@ -81,9 +81,9 @@ public:
     explicit StorageBackend(std::shared_ptr<StorageBackendExecutor> executor = nullptr);
     virtual ~StorageBackend();
 
-    bool             init(std::shared_ptr<const CacheTopology>     topology,
-                          std::vector<std::shared_ptr<IBlockPool>> device_pools,
-                          BufferResolver                           buffer_resolver);
+    bool             init(std::shared_ptr<const CacheTopology> topology,
+                          std::vector<DeviceBlockPoolPtr>      device_pools,
+                          BufferResolver                       buffer_resolver);
     void             match(StorageRequest request, MatchDone done);
     void             read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done);
     StorageWriteTask prepareWrite(StorageRequest request);
@@ -119,7 +119,7 @@ private:
     void                                                      dispatch(Operation operation);
     void                                                      taskFinished();
     std::shared_ptr<const CacheTopology>                      topology_;
-    std::vector<std::shared_ptr<IBlockPool>>                  device_pools_;
+    std::vector<DeviceBlockPoolPtr>                           device_pools_;
     BufferResolver                                            buffer_resolver_;
     std::shared_ptr<StorageBackendExecutor>                   executor_;
     bool                                                      initialized_{false};

@@ -17,13 +17,14 @@ bool StoreTaskRunner::prepareTask(Task& task, const std::vector<std::vector<Grou
                 continue;
             }
             const GroupSetPtr& group_set    = group_sets_[group_set_id];
-            const BlockIdxType target_block = group_set->allocateSingleBlock(task.target_tier, BlockRefType::STORE);
+            const BlockIdxType target_block = group_set->allocateSingleBlock(task.target_tier, BlockTreeRefType::STORE);
             if (isNullBlockIdx(target_block)) {
                 RTP_LLM_LOG_WARNING(
                     "store aborted: %s pool exhausted for group_set[%zu]", tierName(task.target_tier), group_set_id);
                 return false;
             }
-            group_set->referenceBlocks({group_set_id, Tier::DEVICE, {{nullptr, source.device_blocks}}}, BlockRefType::STORE);
+            group_set->referenceBlocks({group_set_id, Tier::DEVICE, {{nullptr, source.device_blocks}}},
+                                       BlockTreeRefType::STORE);
             TransferDescriptor descriptor =
                 task.target_tier == Tier::HOST ?
                     TransferDescriptor::deviceToHost(group_set_id, source.device_blocks, target_block) :
@@ -81,10 +82,10 @@ void StoreTaskRunner::releaseTaskResources(const Task& task) {
     for (const TransferDescriptor& descriptor : task.descriptors) {
         const GroupSetPtr& group_set = group_sets_[descriptor.group_set_id];
         group_set->releaseSingleBlock(
-            task.target_tier, descriptor.singleBlockAt(task.target_tier), BlockRefType::STORE);
+            task.target_tier, descriptor.singleBlockAt(task.target_tier), BlockTreeRefType::STORE);
         group_set->unreferenceBlocks(
             MultiNodeResource{descriptor.group_set_id, Tier::DEVICE, {{nullptr, descriptor.source_blocks}}},
-            BlockRefType::STORE);
+            BlockTreeRefType::STORE);
     }
 }
 

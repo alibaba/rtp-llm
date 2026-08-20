@@ -56,21 +56,20 @@ makeDevicePool(const std::vector<DeviceLayerBufferSpec>& specs, size_t usable_co
 using MultiNodeBlocks = std::vector<std::vector<BlockIdxType>>;
 
 BlockIdxType    poolMalloc(IBlockPool& pool);
-MultiNodeBlocks allocateDeviceBlocksForTest(GroupSet& group_set, size_t count, BlockRefType ref_type);
-void            referenceDeviceBlocksForTest(GroupSet& group_set, const MultiNodeBlocks& blocks, BlockRefType ref_type);
-void unreferenceDeviceBlocksForTest(GroupSet& group_set, const MultiNodeBlocks& blocks, BlockRefType ref_type);
+MultiNodeBlocks allocateDeviceBlocksForTest(GroupSet& group_set, size_t count);
+MultiNodeBlocks allocateDeviceBlocksForTest(GroupSet& group_set, size_t count, BlockTreeRefType ref_type);
+void            referenceDeviceBlocksForTest(GroupSet& group_set, const MultiNodeBlocks& blocks);
+void referenceDeviceBlocksForTest(GroupSet& group_set, const MultiNodeBlocks& blocks, BlockTreeRefType ref_type);
+void unreferenceDeviceBlocksForTest(GroupSet& group_set, const MultiNodeBlocks& blocks);
+void unreferenceDeviceBlocksForTest(GroupSet& group_set, const MultiNodeBlocks& blocks, BlockTreeRefType ref_type);
 MultiNodeResource makeMultiNodeResourceForTest(size_t                        group_set_id,
                                                Tier                          tier,
                                                const std::vector<TreeNode*>& nodes,
                                                const MultiNodeBlocks&        blocks);
 
-size_t             unreferencedBlocksNum(const IBlockPool& pool);
-size_t             treeCachedBlocksNum(const IBlockPool& pool);
+size_t             unreferencedBlocksNum(const DeviceBlockPool& pool);
 DeviceBlockPoolPtr makeStructuralDevicePool(size_t group_set_id);
-void               releaseDeviceBlocks(BlockTreeCache&           cache,
-                                       const DeviceBlockPoolPtr& pool,
-                                       const BlockIdList&        blocks,
-                                       BlockRefType              ref_type);
+void releaseDeviceBlocks(BlockTreeCache& cache, const DeviceBlockPoolPtr& pool, const BlockIdList& blocks);
 void releaseRequestRefsForTest(BlockTreeCache& cache, const std::vector<MultiNodeResource>& resources);
 
 void prepareGroupSetsForTest(std::vector<GroupSetPtr>& group_sets);

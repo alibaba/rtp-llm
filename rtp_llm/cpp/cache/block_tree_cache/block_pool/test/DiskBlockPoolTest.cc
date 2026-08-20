@@ -281,8 +281,9 @@ TEST(DiskBlockPoolTest, ReadWriteAcceptValidPhysicalBlock) {
     EXPECT_EQ(pool.write(unallocated, data.data(), data.size()), BlockIOStatus::OK);
     EXPECT_EQ(pool.read(unallocated, read_buf.data(), read_buf.size()), BlockIOStatus::OK);
 
-    // Freeing changes ownership bookkeeping, not physical index accessibility.
-    pool.free(*block);
+    // Releasing the last Tree owner changes bookkeeping, not physical index accessibility.
+    pool.incTreeRef(*block, BlockTreeRefType::STORE);
+    pool.decTreeRef(*block, BlockTreeRefType::STORE);
     EXPECT_EQ(pool.write(*block, data.data(), data.size()), BlockIOStatus::OK);
 
     const BlockIdxType out_of_range = static_cast<BlockIdxType>(pool.totalBlocksNum() + 1);
