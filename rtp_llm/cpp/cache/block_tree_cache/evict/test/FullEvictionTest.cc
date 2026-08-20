@@ -58,8 +58,8 @@ TieredFullCache makeTieredFullCache(bool enable_lower_tiers = true) {
 }
 
 std::vector<TreeNode*> insertFullSandwich(TieredFullCache& environment) {
-    const BlockIdxType host_block = environment.full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
-    const BlockIdxType disk_block = environment.full->allocateSingleBlock(Tier::DISK, BlockRefType::BLOCK_CACHE);
+    const BlockIdxType host_block = environment.full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    const BlockIdxType disk_block = environment.full->allocateSingleBlock(Tier::DISK, BlockTreeRefType::CACHE);
     RTP_LLM_CHECK(!isNullBlockIdx(host_block));
     RTP_LLM_CHECK(!isNullBlockIdx(disk_block));
 
@@ -75,8 +75,8 @@ std::vector<TreeNode*> insertFullSandwich(TieredFullCache& environment) {
 }
 
 std::vector<TreeNode*> insertFullLowerTierDescendants(TieredFullCache& environment) {
-    const BlockIdxType host_block = environment.full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
-    const BlockIdxType disk_block = environment.full->allocateSingleBlock(Tier::DISK, BlockRefType::BLOCK_CACHE);
+    const BlockIdxType host_block = environment.full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    const BlockIdxType disk_block = environment.full->allocateSingleBlock(Tier::DISK, BlockTreeRefType::CACHE);
     RTP_LLM_CHECK(!isNullBlockIdx(host_block));
     RTP_LLM_CHECK(!isNullBlockIdx(disk_block));
 
@@ -411,8 +411,8 @@ TEST(FullPruneTest, PrunesDependentFullSubtreeAcrossTiers) {
 TEST(FullPruneTest, PrunesBranchedFullSubtreeBottomUp) {
     TieredFullCache    environment      = makeTieredFullCache();
     const size_t       host_free_before = environment.host_pool->freeBlocksNum();
-    const BlockIdxType left_host_block  = environment.full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
-    const BlockIdxType right_host_block = environment.full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+    const BlockIdxType left_host_block  = environment.full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    const BlockIdxType right_host_block = environment.full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
     ASSERT_FALSE(isNullBlockIdx(left_host_block));
     ASSERT_FALSE(isNullBlockIdx(right_host_block));
 
@@ -482,7 +482,7 @@ TEST(FullPruneTest, PrunesCascadedDescendantGroupResourcesAndTopology) {
     auto                     cache = makeBlockTreeCacheForTest(std::move(group_sets), config);
     ASSERT_NE(cache, nullptr);
 
-    const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+    const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
     ASSERT_FALSE(isNullBlockIdx(host_block));
     std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(2));
     resources[0][0].device_blocks = {10};
@@ -519,7 +519,7 @@ TEST(FullPruneTest, RefreshesSurvivingFullResourceAfterDescendantPrune) {
     auto cache               = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full0, full1}, config);
     ASSERT_NE(cache, nullptr);
 
-    const BlockIdxType full0_host_block = full0->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+    const BlockIdxType full0_host_block = full0->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
     ASSERT_FALSE(isNullBlockIdx(full0_host_block));
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(2));
     resources[0][0].host_block    = full0_host_block;
@@ -551,8 +551,8 @@ TEST(FullPruneTest, DetachesBusyDescendantGroupResource) {
     auto cache               = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full, swa}, config);
     ASSERT_NE(cache, nullptr);
 
-    const BlockIdxType full_host_block = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
-    const BlockIdxType swa_host_block  = swa->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+    const BlockIdxType full_host_block = full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    const BlockIdxType swa_host_block  = swa->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
     ASSERT_FALSE(isNullBlockIdx(full_host_block));
     ASSERT_FALSE(isNullBlockIdx(swa_host_block));
     std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(2));
@@ -597,7 +597,7 @@ TEST(FullPruneTest, DetachesBusyClosureRootGroupResource) {
     auto cache               = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full, swa}, config);
     ASSERT_NE(cache, nullptr);
 
-    const BlockIdxType swa_host_block = swa->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+    const BlockIdxType swa_host_block = swa->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
     ASSERT_FALSE(isNullBlockIdx(swa_host_block));
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(2));
     resources[0][0].device_blocks = {10};
@@ -639,7 +639,7 @@ TEST(FullPruneTest, ReverseDirectDropPrunesCascadedFullSubtree) {
     auto cache               = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full, swa}, config);
     ASSERT_NE(cache, nullptr);
 
-    const BlockIdxType host_descendant = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+    const BlockIdxType host_descendant = full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
     ASSERT_FALSE(isNullBlockIdx(host_descendant));
     std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(2));
     resources[0][0].device_blocks = {10};
@@ -673,8 +673,8 @@ TEST(FullPruneTest, ReverseDirectDropAttachesOneClosureForMultipleFullGroups) {
     auto cache               = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full0, full1, swa}, config);
     ASSERT_NE(cache, nullptr);
 
-    const BlockIdxType full0_host_descendant = full0->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
-    const BlockIdxType full1_host_descendant = full1->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+    const BlockIdxType full0_host_descendant = full0->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    const BlockIdxType full1_host_descendant = full1->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
     ASSERT_FALSE(isNullBlockIdx(full0_host_descendant));
     ASSERT_FALSE(isNullBlockIdx(full1_host_descendant));
     std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(3));
@@ -727,7 +727,7 @@ TEST(FullPruneTest, HostPruneKeepsRequestReferencedDeviceDescendantUntilRelease)
 
     const size_t       device_free_before = device_pool->freeBlocksNum();
     const size_t       host_free_before   = host_pool->freeBlocksNum();
-    const BlockIdxType host_block         = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+    const BlockIdxType host_block         = full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
     ASSERT_FALSE(isNullBlockIdx(host_block));
 
     std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(1));
@@ -735,7 +735,7 @@ TEST(FullPruneTest, HostPruneKeepsRequestReferencedDeviceDescendantUntilRelease)
     resources[1][0].host_block    = host_block;
     resources[2][0].device_blocks = {11};
     ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(*cache, {100, 200, 300}, resources));
-    device_pool->incRef({11}, BlockRefType::REQUEST);
+    device_pool->incRef({11});
     ASSERT_EQ(device_pool->refCount(11), 2u);
 
     const double watermark_ratio = 0.5 / static_cast<double>(host_pool->totalBlocksNum());
@@ -752,7 +752,7 @@ TEST(FullPruneTest, HostPruneKeepsRequestReferencedDeviceDescendantUntilRelease)
     EXPECT_EQ(host_pool->freeBlocksNum(), host_free_before);
     EXPECT_FALSE(host_pool->isAllocated(host_block));
 
-    block_tree_cache_test::releaseDeviceBlocks(*cache, device_pool, {11}, BlockRefType::REQUEST);
+    block_tree_cache_test::releaseDeviceBlocks(*cache, device_pool, {11});
     EXPECT_FALSE(device_pool->isAllocated(11));
     EXPECT_EQ(device_pool->freeBlocksNum(), device_free_before + 1);
 }

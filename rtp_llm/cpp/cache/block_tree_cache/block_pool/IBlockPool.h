@@ -22,17 +22,15 @@ enum class BlockPoolType {
     DISK,
 };
 
-enum class BlockRefType : uint8_t {
-    REQUEST = 0,
-    STORAGE_BACKEND,
-    BLOCK_CACHE,
+enum class BlockTreeRefType : uint8_t {
+    CACHE = 0,
+    LOAD,
     EVICTION,
-    // Pins source and target blocks during an asynchronous lower-tier copy.
     STORE,
     COUNT,
 };
 
-constexpr size_t kBlockRefTypeCount = static_cast<size_t>(BlockRefType::COUNT);
+constexpr size_t kBlockTreeRefTypeCount = static_cast<size_t>(BlockTreeRefType::COUNT);
 
 struct BlockPoolConfigBase {
     virtual ~BlockPoolConfigBase() = default;
@@ -42,12 +40,8 @@ struct BlockPoolConfigBase {
     size_t        physical_block_count{0};
 };
 
-// IBlockPool is the abstract lifecycle base class shared by the device / host / disk
-// block pool implementations under rtp_llm::block_tree_cache. It owns the
-// BlockPoolConfigBase and implements every non-virtual malloc/free/refcount/metrics
-// API so that subclasses cannot intercept or override lifecycle behavior. Subclasses
-// only add medium-specific init() (calling the protected markInitialized()) and
-// medium-specific accessors.
+// IBlockPool owns allocation and Tree-internal lifetime shared by Device, Host, and Disk.
+// DeviceBlockPool adds request-like outer ownership through the protected Tree edge hooks.
 class IBlockPool {
 public:
     virtual ~IBlockPool() = default;
@@ -59,20 +53,14 @@ public:
     std::optional<BlockIdxType> malloc();
     std::optional<BlockIdList>  malloc(size_t n);
 
-    void free(BlockIdxType block);
-    void free(const BlockIdList& blocks);
+    void     incTreeRef(BlockIdxType block, BlockTreeRefType ref_type);
+    void     incTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type);
+    void     decTreeRef(BlockIdxType block, BlockTreeRefType ref_type);
+    void     decTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type);
+    uint32_t treeRefCount(BlockIdxType block) const;
 
-    void incRef(BlockIdxType block, BlockRefType ref_type);
-    void incRef(const BlockIdList& blocks, BlockRefType ref_type);
-
-    // Release one holder: decrement one reference and, only when the refcount reaches 0,
-    // return the block's capacity to the free list. Category releases must use this rather
-    // than free() directly. Requires refcount > 0.
-    void     decRef(BlockIdxType block, BlockRefType ref_type);
-    void     decRef(const BlockIdList& blocks, BlockRefType ref_type);
-    uint32_t refCount(BlockIdxType block) const;
-    // Number of distinct blocks carrying at least one reference of this type.
-    size_t referencedBlocksNum(BlockRefType ref_type) const;
+    // Number of distinct blocks carrying at least one tree reference of this type.
+    size_t referencedBlocksNum(BlockTreeRefType ref_type) const;
 
     bool validBlock(BlockIdxType block) const;
     bool isAllocated(BlockIdxType block) const;
@@ -80,13 +68,43 @@ public:
     size_t totalBlocksNum() const;
     size_t freeBlocksNum() const;
     size_t usedBlocksNum() const;
-    size_t activeTreeCachedBlocksNum() const;
 
 protected:
     explicit IBlockPool(std::shared_ptr<const BlockPoolConfigBase> config);
 
     void markInitialized();
     bool initialized() const;
+
+    virtual void onFirstTreeRefNoLock(BlockIdxType) {}
+    virtual bool onLastTreeRefNoLock(BlockIdxType) {
+        return true;
+    }
+    virtual void onCacheRefChangedNoLock(BlockIdxType, bool) {}
+
+    template<typename Validator, typename Mutator>
+    void mutateAllocatedBlocks(const BlockIdList& blocks, Validator&& validate, Mutator&& mutate) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        checkInitializedNoLock();
+        if (blocks.empty()) {
+            return;
+        }
+        checkUniqueBlocksNoLock(blocks);
+        for (const auto block : blocks) {
+            checkAllocatedNoLock(block);
+            validate(block);
+        }
+        for (const auto block : blocks) {
+            mutate(block);
+        }
+    }
+
+    void     checkInitializedNoLock() const;
+    void     checkAllocatedNoLock(BlockIdxType block) const;
+    uint32_t treeRefCountNoLock(BlockIdxType block) const;
+    uint32_t treeRefCountNoLock(BlockIdxType block, BlockTreeRefType ref_type) const;
+    void     freeAllocatedBlockNoLock(BlockIdxType block);
+
+    mutable std::mutex mutex_;
 
     template<typename ConfigT>
     const ConfigT& configAs(BlockPoolType expected_type) const {
@@ -96,10 +114,8 @@ protected:
 
 private:
     bool          validBlockNoLock(BlockIdxType block) const;
-    void          checkInitializedNoLock() const;
-    void          checkAllocatedNoLock(BlockIdxType block) const;
     void          checkUniqueBlocksNoLock(const BlockIdList& blocks) const;
-    static size_t refTypeIndex(BlockRefType ref_type);
+    static size_t treeRefTypeIndex(BlockTreeRefType ref_type);
 
     size_t       totalBlocksNumNoLock() const;
     size_t       availableFreeBlocksNoLock() const;
@@ -107,23 +123,16 @@ private:
     BlockIdxType popFreeBlockNoLock();
     void         pushFreeBlockNoLock(BlockIdxType block);
 
-    void decRefOneNoLock(BlockIdxType block, size_t ref_type_index);
-    bool isActiveTreeCachedBlockNoLock(BlockIdxType block) const;
-    void adjustActiveTreeCachedBlocksNoLock(bool was_active, bool is_active);
-    void freeAllocatedBlockNoLock(BlockIdxType block);
-
 private:
-    std::shared_ptr<const BlockPoolConfigBase>            config_;
-    mutable std::mutex                                    mutex_;
-    bool                                                  initialized_{false};
-    std::vector<uint8_t>                                  allocated_;
-    std::vector<uint32_t>                                 refcounts_;
-    std::array<std::vector<uint32_t>, kBlockRefTypeCount> metric_refcounts_by_type_;
-    std::array<size_t, kBlockRefTypeCount>                referenced_block_counts_{};
-    std::vector<BlockIdxType>                             free_blocks_;
-    std::vector<BlockIdxType>                             released_blocks_;
-    size_t                                                free_head_{0};
-    size_t                                                active_tree_cached_blocks_num_{0};
+    std::shared_ptr<const BlockPoolConfigBase>                config_;
+    bool                                                      initialized_{false};
+    std::vector<uint8_t>                                      allocated_;
+    std::vector<uint32_t>                                     tree_refcounts_;
+    std::array<std::vector<uint32_t>, kBlockTreeRefTypeCount> tree_refcounts_by_type_;
+    std::array<size_t, kBlockTreeRefTypeCount>                tree_referenced_block_counts_{};
+    std::vector<BlockIdxType>                                 free_blocks_;
+    std::vector<BlockIdxType>                                 released_blocks_;
+    size_t                                                    free_head_{0};
 };
 
 }  // namespace rtp_llm

@@ -93,7 +93,7 @@ TEST_F(DeviceFullKVCacheGroupTest, MallocFreeTest) {
     BlockIndicesType expected_result = {1, 2, 3, 4};
     ASSERT_EQ(block_ids.blocks(), expected_result);
 
-    group1.free(block_ids.blocks());
+    group1.unreference(block_ids.blocks());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9);
 
     BlockIds block_ids2(/*kernel_blocks_per_kv_block=*/1);
@@ -110,7 +110,7 @@ TEST_F(DeviceFullKVCacheGroupTest, MallocBackfillsMatchedLoadPlaceholder) {
 
     auto resident = block_pool->malloc();
     ASSERT_TRUE(resident.has_value());
-    block_pool->incRef(*resident, BlockRefType::REQUEST);
+    block_pool->incRef(*resident);
 
     BlockIds block_ids(/*kernel_blocks_per_kv_block=*/1);
     block_ids.assign({NULL_BLOCK_IDX, *resident});
@@ -122,7 +122,7 @@ TEST_F(DeviceFullKVCacheGroupTest, MallocBackfillsMatchedLoadPlaceholder) {
     EXPECT_EQ(block_pool->refCount(block_ids.blocks()[0]), 1u);
     EXPECT_EQ(block_pool->refCount(*resident), 1u);
 
-    group.free(block_ids.blocks());
+    group.unreference(block_ids.blocks());
 }
 
 // Single-count co-hold: a block held by both a request (via group malloc) and a cache
@@ -143,14 +143,14 @@ TEST_F(DeviceFullKVCacheGroupTest, RequestReleaseKeepsCacheHeldBlock) {
     const auto block = block_ids.blocks()[0];
     EXPECT_EQ(block_pool->refCount(block), 1u);  // request holder
 
-    block_pool->incRef(block, BlockRefType::BLOCK_CACHE);
+    block_pool->incTreeRef(block, BlockTreeRefType::CACHE);
     EXPECT_EQ(block_pool->refCount(block), 2u);
 
-    group1.free(BlockIndicesType{block});  // release request holder
+    group1.unreference(BlockIndicesType{block});  // release request holder
     EXPECT_TRUE(block_pool->isAllocated(block));
     EXPECT_EQ(block_pool->refCount(block), 1u);
 
-    block_pool->decRef(block, BlockRefType::BLOCK_CACHE);
+    block_pool->decTreeRef(block, BlockTreeRefType::CACHE);
     EXPECT_FALSE(block_pool->isAllocated(block));
 }
 
@@ -166,14 +166,14 @@ TEST_F(DeviceFullKVCacheGroupTest, ReleaseFiltersNullBlocksAndPreservesOtherRefe
     ASSERT_TRUE(group.malloc(block_ids, /*seq_len=*/2));
     ASSERT_EQ(block_ids.blocksNum(), 1u);
     const BlockIdxType block = block_ids.blocks()[0];
-    block_pool->incRef(block, BlockRefType::BLOCK_CACHE);
+    block_pool->incTreeRef(block, BlockTreeRefType::CACHE);
 
-    group.release(BlockIndicesType{NULL_BLOCK_IDX, block}, BlockRefType::REQUEST);
+    group.unreference(BlockIndicesType{NULL_BLOCK_IDX, block});
 
     EXPECT_TRUE(block_pool->isAllocated(block));
     EXPECT_EQ(block_pool->refCount(block), 1u);
 
-    block_pool->decRef(block, BlockRefType::BLOCK_CACHE);
+    block_pool->decTreeRef(block, BlockTreeRefType::CACHE);
     EXPECT_FALSE(block_pool->isAllocated(block));
 }
 

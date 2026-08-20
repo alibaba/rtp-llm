@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 
+#include <cassert>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
@@ -36,7 +37,102 @@ const char* memoryTypeName(MemoryType memory_type) {
 }  // namespace
 
 DeviceBlockPool::DeviceBlockPool(std::shared_ptr<const DeviceBlockPoolConfig> config):
-    IBlockPool(normalizeConfig(config)) {}
+    IBlockPool(normalizeConfig(config)) {
+    refcounts_.assign(this->config().physical_block_count, 0);
+}
+
+void DeviceBlockPool::incRef(BlockIdxType block) {
+    incRef(BlockIdList{block});
+}
+
+void DeviceBlockPool::incRef(const BlockIdList& blocks) {
+    mutateAllocatedBlocks(
+        blocks,
+        [](BlockIdxType) {},
+        [this](BlockIdxType block) {
+            const bool was_referenced = hasRequestRefNoLock(block);
+            ++refcounts_[block];
+            if (!was_referenced) {
+                ++request_referenced_blocks_num_;
+                if (treeRefCountNoLock(block, BlockTreeRefType::CACHE) > 0) {
+                    ++active_tree_cached_blocks_num_;
+                }
+            }
+        });
+}
+
+void DeviceBlockPool::decRef(BlockIdxType block) {
+    decRef(BlockIdList{block});
+}
+
+void DeviceBlockPool::decRef(const BlockIdList& blocks) {
+    mutateAllocatedBlocks(
+        blocks,
+        [this](BlockIdxType block) {
+            RTP_LLM_CHECK_WITH_INFO(hasRequestRefNoLock(block),
+                                    "cannot decRef block [%d] of pool [%s] without a request reference",
+                                    block,
+                                    poolName().c_str());
+        },
+        [this](BlockIdxType block) {
+            --refcounts_[block];
+            if (!hasRequestRefNoLock(block)) {
+                --request_referenced_blocks_num_;
+                if (treeRefCountNoLock(block, BlockTreeRefType::CACHE) > 0) {
+                    assert(active_tree_cached_blocks_num_ > 0);
+                    --active_tree_cached_blocks_num_;
+                }
+            }
+            if (refcounts_[block] == 0) {
+                freeAllocatedBlockNoLock(block);
+            }
+        });
+}
+
+uint32_t DeviceBlockPool::refCount(BlockIdxType block) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    checkAllocatedNoLock(block);
+    return refcounts_[block];
+}
+
+size_t DeviceBlockPool::referencedBlocksNum() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    return request_referenced_blocks_num_;
+}
+
+size_t DeviceBlockPool::activeTreeCachedBlocksNum() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    return active_tree_cached_blocks_num_;
+}
+
+void DeviceBlockPool::onFirstTreeRefNoLock(BlockIdxType block) {
+    ++refcounts_[block];
+}
+
+bool DeviceBlockPool::onLastTreeRefNoLock(BlockIdxType block) {
+    assert(refcounts_[block] > 0);
+    --refcounts_[block];
+    return refcounts_[block] == 0;
+}
+
+void DeviceBlockPool::onCacheRefChangedNoLock(BlockIdxType block, bool cached) {
+    if (!hasRequestRefNoLock(block)) {
+        return;
+    }
+    if (cached) {
+        ++active_tree_cached_blocks_num_;
+    } else {
+        assert(active_tree_cached_blocks_num_ > 0);
+        --active_tree_cached_blocks_num_;
+    }
+}
+
+bool DeviceBlockPool::hasRequestRefNoLock(BlockIdxType block) const {
+    return refcounts_[block] > static_cast<uint32_t>(treeRefCountNoLock(block) > 0);
+}
 
 DeviceBlockPool::~DeviceBlockPool() {
     cache_aligned_buffer_ = torch::Tensor();
@@ -503,9 +599,18 @@ size_t DeviceBlockPool::blockSizeBytes() const {
 }
 
 std::string DeviceBlockPool::debugString() const {
+    size_t request_ref_blocks;
+    size_t active_tree_cached_blocks;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        request_ref_blocks        = request_referenced_blocks_num_;
+        active_tree_cached_blocks = active_tree_cached_blocks_num_;
+    }
+
     std::ostringstream oss;
     oss << "DeviceBlockPool{" << IBlockPool::debugString() << ", pool_name=" << config().pool_name
         << ", memory_layouts=" << config().memory_layouts.size() << ", total_size_bytes=" << config().total_size_bytes
+        << ", request_ref_blocks=" << request_ref_blocks << ", active_tree_cached=" << active_tree_cached_blocks
         << ", where=" << memoryTypeName(where()) << "}";
     return oss.str();
 }

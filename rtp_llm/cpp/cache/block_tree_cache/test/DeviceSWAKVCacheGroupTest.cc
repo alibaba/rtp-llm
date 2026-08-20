@@ -417,7 +417,7 @@ TEST_F(DeviceSWAKVCacheGroupTest, MallocRequiredPositionsBackfillsPolicySkippedS
     EXPECT_EQ(backfilled_positions, (std::vector<size_t>{1, 2, 3}));
     EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 3);
 
-    group.free(block_ids.blocks());
+    group.unreference(block_ids.blocks());
 }
 
 // ==================== removeSkippedBlocks ====================
@@ -475,7 +475,7 @@ TEST_F(DeviceSWAKVCacheGroupTest, RemoveSkippedBlocks_WithStep_FreesNonStepBlock
     // incRef gives each a single holder so removeSkippedBlocks' decRef can free them.
     auto allocated = block_pool->malloc(6).value();
     ASSERT_EQ(allocated.size(), 6u);
-    block_pool->incRef(allocated, BlockRefType::REQUEST);
+    block_pool->incRef(allocated);
     BlockIds blocks;
     blocks.assign(allocated);
 
@@ -511,7 +511,7 @@ TEST_F(DeviceSWAKVCacheGroupTest, RemoveSkippedBlocks_HCAStateReuseEnabledKeepsT
 
     auto allocated = block_pool->malloc(6).value();
     ASSERT_EQ(allocated.size(), 6u);
-    block_pool->incRef(allocated, BlockRefType::REQUEST);
+    block_pool->incRef(allocated);
     BlockIds blocks;
     blocks.assign(allocated);
 
@@ -537,7 +537,7 @@ TEST_F(DeviceSWAKVCacheGroupTest, RemoveSkippedBlocks_WithReserveStep) {
 
     auto allocated = block_pool->malloc(6).value();
     ASSERT_EQ(allocated.size(), 6u);
-    block_pool->incRef(allocated, BlockRefType::REQUEST);
+    block_pool->incRef(allocated);
     BlockIds blocks;
     blocks.assign(allocated);
 
@@ -567,13 +567,13 @@ TEST_F(DeviceSWAKVCacheGroupTest, Free_ReleasesRealBlocks) {
     ASSERT_TRUE(group.malloc(block_ids, 20));
     EXPECT_LT(block_pool_->freeBlocksNum(), total_blocks_);
 
-    group.free(block_ids.blocks());
+    group.unreference(block_ids.blocks());
     EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
 }
 
 TEST_F(DeviceSWAKVCacheGroupTest, Free_Empty) {
     auto group = makeGroup(4);
-    group.free({});
+    group.unreference({});
     EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
 }
 
@@ -583,7 +583,7 @@ TEST_F(DeviceSWAKVCacheGroupTest, Free_SkipsNullBlocks) {
     ASSERT_TRUE(group.malloc(block_ids, 20));
     EXPECT_LT(block_pool_->freeBlocksNum(), total_blocks_);
 
-    group.free(block_ids.blocks());
+    group.unreference(block_ids.blocks());
     EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
 }
 
@@ -629,7 +629,7 @@ TEST_F(DeviceSWAKVCacheGroupTest, Malloc_FailsAtomicallyWithoutLeak) {
     // ensureFreeBlocks() cannot evict and refill the pool.
     auto pre_alloc = block_pool_->malloc(7).value();
     ASSERT_EQ(pre_alloc.size(), 7u);
-    block_pool_->incRef(pre_alloc, BlockRefType::REQUEST);
+    block_pool_->incRef(pre_alloc);
     const size_t free_before = block_pool_->freeBlocksNum();
     ASSERT_EQ(free_before, total_blocks_ - 7);
 
@@ -645,7 +645,7 @@ TEST_F(DeviceSWAKVCacheGroupTest, Malloc_FailsAtomicallyWithoutLeak) {
 
     // The pre-allocated blocks must still be releasable, proving that DeviceBlockPool ref
     // counters were not corrupted by the failed malloc path.
-    block_pool_->decRef(pre_alloc, BlockRefType::REQUEST);
+    block_pool_->decRef(pre_alloc);
     EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
 }
 
@@ -667,7 +667,7 @@ TEST_F(DeviceSWAKVCacheGroupTest, Malloc_AllocatesAtomicallyAsBatch) {
     // The pool's free count must drop by exactly the number of physical blocks (3).
     EXPECT_EQ(block_pool_->freeBlocksNum(), free_before - 3);
 
-    group.free(block_ids.blocks());
+    group.unreference(block_ids.blocks());
     EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
 }
 
@@ -697,7 +697,7 @@ TEST_F(DeviceSWAKVCacheGroupTest, Malloc_BatchPlacementMatchesShouldAllocate) {
 
     EXPECT_EQ(block_pool_->freeBlocksNum(), free_before - 4);
 
-    group.free(block_ids.blocks());
+    group.unreference(block_ids.blocks());
     EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
 }
 

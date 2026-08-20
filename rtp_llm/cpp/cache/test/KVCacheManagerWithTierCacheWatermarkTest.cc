@@ -97,8 +97,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
         }
     }
     for (const auto& group_set : cache->groupSets()) {
-        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 1u);
-        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 0u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 1u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
         if (GetParam() == TierLayout::HOST_DISK) {
             EXPECT_EQ(group_set->diskPool()->usedBlocksNum(), 0u);
         }
@@ -120,9 +120,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
                 EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
                 EXPECT_EQ(resource.getTopTier(), Tier::HOST);
                 host_sources[group_set_id] = resource.host_block;
-                EXPECT_EQ(group_set->hostPool()->refCount(resource.host_block), 1u);
-                EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
-                EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
+                EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 1u);
+                EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
+                EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
                 const size_t group_id = group_set->groupIds().front();
                 EXPECT_FALSE(group_set->devicePools().front()->isAllocated(seed.blocks_by_group[group_id][path_index]));
             } else {
@@ -189,7 +189,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
                 EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOADING);
                 ASSERT_TRUE(resource.hasTier(Tier::HOST));
                 EXPECT_EQ(resource.host_block, host_sources[group_set_id]);
-                EXPECT_EQ(group_set->hostPool()->refCount(resource.host_block), 2u);
+                EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 2u);
                 const size_t group_id = group_set->groupIds().front();
                 const auto&  blocks   = load_resource->blocks(0, static_cast<int>(group_id));
                 ASSERT_GT(blocks.size(), path_index);
@@ -332,7 +332,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
         EXPECT_EQ(resource.getTopTier(), Tier::DEVICE);
         const size_t group_id = group_set->groupIds().front();
         EXPECT_EQ(resource.device_blocks, (BlockIndicesType{seed.blocks_by_group[group_id][0]}));
-        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 1u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 1u);
         EXPECT_EQ(group_set->diskPool()->usedBlocksNum(), 0u);
     }
 
@@ -350,9 +350,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
         EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
         EXPECT_EQ(resource.getTopTier(), Tier::HOST);
         host_sources[group_set_id] = resource.host_block;
-        EXPECT_EQ(group_set->hostPool()->refCount(resource.host_block), 1u);
-        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
-        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
+        EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 1u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
         const size_t group_id = group_set->groupIds().front();
         EXPECT_FALSE(group_set->devicePools().front()->isAllocated(seed.blocks_by_group[group_id][0]));
     }
@@ -402,9 +402,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
         ASSERT_TRUE(resource.hasTier(Tier::HOST));
         EXPECT_EQ(resource.getTopTier(), Tier::HOST);
         EXPECT_EQ(resource.host_block, host_sources[group_set_id]);
-        EXPECT_EQ(group_set->hostPool()->refCount(resource.host_block), 1u);
-        EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockRefType::EVICTION), 1u);
-        EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 0u);
+        EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 1u);
+        EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 1u);
+        EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
     }
 
     pausable_engine->release();
@@ -422,9 +422,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
         EXPECT_EQ(resource.getTopTier(), Tier::DISK);
         disk_sources[group_set_id] = resource.disk_slot;
         EXPECT_FALSE(group_set->hostPool()->isAllocated(host_sources[group_set_id]));
-        EXPECT_EQ(group_set->diskPool()->refCount(resource.disk_slot), 1u);
-        EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
-        EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
+        EXPECT_EQ(group_set->diskPool()->treeRefCount(resource.disk_slot), 1u);
+        EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
+        EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
     }
 
     descriptors = pausable_engine->descriptors();
@@ -477,7 +477,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
         ASSERT_TRUE(resource.hasTier(Tier::DISK));
         EXPECT_EQ(resource.getTopTier(), Tier::DISK);
         EXPECT_EQ(resource.disk_slot, disk_sources[group_set_id]);
-        EXPECT_EQ(group_set->diskPool()->refCount(resource.disk_slot), 2u);
+        EXPECT_EQ(group_set->diskPool()->treeRefCount(resource.disk_slot), 2u);
         const size_t group_id = group_set->groupIds().front();
         const auto&  blocks   = load_resource->blocks(0, static_cast<int>(group_id));
         ASSERT_FALSE(blocks.empty());
@@ -610,7 +610,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         const size_t group_id = group_set->groupIds().front();
         EXPECT_EQ(resource.device_blocks.front(), seed.blocks_by_group[group_id][0]);
         EXPECT_EQ(group_set->devicePools().front()->refCount(resource.device_blocks.front()), 1u);
-        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
         EXPECT_EQ(group_set->hostPool()->usedBlocksNum(), 0u);
         ASSERT_NE(group_set->diskPool(), nullptr);
         EXPECT_EQ(group_set->diskPool()->usedBlocksNum(), 0u);
@@ -662,7 +662,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
         EXPECT_EQ(resource.getTopTier(), Tier::HOST);
         host_sources_before_failure[group_set_id] = resource.host_block;
-        EXPECT_EQ(group_set->hostPool()->refCount(resource.host_block), 1u);
+        EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 1u);
     }
 
     {
@@ -707,11 +707,11 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
             EXPECT_FALSE(resource.hasTier(Tier::DISK));
             EXPECT_EQ(resource.getTopTier(), Tier::HOST);
             EXPECT_EQ(resource.host_block, host_sources_before_failure[group_set_id]);
-            EXPECT_EQ(group_set->hostPool()->refCount(resource.host_block), 1u);
-            EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
-            EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
-            EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 0u);
-            EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
+            EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 1u);
+            EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
+            EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
+            EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
+            EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
         }
         expectPoolSnapshotsEq(lower_before_host_failure, snapshotLowerPools(*cache, GetParam()));
 
@@ -781,9 +781,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
             const auto& resource  = (*rebuilt_host)[0][group_set_id];
             EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
             EXPECT_EQ(resource.getTopTier(), Tier::HOST);
-            EXPECT_EQ(group_set->hostPool()->refCount(resource.host_block), 1u);
-            EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
-            EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
+            EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 1u);
+            EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
+            EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
         }
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
@@ -802,7 +802,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
             ASSERT_TRUE(resource.hasTier(Tier::DISK));
             EXPECT_FALSE(resource.hasTier(Tier::HOST));
             EXPECT_EQ(resource.getTopTier(), Tier::DISK);
-            EXPECT_EQ(group_set->diskPool()->refCount(resource.disk_slot), 1u);
+            EXPECT_EQ(group_set->diskPool()->treeRefCount(resource.disk_slot), 1u);
         }
     }
 
@@ -882,7 +882,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
         EXPECT_EQ(state.device_blocks, (BlockIndicesType{seed.blocks_by_group[group_id][0]}));
         EXPECT_EQ(group_set->devicePools().front()->refCount(state.device_blocks.front()), 1u);
         EXPECT_EQ(group_set->hostPool()->usedBlocksNum(), 1u);
-        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 1u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 1u);
     }
     auto       resource = makeResource(cache_config_);
     auto       tokens   = makeTokenIds(0,
@@ -909,7 +909,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
         EXPECT_EQ(state.transfer_state, GroupSetTransferState::DEMOTING);
         EXPECT_EQ(group_set->devicePools().front()->refCount(state.device_blocks.front()), 1u)
             << "the miss request must not reference the DEMOTING source";
-        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 1u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 1u);
     }
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
@@ -926,8 +926,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
         EXPECT_EQ(state.transfer_state, GroupSetTransferState::IDLE);
         ASSERT_TRUE(state.hasTier(Tier::HOST));
         EXPECT_FALSE(state.hasTier(Tier::DEVICE));
-        EXPECT_EQ(group_set->hostPool()->refCount(state.host_block), 1u);
-        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
+        EXPECT_EQ(group_set->hostPool()->treeRefCount(state.host_block), 1u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
     }
     manager_->free(FreeInfo{resource, tokens});
 

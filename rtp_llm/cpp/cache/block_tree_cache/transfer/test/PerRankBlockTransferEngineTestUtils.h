@@ -99,6 +99,7 @@ private:
 };
 
 BlockIdxType poolMalloc(IBlockPool& pool);
+void         releasePoolBlock(IBlockPool& pool, BlockIdxType block);
 
 TransferDescriptor makeDescriptor(Tier                             source_tier,
                                   Tier                             target_tier,
