@@ -51,9 +51,9 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
         const size_t need_evict = static_cast<size_t>(required_blocks) - free_blocks;
         if (evict_callback_) {
             if (evict_callback_(need_evict) == 0) {
-                RTP_LLM_LOG_WARNING("ensure free blocks failed, BTC reclaimed no blocks for tag=%s need=%zu",
-                                    tag().c_str(),
-                                    need_evict);
+                RTP_LLM_LOG_DEBUG("ensure free blocks failed, BTC reclaimed no blocks for tag=%s need=%zu",
+                                  tag().c_str(),
+                                  need_evict);
                 return false;
             }
             continue;
