@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import unittest
 
 import torch
@@ -103,6 +104,58 @@ def _bench(fn, warmup: int = 5, iters: int = 12, repeats: int = 3) -> float:
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class GroupedFP4StrategyPerfTest(unittest.TestCase):
+    def test_sm120_fused_moe_matches_groupwise(self):
+        if torch.cuda.get_device_capability()[0] != 12:
+            self.skipTest("SM120 required")
+        if not _has_fp8_fp4_grouped_kernel():
+            self.skipTest("FlashInfer MXFP8xMXFP4 kernels unavailable")
+
+        from flashinfer import mxfp8_quantize
+
+        torch.manual_seed(20260821)
+        E, D, inter, topk, tokens = 8, 512, 256, 6, 33
+        cfg = _cfg(E, D, inter, topk, tokens)
+        grouped = GroupedFP4Strategy(cfg)
+        grouped.setup_weights(_make_layer_weights(E, D, inter))
+        x, weights, indices = _make_inputs(tokens, D, E, topk)
+        x_q, x_scale = mxfp8_quantize(
+            x.contiguous(), is_sf_swizzled_layout=False
+        )
+        x_scale = x_scale.reshape(tokens, D // 32)
+
+        old_flag = os.environ.get("DSV4_SM120_FUSED_MOE_PREFILL")
+        try:
+            with torch.inference_mode():
+                os.environ["DSV4_SM120_FUSED_MOE_PREFILL"] = "0"
+                groupwise_y = grouped.forward_sm120_mxfp8(
+                    x_q, x_scale, weights, indices
+                )
+                os.environ["DSV4_SM120_FUSED_MOE_PREFILL"] = "1"
+                fused_y = grouped.forward_sm120_mxfp8(
+                    x_q, x_scale, weights, indices
+                )
+            torch.cuda.synchronize()
+        finally:
+            if old_flag is None:
+                os.environ.pop("DSV4_SM120_FUSED_MOE_PREFILL", None)
+            else:
+                os.environ["DSV4_SM120_FUSED_MOE_PREFILL"] = old_flag
+
+        self.assertEqual(tuple(groupwise_y.shape), (tokens, D))
+        self.assertEqual(tuple(fused_y.shape), (tokens, D))
+        self.assertTrue(torch.isfinite(groupwise_y).all().item())
+        self.assertTrue(torch.isfinite(fused_y).all().item())
+        rel = _relative_mean_error(groupwise_y, fused_y)
+        cosine = torch.nn.functional.cosine_similarity(
+            groupwise_y.flatten().float(), fused_y.flatten().float(), dim=0
+        ).item()
+        print(
+            f"[SM120 grouped_fp4] fused/groupwise rel={rel:.6f} "
+            f"cosine={cosine:.6f}"
+        )
+        self.assertLess(rel, 0.05)
+        self.assertGreater(cosine, 0.998)
+
     def test_cuda_graph_capture_bs1_matches_eager(self):
         if torch.cuda.get_device_capability()[0] != 10:
             self.skipTest("SM100 required")
