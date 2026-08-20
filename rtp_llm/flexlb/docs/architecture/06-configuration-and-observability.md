@@ -102,7 +102,8 @@ Nacos 中使用对象字段 `modelServiceConfig`。缺省**启动失败**。配�
   `ttl_ms=300000`、`minimum_ttl_ms=100000`、`ttl_reduction_start_ratio=0.8`、
   `maximum_entries=2000000`、`capacity_multiplier=10.0`、`async_queue_capacity=100000`、
   `hash_thread_count=4`、`hash_queue_capacity=100000`。
-- `OptimizerConfig`（可选）：`enabled`、`address`、`path=/api/optimizer`、
+- `OptimizerConfig`（可选）：`enabled`、`address`、`port=8082`（覆盖服务发现返回的
+  端口，discovery 仅提供 IP）、`path=/api/optimizer`、
   `discovery`。启用后仅在成功调度结束时，由专用 `doFinally` 线程池异步发送
   `/traceQuery`；`instance_id` 根据 selected worker 的 role、group 和 block size 解析
   KVCM namespace。请求收尾从 Reactor event-loop 卸载；线程池不设置任务队列，瞬时

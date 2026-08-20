@@ -61,7 +61,8 @@ public class OptimizerClient {
         }
 
         Endpoint endpoint = optimizerConfig.toEndpoint();
-        this.addressResolver = new ServiceDiscoveryAddressResolver(serviceDiscovery, endpoint);
+        this.addressResolver =
+                new OptimizerAddressResolver(serviceDiscovery, endpoint, optimizerConfig.getPort());
         this.basePath = stripTrailingSlash(optimizerConfig.getPath());
         log.info("Optimizer trace query enabled: address={}", endpoint.getAddress());
     }

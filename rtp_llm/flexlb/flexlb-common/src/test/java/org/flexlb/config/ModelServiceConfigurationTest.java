@@ -110,6 +110,7 @@ class ModelServiceConfigurationTest {
                             .getOptimizer();
                     assertThat(optimizer.isEnabled()).isTrue();
                     assertThat(optimizer.getAddress()).isEqualTo("optimizer-service");
+                    assertThat(optimizer.getPort()).isEqualTo(9090);
                     assertThat(optimizer.getPath()).isEqualTo("/custom/optimizer");
                     assertThat(optimizer.toEndpoint().getProtocol()).isEqualTo("http");
                     assertThat(optimizer.toEndpoint().getDiscovery().getType())
@@ -120,14 +121,14 @@ class ModelServiceConfigurationTest {
     @Test
     void appliesOptimizerTraceDefaults() {
         withModelConfig(modelConfig(
-                validOptimizerConfig().replace(",\"path\":\"/custom/optimizer\"", "")))
+                validOptimizerConfig().replace(",\"port\":9090,\"path\":\"/custom/optimizer\"", "")))
                 .run(context -> {
                     assertThat(context).hasNotFailed();
-                    assertThat(context.getBean(ModelMetaConfig.class)
+                    OptimizerConfig optimizer = context.getBean(ModelMetaConfig.class)
                             .getServiceRoute("test-service")
-                            .getOptimizer()
-                            .getPath())
-                            .isEqualTo(OptimizerConfig.DEFAULT_PATH);
+                            .getOptimizer();
+                    assertThat(optimizer.getPath()).isEqualTo(OptimizerConfig.DEFAULT_PATH);
+                    assertThat(optimizer.getPort()).isEqualTo(OptimizerConfig.DEFAULT_PORT);
                 });
     }
 
@@ -250,7 +251,7 @@ class ModelServiceConfigurationTest {
 
     private String validOptimizerConfig() {
         return """
-                {"enabled":true,"address":"optimizer-service","path":"/custom/optimizer",
+                {"enabled":true,"address":"optimizer-service","port":9090,"path":"/custom/optimizer",
                 "discovery":{"type":"static-env","hosts":["127.0.0.1:8082"]}}
                 """;
     }

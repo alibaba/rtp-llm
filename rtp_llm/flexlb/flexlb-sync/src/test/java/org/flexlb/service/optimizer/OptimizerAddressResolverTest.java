@@ -22,9 +22,10 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-class ServiceDiscoveryAddressResolverTest {
+class OptimizerAddressResolverTest {
 
     private static final String DOMAIN = "optimizer.test.domain.com";
+    private static final int PORT = 8082;
 
     @Test
     void vipserver_should_refresh_by_polling_without_installing_private_listener() throws Exception {
@@ -37,6 +38,20 @@ class ServiceDiscoveryAddressResolverTest {
     }
 
     @Test
+    void configured_port_should_override_discovered_ports() throws Exception {
+        ServiceDiscovery serviceDiscovery = mock(ServiceDiscovery.class);
+        Endpoint endpoint = endpoint(ServiceDiscoveryType.STATIC_ENV);
+        when(serviceDiscovery.getHosts(endpoint))
+                .thenReturn(List.of(WorkerHost.of("127.0.0.1", 8080), WorkerHost.of("127.0.0.2", 9000)));
+        OptimizerAddressResolver resolver =
+                new OptimizerAddressResolver(serviceDiscovery, endpoint, PORT);
+
+        resolver.start();
+        assertEquals(List.of("127.0.0.1:8082", "127.0.0.2:8082"), resolver.getAddresses());
+        resolver.shutdown();
+    }
+
+    @Test
     void dynamic_discovery_should_run_initial_refresh_on_scheduler() {
         ServiceDiscovery serviceDiscovery = mock(ServiceDiscovery.class);
         Endpoint endpoint = endpoint(ServiceDiscoveryType.VIPSERVER);
@@ -45,8 +60,8 @@ class ServiceDiscoveryAddressResolverTest {
             refreshThread.compareAndSet(null, Thread.currentThread().getName());
             return List.of(WorkerHost.of("1.1.1.1", 8000));
         });
-        ServiceDiscoveryAddressResolver resolver =
-                new ServiceDiscoveryAddressResolver(serviceDiscovery, endpoint);
+        OptimizerAddressResolver resolver =
+                new OptimizerAddressResolver(serviceDiscovery, endpoint, PORT);
 
         resolver.start();
 
@@ -60,9 +75,9 @@ class ServiceDiscoveryAddressResolverTest {
         ServiceDiscovery serviceDiscovery = mock(ServiceDiscovery.class);
         Endpoint endpoint = endpoint(ServiceDiscoveryType.STATIC_ENV);
         when(serviceDiscovery.getHosts(endpoint))
-                .thenReturn(List.of(WorkerHost.of("127.0.0.1", 8082)));
-        ServiceDiscoveryAddressResolver resolver =
-                new ServiceDiscoveryAddressResolver(serviceDiscovery, endpoint);
+                .thenReturn(List.of(WorkerHost.of("127.0.0.1", 8080)));
+        OptimizerAddressResolver resolver =
+                new OptimizerAddressResolver(serviceDiscovery, endpoint, PORT);
 
         resolver.start();
         assertEquals(List.of("127.0.0.1:8082"), resolver.getAddresses());
@@ -79,13 +94,13 @@ class ServiceDiscoveryAddressResolverTest {
         when(serviceDiscovery.getHosts(endpoint))
                 .thenThrow(new RuntimeException("temporary failure"))
                 .thenReturn(List.of(WorkerHost.of("4.4.4.4", 7000)));
-        ServiceDiscoveryAddressResolver resolver =
-                new ServiceDiscoveryAddressResolver(serviceDiscovery, endpoint);
+        OptimizerAddressResolver resolver =
+                new OptimizerAddressResolver(serviceDiscovery, endpoint, PORT);
 
         resolver.start();
         assertTrue(resolver.getAddresses().isEmpty());
         verify(serviceDiscovery, timeout(1000).atLeast(2)).getHosts(endpoint);
-        awaitAddresses(resolver, List.of("4.4.4.4:7000"));
+        awaitAddresses(resolver, List.of("4.4.4.4:8082"));
         resolver.shutdown();
     }
 
@@ -97,11 +112,11 @@ class ServiceDiscoveryAddressResolverTest {
         when(serviceDiscovery.getHosts(endpoint))
                 .thenReturn(List.of(WorkerHost.of("1.1.1.1", 8000)))
                 .thenReturn(List.of());
-        ServiceDiscoveryAddressResolver resolver =
-                new ServiceDiscoveryAddressResolver(serviceDiscovery, endpoint);
+        OptimizerAddressResolver resolver =
+                new OptimizerAddressResolver(serviceDiscovery, endpoint, PORT);
 
         resolver.start();
-        awaitAddresses(resolver, List.of("1.1.1.1:8000"));
+        awaitAddresses(resolver, List.of("1.1.1.1:8082"));
         awaitAddresses(resolver, List.of());
         resolver.shutdown();
     }
@@ -112,14 +127,14 @@ class ServiceDiscoveryAddressResolverTest {
         Endpoint endpoint = endpoint(ServiceDiscoveryType.DASHSCOPE);
         when(serviceDiscovery.getHosts(endpoint))
                 .thenReturn(List.of(WorkerHost.of("1.1.1.1", 8000)))
-                .thenReturn(List.of(WorkerHost.of("", 8000), WorkerHost.of("2.2.2.2", 0)));
-        ServiceDiscoveryAddressResolver resolver =
-                new ServiceDiscoveryAddressResolver(serviceDiscovery, endpoint);
+                .thenReturn(List.of(WorkerHost.of("", 8000)));
+        OptimizerAddressResolver resolver =
+                new OptimizerAddressResolver(serviceDiscovery, endpoint, PORT);
 
         resolver.start();
-        awaitAddresses(resolver, List.of("1.1.1.1:8000"));
+        awaitAddresses(resolver, List.of("1.1.1.1:8082"));
         verify(serviceDiscovery, timeout(1000).atLeast(2)).getHosts(endpoint);
-        assertEquals(List.of("1.1.1.1:8000"), resolver.getAddresses());
+        assertEquals(List.of("1.1.1.1:8082"), resolver.getAddresses());
         resolver.shutdown();
     }
 
@@ -129,15 +144,15 @@ class ServiceDiscoveryAddressResolverTest {
         Endpoint endpoint = endpoint(ServiceDiscoveryType.VIPSERVER);
         when(serviceDiscovery.getHosts(endpoint))
                 .thenReturn(List.of(WorkerHost.of("1.1.1.1", 8000)));
-        ServiceDiscoveryAddressResolver resolver =
-                new ServiceDiscoveryAddressResolver(serviceDiscovery, endpoint);
+        OptimizerAddressResolver resolver =
+                new OptimizerAddressResolver(serviceDiscovery, endpoint, PORT);
         resolver.start();
-        awaitAddresses(resolver, List.of("1.1.1.1:8000"));
+        awaitAddresses(resolver, List.of("1.1.1.1:8082"));
         resolver.shutdown();
         clearInvocations(serviceDiscovery);
 
-        assertEquals(List.of("1.1.1.1:8000"), resolver.getAddresses());
-        assertEquals(List.of("1.1.1.1:8000"), resolver.getAddresses());
+        assertEquals(List.of("1.1.1.1:8082"), resolver.getAddresses());
+        assertEquals(List.of("1.1.1.1:8082"), resolver.getAddresses());
 
         verifyNoInteractions(serviceDiscovery);
     }
@@ -147,8 +162,8 @@ class ServiceDiscoveryAddressResolverTest {
         ServiceDiscovery serviceDiscovery = mock(ServiceDiscovery.class);
         Endpoint endpoint = endpoint(ServiceDiscoveryType.STATIC_ENV);
         when(serviceDiscovery.getHosts(endpoint)).thenReturn(List.of());
-        ServiceDiscoveryAddressResolver resolver =
-                new ServiceDiscoveryAddressResolver(serviceDiscovery, endpoint);
+        OptimizerAddressResolver resolver =
+                new OptimizerAddressResolver(serviceDiscovery, endpoint, PORT);
 
         resolver.start();
         resolver.start();
@@ -161,9 +176,8 @@ class ServiceDiscoveryAddressResolverTest {
 
     @Test
     void should_return_empty_before_start() {
-        ServiceDiscoveryAddressResolver resolver =
-                new ServiceDiscoveryAddressResolver(
-                        mock(ServiceDiscovery.class), endpoint(ServiceDiscoveryType.VIPSERVER));
+        OptimizerAddressResolver resolver = new OptimizerAddressResolver(
+                mock(ServiceDiscovery.class), endpoint(ServiceDiscoveryType.VIPSERVER), PORT);
 
         assertTrue(resolver.getAddresses().isEmpty());
         resolver.shutdown();
@@ -175,18 +189,18 @@ class ServiceDiscoveryAddressResolverTest {
         when(serviceDiscovery.getHosts(endpoint))
                 .thenReturn(List.of(WorkerHost.of("1.1.1.1", 8000)))
                 .thenReturn(List.of(WorkerHost.of("2.2.2.2", 9000)));
-        ServiceDiscoveryAddressResolver resolver =
-                new ServiceDiscoveryAddressResolver(serviceDiscovery, endpoint);
+        OptimizerAddressResolver resolver =
+                new OptimizerAddressResolver(serviceDiscovery, endpoint, PORT);
 
         resolver.start();
         verify(serviceDiscovery, timeout(1000).atLeast(2)).getHosts(endpoint);
-        awaitAddresses(resolver, List.of("2.2.2.2:9000"));
+        awaitAddresses(resolver, List.of("2.2.2.2:8082"));
         verify(serviceDiscovery, never()).listen(any(), any());
         resolver.shutdown();
     }
 
     private static void awaitAddresses(
-            ServiceDiscoveryAddressResolver resolver,
+            OptimizerAddressResolver resolver,
             List<String> expected) throws Exception {
         long deadline = System.nanoTime() + 1_000_000_000L;
         while (!resolver.getAddresses().equals(expected) && System.nanoTime() < deadline) {
@@ -200,7 +214,7 @@ class ServiceDiscoveryAddressResolverTest {
         discovery.setType(type);
         discovery.setPollIntervalMs(10);
         if (type == ServiceDiscoveryType.STATIC_ENV) {
-            discovery.setHosts(List.of("127.0.0.1:8082"));
+            discovery.setHosts(List.of("127.0.0.1:8080"));
         }
         Endpoint endpoint = new Endpoint();
         endpoint.setAddress(DOMAIN);

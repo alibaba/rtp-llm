@@ -12,12 +12,19 @@ import lombok.Data;
 public class OptimizerConfig {
 
     public static final String DEFAULT_PATH = "/api/optimizer";
+    public static final int DEFAULT_PORT = 8082;
 
     @JsonProperty("enabled")
     private boolean enabled;
 
     @JsonProperty("address")
     private String address;
+
+    /**
+     * Optimizer HTTP port overriding the port returned by service discovery.
+     */
+    @JsonProperty("port")
+    private int port = DEFAULT_PORT;
 
     @JsonProperty("path")
     private String path = DEFAULT_PATH;
