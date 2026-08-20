@@ -39,6 +39,7 @@ using block_transfer_engine_test::makeTestGroupBase;
 using block_transfer_engine_test::makeTestGroupSet;
 using block_transfer_engine_test::makeTestTopology;
 using block_transfer_engine_test::poolMalloc;
+using block_transfer_engine_test::releasePoolBlock;
 using block_transfer_engine_test::submitSucceeded;
 
 struct DeviceLayerBufferSpec {
@@ -335,7 +336,7 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitDeviceHostRoundTripPreservesLayout)
     for (size_t i = layer_bytes_[2]; i < d2.size(); ++i)
         EXPECT_EQ(d2[i], 0x00);
 
-    host_pool_->free(host_block);
+    releasePoolBlock(*host_pool_, host_block);
 }
 
 TEST_F(PerRankBlockTransferEngineTest, ExecutorDerivesDirectionFromDescriptorTargetTier) {
@@ -362,7 +363,7 @@ TEST_F(PerRankBlockTransferEngineTest, ExecutorDerivesDirectionFromDescriptorTar
         EXPECT_EQ(device_data[i], 0xA5);
     }
 
-    host_pool_->free(host_block);
+    releasePoolBlock(*host_pool_, host_block);
 }
 
 TEST_F(PerRankBlockTransferEngineTest, SharedDevicePoolGroupsIsolateByBlockId) {
@@ -418,9 +419,11 @@ TEST_F(PerRankBlockTransferEngineTest, SharedDevicePoolGroupsIsolateByBlockId) {
     for (auto byte : readDeviceLayer(shared_pool, 1, block_b))
         EXPECT_EQ(byte, 0xB1);
 
-    host_pool->free(host_block);
-    shared_pool->free(block_a);
-    shared_pool->free(block_b);
+    releasePoolBlock(*host_pool, host_block);
+    shared_pool->incRef(block_a);
+    shared_pool->decRef(block_a);
+    shared_pool->incRef(block_b);
+    shared_pool->decRef(block_b);
 }
 
 TEST_F(PerRankBlockTransferEngineTest, SubmitAcceptsValidUnallocatedHostBlock) {
@@ -437,7 +440,8 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitAcceptsValidUnallocatedDeviceBlock)
     // Worker transfers may use a valid logical block ID without local allocator ownership.
     BlockIdxType freed_device_block = poolMalloc(*device_pool_);
     ASSERT_NE(freed_device_block, NULL_BLOCK_IDX);
-    device_pool_->free(freed_device_block);
+    device_pool_->incRef(freed_device_block);
+    device_pool_->decRef(freed_device_block);
     std::vector<BlockIdxType> unallocated_device_blocks = {freed_device_block};
 
     BlockIdxType host_block = poolMalloc(*host_pool_);
@@ -450,7 +454,7 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitAcceptsValidUnallocatedDeviceBlock)
                  makeDescriptor(Tier::HOST, Tier::DEVICE, unallocated_device_blocks, host_block),
                  TransferStatus::OK);
 
-    host_pool_->free(host_block);
+    releasePoolBlock(*host_pool_, host_block);
 }
 
 TEST_F(PerRankBlockTransferEngineTest, SubmitReportsFinalStatusAfterWait) {
@@ -478,7 +482,7 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitReportsFinalStatusAfterWait) {
     EXPECT_EQ(failed_context->errorInfo().code(), ErrorCode::INVALID_PARAMS);
     EXPECT_FALSE(failed_context->errorInfo().ToString().empty());
 
-    host_pool_->free(host_block);
+    releasePoolBlock(*host_pool_, host_block);
 }
 
 TEST_F(PerRankBlockTransferEngineTest, SubmitHostToDeviceIndependentDescriptors) {
@@ -519,9 +523,10 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitHostToDeviceIndependentDescriptors)
         EXPECT_EQ(second_layer2[i], 0xBC);
     }
 
-    host_pool_->free(host_block_1);
-    host_pool_->free(host_block_2);
-    device_pool_->free(second_device_block);
+    releasePoolBlock(*host_pool_, host_block_1);
+    releasePoolBlock(*host_pool_, host_block_2);
+    device_pool_->incRef(second_device_block);
+    device_pool_->decRef(second_device_block);
 }
 
 TEST_F(PerRankBlockTransferEngineTest, SameDirectionDeviceToHostTasksAreSerialized) {
@@ -551,9 +556,10 @@ TEST_F(PerRankBlockTransferEngineTest, SameDirectionDeviceToHostTasksAreSerializ
     EXPECT_TRUE(first->success());
     EXPECT_TRUE(second->success());
 
-    host_pool_->free(first_host_block);
-    host_pool_->free(second_host_block);
-    device_pool_->free(second_device_block);
+    releasePoolBlock(*host_pool_, first_host_block);
+    releasePoolBlock(*host_pool_, second_host_block);
+    device_pool_->incRef(second_device_block);
+    device_pool_->decRef(second_device_block);
 }
 
 TEST_F(PerRankBlockTransferEngineTest, SameDirectionHostToDeviceTasksAreSerialized) {
@@ -583,9 +589,10 @@ TEST_F(PerRankBlockTransferEngineTest, SameDirectionHostToDeviceTasksAreSerializ
     EXPECT_TRUE(first->success());
     EXPECT_TRUE(second->success());
 
-    host_pool_->free(first_host_block);
-    host_pool_->free(second_host_block);
-    device_pool_->free(second_device_block);
+    releasePoolBlock(*host_pool_, first_host_block);
+    releasePoolBlock(*host_pool_, second_host_block);
+    device_pool_->incRef(second_device_block);
+    device_pool_->decRef(second_device_block);
 }
 
 TEST_F(PerRankBlockTransferEngineTest, BatchAllowsSharedReadEndpoint) {
@@ -601,8 +608,8 @@ TEST_F(PerRankBlockTransferEngineTest, BatchAllowsSharedReadEndpoint) {
     context->waitDone();
     EXPECT_TRUE(context->success());
 
-    host_pool_->free(first_host_block);
-    host_pool_->free(second_host_block);
+    releasePoolBlock(*host_pool_, first_host_block);
+    releasePoolBlock(*host_pool_, second_host_block);
 }
 
 class PerRankBlockTransferEngineMultiMemberTest: public ::testing::Test {
@@ -1220,7 +1227,7 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, GenericStrategyRoundTrip) {
     EXPECT_EQ(counters[1].not_applicable, 2);
     EXPECT_EQ(counters[2].done, 2);
 
-    host_pool_->free(host_block);
+    releasePoolBlock(*host_pool_, host_block);
 }
 
 TEST_F(PerRankBlockTransferEngineStrategyTest, BatchStrategyExecutesWhenSupportedOtherwiseFallsBack) {
@@ -1277,7 +1284,7 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, BatchStrategyExecutesWhenSupporte
     EXPECT_EQ(counters[2].not_applicable, 0);
     EXPECT_EQ(counters[2].failed, 0);
 
-    host_pool_->free(host_block);
+    releasePoolBlock(*host_pool_, host_block);
 }
 
 TEST_F(PerRankBlockTransferEngineStrategyTest, StagedEnabledBelowThresholdFallsBackToGeneric) {
@@ -1308,7 +1315,7 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedEnabledBelowThresholdFallsB
     EXPECT_EQ(counters[1].not_applicable, 1);
     EXPECT_EQ(counters[2].done, 1);
 
-    host_pool_->free(host_block);
+    releasePoolBlock(*host_pool_, host_block);
 }
 
 TEST_F(PerRankBlockTransferEngineStrategyTest, StagedStrategyAboveThresholdRoundTrip) {
@@ -1350,7 +1357,7 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedStrategyAboveThresholdRound
     EXPECT_EQ(counters[1].attempts, 0);
     EXPECT_EQ(counters[2].attempts, 0);
 
-    host_pool_->free(host_block);
+    releasePoolBlock(*host_pool_, host_block);
 }
 
 TEST_F(PerRankBlockTransferEngineStrategyTest, StagedStrategyTakesPrecedenceWhenEligible) {
@@ -1374,7 +1381,7 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedStrategyTakesPrecedenceWhen
     EXPECT_EQ(counters[1].attempts, 0);
     EXPECT_EQ(counters[2].attempts, 0);
 
-    host_pool_->free(host_block);
+    releasePoolBlock(*host_pool_, host_block);
 }
 
 }  // namespace

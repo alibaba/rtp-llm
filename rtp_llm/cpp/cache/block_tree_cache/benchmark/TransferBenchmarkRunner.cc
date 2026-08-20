@@ -730,13 +730,19 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
     writer_.addStatistic("sample_count", static_cast<double>(succeeded));
 
     for (size_t member_index = 0; member_index < setup.device_pools.size(); ++member_index) {
-        for (const auto block : device_blocks[member_index])
-            setup.device_pools[member_index]->free(block);
+        for (const auto block : device_blocks[member_index]) {
+            setup.device_pools[member_index]->incRef(block);
+            setup.device_pools[member_index]->decRef(block);
+        }
     }
-    for (const auto block : host_blocks)
-        host_pool->free(block);
-    for (const auto block : disk_blocks)
-        disk_pool->free(block);
+    for (const auto block : host_blocks) {
+        host_pool->incTreeRef(block, BlockTreeRefType::STORE);
+        host_pool->decTreeRef(block, BlockTreeRefType::STORE);
+    }
+    for (const auto block : disk_blocks) {
+        disk_pool->incTreeRef(block, BlockTreeRefType::STORE);
+        disk_pool->decTreeRef(block, BlockTreeRefType::STORE);
+    }
 
     const bool strategy_ok = options_.copy_strategy == "auto" || actual_strategy == options_.copy_strategy;
     return attempted == final_operations && succeeded + failed == attempted && failed == 0

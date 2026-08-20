@@ -59,12 +59,17 @@ BlockTreePoolMetricsSnapshot makePoolMetricsSnapshot(Tier tier, const IBlockPool
     snapshot.free_blocks               = pool.freeBlocksNum();
     snapshot.used_blocks               = snapshot.total_blocks - snapshot.free_blocks;
     snapshot.available_blocks          = std::min(snapshot.total_blocks, snapshot.free_blocks + candidate_blocks);
-    snapshot.active_tree_cached_blocks = pool.activeTreeCachedBlocksNum();
-    snapshot.request_ref_blocks        = pool.referencedBlocksNum(BlockRefType::REQUEST);
-    snapshot.connector_ref_blocks      = pool.referencedBlocksNum(BlockRefType::STORAGE_BACKEND);
-    snapshot.block_cache_ref_blocks    = pool.referencedBlocksNum(BlockRefType::BLOCK_CACHE);
-    snapshot.eviction_ref_blocks       = pool.referencedBlocksNum(BlockRefType::EVICTION);
-    snapshot.store_ref_blocks          = pool.referencedBlocksNum(BlockRefType::STORE);
+    snapshot.block_cache_ref_blocks    = pool.referencedBlocksNum(BlockTreeRefType::CACHE);
+    snapshot.load_ref_blocks           = pool.referencedBlocksNum(BlockTreeRefType::LOAD);
+    snapshot.eviction_ref_blocks       = pool.referencedBlocksNum(BlockTreeRefType::EVICTION);
+    snapshot.store_ref_blocks          = pool.referencedBlocksNum(BlockTreeRefType::STORE);
+    return snapshot;
+}
+
+BlockTreePoolMetricsSnapshot makeDevicePoolMetricsSnapshot(const DeviceBlockPool& pool, size_t candidate_blocks) {
+    BlockTreePoolMetricsSnapshot snapshot = makePoolMetricsSnapshot(Tier::DEVICE, pool, candidate_blocks);
+    snapshot.active_tree_cached_blocks    = pool.activeTreeCachedBlocksNum();
+    snapshot.request_ref_blocks           = pool.referencedBlocksNum();
     return snapshot;
 }
 
@@ -129,8 +134,8 @@ BlockTreeCacheMetricsReporter::collectPoolMetricsSnapshots(const std::vector<Gro
             if (!insert_result.second) {
                 continue;
             }
-            snapshots.push_back(makePoolMetricsSnapshot(
-                Tier::DEVICE, *pool, deviceCandidateBlockCount(device_candidate_blocks, pool.get())));
+            snapshots.push_back(
+                makeDevicePoolMetricsSnapshot(*pool, deviceCandidateBlockCount(device_candidate_blocks, pool.get())));
         }
 
         const std::shared_ptr<HostBlockPool> host_pool = group_set->hostPool();

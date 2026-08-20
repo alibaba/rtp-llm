@@ -146,7 +146,7 @@ static BlockIdxType prepareDeviceTarget(const std::shared_ptr<FullGroupSet>& gro
     if (!block.has_value()) {
         return NULL_BLOCK_IDX;
     }
-    device_pool->incRef(*block, BlockRefType::REQUEST);
+    device_pool->incRef(*block);
     return *block;
 }
 
@@ -469,7 +469,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadCommitsDeviceResource)
     std::shared_ptr<FullGroupSet>  group        = makeBroadcastGroup("broadcast_host_load_success", host_pool);
     const BlockIdxType             device_block = prepareDeviceTarget(group);
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
-    const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+    const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
     BlockTreeCacheConfig config;
@@ -501,7 +501,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadCommitsDeviceResource)
     EXPECT_EQ(host_pool->freeBlocksNum(), 4u);
     EXPECT_EQ(cache->getStats().host_heap_total_size, 0u);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
-    releaseDeviceBlocks(*cache, group->devicePools().front(), {device_block}, BlockRefType::REQUEST);
+    releaseDeviceBlocks(*cache, group->devicePools().front(), {device_block});
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
 
     std::lock_guard<std::mutex> lock(state->mutex);
@@ -531,7 +531,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadFailureKeepsSourceReso
     std::shared_ptr<FullGroupSet>  group        = makeBroadcastGroup("broadcast_host_load_failure", host_pool);
     const BlockIdxType             device_block = prepareDeviceTarget(group);
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
-    const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+    const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
     BlockTreeCacheConfig config;
@@ -573,7 +573,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadFailureKeepsSourceReso
         EXPECT_EQ(worker_request.copy_items(0).mem_block(), host_block);
         expectSingleGroupBlock(worker_request.copy_items(0), 0, 0, device_block);
     }
-    group->devicePools().front()->decRef(device_block, BlockRefType::REQUEST);
+    group->devicePools().front()->decRef(device_block);
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadUsesSingleDirectStage) {
@@ -594,7 +594,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadUsesSingleDirectStage)
     std::shared_ptr<FullGroupSet>           group     = makeBroadcastGroup("broadcast_disk_load", host_pool, disk_pool);
     const BlockIdxType                      device_block = prepareDeviceTarget(group);
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
-    const BlockIdxType disk_block = group->allocateSingleBlock(Tier::DISK, BlockRefType::BLOCK_CACHE);
+    const BlockIdxType disk_block = group->allocateSingleBlock(Tier::DISK, BlockTreeRefType::CACHE);
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
 
     BlockTreeCacheConfig config;
@@ -628,7 +628,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadUsesSingleDirectStage)
     EXPECT_EQ(disk_pool->freeBlocksNum(), 4u);
     EXPECT_EQ(cache->getStats().disk_heap_total_size, 0u);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
-    releaseDeviceBlocks(*cache, group->devicePools().front(), {device_block}, BlockRefType::REQUEST);
+    releaseDeviceBlocks(*cache, group->devicePools().front(), {device_block});
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
 
     std::lock_guard<std::mutex> lock(state->mutex);
@@ -656,7 +656,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionSuccessCommitsTask) {
     std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
     std::shared_ptr<FullGroupSet> full = makeBroadcastGroup("broadcast_eviction_success", host_pool, disk_pool);
     initializeBroadcastGroups({full});
-    const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+    const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
     BlockTreeCacheConfig config;
@@ -719,7 +719,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDeviceEvictionBypassesHostWith
     auto disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
     auto full      = makeBroadcastGroup("broadcast_device_to_disk", nullptr, disk_pool);
     initializeBroadcastGroups({full});
-    MultiNodeBlocks device = allocateDeviceBlocksForTest(*full, 1, BlockRefType::REQUEST);
+    MultiNodeBlocks device = allocateDeviceBlocksForTest(*full, 1);
     ASSERT_EQ(device.size(), 1u);
     ASSERT_EQ(device.front().size(), 1u);
     const BlockIdxType device_block = device.front().front();
@@ -736,7 +736,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDeviceEvictionBypassesHostWith
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = device.front();
     ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
-    releaseDeviceBlocks(*cache, full->devicePools().front(), device.front(), BlockRefType::REQUEST);
+    releaseDeviceBlocks(*cache, full->devicePools().front(), device.front());
 
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
@@ -775,7 +775,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastD2DiskFailureRollsBackDeviceSo
     auto disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
     auto full      = makeBroadcastGroup("broadcast_device_to_disk_failure", nullptr, disk_pool);
     initializeBroadcastGroups({full});
-    MultiNodeBlocks device = allocateDeviceBlocksForTest(*full, 1, BlockRefType::REQUEST);
+    MultiNodeBlocks device = allocateDeviceBlocksForTest(*full, 1);
     ASSERT_EQ(device.size(), 1u);
     ASSERT_EQ(device.front().size(), 1u);
     const BlockIdxType device_block = device.front().front();
@@ -792,7 +792,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastD2DiskFailureRollsBackDeviceSo
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = device.front();
     ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
-    releaseDeviceBlocks(*cache, full->devicePools().front(), device.front(), BlockRefType::REQUEST);
+    releaseDeviceBlocks(*cache, full->devicePools().front(), device.front());
 
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
@@ -827,7 +827,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionFailureRollsBackTask) 
     std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
     std::shared_ptr<FullGroupSet> full = makeBroadcastGroup("broadcast_eviction_failure", host_pool, disk_pool);
     initializeBroadcastGroups({full});
-    const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+    const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
     BlockTreeCacheConfig config;

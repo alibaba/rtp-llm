@@ -447,10 +447,18 @@ inline PoolSnapshot snapshotPool(const std::shared_ptr<IBlockPool>& pool) {
         pool,
         pool->freeBlocksNum(),
         pool->usedBlocksNum(),
-        pool->referencedBlocksNum(BlockRefType::REQUEST),
-        pool->referencedBlocksNum(BlockRefType::BLOCK_CACHE),
-        pool->referencedBlocksNum(BlockRefType::EVICTION),
+        0,
+        pool->referencedBlocksNum(BlockTreeRefType::CACHE),
+        pool->referencedBlocksNum(BlockTreeRefType::EVICTION),
     };
+}
+
+inline PoolSnapshot snapshotPool(const DeviceBlockPoolPtr& pool) {
+    PoolSnapshot snapshot = snapshotPool(std::static_pointer_cast<IBlockPool>(pool));
+    if (pool != nullptr) {
+        snapshot.request_refs = pool->referencedBlocksNum();
+    }
+    return snapshot;
 }
 
 inline std::vector<PoolSnapshot> snapshotDevicePools(const std::shared_ptr<KVCacheManager>& manager) {
@@ -721,16 +729,15 @@ inline void expectFullTierPathUnchanged(const BlockTreeCache&                   
                 << "path=" << path_index << " group_set=" << group_set_id;
             EXPECT_TRUE(pools[group_set_id]->isAllocated(expected_blocks[path_index][group_set_id]))
                 << "path=" << path_index << " group_set=" << group_set_id;
-            EXPECT_EQ(pools[group_set_id]->refCount(expected_blocks[path_index][group_set_id]), 1u)
+            EXPECT_EQ(pools[group_set_id]->treeRefCount(expected_blocks[path_index][group_set_id]), 1u)
                 << "path=" << path_index << " group_set=" << group_set_id;
         }
     }
     for (const auto& pool : pools) {
         EXPECT_EQ(pool->freeBlocksNum(), 0u) << pool->poolName();
         EXPECT_EQ(pool->usedBlocksNum(), capacity) << pool->poolName();
-        EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::REQUEST), 0u) << pool->poolName();
-        EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::BLOCK_CACHE), capacity) << pool->poolName();
-        EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::EVICTION), 0u) << pool->poolName();
+        EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), capacity) << pool->poolName();
+        EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u) << pool->poolName();
     }
 }
 
@@ -1390,8 +1397,8 @@ protected:
                 any_capacity_progress = any_capacity_progress
                                         || source_pool->usedBlocksNum() < source_used_before[group_set_id]
                                         || target_pool->usedBlocksNum() > target_used_before[group_set_id];
-                EXPECT_EQ(source_pool->referencedBlocksNum(BlockRefType::EVICTION), 0u) << "round=" << round;
-                EXPECT_EQ(target_pool->referencedBlocksNum(BlockRefType::EVICTION), 0u) << "round=" << round;
+                EXPECT_EQ(source_pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u) << "round=" << round;
+                EXPECT_EQ(target_pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u) << "round=" << round;
             }
             EXPECT_TRUE(any_capacity_progress) << "round=" << round;
             for (size_t path_index = 0; path_index < maybe_after->size(); ++path_index) {
@@ -1402,10 +1409,18 @@ protected:
                     const Tier top_tier = resource.getTopTier();
                     ASSERT_TRUE(top_tier == source_tier || top_tier == target_tier)
                         << "round=" << round << " path=" << path_index << " group_set=" << group_set_id;
-                    const auto pool = poolForTier(cache->groupSets()[group_set_id], top_tier);
-                    ASSERT_NE(pool, nullptr);
-                    EXPECT_EQ(pool->refCount(singleResourceBlockForTier(resource, top_tier)), 1u)
-                        << "round=" << round << " path=" << path_index << " group_set=" << group_set_id;
+                    const BlockIdxType block = singleResourceBlockForTier(resource, top_tier);
+                    if (top_tier == Tier::DEVICE) {
+                        const auto& device_pools = cache->groupSets()[group_set_id]->devicePools();
+                        ASSERT_EQ(device_pools.size(), 1u);
+                        EXPECT_EQ(device_pools.front()->refCount(block), 1u)
+                            << "round=" << round << " path=" << path_index << " group_set=" << group_set_id;
+                    } else {
+                        const auto lower_pool = lowerPoolForTier(cache->groupSets()[group_set_id], top_tier);
+                        ASSERT_NE(lower_pool, nullptr);
+                        EXPECT_EQ(lower_pool->treeRefCount(block), 1u)
+                            << "round=" << round << " path=" << path_index << " group_set=" << group_set_id;
+                    }
                 }
             }
             remaining = next;
@@ -1465,12 +1480,12 @@ protected:
                     EXPECT_TRUE(isNullBlockIdx(blocks[path_index]))
                         << "non-active SWA prefix must remain sparse, group=" << group_id << " path=" << path_index;
                     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
-                    EXPECT_EQ(group_set->hostPool()->refCount(resource.host_block), 1u);
+                    EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 1u);
                     continue;
                 }
                 ASSERT_FALSE(isNullBlockIdx(blocks[path_index]));
                 EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOADING);
-                EXPECT_EQ(group_set->hostPool()->refCount(resource.host_block), 2u);
+                EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 2u);
                 EXPECT_EQ(group_set->devicePools().front()->refCount(blocks[path_index]), 2u);
             }
         }
@@ -1508,7 +1523,7 @@ protected:
                     ASSERT_TRUE(resource.hasTier(Tier::HOST));
                     EXPECT_EQ(resource.getTopTier(), Tier::HOST);
                     EXPECT_EQ(resource.host_block, host_snapshot[path_index][group_set_id].host_block);
-                    EXPECT_EQ(group_set->hostPool()->refCount(resource.host_block), 1u);
+                    EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 1u);
                     continue;
                 }
                 ASSERT_FALSE(isNullBlockIdx(blocks[path_index]));
@@ -1560,7 +1575,7 @@ protected:
             EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
             ASSERT_TRUE(resource.hasTier(Tier::HOST));
             EXPECT_EQ(resource.getTopTier(), Tier::HOST);
-            EXPECT_EQ(group_set->hostPool()->refCount(resource.host_block), 1u);
+            EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 1u);
         }
 
         if (failure_source == LoadFailureSource::DISK) {
@@ -1592,12 +1607,12 @@ protected:
             if (source_tiers[group_set_id] == Tier::HOST) {
                 source_blocks[group_set_id] = resource.host_block;
                 ++host_source_count;
-                EXPECT_EQ(group_set->hostPool()->refCount(resource.host_block), 1u);
+                EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 1u);
             } else {
                 ASSERT_EQ(source_tiers[group_set_id], Tier::DISK);
                 source_blocks[group_set_id] = resource.disk_slot;
                 ++disk_source_count;
-                EXPECT_EQ(group_set->diskPool()->refCount(resource.disk_slot), 1u);
+                EXPECT_EQ(group_set->diskPool()->treeRefCount(resource.disk_slot), 1u);
             }
         }
         if (failure_source == LoadFailureSource::HOST) {
@@ -1650,10 +1665,10 @@ protected:
             EXPECT_EQ(resource.getTopTier(), source_tiers[group_set_id]);
             if (source_tiers[group_set_id] == Tier::HOST) {
                 EXPECT_EQ(resource.host_block, source_blocks[group_set_id]);
-                EXPECT_EQ(group_set->hostPool()->refCount(resource.host_block), 2u);
+                EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 2u);
             } else {
                 EXPECT_EQ(resource.disk_slot, source_blocks[group_set_id]);
-                EXPECT_EQ(group_set->diskPool()->refCount(resource.disk_slot), 2u);
+                EXPECT_EQ(group_set->diskPool()->treeRefCount(resource.disk_slot), 2u);
             }
             ASSERT_EQ(group_set->groupIds().size(), 1u);
             const int   group_id = static_cast<int>(group_set->groupIds().front());
@@ -1693,10 +1708,10 @@ protected:
             EXPECT_EQ(resource.getTopTier(), source_tiers[group_set_id]);
             if (source_tiers[group_set_id] == Tier::HOST) {
                 EXPECT_EQ(resource.host_block, source_blocks[group_set_id]);
-                EXPECT_EQ(group_set->hostPool()->refCount(resource.host_block), 1u);
+                EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 1u);
             } else {
                 EXPECT_EQ(resource.disk_slot, source_blocks[group_set_id]);
-                EXPECT_EQ(group_set->diskPool()->refCount(resource.disk_slot), 1u);
+                EXPECT_EQ(group_set->diskPool()->treeRefCount(resource.disk_slot), 1u);
             }
             EXPECT_EQ(group_set->devicePools().front()->refCount(failed_targets[group_set_id]), 1u);
         }
@@ -1832,7 +1847,7 @@ protected:
             EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
             EXPECT_EQ(resource.getTopTier(), source_tier);
             lower_sources[group_set_id] = lowerBlockForTier(resource, source_tier);
-            EXPECT_EQ(source_pool->refCount(lower_sources[group_set_id]), 1u);
+            EXPECT_EQ(source_pool->treeRefCount(lower_sources[group_set_id]), 1u);
         }
 
         const auto device_before_load = snapshotDevicePools(manager_);
@@ -1891,8 +1906,8 @@ protected:
             ASSERT_NE(source_pool, nullptr);
             EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOADING);
             EXPECT_EQ(lowerBlockForTier(resource, source_tier), lower_sources[group_set_id]);
-            EXPECT_EQ(source_pool->refCount(lower_sources[group_set_id]), 2u);
-            EXPECT_EQ(source_pool->referencedBlocksNum(BlockRefType::REQUEST), 1u);
+            EXPECT_EQ(source_pool->treeRefCount(lower_sources[group_set_id]), 2u);
+            EXPECT_EQ(source_pool->referencedBlocksNum(BlockTreeRefType::LOAD), 1u);
             ASSERT_EQ(group_set->groupIds().size(), 1u);
             const int   group_id = static_cast<int>(group_set->groupIds().front());
             const auto& blocks   = first_resource->blocks(0, group_id);
@@ -1900,7 +1915,7 @@ protected:
             ASSERT_FALSE(isNullBlockIdx(blocks.front()));
             load_targets[group_set_id] = blocks.front();
             EXPECT_EQ(group_set->devicePools().front()->refCount(blocks.front()), 2u);
-            EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockRefType::REQUEST), 2u);
+            EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(), 2u);
         }
 
         auto second_resource = makeResource(cache_config_);
@@ -1929,7 +1944,7 @@ protected:
             ASSERT_NE(source_pool, nullptr);
             EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOADING);
             EXPECT_EQ(lowerBlockForTier(resource, source_tier), lower_sources[group_set_id]);
-            EXPECT_EQ(source_pool->refCount(lower_sources[group_set_id]), 2u)
+            EXPECT_EQ(source_pool->treeRefCount(lower_sources[group_set_id]), 2u)
                 << "a joiner references the in-flight target, not the source";
             const int   group_id      = static_cast<int>(group_set->groupIds().front());
             const auto& first_blocks  = first_resource->blocks(0, group_id);
@@ -1939,8 +1954,8 @@ protected:
             EXPECT_EQ(first_blocks.front(), load_targets[group_set_id]);
             EXPECT_EQ(second_blocks.front(), load_targets[group_set_id]);
             EXPECT_EQ(group_set->devicePools().front()->refCount(load_targets[group_set_id]), 3u);
-            EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockRefType::REQUEST), 3u);
-            EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 0u);
+            EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(), 3u);
+            EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
         }
 
         engine->release();
@@ -1985,8 +2000,8 @@ protected:
                 ASSERT_NE(source_pool, nullptr);
                 EXPECT_FALSE(source_pool->isAllocated(lower_sources[group_set_id]));
                 EXPECT_EQ(group_set->devicePools().front()->refCount(load_targets[group_set_id]), 3u);
-                EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockRefType::REQUEST), 3u);
-                EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
+                EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(), 3u);
+                EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
             }
             manager_->free(FreeInfo{first_resource, first_tokens});
             for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
@@ -2011,10 +2026,10 @@ protected:
                 EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
                 ASSERT_TRUE(resource.hasTier(source_tier));
                 EXPECT_EQ(lowerBlockForTier(resource, source_tier), lower_sources[group_set_id]);
-                EXPECT_EQ(source_pool->refCount(lower_sources[group_set_id]), 1u);
+                EXPECT_EQ(source_pool->treeRefCount(lower_sources[group_set_id]), 1u);
                 EXPECT_EQ(group_set->devicePools().front()->refCount(load_targets[group_set_id]), 2u);
-                EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockRefType::REQUEST), 3u);
-                EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 0u);
+                EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(), 3u);
+                EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
             }
             expectPoolSnapshotsEq(lower_before_load, snapshotLowerPools(*cache, GetParam()));
             manager_->free(FreeInfo{first_resource, first_tokens});
