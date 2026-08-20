@@ -2455,7 +2455,8 @@ TEST_F(DSV4AllocatorTest, MallocAndFreeBlocks) {
     ASSERT_EQ(blocks->size(), 3u);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before - 3);
 
-    block_pool->free(*blocks);
+    block_pool->incRef(*blocks);
+    block_pool->decRef(*blocks);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
@@ -2605,7 +2606,8 @@ TEST_F(DSV4AllocatorTest, FlashMallocAndFree) {
     ASSERT_EQ(blocks->size(), 5u);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before - 5);
 
-    block_pool->free(*blocks);
+    block_pool->incRef(*blocks);
+    block_pool->decRef(*blocks);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
@@ -2633,7 +2635,7 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
         auto blocks = block_pool->malloc(3);
         ASSERT_TRUE(blocks.has_value());
         ASSERT_EQ(blocks->size(), 3u);
-        block_pool->incRef(*blocks, BlockRefType::REQUEST);
+        block_pool->incRef(*blocks);
         batch_res->mutableBlockIds(0, gid).assign(*blocks);
     }
 
@@ -2668,7 +2670,7 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
     // Free all blocks
     for (int gid = 0; gid < 7; gid++) {
         const auto& blocks = batch_res->blocks(0, gid);
-        block_pool->decRef(blocks, BlockRefType::REQUEST);
+        block_pool->decRef(blocks);
     }
 }
 
@@ -2694,7 +2696,7 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
         auto blocks = block_pool->malloc(3);
         ASSERT_TRUE(blocks.has_value());
         ASSERT_EQ(blocks->size(), 3u);
-        block_pool->incRef(*blocks, BlockRefType::REQUEST);
+        block_pool->incRef(*blocks);
         batch_res->mutableBlockIds(0, gid).assign(*blocks);
     }
 
@@ -2725,7 +2727,7 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
     block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(), match.matched_device_resources);
 
     for (int gid = 0; gid < 7; gid++) {
-        block_pool->decRef(batch_res->blocks(0, gid), BlockRefType::REQUEST);
+        block_pool->decRef(batch_res->blocks(0, gid));
     }
 }
 

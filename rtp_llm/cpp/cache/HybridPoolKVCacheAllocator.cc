@@ -709,7 +709,7 @@ void HybridPoolKVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
                             "group_reserve_blocks=%zu required_available_blocks=%lld shortfall_blocks=%lld "
                             "current_slots=%zu "
                             "current_valid_blocks=%zu total_blocks=%zu free_blocks=%zu "
-                            "request_ref_blocks=%zu connector_ref_blocks=%zu block_cache_ref_blocks=%zu "
+                            "request_ref_blocks=%zu block_cache_ref_blocks=%zu load_ref_blocks=%zu "
                             "layer_count=%zu block_bytes=%zu seq_size_per_block=%zu",
                             malloc_info.request_id,
                             gid,
@@ -726,9 +726,9 @@ void HybridPoolKVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
                             current_valid_blocks,
                             pool->totalBlocksNum(),
                             free_blocks,
-                            pool->referencedBlocksNum(BlockRefType::REQUEST),
-                            pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND),
-                            pool->referencedBlocksNum(BlockRefType::BLOCK_CACHE),
+                            pool->referencedBlocksNum(),
+                            pool->referencedBlocksNum(BlockTreeRefType::CACHE),
+                            pool->referencedBlocksNum(BlockTreeRefType::LOAD),
                             config_.layerIdsForGroup(group_index).size(),
                             config_.blockSizeBytesForGroup(group_index),
                             config_.seqSizePerBlockForGroup(group_index));

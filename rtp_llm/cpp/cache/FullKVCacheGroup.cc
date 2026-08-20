@@ -94,7 +94,7 @@ bool FullKVCacheGroup::malloc(BlockIds&                  block_ids,
     if (!result.has_value() || result->size() != static_cast<size_t>(need_blocks_num)) {
         return false;
     }
-    addBlockRefs(*result, BlockRefType::REQUEST);
+    block_pool_->incRef(*result);
 
     size_t allocated_index = 0;
     for (const size_t position : positions_to_backfill) {
@@ -117,40 +117,6 @@ bool FullKVCacheGroup::malloc(BlockIds&                  block_ids,
                             allocated_index,
                             result->size());
     return true;
-}
-
-void FullKVCacheGroup::release(const BlockIndicesType& block_indices, BlockRefType ref_type) {
-    if (block_indices.empty()) {
-        return;
-    }
-
-    BlockIndicesType valid_blocks;
-    valid_blocks.reserve(block_indices.size());
-    for (const BlockIdxType block : block_indices) {
-        if (!isNullBlockIdx(block)) {
-            valid_blocks.push_back(block);
-        }
-    }
-    releaseBlockRefs(valid_blocks, ref_type);
-    RTP_LLM_LOG_DEBUG("Freed %zu blocks", valid_blocks.size());
-}
-
-void FullKVCacheGroup::free(const BlockIndicesType& block_indices) {
-    release(block_indices, BlockRefType::REQUEST);
-}
-
-void FullKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
-    block_ids.add(new_block_indices);
-    BlockIndicesType valid_blocks;
-    valid_blocks.reserve(new_block_indices.size());
-    for (const BlockIdxType block : new_block_indices) {
-        if (!isNullBlockIdx(block)) {
-            valid_blocks.push_back(block);
-        }
-    }
-    if (!valid_blocks.empty()) {
-        addBlockRefs(valid_blocks, BlockRefType::REQUEST);
-    }
 }
 
 void FullKVCacheGroup::removeSkippedBlocks(BlockIds& /*block_ids*/,

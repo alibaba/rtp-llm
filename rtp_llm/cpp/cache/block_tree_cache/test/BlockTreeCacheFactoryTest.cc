@@ -384,7 +384,7 @@ insertOneKeyThroughAllocator(const CacheConfig& config, const KVCacheAllocatorPt
         if (!allocated.has_value()) {
             continue;
         }
-        pool->incRef(*allocated, BlockRefType::REQUEST);
+        pool->incRef(*allocated);
         blocks[group_id] = allocated->front();
         resource->setBatchBlocks(0, static_cast<int>(group_id), BlockIndicesType{allocated->front()});
     }
@@ -397,7 +397,7 @@ void releaseInsertedRequestBlocks(const KVCacheAllocatorPtr& allocator, const st
     ASSERT_EQ(groups.size(), blocks.size());
     for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
         if (!isNullBlockIdx(blocks[group_id])) {
-            groups[group_id]->release({blocks[group_id]}, BlockRefType::REQUEST);
+            groups[group_id]->unreference({blocks[group_id]});
         }
     }
 }
@@ -708,13 +708,13 @@ TEST_F(BlockTreeCacheFactoryTest, HybridPoolBindsIndependentPoolsAndNonContiguou
         const auto  block = pool->malloc(1);
         ASSERT_TRUE(block.has_value());
         ASSERT_EQ(block->size(), 1u);
-        pool->incRef(*block, BlockRefType::REQUEST);
+        pool->incRef(*block);
         const int  global_layer = group->config().layer_ids.back();
         const int  local_layer  = static_cast<int>(group->config().layer_ids.size() - 1);
         const auto via_group    = group->convertIndexToAddr(global_layer, block->front());
         const auto via_backing  = pool->convertIndexToAddr(local_layer, block->front());
         EXPECT_EQ(via_group.kv_addr, via_backing.kv_addr);
-        pool->decRef(*block, BlockRefType::REQUEST);
+        pool->decRef(*block);
     }
 }
 
@@ -747,10 +747,12 @@ TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguo
     const auto device_blocks = full_group->blockPool()->malloc(1);
     ASSERT_TRUE(device_blocks.has_value());
     ASSERT_EQ(device_blocks->size(), 1u);
-    full_group->blockPool()->incRef(*device_blocks, BlockRefType::REQUEST);
+    full_group->blockPool()->incRef(*device_blocks);
     const BlockIdxType device_block = device_blocks->front();
-    const BlockIdxType host_block   = group_set->allocateSingleBlock(Tier::HOST, BlockRefType::REQUEST);
-    ASSERT_NE(host_block, NULL_BLOCK_IDX);
+    const auto         host_block_result = group_set->hostPool()->malloc();
+    ASSERT_TRUE(host_block_result.has_value());
+    group_set->hostPool()->incTreeRef(*host_block_result, BlockTreeRefType::STORE);
+    const BlockIdxType host_block = *host_block_result;
 
     const size_t layer_bytes = full_group->config().kv_block_stride_bytes + full_group->config().kv_scale_stride_bytes;
     ASSERT_GT(layer_bytes, 0u);
@@ -767,8 +769,8 @@ TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguo
     expectDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/0, device_block).kv_addr, layer_bytes, 0x31);
     expectDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x72);
 
-    group_set->releaseSingleBlock(Tier::HOST, host_block, BlockRefType::REQUEST);
-    full_group->blockPool()->decRef(*device_blocks, BlockRefType::REQUEST);
+    group_set->hostPool()->decTreeRef(host_block, BlockTreeRefType::STORE);
+    full_group->blockPool()->decRef(*device_blocks);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, ReorderedAllocatorGroupsStillMapByEmbeddedGroupId) {
@@ -976,7 +978,7 @@ TEST_F(BlockTreeCacheFactoryTest, SurvivingGroupCallbackKeepsBlockTreeCacheAlive
     const size_t             free_blocks = pool->freeBlocksNum();
     auto                     allocated   = pool->malloc(free_blocks);
     ASSERT_TRUE(allocated.has_value());
-    pool->incRef(*allocated, BlockRefType::REQUEST);
+    pool->incRef(*allocated);
 
     std::weak_ptr<BlockTreeCache> cache_lifetime = cache;
     allocator.reset();
@@ -985,7 +987,7 @@ TEST_F(BlockTreeCacheFactoryTest, SurvivingGroupCallbackKeepsBlockTreeCacheAlive
     EXPECT_FALSE(cache_lifetime.expired());
     EXPECT_FALSE(group->ensureFreeBlocks(1));
 
-    pool->decRef(*allocated, BlockRefType::REQUEST);
+    pool->decRef(*allocated);
     group.reset();
     EXPECT_TRUE(cache_lifetime.expired());
 }
@@ -1191,7 +1193,7 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
     auto clear_group_set_a = [&](BlockIdxType block) {
         const MultiNodeResource device_resource{0, Tier::DEVICE, {{node, {block}}}};
         node->group_set_resources[0].evictFromTier(Tier::DEVICE);
-        group_set_a->unreferenceBlocks(device_resource, BlockRefType::BLOCK_CACHE);
+        group_set_a->unreferenceBlocks(device_resource, BlockTreeRefType::CACHE);
     };
 
     const int    b_layer = config.layerIdsForGroup(1).front();
@@ -1212,7 +1214,7 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
     const auto refill_a = allocator->cacheGroups()[0]->blockPool()->malloc(1);
     ASSERT_TRUE(refill_a.has_value());
     ASSERT_EQ(refill_a->size(), 1u);
-    allocator->cacheGroups()[0]->blockPool()->incRef(*refill_a, BlockRefType::REQUEST);
+    allocator->cacheGroups()[0]->blockPool()->incRef(*refill_a);
     GroupSetResource incoming_a;
     incoming_a.device_blocks = {refill_a->front()};
     GroupSetResource incoming_b;
@@ -1234,8 +1236,7 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
         allocator->cacheGroups()[1]->convertIndexToAddr(b_layer, original_blocks[1]).kv_addr, b_bytes, 0x5a);
 
     EXPECT_EQ(cache->getStats().device_heap_total_size, 2u);
-    block_tree_cache_test::releaseDeviceBlocks(
-        *cache, allocator->cacheGroups()[0]->blockPool(), *refill_a, BlockRefType::REQUEST);
+    block_tree_cache_test::releaseDeviceBlocks(*cache, allocator->cacheGroups()[0]->blockPool(), *refill_a);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 2u);
 
     const size_t a_ref_before_duplicate = group_set_a->devicePools()[0]->refCount(refill_a->front());
@@ -1250,7 +1251,7 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
     const auto nonempty_replacement = allocator->cacheGroups()[0]->blockPool()->malloc(1);
     ASSERT_TRUE(nonempty_replacement.has_value());
     ASSERT_EQ(nonempty_replacement->size(), 1u);
-    allocator->cacheGroups()[0]->blockPool()->incRef(*nonempty_replacement, BlockRefType::REQUEST);
+    allocator->cacheGroups()[0]->blockPool()->incRef(*nonempty_replacement);
     GroupSetResource nonempty_incoming_a;
     nonempty_incoming_a.device_blocks = {nonempty_replacement->front()};
     const auto before_nonempty        = cache->getKeySnapshot(/*limit=*/16);
@@ -1258,18 +1259,18 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
     EXPECT_EQ(cache->getKeySnapshot(/*limit=*/16).version, before_nonempty.version);
     EXPECT_EQ(node->group_set_resources[0].device_blocks, (BlockIndicesType{refill_a->front()}));
     EXPECT_EQ(group_set_a->devicePools()[0]->refCount(refill_a->front()), a_ref_before_duplicate);
-    allocator->cacheGroups()[0]->blockPool()->decRef(*nonempty_replacement, BlockRefType::REQUEST);
+    allocator->cacheGroups()[0]->blockPool()->decRef(*nonempty_replacement);
 
     clear_group_set_a(refill_a->front());
     ASSERT_TRUE(node->group_set_resources[0].is_empty());
 
-    const BlockIdxType host_a = group_set_a->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+    const BlockIdxType host_a = group_set_a->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
     ASSERT_NE(host_a, NULL_BLOCK_IDX);
     node->group_set_resources[0].host_block = host_a;
     const auto host_replacement             = allocator->cacheGroups()[0]->blockPool()->malloc(1);
     ASSERT_TRUE(host_replacement.has_value());
     ASSERT_EQ(host_replacement->size(), 1u);
-    allocator->cacheGroups()[0]->blockPool()->incRef(*host_replacement, BlockRefType::REQUEST);
+    allocator->cacheGroups()[0]->blockPool()->incRef(*host_replacement);
     GroupSetResource blocked_incoming_a;
     blocked_incoming_a.device_blocks = {host_replacement->front()};
     const auto before_host           = cache->getKeySnapshot(/*limit=*/16);
@@ -1277,9 +1278,9 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
     EXPECT_EQ(cache->getKeySnapshot(/*limit=*/16).version, before_host.version);
     EXPECT_EQ(node->group_set_resources[0].host_block, host_a);
     EXPECT_FALSE(node->group_set_resources[0].hasTier(Tier::DEVICE));
-    EXPECT_EQ(group_set_a->hostPool()->refCount(host_a), 1u);
+    EXPECT_EQ(group_set_a->hostPool()->treeRefCount(host_a), 1u);
     node->group_set_resources[0].host_block = NULL_BLOCK_IDX;
-    group_set_a->releaseSingleBlock(Tier::HOST, host_a, BlockRefType::BLOCK_CACHE);
+    group_set_a->releaseSingleBlock(Tier::HOST, host_a, BlockTreeRefType::CACHE);
 
     for (const auto state : {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOADING}) {
         SCOPED_TRACE(state == GroupSetTransferState::DEMOTING ? "demoting" : "loading");
@@ -1291,7 +1292,7 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
         EXPECT_EQ(node->group_set_resources[0].transfer_state, state);
     }
     node->group_set_resources[0].transfer_state = GroupSetTransferState::IDLE;
-    allocator->cacheGroups()[0]->blockPool()->decRef(*host_replacement, BlockRefType::REQUEST);
+    allocator->cacheGroups()[0]->blockPool()->decRef(*host_replacement);
 
     EXPECT_EQ(group_set_b->devicePools()[0]->refCount(original_blocks[1]), b_ref_before);
     expectDevicePattern(
@@ -1314,8 +1315,8 @@ TEST_F(BlockTreeCacheFactoryTest, InsertRejectsWrongShapeAndFailsFastOnInvalidGr
     ASSERT_TRUE(second.has_value());
     ASSERT_EQ(first->size(), 1u);
     ASSERT_EQ(second->size(), 1u);
-    groups[0]->blockPool()->incRef(*first, BlockRefType::REQUEST);
-    groups[1]->blockPool()->incRef(*second, BlockRefType::REQUEST);
+    groups[0]->blockPool()->incRef(*first);
+    groups[1]->blockPool()->incRef(*second);
 
     auto expect_rejected_without_mutation = [&](CacheKeyType                               key,
                                                 std::vector<std::vector<GroupSetResource>> resources) {
@@ -1350,8 +1351,8 @@ TEST_F(BlockTreeCacheFactoryTest, InsertRejectsWrongShapeAndFailsFastOnInvalidGr
     partially_null.device_blocks = {first->front(), NULL_BLOCK_IDX};
     expect_failfast_without_cache_hold(/*key=*/713, {{partially_null}});
 
-    groups[0]->blockPool()->decRef(*first, BlockRefType::REQUEST);
-    groups[1]->blockPool()->decRef(*second, BlockRefType::REQUEST);
+    groups[0]->blockPool()->decRef(*first);
+    groups[1]->blockPool()->decRef(*second);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, SharedPoolGroupSetPayloadUsesTopologyLogicalStrides) {
@@ -1664,22 +1665,26 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
         EXPECT_EQ(group->diskPool()->payloadBytes(), group->payloadBytes());
 
         block_tree_cache_test::MultiNodeBlocks device_blocks =
-            block_tree_cache_test::allocateDeviceBlocksForTest(*group, 1, BlockRefType::REQUEST);
+            block_tree_cache_test::allocateDeviceBlocksForTest(*group, 1);
         ASSERT_EQ(device_blocks.size(), 1u);
         ASSERT_EQ(device_blocks[0].size(), group->devicePools().size());
-        const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::REQUEST);
-        const BlockIdxType disk_block = group->allocateSingleBlock(Tier::DISK, BlockRefType::REQUEST);
-        ASSERT_NE(host_block, NULL_BLOCK_IDX);
-        ASSERT_NE(disk_block, NULL_BLOCK_IDX);
+        const auto host_block_result = group->hostPool()->malloc();
+        const auto disk_block_result = group->diskPool()->malloc();
+        ASSERT_TRUE(host_block_result.has_value());
+        ASSERT_TRUE(disk_block_result.has_value());
+        group->hostPool()->incTreeRef(*host_block_result, BlockTreeRefType::STORE);
+        group->diskPool()->incTreeRef(*disk_block_result, BlockTreeRefType::STORE);
+        const BlockIdxType host_block = *host_block_result;
+        const BlockIdxType disk_block = *disk_block_result;
 
         EXPECT_TRUE(factory_cache->executeTransfer(
             {TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks[0], host_block)}));
         EXPECT_TRUE(factory_cache->executeTransfer(
             {TransferDescriptor::hostToDisk(group->groupSetId(), host_block, disk_block)}));
 
-        block_tree_cache_test::unreferenceDeviceBlocksForTest(*group, device_blocks, BlockRefType::REQUEST);
-        group->releaseSingleBlock(Tier::HOST, host_block, BlockRefType::REQUEST);
-        group->releaseSingleBlock(Tier::DISK, disk_block, BlockRefType::REQUEST);
+        block_tree_cache_test::unreferenceDeviceBlocksForTest(*group, device_blocks);
+        group->hostPool()->decTreeRef(host_block, BlockTreeRefType::STORE);
+        group->diskPool()->decTreeRef(disk_block, BlockTreeRefType::STORE);
     }
 }
 

@@ -47,16 +47,16 @@ void BlockTree::releaseNode(TreeNode* node) {
             const std::vector<BlockIdxType> device_blocks = resource.device_blocks;
             const MultiNodeResource         device_resource{group_set_id, Tier::DEVICE, {{node, device_blocks}}};
             resource.evictFromTier(Tier::DEVICE);
-            group_set->unreferenceBlocks(device_resource, BlockRefType::BLOCK_CACHE);
+            group_set->unreferenceBlocks(device_resource, BlockTreeRefType::CACHE);
         }
         if (resource.hasTier(Tier::HOST)) {
             group_set->unreferenceBlocks(MultiNodeResource{group_set_id, Tier::HOST, {{node, {resource.host_block}}}},
-                                         BlockRefType::BLOCK_CACHE);
+                                         BlockTreeRefType::CACHE);
             resource.host_block = NULL_BLOCK_IDX;
         }
         if (resource.hasTier(Tier::DISK)) {
             group_set->unreferenceBlocks(MultiNodeResource{group_set_id, Tier::DISK, {{node, {resource.disk_slot}}}},
-                                         BlockRefType::BLOCK_CACHE);
+                                         BlockTreeRefType::CACHE);
             resource.disk_slot = NULL_BLOCK_IDX;
         }
         resource.transfer_state = GroupSetTransferState::IDLE;
@@ -151,10 +151,9 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
     TreeNode* current                = root_.get();
     size_t    inserted_prefix_length = 0;
 
-    // All published tiers take BLOCK_CACHE refs.
     auto publishTier = [this](TreeNode* node, size_t group_set_id, const GroupSetResource& resource, Tier tier) {
         const MultiNodeResource published{group_set_id, tier, {{node, resource.getBlocks(tier)}}};
-        group_sets_[group_set_id]->referenceBlocks(published, BlockRefType::BLOCK_CACHE);
+        group_sets_[group_set_id]->referenceBlocks(published, BlockTreeRefType::CACHE);
     };
 
     for (size_t i = 0; i < cache_keys.size(); ++i) {
