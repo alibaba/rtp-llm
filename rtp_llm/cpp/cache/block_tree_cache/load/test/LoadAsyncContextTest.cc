@@ -276,6 +276,7 @@ TEST(LoadAsyncContextTest, BackendMatchFailureAbortsWithoutRunningAllocatorCallb
 
     EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->mallocStatus(), MallocStatus::INTERNAL_ERROR);
     EXPECT_EQ(callbacks, 0u);
     EXPECT_EQ(commits, 0u);
     EXPECT_EQ(aborts, 1u);
@@ -299,8 +300,75 @@ TEST(LoadAsyncContextTest, AllocatorCallbackExceptionAbortsContext) {
 
     EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->mallocStatus(), MallocStatus::INTERNAL_ERROR);
     EXPECT_EQ(commits, 0u);
     EXPECT_EQ(aborts, 1u);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, AllocatorCallbackPreservesRetryableCapacityStatus) {
+    size_t commits     = 0;
+    size_t aborts      = 0;
+    auto   coordinator = makeCoordinator(commits, aborts);
+    auto   backend     = std::make_shared<ManualBackend>();
+    auto   pool        = std::make_shared<TestBlockPool>();
+    initBackend(*backend, pool);
+    auto context = coordinator->create({}, {}, 0, backend, makeRequest(1));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->setMatchCallback([](LoadAsyncContext&, size_t) {
+        return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED};
+    });
+
+    context->startBackendMatch();
+    backend->completeMatch(1);
+
+    EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->mallocStatus(), MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED);
+    EXPECT_EQ(commits, 0u);
+    EXPECT_EQ(aborts, 1u);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, CoordinatorCommitFailurePublishesInternalStatusBeforeTerminalState) {
+    size_t aborts = 0;
+    auto coordinator = std::make_shared<LoadContextCoordinator>(
+        [](const std::shared_ptr<LoadAsyncContext>&) { return false; }, [&](LoadAsyncContext&) { ++aborts; });
+    auto context = coordinator->create({}, {}, 0);
+    ASSERT_TRUE(coordinator->registerContext(context));
+
+    EXPECT_FALSE(context->commit());
+    EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->mallocStatus(), MallocStatus::INTERNAL_ERROR);
+    EXPECT_EQ(aborts, 0u);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, ImmediateTransferFailureAfterSuccessfulCommitKeepsFallbackStatus) {
+    size_t commits = 0;
+    auto coordinator = std::make_shared<LoadContextCoordinator>(
+        [&](const std::shared_ptr<LoadAsyncContext>& context) {
+            ++commits;
+            EXPECT_TRUE(context->completeOne(false));
+            return true;
+        },
+        [](LoadAsyncContext&) {});
+    std::vector<TransferDescriptor> descriptors;
+    descriptors.emplace_back(nullptr,
+                             /*group_set_id=*/0,
+                             /*path_index=*/0,
+                             Tier::HOST,
+                             Tier::DEVICE,
+                             BlockIndicesType{1});
+    auto context = coordinator->create(std::move(descriptors), {false}, 1);
+    ASSERT_TRUE(coordinator->registerContext(context));
+
+    EXPECT_TRUE(context->commit());
+    EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->mallocStatus(), MallocStatus::NONE);
+    EXPECT_EQ(commits, 1u);
     coordinator->shutdown();
 }
 
@@ -329,6 +397,7 @@ TEST(LoadAsyncContextTest, BackendReadFailureMarksCommittedContextFailedAndRelea
 
     EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->mallocStatus(), MallocStatus::NONE);
     EXPECT_EQ(commits, 1u);
     EXPECT_EQ(aborts, 0u);
     EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 0u);
