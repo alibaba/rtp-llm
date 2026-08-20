@@ -42,7 +42,7 @@ BenchmarkOptions BenchmarkOptions::parse(int& argc, char**& argv) {
 
 void BenchmarkOptions::printHelp() {
     std::cout << "Common options:\n"
-              << "  --model-profile=PATH          Model profile JSON path\n"
+              << "  --model-profile=PATH          Tree model profile or transfer descriptor-size profile\n"
               << "  --cuda-device=N               CUDA device ordinal (default: 0)\n"
               << "  --seed=N                      Random seed (default: 42)\n"
               << "  --repetition-id=N             Stable repetition identity (default: 0)\n"

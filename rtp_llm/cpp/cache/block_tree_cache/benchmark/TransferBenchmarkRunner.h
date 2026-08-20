@@ -17,11 +17,15 @@ struct BenchmarkDeviceHostCopyStats {
     std::atomic<size_t> staged_sm{0};
     std::atomic<size_t> cuda_batch{0};
     std::atomic<size_t> generic{0};
+    std::atomic<int64_t> lowest_api_ns{0};
+    std::atomic<size_t> lowest_api_calls{0};
 
     void reset() {
         staged_sm.store(0, std::memory_order_relaxed);
         cuda_batch.store(0, std::memory_order_relaxed);
         generic.store(0, std::memory_order_relaxed);
+        lowest_api_ns.store(0, std::memory_order_relaxed);
+        lowest_api_calls.store(0, std::memory_order_relaxed);
     }
 };
 
@@ -49,10 +53,20 @@ private:
         size_t      attempted{0};
         size_t      succeeded{0};
         size_t      failed{0};
+        size_t      task_submissions{0};
+        size_t      max_descriptors_per_task{0};
         size_t      batch_submissions{0};
         size_t      max_descriptor_batch_size{0};
         size_t      expected_batch_submissions{0};
         size_t      expected_max_descriptor_batch_size{0};
+        int64_t     batch_prepare_ns{0};
+        int64_t     business_e2e_ns{0};
+        int64_t     business_call_ns{0};
+        int64_t     business_e2e_ns_max{0};
+        size_t      business_count{0};
+        int64_t     submit_call_ns{0};
+        int64_t     async_completion_ns{0};
+        size_t      submit_call_count{0};
         std::string first_error;
         std::string first_failure_type;
 
@@ -67,6 +81,8 @@ private:
         size_t attempted() const;
         size_t succeeded() const;
         size_t failed() const;
+        size_t taskSubmissions() const;
+        size_t maxDescriptorsPerTask() const;
         size_t batchSubmissions() const;
         size_t maxDescriptorBatchSize() const;
         size_t visitedWorkingSetBlocks() const;
@@ -105,6 +121,7 @@ private:
                                  const std::vector<BlockIdxType>&                   host_blocks,
                                  const std::vector<BlockIdxType>&                   disk_blocks,
                                  BlockTreeTaskPool*                                 d2disk_submit_pool,
+                                 BlockTreeTaskPool*                                 business_pool,
                                  size_t                                             wave_width,
                                  size_t                                             descriptor_batch_size,
                                  size_t                                             operation_count,
