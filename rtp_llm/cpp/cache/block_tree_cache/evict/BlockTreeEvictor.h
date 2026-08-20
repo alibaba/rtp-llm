@@ -35,8 +35,8 @@ struct CandidateStats {
 // provides group-set-specific evictability and resource lifecycle operations.
 class BlockTreeEvictor {
 public:
-    using IsTierEnabledFn   = std::function<bool(Tier)>;
-    using SettledFn         = std::function<void(bool tree_data_mutated, bool check_watermark)>;
+    using IsTierEnabledFn = std::function<bool(Tier)>;
+    using SettledFn       = std::function<void(bool tree_data_mutated, bool check_watermark)>;
 
     BlockTreeEvictor(BlockTree*                     tree,
                      EvictionPolicy                 device_policy,
@@ -56,7 +56,7 @@ public:
     // Initialize candidate metadata after an insert.
     void onInserted(const BlockTreeInsertResult& result);
     // A real match hit: bump access clock / hit_count and re-sort in-heap entries.
-    void onMatched(const std::vector<TreeNode*>& path);
+    void                   onMatched(const std::vector<TreeNode*>& path);
     CandidateStats         candidateStats() const;
     size_t                 candidateCount(size_t group_set_id, Tier tier) const;
     std::vector<TreeNode*> candidateNodes(size_t group_set_id, Tier tier) const;
@@ -69,10 +69,13 @@ public:
     // Discard a detached operation's source without publishing its target.
     void discardDetachedTransfer(const TransferDescriptor& transfer_desc);
 
-    // Refresh one node after an external owner changes its transfer state.
-    void refreshCandidate(TreeNode* node, size_t group_set_id);
+    // Exact candidate updates for callers that already know the affected tier.
+    void suspendCandidate(TreeNode* node, size_t group_set_id, Tier source_tier);
+    void admitCandidate(TreeNode* node, size_t group_set_id, Tier target_tier);
     // Refresh candidate metadata after a successful load.
     void onLoaded(TreeNode* node, size_t group_set_id);
+    // Refresh the affected FULL parent after a resource changes tier.
+    void onTierChanged(TreeNode* node, size_t group_set_id);
 
 private:
     // A node's topology changed (e.g. became a leaf after child deletion).
@@ -84,38 +87,34 @@ private:
         std::unique_ptr<EvictionHeap> disk;
     };
 
-    EvictionHeap* heapFor(size_t group_set_id, Tier tier) const;
+    EvictionHeap*                     heapFor(size_t group_set_id, Tier tier) const;
+    bool                              isEvictable(TreeNode* node, size_t group_set_id, Tier source_tier) const;
     std::optional<TransferDescriptor> chooseVictim(size_t group_set_id, Tier tier, bool force_drop = false);
     std::optional<EvictionTask>       prepareEvictionLocked(TransferDescriptor eviction_desc);
     void                              runEvictionTask(const EvictionTask& task) noexcept;
     void finalizeEvictionLocked(const EvictionTask& task, const EvictionTaskResult& task_result) noexcept;
     void settleEvictionLocked(const EvictionTask& task, const EvictionTaskResult& task_result);
     void abortEvictionLocked(const EvictionTask& task);
-    // The single candidate-eligibility gate (design section 4.3). Upserts the
-    // node when ready, erases it otherwise. Idempotent.
-    void refreshCandidate(GroupSet& group_set, TreeNode* node, Tier tier);
-    bool isResourceReleasable(const GroupSet& group_set, const TreeNode* node, Tier tier) const;
-    bool isEvictable(const GroupSet& group_set, const TreeNode* node, Tier tier) const;
+    void updateFullCandidateForTopology(TreeNode* node, size_t group_set_id);
 
-    void                selectCascades(EvictionTask&                              task,
-                                       std::vector<std::pair<TreeNode*, size_t>>& detached_resources);
-    void                selectUpwardCascades(EvictionTask& task);
-    void                collectFullPrune(const TransferDescriptor&                  eviction_desc,
-                                         EvictionTask&                              task,
-                                         std::vector<std::pair<TreeNode*, size_t>>& detached_resources) const;
-    bool                allocateTargets(EvictionTask& task);
-    void                activateTaskLocked(const EvictionTask&                              task,
-                                           const std::vector<std::pair<TreeNode*, size_t>>& detached_resources);
-    void                reserveSource(const TransferDescriptor& eviction_desc);
-    void                restoreSource(const TransferDescriptor& eviction_desc);
-    void                releaseTargetBlocks(const TransferDescriptor& eviction_desc);
-    void                completeEvict(const TransferDescriptor& desc);
-    void                settleSingleEviction(TreeNode* node);
-    void                settleFullPrune(const EvictionTask& task);
-    void                eraseNodeFromAllHeaps(TreeNode* node);
-    void                updatePendingReleases(const EvictionTask& task, bool reserve);
-    size_t              poolWatermarkExcess(IBlockPool* pool, double ratio) const;
-    size_t              computeGroupSetExcess(const GroupSet& group_set, Tier tier, double ratio) const;
+    void   selectCascades(EvictionTask& task, std::vector<std::pair<TreeNode*, size_t>>& detached_resources);
+    void   selectUpwardCascades(EvictionTask& task);
+    void   collectFullPrune(const TransferDescriptor&                  eviction_desc,
+                            EvictionTask&                              task,
+                            std::vector<std::pair<TreeNode*, size_t>>& detached_resources) const;
+    bool   allocateTargets(EvictionTask& task);
+    void   activateTaskLocked(const EvictionTask&                              task,
+                              const std::vector<std::pair<TreeNode*, size_t>>& detached_resources);
+    void   reserveSource(const TransferDescriptor& eviction_desc);
+    void   restoreSource(const TransferDescriptor& eviction_desc);
+    void   releaseTargetBlocks(const TransferDescriptor& eviction_desc);
+    void   completeEvict(const TransferDescriptor& desc);
+    void   settleSingleEviction(TreeNode* node);
+    void   settleFullPrune(const EvictionTask& task);
+    void   eraseNodeFromAllHeaps(TreeNode* node);
+    void   updatePendingReleases(const EvictionTask& task, bool reserve);
+    size_t poolWatermarkExcess(IBlockPool* pool, double ratio) const;
+    size_t computeGroupSetExcess(const GroupSet& group_set, Tier tier, double ratio) const;
 
     BlockTree*                          tree_;
     BlockTreeTaskPool*                  task_pool_{nullptr};
