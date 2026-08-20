@@ -233,6 +233,7 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.can_use_pd_separation = (
         input_py.generate_config.can_use_pd_separation
     )
+    generate_config_pb.skip_metrics = input_py.generate_config.skip_metrics
     generate_config_pb.gen_timeline = input_py.generate_config.gen_timeline
     generate_config_pb.profile_step = input_py.generate_config.profile_step
     generate_config_pb.profile_trace_name = input_py.generate_config.profile_trace_name

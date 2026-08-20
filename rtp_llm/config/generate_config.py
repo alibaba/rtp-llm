@@ -229,6 +229,9 @@ class GenerateConfig(BaseModel):
     return_all_probs: int = ReturnAllProbsMode.NONE
     return_softmax_probs: bool = False
     aux_info: bool = True
+    # Internal warmup/benchmark requests opt out of stream and engine-step
+    # metrics so their slow first-run latencies do not pollute dashboards.
+    skip_metrics: bool = False
     can_use_pd_separation: bool = True
     gen_timeline: bool = False
     profile_step: int = 3
