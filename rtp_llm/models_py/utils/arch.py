@@ -3,7 +3,13 @@ from typing import Optional, Tuple, Union
 
 import torch
 
-from rtp_llm.device.device_type import DeviceType, get_device_type, is_cuda, is_hip
+from rtp_llm.device.device_type import (
+    DeviceType,
+    get_device_type,
+    is_cuda,
+    is_hip,
+    is_ppu,
+)
 
 
 def _canonical_cuda_device(device_id: Optional[Union[int, torch.device]]) -> int:
