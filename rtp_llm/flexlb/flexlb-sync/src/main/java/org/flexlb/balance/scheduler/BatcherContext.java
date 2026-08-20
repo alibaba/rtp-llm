@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.BatchDispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.NonBatchDispatcherConfig;
@@ -167,10 +168,37 @@ public class BatcherContext {
         return cfg.getInternalRuntime().getNonBatchWaitingRequestsPerPrefillWorker();
     }
 
+    /**
+     * Largest decision group this dispatcher may release at once. NON_BATCH
+     * decides one request at a time, so its group is complete on arrival.
+     */
     int maxDecisionRequests() {
         return cfg.getDispatcher() instanceof BatchDispatcherConfig batch
                 ? Math.max(1, batch.getMaxRequests())
                 : 1;
+    }
+
+    /**
+     * How long an incomplete group may wait for the arrivals that would
+     * complete it. A single-request group is never incomplete, so it has no
+     * window to spend.
+     */
+    long collectionWindowMs() {
+        return cfg.getDispatcher() instanceof BatchDispatcherConfig batch
+                ? Math.max(0L, batch.getMaxCollectionWaitMs())
+                : 0L;
+    }
+
+    /**
+     * Predicted-execution budget capping group growth, or {@code 0} when no
+     * budget applies. A single-request group has nothing to cap.
+     */
+    long predictedExecutionBudgetMs() {
+        if (!(cfg.getDispatcher() instanceof BatchDispatcherConfig batch)) {
+            return 0L;
+        }
+        Long configured = batch.getEarlyDispatchPredictedExecutionMs();
+        return configured == null ? 0L : configured;
     }
 
     BatchSchedulerReporter reporter() {
@@ -199,13 +227,27 @@ public class BatcherContext {
         return queue.peek();
     }
 
-    /** Whether the active queue still has work requiring a logical decision. */
+    /**
+     * Whether the active queue still has work requiring a logical decision.
+     * A zero charged depth already implies a physically empty queue, so the
+     * container is only consulted once something is charged.
+     */
     boolean isActiveEmpty() {
-        return queue.isEmpty();
+        return queueDepth.get() == 0 || queue.isEmpty();
     }
 
     boolean isEmpty() {
         return queueDepth.get() == 0;
+    }
+
+    /**
+     * Enqueue time of the longest-waiting active member. Any group the batcher
+     * picks is a subset of these members, so this never reports a collection
+     * window as younger than it is. {@link Long#MAX_VALUE} when the active queue
+     * holds nothing.
+     */
+    long oldestActiveEnqueuedAtMs() {
+        return queueWaitView().oldestEnqueuedAtMs();
     }
 
     /**
@@ -288,6 +330,48 @@ public class BatcherContext {
     }
 
     /**
+     * Capture one stable, ordered active-queue snapshot for a batching
+     * decision. The version and identities are linearized under the same lock;
+     * prediction intentionally runs after the lock is released.
+     *
+     * <p>{@code maxItems} is the largest group the decision can release. A
+     * single-request group needs only the ordering head, which the queue
+     * already exposes without a copy.
+     */
+    ActiveQueueSnapshot snapshotActiveQueue(int maxItems) {
+        long version;
+        List<BatchItem> items;
+        queueLock.lock();
+        try {
+            version = queueVersion.get();
+            if (maxItems <= 1) {
+                // The ordering head is the queue's own least element, so a
+                // single-request decision needs neither a copy nor a sort.
+                BatchItem head = queue.peek();
+                return new ActiveQueueSnapshot(
+                        version, head == null ? List.of() : List.of(head));
+            }
+            if (queue.isEmpty()) {
+                return new ActiveQueueSnapshot(version, List.of());
+            }
+            items = new ArrayList<>(queue);
+        } finally {
+            queueLock.unlock();
+        }
+        // Ordering keys are immutable after offer. Sorting the frozen identity
+        // copy outside queueLock preserves the snapshot while keeping O(N logN)
+        // comparator work out of the offer/remove critical section.
+        items.sort(queueOrder);
+        return new ActiveQueueSnapshot(version, items);
+    }
+
+    record ActiveQueueSnapshot(long queueVersion, List<BatchItem> items) {
+        BatchItem head() {
+            return items.isEmpty() ? null : items.get(0);
+        }
+    }
+
+    /**
      * All removable, not-yet-delivered requests in priority order. Used by
      * admission snapshots so a ready route decision remains preemptible and
      * capacity-charged until its delivery actually claims ownership.
@@ -302,6 +386,114 @@ public class BatcherContext {
         candidates.addAll(readyDeliveryQueue);
         candidates.sort(queueOrder);
         return candidates;
+    }
+
+    /**
+     * Probe-independent ordering state of the queued work at one queue version:
+     * the ready count that drains first, the oldest active enqueue time, and the
+     * active members an incoming probe is positioned against.
+     */
+    private record QueueWaitView(long version,
+                                 int readySize,
+                                 long oldestEnqueuedAtMs,
+                                 BatchItem[] activeItems) {
+    }
+
+    private volatile QueueWaitView queueWaitView;
+
+    /**
+     * The ordering view for the current queue version, captured on the first
+     * estimate after a mutation and shared by every later probe until the next
+     * one. "Version unchanged ⇒ queue content unchanged" makes a matching view
+     * exactly as current as reading the containers directly.
+     */
+    private QueueWaitView queueWaitView() {
+        QueueWaitView view = queueWaitView;
+        if (view != null && view.version() == queueVersion.get()) {
+            return view;
+        }
+        queueLock.lock();
+        try {
+            long version = queueVersion.get();
+            view = queueWaitView;
+            if (view == null || view.version() != version) {
+                view = captureQueueWaitView(version);
+                queueWaitView = view;
+            }
+            return view;
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
+    /** Caller holds {@link #queueLock}. */
+    private QueueWaitView captureQueueWaitView(long version) {
+        BatchItem[] activeItems = queue.toArray(new BatchItem[0]);
+        long oldestEnqueuedAtMs = Long.MAX_VALUE;
+        for (BatchItem item : activeItems) {
+            oldestEnqueuedAtMs = Math.min(oldestEnqueuedAtMs, item.enqueuedAtMs());
+        }
+        // Every physical ready member is ahead regardless of priority. Read the
+        // container, not the advisory volatile counter.
+        return new QueueWaitView(version, readyDeliveryQueue.size(),
+                oldestEnqueuedAtMs, activeItems);
+    }
+
+    /**
+     * Estimate the wait position of an incoming Auto-TPM request without
+     * materializing and sorting the endpoint queue.
+     *
+     * <p>Every ready route decision drains before the active queue, so only
+     * its count is needed. For active requests, the number ordered before the
+     * incoming probe is independent of iteration order, while the view's head
+     * is the same active head that a sorted copy would expose. Both come from
+     * one {@link QueueWaitView}, so the probe reduces to an allocation-free
+     * {@code O(N)} scan over published state.
+     */
+    long estimateIncomingWaitMs(int priority, long arrivalMs, long requestId) {
+        if (isEmpty()) {
+            // An idle worker holds no ordering state worth retaining.
+            if (queueWaitView != null) {
+                queueWaitView = null;
+            }
+            return 0L;
+        }
+        QueueWaitView view = queueWaitView();
+        int activeItemsAhead = 0;
+        for (BatchItem item : view.activeItems()) {
+            if (PriorityOrdering.comesBefore(
+                    item, item.requestId(), priority, arrivalMs, requestId)) {
+                activeItemsAhead++;
+            }
+        }
+        long perCycleMs = avgDecisionIntervalMs();
+        // Ready members are request-accounted: the delivery cap may permit only
+        // individual deliveries, so each one charges a whole cycle instead of
+        // collapsing into a shared logical batch.
+        long readyDrainMs = (long) view.readySize() * perCycleMs;
+        long activeDrainMs =
+                (long) (activeItemsAhead / maxDecisionRequests()) * perCycleMs;
+        return readyDrainMs + activeDrainMs
+                + remainingWindowMs(view.oldestEnqueuedAtMs(), arrivalMs);
+    }
+
+    /**
+     * Unelapsed part of the collection window the queued work already sits in.
+     * An incoming probe cannot know which group the batcher will pick next, so
+     * the window is measured over the whole active queue: its longest-waiting
+     * member bounds how much of the window any picked group has consumed.
+     */
+    private long remainingWindowMs(long windowOpenedAtMs, long nowMs) {
+        if (windowOpenedAtMs == Long.MAX_VALUE) {
+            return 0L;
+        }
+        long elapsedMs = Math.max(0L, nowMs - windowOpenedAtMs);
+        return Math.max(0L, collectionWindowMs() - elapsedMs);
+    }
+
+    int queueWaitViewRetainedItemsForTest() {
+        QueueWaitView view = queueWaitView;
+        return view == null ? 0 : view.activeItems().length;
     }
 
     BatchItem findQueued(long requestId) {
@@ -390,6 +582,18 @@ public class BatcherContext {
         return prefillEp.availableRequestSlots(maximum == null ? 0 : maximum);
     }
 
+    /**
+     * Largest number of groups the batch delivery may keep inflight, or
+     * {@code 0} for unlimited. Route deliveries are capped per request by
+     * {@link #availableDeliverySlots()} instead.
+     */
+    int maxInflightBatches() {
+        Integer maximum = cfg.getDispatcher() instanceof BatchDispatcherConfig batch
+                ? batch.getMaxInflightBatchesPerPrefillWorker()
+                : null;
+        return maximum == null ? 0 : maximum;
+    }
+
     /** Delivery-unit inflight count used only for decision diagnostics. */
     int deliveryInflightCount(BatchItem head) {
         return head != null && head.deliveryMode() == DeliveryMode.ROUTE_DECISION
@@ -458,6 +662,96 @@ public class BatcherContext {
                 logicalGroup, availableDeliverySlots(), metadata.reason());
         deliverStaged(staged,
                 new DecisionGroupMetadata(metadata.reason(), liveQueuedDepth()));
+    }
+
+    /**
+     * Publish a decision only while every member selected by the algorithm is
+     * still owned by the active queue.
+     *
+     * <p>The common path validates the unchanged queue version in O(1). The
+     * version tracks every actionable state change, including offers and the
+     * resolution of unrelated earlier deliveries, so under sustained traffic it
+     * advances faster than a group can be shaped; the decision therefore remains
+     * valid while all of its exact identity members are still active. A
+     * concurrent removal of any selected member still rejects the whole group,
+     * so a prediction for {@code [A,B]} can never degrade into delivering only
+     * {@code [A]}.
+     *
+     * <p>Validation and removal/ready staging share {@link #queueLock};
+     * callbacks run only after releasing it.
+     *
+     * @return {@code true} when the expected snapshot was staged, otherwise
+     *         {@code false} without changing queue ownership
+     */
+    boolean stageDecisionGroupIfVersion(List<BatchItem> logicalGroup,
+                                        DecisionGroupMetadata metadata,
+                                        long expectedQueueVersion,
+                                        PrefillTimePredictor expectedPredictor,
+                                        long expectedPredictorGeneration) {
+        if (logicalGroup == null || logicalGroup.isEmpty()) {
+            return false;
+        }
+        boolean containsRouteDecision = false;
+        for (BatchItem item : logicalGroup) {
+            if (item.deliveryMode() == DeliveryMode.ROUTE_DECISION) {
+                containsRouteDecision = true;
+                break;
+            }
+        }
+
+        List<BatchItem> staged;
+        DecisionGroupMetadata stagedMetadata = metadata;
+        queueLock.lock();
+        try {
+            if (queueVersion.get() != expectedQueueVersion
+                    && !containsAllActiveIdentities(logicalGroup)) {
+                return false;
+            }
+            if (expectedPredictor != null
+                    && (prefillEp.getPredictor() != expectedPredictor
+                    || expectedPredictor.generation()
+                    != expectedPredictorGeneration)) {
+                return false;
+            }
+            if (cfg.isPriorityOrdering()) {
+                recordDecisionInterval(now());
+            }
+            if (containsRouteDecision) {
+                staged = stageDecisionGroup(
+                        logicalGroup, availableDeliverySlots(), metadata.reason());
+                stagedMetadata = new DecisionGroupMetadata(
+                        metadata.reason(), liveQueuedDepth());
+            } else {
+                staged = stageRequests(logicalGroup);
+            }
+        } finally {
+            queueLock.unlock();
+        }
+        deliverStaged(staged, stagedMetadata);
+        return true;
+    }
+
+    /**
+     * Whether the active queue still owns every member of the group. A single
+     * allocation-free pass over the queue matches each member it meets against
+     * the bounded group, so a duplicated member can never be counted twice.
+     * Caller holds {@link #queueLock}.
+     */
+    private boolean containsAllActiveIdentities(List<BatchItem> logicalGroup) {
+        int required = logicalGroup.size();
+        int found = 0;
+        for (BatchItem active : queue) {
+            for (BatchItem member : logicalGroup) {
+                if (member == active) {
+                    found++;
+                    break;
+                }
+            }
+            if (found == required) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Drain a previously-decided route backlog before making a new decision. */
@@ -906,8 +1200,6 @@ public class BatcherContext {
         if (ema > 0) {
             return Math.max(1, Math.round(ema));
         }
-        return cfg.getDispatcher() instanceof BatchDispatcherConfig batch
-                ? Math.max(1, batch.getMaxCollectionWaitMs())
-                : 1;
+        return Math.max(1, collectionWindowMs());
     }
 }

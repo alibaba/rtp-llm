@@ -180,6 +180,19 @@ class AdmissionGateCancellationTest {
                 scheduler.cancelRequest(
                         requestId, 0, CancelReason.CLIENT_CANCELLED).state());
         assertEquals(8504, original.get(1, TimeUnit.SECONDS).getCode());
+        awaitNoGenerationGate();
+    }
+
+    /**
+     * The terminal response is published from the completion executor, and the
+     * generation is retired by the future's completion hook, so a caller that
+     * observes the response can still be ahead of the gate release.
+     */
+    private void awaitNoGenerationGate() throws InterruptedException {
+        for (int attempt = 0; attempt < 200
+                && scheduler.generationGateCount() != 0; attempt++) {
+            TimeUnit.MILLISECONDS.sleep(5);
+        }
         assertEquals(0, scheduler.generationGateCount());
     }
 

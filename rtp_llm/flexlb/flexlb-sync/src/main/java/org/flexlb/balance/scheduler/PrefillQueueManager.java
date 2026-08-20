@@ -2,7 +2,6 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.scheduler.priority.PrefillQueueSnapshot;
 import org.flexlb.balance.scheduler.priority.QueuedRequestSnapshot;
-import org.flexlb.util.PriorityOrdering;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -75,74 +74,7 @@ public final class PrefillQueueManager {
      */
     public long estimateWaitMs(int priority, long requestId) {
         long now = ctx.now();
-        int activeItemsAhead = 0;
-        int readyItemsAhead = 0;
-        BatchItem head = null;
-        ctx.queueLock().lock();
-        try {
-            for (BatchItem item : ctx.sortedQueuedItems()) {
-                // A decided route request is drained before the active queue,
-                // regardless of a later arrival's priority. It is also
-                // request-accounted: batchSizeMax must not collapse several
-                // ready requests into one estimated cycle when the route cap
-                // permits only individual deliveries.
-                if (item.readyDeliveryReason() != null) {
-                    readyItemsAhead++;
-                    continue;
-                }
-                if (head == null) {
-                    head = item;
-                }
-                if (ordersBefore(item, priority, now, requestId)) {
-                    activeItemsAhead++;
-                }
-            }
-        } finally {
-            ctx.queueLock().unlock();
-        }
-        int maxBatchSize = ctx.maxDecisionRequests();
-        long intervalMs = ctx.avgDecisionIntervalMs();
-        long batchCyclesAhead = activeItemsAhead / maxBatchSize;
-        long headRemainingWindowMs = 0;
-        if (head != null) {
-            long headWaitedMs = Math.max(0, now - head.enqueuedAtMs());
-            headRemainingWindowMs = Math.max(0, intervalMs - headWaitedMs);
-        }
-        // There is no trustworthy completion-rate signal for frontend-owned
-        // requests, so charge one interval per ready member. This is a
-        // deliberate conservative bound; it avoids the severe cap=1
-        // under-estimate while leaving active logical-batch timing unchanged.
-        long readyDrainWaitMs = saturatedMultiply(readyItemsAhead, intervalMs);
-        long activeWaitMs = saturatedMultiply(batchCyclesAhead, intervalMs);
-        return saturatedAdd(readyDrainWaitMs,
-                saturatedAdd(activeWaitMs, headRemainingWindowMs));
-    }
-
-    private static long saturatedMultiply(long count, long intervalMs) {
-        if (count <= 0 || intervalMs <= 0) {
-            return 0;
-        }
-        return count > Long.MAX_VALUE / intervalMs
-                ? Long.MAX_VALUE : count * intervalMs;
-    }
-
-    private static long saturatedAdd(long left, long right) {
-        return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
-    }
-
-    /**
-     * Whether a queued item is ordered before an incoming probe under
-     * {@link WorkerBatcher#PRIORITY_QUEUE_ORDER} (priority desc → enqueue-seq
-     * asc → requestId asc). The probe's enqueue-seq is its would-be arrival
-     * time ({@code now}) — it has not been enqueued yet.
-     *
-     * <p>Delegates the priority + enqueue-seq + request-id comparison to the
-     * allocation-free primitive overload in {@link PriorityOrdering}.
-     */
-    private static boolean ordersBefore(BatchItem item, int priority,
-                                        long arrivalMs, long requestId) {
-        return PriorityOrdering.comesBefore(
-                item, item.requestId(), priority, arrivalMs, requestId);
+        return ctx.estimateIncomingWaitMs(priority, now, requestId);
     }
 
     /**

@@ -544,7 +544,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
     private long calculateCacheHit(PrefillEndpoint ep,
                                    Map<String, Integer> cacheMatchResults,
                                    Request request) {
-        if (cacheMatchResults == null || request == null) {
+        if (cacheMatchResults == null || cacheMatchResults.isEmpty() || request == null) {
             return 0L;
         }
         long seqLen = request.getSeqLen();

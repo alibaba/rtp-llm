@@ -73,6 +73,24 @@ class LearningPredictorTest {
         for (int i = 0; i < 4; i++) {
             assertDoesNotThrow(() -> p.learn(features, 300, 400));
         }
+        assertEquals(1L, p.generation(),
+                "one generation must be published with one weight update");
+    }
+
+    @Test
+    @DisplayName("generation changes only when new weights are published")
+    void generationTracksPublishedLearningUpdates() {
+        LearningPredictor p = new LearningPredictor();
+        PrefillBatchFeatures features = PrefillBatchFeatures.from(
+                List.of(batchItem(500, 200)));
+
+        assertEquals(0L, p.generation());
+        for (int i = 0; i < 3; i++) {
+            p.learn(features, 300, 400);
+            assertEquals(0L, p.generation());
+        }
+        p.learn(features, 300, 400);
+        assertEquals(1L, p.generation());
     }
 
     @Test
@@ -105,6 +123,8 @@ class LearningPredictorTest {
         step.setAccessible(true);
         assertEquals(1 + sampleCount / 4, step.getLong(p),
                 "every four samples must produce exactly one serialized Adam update");
+        assertEquals(sampleCount / 4, p.generation(),
+                "generation must match the number of published weight updates");
     }
 
     private static BatchItem batchItem(long seqLen, long hitCacheLen) {

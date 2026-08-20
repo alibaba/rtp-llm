@@ -2,6 +2,7 @@ package org.flexlb.util;
 
 import ch.qos.logback.classic.Level;
 import org.flexlb.enums.LogLevel;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -24,6 +25,11 @@ class LoggerTest {
 
     @BeforeEach
     void setUp() {
+        Logger.setLevel(null);
+    }
+
+    @AfterEach
+    void tearDown() {
         Logger.setLevel(null);
     }
 
@@ -142,6 +148,19 @@ class LoggerTest {
 
         assertNotNull(Logger.class, "Logger class should be loaded");
         assertDoesNotThrow(Logger::getLevel, "getLevel should work");
+    }
+
+    @Test
+    @DisplayName("isDebugEnabled follows the runtime logback level")
+    void isDebugEnabled_followsRuntimeLevel() {
+        Logger.setLevel(LogLevel.INFO);
+        assertFalse(Logger.isDebugEnabled());
+
+        Logger.setLevel(LogLevel.DEBUG);
+        assertTrue(Logger.isDebugEnabled());
+
+        Logger.setLevel(LogLevel.WARN);
+        assertFalse(Logger.isDebugEnabled());
     }
 
     @Test

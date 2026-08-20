@@ -19,6 +19,17 @@ import org.flexlb.balance.scheduler.BatchItem;
 public interface PrefillTimePredictor {
 
     /**
+     * Monotonic version of the prediction model.
+     *
+     * <p>Immutable predictors keep the default value. Online-learning
+     * predictors increment it after publishing new parameters so scheduling
+     * decisions made against an older model are discarded.
+     */
+    default long generation() {
+        return 0L;
+    }
+
+    /**
      * Estimate prefill time for a single request from raw token counts.
      *
      * @param totalTokens input length
@@ -34,19 +45,6 @@ public interface PrefillTimePredictor {
      * @return predicted time in milliseconds (0 for an empty batch)
      */
     double predictBatchMs(List<BatchItem> items);
-
-    /**
-     * Estimate prefill time for a batch of requests without consulting or
-     * populating any internal cache.
-     *
-     * <p>Useful in trial-and-error loops (e.g. batcher algorithm candidate
-     * evaluation) where each candidate batch differs and cache lookups are
-     * pure overhead.
-     *
-     * @param items batch items (may be empty)
-     * @return predicted time in milliseconds (0 for an empty batch)
-     */
-    double predictBatchMsUncached(List<BatchItem> items);
 
     /**
      * Payload-free learning entry point used by long-lived inflight accounting.

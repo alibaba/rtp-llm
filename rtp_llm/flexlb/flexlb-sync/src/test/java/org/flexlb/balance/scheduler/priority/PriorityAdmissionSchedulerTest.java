@@ -6,8 +6,11 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.BatchDispatcher;
 import org.flexlb.balance.scheduler.BatchItem;
+import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.PriorityScheduler;
+import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
+import org.flexlb.balance.scheduler.RequestLifecycleState;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.config.ConfigService;
@@ -48,6 +51,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -55,11 +59,13 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -113,7 +119,7 @@ class PriorityAdmissionSchedulerTest {
                     return CompletableFuture.completedFuture(ackFor(request));
                 });
 
-        endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
+        endpointRegistry = spy(new EndpointRegistry(configService, () -> scheduler, reporter));
         BatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
         priorityScheduler = spy(new PriorityAdmissionScheduler(
                 configService, router, endpointRegistry, new PlanCommitter(),
@@ -341,12 +347,13 @@ class PriorityAdmissionSchedulerTest {
 
         Response first = scheduler.submit(contextWithBudget(78))
                 .get(2, TimeUnit.SECONDS);
+        awaitActiveAdmissionCount(0);
         Response second = scheduler.submit(contextWithBudget(79))
                 .get(2, TimeUnit.SECONDS);
+        awaitActiveAdmissionCount(0);
 
         assertTrue(first.isSuccess(), first.getErrorMessage());
         assertTrue(second.isSuccess(), second.getErrorMessage());
-        assertEquals(0, priorityScheduler.activeAdmissionCount());
         assertEquals(0, priorityScheduler.pendingSoftTimeoutLeaseCount());
     }
 
@@ -487,6 +494,22 @@ class PriorityAdmissionSchedulerTest {
     }
 
     @Test
+    void nonDecodeRouteFailureNeverEnumeratesOrTouchesDecodeEndpoints() throws Exception {
+        DecodeEndpoint decode = spy(endpointRegistry.getDecode(DECODE_IP_PORT));
+        endpointRegistry.getDecodeEndpoints().put(DECODE_IP_PORT, decode);
+        clearInvocations(endpointRegistry, decode);
+        when(router.route(any(BalanceContext.class)))
+                .thenReturn(Response.error(StrategyErrorType.NO_PREFILL_WORKER));
+
+        Response response = scheduler.submit(context(220)).get(1, TimeUnit.SECONDS);
+
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
+        verify(endpointRegistry, never()).getDecodeEndpoints();
+        verifyNoInteractions(decode);
+    }
+
+    @Test
     void decodeCapacityBlockedByUnattributedEngineOccupantIsAdmissionUnavailable()
             throws Exception {
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (1));
@@ -512,6 +535,90 @@ class PriorityAdmissionSchedulerTest {
         assertEquals(StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(), response.getCode());
         assertEquals(AdmissionRejectReason.UNSPECIFIED,
                 response.getAdmissionRejectReason());
+    }
+
+    @Test
+    void decodeFailureClassificationCapturesOccupantsAddedDuringRoute() throws Exception {
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
+        DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
+        WorkerStatus decodeStatus = decodeEp.getStatus();
+        when(router.route(any(BalanceContext.class))).thenAnswer(invocation -> {
+            TaskInfo untrackedRunning = new TaskInfo();
+            untrackedRunning.setRequestId(901L);
+            untrackedRunning.setPhase(TaskPhase.RUNNING);
+            untrackedRunning.setInputLength(128L);
+            WorkerStatusResponse workerStatus = new WorkerStatusResponse();
+            workerStatus.setRunningTaskInfo(Map.of("901", untrackedRunning));
+            decodeEp.onWorkerStatusUpdate(decodeStatus, workerStatus);
+            return Response.error(StrategyErrorType.NO_DECODE_WORKER);
+        });
+
+        Response response = scheduler.submit(context(24)).get(1, TimeUnit.SECONDS);
+
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(), response.getCode(),
+                "classifier must use the fresh full snapshot taken after route failed");
+        assertEquals(AdmissionRejectReason.UNSPECIFIED,
+                response.getAdmissionRejectReason());
+    }
+
+    @Test
+    void cancelDuringFullDecodeCaptureWinsWithoutApplyingEviction() throws Exception {
+        long victimId = 902L;
+        long incomingId = 25L;
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
+        SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.DECODE_RESERVED);
+
+        WorkerStatus decodeStatus = endpointRegistry.getDecode(DECODE_IP_PORT).getStatus();
+        CountDownLatch captureEntered = new CountDownLatch(1);
+        CountDownLatch releaseCapture = new CountDownLatch(1);
+        DecodeEndpoint decodeEp = new DecodeEndpoint(decodeStatus) {
+            @Override
+            public LayeredAdmissionView layeredAdmissionView() {
+                LayeredAdmissionView view = super.layeredAdmissionView();
+                captureEntered.countDown();
+                try {
+                    if (!releaseCapture.await(2, TimeUnit.SECONDS)) {
+                        throw new AssertionError("timed out waiting to release full capture");
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError(interrupted);
+                }
+                return view;
+            }
+        };
+        decodeEp.reserve(victimId, 128, 136, 10);
+        decodeEp.markQueuedPhase(victimId);
+        endpointRegistry.getDecodeEndpoints().put(DECODE_IP_PORT, decodeEp);
+        when(router.route(any(BalanceContext.class)))
+                .thenReturn(Response.error(StrategyErrorType.NO_DECODE_WORKER));
+
+        ExecutorService submitter = Executors.newSingleThreadExecutor();
+        Future<CompletableFuture<Response>> submission =
+                submitter.submit(() -> scheduler.submit(context(incomingId, 70)));
+        try {
+            assertTrue(captureEntered.await(1, TimeUnit.SECONDS));
+            RequestLifecycleSnapshot cancellation = scheduler.cancelRequest(
+                    incomingId, 0, CancelReason.CLIENT_CANCELLED);
+            assertNotNull(cancellation);
+            assertEquals(RequestLifecycleState.CANCELLED, cancellation.state());
+
+            releaseCapture.countDown();
+            Response response = submission.get(1, TimeUnit.SECONDS)
+                    .get(1, TimeUnit.SECONDS);
+
+            assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), response.getCode());
+            assertTrue(decodeEp.reservedView().containsKey(victimId),
+                    "the cancelled admission must not evict its planned victim");
+            assertFalse(decodeEp.reservedView().containsKey(incomingId),
+                    "the cancelled admission must not reserve the incoming request");
+            assertEquals(RequestLifecycleState.CANCELLED,
+                    scheduler.getRequestState(incomingId, 0).state());
+        } finally {
+            releaseCapture.countDown();
+            submitter.shutdownNow();
+        }
     }
 
     // ==================== offer failure: decode reservation rollback ====================
@@ -634,6 +741,15 @@ class PriorityAdmissionSchedulerTest {
             Thread.sleep(1);
         }
         assertEquals(expected, priorityScheduler.softTimeoutQueueSize());
+    }
+
+    private void awaitActiveAdmissionCount(int expected) throws InterruptedException {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+        while (priorityScheduler.activeAdmissionCount() != expected
+                && System.nanoTime() < deadlineNanos) {
+            Thread.sleep(1);
+        }
+        assertEquals(expected, priorityScheduler.activeAdmissionCount());
     }
 
     private static void awaitLatch(CountDownLatch latch) {

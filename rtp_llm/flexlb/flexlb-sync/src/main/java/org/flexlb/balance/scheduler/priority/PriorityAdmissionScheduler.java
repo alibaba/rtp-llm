@@ -54,7 +54,6 @@ import java.util.function.Supplier;
  *
  * <p>Per attempt (up to {@link #MAX_PLAN_RETRIES}):
  * <ol>
- *   <li>Capture a read-only {@link ClusterSnapshot}</li>
  *   <li>Build a {@link NormalPlacementPlan} by reusing the existing
  *       {@link Router#route} (which also performs the decode reservation),
  *       guaranteeing consistent placement behavior</li>
@@ -444,18 +443,17 @@ public class PriorityAdmissionScheduler {
         int evictionReplans = 0;
 
         for (int attempt = 1; attempt <= maxRetries; attempt++) {
-            if (!registrar.isAdmissionOpen(ctx.getRequestId(), future)) {
-                return;
-            }
             // §19.1 schedule_attempt: final value = attempts consumed.
             ctx.setScheduleAttempt(attempt);
+            // The mutation claim subsumes the admission-open test: it takes the
+            // same generation gate and additionally rejects a concurrent
+            // mutation, so a separate pre-check would re-enter the gate to
+            // reach the identical verdict.
             if (!registrar.claimAdmissionMutation(ctx.getRequestId(), future)) {
                 return;
             }
-            ClusterSnapshot snapshot;
             PlacementOutcome outcome;
             try {
-                snapshot = ClusterSnapshot.capture(endpointRegistry, config);
                 outcome = tryNormalPlacement(ctx, future);
             } catch (RuntimeException | Error routeFailure) {
                 registrar.completeAdmissionMutation(ctx.getRequestId(), future);
@@ -471,6 +469,16 @@ public class PriorityAdmissionScheduler {
                 if (!registrar.isAdmissionOpen(ctx.getRequestId(), future)) {
                     return;
                 }
+                if (!isDecodeCapacityFailure(outcome.failureResponse)) {
+                    onInfeasible(ctx, future, outcome.failureResponse);
+                    return;
+                }
+                // Normal placement never enumerates Decode. Materialize the
+                // layered request state once, as late as possible, and use
+                // this same fresh generation for either classification or
+                // eviction planning/commit OCC.
+                DecodeClusterSnapshot decodeSnapshot =
+                        DecodeClusterSnapshot.capture(endpointRegistry, config);
                 // Decode eviction (gated, default off): the route failed
                 // specifically for Decode capacity. Either victim domain may
                 // independently open this planning entry point; the planner
@@ -481,7 +489,8 @@ public class PriorityAdmissionScheduler {
                         || preemptionAllows(config, VictimStage.DECODE_ENGINE_OWNED))
                         && isDecodeCapacityFailure(outcome.failureResponse)) {
                     DecodeEvictionOutcome eviction =
-                            tryDecodeEviction(ctx, future, snapshot, config, registrar, permit);
+                            tryDecodeEviction(ctx, future, decodeSnapshot,
+                                    config, registrar, permit);
                     if (eviction == DecodeEvictionOutcome.CONFLICT) {
                         Logger.debug("[priority-scheduler] decode eviction conflict (attempt {}/{}), request_id={}",
                                 attempt, maxRetries, ctx.getRequestId());
@@ -522,7 +531,7 @@ public class PriorityAdmissionScheduler {
                                     ctx.getRequest().getSeqLen(),
                                     ctx.getRequest().getMaxNewTokens(), 0L));
                     AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
-                            envelope, new ArrayList<>(snapshot.decodes().values()));
+                            envelope, new ArrayList<>(decodeSnapshot.decodes().values()));
                     completeAdmissionError(future, failure.errorType(),
                             failure.reason(), failure.message());
                     return;
@@ -900,12 +909,13 @@ public class PriorityAdmissionScheduler {
      * Plan and atomically commit a Decode eviction (design doc 11-13, 17.2),
      * then place the incoming request on the freed endpoint. Master-local and
      * Engine-owned victim domains are enabled independently by configuration.
-     * Uses the pre-route {@link ClusterSnapshot} decode views so the
-     * admission-version check detects any interference since plan build.
+     * Uses a fresh post-route-failure {@link DecodeClusterSnapshot}; the
+     * admission-version check detects any interference after that full
+     * layered view was built.
      */
     private DecodeEvictionOutcome tryDecodeEviction(BalanceContext ctx,
                                                     CompletableFuture<Response> future,
-                                                    ClusterSnapshot snapshot,
+                                                    DecodeClusterSnapshot snapshot,
                                                     FlexlbConfig config,
                                                     InflightRegistrar registrar,
                                                     AdmissionPermit permit) {

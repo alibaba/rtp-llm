@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.StringValue;
+import io.grpc.ConnectivityState;
 import io.grpc.ManagedChannel;
 import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.stub.StreamObserver;
@@ -73,6 +74,7 @@ import java.util.Set;
 import java.util.SplittableRandom;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.LockSupport;
@@ -100,6 +102,8 @@ import static org.mockito.Mockito.withSettings;
 class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
     private static final int WARMUP_REQUESTS = 64;
+    /** Per-request schedule deadline; a stalled Master fails fast instead of hanging. */
+    private static final long REQUEST_DEADLINE_SECONDS = 20L;
     private static final int REAL_REQUEST_TEMPLATE_COUNT = 128;
     private static final int DISPATCH_THREADS = 32;
     private static final int DISPATCH_QUEUE_CAPACITY = 2_048;
@@ -112,6 +116,20 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             Integer.getInteger("flexlb.perf.engine-matrix-duration-ms", 500);
     private static final int ENGINE_MATRIX_MIN_REQUESTS =
             Integer.getInteger("flexlb.perf.engine-matrix-min-requests", 1_024);
+    /**
+     * Measured requests per engine. The matrix asserts that every prefill and
+     * decode engine appears in the measured routing decisions, so the window
+     * has to be long enough to reach the whole fleet.
+     */
+    private static final int ENGINE_MATRIX_REQUESTS_PER_ENGINE =
+            Integer.getInteger("flexlb.perf.engine-matrix-requests-per-engine", 16);
+    /**
+     * Comma-separated {@code prefillxdecode} topologies replacing the default
+     * matrix, e.g. {@code 100x100,200x200,500x500,750x500} for production
+     * fleet sizes.
+     */
+    private static final String ENGINE_MATRIX_TOPOLOGIES =
+            System.getProperty("flexlb.perf.engine-matrix-topologies", "");
     private static final int[] STANDARD_ENGINE_MATRIX_TARGET_QPS =
             {1_000, 2_000, 5_000, 10_000};
 
@@ -275,8 +293,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 .forAddress("127.0.0.1", grpcPort)
                 .usePlaintext()
                 .build();
-        masterStub = FlexlbServiceGrpc.newStub(masterChannel)
-                .withDeadlineAfter(20, TimeUnit.SECONDS);
+        masterStub = FlexlbServiceGrpc.newStub(masterChannel);
+        awaitChannelReady(masterChannel);
     }
 
     @AfterEach
@@ -360,7 +378,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
     @ParameterizedTest(name = "prefill={0}, decode={1}")
     @MethodSource("engineScales")
-    @Timeout(value = 45, unit = TimeUnit.SECONDS)
+    @Timeout(value = 300, unit = TimeUnit.SECONDS)
     void masterMeetsRateSloAcrossEngineScaleMatrix(int prefillEngineCount,
                                                    int decodeEngineCount,
                                                    int[] targetQpsValues) throws Exception {
@@ -374,8 +392,9 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         assertEquals(decodeEngineCount, endpointRegistry.getEndpointCount(RoleType.DECODE));
 
         int warmupRequests = Math.max(WARMUP_REQUESTS, prefillEngineCount * 16);
+        int warmupQps = Arrays.stream(targetQpsValues).min().orElseThrow();
         TrafficResult warmup = runTraffic(
-                warmupRequests, 50_000_000L + prefillEngineCount * 10_000L);
+                warmupRequests, 50_000_000L + prefillEngineCount * 10_000L, warmupQps);
         assertSuccessful(warmup);
         awaitCompletionCount(warmupRequests);
         resetMeasurementState();
@@ -389,7 +408,10 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
         for (int qpsIndex = 0; qpsIndex < targetQpsValues.length; qpsIndex++) {
             int targetQps = targetQpsValues[qpsIndex];
-            int requestCount = Math.max(ENGINE_MATRIX_MIN_REQUESTS,
+            int fleetCoverageRequests = Math.max(prefillEngineCount, decodeEngineCount)
+                    * ENGINE_MATRIX_REQUESTS_PER_ENGINE;
+            int requestCount = Math.max(
+                    Math.max(ENGINE_MATRIX_MIN_REQUESTS, fleetCoverageRequests),
                     targetQps * ENGINE_MATRIX_DURATION_MS / 1_000);
             long firstRequestId = 10_000_000L
                     + prefillEngineCount * 1_000_000L
@@ -418,7 +440,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             double dispatchAckMeanMs = number(dispatchAck, "mean").doubleValue();
             long batchFullCount = dispatchReasonCount("batch_full");
             long windowTimeoutCount = dispatchReasonCount("fixed_window_timeout");
-            long predictThresholdCount = dispatchReasonCount("predict_threshold");
+            long predictedExecutionCapCount = dispatchReasonCount("predicted_execution_cap");
             int activePrefillRoutes = activeScheduledEngineCount(result, RoleType.PREFILL);
             int activeDecodeRoutes = activeScheduledEngineCount(result, RoleType.DECODE);
 
@@ -432,7 +454,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                             + "batch_wait_p95=%dms batch_wait_p99=%dms "
                             + "batch_wait_avg=%.3fms dispatch_ack_p99=%dms "
                             + "dispatch_ack_avg=%.3fms engine_batches=%d "
-                            + "batch_full=%d window_timeout=%d predict_threshold=%d "
+                            + "batch_full=%d window_timeout=%d predicted_execution_cap=%d "
                             + "avg_batch=%.2f max_batch=%d%n",
                     prefillEngineCount, decodeEngineCount, targetQps, requestCount,
                     result.qps(), masterQps, serverP50Ms, serverP90Ms, serverP95Ms,
@@ -441,7 +463,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                     batchWaitP50Ms, batchWaitP90Ms, batchWaitP95Ms, batchWaitP99Ms,
                     batchWaitMeanMs, dispatchAckP99Ms, dispatchAckMeanMs,
                     batches.batchCount(), batchFullCount, windowTimeoutCount,
-                    predictThresholdCount, batches.averageBatchSize(),
+                    predictedExecutionCapCount, batches.averageBatchSize(),
                     batches.maxBatchSize());
 
             assertEquals(requestCount, number(masterSnapshot, "arrival_count").longValue());
@@ -458,7 +480,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             assertEquals(decodeEngineCount, activeDecodeRoutes,
                     "every decode engine must appear in measured routing decisions");
             assertEquals(batches.batchCount(),
-                    batchFullCount + windowTimeoutCount + predictThresholdCount,
+                    batchFullCount + windowTimeoutCount + predictedExecutionCapCount,
                     "every engine batch must have one recorded dispatch reason");
             assertEquals(0L, activeRequestCounter.getCount());
             assertTrue(result.qps() >= targetQps * minimumQpsRatio,
@@ -502,6 +524,15 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     }
 
     private static Stream<Arguments> engineScales() {
+        if (!ENGINE_MATRIX_TOPOLOGIES.isBlank()) {
+            return Arrays.stream(ENGINE_MATRIX_TOPOLOGIES.split(","))
+                    .map(String::trim)
+                    .filter(topology -> !topology.isEmpty())
+                    .map(topology -> topology.split("x"))
+                    .map(engines -> Arguments.of(Integer.parseInt(engines[0]),
+                            Integer.parseInt(engines[1]),
+                            STANDARD_ENGINE_MATRIX_TARGET_QPS));
+        }
         return Stream.of(
                 Arguments.of(1, 2, STANDARD_ENGINE_MATRIX_TARGET_QPS),
                 Arguments.of(2, 4, new int[]{2_000}),
@@ -526,23 +557,27 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             long requestId = firstRequestId + index;
             long requestStartNanos = System.nanoTime();
             CompletableFuture<TimedResponse> future = new CompletableFuture<>();
-            masterStub.schedule(scheduleRequest(requestId, index), new StreamObserver<>() {
-                @Override
-                public void onNext(FlexlbScheduleProtocol.FlexlbScheduleResponsePB response) {
-                    future.complete(new TimedResponse(
-                            response, System.nanoTime() - requestStartNanos));
-                }
+            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
+                    new StreamObserver<>() {
+                        @Override
+                        public void onNext(
+                                FlexlbScheduleProtocol.FlexlbScheduleResponsePB response) {
+                            future.complete(new TimedResponse(
+                                    response, System.nanoTime() - requestStartNanos));
+                        }
 
-                @Override
-                public void onError(Throwable throwable) {
-                    future.completeExceptionally(throwable);
-                }
+                        @Override
+                        public void onError(Throwable throwable) {
+                            future.completeExceptionally(throwable);
+                        }
 
-                @Override
-                public void onCompleted() {
-                    // Unary response is completed in onNext.
-                }
-            });
+                        @Override
+                        public void onCompleted() {
+                            // Unary response is completed in onNext.
+                        }
+                    };
+            masterStub.withDeadlineAfter(REQUEST_DEADLINE_SECONDS, TimeUnit.SECONDS)
+                    .schedule(scheduleRequest(requestId, index), observer);
             futures.add(future);
         }
 
@@ -563,6 +598,23 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 percentileNanos(latencies, 0.50) / 1_000_000.0,
                 percentileNanos(latencies, 0.99) / 1_000_000.0,
                 responses);
+    }
+
+    /**
+     * Connect the channel before any traffic, so a burst is written to the wire
+     * instead of being buffered against a channel that is still resolving.
+     */
+    private static void awaitChannelReady(ManagedChannel channel) throws InterruptedException {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        ConnectivityState state = channel.getState(true);
+        while (state != ConnectivityState.READY && System.nanoTime() < deadlineNanos) {
+            CountDownLatch changed = new CountDownLatch(1);
+            channel.notifyWhenStateChanged(state, changed::countDown);
+            changed.await(1, TimeUnit.SECONDS);
+            state = channel.getState(true);
+        }
+        assertEquals(ConnectivityState.READY, state,
+                "Master channel must be connected before traffic starts");
     }
 
     private static void paceUntil(long targetNanos) {

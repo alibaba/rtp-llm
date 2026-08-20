@@ -35,7 +35,7 @@ final class PrefillTimeVariableBindings {
         fillRequestVars(item, totalTokens, hitCacheTokens);
         ctx.itemVars.add(item);
 
-        return new EvaluationVariables(ctx.topLevelVars, ctx.itemVars);
+        return ctx.evaluationVariables;
     }
 
     static EvaluationVariables batchVariables(List<BatchItem> items) {
@@ -61,7 +61,7 @@ final class PrefillTimeVariableBindings {
         ctx.topLevelVars[PrefillTimeFormula.IDX_BATCH_SIZE] = items.size();
         fillBatchVars(ctx.topLevelVars, totalInputTokens, totalHitCacheTokens,
                 maxInputTokens, maxComputeTokens);
-        return new EvaluationVariables(ctx.topLevelVars, ctx.itemVars);
+        return ctx.evaluationVariables;
     }
 
     private static void fillBatchVars(double[] vars,
@@ -105,6 +105,8 @@ final class PrefillTimeVariableBindings {
         final double[] topLevelVars = new double[PrefillTimeFormula.VAR_COUNT];
         final List<double[]> itemVars = new ArrayList<>();
         final List<double[]> arrayPool = new ArrayList<>();
+        final EvaluationVariables evaluationVariables =
+                new EvaluationVariables(topLevelVars, itemVars);
         int poolIndex = 0;
 
         void reset() {
