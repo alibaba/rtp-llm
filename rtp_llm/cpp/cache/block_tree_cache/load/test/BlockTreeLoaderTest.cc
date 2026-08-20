@@ -22,7 +22,7 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
     }
 
     FullSWAEnvironmentOptions options;
-    options.path_length = 1;
+    options.path_length = 2;
     options.enable_disk = false;
     auto environment    = FullSWAEnvironment::create(options);
     ASSERT_NE(environment, nullptr);
@@ -31,13 +31,14 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
     environment->releaseRequestRefs();
     environment->demoteAll(Tier::DEVICE);
     ASSERT_TRUE(environment->allResourcesAtTier(Tier::HOST));
+    EXPECT_EQ(environment->cache->evictor_.candidateCount(/*group_set_id=*/0, Tier::HOST), 1u);
 
     BlockTreeMatchResult result = environment->cache->match(environment->keys);
     EXPECT_EQ(result.matched_device_blocks, 0u);
     std::shared_ptr<LoadAsyncContext> load_context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
     ASSERT_NE(load_context, nullptr);
-    EXPECT_EQ(load_context->matchedBlocks(), 1u);
-    EXPECT_EQ(load_context->matchedBlocks(Tier::HOST), 1u);
+    EXPECT_EQ(load_context->matchedBlocks(), 2u);
+    EXPECT_EQ(load_context->matchedBlocks(Tier::HOST), 2u);
     EXPECT_EQ(load_context->matchedBlocks(Tier::DISK), 0u);
 
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> request_targets;
@@ -60,6 +61,8 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
     ASSERT_TRUE(context->done());
     EXPECT_TRUE(context->success());
     EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
+    EXPECT_EQ(environment->cache->evictor_.candidateCount(/*group_set_id=*/0, Tier::HOST), 0u);
+    EXPECT_EQ(environment->cache->evictor_.candidateCount(/*group_set_id=*/0, Tier::DEVICE), 1u);
     environment->expectPayloads();
 
     result.async_context.reset();
@@ -92,13 +95,13 @@ TEST(BlockTreeLoaderTest, DiskTransferFailureInstallsNoLoadTargets) {
     environment->scripted_per_rank_transfer_engine->enqueue(true);
     environment->scripted_per_rank_transfer_engine->enqueue(false);
 
-    BlockTreeMatchResult result = environment->cache->match(environment->keys);
-    auto load_context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
+    BlockTreeMatchResult result       = environment->cache->match(environment->keys);
+    auto                 load_context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
     ASSERT_NE(load_context, nullptr);
     ASSERT_EQ(load_context->loadDescs().size(), 2u);
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> request_targets;
     for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {
-        const size_t group_set_id = load_context->loadDescs()[desc_index].group_set_id;
+        const size_t              group_set_id = load_context->loadDescs()[desc_index].group_set_id;
         std::vector<BlockIdxType> targets;
         for (const DeviceBlockPoolPtr& pool : environment->groups[group_set_id]->devicePools()) {
             const BlockIdList blocks = pool->malloc(1).value();
@@ -151,11 +154,11 @@ TEST(BlockTreeLoaderTest, LoadStateMachineRejectsDuplicateTransitionAndRestoresS
     ASSERT_FALSE(find_result.empty());
 
     constexpr size_t  group_set_id = 0;
-    GroupSetResource& resource = find_result.back()->group_set_resources[group_set_id];
+    GroupSetResource& resource     = find_result.back()->group_set_resources[group_set_id];
 
     ASSERT_TRUE(environment->cache->loader_.changeTransferState(
         find_result.back(), group_set_id, GroupSetTransferState::IDLE, GroupSetTransferState::LOAD_PENDING));
-    environment->cache->evictor_.refreshCandidate(find_result.back(), group_set_id);
+    environment->cache->evictor_.suspendCandidate(find_result.back(), group_set_id, Tier::HOST);
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOAD_PENDING);
     ASSERT_TRUE(environment->cache->loader_.changeTransferState(
         find_result.back(), group_set_id, GroupSetTransferState::LOAD_PENDING, GroupSetTransferState::LOADING));
@@ -166,7 +169,7 @@ TEST(BlockTreeLoaderTest, LoadStateMachineRejectsDuplicateTransitionAndRestoresS
 
     ASSERT_TRUE(environment->cache->loader_.changeTransferState(
         find_result.back(), group_set_id, GroupSetTransferState::LOADING, GroupSetTransferState::IDLE));
-    environment->cache->evictor_.refreshCandidate(find_result.back(), group_set_id);
+    environment->cache->evictor_.admitCandidate(find_result.back(), group_set_id, Tier::HOST);
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
 
     environment->reclaimAll();

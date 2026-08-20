@@ -144,6 +144,29 @@ TEST(EvictionHeapTest, RepeatedUpsertKeepsSingleEntry) {
     delete n1;
 }
 
+TEST(EvictionHeapTest, UpdateIfPresentReordersExistingEntryWithoutAdmittingMissingNode) {
+    EvictionHeap heap(EvictionPolicy::LRU);
+
+    TreeNode* first   = makeNode(1);
+    TreeNode* second  = makeNode(2);
+    TreeNode* missing = makeNode(3);
+    heap.upsert(first, makeMeta(/*last_access=*/10, /*admission=*/1, 0));
+    heap.upsert(second, makeMeta(/*last_access=*/20, /*admission=*/2, 0));
+
+    EXPECT_FALSE(heap.updateIfPresent(missing, makeMeta(/*last_access=*/5, /*admission=*/3, 0)));
+    EXPECT_FALSE(heap.contains(missing));
+    EXPECT_EQ(heap.size(), 2u);
+
+    EXPECT_TRUE(heap.updateIfPresent(first, makeMeta(/*last_access=*/30, /*admission=*/1, 0)));
+    ASSERT_TRUE(heap.best().has_value());
+    EXPECT_EQ(heap.best()->node, second);
+    EXPECT_EQ(heap.size(), 2u);
+
+    delete first;
+    delete second;
+    delete missing;
+}
+
 TEST(EvictionHeapTest, EraseSyncsBothContainers) {
     EvictionHeap heap(EvictionPolicy::FIFO);
 
