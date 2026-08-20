@@ -14,6 +14,7 @@
 
 #include <cstdlib>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <exception>
@@ -245,6 +246,7 @@ void BlockPool::initializeCacheBuffer() {
         auto cpu_buffer = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
                                        torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
         if (shouldPinHostBlockPool()) {
+            const auto pin_start = std::chrono::steady_clock::now();
             try {
                 cache_aligned_buffer_ = cpu_buffer.pin_memory();
             } catch (const std::exception& e) {
@@ -254,6 +256,13 @@ void BlockPool::initializeCacheBuffer() {
                     e.what());
                 cache_aligned_buffer_ = std::move(cpu_buffer);
             }
+            const double pin_seconds =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - pin_start).count();
+            RTP_LLM_LOG_INFO("pinned memory allocation took %.3fs, pool_name=%s, total_size=%zu bytes, is_pinned=%d",
+                             pin_seconds,
+                             config_.pool_name.c_str(),
+                             config_.total_size_bytes,
+                             cache_aligned_buffer_.is_pinned());
         } else {
             RTP_LLM_LOG_INFO("host block pool uses pageable CPU memory, total_size=%zu bytes",
                              config_.total_size_bytes);
@@ -294,13 +303,20 @@ void BlockPool::initializeCacheBuffer() {
 void BlockPool::initializePinnedCpuBuffer(const char* log_context) {
     RTP_LLM_LOG_WARNING(
         "%s, pool_name=%s, total_size=%zu bytes", log_context, config_.pool_name.c_str(), config_.total_size_bytes);
-    auto cpu_buffer = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
+    auto       cpu_buffer = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
                                    torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
+    const auto pin_start  = std::chrono::steady_clock::now();
     try {
         cache_aligned_buffer_ = cpu_buffer.pin_memory();
     } catch (const std::exception& e) {
         RTP_LLM_FAIL("%s pin failed, total_size=%zu bytes, error=%s", log_context, config_.total_size_bytes, e.what());
     }
+    const double pin_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - pin_start).count();
+    RTP_LLM_LOG_INFO("pinned memory allocation took %.3fs, context=%s, pool_name=%s, total_size=%zu bytes",
+                     pin_seconds,
+                     log_context,
+                     config_.pool_name.c_str(),
+                     config_.total_size_bytes);
 }
 
 void BlockPool::initializeCudaMallocBuffer() {
@@ -529,6 +545,7 @@ void BlockPool::releaseHostBuffer() {
     if (host_released_) {
         return;
     }
+    const auto release_start = std::chrono::steady_clock::now();
     {
         // Prevent malloc() from handing out blocks that point into the freed buffer.
         std::scoped_lock lock(ref_mu_, free_mu_);
@@ -549,6 +566,12 @@ void BlockPool::releaseHostBuffer() {
     // (the whole point of discarding the memory cache on sleep). Only frees unused blocks.
     at::getHostAllocator(at::kCUDA)->empty_cache();
     host_released_ = true;
+    const double release_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - release_start).count();
+    RTP_LLM_LOG_INFO("pinned memory release took %.3fs, pool_name=%s, total_size=%zu bytes",
+                     release_seconds,
+                     config_.pool_name.c_str(),
+                     config_.total_size_bytes);
     RTP_LLM_LOG_INFO("BlockPool host buffer released for sleep (%zu bytes freed)", config_.total_size_bytes);
 }
 

@@ -137,6 +137,105 @@ def _clear_module_device_caches() -> list[str]:
     return notes
 
 
+def _pool_id(seg: dict) -> tuple:
+    """``segment_pool_id`` as a comparable tuple.
+
+    ``(0, 0)`` == default caching-allocator pool; anything else is a private
+    MemPool (TMS weights ``_primary_mem_pool``) or a CUDA-graph private pool.
+    ``empty_cache()`` only returns fully-free segments of the DEFAULT pool to the
+    driver; free blocks trapped in a still-referenced private MemPool are
+    physically resident but ``empty_cache`` never releases them. This split is
+    exactly what attributes the sleep residual to default-vs-MemPool.
+    """
+    pid = seg.get("segment_pool_id")
+    if pid is None:
+        return (-1, -1)  # field absent on this torch build
+    return tuple(pid) if isinstance(pid, (list, tuple)) else (pid,)
+
+
+def _seg_frames(seg: dict) -> list:
+    """Allocation traceback for a segment, if history recording captured one.
+
+    Prefers the segment-level frames and falls back to the first block's. Only
+    populated when ``RTP_LLM_RECORD_MEM_HISTORY=1`` turned on torch's history
+    recording; see ``gpu_mem_probe._maybe_enable_mem_history``.
+    """
+    frames = seg.get("frames") or []
+    if not frames:
+        for b in seg.get("blocks", []):
+            if b.get("frames"):
+                frames = b["frames"]
+                break
+    return frames
+
+
+# Frames contributed by the recording machinery and the allocator itself. With
+# stacks="all" every C++ traceback starts with a dozen of these, so the naive
+# "first N frames" fallback shows only plumbing and hides the actual caller.
+_NOISE = (
+    "torch::unwind",
+    "CapturedTraceback",
+    "gather_with_cpp",
+    "CUDACachingAllocator",
+    "CachingAllocator::",
+    "c10::cuda::CUDACachingAllocator",
+    "empty_generic",
+    "at::detail::empty_cuda",
+    # The dispatcher trampoline between `torch.empty` and the allocator. Every
+    # single traceback carries ~8 of these, each a multi-hundred-character
+    # template instantiation, so leaving them in both hides the real caller
+    # behind the 8-frame cap and makes the log line unreadable.
+    "at::native::empty",
+    "wrapper_CUDA",
+    "wrap_kernel_functor",
+    "at::_ops::",
+    "c10::impl::",
+    "at::(anonymous namespace)",
+)
+
+# Frame renderings longer than this are template soup, not information. Truncating
+# keeps one segment's attribution on one readable log line.
+_FRAME_CHARS = 90
+
+
+def _fmt_frame(fr: dict) -> str:
+    name = fr.get("name") or "?"
+    if len(name) > _FRAME_CHARS:
+        name = name[:_FRAME_CHARS] + "..."
+    return f"{fr.get('filename', '?').split('/')[-1]}:{fr.get('line', '?')}:{name}"
+
+
+def _frames_str(seg: dict) -> str:
+    """Render a segment's/block's allocation traceback down to the actionable frames.
+
+    Preference order is deliberate: Python frames first, then rtp_llm C++ frames,
+    then anything non-noise. Some real owners have no Python frame at all (e.g. the
+    CUDA-graph capture holds allocated straight from ``cuda_graph_runner.cc``), so
+    the C++ tier cannot be dropped -- but when a Python frame exists it is always
+    the one that says which component to change.
+    """
+    frames = _seg_frames(seg)
+    if not frames:
+        # Ambiguous on purpose: this is equally "allocated from C++ with no
+        # Python frame" and "RTP_LLM_RECORD_MEM_HISTORY was not set".
+        return "<no frames recorded>"
+    frames = [
+        fr for fr in frames if not any(n in (fr.get("name") or "") for n in _NOISE)
+    ] or frames
+    py = [fr for fr in frames if (fr.get("filename") or "").endswith(".py")]
+    picked = [_fmt_frame(fr) for fr in (py or frames)[:8]]
+    if not py:
+        # No Python frame: prefer the rtp_llm C++ frames over unrelated plumbing,
+        # but keep the plain head as a last resort so "recording on, owner unknown"
+        # still reads differently from "recording off".
+        rtp = [fr for fr in frames if "rtp_llm" in (fr.get("filename") or "")]
+        if rtp:
+            picked = [_fmt_frame(fr) for fr in rtp[:8]]
+        else:
+            picked = picked[:6]
+    return " <- ".join(picked)
+
+
 def _snapshot_summary(device: object, top_n: int = 12) -> str:
     """Summarize ``torch.cuda.memory_snapshot`` for the given device.
 
@@ -171,18 +270,6 @@ def _snapshot_summary(device: object, top_n: int = 12) -> str:
             ),
             default=0,
         )
-
-    def _pool_id(seg: dict) -> tuple:
-        # (0, 0) == default caching-allocator pool; anything else is a private
-        # MemPool (TMS weights `_primary_mem_pool`) or a CUDA-graph private pool.
-        # empty_cache() only returns fully-free segments of the DEFAULT pool to
-        # the driver; free blocks trapped in a still-referenced private MemPool
-        # are physically resident but empty_cache never releases them. This split
-        # is exactly what attributes the sleep residual to default-vs-MemPool.
-        pid = seg.get("segment_pool_id")
-        if pid is None:
-            return (-1, -1)  # field absent on this torch build
-        return tuple(pid) if isinstance(pid, (list, tuple)) else (pid,)
 
     # Per-pool free-byte breakdown: which pool holds the physically-resident
     # free reserve that empty_cache cannot return.
@@ -222,45 +309,6 @@ def _snapshot_summary(device: object, top_n: int = 12) -> str:
             f"pool={s.get('segment_type', '?')} pool_id={_pool_id(s)} "
             f"largest_live_block={_largest_live_block(s) / _MiB:.1f}MiB"
         )
-
-    # Allocation backtraces for the biggest private-MemPool segments (only present
-    # when RTP_LLM_RECORD_MEM_HISTORY=1 enabled torch's history recording). This
-    # attributes the private-pool residual to its REAL allocator (symmetric-memory
-    # vs weights-region vs a workspace) instead of inferring from pool size.
-    def _seg_frames(seg: dict) -> list:
-        # Prefer the segment-level frames; fall back to the first block's frames.
-        frames = seg.get("frames") or []
-        if not frames:
-            for b in seg.get("blocks", []):
-                if b.get("frames"):
-                    frames = b["frames"]
-                    break
-        return frames
-
-    def _frames_str(seg: dict) -> str:
-        frames = _seg_frames(seg)
-        if not frames:
-            return "<no python frames (C++/engine alloc)>"
-        picked = []
-        for fr in frames:
-            fn = fr.get("filename", "")
-            name = fr.get("name", "")
-            if (
-                "rtp_llm" in fn
-                or "symmetric_memory" in fn
-                or "mem_pool" in name
-                or "use_mem_pool" in name
-                or "empty" == name
-            ):
-                picked.append(f"{fn.split('/')[-1]}:{fr.get('line', '?')}:{name}")
-            if len(picked) >= 8:
-                break
-        if not picked:
-            picked = [
-                f"{fr.get('filename', '?').split('/')[-1]}:{fr.get('line', '?')}:{fr.get('name', '?')}"
-                for fr in frames[:6]
-            ]
-        return " <- ".join(picked)
 
     def _is_kv(seg: dict) -> bool:
         # KV cache = C++ BlockPool alloc (tagged kv_cache, released at sleep).

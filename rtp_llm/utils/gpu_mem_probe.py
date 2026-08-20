@@ -26,19 +26,33 @@ def _maybe_enable_mem_history() -> None:
     """Enable CUDA allocation backtrace recording once, if opted in via env.
 
     ``RTP_LLM_RECORD_MEM_HISTORY=1`` turns on ``torch.cuda.memory._record_memory_history``
-    so every caching-allocator segment/block carries the Python stack that
-    allocated it. The sleep-time ``[SleepReclaim]`` snapshot then attributes each
-    private-MemPool segment to its real allocator (symmetric-memory vs weights-region
-    vs workspace) instead of guessing from pool size. Diagnostic only (per-alloc
-    stack capture has overhead); off by default.
+    so every caching-allocator segment/block carries the stack that allocated it.
+    The sleep-time ``[SleepReclaim]`` snapshot then attributes each segment to its
+    real allocator (symmetric-memory vs weights-region vs workspace) instead of
+    guessing from pool size. Diagnostic only; off by default.
+
+    Recording is deliberately narrowed to ``state``/``state``: keep a traceback for
+    memory that is *currently allocated* and skip the alloc/free event ring buffer
+    entirely. Attributing a sleep residual only ever needs the stacks of blocks that
+    are still live, and the default ``all``/``all`` would additionally retain
+    several-KB entries for every alloc AND free across a 222 GiB weight load.
+    ``stacks="all"`` is kept (it is also the default) because the interesting
+    residual candidates may have been allocated from C++ with no Python frame at
+    all, and "python-only" recording would render those indistinguishable from
+    "recording was off".
     """
     global _mem_history_enabled
     if _mem_history_enabled or os.environ.get("RTP_LLM_RECORD_MEM_HISTORY", "0") != "1":
         return
     try:
-        torch.cuda.memory._record_memory_history(max_entries=200000)
+        torch.cuda.memory._record_memory_history(
+            enabled="state", context="state", stacks="all", max_entries=200000
+        )
         _mem_history_enabled = True
-        logging.info("[InitMem] CUDA allocation history recording ENABLED (diagnostic)")
+        logging.info(
+            "[InitMem] CUDA allocation history recording ENABLED "
+            "(diagnostic, state/state, python+C++ frames)"
+        )
     except Exception as e:  # best-effort; never fail the caller
         logging.warning("[InitMem] could not enable mem history (ignored): %s", e)
 

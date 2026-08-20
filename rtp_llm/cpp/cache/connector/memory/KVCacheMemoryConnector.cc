@@ -155,7 +155,11 @@ bool KVCacheMemoryConnector::init() {
 
     checkLayerBlockStrideBytes();
 
+    const auto memory_cache_allocation_start = std::chrono::steady_clock::now();
     initBlockPool();
+    const double memory_cache_allocation_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - memory_cache_allocation_start).count();
+    RTP_LLM_LOG_INFO("memory cache allocation took %.3fs", memory_cache_allocation_seconds);
     RTP_LLM_CHECK_WITH_INFO(!(kv_cache_config_.enable_memory_cache_disk && kv_cache_config_.enable_tiered_memory_cache
                               && !usePrefixTreeMemoryCache()),
                             "init failed, enable_memory_cache_disk with tiered memory cache requires prefix-tree "
@@ -680,6 +684,7 @@ bool KVCacheMemoryConnector::releaseMemoryCacheBacking() {
     if (pools.empty()) {
         return true;
     }
+    const auto release_start = std::chrono::steady_clock::now();
     // The cache-key -> block index maps point into the buffers we are about to free.
     // Clear in place (keeping the cache object's address stable) so lock-free readers that
     // hold the shared_ptr never race a pointer swap; both caches are internally locked.
@@ -692,6 +697,9 @@ bool KVCacheMemoryConnector::releaseMemoryCacheBacking() {
     for (const auto& pool : pools) {
         pool->releaseHostBuffer();
     }
+    const double release_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - release_start).count();
+    RTP_LLM_LOG_INFO("memory cache pinned memory release took %.3fs", release_seconds);
     RTP_LLM_LOG_INFO("memory cache backing released for sleep (%zu host pool(s))", pools.size());
     return true;
 }
@@ -702,6 +710,7 @@ bool KVCacheMemoryConnector::restoreMemoryCacheBacking() {
     if (pools.empty()) {
         return true;
     }
+    const auto allocation_start = std::chrono::steady_clock::now();
     for (const auto& pool : pools) {
         pool->reallocateHostBuffer();
     }
@@ -713,6 +722,9 @@ bool KVCacheMemoryConnector::restoreMemoryCacheBacking() {
     if (prefix_block_cache_) {
         prefix_block_cache_->clear();
     }
+    const double allocation_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - allocation_start).count();
+    RTP_LLM_LOG_INFO("wake up memory cache allocation took %.3fs", allocation_seconds);
     RTP_LLM_LOG_INFO("memory cache backing restored on wake (%zu host pool(s))", pools.size());
     return true;
 }
