@@ -826,11 +826,12 @@ void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
 }
 
 void rejectionSampling(const RejectionSamplingParams& params) {
+    RTP_LLM_CHECK_WITH_INFO(!params.draft_probs_point_mass,
+                            "point-mass rejection sampling is only implemented by the CUDA backend");
     auto config = validateRejectionSamplingParams(params);
     auto stream = at::hip::getCurrentHIPStream().stream();
 
-    hipError_t err = ::invokeRejectionSampling(params.draft_probs_point_mass ? nullptr :
-                                                                                params.draft_probs_d.data_ptr<float>(),
+    hipError_t err = ::invokeRejectionSampling(params.draft_probs_d.data_ptr<float>(),
                                                params.draft_token_ids_d.data_ptr<int32_t>(),
                                                params.uniform_samples_d.data_ptr<float>(),
                                                params.target_probs_d.data_ptr<float>(),
@@ -842,8 +843,7 @@ void rejectionSampling(const RejectionSamplingParams& params) {
                                                config.batch_size,
                                                config.num_speculative_tokens,
                                                config.target_vocab_size,
-                                               stream,
-                                               params.draft_probs_point_mass);
+                                               stream);
     RTP_LLM_CHECK_WITH_INFO(err == hipSuccess, "invokeRejectionSampling failed: %s", hipGetErrorString(err));
 }
 

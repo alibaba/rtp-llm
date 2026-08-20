@@ -35,6 +35,8 @@ constexpr int kMaxBatch = 32;
 constexpr int kMaxBatchTiles = kMaxBatch / kBatchTile;
 constexpr int kMaxCtasPerBatchTile = 256;
 
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
+
 struct SharedStorage {
   __nv_bfloat16 state[kBatchTile][kRank];
   alignas(16) __nv_bfloat16
@@ -131,6 +133,8 @@ __device__ __forceinline__ void prefetch_weight_stage(
   }
 }
 
+#endif
+
 __global__ void __launch_bounds__(kThreads)
     dspark_persistent_markov_kernel(
         int32_t* output, const int* anchor,
@@ -141,6 +145,13 @@ __global__ void __launch_bounds__(kThreads)
         int anchor_stride, int vocab_size,
         int base_logits_batch_stride, int base_logits_step_stride, float scale,
         int batch_tiles, int ctas_per_batch_tile) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 900
+  // The serving entry point rejects non-SM90 devices before launch.  Keep a
+  // no-op device variant so multi-architecture wheels can still contain the
+  // SM90-only BF16 WMMA implementation without nvcc instantiating unsupported
+  // fragments (or cp.async) for sm7x/sm8x code-generation passes.
+  return;
+#else
   __shared__ SharedStorage shared;
 
   const int batch_tile = blockIdx.x % batch_tiles;
@@ -457,6 +468,7 @@ __global__ void __launch_bounds__(kThreads)
     }
     __syncthreads();
   }
+#endif
 }
 
 
