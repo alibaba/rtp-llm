@@ -118,7 +118,7 @@ public class PriorityAdmissionScheduler {
     private record TimedSnapshot(ClusterSnapshot snapshot, long capturedAtNanos) {}
 
     /**
-     * Short-TTL {@link ClusterSnapshot} cache (na130_4 D1 fix).
+     * Short-TTL {@link ClusterSnapshot} cache (na130_4 snapshot-cache fix).
      * {@code ClusterSnapshot.capture()} walks every decode endpoint under its
      * admission lock and deep-copies the layered views; per-request×retry
      * capture at production QPS is an O(N) allocation flood that stalls the

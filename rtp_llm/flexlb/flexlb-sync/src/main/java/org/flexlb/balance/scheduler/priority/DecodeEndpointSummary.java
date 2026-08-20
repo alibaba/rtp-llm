@@ -28,7 +28,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
  * @param realKvAvailable    engine-reported available KV minus local hard reservations
  * @param realKvTotal        engine-reported total KV capacity
  * @param totalLoad          confirmed running + local inflight request count
- * @param engineLoad         engine-facing load (same measure as the N2 gate)
+ * @param engineLoad         engine-facing load (same measure as the decode concurrency gate)
  * @param concurrencyLimit   configured decode concurrency limit (0 = unlimited)
  * @param hardKvReserved     sum of reserved hard KV tokens (shadow accounting)
  * @param expectedKvReserved sum of reserved expected KV tokens (shadow accounting)

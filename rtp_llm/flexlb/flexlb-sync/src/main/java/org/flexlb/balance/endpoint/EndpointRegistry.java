@@ -29,7 +29,7 @@ public class EndpointRegistry {
 
     /** Hard age cap overriding TTL exemptions and observation keep-alives: 30 minutes. */
     private static final long INFLIGHT_HARD_MAX_AGE_MS = 30 * 60 * 1000L;
-    /** Progress-aware batch-level inflight age cap (F-F): 120 seconds. */
+    /** Progress-aware batch-level inflight age cap: 120 seconds. */
     private static final long BATCH_INFLIGHT_MAX_AGE_MS = 120_000L;
     /** No-progress staleness threshold for the batch-level age cap: 60 seconds. */
     private static final long BATCH_INFLIGHT_STALE_MS = 60_000L;
@@ -256,7 +256,7 @@ public class EndpointRegistry {
      * @param hardMaxAgeMs hard age cap overriding TTL exemptions and
      *                     observation keep-alives; {@code <= 0} disables it
      * @param batchInflightMaxAgeMs progress-aware batch-level inflight age
-     *                     cap (F-F) applied to prefill/pdFusion batch
+     *                     cap applied to prefill/pdFusion batch
      *                     ledgers — force-settles over-age batches that also
      *                     went unobserved; {@code <= 0} disables it
      * @param batchInflightStaleMs  no-progress staleness threshold for the
@@ -265,7 +265,7 @@ public class EndpointRegistry {
     private void evictExpiredAll(long ttlMs, long hardMaxAgeMs,
                                  long batchInflightMaxAgeMs, long batchInflightStaleMs) {
         // Race guard for hard-cap eviction: entries the scheduler still owns
-        // are left to the scheduler's own cleanup cascade. The F-F batch age
+        // are left to the scheduler's own cleanup cascade. The batch age
         // cap is intentionally unconditional (bounded freeze) and takes the
         // scheduler-owned members through the handler terminal chain instead.
         LongPredicate schedulerOwns = batchScheduler()::hasInflightRequest;
@@ -288,7 +288,7 @@ public class EndpointRegistry {
      * reason. Reason buckets mirror the eviction exits and reuse the
      * scheduler-side series naming: {@code all_terminal} — every member's
      * scheduler-side future is already terminal (all-terminal release);
-     * {@code age_capped} — progress-aware batch-level age cap (F-F);
+     * {@code age_capped} — progress-aware batch-level age cap;
      * {@code hard_age_cap} — guarded hard cap overriding fences and
      * observation keep-alives; {@code ttl} — normal unobserved TTL. Only
      * non-zero buckets are reported, so decode endpoints (no batch-ledger

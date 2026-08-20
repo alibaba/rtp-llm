@@ -36,7 +36,7 @@ public:
     bool                         hasOutput() override;
     ErrorResult<GenerateOutputs> nextOutput() override;
     void                         updateOutput(const StreamUpdateInfo& update_info) override;
-    // C-1 (Z1) thread-level exit: un-park any FetchResponse thread blocked in
+    // Thread-level output-wait wakeup: un-park any FetchResponse thread blocked in
     // nextOutput()->waitNotEmpty() so it re-evaluates the loop condition
     // (hasError / FINISHED) and unwinds. wakeup() is the queue's own
     // destructor-grade wake (same primitive ~NormalGenerateStream relies on);

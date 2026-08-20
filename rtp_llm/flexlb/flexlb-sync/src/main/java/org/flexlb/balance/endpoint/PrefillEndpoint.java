@@ -65,7 +65,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private final BatchSchedulerReporter reporter;
     /**
      * The batch decision handler (the FlexlbBatchScheduler in production).
-     * Retained so the F-F batch-level age cap can route each member of a
+     * Retained so the batch-level age cap can route each member of a
      * force-settled batch through the existing handler terminal chain
      * ({@link BatchDecisionHandler#onExpired}) instead of leaving the
      * scheduler-side inflight entries dangling after the endpoint ledger
@@ -75,7 +75,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /**
      * Active Engine tasks not already represented in the local batch ledger.
-     * Atomic so the F-F age-cap release (R5 compensation) can add the
+     * Atomic so the age-cap release (engine-untracked compensation) can add the
      * force-settled members back concurrently with the status-sync
      * recomputation.
      */
@@ -580,7 +580,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /**
      * Whether any live inflight batch still carries {@code requestId} as a
      * member — the prefill-side visibility check for the scheduler's
-     * post-ACK inflight audit (F1). An entry invisible here and on the decode
+     * post-ACK inflight audit. An entry invisible here and on the decode
      * confirmed registry can no longer be settled through any ordinary path,
      * so the audit may force-settle it.
      */
@@ -633,7 +633,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /**
      * Full eviction pass with the progress-aware batch-level inflight age
-     * cap (F-F, {@code flexlbBatchInflightMaxAgeMs} +
+     * cap ({@code flexlbBatchInflightMaxAgeMs} +
      * {@code flexlbBatchInflightStaleMs}) layered on top: a committed
      * inflight batch whose creation age exceeds {@code batchInflightMaxAgeMs}
      * <b>and</b> whose last observation is older than
@@ -651,7 +651,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * {@code batchInflightStaleMs <= 0} drops the progress guard (pure age
      * cap). On release the batch entry, its reconciliation fence and the
      * request counter are dropped, the members are re-reserved as
-     * engine-untracked (R5 compensation — the engine may still be executing
+     * engine-untracked (the engine may still be executing
      * them, and the next status sync recomputes the exact count), each
      * member is routed through the existing handler terminal chain
      * ({@link BatchDecisionHandler#onExpired} — idempotent against entries
@@ -668,7 +668,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * engine finished reports) — is removed regardless of observation
      * freshness. Zombie engine running entries keep touching such a batch
      * ({@code markQueued}), defeating every staleness-based release leg
-     * (TTL / F-F cap / lost-detection) indefinitely; terminal members
+     * (TTL / age cap / lost-detection) indefinitely; terminal members
      * cannot revive, so the sweep releases the ledger entry and the
      * inflight gate directly. Fenced batches are excluded (the fence owns
      * their settle: finished evidence is deferred into the fence state and
@@ -679,7 +679,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * @param ttlMs                 max unobserved age before normal eviction
      * @param hardMaxAgeMs          guarded hard creation-age cap;
      *                              {@code <= 0} disables
-     * @param batchInflightMaxAgeMs batch-level age cap (F-F);
+     * @param batchInflightMaxAgeMs batch-level age cap;
      *                              {@code <= 0} disables
      * @param batchInflightStaleMs  no-progress staleness threshold for the
      *                              age cap; {@code <= 0} drops the
@@ -728,7 +728,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 // finished reports (admission timeout, client cancel,
                 // scheduler-side expiry). Zombie engine running entries keep
                 // touching the batch (markQueued), so every staleness-based
-                // release leg (TTL / F-F cap / lost-detection) is defeated
+                // release leg (TTL / age cap / lost-detection) is defeated
                 // indefinitely. Terminal members cannot revive — release the
                 // gate now, regardless of observation freshness. Fenced
                 // batches stay with the fence's own settle paths.
@@ -839,13 +839,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * F-F bounded-freeze release for one age-capped inflight batch, called
+     * Bounded-freeze release for one age-capped inflight batch, called
      * after the per-key compute already removed it from {@code inflightBatches}
      * (so the visible {@code inflight.batch.count} drops immediately).
      * Drops the reconciliation fence (the authoritative settlement this
      * fence is waiting for will never arrive — that is why the batch
      * reached the cap), decrements the request counter, compensates the
-     * engine-untracked counter (R5: the engine may still be executing the
+     * engine-untracked counter (the engine may still be executing the
      * members — re-reserve them so the fixed-window inflight gate does not
      * oversell in the short window before the next status sync recomputes
      * the exact count), emits one WARN line per batch, and routes every
@@ -861,12 +861,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
         boolean hadFence = reconciliationRequests.remove(batchId) != null;
         int members = batch.requests().size();
         inflightRequestCount.addAndGet(-members);
-        // R5 compensation: re-reserve the members as engine-untracked so the
+        // Re-reserve the members as engine-untracked so the
         // released inflight gate does not oversell before the next worker
         // status sync recomputes the count.
         engineUntrackedRequestCount.addAndGet(members);
         cachedWaitTimeExpireAtMs = 0;
-        // W2: tag with the endpoint's own role, not a hard-coded PREFILL.
+        // Tag with the endpoint's own role, not a hard-coded PREFILL.
         RoleType role = status.getRole();
         String roleName = role != null ? role.name() : RoleType.PREFILL.name();
         org.flexlb.util.Logger.warn(
@@ -923,7 +923,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 batch.touch(statusMs);
                 return batch;
             }
-            // A2: with the engine reporting a Prefill member finished as
+            // With the engine reporting a Prefill member finished as
             // soon as its stream terminates (no fetch wait), the fence's own
             // ack-only release path closes this fence on the same response
             // that carried the finished evidence, so the cached
@@ -943,8 +943,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * fence owns its settle decision, so the evidence is cached in the fence
      * state (merged with any earlier one) instead of settling immediately.
      * {@link #endDispatchReconciliation} replays the cached terminal once the
-     * fence closes — under A2 that is the ack-only release triggered by the
-     * same finished report, so the defer window is one fence lifetime, not an
+     * fence closes — under event-driven finish promotion that is the
+     * ack-only release triggered by the same finished report, so the defer
+     * window is one fence lifetime, not an
      * unbounded wait on the lost Enqueue ACK.
      */
     private boolean deferIfReconciling(long batchId, FinishedObservation observation) {

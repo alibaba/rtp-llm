@@ -404,7 +404,7 @@ class PriorityAdmissionSchedulerTest {
         assertEquals(0, decodeEp.inflightHardKvReserved());
     }
 
-    // ==================== snapshot cache (na130_4 D1 fix) ====================
+    // ==================== snapshot cache (na130_4 fix) ====================
 
     @Test
     void snapshotCacheReusesInstanceWithinTtl() {

@@ -74,7 +74,7 @@ void PrefillGenerateContext::setStream(const std::shared_ptr<GenerateStream>& st
     stream_ = stream;
     if (stream) {
         meta->enqueue(task_identity_, stream_);
-        // A2 event-driven promotion: migrate the runtime-meta entry to the
+        // Event-driven finish promotion: migrate the runtime-meta entry to the
         // finished list as soon as the local stream reaches its terminal
         // FINISHED state (normal completion or error converges there),
         // instead of a lazy scan at getEngineScheduleInfo() time. A later

@@ -324,7 +324,7 @@ public class BatchSchedulerReporter {
      * (event=endpoint_inflight_ttl_eviction); this closes the gap with the
      * shared {role, engineIp, reason} tag schema. Reason values split by
      * eviction exit: {@code all_terminal} (all-terminal release),
-     * {@code age_capped} (F-F batch age cap), {@code hard_age_cap} (guarded
+     * {@code age_capped} (batch age cap), {@code hard_age_cap} (guarded
      * hard cap — same value as the scheduler-side series), {@code ttl}
      * (normal unobserved TTL) and {@code orphan_reservation} (scheduler-side
      * orphan decode reservation reclaim); only non-zero buckets are reported.

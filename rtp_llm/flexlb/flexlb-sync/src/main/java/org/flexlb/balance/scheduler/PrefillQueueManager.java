@@ -45,7 +45,7 @@ public final class PrefillQueueManager {
      * version + per-item {@link QueuedRequestSnapshot} in queue order.
      * The hard capacity reuses {@code flexlbBatchQueueMaxSize} (0 = unbounded).
      *
-     * <p>task61 M2: only the membership copy and the version capture run under
+     * <p>Only the membership copy and the version capture run under
      * the queue lock; the O(n log n) sort runs on the thread-confined copy
      * outside it, so the submit path's {@code offer()} never blocks behind a
      * snapshot sort. Correctness: the copy and the version are captured

@@ -19,7 +19,7 @@ public:
 
     void updateOutput(const StreamUpdateInfo&) override {}
 
-    // Terminal-state drivers for A2 promotion tests: completion is
+    // Terminal-state drivers for the finish-promotion tests: completion is
     // event-driven now, so these must drive the real state-machine FINISHED
     // transition through moveToNext() (as the scheduler does each step)
     // instead of writing the status word directly — that transition is what
@@ -280,7 +280,7 @@ TEST(RpcServerRuntimeMetaTest, ComputeExecutionTimeExcludesQueueWait) {
               800);
 }
 
-// A2 event-driven promotion: the finish callback registered by
+// Event-driven promotion: the finish callback registered by
 // PrefillGenerateContext::setStream migrates the runtime-meta entry into
 // the finished report at the stream's terminal transition, even while its
 // Decode-side fetch()/dequeue() call has not arrived yet — the Master's
@@ -335,7 +335,7 @@ TEST(RpcServerRuntimeMetaTest, FinishCallbackPromotesFinishedStreamWithoutDequeu
     EXPECT_TRUE(after.finished_task_info_list.empty());
 }
 
-// A2 error terminal: the finish callback fires on an errored stream's
+// Error-terminal promotion: the finish callback fires on an errored stream's
 // FINISHED transition too (the Error event converges to FINISHED in
 // moveToNext()), and the finished record carries the stream's error_code.
 TEST(RpcServerRuntimeMetaTest, FinishCallbackPromotesErroredStreamWithErrorCode) {

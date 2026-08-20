@@ -83,11 +83,11 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     private final Object dispatchFence = new Object();
     /** Hard age cap for fenced inflight entries (preemption / reconciliation / cleanup): 30 minutes. */
     private static final long INFLIGHT_HARD_MAX_AGE_MS = 30 * 60 * 1000L;
-    /** Post-ACK invisibility audit grace: entries older than this qualify for the F1 backstop. */
+    /** Post-ACK invisibility audit grace: entries older than this qualify for the audit backstop. */
     private static final long INFLIGHT_AUDIT_AFTER_MS = 30_000L;
     /** Grace before terminal-settling a reconciliation whose Cancel target left the registry. */
     private static final long RECONCILE_TARGET_MISSING_GRACE_MS = 15_000L;
-    /** Consecutive failed reconciliation Cancels before the D3 backstop forces the terminal. */
+    /** Consecutive failed reconciliation Cancels before the retry backstop forces the terminal. */
     private static final int RECONCILE_MAX_CONSECUTIVE_FAILURES = 36;
 
     /**
@@ -802,7 +802,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                         // and stored this batch member even though the Enqueue
                         // ACK never fired (covers members whose running window
                         // was skipped by polling). Release through the single
-                        // S1 semantic instead of retaining on the cancel fence.
+                        // ack-only-release path instead of retaining on the cancel fence.
                         Logger.info("event=ack_only_release source=prefill_finished "
                                         + "request_id={} batch_id={}",
                                 requestId, snapshot.batchId());
@@ -865,7 +865,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 }
                 markDecodeAcceptedLocked(entry);
                 // Ack-only release: Decode observations only record ownership;
-                // release waits for the S1 semantic (late ACK / Prefill
+                // release waits for the ack-only semantic (late ACK / Prefill
                 // observation) instead of this legacy Decode shortcut.
             }
         }
@@ -1122,7 +1122,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         int expiredCount = 0;
         // Hard-age-cap subset of expiredCount, split out for the reason tag.
         int hardCapCount = 0;
-        // F3 observability: entries past the TTL retained only by a fence
+        // Observability: entries past the TTL retained only by a fence
         // (preemption / dispatch reconciliation / cleanup ownership). A
         // persistently non-zero rate is the inflight-leak signature.
         int skippedFenced = 0;
@@ -1215,10 +1215,10 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         }
     }
 
-    // ==================== Post-ACK inflight audit (F1) ====================
+    // ==================== Post-ACK inflight audit ====================
 
     /**
-     * F1 backstop: force-settle ledger entries the ordinary paths can no
+     * Audit backstop: force-settle ledger entries the ordinary paths can no
      * longer reach. An entry qualifies only when ALL of the following hold:
      * <ol>
      *   <li>age exceeds {@value #INFLIGHT_AUDIT_AFTER_MS} ms (the ACK round
@@ -1238,13 +1238,13 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
      * the TTL/hard-cap eviction notices it minutes later. The audit clears it
      * in seconds.
      *
-     * <p>Decode visibility spans BOTH admission layers (R1): a request queued
+     * <p>Decode visibility spans BOTH admission layers: a request queued
      * inside a saturated decode engine is not yet engine-confirmed (no KV
      * allocated), but its shadow reservation is still live — force-settling
      * the entry would roll that reservation back and oversell admission KV.
      * Only when neither layer holds the request is decode truly invisible.
      *
-     * <p>Lock order mirrors {@link #cleanupInflight()} (R5): the visibility
+     * <p>Lock order mirrors {@link #cleanupInflight()}: the visibility
      * probes ({@link PrefillEndpoint#tracksRequest} /
      * {@link DecodeEndpoint#isEngineConfirmed} /
      * {@link DecodeEndpoint#isReserved}) are lock-free CHM reads and run
@@ -1282,7 +1282,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
      * Shared post-ACK invisibility verdict + settlement, used by both the
      * periodic {@link #auditInflight()} fallback and the immediate
      * decode-vanish sync path. Visibility probes are lock-free CHM reads
-     * taken OUTSIDE the entry monitor (R5/R1 — see the audit javadoc for the
+     * taken OUTSIDE the entry monitor (see the audit javadoc for the
      * full safety argument); the monitor is then taken only for the
      * re-verify, the fence exclusions (preemption / dispatch reconciliation
      * / cleanup ownership — D/E-class entries are never touched), the
@@ -1622,7 +1622,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 return;
             }
             if (entry.dispatchReconciliation) {
-                // Ack-only release: the ACK is the S1 release semantic itself.
+                // Ack-only release: the ACK is itself the release proof.
                 // It proves the engine stored the fetch slot for this exact
                 // dispatch generation (batch id already validated above), so a
                 // late arrival dissolves the reconciliation uncertainty instead
@@ -1931,8 +1931,8 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     }
 
     /**
-     * Fix B (D3 backstop): caps the otherwise unbounded reconciliation retry
-     * chain. FAILED, UNSUPPORTED and NOT_FOUND all count — NOT_FOUND must not
+     * Fix B (retry backstop): caps the otherwise unbounded reconciliation
+     * retry chain. FAILED, UNSUPPORTED and NOT_FOUND all count — NOT_FOUND must not
      * settle immediately because only TOMBSTONED installs the absent fence on
      * the engine; a buffered late EnqueueBatch could still land after a bare
      * NOT_FOUND. At the default cap (36 tries ≈ 3 minutes at the 5s backoff
@@ -2215,7 +2215,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     @Scheduled(fixedRateString = "${report.interval.ms:2000}")
     public void reportBatchMetrics() {
         reporter.reportSchedulerInflightSize(inflight.size());
-        // F3 observability: age of the oldest inflight entry. With a healthy
+        // Observability: age of the oldest inflight entry. With a healthy
         // TTL the size gauge alone cannot distinguish "busy" from "leaking";
         // a max age creeping toward the TTL window is the leak signature.
         reporter.reportSchedulerInflightMaxAgeMs(

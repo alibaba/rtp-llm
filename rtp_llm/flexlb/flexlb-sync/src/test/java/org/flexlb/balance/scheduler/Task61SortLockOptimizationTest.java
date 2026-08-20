@@ -23,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 /**
- * task61 M2 (snapshot sort outside the queue lock) pins, two suites:
+ * Invariant pins for the outside-lock snapshot sort, two suites:
  *
  * <ol>
  *   <li><b>Sort equivalence</b> — the outside-lock snapshot produces exactly
@@ -63,7 +63,7 @@ class Task61SortLockOptimizationTest {
                 "outside-lock sort must equal the AUTO_TPM full-sort order");
     }
 
-    // ==================== 2. outside-lock concurrency (M2) ====================
+    // ==================== 2. outside-lock concurrency ====================
 
     @Test
     void snapshotVersionInvariantHoldsUnderConcurrentMutation() throws Exception {
@@ -110,7 +110,7 @@ class Task61SortLockOptimizationTest {
                         if (previous != null
                                 && previous.queueVersion() == snapshot.queueVersion()) {
                             assertEquals(previous.items(), snapshot.items(),
-                                    "version unchanged ⇒ content unchanged (M2 invariant)");
+                                    "version unchanged ⇒ content unchanged (outside-lock sort invariant)");
                             sameVersionPairs++;
                         }
                         previous = snapshot;

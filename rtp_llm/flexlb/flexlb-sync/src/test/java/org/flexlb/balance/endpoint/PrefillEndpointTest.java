@@ -484,7 +484,7 @@ class PrefillEndpointTest {
                 "a non-protected sibling must be repacked, not erase the protected batch");
         assertEquals(1, endpoint.realPendingCount());
 
-        // A2 defer semantics: the engine-finished evidence is cached in the
+        // Finish-promotion defer semantics: the engine-finished evidence is cached in the
         // fence state instead of settling the fenced member directly; the
         // fence (closed by the ack-only release on the same finished report)
         // replays it through endDispatchReconciliation.
@@ -603,7 +603,7 @@ class PrefillEndpointTest {
         ambiguousMemberSuccess.setBatchId(7L);
         ambiguousMemberSuccess.setRequestId(101L);
         ambiguousMemberSuccess.setErrorCode(0);
-        // A2 defer semantics: the fenced member's own success report is
+        // Finish-promotion defer semantics: the fenced member's own success report is
         // cached in the fence state; the ack-only release triggered by the
         // same finished report closes the fence, which replays the evidence.
         calibrate(Map.of("101", ambiguousMemberSuccess), Map.of());
@@ -625,7 +625,7 @@ class PrefillEndpointTest {
 
         TaskInfo protectedFailure = taskInfo(101L, 7L, null, 500, 40);
         TaskInfo siblingFailure = taskInfo(102L, 7L, null, 501, 50);
-        // A2 defer semantics: the fenced member's failure is deferred into
+        // Finish-promotion defer semantics: the fenced member's failure is deferred into
         // the fence state; only the unprotected sibling settles here.
         calibrate(Map.of("101", protectedFailure, "102", siblingFailure), Map.of());
 
@@ -666,7 +666,7 @@ class PrefillEndpointTest {
                 createBatchItem(732L, 300, 100)));
         endpoint.beginDispatchReconciliation(703L, 731L);
 
-        // A2 defer semantics: the fenced member's finished evidence is
+        // Finish-promotion defer semantics: the fenced member's finished evidence is
         // cached in the fence state — neither member settles yet.
         calibrate(Map.of("731", taskInfo(731L, 703L, null, 0, 40)), Map.of());
         assertEquals(1, endpoint.getInflightBatchCount(),
@@ -707,7 +707,7 @@ class PrefillEndpointTest {
                 "812", taskInfo(812L, 810L, TaskPhase.KV_ALLOCATED, 0, 0)));
         assertEquals(1, endpoint.getInflightBatchCount());
 
-        // Huge TTL, no hard cap, no F-F cap, scheduler still "owns" every
+        // Huge TTL, no hard cap, no batch age cap, scheduler still "owns" every
         // member: only the all-terminal leg can release the batch.
         int evicted = endpoint.evictExpiredBatches(300_000, 0, 0, 0, requestId -> true);
         assertEquals(1, evicted);
@@ -871,7 +871,7 @@ class PrefillEndpointTest {
         assertEquals(1, endpoint.getInflightBatchCount());
     }
 
-    // ---- batch-level inflight age cap (F-F, bounded freeze) ----
+    // ---- batch-level inflight age cap (bounded freeze) ----
 
     /** Records every onExpired member routed through the handler chain. */
     private static final class RecordingHandler implements BatchDecisionHandler {
@@ -927,7 +927,7 @@ class PrefillEndpointTest {
             assertEquals(0, capped.getInflightBatchCount(),
                     "inflight.batch.count must drop immediately on the age cap");
             assertEquals(2, capped.realPendingCount(),
-                    "R5 compensation: members are re-reserved as engine-untracked until "
+                    "members are re-reserved as engine-untracked until "
                             + "the next status sync recomputes the count");
             assertEquals(List.of(101L, 102L), handler.expiredRequestIds,
                     "every member must be routed through the handler terminal chain");
@@ -938,7 +938,7 @@ class PrefillEndpointTest {
 
     @Test
     void batchAgeCapForceSettlesFencedBatchDespiteSchedulerOwnership() throws InterruptedException {
-        // The core F-F assertion: a reconciliation fence (and even scheduler
+        // The core bounded-freeze assertion: a reconciliation fence (and even scheduler
         // ownership, which the guarded hard-cap branch respects) must not
         // extend the freeze past the batch-level age cap.
         RecordingHandler handler = new RecordingHandler();
@@ -956,7 +956,7 @@ class PrefillEndpointTest {
                     "the cap must fire even when fenced and scheduler-owned");
             assertEquals(0, capped.getInflightBatchCount());
             assertEquals(1, capped.realPendingCount(),
-                    "R5 compensation re-reserves the single member as engine-untracked");
+                    "the age-cap release re-reserves the single member as engine-untracked");
             assertEquals(List.of(101L), handler.expiredRequestIds);
 
             // The fence is gone too: a late authoritative settlement must be
@@ -990,7 +990,7 @@ class PrefillEndpointTest {
 
     @Test
     void batchAgeCapSparesOverdueBatchStillObservedByStatusSync() throws Exception {
-        // Misfire guard (R1 core): an over-age batch whose member the worker
+        // Misfire guard: an over-age batch whose member the worker
         // status sync still reports (RUNNING or queued — either path refreshes
         // lastObservedAtMs in calibrate Phase 3) must NOT be force-settled;
         // only batches that went silent past the staleness threshold are frozen.
@@ -1010,7 +1010,7 @@ class PrefillEndpointTest {
         assertEquals(1, endpoint.evictExpiredBatches(60_000, 0, 5, 15, requestId -> false));
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(1, endpoint.realPendingCount(),
-                "R5 compensation re-reserves the member as engine-untracked");
+                "the age-cap release re-reserves the member as engine-untracked");
     }
 
     // ---- reason-split eviction breakdown (metric tag layer) ----
@@ -1040,7 +1040,7 @@ class PrefillEndpointTest {
     void evictionBreakdownBucketsAgeCappedExit() throws InterruptedException {
         endpoint.commitBatch(920L, 100, List.of(createBatchItem(921L, 500, 200)));
         Thread.sleep(10);
-        // age > 5ms AND unobserved > 5ms → F-F age cap (ttlMs=60s keeps the
+        // age > 5ms AND unobserved > 5ms → batch age cap (ttlMs=60s keeps the
         // normal TTL leg out of the picture).
         EvictionBreakdown breakdown =
                 endpoint.evictExpiredBatchesByReason(60_000, 0, 5, 5, requestId -> false);

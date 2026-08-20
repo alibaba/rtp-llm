@@ -186,7 +186,7 @@ public class BatcherContext {
     /**
      * Unordered mutable copy of the live queue members. Callers holding
      * {@link #queueLock()} get a copy consistent with the current queue
-     * version that they may sort outside the lock (task61 M2).
+     * version that they may sort outside the lock.
      */
     List<BatchItem> copiedItems() {
         return new ArrayList<>(queue);

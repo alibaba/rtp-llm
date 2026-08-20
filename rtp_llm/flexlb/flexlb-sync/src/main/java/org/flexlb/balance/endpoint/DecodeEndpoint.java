@@ -1243,7 +1243,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     /**
      * Whether the engine has confirmed this request in the layered registry
      * (KV_ALLOCATED / RUNNING) — the decode-side visibility check for the
-     * scheduler's post-ACK inflight audit (F1). Mirrors
+     * scheduler's post-ACK inflight audit. Mirrors
      * {@link #isConfirmedTracked} under the audit's engine-confirmed
      * vocabulary.
      */
@@ -1254,7 +1254,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     /**
      * Whether this endpoint still holds the request's shadow reservation
      * ({@code inflightRequests}, the pre-queue admission layer). The
-     * scheduler's post-ACK inflight audit (F1) must treat such a reservation
+     * scheduler's post-ACK inflight audit must treat such a reservation
      * as decode-side visibility: a request queued inside a saturated decode
      * engine is not yet engine-confirmed (no KV allocated), yet force-settling
      * its ledger entry would roll the reservation back and oversell

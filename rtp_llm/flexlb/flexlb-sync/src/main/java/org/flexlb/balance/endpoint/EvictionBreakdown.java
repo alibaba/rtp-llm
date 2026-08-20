@@ -16,7 +16,7 @@ package org.flexlb.balance.endpoint;
  * @param allTerminal batches released because every member's scheduler-side
  *                    future is already terminal (all-terminal release fix)
  * @param ageCapped   batches force-settled by the progress-aware batch-level
- *                    age cap (F-F)
+ *                    age cap
  * @param hardAgeCap  entries force-released by the guarded hard age cap
  *                    overriding fences and observation keep-alives
  * @param ttl         entries evicted by the normal unobserved TTL

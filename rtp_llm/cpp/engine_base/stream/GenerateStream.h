@@ -132,7 +132,7 @@ public:
     virtual bool                         hasOutput() {
         return false;
     }
-    // C-1 (Z1) thread-level exit: wake any consumer thread parked on this
+    // Thread-level output-wait wakeup: wake any consumer thread parked on this
     // stream's output wait (e.g. NormalGenerateStream's nextOutput ->
     // waitNotEmpty) so it re-evaluates its loop condition (hasError /
     // FINISHED) instead of sleeping until the stream is destroyed. Called on
@@ -141,7 +141,7 @@ public:
     // own one override this (see NormalGenerateStream::terminateOutputWait).
     virtual void terminateOutputWait() {}
 
-    // A2 event-driven completion notification: fired exactly once when this
+    // Event-driven completion notification: fired exactly once when this
     // stream first reaches its terminal FINISHED state (errored streams
     // converge to FINISHED as well). Lets the runtime meta migrate the entry
     // to the finished list at completion time instead of a lazy report-time

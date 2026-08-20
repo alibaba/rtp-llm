@@ -642,7 +642,7 @@ void GenerateStream::reportEvent(StreamEvents::EventType event, ErrorCode error_
         generate_status_->reportEvent(event, error_code, error_msg);
     }
     if (event == StreamEvents::Error) {
-        // C-1 (Z1): the error is latched (outside mutex_); a consumer parked in
+        // Error-latch wakeup: the error is latched (outside mutex_); a consumer parked in
         // nextOutput()->waitNotEmpty() must re-evaluate hasError() now instead
         // of sleeping until the stream is destroyed. Covers checkTimeout()'s
         // GENERATE_TIMEOUT latch on the Fetch thread itself: the wakeup makes
@@ -666,7 +666,7 @@ void GenerateStream::reportError(ErrorCode error_code, const std::string& error_
         std::lock_guard<std::mutex> lock(*mutex_);
         generate_status_->reportEvent(StreamEvents::Error, error_code, error_msg);
     }
-    // C-1 (Z1): mirror reportEvent's Error branch — wake parked output
+    // Mirror reportEvent's Error branch — wake parked output
     // consumers so they observe the latched error and unwind.
     terminateOutputWait();
 }
@@ -749,7 +749,7 @@ StreamState GenerateStream::moveToNext() {
             }
         }
         cv_->notify_one();
-        // C-1 (Z1) terminal-path exit: a consumer parked in nextOutput()'s
+        // Terminal-path wakeup: a consumer parked in nextOutput()'s
         // waitNotEmpty() with an empty queue must observe FINISHED. Harmless
         // when queued outputs remain: they stay consumable one getAndPopFront
         // at a time; the queue's terminated latch only ends the WAIT, not the
