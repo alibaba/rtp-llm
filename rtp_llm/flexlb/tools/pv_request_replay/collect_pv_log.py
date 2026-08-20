@@ -144,6 +144,8 @@ def _remote_command(
             workspace,
             "exec",
             f"inst/{instance}",
+            "-c",
+            "worker0",
             "--",
             *remote_command,
         ]

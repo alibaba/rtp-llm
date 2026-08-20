@@ -242,6 +242,15 @@ class CollectPvLogTest(unittest.TestCase):
             ).read_text()
             self.assertNotIn("application.log", snapshot_text)
             self.assertNotIn("pv.log.1", [Path(path).name for path in files])
+            exec_commands = [command for command in fake.commands if "exec" in command]
+            self.assertTrue(exec_commands)
+            self.assertTrue(
+                all(
+                    command[command.index("exec") + 2 : command.index("--")]
+                    == ["-c", "worker0"]
+                    for command in exec_commands
+                )
+            )
 
     def test_remote_collection_recovers_newline_terminated_partial_boundary(self) -> None:
         path = "/home/admin/logs/pv.log"
