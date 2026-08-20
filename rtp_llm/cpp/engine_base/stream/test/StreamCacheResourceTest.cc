@@ -243,14 +243,14 @@ protected:
         stream_->generate_status_->status = StreamState::RUNNING;
     }
 
-    std::shared_ptr<StreamReadStorageBackend> prepareStorageBackendResource(bool block_matches,
-                                                                            bool seed_host = false) {
+    std::shared_ptr<StreamReadStorageBackend> prepareStorageBackendResource(
+        bool block_matches, bool seed_host = false, RoleType role_type = RoleType::PDFUSION) {
         KVCacheConfig kv_cache_config;
         kv_cache_config.enable_remote_cache  = true;
         kv_cache_config.enable_host_cache  = seed_host;
         kv_cache_config.host_cache_size_mb = seed_host ? 1 : 0;
         prepareResourceWithCacheConfig(
-            init_config(), {1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, RoleType::PDFUSION, kv_cache_config);
+            init_config(), {1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, role_type, kv_cache_config);
 
         auto backend = std::make_shared<StreamReadStorageBackend>();
         if (block_matches) {
@@ -668,7 +668,18 @@ TEST_F(StreamCacheResourceTest, testCacheLoadLatencySegmentsCoverMatchToReady) {
     result.load_prepare_latency_us = 300;
     result.load_attempted          = true;
 
+    resource.cache_reuse_metrics_.load_success                  = false;
+    resource.cache_reuse_metrics_.report_load_metrics           = true;
+    resource.cache_reuse_metrics_.report_load_wait_latency      = true;
+    resource.cache_reuse_metrics_.load_wait_latency_us          = 123;
+    resource.cache_reuse_metrics_.report_match_to_ready_latency = true;
+    resource.cache_reuse_metrics_.match_to_ready_latency_us     = 456;
     resource.recordCacheReuseMallocResult(result);
+    EXPECT_FALSE(resource.cache_reuse_metrics_.report_load_metrics);
+    EXPECT_FALSE(resource.cache_reuse_metrics_.report_load_wait_latency);
+    EXPECT_FALSE(resource.cache_reuse_metrics_.report_match_to_ready_latency);
+    EXPECT_EQ(resource.cache_reuse_metrics_.load_wait_latency_us, 0);
+    EXPECT_EQ(resource.cache_reuse_metrics_.match_to_ready_latency_us, 0);
     resource.allocator_load_context_ = makeAllocatorLoadContext(/*matched_blocks=*/1, {Tier::DEVICE});
     ASSERT_TRUE(resource.loadCacheDone());
 
@@ -722,7 +733,10 @@ TEST_F(StreamCacheResourceTest, testCacheLoadFailureKeepsDeviceReuseMetrics) {
     resource.load_wait_begin_time_us_                         = currentTimeUs();
     resource.malloc_begin_time_us_                            = resource.load_wait_begin_time_us_;
 
-    resource.allocator_load_context_ = std::make_shared<ImmediateAllocatorContext>(false);
+    auto load_context = makeAllocatorLoadContext(/*matched_blocks=*/1, {Tier::HOST});
+    ASSERT_TRUE(load_context->completeOne(false));
+    ASSERT_EQ(load_context->mallocStatus(), MallocStatus::NONE);
+    resource.allocator_load_context_ = load_context;
     ASSERT_TRUE(resource.loadCacheDone());
 
     EXPECT_EQ(stream_->reuseLength(), 2);
@@ -1009,6 +1023,126 @@ TEST_F(StreamCacheResourceTest, testPrefillAllocatorLoadFailureKeepsDeviceReadyR
     EXPECT_EQ(stream_->hostReuseLength(), 0);
     EXPECT_EQ(stream_->diskReuseLength(), 0);
     EXPECT_FALSE(stream_->hasError());
+}
+
+TEST_F(StreamCacheResourceTest, testPrefillMaterializationShortfallRearmsAllocatorLoad) {
+    auto backend =
+        prepareStorageBackendResource(/*block_matches=*/false, /*seed_host=*/false, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_EQ(resource.resourceContext().role_type, RoleType::PREFILL);
+
+    size_t commits = 0;
+    size_t aborts  = 0;
+    auto coordinator = std::make_shared<LoadContextCoordinator>(
+        [&](const std::shared_ptr<LoadAsyncContext>&) {
+            ++commits;
+            return true;
+        },
+        [&](LoadAsyncContext&) { ++aborts; });
+    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}),
+                           {{{/*group_id=*/0, NULL_BLOCK_IDX}}}};
+    auto context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->setMatchCallback([](LoadAsyncContext&, size_t) {
+        return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED};
+    });
+
+    resource.allocator_load_context_ = context;
+    stream_->reportEvent(StreamEvents::CanRun);
+    stream_->reportEvent(StreamEvents::LoadInitiated);
+    stream_->generate_status_->status = StreamState::LOADING_CACHE;
+    resource.malloc_failed_times_      = 9;
+    context->startBackendMatch();
+    context->waitDone();
+    ASSERT_FALSE(context->success());
+
+    EXPECT_EQ(stream_->moveToNext(), StreamState::WAITING);
+    // Admission ownership belongs to the scheduler: ordinary loading streams
+    // clear CanRun when they move back to WAITING, while explicit groups keep
+    // their admission and retry in the group lane.
+    EXPECT_TRUE(stream_->hasEvent(StreamEvents::CanRun));
+    EXPECT_FALSE(stream_->hasEvent(StreamEvents::LoadInitiated));
+    EXPECT_FALSE(stream_->hasError());
+    EXPECT_EQ(resource.mallocFailedTimes(), 10);
+    EXPECT_EQ(commits, 0u);
+    EXPECT_EQ(aborts, 1u);
+
+    auto allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
+    cache_manager_->allocator_ = allocator;
+    EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
+        .WillOnce(testing::Invoke([](const MallocInfo& info) -> MallocResult {
+            EXPECT_FALSE(info.verbose);
+            return {true, 0};
+        }));
+    EXPECT_CALL(*allocator, incrMalloc(testing::_))
+        .WillOnce(testing::Invoke([](const MallocInfo& info) -> MallocResult {
+            info.batch_kv_cache_resource->mutableBlockIds(0, /*group_id=*/0).assign({1});
+            return {true, 0};
+        }));
+
+    EXPECT_EQ(stream_->moveToNext(), StreamState::RUNNING);
+    EXPECT_TRUE(stream_->hasEvent(StreamEvents::LoadInitiated));
+    EXPECT_EQ(resource.curBlocksNum(), 1);
+    coordinator->shutdown();
+}
+
+TEST_F(StreamCacheResourceTest, testPrefillPermanentMaterializationFailureTerminates) {
+    auto backend =
+        prepareStorageBackendResource(/*block_matches=*/false, /*seed_host=*/false, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_EQ(resource.resourceContext().role_type, RoleType::PREFILL);
+
+    auto coordinator = std::make_shared<LoadContextCoordinator>(
+        [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
+    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{5678}),
+                           {{{/*group_id=*/0, NULL_BLOCK_IDX}}}};
+    auto context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->setMatchCallback([](LoadAsyncContext&, size_t) {
+        return LoadMatchResult{false, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED};
+    });
+
+    resource.allocator_load_context_ = context;
+    stream_->reportEvent(StreamEvents::CanRun);
+    stream_->reportEvent(StreamEvents::LoadInitiated);
+    stream_->generate_status_->status = StreamState::LOADING_CACHE;
+    context->startBackendMatch();
+    context->waitDone();
+
+    EXPECT_EQ(stream_->moveToNext(), StreamState::WAITING);
+    EXPECT_TRUE(stream_->hasError());
+    EXPECT_EQ(resource.curBlocksNum(), 0);
+    EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+    coordinator->shutdown();
+}
+
+TEST_F(StreamCacheResourceTest, testPrefillCoordinatorCommitFailureTerminates) {
+    auto backend =
+        prepareStorageBackendResource(/*block_matches=*/false, /*seed_host=*/false, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_EQ(resource.resourceContext().role_type, RoleType::PREFILL);
+
+    auto coordinator = std::make_shared<LoadContextCoordinator>(
+        [](const std::shared_ptr<LoadAsyncContext>&) { return false; }, [](LoadAsyncContext&) {});
+    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{9012}),
+                           {{{/*group_id=*/0, NULL_BLOCK_IDX}}}};
+    auto context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->setMatchCallback([](LoadAsyncContext& current, size_t) { return current.commit(); });
+
+    resource.allocator_load_context_ = context;
+    stream_->reportEvent(StreamEvents::CanRun);
+    stream_->reportEvent(StreamEvents::LoadInitiated);
+    stream_->generate_status_->status = StreamState::LOADING_CACHE;
+    context->startBackendMatch();
+    context->waitDone();
+    ASSERT_EQ(context->mallocStatus(), MallocStatus::INTERNAL_ERROR);
+
+    EXPECT_EQ(stream_->moveToNext(), StreamState::WAITING);
+    EXPECT_TRUE(stream_->hasError());
+    EXPECT_EQ(resource.curBlocksNum(), 0);
+    EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+    coordinator->shutdown();
 }
 
 TEST_F(StreamCacheResourceTest, testPrefillWaitForAllocatorLoadFailureKeepsDeviceReadyReuse) {

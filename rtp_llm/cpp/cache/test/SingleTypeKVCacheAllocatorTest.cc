@@ -19,6 +19,8 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackendExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/config/MTPModelConfigHelper.h"
@@ -52,6 +54,37 @@ public:
 
 private:
     size_t submit_count_{0};
+};
+
+class InlineSingleTypeStorageBackendExecutor: public StorageBackendExecutor {
+public:
+    bool start() override {
+        return true;
+    }
+    bool submit(Task task) override {
+        task();
+        return true;
+    }
+    void shutdown() noexcept override {}
+};
+
+class AlwaysHitSingleTypeStorageBackend: public StorageBackend {
+public:
+    AlwaysHitSingleTypeStorageBackend():
+        StorageBackend(std::make_shared<InlineSingleTypeStorageBackendExecutor>()) {}
+    ~AlwaysHitSingleTypeStorageBackend() override {
+        shutdown();
+    }
+
+protected:
+    bool initImpl() override {
+        return true;
+    }
+    StorageMatchResult matchImpl(const StorageRequest& request) override {
+        return {request.handles.size(), nullptr};
+    }
+    void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {}
+    void writeImpl(const StorageRequest&) override {}
 };
 
 class ScopedSingleTypeDiskDirectory {
@@ -992,6 +1025,56 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SuccessfulOuterAllocationCommitsLoadExact
 
     allocator_->free(FreeInfo{resource, token_ids});
     coordinator->commit_callback_ = std::move(original_commit);
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, DeferredBackendMatchRetriesZeroReservePoolShortfall) {
+    const auto config = createSingleTypeTestConfig(/*layer_num=*/2, /*block_num=*/5, /*seq_size_per_block=*/4);
+    allocator_        = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
+    KVCacheConfig remote_config;
+    remote_config.enable_remote_cache = true;
+    allocator_->setBlockTreeCacheConfigForTest(remote_config);
+    allocator_->setStorageBackendForTest(std::make_shared<AlwaysHitSingleTypeStorageBackend>());
+    ASSERT_TRUE(allocator_->init());
+    allocator_->setReserveBlocksNum(0);
+
+    const auto pool = allocator_->getDeviceBlockPool();
+    ASSERT_NE(pool, nullptr);
+    auto pinned = pool->malloc(pool->freeBlocksNum());
+    ASSERT_TRUE(pinned.has_value());
+    pool->incRef(*pinned, BlockRefType::STORAGE_BACKEND);
+    ASSERT_EQ(pool->freeBlocksNum(), 0u);
+
+    auto resource = createBatchKVCacheResource(/*batch_size=*/1, config);
+    resource->setBatchCacheKeys(0, CacheKeysType{100});
+    auto       token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+    MallocInfo malloc_info{resource, token_ids};
+    malloc_info.enable_cache_lookup = true;
+    malloc_info.reuse_cache         = true;
+    malloc_info.verbose             = false;
+
+    auto result = allocator_->malloc(malloc_info);
+    ASSERT_TRUE(result.success);
+    auto load_context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
+    ASSERT_NE(load_context, nullptr);
+    EXPECT_TRUE(load_context->needBackendMatch());
+    EXPECT_TRUE(load_context->done());
+    EXPECT_FALSE(load_context->success());
+    EXPECT_EQ(load_context->mallocStatus(), MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED);
+    EXPECT_EQ(resource->curBlocksNum(), 0);
+
+    pool->decRef(*pinned, BlockRefType::STORAGE_BACKEND);
+    load_context.reset();
+    result.async_context.reset();
+
+    auto retry_result = allocator_->malloc(malloc_info);
+    ASSERT_TRUE(retry_result.success);
+    auto retry_context = std::dynamic_pointer_cast<LoadAsyncContext>(retry_result.async_context);
+    ASSERT_NE(retry_context, nullptr);
+    retry_context->waitDone();
+    EXPECT_TRUE(retry_context->success());
+    EXPECT_EQ(retry_context->mallocStatus(), MallocStatus::NONE);
+    EXPECT_GT(resource->curBlocksNum(), 0);
+    allocator_->free(FreeInfo{resource, token_ids});
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, PrefixReuseDisabledSkipsMatchAndInsert) {

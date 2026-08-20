@@ -299,9 +299,9 @@ void FIFOScheduler::onRunningStream(const GenerateStreamPtr& stream) {
 
 bool FIFOScheduler::waitPredicate() {
     // Check streams directly without calling empty() which acquires lock_ (already held by schedule())
-    // A pending load is polled by the timed wait below; it is not itself a
-    // wakeup event, otherwise the predicate is immediately true and spins a CPU.
-    return stop_ || schedule_trigger_ || !waiting_streams_.empty() || !running_streams_.empty();
+    // Pending loads and capacity-blocked waiters are polled by the timed wait below. They are not
+    // wakeup events themselves, otherwise a retryable KV shortage spins the scheduler.
+    return stop_ || schedule_trigger_ || !running_streams_.empty();
 }
 
 void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_streams,
@@ -574,6 +574,10 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     if (need_fill_fake_stream_ || !loading_cache_streams_.empty() || !loading_cache_group_queue_.empty()
         || !waiting_group_queue_.empty()) {
         cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
+    } else if (!waiting_streams_.empty()) {
+        // No running work can release capacity. Poll PD-held block releases without turning a
+        // large retryable queue into a tight malloc/eviction loop.
+        cond_.wait_for(lock, std::chrono::milliseconds(100), [this] { return waitPredicate(); });
     } else {
         cond_.wait(lock, [this] { return waitPredicate(); });
     }
