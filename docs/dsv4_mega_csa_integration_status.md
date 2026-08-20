@@ -1,14 +1,21 @@
 # DSV4 Mega CSA/HCA TP1 接入状态与后续方案
 
-更新日期：2026-08-18
+更新日期：2026-08-20
 
 ## 1. 当前结论
 
-DSV4 Mega CSA 的开源框架适配已经进入生产 decode 层循环。使用本地
-`cuda_extension@b93e0761` 本地构建，TP1 单层真实 RTP attention sublayer 的数值对照、eager、
-CUDA Graph 和 slot reuse 已通过；但还不能称为 RTP-LLM 整模型端到端已跑通。框架当前锁定的
-CUDA13 `rtp-kernel` wheel 仍不含 Mega 扩展，必须先发布对应制品并完成真实 allocator、
-prefill/decode 切换和整模型验证。
+DSV4 Mega CSA 的开源框架适配已经进入生产 decode 层循环。TP1 单层真实 RTP attention
+sublayer 的数值对照、eager、CUDA Graph 和 slot reuse 已通过。2026-08-18 起本地整模型
+serving 端到端已跑通（裁层 DSV4-Pro）；2026-08-19 起 **全量 DeepSeek-V4-Flash（43 层，
+单卡）端到端跑通**，baseline 与 Mega（CSA+HCA 双开）输出语义等价，仅在近平局 token 处
+出现 greedy 分岔（与框架 smoke 对不同拓扑使用各自 golden 的既有现象同类）。框架公共
+CUDA13 `rtp-kernel` wheel 仍不含 Mega 扩展；当前所有验证使用本地 wheel + 未提交的本地
+lock 补丁，发布制品后才能推平公共依赖。
+
+2026-08-19 起，同一 extension 二进制内同时编译 **DSV4-Pro 与 DSV4-Flash 两套 CSA 几何**
+（Pro: dim 7168 / q_lora 1536 / 128 heads / o_groups 16；Flash: 4096 / 1024 / 64 / 8），
+python wrapper 按张量形状 dispatch；HCA 算子自始就带双几何。RTP 侧 weights/adapter/runtime
+以 `CSAGeometry` profile 按 `attn.dim` 选择，两种模型共用全部代码路径。
 
 2026-08-18 起，HCA（`compress_ratio == 128`）层的同型接入也已完成并通过单层对照，由独立
 开关 `DSV4_MEGA_HCA` 控制。HCA 没有 indexer/TopK/MQA 阶段：opA/opB 两个融合 GEMM 覆盖
@@ -56,6 +63,7 @@ FFN sublayer、FFN mHC、model head mHC 不在 Mega 替换范围内。
 | 并行 | TP1、单卡 | `tp_size != 1` 初始化失败 |
 | KV cache | FP8 | 非 FP8 初始化失败 |
 | 层类型 | `compress_ratio == 4` 的 CSA 层（`DSV4_MEGA_CSA`）；`compress_ratio == 128` 的 HCA 层（`DSV4_MEGA_HCA`） | 按 ratio 分别挂 adapter |
+| 模型几何 | DSV4-Pro（dim 7168）与 DSV4-Flash（dim 4096） | `GEOMETRY_BY_DIM` 按 `attn.dim` 选 profile，其他 dim 初始化失败 |
 | 请求形态 | decode、`q_len == 1`、batch 1..128 | 其余形态走现有路径 |
 | 进程角色 | `DECODE` 和单卡 `PDFUSION` | 由 `forward_decode` 限制实际执行 |
 | 开关 | `DSV4_MEGA_CSA=1` / `DSV4_MEGA_HCA=1` | 各自默认关闭，模型构造期固定，共享一个模型级 runtime |
@@ -87,6 +95,9 @@ MTP 是独立模型且当前 `compress_ratio == 0`，不会挂载 CSA adapter。
 | `dsv4/block.py`（扩展） | `enable_mega_hca`（仅 ratio==128），`forward_decode` 统一 `_mega_csa_adapter or _mega_hca_adapter` 选路 |
 | `fp8/test/test_mega_hca_adapter.py` | HCA 选路、双开关、权重布局、geometry/ABI、runtime slot 生命周期 |
 | `fp8/test/test_mega_hca_rtp_eager.py` | 真实 `AttentionFP8(ratio=128)` 对照原 `_forward_decode_hca`：输出、边界压缩 HCA_KV、SWA、state 环、长上下文、graph、性能 |
+| `mega_csa_weights.py`（Flash 化） | `CSAGeometry` profile（PRO/FLASH），打包形状全部由 profile 派生；模块级 Pro 常量保留为别名 |
+| `mega_csa_adapter.py` / `mega_hca_adapter.py`（Flash 化） | `_validate_geometry` 按 `attn.dim` 选 profile 并 fail-fast；ABI 探针改为按本层几何的子集校验（extension 广告双形状） |
+| `mega_csa_runtime.py`（Flash 化） | CSA/HCA workspace 尺寸按 profile 分配并以 dim 入 key；`num_hc_splits` 接受 hidden 宽度 |
 
 ### 3.2 权重
 
@@ -167,17 +178,26 @@ CUDA Extension 已完成 Wuda 最新 TP1（不含 TPDP）迁移并推送：
 repo:   /root/work/cuda_extension
 branch: dsv4_megakernel
 base:   origin/main@3bc0ca4
-source: Wuda origin/main@6818258
-commit: b93e0761 feat(dsv4): consume int64 slots in HCA decode ops
-        （其上一提交 e1d1c985 为 fused MLA output inverse RoPE quant）
+source: Wuda origin/main@6818258 + origin/flash@ce0b82b（Flash CSA 几何）
+commit: 9f4c3fe fix(dsv4): accept 64-head query rows in fused/standalone query RMS+RoPE
+        aac0948 feat(dsv4): compile CSA ops for Flash geometry
+        b93e0761 feat(dsv4): consume int64 slots in HCA decode ops
+        e1d1c985 feat(dsv4): fuse MLA output inverse RoPE quant
 ```
+
+Flash 支持的实现方式：CSA 链（front/wq_b/hc_reduce）在同一源码上以
+`DSV4_FLASH_CSA` 编译出第二组 TU（`*_flash.cu`），所有受宏影响的 namespace/kernel
+符号重命名以避免 ODR 合并；pybind 注册 `*_flash` 入口，python wrapper 按输入形状
+一行 dispatch。`geometry_csa()`/`geometry_hca()` 同时广告两组形状。随迁的几何无关
+优化：wq_b BM16 小批模板（M<=16）、qnorm warp 数模板化、mqa fp4/fp8 与 standalone
+`query_rms_rope_out` 的 `output_heads` 运行时化（64/128）。
 
 当前已生成但尚未发布的本地 CUDA13.2 wheel：
 
 ```text
 /root/work/cuda_extension/dist/
-  rtp_kernel-0.1.0+b93e0761-cp310-cp310-linux_x86_64.whl
-sha256: 1a18bfc492a1ba91f7a66cd87d7710ec8f8a880ce742f50262eb953922145e5c
+  rtp_kernel-0.1.0+aac0948b.20260819174054-cp310-cp310-linux_x86_64.whl
+sha256: ebba2d0a9bcbbfd92d6773ce3bc6bec0cc45e31a82646b09c5f2c6a9f2c4cde7
 ```
 
 wheel 已确认包含：
@@ -369,14 +389,52 @@ CSA 回归在新 wheel 与共享 runtime/block/transformer 改动下重跑，数
 2. HCA state 环对照为 `1e-06` 量级（CSA 为 `1e-11`）：extension FRONT-EMIT 的 bf16
    round 语义与框架 Triton compressor 存在实现差，后续可对齐；不阻塞当前结论。
 
+### 2026-08-18：裁层 DSV4-Pro 本地 serving 端到端
+
+用 `truncate_dsv4_pro.py` 从 `/mnt/nas1/nanjun.cp/DeepSeek-V4-Pro` 裁出 4 层
+（`compress_ratios=[128,128,4,128]`，59 GB，`num_nextn_predict_layers=0`，需带 `encoding/`）。
+单卡 `rtp_llm.start_server`（BF16 act、FP8 KV、`seq_size_per_block=256`）baseline 与
+Mega（CSA+HCA 双开）各完成 3 条 greedy 请求（含跨 128-token 压缩边界的 200-token 生成），
+无 crash/NaN。token 前缀 7~12 个一致后分岔；logits 对照 `calc_diff=5.6e-04/7.5e-04`、
+`top1_same=1`、baseline top1 margin 仅 `0.0036/0.0040`——4 层裁层模型 argmax 病态敏感，
+分岔不构成 Mega 缺陷证据；正确性定论需健康模型（见下）。
+
+### 2026-08-19/20：Flash 双几何与全量 Flash 端到端
+
+extension 侧（`aac0948` + `9f4c3fe`）：
+
+- 新增 `tests/test_dsv4_mega_flash_csa.py`：hc_reduce（DIM 4096）、front（K 4096/N 4160）、
+  wq_b（K 1024/64 heads，覆盖 BM16 与全部 32-row 模板）对照 torch 参考全过
+  （GEMM `calc_diff < 1e-5`，fp4 链 byte-match）；另含 64-head 奇数 batch 的
+  `query_rms_rope_out` 回归用例。
+- Pro CSA 6/6、HCA 4/4 pytest 回归全绿（含 BM16 新路径）。
+- 修复：`output_heads` 运行时化漏掉的三处 128-head 行数前置校验
+  （mqa fp8/fp4 `numel % (128*512)`、standalone query_rms_rope 的 host 校验与
+  kernel `>>7`）。Pro 偶数头批次永远不触发，Flash 首步 decode 即 abort；`9f4c3fe`
+  修复并补测试。
+
+RTP 侧（`5a393bedda` CSA、`da03d2b19c` HCA）：bazel
+`test_mega_{csa,hca}_rtp_eager` + `test_mega_{csa,hca}_adapter` 全绿（Pro 回归口径）。
+
+全量 Flash 端到端（`/mnt/nas1/hf/DeepSeek-V4-Flash-0731`，43 层 156 GB，单卡，
+`max_seq_len 4096`）：baseline 与 Mega（CSA+HCA 双开，SWA-only 前两层走原生路径）
+各完成 3 条 greedy 请求。两侧输出均语言连贯且关键答案一致（"Paris"、"2+2=4"）；
+200-token 长生成前约 160 字符逐字相同后在近平局 token 处分岔，之后各自连贯。
+0/3 文本逐字一致——与框架 smoke 对 cp2/cp4/tp1 各用 golden 的既有现象同类，
+文本级验收应采用 per-配置 golden；logits 级定量对照在排队等空卡（`watch_and_run_logits.sh`）。
+
 ## 6. 端到端剩余缺口
 
 按阻塞顺序还需要：
 
-1. 发布 `e1d1c985` 对应的 CUDA13 x86_64 wheel，更新开源/内源实际使用的依赖入口和 lock；
-2. 增加由真实 `KVCacheManager` 创建 typed pools/block tables 的集成测试，替代手工 pool fixture；
-3. 校验 normal prefill -> Mega decode -> normal target verify -> Mega decode；
-4. 跑完整 TP1 模型正确性；
+1. 发布 `9f4c3fe` 对应的 CUDA13 x86_64 wheel，更新开源/内源实际使用的依赖入口和 lock；
+2. 增加由真实 `KVCacheManager` 创建 typed pools/block tables 的集成测试，替代手工 pool
+   fixture（本地 serving e2e 已实际走真实 allocator，但缺 bazel 内可回归的形式）；
+3. ~~校验 normal prefill -> Mega decode~~ 已在裁层 Pro 与全量 Flash serving 中覆盖
+   （target verify / MTP 场景仍未覆盖）；
+4. 整模型正确性收口：为 Mega 配置生成 per-配置 golden（框架 smoke 惯例），并在健康模型
+   上完成 logits 级对照（Flash 对照排队中）；建议同时把 4 层 Pro 裁层 checkpoint 上传 NAS
+   并新增 `v4_pro_4layer_tp1` / `..._mega` smoke case；
 5. 测量开关关闭时普通 FP8 整模型路径，确认新增 Python 分支不可测；
 6. 对 normal FP8 与 Mega FP8 做真实模型、代表性长上下文和完整 batch grid 性能 A/B。
 
@@ -408,3 +466,112 @@ HCA 两组 adapter/runtime/weights/测试文件）：
 HCA 已按同样的“完整 sublayer adapter”模式接入（`MegaHCAAdapter`，独立 geometry 检查）。
 SWA-only、prefill、TP2/DP2 与 FlashMLA 通用接口仍不修改；若后续接入这些场景，应分别
 新增受支持的完整 sublayer adapter，不能放宽现有 CSA/HCA TP1 adapter 的 geometry 检查。
+
+## 8. 开发操作手册（分支 / 编译 / 运行 / 测试 / benchmark）
+
+以下均为本文档验证所实际使用的流程，路径以开发容器为准（`/root/work` 与
+`/data3/<user>/root-work` 为同一目录）。
+
+### 8.1 仓库与分支
+
+| 仓库 | 地址 | 分支 | 角色 |
+| --- | --- | --- | --- |
+| Wuda（算子上游） | `git@github.com:guluguluhhhh/wuda.git` | `main`（Pro TP1）、`flash`（Flash CSA 几何源，`ce0b82b`） | 只读迁移源，不直接部署 |
+| cuda_extension | `git@gitlab.alibaba-inc.com:foundation_models/cuda_extension.git` | `dsv4_megakernel`（HEAD `9f4c3fe`） | Mega 算子生产载体，出 `rtp-kernel` wheel |
+| RTP 开源 fork | `git@github.com:guluguluhhhh/rtp-llm.git` | `dsv4-mega`（HEAD `da03d2b19c`） | 框架适配（adapter/runtime/weights/测试/本文档） |
+| RTP 内源 | gitlab `foundation_models/RTP-LLM` | `develop/wangyin_ds_v4_20260424` | 内源载体；子模块 `github-opensource` 指向上一行的 fork 分支 |
+
+本地布局：内源主仓检出后执行 `scripts/create_symlinks.sh`；`.worktrees/dsv4-mega`
+是同一内源仓的 worktree（保有 Bazel 暖缓存，GPU bazel 测试在这里跑）；主树
+`github-opensource` 做提交，测试前将改动文件同步进 worktree 的同名路径。
+
+### 8.2 编译
+
+CUDA Extension（venv 需 torch cu130，已备 `~/root-work/.venvs/rtpllm-dsv4-mega-*`）：
+
+```bash
+cd /root/work/cuda_extension
+python build.py          # pip wheel 全量构建，约 13 分钟，产物在 dist/
+pip install --force-reinstall --no-deps dist/rtp_kernel-*.whl
+```
+
+冒烟：`python -c "from rtp_kernel import dsv4_mega; print(dsv4_mega.geometry_csa())"`
+应同时出现 Pro 与 `*_flash` 两组形状。
+
+RTP Bazel 依赖本地 wheel：修改两树
+`internal_source/deps/requirements_lock_torch_gpu_cuda13.txt` 中 `rtp-kernel` 行为
+`file:///root/work/cuda_extension/dist/<wheel>` 并更新其 `--hash=sha256:`。该补丁
+**不提交**；wheel 重建后（文件名含时间戳）必须同步刷新。完整编译：
+
+```bash
+cd .worktrees/dsv4-mega/github-opensource
+bazelisk build //rtp_llm:rtp_llm --config=cuda13 --jobs=64 --verbose_failures
+```
+
+### 8.3 运行（本地 serving 端到端）
+
+serving venv 为 `~/root-work/.venvs/rtpllm-e2e`（`rtp_llm` 以 site-packages 拷贝安装：
+改完框架代码需把改动文件拷入该 venv，或重装）。可用 checkpoint：
+
+```text
+/root/work/checkpoints/DeepSeek-V4-Pro-4layer   59 GB 裁层（truncate_dsv4_pro.py 产物）
+/root/work/checkpoints/DeepSeek-V4-Pro-6layer   87 GB 裁层
+/mnt/nas1/hf/DeepSeek-V4-Flash-0731            156 GB 全量 43 层（单卡可跑；NAS 冷读约 40 min）
+```
+
+一键对照脚本（`/root/work/scripts_e2e/`，环境变量 `E2E_CKPT`/`E2E_GPU` 可覆盖）：
+
+```bash
+python run_e2e_compare.py                       # baseline + mega 两轮 serving + 文本对照
+python run_e2e_logits.py baseline|mega|compare  # 三步式 logits 级对照（return_logits）
+./watch_and_run_logits.sh                       # 轮询空卡（>=200GB），自动跑上面三步
+```
+
+脚本封装的关键运行要素（手工起 server 时同样必需）：
+`MODEL_TYPE=deepseek_v4`、`CHECKPOINT_PATH`/`TOKENIZER_PATH`、`START_PORT`；
+`--load_method scratch --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 256`
+（必须为 128 的倍数且 >=128）；容器内 `/tmp/rtp-llm` 可能属他人，需预设 8 个 JIT
+cache 环境变量（`FLASHINFER_WORKSPACE_BASE`、`DG_JIT_CACHE_DIR`、`TRTLLM_DG_CACHE_DIR`、
+`TILELANG_CACHE_DIR`、`TORCH_EXTENSIONS_DIR`、`TVM_FFI_CACHE_DIR`、`CUTE_DSL_CACHE_DIR`、
+`TRITON_CACHE_DIR`）到自有目录；`DG_JIT_CPP_STANDARD=20`。Mega 开关：
+`DSV4_MEGA_CSA=1`、`DSV4_MEGA_HCA=1`（默认全关，即 baseline）。
+
+### 8.4 测试
+
+CUDA Extension（pytest，单卡 GPU，全套约 1 分钟）：
+
+```bash
+cd /root/work/cuda_extension
+CUDA_VISIBLE_DEVICES=<idx> python -m pytest   tests/test_dsv4_mega_front_gemm_csa.py tests/test_dsv4_mega_wq_b_csa.py   tests/test_dsv4_mega_hc_fused.py tests/test_dsv4_mega_mqa_logits.py   tests/test_dsv4_mega_idx_post.py tests/test_dsv4_mega_mla_o_quant.py   tests/test_dsv4_mega_front_gemm_hca.py tests/test_dsv4_mega_wq_b_hca.py   tests/test_dsv4_mega_hca_chain.py tests/test_dsv4_mega_state_pool.py   tests/test_dsv4_mega_flash_csa.py -x -q
+# tests/test_dsv4_mega_hca_e2e.py 需要 RTP_OPENSOURCE_ROOT 指向开源树
+```
+
+RTP（bazel，GPU 目标在 worktree 跑）：
+
+```bash
+cd .worktrees/dsv4-mega/github-opensource
+bazelisk test --config=cuda13 --jobs=64 --test_output=summary   --test_env=CUDA_VISIBLE_DEVICES=<idx> --nocache_test_results   //rtp_llm/models_py/modules/dsv4/fp8/test:test_mega_csa_adapter   //rtp_llm/models_py/modules/dsv4/fp8/test:test_mega_csa_rtp_eager   //rtp_llm/models_py/modules/dsv4/fp8/test:test_mega_hca_adapter   //rtp_llm/models_py/modules/dsv4/fp8/test:test_mega_hca_rtp_eager
+```
+
+CPU/静态回归与端到端见第 5 节与 8.3。
+
+### 8.5 Benchmark
+
+1. **RTP 单层生产口径**（最有对比价值）：eager 测试内建性能模式，测同一真实
+   sublayer 的原路径 vs Mega，三口径（eager / 生产 CUDA Graph / 预绑定算子链）
+   并带 `1.05x` 回归门：
+
+   ```bash
+   bazelisk test ... //rtp_llm/models_py/modules/dsv4/fp8/test:test_mega_csa_rtp_eager      --test_env=DSV4_MEGA_RUN_PERF=1      --test_env=DSV4_MEGA_PERF_CASES="1:2048,8:2048,32:8192,128:65536"
+   # HCA 同理换 test_mega_hca_rtp_eager；边界步用 ctx 为 128 的倍数（如 8:2048）
+   ```
+
+   已有基线：CSA B128/64K `-24.6%`（§5 表）；HCA 非边界 `-20%`、压缩边界 `-54%`、
+   B128/4K `-43%`（§5 HCA 表）。
+2. **端到端粗口径**：`run_e2e_compare.py` 输出每请求 `cost_time`/`iter_count`
+   （aux_info），可对 baseline/mega 两轮做同 prompt 对比；正式吞吐 A/B 见第 6 节
+   缺口 6，需要专用整机窗口。
+3. **extension 侧微基准**：`tests/benchmark_dsv4_mega_flash_segments.py`（Flash HCA
+   decode 链冷-L2 分段基准：opA→opB→Q norm/RoPE→FlashMLA→O-proj），
+   以及 Wuda 仓 `dsv4_megakernel/megakernel/test/` 下的原始 bench（`test_e2e_decode.py`
+   等，含 cuBLAS 对照）——后者在 Wuda 环境跑，用于算子级归因，不是 RTP 生产口径。
