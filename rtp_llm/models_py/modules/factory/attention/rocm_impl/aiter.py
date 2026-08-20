@@ -1,4 +1,6 @@
+import logging
 import math
+import time
 from typing import Any, Optional
 
 import aiter
@@ -30,6 +32,85 @@ from rtp_llm.ops.compute_ops import (
     get_scalar_type,
     paged_attention_atrex,
 )
+from rtp_llm.utils.warmup import model_warm_up_enabled
+
+_batch_prefill_warmup_done = False
+
+
+def warmup_aiter_batch_prefill(fp8_kv_cache: bool = False) -> None:
+    """Pre-build the aiter mha_batch_prefill JIT kernel during warmup.
+
+    ROCm skips the C++ fake-request engine warmup (NormalEngine gates it
+    behind USING_CUDA), so without this the first real prefill request
+    blocks for minutes while aiter JIT-compiles mha_batch_prefill. One call
+    with tiny dummy tensors triggers the compile; the build is cached under
+    AITER_JIT_DIR and reused by real requests. The kernel binary name only
+    encodes dtype and launch flags (not shapes), and matches the production
+    call flags, so a single tiny call covers subsequent requests.
+    """
+    global _batch_prefill_warmup_done
+    if not model_warm_up_enabled():
+        return
+    if _batch_prefill_warmup_done:
+        return
+    _batch_prefill_warmup_done = True
+
+    try:
+        start = time.perf_counter()
+        device = torch.device("cuda")
+        head_num, head_num_kv, head_dim = 2, 1, 128
+        tokens_per_block, seq_len, block_num = 16, 4, 1
+        kv_dtype = torch.float8_e4m3fnuz if fp8_kv_cache else torch.bfloat16
+        vs = 16 // torch.empty(0, dtype=kv_dtype).element_size()
+
+        q = torch.zeros(
+            (seq_len, head_num, head_dim), dtype=torch.bfloat16, device=device
+        )
+        k_cache = torch.zeros(
+            (block_num, head_num_kv, head_dim // vs, tokens_per_block, vs),
+            dtype=kv_dtype,
+            device=device,
+        )
+        v_cache = torch.zeros(
+            (block_num, head_num_kv, tokens_per_block // vs, head_dim, vs),
+            dtype=kv_dtype,
+            device=device,
+        )
+        cu_seqlens_q = torch.tensor([0, seq_len], dtype=torch.int32, device=device)
+        kv_indptr = torch.zeros(2, dtype=torch.int32, device=device)
+        kv_page_indices = torch.empty(0, dtype=torch.int32, device=device)
+        block_table = torch.zeros((1, 1), dtype=torch.int32, device=device)
+        seqlen_k = torch.full((1,), seq_len, dtype=torch.int32, device=device)
+        descale = (
+            torch.ones(1, dtype=torch.float32, device=device)
+            if fp8_kv_cache
+            else None
+        )
+
+        aiter.mha_batch_prefill_func(
+            q,
+            k_cache,
+            v_cache,
+            cu_seqlens_q,
+            kv_indptr,
+            kv_page_indices,
+            seq_len,
+            seq_len,
+            causal=True,
+            block_table=block_table,
+            seqlen_k=seqlen_k,
+            q_descale=descale,
+            k_descale=descale,
+            v_descale=descale,
+        )
+        torch.cuda.synchronize()
+        logging.info(
+            "aiter mha_batch_prefill warmup done (fp8_kv_cache=%s), cost %.1fs",
+            fp8_kv_cache,
+            time.perf_counter() - start,
+        )
+    except Exception as e:
+        logging.warning("aiter mha_batch_prefill warmup failed: %s", e)
 
 
 def _is_mrope_interleaved_supported(attn_configs: AttentionConfigs) -> bool:

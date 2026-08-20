@@ -50,3 +50,16 @@ py_test(
     tags = ["rocm"],
     exec_properties = {"gpu": "MI308X-ROCM7"},
 )
+
+py_test(
+    name = "test_aiter_batch_prefill_warmup",
+    srcs = ["test_aiter_batch_prefill_warmup.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+    ],
+    timeout = "long",
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)

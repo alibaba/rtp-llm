@@ -85,6 +85,20 @@ class BackendManager(object):
             model_config=model_config,
         )
 
+        # ROCm skips the C++ fake-request engine warmup (USING_CUDA only), so
+        # pre-build the aiter mha_batch_prefill JIT kernel here; otherwise the
+        # first real prefill request pays a multi-minute JIT compile.
+        from rtp_llm.device.device_type import is_hip
+
+        if is_hip():
+            from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
+                warmup_aiter_batch_prefill,
+            )
+
+            warmup_aiter_batch_prefill(
+                fp8_kv_cache=bool(engine_config.kv_cache_config.fp8_kv_cache)
+            )
+
         # Initialize DeepEP/MoriEP wrapper if MOE model and EP is enabled
         if (
             model_config.expert_num > 0
