@@ -218,7 +218,8 @@ void NormalSamplerInputGatherer::setLogitsProcessorInputs(SamplerInputs&        
         const size_t batch_size = stream->currentBatchSize();
         for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
             if (processor) {
-                state_ptr->insert(processor, idx, idx + batch_size);            }
+                state_ptr->insert(processor, idx, idx + batch_size);
+            }
         }
         idx += batch_size;
     });
