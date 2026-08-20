@@ -300,7 +300,7 @@ GptModelInputs makeInputs(const std::vector<int32_t>& input_lengths,
 class TestContextParallelProcessor: public IContextParallelProcessor {
 public:
     explicit TestContextParallelProcessor(const ParallelismConfig& config):
-        IContextParallelProcessor(config, /*split_hidden_states=*/true) {}
+        IContextParallelProcessor(config) {}
 
     size_t handleOutputs(torch::Tensor& hidden_states,
                          const GptModelInputs&,
