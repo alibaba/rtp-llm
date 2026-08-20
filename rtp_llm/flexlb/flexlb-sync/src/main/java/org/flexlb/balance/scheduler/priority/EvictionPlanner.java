@@ -31,8 +31,8 @@ public final class EvictionPlanner {
      */
     static final Comparator<QueuedRequestSnapshot> CANDIDATE_ORDER = Comparator
             .comparingInt(QueuedRequestSnapshot::priority)
-            .thenComparing(QueuedRequestSnapshot::deadlineMs, Comparator.reverseOrder())
-            .thenComparing(QueuedRequestSnapshot::arrivalTimeMs, Comparator.reverseOrder())
+            .thenComparing(Comparator.comparingLong(QueuedRequestSnapshot::deadlineMs).reversed())
+            .thenComparing(Comparator.comparingLong(QueuedRequestSnapshot::arrivalTimeMs).reversed())
             .thenComparingLong(QueuedRequestSnapshot::requestId);
 
     private EvictionPlanner() {
@@ -146,7 +146,7 @@ public final class EvictionPlanner {
     static final Comparator<DecodeRequestSnapshot> DECODE_SLOT_ORDER = Comparator
             .comparingInt(DecodeRequestSnapshot::priority)
             .thenComparingInt(v -> v.phase().ordinal())
-            .thenComparing(DecodeRequestSnapshot::deadlineMs, Comparator.reverseOrder())
+            .thenComparing(Comparator.comparingLong(DecodeRequestSnapshot::deadlineMs).reversed())
             .thenComparingLong(DecodeRequestSnapshot::requestId);
 
     /**
@@ -157,8 +157,9 @@ public final class EvictionPlanner {
     static final Comparator<DecodeRequestSnapshot> DECODE_KV_ORDER = Comparator
             .comparingInt(DecodeRequestSnapshot::priority)
             .thenComparingInt(v -> v.phase().ordinal())
-            .thenComparing(v -> PriorityCostFunction.kvBucket(v.kvTokens()), Comparator.reverseOrder())
-            .thenComparing(DecodeRequestSnapshot::deadlineMs, Comparator.reverseOrder())
+            .thenComparing(Comparator.comparingLong(
+                    (DecodeRequestSnapshot v) -> PriorityCostFunction.kvBucket(v.kvTokens())).reversed())
+            .thenComparing(Comparator.comparingLong(DecodeRequestSnapshot::deadlineMs).reversed())
             .thenComparingLong(DecodeRequestSnapshot::requestId);
 
     /**
@@ -226,6 +227,15 @@ public final class EvictionPlanner {
             return DecodeEvictionProposal.CASE_SLOT;
         }
         return kv ? DecodeEvictionProposal.CASE_KV : null;
+    }
+
+    /**
+     * Lightweight deficit pre-check on the O(1) aggregate summary — lets a
+     * caller skip the full-snapshot upgrade entirely when the endpoint still
+     * has spare slot and KV capacity for the incoming request.
+     */
+    public static boolean hasDeficit(PriorityRequestEnvelope envelope, DecodeEndpointSummary summary) {
+        return summary.slotDeficit() > 0 || summary.kvDeficit(envelope.hardKvTokens()) > 0;
     }
 
     /**

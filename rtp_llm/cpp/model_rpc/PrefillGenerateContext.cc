@@ -74,6 +74,23 @@ void PrefillGenerateContext::setStream(const std::shared_ptr<GenerateStream>& st
     stream_ = stream;
     if (stream) {
         meta->enqueue(task_identity_, stream_);
+        // Event-driven finish promotion: migrate the runtime-meta entry to the
+        // finished list as soon as the local stream reaches its terminal
+        // FINISHED state (normal completion or error converges there),
+        // instead of a lazy scan at getEngineScheduleInfo() time. A later
+        // fetch() or stopStream() dequeue is find-miss idempotent. Only the
+        // meta shared_ptr, the request id, and a weak stream reference are
+        // captured: the context itself is not captured (it may already be
+        // destroyed when the callback fires) and the weak ref cannot extend
+        // the stream's lifetime or create an ownership cycle.
+        auto                          meta_holder = meta;
+        auto                          rid         = request_id;
+        std::weak_ptr<GenerateStream> weak_stream = stream;
+        stream->setFinishCallback([meta_holder, rid, weak_stream]() {
+            if (auto finished = weak_stream.lock()) {
+                meta_holder->dequeue(rid, finished);
+            }
+        });
     }
 }
 
@@ -189,11 +206,9 @@ bool PrefillGenerateContext::isPriorityPreempted() const {
 
 bool PrefillGenerateContext::tryMarkOtherTerminal() {
     std::lock_guard<std::mutex> lock(terminal_transition_mu_);
-    auto expected = PrefillTerminalCause::ACTIVE;
-    if (terminal_cause_.compare_exchange_strong(expected,
-                                                PrefillTerminalCause::OTHER,
-                                                std::memory_order_acq_rel,
-                                                std::memory_order_acquire)) {
+    auto                        expected = PrefillTerminalCause::ACTIVE;
+    if (terminal_cause_.compare_exchange_strong(
+            expected, PrefillTerminalCause::OTHER, std::memory_order_acq_rel, std::memory_order_acquire)) {
         return true;
     }
     return expected == PrefillTerminalCause::OTHER;
@@ -236,9 +251,8 @@ bool PrefillGenerateContext::finalizePriorityPreemption() {
     details.set_error_message(error_info.ToString());
     std::string serialized_details;
     details.SerializeToString(&serialized_details);
-    error_status = grpc::Status(transErrorCodeToGrpc(ErrorCode::PRIORITY_PREEMPTED),
-                                error_info.ToString(),
-                                serialized_details);
+    error_status =
+        grpc::Status(transErrorCodeToGrpc(ErrorCode::PRIORITY_PREEMPTED), error_info.ToString(), serialized_details);
 
     // TryCancel is only the stop trigger. Finish joins the existing P->D RPC
     // execution; Decode's cancellation finalizer runs before Finish returns.
@@ -260,9 +274,8 @@ bool PrefillGenerateContext::finalizePriorityPreemption() {
     }
 
     if (meta) {
-        meta->markPriorityPreemptionCanceled(request_id,
-                                             static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED),
-                                             "preempted by a higher-priority request");
+        meta->markPriorityPreemptionCanceled(
+            request_id, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "preempted by a higher-priority request");
     }
     priority_finalized_ = true;
     return true;
@@ -295,9 +308,25 @@ void PrefillGenerateContext::markRequestEnd() {
         }
         auto          stub = connect_status.value().stub.get();
         ClientContext client_context;
-        EmptyPB       response;
-        auto          grpc_status = stub->RemoteFinish(&client_context, finish_request, &response);
+        // Best-effort notification semantics: a remote worker that never
+        // answers must not block the finalizer/prefill thread pool forever.
+        // Failures are already warned and ignored below; the deadline only
+        // bounds each synchronous wait.
+        client_context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+        EmptyPB response;
+        auto    grpc_status = stub->RemoteFinish(&client_context, finish_request, &response);
         if (!grpc_status.ok()) {
+            if (grpc_status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
+                // Leak-fix verification log: the 5s markRequestEnd deadline
+                // fired, so this worker's cache_store request-end was not
+                // delivered within the bound (low frequency, not sampled).
+                RTP_LLM_LOG_WARNING("event=mark_request_end_deadline_exceeded request_id=%ld batch_id=%ld "
+                                    "worker=%s deadline_ms=5000: markRequestEnd RemoteFinish RPC hit its "
+                                    "5s deadline; request-end not delivered to this worker",
+                                    real_id,
+                                    task_identity_.batch_id,
+                                    prefill_worker.c_str());
+            }
             RTP_LLM_LOG_WARNING("request [%d], remote finish for ip %s failed, ignore markRequestEnd for it",
                                 real_id,
                                 prefill_worker.c_str());

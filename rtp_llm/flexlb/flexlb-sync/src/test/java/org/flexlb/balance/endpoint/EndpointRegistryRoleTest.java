@@ -1,7 +1,14 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.scheduler.BatchItem;
+import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.DebugInfo;
+import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -11,7 +18,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -103,6 +112,73 @@ class EndpointRegistryRoleTest {
 
         assertTrue(registry.remove(RoleType.VIT, ipPort, replacement));
         assertNull(registry.get(RoleType.VIT, ipPort));
+    }
+
+    // ---- reason-split endpoint eviction reporting ----
+
+    @Test
+    void scheduledEvictionSplitsEndpointEvictionReasonByExit() throws InterruptedException {
+        BatchSchedulerReporter reporter = Mockito.mock(BatchSchedulerReporter.class);
+        FlexlbBatchScheduler scheduler = Mockito.mock(FlexlbBatchScheduler.class);
+        ConfigService configService = Mockito.mock(ConfigService.class);
+        FlexlbConfig config = new FlexlbConfig();
+        config.setFlexlbInflightTtlMs(1);
+        Mockito.when(configService.loadBalanceConfig()).thenReturn(config);
+        EndpointRegistry evictionRegistry =
+                new EndpointRegistry(configService, () -> scheduler, reporter);
+        try {
+            PrefillEndpoint prefill = (PrefillEndpoint) evictionRegistry.ensureEndpoint(
+                    RoleType.PREFILL, "127.0.0.1:8001", status(RoleType.PREFILL, 8001));
+            // All-terminal batch: every member's scheduler-side future is
+            // already done (terminals that never surface as engine finished
+            // reports).
+            CompletableFuture<Response> done = new CompletableFuture<>();
+            done.complete(null);
+            prefill.commitBatch(910L, 100, List.of(
+                    prefillBatchItem(prefill, 911L, done)));
+            // Plain batch: goes stale past the 1ms configured TTL.
+            prefill.commitBatch(920L, 100, List.of(
+                    prefillBatchItem(prefill, 921L, null)));
+            Thread.sleep(10);
+
+            evictionRegistry.scheduledEviction();
+
+            Mockito.verify(reporter).reportEndpointInflightTtlExpired(
+                    "PREFILL", "127.0.0.1", "all_terminal", 1);
+            Mockito.verify(reporter).reportEndpointInflightTtlExpired(
+                    "PREFILL", "127.0.0.1", "ttl", 1);
+            Mockito.verify(reporter, Mockito.never()).reportEndpointInflightTtlExpired(
+                    Mockito.eq("PREFILL"), Mockito.eq("127.0.0.1"),
+                    Mockito.eq("age_capped"), Mockito.anyInt());
+            Mockito.verify(reporter, Mockito.never()).reportEndpointInflightTtlExpired(
+                    Mockito.eq("PREFILL"), Mockito.eq("127.0.0.1"),
+                    Mockito.eq("hard_age_cap"), Mockito.anyInt());
+        } finally {
+            evictionRegistry.close();
+        }
+    }
+
+    private static BatchItem prefillBatchItem(PrefillEndpoint owner,
+                                              long requestId,
+                                              CompletableFuture<Response> future) {
+        Request request = new Request();
+        request.setRequestId(requestId);
+        request.setSeqLen(500);
+
+        BalanceContext ctx = new BalanceContext();
+        ctx.setRequest(request);
+
+        ServerStatus prefill = new ServerStatus();
+        prefill.setRole(RoleType.PREFILL);
+        prefill.setServerIp("127.0.0.1");
+        prefill.setHttpPort(8001);
+        prefill.setGrpcPort(8002);
+        DebugInfo debugInfo = new DebugInfo();
+        debugInfo.setHitCacheLen(200);
+        prefill.setDebugInfo(debugInfo);
+
+        return new BatchItem(ctx, future, null, prefill, null, owner, null,
+                System.currentTimeMillis());
     }
 
     private static WorkerStatus status(RoleType roleType, int port) {

@@ -83,6 +83,8 @@ class EngineSyncRunnerTest {
                 roleType,
                 localKvCacheAwareManager,
                 syncRequestTimeoutMs,
+                10,
+                3,
                 syncCount,
                 syncEngineStatusInterval,
                 null,
@@ -112,6 +114,8 @@ class EngineSyncRunnerTest {
                 roleType,
                 localKvCacheAwareManager,
                 syncRequestTimeoutMs,
+                10,
+                3,
                 syncCount,
                 syncEngineStatusInterval,
                 null,
@@ -133,7 +137,7 @@ class EngineSyncRunnerTest {
         EngineSyncRunner runner = new EngineSyncRunner(
                 modelName, workerStatusMap, workerAddressService, statusCheckExecutor,
                 engineHealthReporter, engineGrpcService, RoleType.VIT,
-                localKvCacheAwareManager, syncRequestTimeoutMs, syncCount,
+                localKvCacheAwareManager, syncRequestTimeoutMs, 10, 3, syncCount,
                 syncEngineStatusInterval, null, null);
 
         runner.run();
@@ -164,7 +168,7 @@ class EngineSyncRunnerTest {
         EngineSyncRunner runner = new EngineSyncRunner(
                 modelName, statuses, workerAddressService, statusCheckExecutor,
                 engineHealthReporter, engineGrpcService, RoleType.PREFILL,
-                localKvCacheAwareManager, syncRequestTimeoutMs, syncCount,
+                localKvCacheAwareManager, syncRequestTimeoutMs, 10, 3, syncCount,
                 syncEngineStatusInterval, null, registry);
         runner.run();
 
@@ -186,6 +190,8 @@ class EngineSyncRunnerTest {
                 RoleType.PREFILL,
                 localKvCacheAwareManager,
                 syncRequestTimeoutMs,
+                10,
+                3,
                 syncCount,
                 syncEngineStatusInterval,
                 null,

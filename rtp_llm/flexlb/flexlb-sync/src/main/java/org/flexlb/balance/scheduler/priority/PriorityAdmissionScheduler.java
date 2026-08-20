@@ -114,8 +114,66 @@ public class PriorityAdmissionScheduler {
      */
     private final AtomicInteger activeLeaseCount = new AtomicInteger(0);
 
+    /** Immutable (snapshot, capture-time) pair published by the snapshot cache. */
+    private record TimedSnapshot(ClusterSnapshot snapshot, long capturedAtNanos) {}
+
+    /**
+     * Short-TTL {@link ClusterSnapshot} cache (na130_4 snapshot-cache fix).
+     * {@code ClusterSnapshot.capture()} walks every decode endpoint under its
+     * admission lock and deep-copies the layered views; per-request×retry
+     * capture at production QPS is an O(N) allocation flood that stalls the
+     * master in GC. Endpoint state only refreshes on the ~3.2s sync cadence,
+     * so all requests and retries inside one TTL window
+     * ({@value #SNAPSHOT_CACHE_TTL_MS} ms, fixed) share one immutable
+     * snapshot. Read-mostly volatile publication — a concurrent expiry may
+     * rebuild twice, both snapshots are equally valid, so no lock on purpose
+     * (a lock would trade the allocation flood for contention).
+     * Staleness is OCC-safe: commits never trust the snapshot (see
+     * {@link PlanCommitter}; decode reservations are booked atomically on the
+     * live endpoint, victim guards re-validate live state at commit).
+     * Conflict-driven retries (commit VERSION_MISMATCH, eviction CONFLICT)
+     * force a refresh — the conflict proves the snapshot stale, and replanning
+     * from it would deterministically re-conflict until the TTL expires.
+     * Capacity-rooted retries keep the cached view (live route/offer checks
+     * govern actual admission), so the saturation-time capture flood — the
+     * na130_4 failure mode — stays collapsed.
+     */
+    private static final long SNAPSHOT_CACHE_TTL_MS = 200;
+
+    private volatile TimedSnapshot cachedSnapshot;
+
     int activeLeaseCount() {
         return activeLeaseCount.get();
+    }
+
+    /** Capture, reuse or refresh the cached cluster snapshot; see {@link #cachedSnapshot}. */
+    ClusterSnapshot captureSnapshot(FlexlbConfig config, boolean forceRefresh) {
+        return captureSnapshot(config, forceRefresh, System.nanoTime());
+    }
+
+    ClusterSnapshot captureSnapshot(FlexlbConfig config, boolean forceRefresh, long nowNanos) {
+        if (!forceRefresh) {
+            TimedSnapshot cached = cachedSnapshot;
+            if (cached != null
+                    && nowNanos - cached.capturedAtNanos() < SNAPSHOT_CACHE_TTL_MS * 1_000_000L) {
+                return cached.snapshot();
+            }
+        }
+        ClusterSnapshot fresh = ClusterSnapshot.capture(endpointRegistry, config);
+        cachedSnapshot = new TimedSnapshot(fresh, nowNanos);
+        return fresh;
+    }
+
+    /**
+     * Full decode views for the eviction / failure-classification paths.
+     * The cached snapshot is shared across requests and may predate the
+     * newest reservations — planning victims from it would make a
+     * just-reserved lower-priority request invisible (spurious infeasible +
+     * terminal misclassification), so these paths re-capture from the live
+     * endpoints.
+     */
+    private Map<String, DecodeEndpointSnapshot> liveDecodeViews(FlexlbConfig config) {
+        return ClusterSnapshot.captureDecodes(endpointRegistry, config);
     }
 
     @Autowired
@@ -218,11 +276,16 @@ public class PriorityAdmissionScheduler {
         // size as the capacity retry budget) — capacity churn must neither
         // consume the capacity retries nor feed the fast-reject counter.
         int evictionReplans = 0;
+        // Snapshot-cache coherence: an OCC conflict proves the cached snapshot
+        // stale — the next attempt must replan from a fresh capture or it
+        // would deterministically re-conflict until the cache TTL expires.
+        boolean refreshSnapshot = false;
 
         for (int attempt = 1; attempt <= maxRetries; attempt++) {
             // §19.1 schedule_attempt: final value = attempts consumed.
             ctx.setScheduleAttempt(attempt);
-            ClusterSnapshot snapshot = ClusterSnapshot.capture(endpointRegistry, config);
+            ClusterSnapshot snapshot = captureSnapshot(config, refreshSnapshot);
+            refreshSnapshot = false;
             PlacementOutcome outcome = tryNormalPlacement(ctx, future, snapshot);
 
             if (outcome.plan == null) {
@@ -240,6 +303,10 @@ public class PriorityAdmissionScheduler {
                     if (eviction == DecodeEvictionOutcome.CONFLICT) {
                         Logger.debug("[auto-tpm] decode eviction conflict (attempt {}/{}), request_id={}",
                                 attempt, maxRetries, ctx.getRequestId());
+                        // The victims (or the admission version) moved under
+                        // the plan — replanning from the same cached snapshot
+                        // would repropose them; force a fresh capture.
+                        refreshSnapshot = true;
                         if (victimPresence) {
                             // N3 §3.4/3.6: presence-guard conflicts mean the
                             // victims left (capacity churn, not an OCC race)
@@ -284,7 +351,7 @@ public class PriorityAdmissionScheduler {
                             ctx.getRequest().getSeqLen()
                                     + config.effectiveMaxNewTokensForReservation(ctx.getRequest().getMaxNewTokens()));
                     AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
-                            envelope, new ArrayList<>(snapshot.decodes().values()));
+                            envelope, new ArrayList<>(liveDecodeViews(config).values()));
                     completeAdmissionError(future, failure.errorType(),
                             failure.reason(), failure.message());
                     return;
@@ -312,6 +379,9 @@ public class PriorityAdmissionScheduler {
 
             if (result == PlanCommitter.CommitResult.VERSION_MISMATCH) {
                 priorityReporter.reportPlanConflict("normal_placement_version");
+                // Versioned-commit OCC: the mismatch proves the snapshot's
+                // queue version stale — the retry needs a fresh capture.
+                refreshSnapshot = true;
             }
             if (result == PlanCommitter.CommitResult.OFFER_FAILED) {
                 // Capacity-rooted failure (typically a full prefill queue).
@@ -366,6 +436,9 @@ public class PriorityAdmissionScheduler {
                     }
                     case CONFLICT -> {
                         // fall through: release the decode reservation and retry
+                        // (queue victims moved under the plan — same coherence
+                        // rule as the decode-eviction conflict above).
+                        refreshSnapshot = true;
                         if (victimPresence) {
                             // N3 §3.4/3.6: queued victims left before commit —
                             // capacity churn; replan with jittered backoff.
@@ -618,7 +691,12 @@ public class PriorityAdmissionScheduler {
                 ctx.getStartTime(), ctx.getRequestSloMs(), ctx.getDeadlineMs(),
                 seqLen, seqLen + effectiveMaxNewTokens);
 
-        List<DecodeEndpointSnapshot> decodes = new ArrayList<>(snapshot.decodes().values());
+        // Single decode-view build shared by the planner list and the target
+        // lookup below (a decodes() call lazily rebuilds the full snapshots,
+        // so two calls could disagree); liveDecodeViews re-captures from the
+        // live endpoints — see its doc.
+        Map<String, DecodeEndpointSnapshot> decodeViews = liveDecodeViews(config);
+        List<DecodeEndpointSnapshot> decodes = new ArrayList<>(decodeViews.values());
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal =
                 EvictionPlanner.planDecode(planEnvelope, decodes, config, cancelChannel, failures);
@@ -677,7 +755,7 @@ public class PriorityAdmissionScheduler {
         }
         priorityReporter.reportEvictionPlan(ctx.getPriority(), proposal.evictionCase(), "feasible");
 
-        DecodeEndpointSnapshot target = snapshot.decodes().get(proposal.endpointId());
+        DecodeEndpointSnapshot target = decodeViews.get(proposal.endpointId());
         DecodeEndpoint decodeEp = target.endpoint();
         long expectedKvTokens = target.realKvTotal() > 0
                 ? Math.min(seqLen + effectiveMaxNewTokens, target.realKvTotal())

@@ -41,6 +41,8 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -400,6 +402,43 @@ class PriorityAdmissionSchedulerTest {
         // All decode reservations rolled back across the retries
         assertEquals(0, decodeEp.getInflightCount());
         assertEquals(0, decodeEp.inflightHardKvReserved());
+    }
+
+    // ==================== snapshot cache (na130_4 fix) ====================
+
+    @Test
+    void snapshotCacheReusesInstanceWithinTtl() {
+        long t0 = System.nanoTime();
+        ClusterSnapshot first = priorityScheduler.captureSnapshot(config, false, t0);
+        ClusterSnapshot second = priorityScheduler.captureSnapshot(
+                config, false, t0 + TimeUnit.MILLISECONDS.toNanos(199));
+        assertSame(first, second);
+    }
+
+    @Test
+    void snapshotCacheRebuildsAfterTtlExpiry() {
+        long t0 = System.nanoTime();
+        ClusterSnapshot first = priorityScheduler.captureSnapshot(config, false, t0);
+        ClusterSnapshot second = priorityScheduler.captureSnapshot(
+                config, false, t0 + TimeUnit.MILLISECONDS.toNanos(200));
+        assertNotSame(first, second);
+        // The rebuilt snapshot is re-published: a follow-up read inside the
+        // new window reuses it.
+        ClusterSnapshot third = priorityScheduler.captureSnapshot(
+                config, false, t0 + TimeUnit.MILLISECONDS.toNanos(399));
+        assertSame(second, third);
+    }
+
+    @Test
+    void snapshotCacheForceRefreshBypassesFreshEntryAndRepublishes() {
+        long t0 = System.nanoTime();
+        ClusterSnapshot first = priorityScheduler.captureSnapshot(config, false, t0);
+        // OCC-conflict retry: refresh even though the entry is still fresh.
+        ClusterSnapshot second = priorityScheduler.captureSnapshot(config, true, t0);
+        assertNotSame(first, second);
+        // The refreshed snapshot replaces the cached entry.
+        ClusterSnapshot third = priorityScheduler.captureSnapshot(config, false, t0);
+        assertSame(second, third);
     }
 
     // ==================== helpers ====================

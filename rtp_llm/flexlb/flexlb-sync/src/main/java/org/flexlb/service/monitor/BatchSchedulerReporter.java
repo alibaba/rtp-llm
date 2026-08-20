@@ -52,6 +52,12 @@ public class BatchSchedulerReporter {
             "batch_full", "fixed_window_timeout", "predict_threshold"
     };
 
+    /** role tag value for scheduler-ledger series (vs PREFILL/DECODE endpoint ledgers). */
+    public static final String SCHEDULER_ROLE = "SCHEDULER";
+
+    /** engineIp tag value for scheduler-ledger series (no real engine behind them). */
+    public static final String SCHEDULER_ENGINE_IP = "scheduler";
+
     private final FlexMonitor monitor;
 
     @Autowired
@@ -241,6 +247,23 @@ public class BatchSchedulerReporter {
     }
 
     /**
+     * Report the age (ms) of the oldest entry in the scheduler's own inflight
+     * ledger via the unified {@code app.flexlb.inflight.max.age.ms} series
+     * with role=SCHEDULER + engineIp="scheduler" — same metric name and tag
+     * schema as the per-worker reportInflightMaxAgeMs, so a single role='*'
+     * grouping compares the scheduler ledger against the PREFILL/DECODE
+     * endpoint ledgers. Immune to per-endpoint ledger releases, it exposes
+     * master-side leaks (fence-skipped or post-ACK entries) that keep the
+     * scheduler ledger pinned.
+     *
+     * @param ageMs age of the oldest scheduler inflight entry, 0 when empty
+     */
+    public void reportSchedulerInflightMaxAgeMs(long ageMs) {
+        monitor.report(INFLIGHT_MAX_AGE_MS,
+                FlexMetricTags.ofEngine(SCHEDULER_ENGINE_IP, "role", SCHEDULER_ROLE), ageMs);
+    }
+
+    /**
      * Report per-worker inflight batch count (number of dispatched-but-uncompleted batches)
      * via {@code flexlb.inflight.batch.count}.
      * <p>Unified for both prefill and decode workers, tagged by role and engineIp.
@@ -274,15 +297,60 @@ public class BatchSchedulerReporter {
     }
 
     /**
-     * Report the count of inflight requests expired and cleaned up by the TTL task
-     * via {@code app.flexlb.inflight.ttl.expired.qps}.
-     * <p>Scheduler-level metric tagged by role only (no engineIp), because the TTL
-     * cleanup is a scheduler-wide operation not tied to a specific engine.
+     * Report inflight entries evicted from the scheduler ledger by the TTL
+     * cleanup task via {@code app.flexlb.inflight.ttl.expired.qps}.
+     * <p>Tagged role=SCHEDULER + engineIp="scheduler" (the ledger that
+     * evicted — the former hardcoded role=PREFILL tag mislabelled these
+     * scheduler-level evictions as an endpoint series) + reason
+     * (ttl / hard_age_cap), keeping one tag schema with the endpoint series.
      *
-     * @param count number of inflight entries expired in this cleanup cycle
+     * @param reason eviction reason bucket
+     * @param count  number of entries evicted in this cleanup cycle
      */
-    public void reportInflightTtlExpired(int count) {
-        FlexMetricTags tags = FlexMetricTags.of("role", RoleType.PREFILL.name());
+    public void reportSchedulerInflightTtlExpired(String reason, int count) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(SCHEDULER_ENGINE_IP,
+                "role", SCHEDULER_ROLE,
+                "reason", reason);
+        monitor.report(INFLIGHT_TTL_EXPIRED_QPS, tags, count);
+    }
+
+    /**
+     * Report inflight entries evicted from an endpoint ledger
+     * (PrefillEndpoint.evictExpiredBatchesByReason /
+     * DecodeEndpoint.evictExpiredRequestsByReason, plus the scheduler-side
+     * orphan decode reservation reclaim) via the same
+     * {@code app.flexlb.inflight.ttl.expired.qps} series family.
+     * <p>Endpoint-side evictions were previously log-only
+     * (event=endpoint_inflight_ttl_eviction); this closes the gap with the
+     * shared {role, engineIp, reason} tag schema. Reason values split by
+     * eviction exit: {@code all_terminal} (all-terminal release),
+     * {@code age_capped} (batch age cap), {@code hard_age_cap} (guarded
+     * hard cap — same value as the scheduler-side series), {@code ttl}
+     * (normal unobserved TTL) and {@code orphan_reservation} (scheduler-side
+     * orphan decode reservation reclaim); only non-zero buckets are reported.
+     */
+    public void reportEndpointInflightTtlExpired(String role, String engineIp, String reason, int count) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
+                "role", role,
+                "reason", reason);
+        monitor.report(INFLIGHT_TTL_EXPIRED_QPS, tags, count);
+    }
+
+    /**
+     * Report post-ACK invisible inflight releases accumulated over the
+     * caller's report window (periodic audit fallback + decode-vanish sync
+     * settlement) via the shared {@code app.flexlb.inflight.ttl.expired.qps}
+     * series with role=SCHEDULER + reason=post_ack_lost.
+     * <p>Window-aggregated by the scheduler (LongAdder flush on the 2s
+     * metrics tick) — never called per event on the WorkerStatus sync hot
+     * path; the audit-vs-sync split stays in the event logs.
+     *
+     * @param count post-ACK invisible releases accumulated in this window
+     */
+    public void reportSchedulerInflightAuditRelease(long count) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(SCHEDULER_ENGINE_IP,
+                "role", SCHEDULER_ROLE,
+                "reason", "post_ack_lost");
         monitor.report(INFLIGHT_TTL_EXPIRED_QPS, tags, count);
     }
 

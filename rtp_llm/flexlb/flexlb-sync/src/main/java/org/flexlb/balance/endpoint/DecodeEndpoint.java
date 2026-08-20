@@ -21,6 +21,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.LongPredicate;
 
 /**
  * Decode-side endpoint with Auto-TPM shadow admission accounting.
@@ -58,6 +59,22 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * pure metadata for eviction planning, cancel dedup and layered gauges.
      */
     private final ConcurrentHashMap<Long, ConfirmedTask> trackedConfirmed = new ConcurrentHashMap<>();
+
+    /**
+     * Requests that vanished from the engine-confirmed layer without a
+     * matching finished record in the same WorkerStatus report — the raw
+     * material of A-class scheduler ghosts (lost finished delta). Produced
+     * under {@link #admissionLock} by calibrate and drained by the scheduler
+     * right after the same sync round (lock-free poll), so the settlement
+     * probes never nest inside the admission lock (settle takes the entry
+     * monitor before the admission lock — enqueue-only here keeps the lock
+     * order acyclic). Bounded: when the scheduler is absent or slow the
+     * queue caps out and the periodic post-ACK audit remains the fallback.
+     */
+    private static final int VANISHED_QUEUE_CAP = 4096;
+    private final java.util.concurrent.ConcurrentLinkedQueue<Long> vanishedEngineConfirmed =
+            new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private final AtomicInteger vanishedQueueSize = new AtomicInteger();
 
     /**
      * Token-fenced priority-preemption ownership.  Victim accounting remains
@@ -757,9 +774,37 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
         // Keep claimed entries discoverable even if Decode reports them
         // finished first.  Unclaimed entries follow ordinary calibration.
-        trackedConfirmed.entrySet().removeIf(entry ->
-                !confirmedNow.contains(entry.getKey())
-                        && !preemptionClaims.containsKey(entry.getKey()));
+        // Entries dropped here WITHOUT any trace in the same report (no
+        // running task of any phase, no finished record) are exactly the
+        // A-class ghost trigger — the finished delta was lost — so collect
+        // them for immediate scheduler settlement instead of waiting for the
+        // periodic audit. A requeued-but-unconfirmed request still shows up
+        // in runningTaskInfo (RECEIVED/PENDING) and is NOT treated as
+        // vanished.
+        Set<Long> reportedIds = new HashSet<>();
+        if (runningTaskInfo != null) {
+            for (TaskInfo task : runningTaskInfo.values()) {
+                reportedIds.add(task.getRequestId());
+            }
+        }
+        if (finishedTaskInfo != null) {
+            for (TaskInfo task : finishedTaskInfo.values()) {
+                reportedIds.add(task.getRequestId());
+            }
+        }
+        java.util.Iterator<Map.Entry<Long, ConfirmedTask>> trackedIt =
+                trackedConfirmed.entrySet().iterator();
+        while (trackedIt.hasNext()) {
+            Long requestId = trackedIt.next().getKey();
+            if (confirmedNow.contains(requestId)
+                    || preemptionClaims.containsKey(requestId)) {
+                continue;
+            }
+            trackedIt.remove();
+            if (!reportedIds.contains(requestId)) {
+                offerVanished(requestId);
+            }
+        }
 
         if (finishedTaskInfo != null) {
             for (TaskInfo task : finishedTaskInfo.values()) {
@@ -789,6 +834,39 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 queuedPhaseCount.decrementAndGet();
             }
         }
+    }
+
+    /**
+     * Enqueue one vanished engine-confirmed request id for scheduler
+     * settlement; dropped when the bounded queue is full (the periodic
+     * post-ACK audit remains the fallback). Called under
+     * {@link #admissionLock} — enqueue only, never a callback.
+     */
+    private void offerVanished(long requestId) {
+        if (vanishedQueueSize.get() >= VANISHED_QUEUE_CAP) {
+            return;
+        }
+        vanishedEngineConfirmed.offer(requestId);
+        vanishedQueueSize.incrementAndGet();
+    }
+
+    /**
+     * Drain the request ids that vanished from the engine-confirmed layer
+     * since the previous drain. Called by the scheduler outside the
+     * admission lock, right after the endpoint calibrated the same
+     * WorkerStatus response.
+     */
+    public List<Long> drainVanishedEngineConfirmed() {
+        if (vanishedEngineConfirmed.isEmpty()) {
+            return java.util.Collections.emptyList();
+        }
+        List<Long> drained = new ArrayList<>();
+        Long requestId;
+        while ((requestId = vanishedEngineConfirmed.poll()) != null) {
+            vanishedQueueSize.decrementAndGet();
+            drained.add(requestId);
+        }
+        return drained;
     }
 
     /**
@@ -925,14 +1003,79 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * @return number of entries evicted
      */
     public int evictExpiredRequests(long ttlMs) {
+        return evictExpiredRequests(ttlMs, 0, requestId -> false);
+    }
+
+    /**
+     * TTL eviction with a hard age cap: entries older than
+     * {@code hardMaxAgeMs} are force-evicted even when a priority-preemption
+     * claim exempts them from the regular TTL pass — a claim whose Prefill
+     * CANCELED settlement never arrives (zombie cancel overlay in the engine
+     * report) must not pin decode accounting forever. Entries still owned by
+     * the batch scheduler are skipped ({@code schedulerOwnsRequest}) so the
+     * scheduler's own lifecycle/fence handling stays authoritative.
+     * {@code hardMaxAgeMs <= 0} disables the cap.
+     */
+    public int evictExpiredRequests(long ttlMs, long hardMaxAgeMs,
+                                    LongPredicate schedulerOwnsRequest) {
+        return evictExpiredRequestsByReason(ttlMs, hardMaxAgeMs, schedulerOwnsRequest).total();
+    }
+
+    /**
+     * Same eviction pass as
+     * {@link #evictExpiredRequests(long, long, LongPredicate)} but returns
+     * the per-exit counts for the reason-split eviction metric. Decode has
+     * exactly two exits: {@code ttl} (regular unobserved TTL pass) and
+     * {@code hard_age_cap} (guarded hard cap force-releasing zombie
+     * preemption claims) — the batch-ledger exits ({@code all_terminal},
+     * {@code age_capped}) do not exist here and stay zero.
+     *
+     * @return per-exit eviction counts
+     */
+    public EvictionBreakdown evictExpiredRequestsByReason(long ttlMs, long hardMaxAgeMs,
+                                                          LongPredicate schedulerOwnsRequest) {
         admissionLock.lock();
         try {
             // A priority claim is a stronger accounting owner than generic
             // TTL cleanup. In particular, an ENGINE_MAY_HAVE_SEEN shadow must
             // remain charged until typed Prefill CANCELED or explicit
             // NOT_FOUND/UNKNOWN reconciliation settles the claim.
-            int evicted = requestEvictor.evictExpired(
+            int ttlEvicted = requestEvictor.evictExpired(
                     ttlMs, requestId -> !preemptionClaims.containsKey(requestId));
+            int hardCapped = 0;
+            // Hard age cap pass: whatever survived above (claim-exempted) but
+            // exceeds the cap is force-released with full counter cleanup.
+            if (hardMaxAgeMs > 0) {
+                long nowMs = System.currentTimeMillis();
+                for (Map.Entry<Long, RequestInflight> entry : inflightRequests.entrySet()) {
+                    long requestId = entry.getKey();
+                    long ageMs = nowMs - entry.getValue().createdAtMs();
+                    if (ageMs <= hardMaxAgeMs || schedulerOwnsRequest.test(requestId)) {
+                        continue;
+                    }
+                    RequestInflight removed = inflightRequests.remove(requestId);
+                    if (removed == null) {
+                        continue;
+                    }
+                    inflightKvReservedTotal.addAndGet(-removed.kvTokens());
+                    inflightExpectedKvReservedTotal.addAndGet(-removed.expectedKvTokens());
+                    // Settle the zombie claim: return any KV still held behind
+                    // the never-arriving CANCELED fence, then drop the claim.
+                    PreemptionClaim claim = preemptionClaims.remove(requestId);
+                    if (claim != null) {
+                        releaseHeldKv(claim);
+                    }
+                    hardCapped++;
+                    logger.warn("event=inflight_hard_age_eviction role=DECODE endpoint={} "
+                                    + "request_id={} age_ms={} hard_max_age_ms={} created_at_ms={} "
+                                    + "kv_tokens={} expected_kv_tokens={} priority={} deadline_ms={} "
+                                    + "phase={} preemption_claim={} queued_phase={}",
+                            getIp(), requestId, ageMs, hardMaxAgeMs, removed.createdAtMs(),
+                            removed.kvTokens(), removed.expectedKvTokens(), removed.priority(),
+                            removed.deadlineMs(), removed.phase(), claim != null,
+                            queuedPhase.contains(requestId));
+                }
+            }
             // Drop stale queued ids one-by-one so the O(1) counter stays in
             // sync (PR-C) — evictExpired may have removed inflight entries.
             java.util.Iterator<Long> queuedEvictIt = queuedPhase.iterator();
@@ -948,10 +1091,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     .removeIf(task -> task.lastSeenMs() < cutoff);
             boolean canceledTombstonesPurged = priorityCanceledTombstones.entrySet()
                     .removeIf(entry -> entry.getValue() < cutoff);
+            int evicted = ttlEvicted + hardCapped;
             if (evicted > 0 || trackedPurged || canceledTombstonesPurged) {
                 admissionVersion.incrementAndGet();
             }
-            return evicted;
+            return new EvictionBreakdown(0, 0, hardCapped, ttlEvicted);
         } finally {
             admissionLock.unlock();
         }
@@ -1094,6 +1238,32 @@ public class DecodeEndpoint extends WorkerEndpoint {
     /** Whether the latest Decode WorkerStatus still owns this request. */
     public boolean isConfirmedTracked(long requestId) {
         return trackedConfirmed.containsKey(requestId);
+    }
+
+    /**
+     * Whether the engine has confirmed this request in the layered registry
+     * (KV_ALLOCATED / RUNNING) — the decode-side visibility check for the
+     * scheduler's post-ACK inflight audit. Mirrors
+     * {@link #isConfirmedTracked} under the audit's engine-confirmed
+     * vocabulary.
+     */
+    public boolean isEngineConfirmed(long requestId) {
+        return isConfirmedTracked(requestId);
+    }
+
+    /**
+     * Whether this endpoint still holds the request's shadow reservation
+     * ({@code inflightRequests}, the pre-queue admission layer). The
+     * scheduler's post-ACK inflight audit must treat such a reservation
+     * as decode-side visibility: a request queued inside a saturated decode
+     * engine is not yet engine-confirmed (no KV allocated), yet force-settling
+     * its ledger entry would roll the reservation back and oversell
+     * admission KV. Lock-free CHM probe — unlike {@link #reservedView()} it
+     * takes no admission lock and copies nothing, so it is safe to call
+     * outside the entry monitor.
+     */
+    public boolean isReserved(long requestId) {
+        return inflightRequests.containsKey(requestId);
     }
 
     @Override

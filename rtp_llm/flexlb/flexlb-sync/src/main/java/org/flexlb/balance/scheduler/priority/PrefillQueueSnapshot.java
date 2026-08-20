@@ -3,10 +3,12 @@ package org.flexlb.balance.scheduler.priority;
 import java.util.List;
 
 /**
- * Strongly-consistent point-in-time view of one prefill batcher queue: it is
- * built entirely inside the batcher's {@code queueLock} critical section
- * (see {@code PrefillQueueManager.snapshot()}), so version and items always
- * belong to the same queue state. {@link #queueVersion} is re-validated by
+ * Strongly-consistent point-in-time view of one prefill batcher queue: the
+ * membership and version are captured in the same {@code queueLock} critical
+ * section (see {@code PrefillQueueManager.snapshot()}; the sort may run on
+ * the thread-confined copy outside the lock), so version and
+ * items always belong to the same queue state. {@link #queueVersion} is
+ * re-validated by
  * the atomic replace/remove/offer operations so a plan built on this snapshot
  * can never be applied against a mutated queue.
  *

@@ -21,6 +21,7 @@ import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
@@ -45,7 +46,16 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Deterministic ordering tests for Decode ownership versus Enqueue outcome. */
+/**
+ * Deterministic ordering tests for Decode ownership versus Enqueue outcome.
+ *
+ * <p>Disabled on the curated branch: this suite pins the legacy
+ * Decode-owned shortcut release semantics, which are superseded by the
+ * always-on ack-only release (release gate single-sourced on Prefill
+ * evidence / late ACK). The ack-only semantics are covered by
+ * {@code AckOnlyReleaseGateTest} and {@code PostAckInvisibleSettleTest}.
+ */
+@Disabled("legacy decode-shortcut semantics superseded by fixed ack-only release")
 class DecodeAcceptanceLinearizationTest {
 
     private static final long REQUEST_ID = 901L;

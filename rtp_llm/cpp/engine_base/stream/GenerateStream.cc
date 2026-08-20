@@ -634,11 +634,21 @@ void GenerateStream::recordRunningTime() {
 // 统一的事件上报接口，替代原先所有 reportXX 方法。
 // 外部线程调用时自动加锁保护 error_info 和 events_ 的一致性。
 void GenerateStream::reportEvent(StreamEvents::EventType event, ErrorCode error_code, const std::string& error_msg) {
-    std::lock_guard<std::mutex> lock(*mutex_);
-    if (event == StreamEvents::CanRun) {
-        recordCanRunTime();
+    {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        if (event == StreamEvents::CanRun) {
+            recordCanRunTime();
+        }
+        generate_status_->reportEvent(event, error_code, error_msg);
     }
-    generate_status_->reportEvent(event, error_code, error_msg);
+    if (event == StreamEvents::Error) {
+        // Error-latch wakeup: the error is latched (outside mutex_); a consumer parked in
+        // nextOutput()->waitNotEmpty() must re-evaluate hasError() now instead
+        // of sleeping until the stream is destroyed. Covers checkTimeout()'s
+        // GENERATE_TIMEOUT latch on the Fetch thread itself: the wakeup makes
+        // its own subsequent waitNotEmpty return immediately.
+        terminateOutputWait();
+    }
 }
 
 // 无锁版本，供已持有 mutex_ 的内部调用路径使用（如 update/specUpdate/moveToNext 链路）。
@@ -652,8 +662,13 @@ void GenerateStream::reportEventWithoutLock(StreamEvents::EventType event,
 }
 
 void GenerateStream::reportError(ErrorCode error_code, const std::string& error_msg) {
-    std::lock_guard<std::mutex> lock(*mutex_);
-    generate_status_->reportEvent(StreamEvents::Error, error_code, error_msg);
+    {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        generate_status_->reportEvent(StreamEvents::Error, error_code, error_msg);
+    }
+    // Mirror reportEvent's Error branch — wake parked output
+    // consumers so they observe the latched error and unwind.
+    terminateOutputWait();
 }
 
 void GenerateStream::reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg) {
@@ -682,15 +697,43 @@ void GenerateStream::setReserveStep(size_t reserve_step) {
     generate_status_->setReserveStep(reserve_step);
 }
 
+void GenerateStream::setFinishCallback(FinishCallback callback) {
+    FinishCallback fire_now;
+    {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        if (generate_status_->getStatus() == StreamState::FINISHED) {
+            // Registration lost the race with the terminal transition: fire
+            // immediately (outside the lock) so no completion goes unseen.
+            fire_now = std::move(callback);
+        } else {
+            finish_callback_ = std::move(callback);
+        }
+    }
+    if (fire_now) {
+        try {
+            fire_now();
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("finish callback failed on an already-finished stream: %s", e.what());
+        }
+    }
+}
+
 StreamState GenerateStream::moveToNext() {
     checkTimeout();
-    StreamState state;
-    bool        should_report_metric = false;
+    StreamState    state;
+    bool           should_report_metric = false;
+    FinishCallback finish_callback;
     {
         std::lock_guard<std::mutex> lock(*mutex_);
         auto                        old_state = generate_status_->getStatus();
         state                                 = generate_status_->moveToNext();
         should_report_metric                  = old_state != StreamState::FINISHED && state == StreamState::FINISHED;
+        if (should_report_metric) {
+            // One-shot handoff: take the callback under the lock, fire it
+            // outside so it may safely call back into stream/meta APIs.
+            finish_callback  = std::move(finish_callback_);
+            finish_callback_ = nullptr;
+        }
     }
 
     // notify one thread waiting for stream completion
@@ -698,7 +741,20 @@ StreamState GenerateStream::moveToNext() {
         if (should_report_metric) {
             reportMetricOnce();
         }
+        if (finish_callback) {
+            try {
+                finish_callback();
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_WARNING("finish callback failed on terminal transition: %s", e.what());
+            }
+        }
         cv_->notify_one();
+        // Terminal-path wakeup: a consumer parked in nextOutput()'s
+        // waitNotEmpty() with an empty queue must observe FINISHED. Harmless
+        // when queued outputs remain: they stay consumable one getAndPopFront
+        // at a time; the queue's terminated latch only ends the WAIT, not the
+        // buffered data.
+        terminateOutputWait();
     }
     return state;
 }
@@ -906,7 +962,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     if (update_info.draft_token >= 0) {
         RTP_LLM_CHECK_WITH_INFO(sp_output_buffer_->tokens.numel() >= 2,
                                 "speculative token buffer must contain target and draft slots");
-        spec_tokens[1]  = update_info.draft_token;
+        spec_tokens[1] = update_info.draft_token;
         propose_token_ = {target_last_token, update_info.draft_token};
     } else {
         // Commit-only speculative steps (DSpARK prefill/decode tail) publish
@@ -1202,8 +1258,8 @@ void GenerateStream::reportStreamMetrics() {
         collector.is_streaming_qps  = generate_input_->generate_config->is_streaming;
         collector.not_streaming_qps = !generate_input_->generate_config->is_streaming;
         if (getStatus() == StreamState::FINISHED || cancelled || timeout) {
-            collector.reuse_length           = initial_reuse_length_;
-            collector.input_token_length     = inputLength();
+            collector.reuse_length       = initial_reuse_length_;
+            collector.input_token_length = inputLength();
             collector.effective_context_length =
                 std::max<int64_t>(0, collector.input_token_length - initial_reuse_length_);
             collector.output_token_length    = outputTokenLen();

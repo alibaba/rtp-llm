@@ -258,8 +258,7 @@ bool FIFOScheduler::fitsPrefillTokenLimits(size_t                   admitted_str
                                            const GenerateStreamPtr& candidate) const {
     // Preserve the historical singleton boundary; checkInputLength() has already
     // validated the candidate's standalone token cost.
-    if (admitted_stream_count == 0
-        && candidate->contextLength() + running_streams_.size() < int(max_seq_len_)) {
+    if (admitted_stream_count == 0 && candidate->contextLength() + running_streams_.size() < int(max_seq_len_)) {
         return true;
     }
 
@@ -286,8 +285,8 @@ bool FIFOScheduler::fitsPrefillTokenLimits(size_t                   admitted_str
     // sequence length (prefix included) and the real sequence width represented
     // by currentBatchSize(). Division avoids overflow in max_seq_len * width.
     const auto candidate_sequence_count = static_cast<size_t>(candidate->currentBatchSize());
-    const auto sequence_count = admitted_sequence_count + candidate_sequence_count;
-    const auto max_seq_len     = std::max(admitted_max_seq_len, prefillSeqLenWithCache(candidate));
+    const auto sequence_count           = admitted_sequence_count + candidate_sequence_count;
+    const auto max_seq_len              = std::max(admitted_max_seq_len, prefillSeqLenWithCache(candidate));
     return max_seq_len == 0 || sequence_count <= (available_tokens - 1) / max_seq_len;
 }
 
@@ -590,12 +589,12 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
         return;
     }
 
-    StreamGroup admitted_streams;
-    const size_t inited_kv_streams = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
+    StreamGroup  admitted_streams;
+    const size_t inited_kv_streams       = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
     size_t       newly_inited_kv_streams = 0;
     for (auto it = group.begin(); it != group.end();) {
-        auto  current = it++;
-        auto& stream  = *current;
+        auto       current           = it++;
+        auto&      stream            = *current;
         const bool already_inited_kv = stream->curBlocksNum() > 0;
         if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv
             && inited_kv_streams + newly_inited_kv_streams >= max_inited_kv_cache_streams_) {

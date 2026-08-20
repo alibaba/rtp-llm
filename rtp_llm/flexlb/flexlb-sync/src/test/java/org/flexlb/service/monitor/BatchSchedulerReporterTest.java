@@ -136,11 +136,35 @@ class BatchSchedulerReporterTest {
     }
 
     @Test
-    void should_report_inflight_ttl_expired_with_role_tag_only() {
-        reporter.reportInflightTtlExpired(3);
+    void should_report_scheduler_inflight_ttl_expired_with_scheduler_role_and_reason() {
+        reporter.reportSchedulerInflightTtlExpired("hard_age_cap", 3);
 
-        FlexMetricTags tags = FlexMetricTags.of("role", "PREFILL");
+        FlexMetricTags tags = FlexMetricTags.of(
+                "engineIp", "scheduler",
+                "role", "SCHEDULER",
+                "reason", "hard_age_cap");
         verify(monitor).report(INFLIGHT_TTL_EXPIRED_QPS, tags, 3.0);
+    }
+
+    @Test
+    void should_report_endpoint_inflight_ttl_expired_with_engine_tags() {
+        reporter.reportEndpointInflightTtlExpired("DECODE", "10.0.0.2", "ttl", 2);
+
+        FlexMetricTags tags = FlexMetricTags.of(
+                "engineIp", "10.0.0.2",
+                "role", "DECODE",
+                "reason", "ttl");
+        verify(monitor).report(INFLIGHT_TTL_EXPIRED_QPS, tags, 2.0);
+    }
+
+    @Test
+    void should_report_scheduler_max_age_on_unified_series_with_scheduler_role() {
+        reporter.reportSchedulerInflightMaxAgeMs(12_000L);
+
+        FlexMetricTags unifiedTags = FlexMetricTags.of(
+                "engineIp", "scheduler",
+                "role", "SCHEDULER");
+        verify(monitor).report(INFLIGHT_MAX_AGE_MS, unifiedTags, 12_000.0);
     }
 
     @Test

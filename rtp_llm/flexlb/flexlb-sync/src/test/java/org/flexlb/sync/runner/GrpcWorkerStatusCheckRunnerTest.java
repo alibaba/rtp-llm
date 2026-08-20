@@ -1,5 +1,7 @@
 package org.flexlb.sync.runner;
 
+import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
@@ -79,7 +81,7 @@ class GrpcWorkerStatusCheckRunnerTest {
                 modelName, ipPort, site,
                 RoleType.PREFILL,
                 group, workerStatus, Map.of(ipPort, workerStatus),
-                engineHealthReporter, engineGrpcService, 20L, null, null, Runnable::run);
+                engineHealthReporter, engineGrpcService, 20L, 10, 3, null, null, Runnable::run);
         runner.run();
 
         // Assert — gRPC port is derived from HTTP port 8080 → 8081
@@ -123,7 +125,7 @@ class GrpcWorkerStatusCheckRunnerTest {
                 modelName, ipPort, site,
                 RoleType.PREFILL,
                 group, workerStatus, Map.of(ipPort, workerStatus),
-                engineHealthReporter, engineGrpcService, 20L, null, null, Runnable::run);
+                engineHealthReporter, engineGrpcService, 20L, 10, 3, null, null, Runnable::run);
         runner.run();
 
         // Version not advanced → runningTaskList should NOT be populated from response
@@ -153,7 +155,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
                 "test-model", ipPort, "test-site", RoleType.VIT, "test-group",
                 expired, statuses, engineHealthReporter, engineGrpcService,
-                20L, null, registry, Runnable::run);
+                20L, 10, 3, null, registry, Runnable::run);
         runner.run();
 
         assertSame(currentEndpoint, registry.get(RoleType.VIT, ipPort));
@@ -176,7 +178,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
                 "test-model", ipPort, "test-site", RoleType.VIT, "test-group",
                 status, statuses, engineHealthReporter, engineGrpcService,
-                20L, null, registry, Runnable::run);
+                20L, 10, 3, null, registry, Runnable::run);
 
         runner.run();
         runner.run();
@@ -184,6 +186,87 @@ class GrpcWorkerStatusCheckRunnerTest {
 
         assertFalse(status.isAlive());
         assertNull(registry.get(RoleType.VIT, ipPort));
+        registry.close();
+    }
+
+    @Test
+    void should_tolerate_timeout_failures_until_timeout_threshold() {
+        String ipPort = "127.0.0.1:8080";
+        WorkerStatus status = status(8080);
+        Map<String, WorkerStatus> statuses = new ConcurrentHashMap<>();
+        statuses.put(ipPort, status);
+        EndpointRegistry registry = registry();
+        registry.ensureEndpoint(RoleType.VIT, ipPort, status);
+        when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                .thenReturn(CompletableFuture.failedFuture(
+                        new StatusRuntimeException(Status.DEADLINE_EXCEEDED)));
+        GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
+                "test-model", ipPort, "test-site", RoleType.VIT, "test-group",
+                status, statuses, engineHealthReporter, engineGrpcService,
+                20L, 10, 3, null, registry, Runnable::run);
+
+        // Slow != dead: 9 consecutive timeouts stay below the timeout threshold (10)
+        for (int i = 0; i < 9; i++) {
+            runner.run();
+        }
+        assertTrue(status.isAlive());
+        assertSame(status, registry.get(RoleType.VIT, ipPort).getStatus());
+        assertEquals(9L, status.getConsecutiveTimeoutFailures().get());
+        assertEquals(0L, status.getConsecutiveFailures().get());
+
+        // 10th consecutive timeout reaches the threshold: worker removed
+        runner.run();
+        assertFalse(status.isAlive());
+        assertNull(registry.get(RoleType.VIT, ipPort));
+        registry.close();
+    }
+
+    @Test
+    void should_reset_both_failure_counters_on_success() {
+        String ipPort = "127.0.0.1:8080";
+        WorkerStatus status = status(8080);
+        status.getStatusVersion().set(100L);
+        Map<String, WorkerStatus> statuses = new ConcurrentHashMap<>();
+        statuses.put(ipPort, status);
+        EndpointRegistry registry = registry();
+        registry.ensureEndpoint(RoleType.VIT, ipPort, status);
+        GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
+                "test-model", ipPort, "test-site", RoleType.VIT, "test-group",
+                status, statuses, engineHealthReporter, engineGrpcService,
+                20L, 10, 3, null, registry, Runnable::run);
+
+        when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                .thenReturn(CompletableFuture.failedFuture(
+                        new StatusRuntimeException(Status.DEADLINE_EXCEEDED)));
+        runner.run();
+        runner.run();
+        when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                .thenReturn(CompletableFuture.failedFuture(
+                        new StatusRuntimeException(Status.UNAVAILABLE)));
+        runner.run();
+        runner.run();
+        assertEquals(2L, status.getConsecutiveTimeoutFailures().get());
+        assertEquals(2L, status.getConsecutiveFailures().get());
+        assertTrue(status.isAlive());
+
+        EngineRpcService.WorkerStatusPB recovered = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole(RoleType.VIT.getCode())
+                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_VIT)
+                .setStatusVersion(100L)
+                .setAlive(true)
+                .build();
+        when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                .thenReturn(CompletableFuture.completedFuture(recovered));
+
+        runner.run();
+
+        assertEquals(0L, status.getConsecutiveTimeoutFailures().get());
+        assertEquals(0L, status.getConsecutiveFailures().get());
+        assertTrue(status.isAlive());
         registry.close();
     }
 
@@ -202,7 +285,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
                 "test-model", ipPort, "test-site", RoleType.VIT, "test-group",
                 status, statuses, engineHealthReporter, engineGrpcService,
-                20L, null, registry, Runnable::run);
+                20L, 10, 3, null, registry, Runnable::run);
 
         runner.run();
         runner.run();

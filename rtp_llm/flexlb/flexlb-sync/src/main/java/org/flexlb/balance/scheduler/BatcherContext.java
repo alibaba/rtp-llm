@@ -58,10 +58,6 @@ public class BatcherContext {
     enum PendingRestoreResult { RESTORED, STOPPED, NOT_PENDING }
     enum PendingClaimResult { CLAIMED, STOPPED, NOT_PENDING }
 
-    /** Dispatch-interval sliding average for the 8.4 queue wait estimate. */
-    private volatile long lastDispatchAtMs;
-    private volatile double dispatchIntervalEmaMs;
-
     BatcherContext(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
                    BatchDecisionHandler handler,
                    PriorityBlockingQueue<BatchItem> queue,
@@ -188,6 +184,15 @@ public class BatcherContext {
     }
 
     /**
+     * Unordered mutable copy of the live queue members. Callers holding
+     * {@link #queueLock()} get a copy consistent with the current queue
+     * version that they may sort outside the lock.
+     */
+    List<BatchItem> copiedItems() {
+        return new ArrayList<>(queue);
+    }
+
+    /**
      * Effective strict padded-token limit for one FlexLB batch.
      *
      * <p>The Engine's FIFO scheduler rejects a group when its padded context
@@ -245,12 +250,6 @@ public class BatcherContext {
      * (e.g. {@code lastParkByRequest.remove()}) before calling this.
      */
     void dispatch(List<BatchItem> items, DispatchMeta meta) {
-        // The dispatch-interval EMA only feeds the Auto-TPM queue-wait
-        // estimate (PrefillQueueManager.estimateWaitMs); skip the synchronized
-        // bookkeeping entirely on the legacy path (task10 P2-9).
-        if (cfg.isAutoTpmEnabled()) {
-            recordDispatchInterval(now());
-        }
         List<BatchItem> staged = stageForDispatch(items);
         if (staged.isEmpty()) {
             return;
@@ -499,32 +498,5 @@ public class BatcherContext {
     void dropHead(BatchItem head) {
         remove(head);
         handler.onExpired(head);
-    }
-
-    // ---- dispatch interval estimation (design doc 8.4) ----
-
-    private synchronized void recordDispatchInterval(long nowMs) {
-        if (lastDispatchAtMs > 0 && nowMs > lastDispatchAtMs) {
-            long intervalMs = nowMs - lastDispatchAtMs;
-            dispatchIntervalEmaMs = dispatchIntervalEmaMs <= 0
-                    ? intervalMs
-                    : 0.3 * intervalMs + 0.7 * dispatchIntervalEmaMs;
-        }
-        lastDispatchAtMs = nowMs;
-    }
-
-    /**
-     * Sliding-average interval between batch dispatches; before any dispatch
-     * is observed, falls back to the algorithm's batching window.
-     */
-    long avgDispatchIntervalMs() {
-        double ema = dispatchIntervalEmaMs;
-        if (ema > 0) {
-            return Math.max(1, Math.round(ema));
-        }
-        long windowMs = "fixed_window".equalsIgnoreCase(cfg.getFlexlbBatchAlgorithm())
-                ? cfg.getFlexlbBatchFixedWaitMs()
-                : cfg.getFlexlbBatchWindowMs();
-        return Math.max(1, windowMs);
     }
 }

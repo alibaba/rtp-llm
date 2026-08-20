@@ -235,6 +235,96 @@ class DecodeEndpointTest {
         assertEquals(0, endpoint.getTotalLoad());
     }
 
+    // ==================== hard age cap (zombie preemption claims) ====================
+
+    @Test
+    void hardAgeCap_evictsClaimExemptedEntry_andReleasesCounters() throws InterruptedException {
+        updateStatus(null, null, 10_000);
+        endpoint.reserve(100L, 500, 500, 5, 0);
+        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+                endpoint.beginPriorityPreemption(1L, java.util.List.of(100L), 200L,
+                        100, 100, 10, 0, 0, false));
+        Thread.sleep(20);
+
+        // Regular TTL pass: the claim exempts the victim; only the unclaimed
+        // incoming reservation expires.
+        assertEquals(1, endpoint.evictExpiredRequests(5));
+        assertEquals(1, endpoint.getInflightCount());
+
+        // The hard cap force-releases the zombie claim and its accounting.
+        assertEquals(1, endpoint.evictExpiredRequests(60_000, 5, requestId -> false));
+        assertEquals(0, endpoint.getInflightCount());
+        assertEquals(0, endpoint.getTotalLoad());
+        assertEquals(10_000, endpoint.realKvAvailable());
+    }
+
+    @Test
+    void hardAgeCap_skipsSchedulerOwnedRequests() throws InterruptedException {
+        updateStatus(null, null, 10_000);
+        endpoint.reserve(100L, 500, 500, 5, 0);
+        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+                endpoint.beginPriorityPreemption(1L, java.util.List.of(100L), 200L,
+                        100, 100, 10, 0, 0, false));
+        Thread.sleep(20);
+
+        assertEquals(1, endpoint.evictExpiredRequests(60_000, 5, requestId -> requestId == 100L),
+                "scheduler-owned victim survives the cap; the incoming reservation is evicted");
+        assertEquals(1, endpoint.getInflightCount());
+
+        assertEquals(1, endpoint.evictExpiredRequests(60_000, 5, requestId -> false),
+                "once the scheduler releases ownership the cap applies");
+        assertEquals(0, endpoint.getInflightCount());
+    }
+
+    @Test
+    void hardAgeCap_disabled_keepsClaimExemption() throws InterruptedException {
+        updateStatus(null, null, 10_000);
+        endpoint.reserve(100L, 500, 500, 5, 0);
+        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+                endpoint.beginPriorityPreemption(1L, java.util.List.of(100L), 200L,
+                        100, 100, 10, 0, 0, false));
+        Thread.sleep(20);
+
+        assertEquals(1, endpoint.evictExpiredRequests(5, 0, requestId -> false),
+                "cap disabled: only the regular TTL pass runs");
+        assertEquals(1, endpoint.getInflightCount(),
+                "the claimed victim stays pinned exactly as before");
+    }
+
+    // ==================== reason-split eviction breakdown ====================
+
+    @Test
+    void evictExpiredRequestsByReason_splitsTtlAndHardAgeCapExits() throws InterruptedException {
+        updateStatus(null, null, 10_000);
+        endpoint.reserve(100L, 500, 500, 5, 0);
+        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+                endpoint.beginPriorityPreemption(1L, java.util.List.of(100L), 200L,
+                        100, 100, 10, 0, 0, false));
+        Thread.sleep(20);
+
+        // Regular TTL pass: the claim exempts the victim; only the incoming
+        // reservation expires → reason=ttl bucket.
+        EvictionBreakdown ttlPass =
+                endpoint.evictExpiredRequestsByReason(5, 0, requestId -> false);
+        assertEquals(0, ttlPass.allTerminal());
+        assertEquals(0, ttlPass.ageCapped());
+        assertEquals(0, ttlPass.hardAgeCap());
+        assertEquals(1, ttlPass.ttl());
+        assertEquals(1, ttlPass.total());
+        assertEquals(1, endpoint.getInflightCount());
+
+        // The hard cap force-releases the zombie claim → reason=hard_age_cap
+        // bucket (60s TTL keeps the ttl leg out).
+        EvictionBreakdown cappedPass =
+                endpoint.evictExpiredRequestsByReason(60_000, 5, requestId -> false);
+        assertEquals(0, cappedPass.allTerminal());
+        assertEquals(0, cappedPass.ageCapped());
+        assertEquals(1, cappedPass.hardAgeCap());
+        assertEquals(0, cappedPass.ttl());
+        assertEquals(1, cappedPass.total());
+        assertEquals(0, endpoint.getInflightCount());
+    }
+
     /** Directly mutate the private counter to simulate drift. */
     private void setQueuedPhaseCount(int value) throws Exception {
         java.lang.reflect.Field f = DecodeEndpoint.class.getDeclaredField("queuedPhaseCount");
